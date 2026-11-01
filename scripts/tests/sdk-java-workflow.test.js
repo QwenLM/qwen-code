@@ -201,9 +201,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       if (gateIndex < 0) continue;
 
       gatedJobs.push(name);
-      expect(steps[gateIndex - 1]?.uses, name).toMatch(
-        /^actions\/checkout@/,
-      );
+      expect(steps[gateIndex - 1]?.uses, name).toMatch(/^actions\/checkout@/);
       expect(steps[gateIndex].if, name).toBe(
         "${{ runner.environment == 'self-hosted' }}",
       );
