@@ -202,6 +202,73 @@ intended `owner/repo` is a match to confirm, not a guess to avoid.
 `--watch` installs a standing trigger instead of running once; the contract is
 in **Watch mode** below.
 
+## Local container recipe (Docker + model proxy)
+
+The boundary and the model credential are separate problems: the container
+isolates PR code, and a host-side proxy keeps the real model key out of the
+container. `scripts/verify-pr-model-proxy.mjs` is that proxy — the same relay
+rules as the CI lane's inline one (only `POST /chat/completions`, a per-run
+bearer token, a per-chunk idle watchdog). The CI lane deliberately keeps its
+own inline copy: the proxy holds the real key, so it must never execute a
+script from the PR-head checkout.
+
+1. **Start the proxy on the host** (after prepare has written `context.json`):
+
+   ```bash
+   REVIEW_OPENAI_BASE_URL=<upstream-url> REVIEW_OPENAI_API_KEY=<real-key> \
+     node scripts/verify-pr-model-proxy.mjs --listen 172.17.0.1
+   # => {"port":...,"baseUrl":"http://172.17.0.1:<port>","token":"...","nonce":"..."}
+   ```
+
+   Bind the Docker bridge address, not `127.0.0.1` — a container cannot reach
+   the host's loopback. The bearer check stays mandatory: the port is visible
+   to every container on the bridge. The real key is never printed.
+
+2. **Start the boundary**, mounting nothing credential-shaped:
+
+   ```bash
+   docker run --rm -it \
+     -v <pr-worktree>:/work \
+     -v <round-dir>/context.json:/verify-context/pr.json:ro \
+     -e QWEN_VERIFY_CONTEXT=/verify-context/pr.json \
+     -e QWEN_VERIFY_CREDENTIAL_FREE=1 \
+     -e QWEN_VERIFY_PROXY_TOKEN=<token> \
+     -w /work node:22-bookworm bash
+   ```
+
+   No host `HOME`, no `gh` token, no `SANDBOX_MOUNTS`. The token travels as
+   `QWEN_VERIFY_PROXY_TOKEN`, **not** `OPENAI_API_KEY`: `--require-isolation`
+   refuses any non-empty `OPENAI_API_KEY` (it cannot tell a proxy token from
+   a real key), and this name is not a credential signal.
+   `QWEN_VERIFY_CREDENTIAL_FREE=1` remains the attestation — set it only
+   after confirming the mounts carry nothing.
+
+3. **Point the provider at the proxy** in the container's fresh
+   `$HOME/.qwen/settings.json`; the runtime reads the credential from
+   `envKey`, so no `OPENAI_API_KEY` is needed:
+
+   ```json
+   {
+     "security": { "auth": { "selectedType": "openai" } },
+     "model": { "name": "<model-id>" },
+     "modelProviders": {
+       "openai": [
+         {
+           "id": "<model-id>",
+           "envKey": "QWEN_VERIFY_PROXY_TOKEN",
+           "baseUrl": "<baseUrl printed by the proxy>"
+         }
+       ]
+     }
+   }
+   ```
+
+4. **Inside, the round's first command** is still
+   `node scripts/verify-pr-prepare.mjs --require-isolation` (exit 4 = not a
+   boundary). Then install the CLI, build as the local install strategy
+   requires, and run the round. Coordinate resolution and publishing stay on
+   the host: they need `gh`, which the boundary excludes.
+
 ## Watch mode (local only)
 
 `/verify-pr <n> --watch` installs a standing trigger instead of running once: a
