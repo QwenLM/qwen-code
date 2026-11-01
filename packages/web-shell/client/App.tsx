@@ -190,6 +190,7 @@ import {
   ChatEditor,
   type ComposerToolbarAction,
 } from './components/ChatEditor';
+import { getWorkflowModeMessages } from './components/workflow-mode-messages';
 import {
   mapRestoredInputAnnotationsAfterTextChange,
   type ComposerSubmitCommit,
@@ -695,6 +696,7 @@ function getArtifactPanelTabStops(
 }
 const DEFAULT_COMPOSER_TOOLBAR_ACTIONS = [
   'approvalMode',
+  'workflowMode',
   'contextUsage',
   'model',
   'widthMode',
@@ -20414,6 +20416,23 @@ export function App({
     ],
   );
 
+  const handleWorkflowModeChange = useCallback(
+    (requested: boolean) => {
+      if (sessionWriteBlockedRef.current || !connectionRef.current.sessionId) {
+        return;
+      }
+      const owner = sessionOwnerGuard.capture();
+      void sessionActions.setWorkflowMode(requested).catch((error: unknown) => {
+        if (owner.isCurrent())
+          reportError(
+            error,
+            getWorkflowModeMessages(selectedLanguage).updateFailed,
+          );
+      });
+    },
+    [reportError, sessionActions, sessionOwnerGuard, selectedLanguage],
+  );
+
   const handleReasoningEffort = useCallback(
     (value: ReasoningSelection) => {
       if (sessionWriteBlocked || !connectionRef.current.sessionId) {
@@ -23283,6 +23302,7 @@ export function App({
                       <PluginManagerPage
                         onClose={returnToChat}
                         onUseSkill={handleUseSkill}
+                        showBackButton={!navigationRailVisible}
                         initialFocusRef={pluginTabRef}
                         initialTab={pluginInitialTab}
                         skillsWorkspaceCwd={skillsSourceCwd}
@@ -24797,6 +24817,20 @@ export function App({
                           }
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
+                          workflowMode={connection.workflowMode}
+                          workflowModeStatus={
+                            managedMode
+                              ? undefined
+                              : !connection.sessionId
+                                ? 'unbound'
+                                : sessionWriteBlocked ||
+                                    connection.catchingUp ||
+                                    connection.status !== 'connected'
+                                  ? 'syncing'
+                                  : (connection.workflowModeStatus ?? 'unknown')
+                          }
+                          workflowModePending={connection.workflowModePending}
+                          onWorkflowModeChange={handleWorkflowModeChange}
                           reasoning={displayedReasoning}
                           onSelectReasoningEffort={
                             hasAuthoritativeReasoningContext
