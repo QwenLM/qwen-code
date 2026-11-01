@@ -8892,6 +8892,9 @@ export function App({
   );
   const statusBarRef = useRef<StatusBarHandle>(null);
   const messageListRef = useRef<MessageListHandle | null>(null);
+  const locateWaitingActivity = useCallback((messageId: string) => {
+    messageListRef.current?.scrollToMessage(messageId);
+  }, []);
   const editorRef = useRef<EditorHandle | null>(null);
   const restoreConversationSearchFocus = useCallback(() => {
     editorRef.current?.focus();
@@ -24527,6 +24530,7 @@ export function App({
                             onClose={() => setWaitingMinigameOpen(false)}
                             activity={waitingMinigameActivity}
                             tokenUsage={waitingMinigameTokens}
+                            onSelectActivity={locateWaitingActivity}
                           />
                         )}
                         {streamingState !== 'idle' ||

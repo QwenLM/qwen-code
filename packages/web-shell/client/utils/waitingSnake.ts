@@ -113,7 +113,7 @@ export function turnWaitingSnake(
 }
 
 export function waitingSnakeTickMs(score: number): number {
-  return Math.max(70, 150 - Math.max(0, score) * 4);
+  return Math.max(100, 240 - Math.max(0, score) * 5);
 }
 
 export function tickWaitingSnake(

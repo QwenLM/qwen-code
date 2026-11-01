@@ -4,8 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Blocks, Worm } from 'lucide-react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from 'react';
 import { useI18n } from '../i18n';
 import { isCoarsePointerDevice } from '../hooks/useIsTouchComposer';
 import { formatTokenCount } from '../utils/formatTokenCount';
@@ -17,6 +23,7 @@ import {
   WAITING_MINIGAME_CLEAR_SCORE,
   WAITING_MINIGAME_COLS,
   WAITING_MINIGAME_ROWS,
+  buildWaitingMinigameStartCluster,
   createWaitingMinigame,
   dropWaitingMinigamePiece,
   moveWaitingMinigamePiece,
@@ -50,8 +57,79 @@ const CELLS = Array.from(
   { length: WAITING_MINIGAME_ROWS * WAITING_MINIGAME_COLS },
   (_, index) => index,
 );
+const QWEN_CELL_COL = Math.floor(WAITING_MINIGAME_COLS / 2);
+const QWEN_CELL_ROW = Math.floor(WAITING_MINIGAME_ROWS / 2);
+// 文字出现后整体飞向右侧堆，落定后再切到游戏面板
+const INTRO_FLIGHT_MS = 750;
+const INTRO_LAND_MS = 1_270;
+const INTRO_MS = 1_700;
+// 贪吃蛇没有右侧堆，文字停留后直接进入游戏
+const INTRO_SNAKE_MS = 1_250;
+const INTRO_FONT: Record<string, readonly string[]> = {
+  Q: ['1111', '1001', '1001', '1011', '1111'],
+  W: ['1001', '1001', '1001', '1011', '1111'],
+  E: ['1111', '1000', '1110', '1000', '1111'],
+  N: ['1001', '1101', '1101', '1011', '1001'],
+  C: ['0111', '1000', '1000', '1000', '0111'],
+  O: ['0110', '1001', '1001', '1001', '0110'],
+  D: ['1110', '1001', '1001', '1001', '1110'],
+};
 
-type CardView = 'heatmap' | 'tokens' | 'picker' | 'tetris' | 'snake';
+function buildIntroCells(): ReadonlySet<number> {
+  const cells = new Set<number>();
+  let col = 2;
+  for (const char of 'QWEN CODE') {
+    if (char === ' ') {
+      col += 2;
+      continue;
+    }
+    const rows = INTRO_FONT[char];
+    if (!rows) continue;
+    rows.forEach((row, rowIndex) => {
+      for (let offset = 0; offset < row.length; offset++) {
+        if (row[offset] === '1') {
+          cells.add((rowIndex + 1) * WAITING_MINIGAME_COLS + col + offset);
+        }
+      }
+    });
+    col += rows[0]!.length + 1;
+  }
+  return cells;
+}
+
+const INTRO_CELLS = buildIntroCells();
+
+/**
+ * 每个字符方块飞向右侧堆里高度最接近的格子，保持大致水平移动，
+ * 同高候选中按源列轮换，避免所有方块叠到同一格。
+ */
+function buildIntroFlight(
+  targets: readonly number[],
+): ReadonlyMap<number, number> {
+  const flight = new Map<number, number>();
+  if (targets.length === 0) return flight;
+  for (const source of INTRO_CELLS) {
+    const sourceRow = Math.floor(source / WAITING_MINIGAME_COLS);
+    let bestDistance = Number.POSITIVE_INFINITY;
+    const candidates: number[] = [];
+    for (const target of targets) {
+      const distance = Math.abs(
+        Math.floor(target / WAITING_MINIGAME_COLS) - sourceRow,
+      );
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        candidates.length = 0;
+        candidates.push(target);
+      } else if (distance === bestDistance) {
+        candidates.push(target);
+      }
+    }
+    flight.set(source, candidates[source % candidates.length]!);
+  }
+  return flight;
+}
+
+type CardView = 'heatmap' | 'tokens' | 'intro' | 'tetris' | 'snake';
 type GameKind = 'tetris' | 'snake';
 
 function readBestScore(key: string): number {
@@ -161,6 +239,10 @@ export interface WaitingMinigameProps {
   onClose: () => void;
   activity?: readonly WaitingActivityBucket[];
   tokenUsage?: WaitingTokenUsage;
+  /** Jump to the message that represents the clicked activity bucket. */
+  onSelectActivity?: (messageId: string) => void;
+  /** Delay before the game entry appears; the product default is 5s. */
+  entryDelayMs?: number;
 }
 
 export function WaitingMinigame({
@@ -168,6 +250,8 @@ export function WaitingMinigame({
   onClose,
   activity = [],
   tokenUsage = { input: 0, output: 0, cached: 0 },
+  onSelectActivity,
+  entryDelayMs = 5_000,
 }: WaitingMinigameProps) {
   const { t, language } = useI18n();
   const [view, setView] = useState<CardView>('heatmap');
@@ -191,7 +275,20 @@ export function WaitingMinigame({
   const [documentVisible, setDocumentVisible] = useState(
     () => !isVisibilityHidden(),
   );
+  const [introTargets, setIntroTargets] = useState<readonly number[]>([]);
+  const [introSettling, setIntroSettling] = useState(false);
+  const [introLanded, setIntroLanded] = useState(false);
+  const [hoveredBucket, setHoveredBucket] = useState<number | null>(null);
+  const [qwenCell, setQwenCell] = useState({
+    col: QWEN_CELL_COL,
+    row: QWEN_CELL_ROW,
+  });
+  const [qwenEntryReady, setQwenEntryReady] = useState(false);
+  const entryTimer = useRef<number | undefined>(undefined);
   const noticeTimer = useRef<number | undefined>(undefined);
+  const introTimer = useRef<number | undefined>(undefined);
+  const introRevealTimer = useRef<number | undefined>(undefined);
+  const introLandTimer = useRef<number | undefined>(undefined);
   const audioContext = useRef<AudioContext | undefined>(undefined);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const soundRef = useRef(sound);
@@ -204,6 +301,12 @@ export function WaitingMinigame({
   onCloseRef.current = onClose;
   const coarsePointer = isCoarsePointerDevice();
   const gameView = view === 'tetris' || view === 'snake';
+  const activityRef = useRef(activity);
+  activityRef.current = activity;
+  const introFlight = useMemo(
+    () => buildIntroFlight(introTargets),
+    [introTargets],
+  );
 
   useEffect(() => {
     gameRef.current = game;
@@ -272,20 +375,44 @@ export function WaitingMinigame({
     setSnake(next);
   }, []);
 
+  const cancelIntro = useCallback(() => {
+    if (introTimer.current !== undefined) {
+      window.clearTimeout(introTimer.current);
+      introTimer.current = undefined;
+    }
+    if (introRevealTimer.current !== undefined) {
+      window.clearTimeout(introRevealTimer.current);
+      introRevealTimer.current = undefined;
+    }
+    if (introLandTimer.current !== undefined) {
+      window.clearTimeout(introLandTimer.current);
+      introLandTimer.current = undefined;
+    }
+    setIntroTargets([]);
+    setIntroSettling(false);
+    setIntroLanded(false);
+  }, []);
+
   useEffect(() => {
     if (previousOpen.current === open) return;
     previousOpen.current = open;
+    cancelIntro();
     if (open) {
       setView('heatmap');
       return;
     }
+    setQwenEntryReady(false);
     if (!gameRef.current.paused && !gameRef.current.over) {
       apply(setWaitingMinigamePaused(gameRef.current, true));
     }
     if (!snakeRef.current.paused && !snakeRef.current.over) {
       applySnake(setWaitingSnakePaused(snakeRef.current, true));
     }
-  }, [open, apply, applySnake]);
+  }, [open, apply, applySnake, cancelIntro]);
+
+  useEffect(() => {
+    if (view !== 'heatmap') setHoveredBucket(null);
+  }, [view]);
 
   useEffect(() => {
     if (!open || !documentVisible || view !== 'tetris') return;
@@ -345,6 +472,45 @@ export function WaitingMinigame({
   }, [open, view, apply, applySnake]);
 
   useEffect(() => {
+    if (!open) return;
+    setQwenEntryReady(false);
+    if (entryTimer.current !== undefined) {
+      window.clearTimeout(entryTimer.current);
+      entryTimer.current = undefined;
+    }
+    if (entryDelayMs <= 0) {
+      setQwenEntryReady(true);
+      return;
+    }
+    entryTimer.current = window.setTimeout(() => {
+      entryTimer.current = undefined;
+      setQwenEntryReady(true);
+    }, entryDelayMs);
+    return () => {
+      if (entryTimer.current !== undefined) {
+        window.clearTimeout(entryTimer.current);
+        entryTimer.current = undefined;
+      }
+    };
+  }, [open, entryDelayMs]);
+
+  useEffect(() => {
+    if (!qwenEntryReady) return;
+    const counts = Array.from(
+      { length: WAITING_MINIGAME_COLS },
+      (_, col) => activityRef.current[col]?.count ?? 0,
+    );
+    const coldest = Math.min(...counts);
+    const columns = counts.flatMap((count, col) =>
+      count === coldest ? [col] : [],
+    );
+    const col =
+      columns[Math.floor(Math.random() * columns.length)] ?? QWEN_CELL_COL;
+    const row = Math.floor(Math.random() * WAITING_MINIGAME_ROWS);
+    setQwenCell({ col, row });
+  }, [qwenEntryReady]);
+
+  useEffect(() => {
     if (game.score > best) {
       setBest(game.score);
       writeBestScore(BEST_SCORE_KEY, game.score);
@@ -385,6 +551,15 @@ export function WaitingMinigame({
       if (noticeTimer.current !== undefined) {
         window.clearTimeout(noticeTimer.current);
       }
+      if (introTimer.current !== undefined) {
+        window.clearTimeout(introTimer.current);
+      }
+      if (introRevealTimer.current !== undefined) {
+        window.clearTimeout(introRevealTimer.current);
+      }
+      if (introLandTimer.current !== undefined) {
+        window.clearTimeout(introLandTimer.current);
+      }
       try {
         void audioContext.current?.close?.();
       } catch {
@@ -402,31 +577,60 @@ export function WaitingMinigame({
     applySnake(createWaitingSnake());
   }, [applySnake]);
 
-  const startGame = useCallback(
-    (kind: GameKind) => {
-      setView(kind);
-      ensureAudio();
+  const startFreshGame = useCallback(
+    (kind: GameKind, cluster: readonly number[]) => {
       if (kind === 'tetris') {
-        const current = gameRef.current;
-        if (current.over) restartTetris();
-        else if (current.paused) {
-          apply(setWaitingMinigamePaused(current, false));
-        }
-        return;
+        apply(createWaitingMinigame({ initialSettled: cluster }));
+        setNotice(null);
+      } else {
+        applySnake(createWaitingSnake());
       }
-      const current = snakeRef.current;
-      if (current.over) restartSnake();
-      else if (current.paused) {
-        applySnake(setWaitingSnakePaused(current, false));
-      }
+      ensureAudio();
+      setView(kind);
     },
-    [apply, applySnake, ensureAudio, restartSnake, restartTetris],
+    [apply, applySnake, ensureAudio],
   );
 
   const restartActiveGame = useCallback(() => {
     if (view === 'snake') restartSnake();
     else if (view === 'tetris') restartTetris();
   }, [restartSnake, restartTetris, view]);
+
+  const beginIntroGame = useCallback(
+    (kind: GameKind) => {
+      cancelIntro();
+      ensureAudio();
+      setView('intro');
+      if (kind === 'snake') {
+        introTimer.current = window.setTimeout(() => {
+          introTimer.current = undefined;
+          startFreshGame('snake', []);
+        }, INTRO_SNAKE_MS);
+        return;
+      }
+      const cluster = buildWaitingMinigameStartCluster();
+      setIntroTargets(cluster);
+      setIntroSettling(false);
+      setIntroLanded(false);
+      introRevealTimer.current = window.setTimeout(() => {
+        introRevealTimer.current = undefined;
+        setIntroSettling(true);
+      }, INTRO_FLIGHT_MS);
+      introLandTimer.current = window.setTimeout(() => {
+        introLandTimer.current = undefined;
+        setIntroLanded(true);
+      }, INTRO_LAND_MS);
+      introTimer.current = window.setTimeout(() => {
+        introTimer.current = undefined;
+        startFreshGame(kind, cluster);
+      }, INTRO_MS);
+    },
+    [cancelIntro, ensureAudio, startFreshGame],
+  );
+
+  const startRandomGame = useCallback(() => {
+    beginIntroGame(Math.random() < 0.5 ? 'tetris' : 'snake');
+  }, [beginIntroGame]);
 
   const toggleSound = useCallback(() => {
     const next = !sound;
@@ -577,7 +781,10 @@ export function WaitingMinigame({
             className={styles.textButton}
             onClick={() => {
               if (view === 'heatmap' || view === 'tokens') onClose();
-              else setView('heatmap');
+              else {
+                cancelIntro();
+                setView('heatmap');
+              }
             }}
           >
             <span aria-hidden="true">←</span>
@@ -587,28 +794,25 @@ export function WaitingMinigame({
                 : t('waitingGame.backToHeatmap')}
             </span>
           </button>
-          <span className={styles.title}>{t('waitingGame.title')}</span>
+          <span className={styles.title}>
+            {view === 'heatmap'
+              ? t('waitingGame.activityTitle')
+              : view === 'tokens'
+                ? t('waitingGame.usageTitle')
+                : t('waitingGame.title')}
+          </span>
           {gameView ? (
-            <>
-              <button
-                type="button"
-                className={styles.textButton}
-                onClick={() => setView('picker')}
-              >
-                {t('waitingGame.switchGame')}
-              </button>
-              <button
-                type="button"
-                className={styles.iconButton}
-                aria-pressed={sound}
-                aria-label={
-                  sound ? t('waitingGame.mute') : t('waitingGame.unmute')
-                }
-                onClick={toggleSound}
-              >
-                <SoundIcon muted={!sound} />
-              </button>
-            </>
+            <button
+              type="button"
+              className={styles.iconButton}
+              aria-pressed={sound}
+              aria-label={
+                sound ? t('waitingGame.mute') : t('waitingGame.unmute')
+              }
+              onClick={toggleSound}
+            >
+              <SoundIcon muted={!sound} />
+            </button>
           ) : (
             <span className={styles.headSpacer} aria-hidden="true" />
           )}
@@ -637,52 +841,183 @@ export function WaitingMinigame({
           </div>
         )}
 
+        {view === 'intro' && (
+          <div
+            className={styles.board}
+            data-intro="true"
+            data-settling={introSettling ? 'true' : undefined}
+            data-landed={introLanded ? 'true' : undefined}
+            role="img"
+            aria-label="Qwen Code"
+          >
+            <div
+              className={styles.cells}
+              style={{
+                gridTemplateColumns: `repeat(${WAITING_MINIGAME_COLS}, minmax(0, 1fr))`,
+              }}
+              aria-hidden="true"
+            >
+              {CELLS.map((index) => (
+                <span key={index} className={styles.cell} />
+              ))}
+            </div>
+            <div
+              className={`${styles.cells} ${styles.introCells}`}
+              style={{
+                gridTemplateColumns: `repeat(${WAITING_MINIGAME_COLS}, minmax(0, 1fr))`,
+              }}
+              aria-hidden="true"
+            >
+              {CELLS.map((index) => {
+                const lit = INTRO_CELLS.has(index);
+                const state = introLanded
+                  ? introTargets.includes(index)
+                    ? 1
+                    : 0
+                  : lit
+                    ? 2
+                    : 0;
+                const target = introFlight.get(index) ?? index;
+                const sourceRow = Math.floor(index / WAITING_MINIGAME_COLS);
+                const sourceCol = index % WAITING_MINIGAME_COLS;
+                const targetRow = Math.floor(target / WAITING_MINIGAME_COLS);
+                const targetCol = target % WAITING_MINIGAME_COLS;
+                return (
+                  <span
+                    key={index}
+                    className={styles.cell}
+                    data-state={state}
+                    style={
+                      lit && !introLanded
+                        ? ({
+                            animationDelay: `${sourceCol * 6}ms`,
+                            '--intro-dx': String(targetCol - sourceCol),
+                            '--intro-dy': String(targetRow - sourceRow),
+                          } as CSSProperties)
+                        : undefined
+                    }
+                  />
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {view === 'heatmap' && (
-          <>
-            <div className={styles.heatmap}>
+          <div className={styles.heatmap}>
+            {qwenEntryReady && (
               <div
-                className={styles.heatColumns}
+                className={styles.heatGrid}
                 style={{
                   gridTemplateColumns: `repeat(${WAITING_MINIGAME_COLS}, minmax(0, 1fr))`,
+                  gridTemplateRows: `repeat(${WAITING_MINIGAME_ROWS}, minmax(0, 1fr))`,
                 }}
-                aria-hidden="true"
               >
-                {buckets.map((bucket, index) => (
-                  <div
+                <button
+                  type="button"
+                  className={styles.qwenStart}
+                  data-component="waiting-minigame-start"
+                  title={t('waitingGame.startGame')}
+                  aria-label={t('waitingGame.startGame')}
+                  style={{
+                    gridColumn: qwenCell.col + 1,
+                    gridRow: qwenCell.row + 1,
+                  }}
+                  onClick={startRandomGame}
+                >
+                  <QwenLogoIcon className={styles.qwenLogo} />
+                </button>
+              </div>
+            )}
+            <div
+              className={styles.heatColumns}
+              style={{
+                gridTemplateColumns: `repeat(${WAITING_MINIGAME_COLS}, minmax(0, 1fr))`,
+              }}
+            >
+              {buckets.map((bucket, index) => {
+                const label =
+                  bucket.startAt === undefined
+                    ? t('waitingGame.noActivity')
+                    : t('waitingGame.heatmapTooltip', {
+                        time: `${formatTime(bucket.startAt)}–${formatTime(bucket.endAt)}`,
+                        count: bucket.count,
+                      });
+                return (
+                  <button
                     key={index}
+                    type="button"
                     className={styles.heatColumn}
                     data-level={activityLevel(bucket, maxCount)}
-                    title={
-                      bucket.startAt === undefined
-                        ? t('waitingGame.noActivity')
-                        : t('waitingGame.heatmapTooltip', {
-                            time: `${formatTime(bucket.startAt)}–${formatTime(bucket.endAt)}`,
-                            count: bucket.count,
-                          })
+                    data-empty={bucket.messageId ? undefined : 'true'}
+                    aria-label={
+                      bucket.messageId
+                        ? `${label}. ${t('waitingGame.jumpToMessage')}`
+                        : label
                     }
+                    aria-disabled={bucket.messageId ? undefined : true}
+                    tabIndex={bucket.messageId ? 0 : -1}
+                    onMouseEnter={() => setHoveredBucket(index)}
+                    onMouseLeave={() =>
+                      setHoveredBucket((value) =>
+                        value === index ? null : value,
+                      )
+                    }
+                    onFocus={() => setHoveredBucket(index)}
+                    onBlur={() =>
+                      setHoveredBucket((value) =>
+                        value === index ? null : value,
+                      )
+                    }
+                    onClick={() => {
+                      if (bucket.messageId) {
+                        onSelectActivity?.(bucket.messageId);
+                      }
+                    }}
                   >
                     {Array.from({ length: WAITING_MINIGAME_ROWS }, (_, row) => (
                       <span key={row} className={styles.heatCell} />
                     ))}
-                  </div>
-                ))}
-              </div>
-              <button
-                type="button"
-                className={styles.qwenStart}
-                style={{ background: '#ffffff' }}
-                data-component="waiting-minigame-start"
-                title={t('waitingGame.startGame')}
-                aria-label={t('waitingGame.startGame')}
-                onClick={() => setView('picker')}
+                  </button>
+                );
+              })}
+            </div>
+            {hoveredBucket !== null && buckets[hoveredBucket] && (
+              <div
+                className={styles.heatTooltip}
+                data-align={
+                  hoveredBucket < 4
+                    ? 'start'
+                    : hoveredBucket > WAITING_MINIGAME_COLS - 5
+                      ? 'end'
+                      : 'center'
+                }
+                style={
+                  hoveredBucket >= 4 &&
+                  hoveredBucket <= WAITING_MINIGAME_COLS - 5
+                    ? {
+                        left: `${((hoveredBucket + 0.5) / WAITING_MINIGAME_COLS) * 100}%`,
+                      }
+                    : undefined
+                }
+                role="tooltip"
               >
-                <QwenLogoIcon className={styles.qwenLogo} />
-              </button>
-            </div>
-            <div className={styles.heatFoot}>
-              {t('waitingGame.heatmapHint')}
-            </div>
-          </>
+                <span>
+                  {buckets[hoveredBucket]!.startAt === undefined
+                    ? t('waitingGame.noActivity')
+                    : t('waitingGame.heatmapTooltip', {
+                        time: `${formatTime(buckets[hoveredBucket]!.startAt)}–${formatTime(buckets[hoveredBucket]!.endAt)}`,
+                        count: buckets[hoveredBucket]!.count,
+                      })}
+                </span>
+                {buckets[hoveredBucket]!.messageId && (
+                  <span className={styles.heatTooltipHint}>
+                    {t('waitingGame.jumpToMessage')}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
         )}
 
         {view === 'tokens' && (
@@ -736,32 +1071,6 @@ export function WaitingMinigame({
                 </div>
               </div>
             )}
-          </div>
-        )}
-
-        {view === 'picker' && (
-          <div className={styles.picker}>
-            <span className={styles.pickerTitle}>
-              {t('waitingGame.chooseGame')}
-            </span>
-            <div className={styles.pickerButtons}>
-              <button
-                type="button"
-                className={styles.pickerButton}
-                onClick={() => startGame('tetris')}
-              >
-                <Blocks size={20} aria-hidden />
-                <span>{t('waitingGame.tetris')}</span>
-              </button>
-              <button
-                type="button"
-                className={styles.pickerButton}
-                onClick={() => startGame('snake')}
-              >
-                <Worm size={20} aria-hidden />
-                <span>{t('waitingGame.snake')}</span>
-              </button>
-            </div>
           </div>
         )}
 
@@ -837,13 +1146,18 @@ export function WaitingMinigame({
                 }}
                 aria-hidden="true"
               >
-                {CELLS.map((index) => (
-                  <span
-                    key={index}
-                    className={styles.cell}
-                    data-state={snakeGrid[index] ?? 0}
-                  />
-                ))}
+                {CELLS.map((index) => {
+                  const state = snakeGrid[index] ?? 0;
+                  return (
+                    <span
+                      key={index}
+                      className={styles.cell}
+                      data-state={state}
+                    >
+                      {state === 3 ? '🍎' : null}
+                    </span>
+                  );
+                })}
               </div>
               {snake.paused && !snake.over && (
                 <div className={styles.overlay}>
@@ -902,32 +1216,30 @@ export function WaitingMinigameButton({
       type="button"
       className={styles.trigger}
       data-component="waiting-minigame-trigger"
-      aria-label={t('waitingGame.start')}
+      aria-label={t('waitingGame.openActivity')}
       aria-expanded={open}
-      title={t('waitingGame.title')}
+      title={t('waitingGame.activityTitle')}
       onClick={onToggle}
     >
-      <GamepadIcon />
+      <HeatmapIcon />
     </button>
   );
 }
 
-function GamepadIcon() {
+function HeatmapIcon() {
   return (
-    <svg viewBox="0 0 20 20" width="15" height="15" fill="none" aria-hidden>
-      <path
-        d="M7.2 6.5h5.6a4.4 4.4 0 0 1 4.3 3.5l.5 2.5a1.6 1.6 0 0 1-2.9 1.1l-1-1.2H6.3l-1 1.2a1.6 1.6 0 0 1-2.9-1.1l.5-2.5a4.4 4.4 0 0 1 4.3-3.5Z"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M7 9.3v2.4M5.8 10.5h2.4"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinecap="round"
-      />
-      <circle cx="13.1" cy="10.5" r="0.9" fill="currentColor" />
+    <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden>
+      <g fill="currentColor">
+        <rect x="2" y="2" width="4" height="4" rx="1" opacity="0.3" />
+        <rect x="8" y="2" width="4" height="4" rx="1" opacity="0.85" />
+        <rect x="14" y="2" width="4" height="4" rx="1" opacity="0.2" />
+        <rect x="2" y="8" width="4" height="4" rx="1" opacity="0.6" />
+        <rect x="8" y="8" width="4" height="4" rx="1" opacity="0.25" />
+        <rect x="14" y="8" width="4" height="4" rx="1" opacity="0.9" />
+        <rect x="2" y="14" width="4" height="4" rx="1" opacity="0.2" />
+        <rect x="8" y="14" width="4" height="4" rx="1" opacity="0.55" />
+        <rect x="14" y="14" width="4" height="4" rx="1" opacity="0.4" />
+      </g>
     </svg>
   );
 }

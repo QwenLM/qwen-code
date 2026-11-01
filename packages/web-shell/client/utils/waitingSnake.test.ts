@@ -131,9 +131,9 @@ describe('waiting snake engine', () => {
   });
 
   it('accelerates with score and has a floor', () => {
-    expect(waitingSnakeTickMs(0)).toBe(150);
-    expect(waitingSnakeTickMs(5)).toBe(130);
-    expect(waitingSnakeTickMs(100)).toBe(70);
-    expect(waitingSnakeTickMs(-1)).toBe(150);
+    expect(waitingSnakeTickMs(0)).toBe(240);
+    expect(waitingSnakeTickMs(5)).toBe(215);
+    expect(waitingSnakeTickMs(100)).toBe(100);
+    expect(waitingSnakeTickMs(-1)).toBe(240);
   });
 });

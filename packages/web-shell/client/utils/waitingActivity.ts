@@ -14,9 +14,12 @@ export interface WaitingActivityBucket {
   startAt?: number;
   /** Exclusive end of the bucket, in epoch milliseconds. */
   endAt?: number;
+  /** First message in the bucket, preferring the user question. */
+  messageId?: string;
 }
 
 export interface WaitingActivityMessage {
+  id?: string;
   role?: string;
   timestamp?: number;
   usage?: {
@@ -50,19 +53,17 @@ export function buildWaitingActivity(
   bucketCount = WAITING_ACTIVITY_BUCKETS,
 ): WaitingActivityBucket[] {
   const count = Math.max(1, Math.floor(bucketCount));
-  const points = messages
-    .filter(
-      (message) =>
-        (message.role === 'user' || message.role === 'assistant') &&
-        isTimestamp(message.timestamp),
-    )
-    .map((message) => message.timestamp as number);
+  const points = messages.filter(
+    (message) =>
+      (message.role === 'user' || message.role === 'assistant') &&
+      isTimestamp(message.timestamp),
+  );
   if (points.length === 0) {
     return Array.from({ length: count }, () => ({ count: 0 }));
   }
 
-  const start = Math.min(...points);
-  let end = Math.max(...points);
+  const start = Math.min(...points.map((message) => message.timestamp!));
+  let end = Math.max(...points.map((message) => message.timestamp!));
   if (end <= start) end = start + 60_000;
   const span = end - start;
   const buckets: WaitingActivityBucket[] = Array.from(
@@ -73,13 +74,25 @@ export function buildWaitingActivity(
       endAt: start + (span * (index + 1)) / count,
     }),
   );
-  for (const timestamp of points) {
+  const anchors: Array<{ id: string; role: string } | undefined> = [];
+  for (const message of points) {
+    const timestamp = message.timestamp as number;
     const index = Math.min(
       count - 1,
       Math.max(0, Math.floor(((timestamp - start) / span) * count)),
     );
     buckets[index]!.count += 1;
+    const anchor = anchors[index];
+    if (
+      message.id &&
+      (!anchor || (message.role === 'user' && anchor.role !== 'user'))
+    ) {
+      anchors[index] = { id: message.id, role: message.role! };
+    }
   }
+  anchors.forEach((anchor, index) => {
+    if (anchor) buckets[index]!.messageId = anchor.id;
+  });
   return buckets;
 }
 

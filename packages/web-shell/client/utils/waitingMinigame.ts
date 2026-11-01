@@ -35,6 +35,8 @@ export interface WaitingMinigameOptions {
   rows?: number;
   cols?: number;
   random?: () => number;
+  /** Board indices that start settled, e.g. the random right-side cluster. */
+  initialSettled?: readonly number[];
 }
 
 const PIECE_TYPES: readonly WaitingMinigamePieceType[] = [
@@ -183,10 +185,14 @@ export function createWaitingMinigame(
 ): WaitingMinigameState {
   const rows = Math.max(1, options.rows ?? WAITING_MINIGAME_ROWS);
   const cols = Math.max(1, options.cols ?? WAITING_MINIGAME_COLS);
+  const board = new Uint8Array(rows * cols);
+  for (const index of options.initialSettled ?? []) {
+    if (index >= 0 && index < board.length) board[index] = 1;
+  }
   const initial: WaitingMinigameState = {
     rows,
     cols,
-    board: new Uint8Array(rows * cols),
+    board,
     piece: null,
     score: 0,
     cleared: 0,
@@ -194,6 +200,28 @@ export function createWaitingMinigame(
     paused: false,
   };
   return spawned(initial, options.random ?? Math.random);
+}
+
+/**
+ * A sparse settled cluster in the rightmost columns. The intro blocks fly to
+ * these cells, then the game starts with the same cluster on the board.
+ */
+export function buildWaitingMinigameStartCluster(
+  random: () => number = Math.random,
+  rows = WAITING_MINIGAME_ROWS,
+  cols = WAITING_MINIGAME_COLS,
+): number[] {
+  const cluster: number[] = [];
+  const firstCol = Math.max(0, cols - 4);
+  for (let col = firstCol; col < cols; col++) {
+    const count = 3 + Math.floor(random() * 4);
+    const startRow = Math.floor(random() * rows);
+    for (let offset = 0; offset < count; offset++) {
+      const row = (startRow + offset) % rows;
+      cluster.push(row * cols + col);
+    }
+  }
+  return cluster;
 }
 
 export function waitingMinigameTickMs(cleared: number): number {

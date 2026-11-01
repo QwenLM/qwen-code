@@ -14,7 +14,12 @@ function makeActivity(seed: number): WaitingActivityBucket[] {
   return Array.from({ length: 44 }, (_, index) => {
     const startAt = now - 44 * 60_000 + index * 60_000;
     const count = (index + seed) % 5 === 0 ? 1 + ((index + seed) % 3) : 0;
-    return { count, startAt, endAt: startAt + 60_000 };
+    return {
+      count,
+      startAt,
+      endAt: startAt + 60_000,
+      ...(count > 0 ? { messageId: `harness-message-${index}` } : {}),
+    };
   });
 }
 
@@ -32,6 +37,8 @@ function Harness() {
   const [language, setLanguage] = useState<WebShellLanguage>('en');
   const [seed, setSeed] = useState(1);
   const [withTokens, setWithTokens] = useState(true);
+  const [entryDelayMs, setEntryDelayMs] = useState(0);
+  const [located, setLocated] = useState('');
   const activity = useMemo(() => makeActivity(seed), [seed]);
   const tokenUsage = withTokens ? TOKENS : { input: 0, output: 0, cached: 0 };
   const toggleTheme = () => setDark((value) => !value);
@@ -80,6 +87,14 @@ function Harness() {
           </button>
           <button
             type="button"
+            onClick={() =>
+              setEntryDelayMs((value) => (value === 0 ? 5_000 : 0))
+            }
+          >
+            {entryDelayMs === 0 ? 'Qwen entry: instant' : 'Qwen entry: 5s'}
+          </button>
+          <button
+            type="button"
             onClick={() => {
               setOpen(false);
               window.setTimeout(() => setOpen(true), 30);
@@ -88,7 +103,7 @@ function Harness() {
             Reopen at activity
           </button>
           <span style={{ marginLeft: 'auto', opacity: 0.6 }}>
-            Fake task · local preview
+            {located || 'Fake task · local preview'}
           </span>
         </header>
         <main
@@ -115,6 +130,8 @@ function Harness() {
               onClose={() => setOpen(false)}
               activity={activity}
               tokenUsage={tokenUsage}
+              entryDelayMs={entryDelayMs}
+              onSelectActivity={setLocated}
             />
           )}
           <div

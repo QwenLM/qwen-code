@@ -45,6 +45,30 @@ describe('waiting activity summary', () => {
     expect(buckets[1]?.endAt).toBe(65_000);
   });
 
+  it('anchors each bucket to its first user message for jump-to-message', () => {
+    const buckets = buildWaitingActivity(
+      [
+        { id: 'assistant-1', role: 'assistant', timestamp: 1_000 },
+        { id: 'user-1', role: 'user', timestamp: 2_000 },
+        { id: 'user-2', role: 'user', timestamp: 3_000 },
+      ],
+      1,
+    );
+    expect(buckets[0]?.messageId).toBe('user-1');
+
+    const assistantOnly = buildWaitingActivity(
+      [{ id: 'assistant-2', role: 'assistant', timestamp: 1_000 }],
+      1,
+    );
+    expect(assistantOnly[0]?.messageId).toBe('assistant-2');
+
+    const withoutIds = buildWaitingActivity(
+      [{ role: 'user', timestamp: 1_000 }],
+      1,
+    );
+    expect(withoutIds[0]?.messageId).toBeUndefined();
+  });
+
   it('sums assistant usage and falls back to the latest usage event', () => {
     const summed = buildWaitingTokenUsage(
       [

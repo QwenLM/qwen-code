@@ -9,6 +9,7 @@ import {
   WAITING_MINIGAME_CLEAR_SCORE,
   WAITING_MINIGAME_COLS,
   WAITING_MINIGAME_ROWS,
+  buildWaitingMinigameStartCluster,
   createWaitingMinigame,
   dropWaitingMinigamePiece,
   moveWaitingMinigamePiece,
@@ -233,6 +234,25 @@ describe('waiting minigame engine', () => {
     const grid = waitingMinigameRenderGrid(state);
     expect(Array.from(grid.slice(0, 4))).toEqual([2, 2, 2, 2]);
     expect(Array.from(grid.slice(4))).toEqual([0, 0, 0, 0]);
+  });
+
+  it('pre-fills the intro start cluster before the first piece spawns', () => {
+    const cluster = buildWaitingMinigameStartCluster(firstPiece);
+    expect(cluster).toHaveLength(12);
+    expect(
+      cluster.every(
+        (index) => index % WAITING_MINIGAME_COLS >= WAITING_MINIGAME_COLS - 4,
+      ),
+    ).toBe(true);
+    const state = createWaitingMinigame({
+      random: firstPiece,
+      initialSettled: cluster,
+    });
+    for (const index of cluster) {
+      expect(state.board[index]).toBe(1);
+    }
+    const grid = waitingMinigameRenderGrid(state);
+    expect(Array.from(grid.slice(0, 4))).toEqual([2, 2, 2, 2]);
   });
 
   it('exposes four normalized rotations for every piece', () => {

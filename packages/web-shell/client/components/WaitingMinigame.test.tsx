@@ -63,6 +63,8 @@ function render(props: Partial<WaitingMinigameProps> = {}): Rendered {
             onClose={next.onClose ?? vi.fn()}
             activity={next.activity ?? activity}
             tokenUsage={next.tokenUsage ?? tokens}
+            onSelectActivity={next.onSelectActivity}
+            entryDelayMs={next.entryDelayMs ?? 0}
           />
         </I18nProvider>,
       );
@@ -96,13 +98,25 @@ function clickButton(container: HTMLElement, label: string): void {
   act(() => button?.click());
 }
 
-function startGame(container: HTMLElement, label: 'Tetris' | 'Snake'): void {
+function clickQwenStart(container: HTMLElement): void {
   act(() =>
     container
-      .querySelector<HTMLButtonElement>('[aria-label="Start a game"]')
+      .querySelector<HTMLButtonElement>(
+        '[data-component="waiting-minigame-start"]',
+      )
       ?.click(),
   );
-  clickButton(container, label);
+}
+
+function finishIntro(): void {
+  act(() => {
+    vi.advanceTimersByTime(1_800);
+  });
+}
+
+function startRandomGame(container: HTMLElement): void {
+  clickQwenStart(container);
+  finishIntro();
 }
 
 function activeCellIndexes(container: HTMLElement): number[] {
@@ -128,14 +142,120 @@ describe('WaitingMinigame', () => {
     expect(
       container.querySelector('[data-component="waiting-minigame"]'),
     ).not.toBeNull();
+    expect(container.textContent).toContain('Q&A activity');
     expect(container.textContent).toContain('Activity');
     expect(container.textContent).toContain('Usage');
-    expect(container.textContent).toContain('Click the Qwen mark to play');
     expect(container.querySelectorAll('[data-level]')).toHaveLength(44);
     expect(
-      container.querySelector('[aria-label="Start a game"]'),
+      container.querySelector('[aria-label="Start a random game"]'),
     ).not.toBeNull();
     expect(container.textContent).not.toContain('Score 0');
+  });
+
+  it('reveals the Qwen entry after the five second delay', () => {
+    const { container } = render({ entryDelayMs: 5_000 });
+    expect(
+      container.querySelector('[data-component="waiting-minigame-start"]'),
+    ).toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(4_999);
+    });
+    expect(
+      container.querySelector('[data-component="waiting-minigame-start"]'),
+    ).toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(
+      container.querySelector('[data-component="waiting-minigame-start"]'),
+    ).not.toBeNull();
+  });
+
+  it('keeps the Qwen entry cell stable while activity updates', () => {
+    const { container, rerender } = render();
+    const position = () => {
+      const start = container.querySelector<HTMLElement>(
+        '[data-component="waiting-minigame-start"]',
+      );
+      return `${start?.style.gridColumn}:${start?.style.gridRow}`;
+    };
+    expect(position()).toBe('1:1');
+    rerender({
+      activity: activity.map((_, index) => ({
+        count: index === 5 ? 0 : 1,
+        startAt: 1_000,
+        endAt: 2_000,
+      })),
+    });
+    expect(position()).toBe('1:1');
+  });
+
+  it('flies the Qwen Code blocks into the Tetris start cluster', () => {
+    const { container } = render();
+    clickQwenStart(container);
+    const intro = container.querySelector('[data-intro="true"]');
+    expect(intro).not.toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(750);
+    });
+    expect(intro?.getAttribute('data-settling')).toBe('true');
+    act(() => {
+      vi.advanceTimersByTime(520);
+    });
+    expect(intro?.getAttribute('data-landed')).toBe('true');
+    expect(intro?.querySelectorAll('[data-state="1"]')).toHaveLength(12);
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(container.querySelector('[data-intro="true"]')).toBeNull();
+    expect(container.textContent).toContain('Score 0');
+    expect(container.textContent).toContain('Best 0');
+  });
+
+  it('keeps the Qwen Code blocks still before a Snake game', () => {
+    vi.mocked(Math.random).mockReturnValue(0.9);
+    const { container } = render();
+    clickQwenStart(container);
+    const intro = container.querySelector('[data-intro="true"]');
+    expect(intro).not.toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(750);
+    });
+    expect(intro?.getAttribute('data-settling')).toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(600);
+    });
+    expect(container.querySelector('[data-intro="true"]')).toBeNull();
+    expect(container.textContent).toContain('Arrows / WASD turn');
+  });
+
+  it('shows bucket details on hover and locates the clicked bucket', () => {
+    const onSelectActivity = vi.fn();
+    const buckets = Array.from({ length: 44 }, (_, index) => ({
+      count: index === 3 ? 2 : 0,
+      startAt: 1_000,
+      endAt: 61_000,
+      ...(index === 3 ? { messageId: 'user-3' } : {}),
+    }));
+    const { container } = render({
+      activity: buckets,
+      onSelectActivity,
+    });
+    const columns = container.querySelectorAll<HTMLElement>('[data-level]');
+    const bucket = columns[3]!;
+    act(() => {
+      bucket.dispatchEvent(
+        new MouseEvent('mouseover', { bubbles: true, relatedTarget: null }),
+      );
+    });
+    expect(container.textContent).toContain('2 Q&A');
+    expect(container.textContent).toContain('Click to locate');
+    act(() => bucket.click());
+    expect(onSelectActivity).toHaveBeenCalledWith('user-3');
+
+    const empty = columns[4]!;
+    act(() => empty.click());
+    expect(onSelectActivity).toHaveBeenCalledTimes(1);
   });
 
   it('shows token totals, input, output and context in the usage tab', () => {
@@ -158,10 +278,10 @@ describe('WaitingMinigame', () => {
     expect(container.textContent).toContain('No token data yet');
   });
 
-  it('picks Tetris and supports pause, resume and Escape', () => {
+  it('starts Tetris, pauses, resumes and closes with Escape', () => {
     const onClose = vi.fn();
     const { container } = render({ onClose });
-    startGame(container, 'Tetris');
+    startRandomGame(container);
     expect(container.querySelectorAll('[data-state]')).toHaveLength(44 * 7);
     expect(container.textContent).toContain('Score 0');
     expect(container.textContent).toContain('Best 0');
@@ -175,11 +295,13 @@ describe('WaitingMinigame', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('picks Snake and supports pause, resume and turning', () => {
+  it('starts Snake randomly and supports pause, resume and turning', () => {
+    vi.mocked(Math.random).mockReturnValue(0.9);
     const { container } = render();
-    startGame(container, 'Snake');
+    startRandomGame(container);
     expect(container.querySelectorAll('[data-state]')).toHaveLength(44 * 7);
     expect(container.textContent).toContain('Arrows / WASD turn');
+    expect(container.textContent).toContain('🍎');
     key(' ');
     expect(container.textContent).toContain('Paused');
     key(' ');
@@ -187,24 +309,24 @@ describe('WaitingMinigame', () => {
     const headBefore = activeCellIndexes(container);
     key('ArrowUp');
     act(() => {
-      vi.advanceTimersByTime(150);
+      vi.advanceTimersByTime(240);
     });
     expect(activeCellIndexes(container)).not.toEqual(headBefore);
   });
 
   it('returns to the activity view on reopen', () => {
     const { container, rerender } = render();
-    startGame(container, 'Tetris');
+    startRandomGame(container);
     expect(container.textContent).toContain('Score 0');
     rerender({ open: false });
     rerender({ open: true });
-    expect(container.textContent).toContain('Click the Qwen mark to play');
+    expect(container.textContent).toContain('Q&A activity');
     expect(container.textContent).not.toContain('Score 0');
   });
 
   it('pauses gravity when the tab is hidden and resumes after Space', () => {
     const { container } = render();
-    startGame(container, 'Tetris');
+    startRandomGame(container);
     expect(activeCellIndexes(container)).toEqual([0, 1, 2, 3]);
 
     Object.defineProperty(document, 'visibilityState', {
@@ -234,7 +356,7 @@ describe('WaitingMinigame', () => {
   it('leaves Space and Escape to focused controls and open dialogs', () => {
     const onClose = vi.fn();
     const { container } = render({ onClose });
-    startGame(container, 'Tetris');
+    startRandomGame(container);
     const mute = container.querySelector<HTMLButtonElement>('[aria-pressed]');
     expect(mute).not.toBeNull();
     act(() => mute?.focus());
@@ -252,7 +374,7 @@ describe('WaitingMinigame', () => {
 
   it('keeps game controls out of the aria-hidden board', () => {
     const { container } = render();
-    startGame(container, 'Tetris');
+    startRandomGame(container);
     expect(container.querySelector('[aria-hidden="true"] button')).toBeNull();
     expect(
       container.querySelectorAll('[aria-hidden="true"] [data-state]'),
@@ -280,15 +402,13 @@ describe('WaitingMinigameButton', () => {
     return { container, onToggle };
   }
 
-  it('renders an expanded state and toggles the board on click', () => {
+  it('renders an expanded state and toggles the card on click', () => {
     const { container, onToggle } = renderButton(false);
     const button = container.querySelector<HTMLButtonElement>(
       '[data-component="waiting-minigame-trigger"]',
     );
     expect(button?.getAttribute('aria-expanded')).toBe('false');
-    expect(button?.getAttribute('aria-label')).toBe(
-      'Start the waiting minigame',
-    );
+    expect(button?.getAttribute('aria-label')).toBe('Open task activity');
     act(() => button?.click());
     expect(onToggle).toHaveBeenCalledTimes(1);
   });

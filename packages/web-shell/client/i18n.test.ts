@@ -54,17 +54,15 @@ describe('web-shell i18n catalog', () => {
       const t = getTranslator(language);
       for (const key of [
         'waitingGame.title',
-        'waitingGame.start',
+        'waitingGame.openActivity',
+        'waitingGame.activityTitle',
+        'waitingGame.usageTitle',
         'waitingGame.startGame',
-        'waitingGame.chooseGame',
-        'waitingGame.tetris',
-        'waitingGame.snake',
         'waitingGame.backToHeatmap',
-        'waitingGame.switchGame',
         'waitingGame.heatmap',
         'waitingGame.tokens',
-        'waitingGame.heatmapHint',
         'waitingGame.noActivity',
+        'waitingGame.jumpToMessage',
         'waitingGame.tokenTotal',
         'waitingGame.tokenInput',
         'waitingGame.tokenOutput',
@@ -87,7 +85,8 @@ describe('web-shell i18n catalog', () => {
     }
     const zh = getTranslator('zh-CN');
     expect(zh('waitingGame.heatmap')).toBe('热力图');
-    expect(zh('waitingGame.snake')).toBe('贪吃蛇');
+    expect(zh('waitingGame.activityTitle')).toBe('问答热度');
+    expect(zh('waitingGame.openActivity')).toBe('打开任务热度');
     expect(zh('waitingGame.score', { score: 100 })).toBe('得分 100');
     expect(zh('waitingGame.cleared', { count: 2, score: 100 })).toBe(
       '消除 2 列 · +100',

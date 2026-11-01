@@ -127,6 +127,63 @@
   grid-template-rows: repeat(7, 1fr);
   gap: 2px;
   min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.heatColumn[data-empty='true'] {
+  cursor: default;
+}
+
+.heatColumn:hover,
+.heatColumn:focus-visible {
+  outline: 1px solid color-mix(in srgb, var(--foreground) 30%, transparent);
+  outline-offset: 2px;
+}
+
+.heatColumn:focus-visible {
+  outline-width: 2px;
+  outline-color: var(--ring);
+}
+
+.heatTooltip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--popover, var(--card));
+  color: var(--popover-foreground, var(--card-foreground));
+  box-shadow: 0 4px 14px rgb(0 0 0 / 14%);
+  font-size: 11px;
+  line-height: 15px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.heatTooltip[data-align='center'] {
+  transform: translateX(-50%);
+}
+
+.heatTooltip[data-align='start'] {
+  left: 0;
+}
+
+.heatTooltip[data-align='end'] {
+  right: 0;
+}
+
+.heatTooltipHint {
+  color: var(--muted-foreground);
+  font-size: 10px;
+  line-height: 14px;
 }
 
 .heatCell {
@@ -168,23 +225,46 @@
   );
 }
 
-.qwenStart {
+.heatGrid {
   position: absolute;
-  top: 50%;
-  left: 50%;
-  z-index: 1;
+  inset: 0;
+  display: grid;
+  gap: 2px;
+  pointer-events: none;
+}
+
+.qwenStart {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 48px;
-  height: 48px;
+  width: 100%;
+  height: 100%;
   padding: 0;
-  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-  border-radius: 12px;
+  border: 0;
+  border-radius: 3px;
   background: #ffffff;
-  box-shadow: 0 4px 16px rgb(0 0 0 / 18%);
+  box-shadow: none;
   cursor: pointer;
-  transform: translate(-50%, -50%);
+  pointer-events: auto;
+  animation: waiting-qwen-in 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes waiting-qwen-in {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Keep the visual box cell-sized but give the tiny target a forgiving hit area. */
+.qwenStart::after {
+  content: '';
+  position: absolute;
+  inset: -6px;
 }
 
 .qwenStart:hover {
@@ -197,16 +277,9 @@
 }
 
 .qwenLogo {
-  width: 28px;
-  height: 28px;
+  width: 72%;
+  height: 72%;
   display: block;
-}
-
-.heatFoot {
-  color: var(--muted-foreground);
-  font-size: 11px;
-  line-height: 16px;
-  text-align: center;
 }
 
 .tokenView {
@@ -290,52 +363,52 @@
   background: var(--chat-editor-accent-color, #4a9eff);
 }
 
-.picker {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 0 6px;
+.board[data-intro='true'] .cell[data-state='2'] {
+  animation: waiting-intro-cell 220ms ease-out backwards;
+  box-shadow: 0 0 8px
+    color-mix(
+      in srgb,
+      var(--chat-editor-accent-color, #4a9eff) 55%,
+      transparent
+    );
 }
 
-.pickerTitle {
-  color: var(--muted-foreground);
-  font-size: 12px;
-  line-height: 16px;
+/* 入场结束后方块整体飞向右侧，落成开局预置方块 */
+.board[data-intro='true'][data-settling='true'] .cell[data-state='2'] {
+  opacity: 0.18;
+  transform: translate(
+    calc(var(--intro-dx, 0) * (100% + 2px)),
+    calc(var(--intro-dy, 0) * (100% + 2px))
+  );
+  transition:
+    transform 520ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 180ms ease 340ms;
 }
 
-.pickerButtons {
-  display: flex;
-  gap: 10px;
-  width: 100%;
-  max-width: 420px;
+.board[data-intro='true'][data-landed='true'] .cell[data-state='1'] {
+  animation: waiting-intro-land 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  box-shadow: 0 0 8px
+    color-mix(in srgb, var(--success-color, #22c55e) 55%, transparent);
 }
 
-.pickerButton {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-height: 64px;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--card);
-  color: var(--card-foreground);
-  font-size: 12px;
-  line-height: 16px;
-  cursor: pointer;
+@keyframes waiting-intro-cell {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
-.pickerButton:hover {
-  background: var(--accent);
-}
-
-.pickerButton:focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: 1px;
+@keyframes waiting-intro-land {
+  from {
+    opacity: 0.35;
+    transform: scale(0.82);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 .cells[data-game='snake'] .cell[data-state='1'] {
@@ -351,21 +424,18 @@
 }
 
 .cells[data-game='snake'] .cell[data-state='3'] {
-  background: color-mix(
-    in srgb,
-    var(--success-color, #22c55e) 82%,
-    transparent
-  );
-  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0;
+  background: transparent;
+  font-size: calc(100cqw / 44 * 0.9);
+  line-height: 1;
 }
 
 @media (max-width: 700px) {
   .tokenGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .pickerButtons {
-    max-width: none;
   }
 }
 
@@ -408,6 +478,7 @@
   position: relative;
   width: 100%;
   aspect-ratio: 44 / 7;
+  container-type: inline-size;
 }
 
 .cells {
@@ -416,6 +487,12 @@
   gap: 2px;
   width: 100%;
   height: 100%;
+}
+
+/* 飞行层叠在静态底板上，方块离开后原位置不会露出卡片底色 */
+.introCells {
+  position: absolute;
+  inset: 0;
 }
 
 .cell {
@@ -546,7 +623,14 @@
 
 @media (prefers-reduced-motion: reduce) {
   .card,
-  .notice {
+  .notice,
+  .qwenStart,
+  .board[data-intro='true'] .cell[data-state='2'],
+  .board[data-intro='true'][data-landed='true'] .cell[data-state='1'] {
     animation: none;
+  }
+
+  .board[data-intro='true'][data-settling='true'] .cell[data-state='2'] {
+    transition: none;
   }
 }
