@@ -416,8 +416,8 @@ actually landed. The local path has no publisher enforcing the fail/mismatch
 rule, so run `node scripts/verify-pr-check.mjs <artifact dir>` and clear its
 errors and its verdict-shape and footer warnings before publishing (a
 missing footer is legitimate only when the model could not be resolved),
-act on a gates-size warning by recording the suites it ran under `gates`,
-then state the verdict word from `verdict.txt` verbatim. A published
+act on a gates-size warning by recording the suites it ran under `gates`
+(with none run, say in the report what the count holds), then state the verdict word from `verdict.txt` verbatim. A published
 filename is spent: raw.githubusercontent serves a URL from cache, so
 overwriting `02-matrix.png` leaves every earlier link showing the old image.
 Republish as `02-matrix-v2.png`, update the body and every comment that quotes
@@ -1342,9 +1342,11 @@ never in `pass`, `fail` or `total`. Those count the checks this round wrote.
 Folding a suite in turns them into a count of the repo's tests: a round
 published "7737 scripted assertions" while holding a few dozen checks of its
 own. A mutant run is likewise one assertion (killed, or survived as
-predicted), not its suite's test count. A gate red the PR causes still reaches
-the verdict as an assertion, green at base and red at head, with its
-attribution.
+predicted), not its suite's test count. So is each suite run: it passes when
+green, or when its only failures are the pre-existing ones shown below, and a
+gate red the PR causes, green at base and red at head, fails with its
+attribution. A round whose only checks are suites thus still records a
+positive total, which the checker requires.
 
 **Prove the gate is live before citing it as evidence.** A linter that exits
 0 because it matched no files looks exactly like a linter that passed: plant
@@ -1668,7 +1670,8 @@ regression, asserted that the head showed it, and published `blocked` over
 it trusts any verdict, so run it on the artifact dir before you finish, in
 either path. The publisher reads only the checker's last line and never
 echoes warnings, so a gates-size warning reaches nobody but you — record
-the suites under `gates` before publishing.
+the suites under `gates` before publishing, or, if the round ran none, say in
+the report what the count holds.
 
 ### report.md structure
 
