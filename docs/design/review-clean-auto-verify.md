@@ -72,8 +72,8 @@ Verified against the tree this change is built on:
 
 - A review round that ended clean produces a durable, platform-neutral event.
 - The daemon consumes that event and spawns a sub-session running
-  `/verify-pr <number> --publish --repo <owner>/<repo>`, without the model
-  having to remember the handoff.
+  `/verify-pr <number> --publish --repo <owner>/<repo> --expect-head <sha>`,
+  without the model having to remember the handoff.
 - The mechanism is opt-out, not opt-in, and a repository cannot change the
   policy for its reviewers.
 - Adding a platform later must not change the event schema or the consumer's
@@ -149,9 +149,10 @@ in it — two clean rounds at the same head are one verification, not two.
 
 ### 2. The producers
 
-Two entrances write the same record. The consumer cannot tell them apart except
-by `reviewedBy` and the presence of a `sessionId`, and no gate below depends on
-either.
+Two entrances write the same record, and both require an owning session. The
+consumer applies the same gates to either: `reviewedBy` is attribution only,
+while `sessionId` decides whose sub-session the round becomes — a record without
+one is dropped as `no-owner`, because it cannot become anyone's sub-session.
 
 **E1 — `qwen review verify-event`, for any producer.** Another agent, a script,
 or a person records the handoff explicitly:
@@ -174,7 +175,10 @@ which head was read, and that the round found no Critical.
 **E3 — `saveReviewArtifact`, for qwen-code's own rounds.** Zero configuration:
 the event is emitted after the artifact is written, best-effort — a failure to
 emit is disclosed on stderr and never fails the command, the same posture
-`record_artifact` has in Step 8.
+`record_artifact` has in Step 8. The owner comes from `QWEN_CODE_SESSION_ID`;
+with none set — a headless CI round — no event is written and stderr says why,
+because a sessionless record would only be dropped as `no-owner`, and reporting
+it as written would promise a round that cannot start.
 
 The internal trigger predicate is computed from inputs the command already
 reads:
@@ -232,12 +236,24 @@ An accepted event is processed write-ahead:
 3. Delete the pending file.
 
 Recording before spawning is deliberate: a daemon that dies between the two
-must not replay a round that may already have published a comment. The cost is
-that a failed spawn is not retried — the failure is logged with its reason and
-the operator can run `/verify-pr` by hand. Never double-publishing outranks
-never missing a round for a feature whose output is a public comment.
+must not replay a round that may already have published a comment. Never
+double-publishing outranks never missing a round for a feature whose output is a
+public comment.
 
-The prompt is `/verify-pr <number> --publish --repo <ownerRepo>`.
+What that costs depends on WHICH failure it was, and the launcher distinguishes
+them. A refusal raised before anything was spawned — a saturated concurrency
+cap, a bridge that is not up, a daemon shutting down — proves no session existed
+and no prompt was dispatched, so nothing can have published: the record is
+undone, the event stays pending, and the next pass retries it. Treating that
+like a published round would burn the head permanently, because the ledger
+would then decline every later handoff for it as already-verified. Deferrals are
+bounded (ten passes), so a refusal that will never clear stops being retried and
+takes the conservative outcome. Any other failure may already have published:
+the key stays, the event is dropped, and the reason is logged with the manual
+`/verify-pr` remedy.
+
+The prompt is
+`/verify-pr <number> --publish --repo <ownerRepo> --expect-head <headSha>`.
 The session runs in the same workspace, so the project skill and the operator's
 `verifyPr.assetsRepo` coordinates apply unchanged, and the daemon's existing
 `/verify-pr` prompt admission binds the PR badge to the new session.
@@ -308,7 +324,10 @@ qwen review verify-watch 15846 --repo QwenLM/qwen-code --remove
 The watch list and the observation cursor live beside the events
 (`watches.json`, `observed.json`), host-trusted, keyed by coordinates AND owning session rather than by head — a
 watch spans heads, and two sessions watching one PR are two watches, each dying
-with its own session. The daemon re-reads every watch on a five
+with its own session. The coordinates are canonical before they are keyed, by
+the same rule the event key uses: registering `Owner/Repo` and stopping
+`owner/repo` address one watch, where an uncanonical key made the removal report
+false and left the PR being polled. The daemon re-reads every watch on a five
 minute interval (one GraphQL call each), and an emitted event is consumed by the
 same file pass immediately rather than waiting for the next interval.
 
@@ -387,6 +406,46 @@ Four defects found in review of the first implementation, all fixed here:
   full 40- or 64-character id, and the decision canonicalizes again so the prompt
   and the key cannot disagree.
 
+### 8. Hardening from the pre-merge audit
+
+Four further defects, found by auditing the change against the launcher it
+calls rather than against its own tests:
+
+- **A pre-spawn refusal is not a finished round.** The eligibility probe above
+  mirrors the launcher's two structural refusals, but the launcher has others —
+  a saturated per-caller or workspace concurrency cap, a bridge that is not up,
+  a daemon shutting down, a standalone session service that is unavailable.
+  Those are raised before anything exists, yet the write-ahead key was already
+  recorded, so a busy workspace permanently skipped that head: the ledger
+  claimed a verification that never ran, and every later handoff for it —
+  including the observer's — was declined as already-verified. The launcher now
+  marks its pre-spawn refusals (`sub-session-refusal.ts`), and the consumer undoes
+  the record and leaves the event pending when it sees one. The marker is
+  attached only where no session was created and no prompt dispatched, so a
+  failure that may already have published still takes the conservative path.
+  Deferrals are bounded, so a refusal that will never clear stops retrying
+  instead of notifying on every pass for the life of the daemon.
+- **A watch is keyed on the same canonical identity as an event.** The event key
+  canonicalizes; the watch key did not. Registering `Owner/Repo` and stopping
+  `owner/repo` were two different keys, so the removal reported false and the
+  watch kept polling a PR the operator had stopped, and two spellings of one PR
+  produced two watches and two GraphQL calls per interval. Both now go through
+  one canonicalization rule, and the stored record carries the canonical
+  spelling.
+- **The internal entrance refuses a round nobody owns.** `save-artifact` wrote
+  an event whenever the round was clean, including a headless CI round with no
+  `QWEN_CODE_SESSION_ID`, and reported "verify event written" — while the
+  consumer's only possible action was to drop it as `no-owner`. It now writes
+  nothing in that case and says why, naming the manual remedy, the same refusal
+  the external entrance already made.
+- **A repeated reader discloses the settings degrade once.** The automation reads
+  `review.autoVerify` on every pass that has work, and an unreadable settings
+  file degrades every read. The shared helper announced that on stderr per call,
+  which is right for a CLI invocation and a once-a-minute flood for a daemon.
+  `operatorReviewSettings` now accepts a discloser, and the automation reports
+  the degrade once in its own voice — the same care the unreadable-event, the
+  per-watch and the watch-list notices already take.
+
 ## Design decisions
 
 - **The entrance is a contract, not a pipeline hook.** The first cut emitted only
@@ -432,6 +491,14 @@ Four defects found in review of the first implementation, all fixed here:
   active; a replay after a daemon restart can find it reaped, and `launch` then
   fails and is logged. Ownership itself is decided by EXISTENCE, not residency:
   an idle-reaped session still owns its watches, and only deleting it ends them.
+- The probe reads the transcript LOCATION, so a session that exists but has never
+  been prompted has no transcript yet and reads as gone; a handoff or a watch
+  registered inside that window is pruned on the first pass. The window is narrow
+  (registration happens from inside the session, and the pass that prunes runs
+  later) and the direction is safe — nothing is spawned — but it is the one place
+  where existence and residency are not separated. Left as a follow-up rather
+  than fixed here: the alternative is having this host-trusted reader consult the
+  bridge, which it deliberately does not depend on.
 - The spawned session executes untrusted PR code. It inherits the isolation
   posture of a manually invoked `/verify-pr` round; this change does not weaken
   it and does not add a sandbox of its own. An external producer's assertion of
@@ -470,10 +537,18 @@ Unit tests (collocated, vitest):
   a usage error that writes nothing; an Aone-origin cwd with no `--host` is
   refused rather than labelled github.com; a write failure is a runtime error;
   the handler's stdout JSON and exit codes.
+- `serve/sub-session-refusal.test.ts` — the marker that separates a refusal
+  raised before anything was spawned from a failure that may already have
+  published: it is attached to the launcher's own errors and to a borrowed error
+  without replacing that error's type, an unmarked error is never classified
+  however its message reads, and the marker leaks neither into JSON nor across
+  error objects.
 - `serve/review-verify-automation.test.ts` — each decline gate; the accepted
   path's write-ahead order (key recorded before `launch`, pending file removed
-  after); a failing `launch` leaves the key recorded and drops the event;
-  duplicate events for one head spawn once; `stop()` is idempotent and aborts
+  after); an unclassified `launch` failure leaves the key recorded and drops
+  the event, while a marked pre-spawn refusal undoes the record and keeps the
+  event pending for the next pass, with deferrals bounded; duplicate events for
+  one head spawn once; `stop()` is idempotent and aborts
   the watch. Ownership: every spawn is the owning session's sub-session through the
   launcher; an event naming no owner is dropped `no-owner`; a deleted owner's
   watches and events are pruned and nothing spawns for it; an owner whose
@@ -510,8 +585,8 @@ session's sub-session; turning `review.autoVerify` off produces the event and no
   under the host-trusted review-state directory, carrying platform, host,
   owner/repo, number, reviewed head sha, round and verdict counts.
 - The daemon spawns one sub-session whose prompt is
-  `/verify-pr <number> --publish --repo <owner>/<repo>`, and the pending file is
-  gone afterwards.
+  `/verify-pr <number> --publish --repo <owner>/<repo> --expect-head <sha>`,
+  and the pending file is gone afterwards.
 - `qwen review verify-event --pr <n> --repo <o/r> --head <sha> --reviewed-by
 <agent>` run by any external producer writes the same record, and the daemon
   spawns that session's SUB-SESSION with the same prompt; a handoff naming no

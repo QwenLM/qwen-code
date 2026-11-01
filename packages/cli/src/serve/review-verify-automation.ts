@@ -34,8 +34,13 @@
  * Two rules are deliberate and load-bearing:
  *  - Write-ahead dedupe. The head is recorded in `spawned.json` BEFORE the
  *    spawn, so a daemon that dies in between never replays a round that may
- *    already have published a comment. The cost is that a failed spawn is not
- *    retried; it is logged, and the operator can run `/verify-pr` by hand.
+ *    already have published a comment. A failure that may have published is
+ *    not retried; it is logged, and the operator can run `/verify-pr` by hand.
+ *    A refusal the launcher raises BEFORE anything was spawned is different:
+ *    nothing can have published, so the record is undone and the handoff stays
+ *    pending — a concurrency cap is transient, and keeping the key would
+ *    decline that head forever for a round that never ran. Deferrals are
+ *    bounded, so a refusal that will never clear stops being retried.
  *  - Declined events are dropped, not queued. Nothing about an event becomes
  *    actionable later without a new review round, which writes a new event.
  */
@@ -54,6 +59,7 @@ import {
   readSpawnedKeys,
   recordSpawnedKey,
   removePendingEvent,
+  removeSpawnedKey,
   reviewEventDedupeKey,
   type PendingReviewEvent,
   type ReviewCleanEventV1,
@@ -69,6 +75,7 @@ import {
   type SessionLiveness,
 } from '../commands/review/lib/review-verify-observe.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
+import { isPreSpawnRefusal } from './sub-session-refusal.js';
 
 const log = createDebugLogger('REVIEW_VERIFY');
 
@@ -84,6 +91,12 @@ const WATCH_DEBOUNCE_MS = 500;
  *  per watch, unlike the file pass, so it is minutes rather than seconds; a
  *  review approval is not a latency-sensitive event. */
 const DEFAULT_OBSERVE_INTERVAL_MS = 300_000;
+
+/** How many passes a head may be deferred on a pre-spawn refusal before it
+ *  takes the conservative outcome. Ten file passes is ~10 minutes at the
+ *  default interval — long enough for a concurrency cap to clear, short enough
+ *  that a refusal which will never clear stops being retried. */
+const MAX_DEFERRALS = 10;
 
 /** The project skill the spawned prompt invokes. A workspace without it would
  *  spawn a session that can only report the command is unknown. */
@@ -205,9 +218,20 @@ export function startReviewVerifyAutomation(
   const intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
   const observeIntervalMs =
     opts.observeIntervalMs ?? DEFAULT_OBSERVE_INTERVAL_MS;
-  const isEnabled =
-    opts.isEnabled ?? (() => operatorReviewSettings().autoVerify);
   const notice = opts.onNotice ?? writeStderrLineSafe;
+  // One disclosure per process, not one per pass. An unreadable settings file
+  // degrades EVERY read, and this reads on every pass that has work — left to
+  // the helper's own stderr NOTE it would print the same line once a minute for
+  // the life of the daemon, the same flood the watch-list notice guards against.
+  let reportedSettingsDegrade = false;
+  const isEnabled =
+    opts.isEnabled ??
+    (() =>
+      operatorReviewSettings((message) => {
+        if (reportedSettingsDegrade) return;
+        reportedSettingsDegrade = true;
+        notice(`review-verify: ${message}`);
+      }).autoVerify);
   const observe = opts.observe ?? observeWatches;
   const liveness = opts.sessionExists ?? sessionLivenessFor(boundWorkspace);
   // The daemon always supplies the real probe; the permissive default keeps the
@@ -223,6 +247,12 @@ export function startReviewVerifyAutomation(
   // A corrupt watch list fails every interval; report it once, the same care
   // the per-watch failures below get. Failing closed on it is still right.
   let reportedWatchListFailure = false;
+  // A pre-spawn refusal is retried, but not forever: most are a transient cap,
+  // yet a structural one (a caller this launcher will never accept) would
+  // otherwise leave the event pending and notice on every pass for the life of
+  // the daemon. After this many deferrals the head takes the conservative
+  // outcome instead — recorded, dropped, and disclosed with a manual remedy.
+  const deferrals = new Map<string, number>();
 
   /** Consume one owner's pending events, spawning that owner's sub-sessions. */
   const consumeFor = async (
@@ -285,17 +315,43 @@ export function startReviewVerifyAutomation(
           callerSessionId: owner,
           name: decision.name,
         });
+        deferrals.delete(decision.key);
         notice(
           `review-verify: spawned ${result.sessionId} under ${owner} for ${label} at ${event.target.headSha}${attribution}`,
         );
         log.debug('spawned verification sub-session', result.sessionId);
       } catch (error) {
-        // The key is already recorded: this head is not retried. A missing
-        // round is recoverable by hand; a duplicate published report is not.
+        const reason = error instanceof Error ? error.message : String(error);
+        // A refusal raised BEFORE anything was spawned proves no report can
+        // have been published, so the write-ahead record is undone and the
+        // event stays pending. A concurrency cap is transient: keeping the key
+        // would decline this head forever as already-verified, for a round that
+        // never ran. Anything else may already have published, so the key stays
+        // and the head is not retried — a missing round is recoverable by hand,
+        // a duplicate published report is not.
+        const deferred = (deferrals.get(decision.key) ?? 0) + 1;
+        if (isPreSpawnRefusal(error) && deferred <= MAX_DEFERRALS) {
+          let undone = false;
+          try {
+            removeSpawnedKey(boundWorkspace, decision.key);
+            spawnedKeys.delete(decision.key);
+            undone = true;
+          } catch {
+            // The record could not be undone (an unreadable ledger). Fall
+            // through to the conservative outcome rather than retry against a
+            // key the ledger still holds.
+          }
+          if (undone) {
+            deferrals.set(decision.key, deferred);
+            notice(
+              `review-verify: deferred ${label} (${reason}); nothing was spawned, so the event stays pending for the next pass (${deferred}/${MAX_DEFERRALS})`,
+            );
+            continue;
+          }
+        }
+        deferrals.delete(decision.key);
         notice(
-          `review-verify: spawn failed for ${label} (${
-            error instanceof Error ? error.message : String(error)
-          }); not retried — run /verify-pr ${event.target.number} --publish manually`,
+          `review-verify: spawn failed for ${label} (${reason}); not retried — run /verify-pr ${event.target.number} --publish manually`,
         );
       }
       removePendingEvent(eventPath);
@@ -381,6 +437,12 @@ export function startReviewVerifyAutomation(
     }
   };
 
+  // A corrupt state file fails every pass; report each distinct reason once
+  // rather than notifying on every tick, the same care the per-watch and the
+  // watch-list notices already take. Cleared by a pass that succeeds, so a
+  // failure which returns after recovering is reported again — that is a
+  // transition, not a repeat.
+  const reportedPassFailures = new Set<string>();
   let activeTicks = 0;
   const tick = async (): Promise<void> => {
     activeTicks++;
@@ -393,21 +455,25 @@ export function startReviewVerifyAutomation(
       // construction — wrapping the pass would imply a dependency that does
       // not exist.
       await pass();
+      reportedPassFailures.clear();
     } catch (error) {
-      notice(
-        `review-verify: pass failed (${
-          error instanceof Error ? error.message : String(error)
-        })`,
-      );
+      const reason = error instanceof Error ? error.message : String(error);
+      if (!reportedPassFailures.has(reason)) {
+        reportedPassFailures.add(reason);
+        notice(`review-verify: pass failed (${reason})`);
+      }
     } finally {
       activeTicks--;
     }
   };
 
+  let stopped = false;
   // In-flight guard: a pass awaits a spawn, so it can outlast the interval.
   let running = false;
   const runPass = (): void => {
-    if (running) return;
+    // A stop() that lands while an observation is in flight must not be undone
+    // by that observation's tail starting a fresh pass.
+    if (stopped || running) return;
     running = true;
     void tick().finally(() => {
       running = false;
@@ -437,8 +503,6 @@ export function startReviewVerifyAutomation(
   } catch {
     // Directory unavailable — the interval still ticks.
   }
-
-  let stopped = false;
 
   // Observation: re-read each live owner's watched PRs and hand off any head
   // that came back clean. Separate timer and guard from the file pass: this one

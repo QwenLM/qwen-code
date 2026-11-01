@@ -34,8 +34,10 @@ import {
 import {
   addWatch,
   readWatches,
+  watchKey,
   type ReviewVerifyWatch,
 } from '../commands/review/lib/review-verify-observe.js';
+import { preSpawnRefusal } from './sub-session-refusal.js';
 
 let home: string;
 let root: string;
@@ -248,6 +250,9 @@ describe('startReviewVerifyAutomation', () => {
     installSkill();
     const path = emit();
     launch = vi.fn(async () => {
+      // Deliberately UNMARKED, however cap-shaped the message reads: a failure
+      // that does not prove nothing was spawned may already have published, so
+      // it must take the conservative path. The marked refusal is the next test.
       throw new Error('Too many concurrent sub-sessions');
     });
     notices = [];
@@ -265,6 +270,76 @@ describe('startReviewVerifyAutomation', () => {
     expect(notices.join('\n')).toContain('not retried');
     await automation.tick();
     expect(launch).toHaveBeenCalledTimes(1);
+  });
+
+  it('a pre-spawn refusal undoes the record, so a transient cap does not burn the head', async () => {
+    installSkill();
+    const path = emit();
+    const key = reviewEventDedupeKey(target);
+    let attempt = 0;
+    launch = vi.fn(async () => {
+      attempt += 1;
+      // What the launcher throws when a cap is saturated: nothing was spawned.
+      if (attempt === 1)
+        throw preSpawnRefusal('Too many concurrent sub-sessions');
+      return { sessionId: 'child-1' };
+    });
+    notices = [];
+    automation = startReviewVerifyAutomation({
+      boundWorkspace: root,
+      launch,
+      intervalMs: 600_000,
+      sessionExists: alive,
+      isEnabled: () => true,
+      onNotice: (message) => notices.push(message),
+    });
+
+    await automation.tick();
+    // The handoff survives, and the ledger does NOT claim a round that never ran.
+    expect(existsSync(path)).toBe(true);
+    expect(readSpawnedKeys(root).has(key)).toBe(false);
+    expect(notices.join('\n')).toContain('deferred');
+    expect(notices.join('\n')).not.toContain('not retried');
+
+    // The next pass retries the same head and succeeds.
+    await automation.tick();
+    expect(launch).toHaveBeenCalledTimes(2);
+    expect(existsSync(path)).toBe(false);
+    expect(readSpawnedKeys(root).has(key)).toBe(true);
+    expect(notices.join('\n')).toContain('spawned child-1');
+  });
+
+  it('bounds the deferrals, so a refusal that never clears stops being retried', async () => {
+    installSkill();
+    const path = emit();
+    const key = reviewEventDedupeKey(target);
+    launch = vi.fn(async () => {
+      throw preSpawnRefusal('Standalone session service is unavailable.');
+    });
+    notices = [];
+    automation = startReviewVerifyAutomation({
+      boundWorkspace: root,
+      launch,
+      intervalMs: 600_000,
+      sessionExists: alive,
+      isEnabled: () => true,
+      onNotice: (message) => notices.push(message),
+    });
+
+    // The property is "bounded", not a particular count: keep ticking until the
+    // automation gives up, and fail if it never does.
+    let gaveUp = false;
+    for (let i = 0; i < 40 && !gaveUp; i++) {
+      await automation.tick();
+      gaveUp = notices.some((n) => n.includes('not retried'));
+    }
+    expect(gaveUp).toBe(true);
+    expect(notices.some((n) => n.includes('deferred'))).toBe(true);
+    expect(existsSync(path)).toBe(false);
+    expect(readSpawnedKeys(root).has(key)).toBe(true);
+    const calls = launch.mock.calls.length;
+    await automation.tick();
+    expect(launch).toHaveBeenCalledTimes(calls);
   });
 
   it('verifies one head once across rounds', async () => {
@@ -573,4 +648,57 @@ describe('startReviewVerifyAutomation — parent eligibility (T3)', () => {
     expect(existsSync(path)).toBe(true);
     expect(readSpawnedKeys(root).size).toBe(0);
   });
+
+  it('reports a corrupt state file once per distinct reason, not on every pass', async () => {
+    installSkill();
+    mkdirSync(reviewEventsDir(root), { recursive: true });
+    writeFileSync(join(reviewEventsDir(root), 'watches.json'), '{"v":2}');
+    automation = start();
+
+    // Every pass throws from `readWatches`; the notice marks a transition, so
+    // three failed passes must not produce three identical lines — the shape
+    // that filled the daemon log once a minute for the life of the process.
+    await automation.tick();
+    await automation.tick();
+    await automation.tick();
+
+    const failed = notices.filter((n) => n.includes('pass failed'));
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toContain('v1 watch list');
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it('a stop during an observation is not undone by that observation’s tail', async () => {
+    installSkill();
+    addWatch(root, watch);
+    // A pending event exists, so ANY file pass would spawn. The file interval
+    // is ten minutes and the watcher has nothing new to deliver, so the only
+    // way this launches is the observation's tail starting a pass after stop().
+    emit();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered = false;
+    start({
+      observeIntervalMs: 5,
+      observe: async (_root, o) => {
+        entered = true;
+        await gate;
+        return [
+          {
+            key: watchKey({ ...watch, sessionId: o.sessionId }),
+            action: 'emitted' as const,
+            reason: 'approved',
+            headSha: target.headSha,
+          },
+        ];
+      },
+    });
+    await vi.waitFor(() => expect(entered).toBe(true), { timeout: 5000 });
+    automation?.stop();
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(launch).not.toHaveBeenCalled();
+  }, 10000);
 });

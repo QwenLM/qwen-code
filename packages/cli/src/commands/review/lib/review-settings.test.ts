@@ -190,6 +190,25 @@ describe('operatorReviewSettings', () => {
     });
   });
 
+  it('hands the degrade to a caller-supplied discloser instead of writing stderr', () => {
+    // The daemon's handoff automation reads this on every pass that has work.
+    // Left to the default writer, an unreadable settings file would print the
+    // same NOTE once a minute for the life of the process; a repeated reader
+    // takes the message and discloses it once in its own voice.
+    loadSettingsMock.mockImplementation(() => {
+      throw new Error('Error in /home/u/.qwen/settings.json: Unexpected token');
+    });
+    stderr.mockClear();
+    stderrSafe.mockClear();
+    const seen: string[] = [];
+    const settings = operatorReviewSettings((message) => seen.push(message));
+    expect(settings.autoVerify).toBe(false);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toContain('review settings could not be loaded');
+    expect(stderr).not.toHaveBeenCalled();
+    expect(stderrSafe).not.toHaveBeenCalled();
+  });
+
   // Same re-validation as the ceiling above: a settings file is hand-edited,
   // and a threshold that is not a positive integer must read as absent so the
   // built-in default applies rather than a nonsense number silencing or

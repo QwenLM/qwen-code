@@ -53,11 +53,15 @@ export interface ReviewCleanEventV1 {
   /** Digest of the dedupe key; also the pending file's stem. */
   eventId: string;
   createdAt: string;
-  /** The session that ran the review, when the CLI exported one. The consumer
-   *  uses it as the sub-session's caller: the launcher's concurrency bucket
-   *  and depth-1 gate are keyed on it. Absent for a review performed outside
-   *  qwen-code (another agent, a human, a CI job) — the consumer then spawns a
-   *  top-level automation session rather than a sub-session. */
+  /** The session this handoff belongs to, and the parent of the verification
+   *  round: the consumer spawns the round as THAT session's sub-session, so the
+   *  launcher's concurrency bucket and depth-1 gate are keyed on it. Every
+   *  entrance supplies one — qwen-code's own rounds take the reviewing session,
+   *  an external producer names one (`--session-id`, defaulting to the
+   *  environment), and an observer's event carries the session owning the
+   *  watch. Still optional in the type because a durable file can outlive the
+   *  version that wrote it: a record without it cannot become anyone's
+   *  sub-session and is dropped as `no-owner`. There is no parentless spawn. */
   sessionId?: string;
   /** Who asserted this head was reviewed clean. Attribution for an action
    *  that publishes a public comment: `qwen-code/save-artifact` for the
@@ -95,6 +99,25 @@ export function pendingEventsDir(repositoryRoot: string): string {
 }
 
 /**
+ * The repository half of the canonical identity: the host and, on GitHub, the
+ * owner/repo slug. Exported because a watch is keyed on the same identity as an
+ * event — two spellings of one repository must not become two watches any more
+ * than they may become two verifications.
+ */
+export function canonicalReviewIdentity<
+  T extends { platform: string; host: string; ownerRepo: string },
+>(target: T): T {
+  return {
+    ...target,
+    host: target.host.toLowerCase(),
+    ownerRepo:
+      target.platform === 'github'
+        ? target.ownerRepo.toLowerCase()
+        : target.ownerRepo,
+  };
+}
+
+/**
  * Canonical identities, applied at the one choke point every producer passes
  * through, so two producers spelling one commit or one repository differently
  * cannot produce two keys — and therefore two sessions and two public reports
@@ -105,12 +128,7 @@ export function canonicalReviewTarget(
   target: ReviewEventTarget,
 ): ReviewEventTarget {
   return {
-    ...target,
-    host: target.host.toLowerCase(),
-    ownerRepo:
-      target.platform === 'github'
-        ? target.ownerRepo.toLowerCase()
-        : target.ownerRepo,
+    ...canonicalReviewIdentity(target),
     headSha: target.headSha.toLowerCase(),
   };
 }
@@ -386,6 +404,41 @@ export function recordSpawnedKey(
     `${JSON.stringify({ v: 1, entries } satisfies SpawnedLedger, null, 2)}\n`,
     { encoding: 'utf8', noFollow: true },
   );
+}
+
+/**
+ * Undo a write-ahead record whose spawn was REFUSED BEFORE anything existed —
+ * a concurrency cap, a bridge that is not up, a daemon shutting down. Nothing
+ * was spawned and nothing was published, so the head is not verified and the
+ * handoff must stay retryable; keeping the key would decline every later
+ * attempt as already-verified.
+ *
+ * Strict where `recordSpawnedKey` is lenient: a ledger this cannot parse is
+ * thrown on, never rewritten. Starting a fresh one here would discard every
+ * OTHER head's record and re-open the duplicate-publication hole the ledger
+ * exists to close. Returns false when the key was not there.
+ */
+export function removeSpawnedKey(repositoryRoot: string, key: string): boolean {
+  const path = spawnedLedgerPath(repositoryRoot);
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+  const ledger = JSON.parse(raw) as SpawnedLedger;
+  if (ledger?.v !== 1 || !Array.isArray(ledger.entries)) {
+    throw new Error('spawned.json is not a v1 ledger');
+  }
+  const kept = ledger.entries.filter((entry) => entry?.key !== key);
+  if (kept.length === ledger.entries.length) return false;
+  atomicWriteFileSync(
+    path,
+    `${JSON.stringify({ v: 1, entries: kept } satisfies SpawnedLedger, null, 2)}\n`,
+    { encoding: 'utf8', noFollow: true },
+  );
+  return true;
 }
 
 /** Drop a pending event the consumer has finished with (spawned or declined). */

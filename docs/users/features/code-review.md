@@ -297,7 +297,7 @@ context — withhold that certification), the running `qwen serve` daemon starts
 session in the same workspace executing:
 
 ```
-/verify-pr <number> --publish --repo <owner>/<repo>
+/verify-pr <number> --publish --repo <owner>/<repo> --expect-head <sha>
 ```
 
 That round produces behavioural evidence for the change and posts its report as
@@ -305,9 +305,12 @@ a PR comment. It runs untrusted PR code under the same isolation posture as a
 manually invoked `/verify-pr`, so treat it as you would that command.
 
 - **One verification per reviewed head.** Two clean rounds at the same commit
-  start one round. A failed start is logged and not retried, so a report is
-  never published twice by accident; run `/verify-pr` by hand if you want it
-  again.
+  start one round. A start that fails once the round may already have published
+  is logged and not retried, so a report is never published twice by accident;
+  run `/verify-pr` by hand if you want it again. A refusal raised before anything
+  started — the workspace is already at its sub-session limit, for instance —
+  proves nothing was published, so that handoff is retried on a later pass
+  instead of being skipped for good.
 - **Only `github.com` targets start today.** The handoff records the platform,
   but `/verify-pr` has no Aone or GitLab backend and no `--host` flag yet, and
   the workspace must carry the project skill (`.qwen/skills/verify-pr`).

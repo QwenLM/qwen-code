@@ -63,7 +63,8 @@ CI bot 或人来评审。把入口焊死在 qwen-code 自己的评审管线上�
 
 - 一轮干净的评审产出一条持久化、平台中立的事件。
 - daemon 消费该事件并派生子会话执行
-  `/verify-pr <number> --publish --repo <owner>/<repo>`，不依赖模型记得这次交接。
+  `/verify-pr <number> --publish --repo <owner>/<repo> --expect-head <sha>`，
+  不依赖模型记得这次交接。
 - 该机制默认可用、可关闭，且仓库不能替它的评审者改这条策略。
 - 以后新增平台时，事件 schema 与消费者的控制流都不需要改。
 - 以后新增生产者时，消费者完全不需要改：任何 agent、脚本或人都能记录同一条
@@ -131,8 +132,9 @@ prompt。事件文件名是去重键的摘要，因此同一 head 的重复产�
 
 ### 2. 生产者
 
-两个入口写同一条记录。除了 `reviewedBy` 与是否带 `sessionId`，消费者分辨不出
-它们，而且下面没有任何一道闸门依赖这两者。
+两个入口写同一条记录，且都要求有归属会话。消费者对两者施加同样的闸门：
+`reviewedBy` 只用于归因，而 `sessionId` 决定这一轮成为谁的子会话——不带它的
+记录以 `no-owner` 丢弃，因为它成不了任何人的子会话。
 
 **E1 —— `qwen review verify-event`，面向任何生产者。** 别的 agent、脚本或人
 显式记录这次交接：
@@ -152,7 +154,9 @@ head，以及本轮没有发现 Critical。
 
 **E3 —— `saveReviewArtifact`，面向 qwen-code 自己的轮次。** 零配置：产物写完后
 产出事件，尽力而为——产出失败只在 stderr 披露，绝不使命令失败，与 Step 8 里
-`record_artifact` 的姿态一致。
+`record_artifact` 的姿态一致。归属取自 `QWEN_CODE_SESSION_ID`；没有设置时
+（headless 的 CI 轮次）不写事件，并在 stderr 说明原因——无归属的记录只会被以
+`no-owner` 丢弃，而报成「已写入」等于承诺一轮不可能开始的验证。
 
 内部触发谓词由该命令本来就要读的输入算出：
 
@@ -203,10 +207,18 @@ Aone 目标产出的是 Aone 事件。
 3. 删除 pending 文件。
 
 先记录再派生是刻意的：在两步之间死掉的 daemon 绝不能重放一轮可能已经发过评论的
-验证。代价是派生失败不重试——失败连同原因一起记日志，操作者可以手工跑
-`/verify-pr`。对于一个输出是公开评论的功能，「绝不重复发布」优先于「绝不错过一轮」。
+验证。对于一个输出是公开评论的功能，「绝不重复发布」优先于「绝不错过一轮」。
 
-prompt 是 `/verify-pr <number> --publish --repo <ownerRepo>`。会话在
+代价取决于**是哪一种失败**，而 launcher 会把两者区分开。在什么都没派生之前发出
+的拒绝——并发上限已满、bridge 尚未就绪、daemon 正在关闭——证明没有会话存在、
+也没有 prompt 被派发，因此不可能已经发布：撤销记录、事件保留 pending，下一趟
+重试。把这种拒绝当成「已经发过的一轮」会永久烧掉这个 head，因为台账此后会以
+already-verified 拒绝它的每一次交接。重试次数有上限（十趟），因此永远不会解除的
+拒绝会停止重试并转为保守处置。其他失败则可能已经发布：键保留、事件丢弃，失败原因
+连同手工 `/verify-pr` 的补救一起记日志。
+
+prompt 是
+`/verify-pr <number> --publish --repo <ownerRepo> --expect-head <headSha>`。会话在
 同一工作区运行，因此项目级 skill 与操作者的 `verifyPr.assetsRepo` 坐标原样适用，
 daemon 既有的 `/verify-pr` prompt 准入也会把 PR 徽标绑到新会话上。
 `completion: 'sent'` 让归属会话不被阻塞。派生日志会带上归属会话与 `reviewedBy`，
@@ -265,7 +277,9 @@ qwen review verify-watch 15846 --repo QwenLM/qwen-code --remove
 
 watch 列表与观测 cursor 就放在事件旁边（`watches.json`、`observed.json`），同样
 宿主受信，按坐标**与归属会话**而非 head 建键——一个 watch 跨多个 head，两个会话
-watch 同一个 PR 是两条 watch，各自随自己的会话消亡。daemon 每五分钟重读
+watch 同一个 PR 是两条 watch，各自随自己的会话消亡。坐标在建键前先按事件键的同一
+规则规范化：登记 `Owner/Repo`、停止 `owner/repo` 指的是同一条 watch；未规范化的键
+会让停止操作报 false，而那个 PR 仍被继续轮询。daemon 每五分钟重读
 每个 watch（各一次 GraphQL 调用），产出的事件由同一趟文件消费立即处理，而不必等
 下一个周期。
 
@@ -327,6 +341,35 @@ watch 的 PR 每个周期多一次调用。
   报告。规范化发生在每个生产者都经过的那一个咽喉点，入口与读取端都只接受完整的
   40 或 64 位 id，decision 再规范化一次，使 prompt 与键不可能不一致。
 
+### 8. 合入前审计带来的四处加固
+
+另外四个缺陷，是把本改动对着**它实际调用的 launcher** 审、而不是对着它自己的
+测试审出来的：
+
+- **spawn 前的拒绝不等于一轮已完成。** 上面那个可用性探针复刻的是 launcher 的两条
+  结构性拒绝，但 launcher 还有别的——per-caller 或工作区并发上限已满、bridge 尚未
+  就绪、daemon 正在关闭、standalone 会话服务不可用。这些都在任何东西存在之前发出，
+  而 write-ahead 的键已经记下，于是繁忙的工作区会永久跳过那个 head：台账声称跑了
+  一轮从未跑过的验证，而它之后的每一次交接（**包括观测器的**）都以
+  already-verified 被拒。现在 launcher 会标记它的 spawn 前拒绝
+  （`sub-session-refusal.ts`），消费者见到标记就撤销记录、把事件留待下一趟。标记
+  只加在「没有创建会话、没有派发 prompt」的位置，因此可能已经发布的失败仍走保守
+  路径。重试次数有上限，永远不会解除的拒绝会停止重试，而不是在 daemon 的整个生命
+  周期里每趟都刷一条通知。
+- **watch 与事件按同一套规范身份建键。** 事件键规范化，watch 键却没有。登记
+  `Owner/Repo`、停止 `owner/repo` 是两个不同的键，于是停止操作报 false，而那个已被
+  操作者停掉的 PR 仍被继续轮询；同一个 PR 的两种拼写还会产生两条 watch、每个周期
+  两次 GraphQL 调用。现在两者走同一条规范化规则，落盘记录也带规范拼写。
+- **内部入口拒绝无归属的一轮。** 只要本轮干净，`save-artifact` 就写事件——包括没有
+  `QWEN_CODE_SESSION_ID` 的 headless CI 轮次——并报「verify event written」，而消费者
+  唯一可能的动作是以 `no-owner` 丢弃它。现在这种情况不写事件，并说明原因、给出手工
+  补救，与外部入口早已做出的拒绝一致。
+- **重复读取者只披露一次设置降级。** 自动化在每一趟有工作的 pass 都读
+  `review.autoVerify`，而设置文件读不出来时每次读都会降级。共享 helper 原本每次
+  调用都往 stderr 报一次——对一次 CLI 调用是对的，对 daemon 就是每分钟一条的
+  洪水。`operatorReviewSettings` 现在接受一个披露回调，自动化用它以自己的口径
+  只报一次，与不可读事件、逐 watch、watch 列表三处通知的细致程度一致。
+
 ## 设计决定
 
 - **入口是一份契约，不是一个管线钩子。** 第一版只从 `save-artifact` 产出，等于
@@ -359,6 +402,11 @@ watch 的 PR 每个周期多一次调用。
   caller。内部事件在回合中途（Step 8）写出，因此 watch 会在评审会话仍活跃时点火；
   daemon 重启后的重放可能发现它已被回收，此时 `launch` 失败并记日志。归属本身按
   **存在性**而非驻留判定：空闲被回收的会话仍拥有它的 watch，只有删除会话才终结它们。
+- 探针读的是 transcript 的**位置**，因此一个存在但从未被 prompt 过的会话还没有
+  transcript，会被判为 gone；在这个窗口里登记的交接或 watch 会在第一趟被剪枝。
+  窗口很窄（登记发生在会话内部，执行剪枝的那一趟在其后），方向也安全——不会派生
+  任何东西——但这是「存在」与「驻留」没有被分开的唯一一处。留作后续工作而非在此
+  修复：替代方案是让这个宿主受信的读取者去查 bridge，而它刻意不依赖 bridge。
 - 派生的会话执行 untrusted PR 代码。它继承手工调用 `/verify-pr` 轮次的隔离姿态；
   本次改动不削弱它，也不自带沙箱。外部生产者断言的「干净」没有被独立复核——这是
   E1 的信任模型：调用者与操作者同权限，且记录里带 `reviewedBy` 可归因。
@@ -386,9 +434,14 @@ watch 的 PR 每个周期多一次调用。
   归一化后收敛到同一个去重键；每一种畸形坐标都是「什么都不写」的用法错误；
   Aone origin 的 cwd 且无 `--host` 时被拒绝而不是被标成 github.com；写入失败是
   运行时错误；handler 的 stdout JSON 与退出码。
+- `serve/sub-session-refusal.test.ts` —— 区分「什么都还没派生就发出的拒绝」与
+  「可能已经发布的失败」的那个标记：它既加在 launcher 自己的错误上，也能加在
+  借来的错误上而不替换其类型；未标记的错误无论消息怎么写都不会被归类；标记不会
+  泄漏进 JSON，也不会串到别的错误对象上。
 - `serve/review-verify-automation.test.ts` —— 每一道拒绝闸门；接受路径的
-  write-ahead 顺序（键先于 `launch` 记录，pending 文件在其后移除）；`launch` 失败
-  时键仍被记录且事件被丢弃；同一 head 的重复事件只派生一次；`stop()` 幂等并关闭
+  write-ahead 顺序（键先于 `launch` 记录，pending 文件在其后移除）；未分类的
+  `launch` 失败保留键并丢弃事件，而被标记的 spawn 前拒绝会撤销记录、把事件留到
+  下一趟重试，且重试次数有上限；同一 head 的重复事件只派生一次；`stop()` 幂等并关闭
   watch。归属：每次派生都是归属会话经 launcher 的子会话；不指向会话的事件以
   `no-owner` 丢弃；已删除归属的 watch 与事件被剪枝且不为它派生；读不出存活性的
   归属既不服务也不清理。
@@ -418,7 +471,8 @@ watch 的 PR 每个周期多一次调用。
 - daemon 会话里一轮干净 PR 评审，在宿主受信 review-state 目录下恰好写出一条 pending
   事件，携带 platform、host、owner/repo、number、被评审 head sha、round 与裁决计数。
 - daemon 派生一个子会话，其 prompt 为
-  `/verify-pr <number> --publish --repo <owner>/<repo>`，且事后 pending 文件已消失。
+  `/verify-pr <number> --publish --repo <owner>/<repo> --expect-head <sha>`，
+  且事后 pending 文件已消失。
 - 任何外部生产者跑
   `qwen review verify-event --pr <n> --repo <o/r> --head <sha> --reviewed-by <agent>`
   写出同一条记录，daemon 随之派生该会话 prompt 相同的**子会话**；不点名会话的

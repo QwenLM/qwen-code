@@ -701,6 +701,14 @@ function emitVerifyEvent(input: {
   if (!host) {
     return `save-artifact: clean round on ${platform} with no recorded host; no verify event written.`;
   }
+  // A round nobody owns can never be spawned: the consumer drops a sessionless
+  // event as `no-owner`. Writing one anyway would report a handoff that cannot
+  // happen — the headless CI case — so refuse here, the same refusal the
+  // `verify-event` entrance makes, and name the way to still get the round.
+  const sessionId = process.env['QWEN_CODE_SESSION_ID']?.trim() || undefined;
+  if (!sessionId) {
+    return `save-artifact: clean round, but no owning session (QWEN_CODE_SESSION_ID is unset); no verify event written. Run /verify-pr ${identity.number} --publish by hand, or hand off with "qwen review verify-event --session-id <session>".`;
+  }
   try {
     const emitted = emitReviewCleanEvent({
       workspaceRoot: input.root,
@@ -718,7 +726,7 @@ function emitVerifyEvent(input: {
         suggestion: input.counts.bySeverity['Suggestion'] ?? 0,
       },
       artifactPath: input.artifactPath,
-      sessionId: process.env['QWEN_CODE_SESSION_ID']?.trim() || undefined,
+      sessionId,
       reviewedBy: 'qwen-code/save-artifact',
     });
     return `save-artifact: verify event written (${emitted.path}).`;

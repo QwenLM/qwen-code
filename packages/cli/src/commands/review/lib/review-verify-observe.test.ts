@@ -468,6 +468,34 @@ describe('observeWatches — the watch belongs to a session', () => {
     expect(removeWatch(root, watchKey(watch))).toBe(true);
     expect(readWatches(root)[0]?.sessionId).toBe('other-session');
   });
+
+  it('one repository is one watch however it is spelled, and either spelling removes it', () => {
+    const upper = { ...watch, ownerRepo: watch.ownerRepo.toUpperCase() };
+    const lower = { ...watch, ownerRepo: watch.ownerRepo.toLowerCase() };
+    addWatch(root, upper);
+    addWatch(root, lower);
+    // GitHub repository identity is case-insensitive, so two spellings of one
+    // PR are one watch — not two polls of the same PR every interval.
+    expect(readWatches(root)).toHaveLength(1);
+    expect(readWatches(root)[0]?.ownerRepo).toBe(lower.ownerRepo);
+    // The removal used to report false and leave the watch polling a PR the
+    // operator had stopped, because the key kept the registered spelling.
+    expect(removeWatch(root, watchKey(upper))).toBe(true);
+    expect(readWatches(root)).toHaveLength(0);
+  });
+
+  it('canonicalizes the host but keeps a case-sensitive platform slug', () => {
+    addWatch(root, { ...watch, host: 'GitHub.COM' });
+    expect(readWatches(root)[0]?.host).toBe('github.com');
+    addWatch(root, {
+      ...watch,
+      platform: 'aone',
+      ownerRepo: 'Group/Repo',
+      sessionId: 'other-session',
+    });
+    const aone = readWatches(root).find((w) => w.platform === 'aone');
+    expect(aone?.ownerRepo).toBe('Group/Repo');
+  });
 });
 
 describe('judgeCleanApproval — current-head approval evidence', () => {

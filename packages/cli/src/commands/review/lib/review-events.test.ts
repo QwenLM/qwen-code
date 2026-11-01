@@ -26,6 +26,7 @@ import {
   readSpawnedKeys,
   recordSpawnedKey,
   removePendingEvent,
+  removeSpawnedKey,
   reviewEventDedupeKey,
   reviewEventId,
   reviewEventsDir,
@@ -308,6 +309,32 @@ describe('the spawned ledger', () => {
     writeFileSync(join(reviewEventsDir(root), 'spawned.json'), 'garbage');
     recordSpawnedKey(root, 'key-1');
     expect([...readSpawnedKeys(root)]).toEqual(['key-1']);
+  });
+});
+
+describe('removeSpawnedKey — undoing a record whose spawn never happened', () => {
+  it('removes only the named head and reports whether it was there', () => {
+    recordSpawnedKey(root, 'key-1');
+    recordSpawnedKey(root, 'key-2');
+    expect(removeSpawnedKey(root, 'key-1')).toBe(true);
+    expect([...readSpawnedKeys(root)]).toEqual(['key-2']);
+    expect(removeSpawnedKey(root, 'key-1')).toBe(false);
+    expect([...readSpawnedKeys(root)]).toEqual(['key-2']);
+  });
+
+  it('is a no-op when there is no ledger yet', () => {
+    expect(removeSpawnedKey(root, 'key-1')).toBe(false);
+  });
+
+  it('throws on a corrupt ledger instead of rewriting it', () => {
+    mkdirSync(reviewEventsDir(root), { recursive: true });
+    const path = join(reviewEventsDir(root), 'spawned.json');
+    writeFileSync(path, '{"v":2}');
+    expect(() => removeSpawnedKey(root, 'key-1')).toThrow(/v1 ledger/);
+    // Unlike recordSpawnedKey, this must NOT start a fresh ledger: doing so
+    // would discard every other head's record and re-open the duplicate
+    // publication the ledger exists to prevent.
+    expect(readFileSync(path, 'utf8')).toBe('{"v":2}');
   });
 });
 

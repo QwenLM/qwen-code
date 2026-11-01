@@ -1223,6 +1223,34 @@ describe('saveReviewArtifact — the clean-round verify handoff', () => {
     expect(readPendingReviewEvents(root).events).toEqual([]);
   });
 
+  it('writes nothing without an owning session, and says why instead of promising a handoff', () => {
+    // The headless CI shape: a clean round with no session to own it. The
+    // consumer drops a sessionless event as `no-owner`, so writing one and
+    // reporting "verify event written" would promise a round that cannot start.
+    vi.stubEnv('QWEN_CODE_SESSION_ID', '');
+    const paths = cleanFixture();
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      const saved = saveReviewArtifact({
+        ...paths,
+        target: 'pr-123',
+        effort: 'high',
+      });
+      expect(existsSync(saved.path)).toBe(true);
+      expect(readPendingReviewEvents(root).events).toEqual([]);
+      const note = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(note).toContain('no owning session');
+      expect(note).toContain('no verify event written');
+      expect(note).not.toContain('verify event written (');
+      // The remedy is named, not just the refusal.
+      expect(note).toContain('/verify-pr 123 --publish');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it('never costs the caller its saved review when the event cannot be written', () => {
     const paths = cleanFixture();
     // A file where the global qwen dir must be: the event write cannot land.

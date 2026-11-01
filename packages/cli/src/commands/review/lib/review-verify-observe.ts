@@ -30,6 +30,7 @@ import { promisify } from 'node:util';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import {
+  canonicalReviewIdentity,
   emitReviewCleanEvent,
   readSpawnedKeys,
   reviewEventDedupeKey,
@@ -59,7 +60,11 @@ export function watchKey(watch: {
   number: number;
   sessionId: string;
 }): string {
-  return `${watch.platform}:${watch.host}:${watch.ownerRepo}:${watch.number}:${watch.sessionId}`;
+  // The same canonical identity an event is keyed on. Without it, registering
+  // `Owner/Repo` and removing `owner/repo` are two different keys: the removal
+  // reports false and the watch keeps polling a PR the operator stopped.
+  const canonical = canonicalReviewIdentity(watch);
+  return `${canonical.platform}:${canonical.host}:${canonical.ownerRepo}:${canonical.number}:${canonical.sessionId}`;
 }
 
 function watchesPath(root: string): string {
@@ -104,9 +109,12 @@ export function readWatches(root: string): ReviewVerifyWatch[] {
 }
 
 export function addWatch(root: string, watch: ReviewVerifyWatch): void {
-  const key = watchKey(watch);
+  // Store the canonical spelling, so the record and its key agree and `--list`
+  // shows one entry per repository however the operator spelled it.
+  const canonical = canonicalReviewIdentity(watch);
+  const key = watchKey(canonical);
   const watches = readWatches(root).filter((w) => watchKey(w) !== key);
-  watches.push(watch);
+  watches.push(canonical);
   writeState(root, 'watches.json', { v: 1, watches });
 }
 

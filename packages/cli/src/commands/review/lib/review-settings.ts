@@ -84,8 +84,16 @@ export interface OperatorReviewSettings {
  * review reads: a repository must not decide, for every reviewer who opens
  * it, whether findings publish (`comment`), whether the posted review names
  * its model (`attribution`), or how deeply the pipeline verifies (`effort`).
+ *
+ * `onDegrade` replaces the stderr NOTE for a caller that reads this repeatedly
+ * and discloses the degrade in its own voice. A CLI invocation reads it once, so
+ * the default write is right there; the daemon's handoff automation reads it
+ * every pass, and an unreadable settings file would otherwise print the same
+ * NOTE once a minute for the life of the process.
  */
-export function operatorReviewSettings(): OperatorReviewSettings {
+export function operatorReviewSettings(
+  onDegrade?: (message: string) => void,
+): OperatorReviewSettings {
   // `loadSettings` throws a FatalConfigError when a settings file cannot be
   // READ (or its migration fails) — malformed JSON does not reach that path,
   // it is copied aside and recovered ("Never crash due to a corrupted settings
@@ -108,13 +116,14 @@ export function operatorReviewSettings(): OperatorReviewSettings {
     // EPIPE or a closed fd, and this NOTE is incidental to the degrade — a
     // throw here would propagate out of the catch and end the review by the
     // very path added to stop a broken settings file from ending it.
-    writeStderrLineSafe(
+    const message =
       `NOTE: review settings could not be loaded (${
         error instanceof Error ? error.message.split('\n')[0] : String(error)
       }); this review uses the defaults — attribution on, no auto-posting, no ` +
-        `automatic verification handoff, no effort or round-cap override. ` +
-        `Fix the settings file to restore them.`,
-    );
+      `automatic verification handoff, no effort or round-cap override. ` +
+      `Fix the settings file to restore them.`;
+    if (onDegrade) onDegrade(message);
+    else writeStderrLineSafe(message);
     return { ...SAFE_DEFAULTS };
   }
   // Settings loading performs no per-value type validation — the inferred
