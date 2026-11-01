@@ -88,6 +88,7 @@ import {
   type ServerLlmStreamEvent,
 } from './turn.js';
 import { LoopReason, LoopType } from '../telemetry/types.js';
+import * as loggers from '../telemetry/loggers.js';
 import { logMemoryRecallDelivery } from '../telemetry/index.js';
 import { formatOmniMemorySideQueryReminder } from '../omni/memory-side-query.js';
 import type { MediaMemoryRecallResult } from '../services/media-memory/index.js';
@@ -967,6 +968,10 @@ describe('Gemini Client (client.ts)', () => {
       getModelRouteIdentity: vi.fn().mockReturnValue('test-route'),
       getEffectiveInputModalities: vi.fn().mockReturnValue({}),
       getBaseLlmClient: vi.fn(),
+      // Undefined by default (no goal runtime); goal-runtime tests override.
+      getGoalRuntime: vi
+        .fn<() => GoalRuntime | undefined>()
+        .mockReturnValue(undefined),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
       getLoopProtection: vi.fn().mockReturnValue('stop'),
       // Mimics the resolved Config getter: always a number (Infinity keeps
@@ -11891,6 +11896,170 @@ Other open files:
       });
     });
 
+    /** `reminded` loop-protection decisions logged so far. */
+    const remindedDecisions = () =>
+      vi
+        .mocked(loggers.logLoopProtection)
+        .mock.calls.filter(([, event]) => event.decision === 'reminded');
+    /** First turn that queues the consecutive-identical reminder. */
+    const queueIdenticalReminder = async (promptId: string) => {
+      const shellCall = (i: number) =>
+        toolCallRequest(`repeat-${i}`, 'run_shell_command', {
+          command: 'echo repeated',
+        });
+      installChat();
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(shellCall(0), shellCall(1), shellCall(2), stopped()),
+      );
+      await run([{ text: 'repeat a tool' }], promptId);
+      expect(remindedDecisions()).toEqual([]);
+    };
+    const sendToolResult = (promptId: string, part: Part) => {
+      mockTurnRunFn.mockReturnValueOnce(textTurn('done'));
+      return run([part], promptId, { type: SendMessageType.ToolResult });
+    };
+    const fnShellResult = () =>
+      fnResponse('run_shell_command', { output: 'repeated' });
+
+    it('credits the reminder once the model accepts the send and never re-credits a clean continuation', async () => {
+      const promptId = 'prompt-id-loop-reminder-commit';
+      await queueIdenticalReminder(promptId);
+
+      await sendToolResult(promptId, fnShellResult());
+
+      const request = mockTurnRunFn.mock.lastCall?.[1] as Part[];
+      const warningParts = request.filter(
+        (part) =>
+          typeof part === 'object' &&
+          part !== null &&
+          'text' in part &&
+          String((part as { text?: unknown }).text).includes(
+            '3 times in a row',
+          ),
+      );
+      expect(warningParts).toHaveLength(1);
+      expect(remindedDecisions()).toHaveLength(1);
+      expect(remindedDecisions()[0][1]).toMatchObject({
+        decision: 'reminded',
+        prompt_id: promptId,
+        loop_type: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      });
+
+      // Clean continuation: no new reminder is taken, none credited.
+      await sendToolResult(promptId, fnShellResult());
+      expect(getLastTurnRequestText()).not.toContain('3 times in a row');
+      expect(remindedDecisions()).toHaveLength(1);
+    });
+
+    it('keeps the reminder eligible when the ToolResult send is cancelled at the goal-event yield', async () => {
+      const promptId = 'prompt-id-loop-reminder-cancel';
+      // A goal runtime makes every send carry a pending GoalState event, which
+      // the ToolResult continuation yields after the reminder take and before
+      // the model-bound request — the suspension point the consumer cancels.
+      const goalRuntime = {
+        subscribe: vi.fn(() => vi.fn()),
+        getSnapshot: vi.fn(() => emptyGoalSnapshot()),
+      } as unknown as GoalRuntime;
+      vi.mocked(mockConfig.getGoalRuntime).mockReturnValue(goalRuntime);
+      await queueIdenticalReminder(promptId);
+
+      const turnRunCallsBeforeSend = mockTurnRunFn.mock.calls.length;
+      const stream = client.sendMessageStream(
+        [fnShellResult()],
+        new AbortController().signal,
+        promptId,
+        { type: SendMessageType.ToolResult },
+      );
+      const iterator = stream[Symbol.asyncIterator]();
+      const first = await iterator.next();
+      expect(first.value).toMatchObject({ type: LlmEventType.GoalState });
+      // Suspended after the take, before any model-bound request: no turn.run
+      // call was issued for this send, so the count still matches the
+      // reminder-queueing turn above. Comparing the count is what pins the
+      // premise — clearing the mock first would make the assertion vacuous.
+      expect(mockTurnRunFn.mock.calls.length).toBe(turnRunCallsBeforeSend);
+      await iterator.return!(undefined as unknown as Turn);
+
+      expect(remindedDecisions()).toEqual([]);
+
+      // The same streak's warning is still delivered by the next send.
+      await sendToolResult(promptId, fnShellResult());
+      expect(getLastTurnRequestText()).toContain('3 times in a row');
+      expect(remindedDecisions()).toHaveLength(1);
+      expect(remindedDecisions()[0][1]).toMatchObject({ prompt_id: promptId });
+    });
+
+    it('keeps the reminder eligible when the send fails before the model accepts it', async () => {
+      const promptId = 'prompt-id-loop-reminder-failed-send';
+      await queueIdenticalReminder(promptId);
+
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('model send failed before any event');
+      });
+      await expect(
+        run([fnShellResult()], promptId, {
+          type: SendMessageType.ToolResult,
+        }),
+      ).rejects.toThrow('model send failed before any event');
+      expect(remindedDecisions()).toEqual([]);
+
+      // Retrying the same eligible streak delivers exactly once.
+      await sendToolResult(promptId, fnShellResult());
+      expect(getLastTurnRequestText()).toContain('3 times in a row');
+      expect(remindedDecisions()).toHaveLength(1);
+    });
+
+    it('does not leak an abandoned reminder into an unrelated new prompt', async () => {
+      const promptId = 'prompt-id-loop-reminder-leak';
+      const goalRuntime = {
+        subscribe: vi.fn(() => vi.fn()),
+        getSnapshot: vi.fn(() => emptyGoalSnapshot()),
+      } as unknown as GoalRuntime;
+      vi.mocked(mockConfig.getGoalRuntime).mockReturnValue(goalRuntime);
+      await queueIdenticalReminder(promptId);
+
+      const stream = client.sendMessageStream(
+        [fnShellResult()],
+        new AbortController().signal,
+        promptId,
+        { type: SendMessageType.ToolResult },
+      );
+      const iterator = stream[Symbol.asyncIterator]();
+      await iterator.next();
+      await iterator.return!(undefined as unknown as Turn);
+
+      // A new unrelated task resets the detector before any further send.
+      mockTurnRunFn.mockReturnValueOnce(textTurn('new task started'));
+      await run([{ text: 'completely different task' }], 'prompt-id-new-task');
+
+      await sendToolResult(
+        'prompt-id-new-task',
+        fnResponse('other_tool', { output: 'ok' }),
+      );
+      expect(getLastTurnRequestText()).not.toContain('3 times in a row');
+      expect(remindedDecisions()).toEqual([]);
+    });
+
+    it('credits the prepared reminder once when an attempt restarts before acceptance', async () => {
+      const promptId = 'prompt-id-loop-reminder-retry';
+      await queueIdenticalReminder(promptId);
+
+      // The request carrying the reminder goes out; the first attempt fails
+      // before any model-input event and the turn restarts into a second
+      // attempt whose acceptance settles the delivery exactly once.
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(
+          { type: LlmEventType.Retry },
+          { type: LlmEventType.Content, value: 'attempt two' },
+        ),
+      );
+      await run([fnShellResult()], promptId, {
+        type: SendMessageType.ToolResult,
+      });
+      expect(getLastTurnRequestText()).toContain('3 times in a row');
+      expect(remindedDecisions()).toHaveLength(1);
+    });
+
     describe('retry sendMessageType', () => {
       /** A retry-capable chat stub; `overrides` replace any default. */
       const retryChat = <T extends object>(overrides: T = {} as T) =>
@@ -12682,31 +12851,137 @@ Other open files:
         );
       });
 
-      it('leaves the Stop hook and the memory tasks to a host that runs it after the round', async () => {
-        const request = blockStopOnce();
-        installMessageBus(request, 'Stop');
-        notDoneChat();
-        mockTurnRunFn.mockImplementation(() =>
-          (async function* () {
-            yield { type: LlmEventType.Content, value: 'not done' };
-          })(),
-        );
-        const memoryTasks = vi.spyOn(
-          client,
-          'runManagedAutoMemoryBackgroundTasks',
-        );
+      /** A stop policy that continues once with `text`, then lets it stop. */
+      const continueOnce = (text: string) => ({
+        continueAt: vi
+          .fn()
+          .mockResolvedValueOnce([{ text }])
+          .mockResolvedValue(undefined),
+        onStopHookCap: vi.fn(),
+      });
 
-        await run([{ text: 'Hi' }], 'prompt-stop-hook-by-host', {
+      it("continues a stopped response with a host's stop policy, as a Hook send", async () => {
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const policy = continueOnce('Finish the todos.');
+        const send = vi.spyOn(client, 'sendMessageStream');
+
+        await run([{ text: 'Hi' }], 'prompt-stop-policy', {
           type: SendMessageType.UserQuery,
-          stopHookRunByHost: true,
+          stopPolicies: [policy],
+        });
+
+        expect(policy.continueAt).toHaveBeenCalledTimes(2);
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        expect(mockTurnRunFn.mock.calls[1][1]).toContainEqual({
+          text: 'Finish the todos.',
+        });
+        expect(send.mock.calls[1][3]).toMatchObject({
+          type: SendMessageType.Hook,
+          stopPolicies: [policy],
+        });
+      });
+
+      it("keeps the host's steering on a stop policy's continuation", async () => {
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const policy = continueOnce('Finish the todos.');
+        const getSteerInput = vi.fn().mockResolvedValue(undefined);
+        const send = vi.spyOn(client, 'sendMessageStream');
+
+        await run([{ text: 'Hi' }], 'prompt-stop-policy-steer', {
+          type: SendMessageType.UserQuery,
+          stopPolicies: [policy],
+          getSteerInput,
+        });
+
+        expect(send.mock.calls[1][3]).toMatchObject({
+          type: SendMessageType.Hook,
+          getSteerInput,
+        });
+      });
+
+      it('lets the turn stop when a stop policy returns an empty request', async () => {
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const empty = { continueAt: vi.fn().mockResolvedValue([]) };
+        const next = continueOnce('Finish the todos.');
+
+        await run([{ text: 'Hi' }], 'prompt-stop-policy-empty', {
+          type: SendMessageType.UserQuery,
+          stopPolicies: [empty, next],
+        });
+
+        // The empty request sends nothing; the next policy is asked.
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        expect(mockTurnRunFn.mock.calls[1][1]).toContainEqual({
+          text: 'Finish the todos.',
+        });
+      });
+
+      it('asks the stop policies only once the Stop hook lets the response stop', async () => {
+        installMessageBus(blockStopOnce(), 'Stop');
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const policy = continueOnce('Finish the todos.');
+
+        await run([{ text: 'Hi' }], 'prompt-stop-policy-after-hook', {
+          type: SendMessageType.UserQuery,
+          stopPolicies: [policy],
+        });
+
+        // The hook's continuation, then the policy's, then the stop.
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(3);
+        expect(mockTurnRunFn.mock.calls[1][1]).toContainEqual({
+          text: 'Keep working',
+        });
+        expect(mockTurnRunFn.mock.calls[2][1]).toContainEqual({
+          text: 'Finish the todos.',
+        });
+        expect(policy.continueAt).toHaveBeenCalledTimes(2);
+      });
+
+      it('tells the stop policies when the Stop hook cap ends the turn', async () => {
+        installMessageBus(
+          vi.fn().mockResolvedValue({
+            output: { decision: 'block', reason: 'Keep working' },
+            stopHookCount: 1,
+          }),
+          'Stop',
+        );
+        vi.mocked(mockConfig.getStopHookBlockingCap).mockReturnValue(1);
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const policy = continueOnce('Finish the todos.');
+
+        await run([{ text: 'Hi' }], 'prompt-stop-policy-cap', {
+          type: SendMessageType.UserQuery,
+          stopPolicies: [policy],
         });
 
         expect(mockTurnRunFn).toHaveBeenCalledOnce();
-        expect(request).not.toHaveBeenCalledWith(
-          expect.objectContaining({ eventName: 'Stop' }),
-          expect.anything(),
-        );
-        expect(memoryTasks).not.toHaveBeenCalled();
+        expect(policy.onStopHookCap).toHaveBeenCalledOnce();
+        expect(policy.continueAt).not.toHaveBeenCalled();
+      });
+
+      it("keeps a host's span and guard options in a Stop hook continuation", async () => {
+        installMessageBus(blockStopOnce(), 'Stop');
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const send = vi.spyOn(client, 'sendMessageStream');
+
+        await run([{ text: 'Hi' }], 'prompt-stop-hook-host-options', {
+          type: SendMessageType.UserQuery,
+          interactionSpanByHost: true,
+          toolLoopGuardsByHost: true,
+        });
+
+        expect(send.mock.calls[1][3]).toMatchObject({
+          type: SendMessageType.Hook,
+          interactionSpanByHost: true,
+          toolLoopGuardsByHost: true,
+        });
+        expect(tel.startInteractionSpan).not.toHaveBeenCalled();
       });
 
       it('gives a blocking Stop hook continuation a fresh exploration phase', async () => {

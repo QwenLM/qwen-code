@@ -267,6 +267,29 @@ export enum SendMessageType {
   Goal = 'goal',
 }
 
+/** A host's reason to continue a turn whose response stopped. */
+export interface StopPolicy {
+  /** The request to continue with, or undefined or empty to let the turn stop. */
+  continueAt(stop: {
+    promptId: string;
+    signal: AbortSignal;
+  }): Promise<Part[] | undefined>;
+  /** The Stop hook's blocking cap ended the turn before the policy was asked. */
+  onStopHookCap?(): void;
+}
+
+/** The host-owned options a continuation the client sends on its own keeps. */
+function hostContinuationOptions(
+  options: SendMessageOptions | undefined,
+): Partial<SendMessageOptions> {
+  return {
+    ...(options?.toolCallPreparations && { toolCallPreparations: true }),
+    ...(options?.interactionSpanByHost && { interactionSpanByHost: true }),
+    ...(options?.toolLoopGuardsByHost && { toolLoopGuardsByHost: true }),
+    ...(options?.stopPolicies && { stopPolicies: options.stopPolicies }),
+  };
+}
+
 /** Upper bound on prompt ids tracked for an in-flight Stop-hook chain. */
 export const MAX_STOP_HOOK_CHAIN_PROMPT_IDS = 32;
 
@@ -310,11 +333,10 @@ export interface SendMessageOptions {
   /** Also yield `ToolCallPreparation` for calls the model starts streaming. */
   toolCallPreparations?: boolean;
   /**
-   * The host fires the Stop hook after the round, so this send does not. The
-   * host then decides when the turn ends, so it also runs the turn's memory
-   * tasks through `runManagedAutoMemoryBackgroundTasks`.
+   * The host's own reasons to continue at a stop point, asked in order once
+   * the Stop hook let the response stop.
    */
-  stopHookRunByHost?: boolean;
+  stopPolicies?: readonly StopPolicy[];
   /**
    * The host keeps the interaction span open around its turn, so this send
    * neither starts nor ends one.
@@ -3247,7 +3269,7 @@ export class LlmClient {
 
   /**
    * Schedules the memory work due when a response ends without tool calls.
-   * A host that runs the Stop hook itself calls this once its turn ends.
+   * A host calls this at turn completion if the client did not schedule it.
    */
   runManagedAutoMemoryBackgroundTasks(messageType: SendMessageType): void {
     // During shutdown, skip all background memory tasks so the process
@@ -4565,6 +4587,11 @@ export class LlmClient {
     let memoryDeliveryToCommit: MemoryDeliveryResult | null = null;
     let memoryDeliveryStateInvalidated = false;
     let modelRequestAccepted = false;
+    // Set when this send took a loop-protection reminder into requestToSend;
+    // cleared when the model accepts the request (commit) or on exit
+    // (abandon), so the `reminded` accounting and the pending state settle at
+    // the real delivery boundary instead of the draft request assembly.
+    let loopReminderPrepared = false;
     // A concurrent `/btw` side query runs through this same client and its
     // tool-result continuation is submitted without the flag, so ownership is
     // carried by the prompt id the interaction claimed at its start: a
@@ -5300,7 +5327,10 @@ export class LlmClient {
         const loopReminder = ownsExplorationBudget
           ? this.loopDetector.takeLoopReminder()
           : undefined;
-        if (loopReminder) requestToSend.push({ text: loopReminder });
+        if (loopReminder) {
+          requestToSend.push({ text: loopReminder });
+          loopReminderPrepared = true;
+        }
         if (activeTodoReminder) {
           const insertAt = requestToSend.findIndex(
             (part) =>
@@ -5405,6 +5435,15 @@ export class LlmClient {
                 .reconcileMemoryBodiesPresentInHistory(
                   collectResidentMemoryBodies(this.getHistoryShallow()),
                 );
+            }
+            if (loopReminderPrepared) {
+              // First model-accepted event: the request carrying the prepared
+              // loop-protection reminder is being consumed, so commit its
+              // delivery accounting here — not at take time, where a draft
+              // request cancelled at a yield or failed before acceptance
+              // would credit telemetry for a warning the model never saw.
+              this.loopDetector.commitLoopReminderDelivery();
+              loopReminderPrepared = false;
             }
           }
           if (!steerInputSettled) {
@@ -5735,7 +5774,6 @@ export class LlmClient {
       if (
         hooksEnabled &&
         messageBus &&
-        !options?.stopHookRunByHost &&
         !turn.pendingToolCalls.length &&
         signal &&
         !signal.aborted &&
@@ -5808,6 +5846,9 @@ export class LlmClient {
 
           if (capped) {
             this.clearStopHookChain(prompt_id);
+            for (const policy of options?.stopPolicies ?? []) {
+              policy.onStopHookCap?.();
+            }
             const warning = formatStopHookBlockingCapWarning('Stop', cap);
             yield {
               type: LlmEventType.HookSystemMessage,
@@ -5907,6 +5948,9 @@ export class LlmClient {
           // yield because a cap of 1 means no follow-up turn should run.
           if (capped) {
             this.clearStopHookChain(prompt_id);
+            for (const policy of options?.stopPolicies ?? []) {
+              policy.onStopHookCap?.();
+            }
             const warning = formatStopHookBlockingCapWarning('Stop', cap);
             yield {
               type: LlmEventType.HookSystemMessage,
@@ -5967,7 +6011,7 @@ export class LlmClient {
                 modelOverride: options?.modelOverride,
                 getSteerInput: options?.getSteerInput,
                 steerInput: pendingSteer,
-                toolCallPreparations: options?.toolCallPreparations,
+                ...hostContinuationOptions(options),
               },
               hookTurnBudget,
               managedMemoryType,
@@ -6004,6 +6048,59 @@ export class LlmClient {
       }
 
       if (
+        !turn.pendingToolCalls.length &&
+        !signal.aborted &&
+        options?.stopPolicies?.length
+      ) {
+        for (const policy of options.stopPolicies) {
+          const continueRequest = await policy.continueAt({
+            promptId: prompt_id,
+            signal,
+          });
+          if (signal.aborted) {
+            for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+              yield goalEvent;
+            }
+            endCurrentInteraction('cancelled');
+            return turn;
+          }
+          if (!continueRequest?.length) continue;
+          // Like a Stop hook's continuation, each gets its own tool budget.
+          this.loopDetector.reset(prompt_id);
+          if (ownsExplorationBudget) this.toolExplorationBudget.reset();
+          const policyTurn = yield* this.sendMessageStream(
+            continueRequest,
+            signal,
+            prompt_id,
+            {
+              type: SendMessageType.Hook,
+              modelOverride: options.modelOverride,
+              getSteerInput: options.getSteerInput,
+              ...hostContinuationOptions(options),
+            },
+            boundedTurns - 1,
+            managedMemoryType,
+          );
+          hasToolCalls = policyTurn.pendingToolCalls.length > 0;
+          if (!hasToolCalls) {
+            endCurrentInteraction(signal.aborted ? 'cancelled' : 'ok');
+          }
+          await this.settlePendingGoalProposal(
+            !hasToolCalls,
+            signal,
+            loadGoalRuntime,
+            prompt_id,
+            reportGoalSettlementFailure,
+          );
+          for (const goalEvent of takePendingGoalEvents()) {
+            yield goalEvent;
+          }
+          normalCompletion = true;
+          return policyTurn;
+        }
+      }
+
+      if (
         goalPermit &&
         goalRuntime &&
         !turn.pendingToolCalls.length &&
@@ -6031,7 +6128,7 @@ export class LlmClient {
         this.captureCacheSafeParams();
 
         if (this.config.getSkipNextSpeakerCheck()) {
-          if (!isGoalRuntimeTurn && !options?.stopHookRunByHost) {
+          if (!isGoalRuntimeTurn) {
             this.runManagedAutoMemoryBackgroundTasks(managedMemoryType);
           }
           if (arenaAgentClient) {
@@ -6114,7 +6211,7 @@ export class LlmClient {
           return continueTurn;
         }
 
-        if (!isGoalRuntimeTurn && !options?.stopHookRunByHost) {
+        if (!isGoalRuntimeTurn) {
           this.runManagedAutoMemoryBackgroundTasks(managedMemoryType);
         }
 
@@ -6178,6 +6275,15 @@ export class LlmClient {
       throw error;
     } finally {
       settleMemoryDelivery();
+      if (loopReminderPrepared) {
+        // The send exited before the model accepted the request that carried
+        // the prepared loop-protection reminder (cancelled at a yield, failed
+        // before any model event, ...): put it back so the streak's warning
+        // stays eligible for the next real send instead of being lost while
+        // the telemetry already counted it.
+        this.loopDetector.abandonLoopReminderDelivery();
+        loopReminderPrepared = false;
+      }
       if (messageType === SendMessageType.ToolResult && !modelRequestAccepted) {
         this.restoreMemoryBodyStateFromHistory();
       }

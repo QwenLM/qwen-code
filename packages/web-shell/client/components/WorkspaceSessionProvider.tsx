@@ -31,6 +31,7 @@ import {
 import { WebShellThemeId, type WebShellTheme } from '../themeContext';
 import { Spinner } from './ui/spinner';
 import { WorkspaceUnavailableState } from './WorkspaceUnavailableState';
+import { useDaemonAvailabilityController } from '../daemon/availability-context.js';
 
 function surfaceTheme(theme: WebShellTheme | undefined): WebShellTheme {
   return theme ?? WebShellThemeId.Dark;
@@ -201,6 +202,7 @@ function WorkspaceSessionProviderWorkspace({
   const navigation = useWebShellNavigation();
   const webShellProps = withChrome(appProps, chromeTheme, chromeLanguage);
   const workspace = useWorkspace();
+  const availability = useDaemonAvailabilityController();
   const workspaceActions = useWorkspaceActions();
   const [usePrimaryNewSession, setUsePrimaryNewSession] = useState(false);
   const [registeredWorkspace, setRegisteredWorkspace] = useState<{
@@ -334,7 +336,11 @@ function WorkspaceSessionProviderWorkspace({
         theme={surfaceTheme(webShellProps.theme)}
         icon={<WifiOffIcon />}
         onAction={() => {
-          void workspace.refreshCapabilities?.().catch(() => {});
+          if (availability && availability.getSnapshot() !== 'available') {
+            void availability.check(true);
+          } else {
+            void workspace.refreshCapabilities?.().catch(() => {});
+          }
         }}
       />
     );
@@ -468,6 +474,7 @@ function StandaloneSessionGate({
   const navigation = useWebShellNavigation();
   const webShellProps = withChrome(appProps, chromeTheme, chromeLanguage);
   const workspace = useWorkspace();
+  const availability = useDaemonAvailabilityController();
   const [attempt, setAttempt] = useState(0);
   const [resolution, setResolution] = useState<StandaloneResolution>(() =>
     sessionId ? { status: 'loading' } : { status: 'ready' },
@@ -580,7 +587,11 @@ function StandaloneSessionGate({
         theme={surfaceTheme(webShellProps.theme)}
         icon={<WifiOffIcon />}
         onAction={() => {
-          void workspace.refreshCapabilities?.().catch(() => {});
+          if (availability && availability.getSnapshot() !== 'available') {
+            void availability.check(true);
+          } else {
+            void workspace.refreshCapabilities?.().catch(() => {});
+          }
         }}
       />
     );
