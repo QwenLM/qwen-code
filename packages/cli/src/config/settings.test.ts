@@ -105,13 +105,11 @@ delete process.env['QWEN_HOME'];
 // Resolve the (mocked) user-settings path once at module load. Tests mock
 // `os.homedir`, so the value is stable across the suite. Production callers
 // must keep going through `getUserSettingsPath()` to pick up `QWEN_HOME`
-// resolved from `~/.env` after module load.
-// The package test-setup pins QWEN_HOME to a per-worker temp dir so a
-// polluted real ~/.qwen cannot leak into the suite. This file mocks the
-// filesystem outright and keys its fixtures on the os.homedir() mock, so it
-// drops the pin before the module-load path constants below are captured.
+// resolved from `~/.env` after module load. An ambient QWEN_HOME would divert
+// every user-settings and .env path away from the mocked home, so this file
+// cannot run with one set (the suite setup pins a private home when the
+// environment provides none).
 delete process.env['QWEN_HOME'];
-
 const USER_SETTINGS_PATH = getUserSettingsPath();
 
 const MOCK_WORKSPACE_DIR = '/mock/workspace';
