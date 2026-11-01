@@ -2284,7 +2284,9 @@ const AMEND_PREFIX_FLAGS_WITH_VALUE = new Map<string, ReadonlySet<string>>([
 ]);
 
 const AMEND_LEADING_NOISE = new Set(
-  '! do done elif else esac fi for if in select then time until while'.split(' '),
+  '! do done elif else esac fi for if in select then time until while'.split(
+    ' ',
+  ),
 );
 
 const AMEND_GIT_GLOBAL_FLAGS_WITH_VALUE =
