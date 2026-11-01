@@ -90,7 +90,7 @@ Both call `require_runtime_origin`, which compares the calling webview's URL ori
 - `npm run typecheck --workspace=@qwen-code/web-shell`: clean.
 - ESLint and Prettier on the touched files: clean.
 - `vitest run client/config client/components/workspaces client/main-boot.test.tsx --no-file-parallelism`: covers desktop hydration, mirror re-push, migration, write-through, the hydrate-before-render boot ordering, the desktop-only page-origin rule, the catalog-named host skipping the confirmation gate, and the browser offline snapshot.
-- `node packages/desktop/scripts/test-release.js`: passes, including the pins that the capability grants both shell-state commands and that each command body calls `require_runtime_origin` before touching the store.
+- `node packages/desktop/scripts/test-release.js`: passes, including the pins that the capability grants both shell-state commands, that each command body calls `require_runtime_origin` before touching the store, and that `shell_state_read` checks the key allowlist before it reads.
 - Manual live run on Windows with an isolated app identifier: wrote a catalog over IPC, restarted the process, confirmed the page origin changed, read the catalog back, opened Settings → Connections, and saw the saved host. The same run reproduced, and then verified the fix for, the per-launch workspace-host accumulation.
 
 ## Limitations and follow-ups

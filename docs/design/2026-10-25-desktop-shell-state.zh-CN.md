@@ -90,7 +90,7 @@ WebView2 按 origin 隔离 `localStorage` 与 `sessionStorage`，因此每次启
 - `npm run typecheck --workspace=@qwen-code/web-shell`：干净。
 - 对改动文件运行 ESLint 与 Prettier：干净。
 - `vitest run client/config client/components/workspaces client/main-boot.test.tsx --no-file-parallelism`：覆盖桌面水合、镜像回推、迁移、写穿、水合先于首渲的启动顺序、仅限桌面外壳的页面 origin 规则、目录已命名主机跳过确认门，以及浏览器的离线快照。
-- `node packages/desktop/scripts/test-release.js`：通过，其中包括两项钉住：capability 授予两个 shell-state 命令，以及每个命令体在触达存储前先调用 `require_runtime_origin`。
+- `node packages/desktop/scripts/test-release.js`：通过，其中包括三项钉住：capability 授予两个 shell-state 命令、每个命令体在触达存储前先调用 `require_runtime_origin`，以及 `shell_state_read` 在读取前校验键白名单。
 - 在 Windows 上使用隔离的应用 identifier 进行手动实跑：通过 IPC 写入目录，重启进程，确认页面 origin 已变化，读回目录，打开 Settings → Connections 并看到已保存主机。同一次实跑先复现了每次启动累积工作区主机的问题，随后验证了修复。
 
 ## 限制与后续

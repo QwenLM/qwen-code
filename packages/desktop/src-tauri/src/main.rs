@@ -10,6 +10,7 @@ use desktop_state::{
 };
 use runtime::{fanout_origin, resolve_workspace, stop_runtime_handle, DesktopRuntime};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -600,8 +601,12 @@ fn fanout_origins_from_catalogs(
                 .filter_map(fanout_origin),
         );
     }
-    origins.retain(|origin| origin != page_origin);
-    origins.dedup();
+    // The call site passes `origin_of(runtime.base_url())`, whose path is "/", so
+    // the page origin arrives with a trailing slash while `fanout_origin` strips
+    // it — normalise through the same function or the skip below never matches.
+    let page_origin = fanout_origin(page_origin).unwrap_or_else(|| page_origin.to_string());
+    let mut seen = HashSet::new();
+    origins.retain(|origin| origin != &page_origin && seen.insert(origin.clone()));
     origins
 }
 
@@ -1123,26 +1128,36 @@ mod tests {
     #[test]
     fn fanout_origins_cover_saved_hosts_and_skip_the_page_origin() {
         let connections = Some(
-            r#"["https://remote.example","http://127.0.0.1:49152/","https://remote.example/ws","not a url"]"#,
+            r#"["https://remote.example","https://other.example","http://127.0.0.1:49152/","https://remote.example/ws","not a url"]"#,
         );
         let hosts = Some(
             r#"[{"origin":"https://remote.example","workspaces":[]},{"origin":"http://10.0.0.2:4170","workspaces":[]}]"#,
         );
+        // The page origin as `start_runtime` passes it, with a trailing slash.
+        // `https://remote.example` sits in both catalogs with a different origin
+        // between its two entries, so after the page origin is skipped its
+        // duplicates are still not adjacent — the shape a `Vec::dedup` misses.
+        // One fixture, both properties.
         assert_eq!(
-            fanout_origins_from_catalogs(connections, hosts, "http://127.0.0.1:49152"),
-            ["https://remote.example", "http://10.0.0.2:4170"]
+            fanout_origins_from_catalogs(connections, hosts, "http://127.0.0.1:49152/"),
+            [
+                "https://remote.example",
+                "https://other.example",
+                "http://10.0.0.2:4170",
+            ]
         );
     }
 
     /// A store backed by a real settings file — the same file the IPC writes.
     fn settings_with_shell_state(shell_state: serde_json::Value) -> (PathBuf, SettingsStore) {
+        // Callers run in parallel and the Windows clock ticks coarsely, so a
+        // timestamp alone let two of them share one directory — each then read
+        // the other's catalog.
+        static NEXT_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let root = std::env::temp_dir().join(format!(
             "qwen-desktop-launch-fanout-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
+            NEXT_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&root).expect("temp dir");
         let path = root.join("desktop-state.json");
@@ -1168,7 +1183,7 @@ mod tests {
         });
         let (root, store) = settings_with_shell_state(shell_state);
         assert_eq!(
-            launch_fanout_origins(&store, "http://127.0.0.1:49152"),
+            launch_fanout_origins(&store, "http://127.0.0.1:49152/"),
             [
                 "https://only-in-connections.example",
                 "https://remote.example",
@@ -1189,7 +1204,7 @@ mod tests {
             .to_string(),
         });
         let (root, store) = settings_with_shell_state(shell_state);
-        let origins = launch_fanout_origins(&store, "http://127.0.0.1:49152");
+        let origins = launch_fanout_origins(&store, "http://127.0.0.1:49152/");
         assert_eq!(origins.len(), MAX_LAUNCH_FANOUT_ORIGINS);
         assert_eq!(origins.first().map(String::as_str), Some("http://10.0.0.1:4170"));
         let _ = std::fs::remove_dir_all(root);

@@ -23,7 +23,9 @@ const DISABLE_SETTINGS_PERSISTENCE_ENV: &str = "QWEN_DESKTOP_DISABLE_SETTINGS_PE
 /// `shell_state_*`. Everything else is rejected so this surface cannot become a
 /// general-purpose file store.
 pub const SHELL_STATE_KEYS: &[&str] = &["qwen-remote-connections", "qwen-workspace-hosts"];
-/// Caps one catalog so a runaway page cannot bloat `desktop-state.json`.
+/// Caps one catalog's value so a runaway page cannot grow it without bound. This
+/// measures the string; `desktop-state.json` holds its JSON-escaped form, which
+/// can be larger.
 pub const SHELL_STATE_MAX_VALUE_BYTES: usize = 256 * 1024;
 static NEXT_WRITE_ID: AtomicU64 = AtomicU64::new(1);
 

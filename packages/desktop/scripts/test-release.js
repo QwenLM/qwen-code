@@ -1652,6 +1652,17 @@ function testBootstrapBridgeConfiguration() {
       storeAt === -1 || gate.index < storeAt,
       `${command} must gate on require_runtime_origin before touching the store.`,
     );
+    // The write path's allowlist is pinned by
+    // `shell_state_rejects_unknown_keys_and_oversized_values`; the read path has
+    // no such test, so its own check is pinned here.
+    if (command === 'shell_state_read') {
+      const allowAt = body.indexOf('is_shell_state_key_allowed(&key)');
+      assert.ok(allowAt >= 0, 'shell_state_read must check the key allowlist.');
+      assert.ok(
+        allowAt < storeAt,
+        'shell_state_read must check the key allowlist before touching the store.',
+      );
+    }
   }
 
   assert.match(main, /title_bar_style\(tauri::TitleBarStyle::Overlay\)/);
