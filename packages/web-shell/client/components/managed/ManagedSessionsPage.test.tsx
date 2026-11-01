@@ -606,8 +606,10 @@ describe('ManagedSessionsPage', () => {
 
   it.each([
     ['closed', 'session_not_active', false],
+    ['archived', 'session_not_active', false],
     ['closing', 'session_not_active', true],
     ['closed', 'recovery_blocked', true],
+    ['archived', 'recovery_blocked', true],
   ] as const)(
     'shows recovery for %s and %s only when needed',
     async (lifecycleStatus, reasonCode, visible) => {
@@ -638,39 +640,6 @@ describe('ManagedSessionsPage', () => {
           'This Session needs operator attention',
         ),
       ).toBe(visible);
-    },
-  );
-
-  it.each(['archived', 'closed'])(
-    'does not ask for operator attention on a terminal %s Session',
-    async (lifecycleStatus) => {
-      mocks.client.getSession.mockResolvedValue(
-        summary('s1', {
-          lifecycleStatus,
-          capabilities: { canSend: false, canCancel: false },
-          recovery: {
-            state: 'operator_required',
-            reasonCode: 'session_not_active',
-            nextTurnAllowed: false,
-            actions: {
-              recheck: false,
-              cancel: false,
-              continueInNewSession: true,
-            },
-          },
-        }),
-      );
-
-      await render('s1');
-      expect(container.textContent).not.toContain(
-        'This Session needs operator attention',
-      );
-      expect(container.textContent).not.toContain('Ask an operator to inspect');
-      expect(
-        [...container.querySelectorAll('button')].some(
-          (button) => button.textContent === 'Continue in a new Session',
-        ),
-      ).toBe(true);
     },
   );
 
