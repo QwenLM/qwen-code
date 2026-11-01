@@ -53,6 +53,8 @@ import {
   isAcpChildCapacityError,
 } from './httpErrors.js';
 import {
+  applyConfigOptions,
+  applySessionConfigContext,
   getPlanExecutionMode,
   mapProviderStatus,
   mapSessionContextModels,
@@ -62,6 +64,14 @@ import {
   selectGoalState,
   selectGoalStateFromRead,
 } from './mappers.js';
+import {
+  beginSessionConfigMutation,
+  beginSessionConfigRead,
+  getSessionConfigSync,
+  queueSessionConfigRefresh,
+  type SessionConfigSyncMap,
+  type SessionConfigSync,
+} from './session-config-sync.js';
 import {
   attachmentUriForName,
   daemonPromptImageToBlob,
@@ -225,7 +235,7 @@ export interface CreateDaemonSessionActionsArgs {
   settledPromptsRef: RefBox<Map<string, SettledPrompt>>;
   pendingSessionLoadRef: RefBox<PendingSessionLoad | undefined>;
   pendingSessionLoadIdRef: RefBox<number>;
-  sessionConfigGeneration: WeakMap<DaemonSessionClient, number>;
+  sessionConfigGeneration: SessionConfigSyncMap;
   sessionRecoveryGeneration: WeakMap<DaemonSessionClient, number>;
   heartbeatSupportedRef: RefBox<boolean>;
   manualSessionClearRef: RefBox<boolean>;
@@ -398,6 +408,9 @@ export function getConnectionAfterSessionClear(
     delete next.supportedCommands;
     delete next.context;
     delete next.reasoning;
+    delete next.workflowMode;
+    delete next.workflowModePending;
+    next.workflowModeStatus = 'unbound';
     if (dropSessionContext) {
       // Leaving a context (Live, in practice) has to be a real state change.
       // An undefined pending session context means "inherit from the
@@ -497,6 +510,7 @@ export function createDaemonSessionActions({
   let modelMutationGeneration = 0;
   let pendingPersistedReasoningAction: Promise<void> | undefined;
   let branchInFlight = false;
+  const workflowWrites = new WeakSet<SessionConfigSync>();
   let attachmentClient = sessionRef.current?.client;
   let attachmentSessionId = sessionRef.current?.sessionId;
   let attachmentClientId = sessionRef.current?.clientId;
@@ -506,6 +520,10 @@ export function createDaemonSessionActions({
       sessionRecoveryGeneration,
       session,
     );
+    const configCurrent = getConnection().context
+      ? undefined
+      : beginSessionConfigRead(sessionConfigGeneration, session);
+    const isOwner = captureConfigOwner(session);
     const context = await withActionTimeout(
       session.context(),
       'Load context timed out',
@@ -516,17 +534,23 @@ export function createDaemonSessionActions({
       context.sessionId === session.sessionId &&
       sessionRecoveryGeneration.get(session) === generation
     ) {
-      setConnection((current) =>
-        sessionRef.current === session &&
-        sessionRecoveryGeneration.get(session) === generation
-          ? {
-              ...current,
-              context: current.context
-                ? { ...current.context, recovery: context.recovery }
-                : context,
-            }
-          : current,
-      );
+      setConnection((current) => {
+        if (
+          sessionRef.current !== session ||
+          sessionRecoveryGeneration.get(session) !== generation
+        )
+          return current;
+        const next =
+          configCurrent?.() && isOwner(current)
+            ? applySessionConfigContext(current, context)
+            : current;
+        return {
+          ...next,
+          context: next.context
+            ? { ...next.context, recovery: context.recovery }
+            : { ...context, state: {} },
+        };
+      });
     }
   }
 
@@ -555,26 +579,72 @@ export function createDaemonSessionActions({
     );
   }
 
-  function trackSessionConfigMutation<T>(
-    session: DaemonSessionClient,
-    operation: Promise<T>,
-  ): Promise<T> {
-    sessionConfigGeneration.set(
-      session,
-      (sessionConfigGeneration.get(session) ?? 0) + 1,
-    );
-    void operation.then(
-      () => finishSessionConfigMutation(session),
-      () => finishSessionConfigMutation(session),
-    );
-    return operation;
+  function captureConfigOwner(session: DaemonSessionClient) {
+    const before = getConnection();
+    const state = getSessionConfigSync(sessionConfigGeneration, session);
+    const client = session.client;
+    const clientId = session.clientId;
+    const epoch = session.eventEpoch;
+    return (current = getConnection()) =>
+      sessionRef.current === session &&
+      session.client === client &&
+      session.clientId === clientId &&
+      session.eventEpoch === epoch &&
+      sessionConfigGeneration.get(session) === state &&
+      current.sessionId === before.sessionId &&
+      sessionContextKey(current.sessionContext) ===
+        sessionContextKey(before.sessionContext);
   }
 
-  function finishSessionConfigMutation(session: DaemonSessionClient): void {
-    sessionConfigGeneration.set(
-      session,
-      (sessionConfigGeneration.get(session) ?? 0) + 1,
-    );
+  async function reconcileSessionConfig(
+    session: DaemonSessionClient,
+    isOwner: ReturnType<typeof captureConfigOwner>,
+  ): Promise<void> {
+    if (!isOwner()) return;
+    const isCurrent = beginSessionConfigRead(sessionConfigGeneration, session);
+    try {
+      const context = await withActionTimeout(
+        session.context(),
+        'Refresh session configuration timed out',
+      );
+      setConnection((current) =>
+        isOwner(current) && isCurrent()
+          ? context.sessionId === session.sessionId
+            ? applySessionConfigContext(current, context)
+            : { ...current, workflowModeStatus: 'unknown' }
+          : current,
+      );
+    } catch {
+      setConnection((current) =>
+        isOwner(current) && isCurrent()
+          ? { ...current, workflowModeStatus: 'unknown' }
+          : current,
+      );
+    }
+  }
+
+  async function trackSessionConfigMutation<T>(
+    session: DaemonSessionClient,
+    operation: Promise<T>,
+    timeoutMessage: string,
+    mutation = beginSessionConfigMutation(sessionConfigGeneration, session),
+    reconcile = true,
+  ): Promise<T> {
+    const isOwner = captureConfigOwner(session);
+    try {
+      return await withActionTimeout(operation, timeoutMessage);
+    } finally {
+      mutation.finish();
+      if (
+        reconcile &&
+        isOwner() &&
+        getConnection().workflowModeStatus !== undefined
+      ) {
+        queueSessionConfigRefresh(sessionConfigGeneration, session, () => {
+          void reconcileSessionConfig(session, isOwner);
+        });
+      }
+    }
   }
 
   function discardsSlashCommandAttachments(
@@ -1866,7 +1936,7 @@ export function createDaemonSessionActions({
         clientId: session?.clientId,
       });
       const result = await (session
-        ? trackSessionConfigMutation(session, reload)
+        ? trackSessionConfigMutation(session, reload, 'Reload models timed out')
         : reload);
       if (!isCurrent()) return;
       if (
@@ -1926,24 +1996,23 @@ export function createDaemonSessionActions({
         'Set model failed',
         'switch_model',
       );
+      const isOwner = captureConfigOwner(session);
       try {
-        const modelRequest = session.setModel(modelId);
-        const contextRequest = trackSessionConfigMutation(
+        const result = await trackSessionConfigMutation(
           session,
-          modelRequest.then(() => session.context()),
-        );
-        const result = await withActionTimeout(
-          modelRequest,
+          session.setModel(modelId),
           'Set model timed out',
+          undefined,
+          false,
         );
-        const modelGeneration =
-          sessionRef.current === session
-            ? ++modelMutationGeneration
-            : undefined;
+        if (!isOwner()) return result;
+        const modelGeneration = isOwner()
+          ? ++modelMutationGeneration
+          : undefined;
         if (modelGeneration !== undefined) {
           setConnection((current) => {
             if (
-              sessionRef.current !== session ||
+              !isOwner(current) ||
               modelGeneration !== modelMutationGeneration
             ) {
               return current;
@@ -1951,10 +2020,18 @@ export function createDaemonSessionActions({
             return { ...current, currentModel: modelId, reasoning: undefined };
           });
         }
+        const configCurrent = beginSessionConfigRead(
+          sessionConfigGeneration,
+          session,
+        );
         const context = await withActionTimeout(
-          contextRequest,
+          session.context(),
           'Refresh model context timed out',
-        ).catch(() => undefined);
+        )
+          .then((value) =>
+            value.sessionId === session.sessionId ? value : undefined,
+          )
+          .catch(() => undefined);
         if (
           modelGeneration !== undefined &&
           sessionRef.current === session &&
@@ -1964,12 +2041,17 @@ export function createDaemonSessionActions({
             if (
               sessionRef.current !== session ||
               modelGeneration !== modelMutationGeneration ||
-              current.currentModel !== modelId
+              current.currentModel !== modelId ||
+              !isOwner(current) ||
+              !configCurrent()
             ) {
               return current;
             }
             return {
               ...current,
+              ...(context
+                ? applyConfigOptions(current, context.state.configOptions ?? [])
+                : { workflowModeStatus: 'unknown' as const }),
               context: context
                 ? {
                     ...context,
@@ -1986,12 +2068,86 @@ export function createDaemonSessionActions({
         }
         return result;
       } catch (error) {
+        if (isOwner() && getConnection().workflowModeStatus !== undefined) {
+          queueSessionConfigRefresh(sessionConfigGeneration, session, () => {
+            void reconcileSessionConfig(session, isOwner);
+          });
+        }
         throw dispatchActionError(
           addNotice,
           'Set model failed',
           error,
           'switch_model',
         );
+      }
+    },
+
+    async setWorkflowMode(requested) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Set Workflow mode failed',
+        'set_workflow_mode',
+      );
+      const before = getConnection();
+      if (
+        before.status !== 'connected' ||
+        before.workflowModeStatus !== 'ready' ||
+        !before.workflowMode ||
+        workflowWrites.has(
+          getSessionConfigSync(sessionConfigGeneration, session),
+        ) ||
+        (requested && !before.workflowMode.available)
+      ) {
+        throw new Error('Workflow mode is not available for this session');
+      }
+      const isOwner = captureConfigOwner(session);
+      const workflowState = getSessionConfigSync(
+        sessionConfigGeneration,
+        session,
+      );
+      workflowWrites.add(workflowState);
+      const mutation = beginSessionConfigMutation(
+        sessionConfigGeneration,
+        session,
+      );
+      setConnection((current) =>
+        isOwner(current) ? { ...current, workflowModePending: true } : current,
+      );
+      try {
+        const result = await trackSessionConfigMutation(
+          session,
+          session.setConfigOption('workflow_mode', requested ? 'on' : 'off'),
+          'Workflow mode update was not confirmed',
+          mutation,
+          false,
+        );
+        if (result?.persisted !== true)
+          throw new Error('Workflow mode update was not confirmed');
+      } catch (error) {
+        throw dispatchActionError(
+          isOwner() ? addNotice : ignoreStaleNotice,
+          'Workflow mode update was not confirmed',
+          error,
+          'set_workflow_mode',
+        );
+      } finally {
+        mutation.finish();
+        workflowWrites.delete(workflowState);
+        if (isOwner()) {
+          setConnection((current) =>
+            isOwner(current)
+              ? {
+                  ...current,
+                  workflowModePending: false,
+                  workflowModeStatus: 'syncing',
+                }
+              : current,
+          );
+          queueSessionConfigRefresh(sessionConfigGeneration, session, () => {
+            void reconcileSessionConfig(session, isOwner);
+          });
+        }
       }
     },
 
@@ -2013,13 +2169,18 @@ export function createDaemonSessionActions({
       const actionToken = ++reasoningActionToken;
       const sourceModel = getConnection().currentModel;
       const sourceModelGeneration = modelMutationGeneration;
+      const isOwner = captureConfigOwner(session);
+      const mutation = beginSessionConfigMutation(
+        sessionConfigGeneration,
+        session,
+      );
       try {
-        const result = await withActionTimeout(
-          trackSessionConfigMutation(
-            session,
-            session.setConfigOption('reasoning_effort', value, opts),
-          ),
+        const result = await trackSessionConfigMutation(
+          session,
+          session.setConfigOption('reasoning_effort', value, opts),
           'Set reasoning effort timed out',
+          mutation,
+          false,
         );
         const nextReasoning = mapReasoningControls(result.configOptions);
         const confirmed =
@@ -2036,15 +2197,18 @@ export function createDaemonSessionActions({
         }
         const current = getConnection();
         if (
-          sessionRef.current === session &&
+          isOwner() &&
+          mutation.isCurrent() &&
           sourceModelGeneration === modelMutationGeneration &&
           current.currentModel === sourceModel &&
           actionToken > appliedReasoningActionToken
         ) {
           appliedReasoningActionToken = actionToken;
+          // Check freshness before enqueueing: our own readback can start
+          // before React applies this update. Later observations enqueue after it.
           setConnection((current) => {
             if (
-              sessionRef.current !== session ||
+              !isOwner(current) ||
               sourceModelGeneration !== modelMutationGeneration ||
               current.currentModel !== sourceModel
             ) {
@@ -2065,7 +2229,25 @@ export function createDaemonSessionActions({
               context: current.context
                 ? {
                     ...current.context,
-                    state: { ...current.context.state, configOptions },
+                    state: {
+                      ...current.context.state,
+                      configOptions: [
+                        ...(current.context.state.configOptions ?? []).filter(
+                          (item) =>
+                            !item ||
+                            typeof item !== 'object' ||
+                            (item as { id?: unknown }).id !==
+                              'reasoning_effort',
+                        ),
+                        ...configOptions.filter(
+                          (item) =>
+                            item &&
+                            typeof item === 'object' &&
+                            (item as { id?: unknown }).id ===
+                              'reasoning_effort',
+                        ),
+                      ],
+                    },
                   }
                 : current.context,
             };
@@ -2079,6 +2261,12 @@ export function createDaemonSessionActions({
           'set_reasoning_effort',
         );
       } finally {
+        mutation.finish();
+        if (isOwner() && getConnection().workflowModeStatus !== undefined) {
+          queueSessionConfigRefresh(sessionConfigGeneration, session, () => {
+            void reconcileSessionConfig(session, isOwner);
+          });
+        }
         completePersistedAction?.();
         if (pendingPersistedReasoningAction === persistedAction) {
           pendingPersistedReasoningAction = undefined;
@@ -2093,27 +2281,32 @@ export function createDaemonSessionActions({
         'Set approval mode failed',
         'set_approval_mode',
       );
+      const isOwner = captureConfigOwner(session);
       try {
-        const result = await withActionTimeout(
-          trackSessionConfigMutation(
-            session,
-            session.client.setSessionApprovalMode(session.sessionId, mode, {
-              persist: opts?.persist,
-              clientId: session.clientId,
-              ...(opts?.planMode !== undefined
-                ? { planMode: opts.planMode }
-                : {}),
-            }),
-          ),
+        const result = await trackSessionConfigMutation(
+          session,
+          session.client.setSessionApprovalMode(session.sessionId, mode, {
+            persist: opts?.persist,
+            clientId: session.clientId,
+            ...(opts?.planMode !== undefined
+              ? { planMode: opts.planMode }
+              : {}),
+          }),
           'Set approval mode timed out',
         );
-        if (sessionRef.current === session) {
-          setConnection((current) => ({
-            ...current,
-            currentMode: result.mode || mode,
-            planExecutionMode:
-              result.mode === 'plan' ? result.planExecutionMode : undefined,
-          }));
+        if (isOwner()) {
+          setConnection((current) =>
+            isOwner(current)
+              ? {
+                  ...current,
+                  currentMode: result.mode || mode,
+                  planExecutionMode:
+                    result.mode === 'plan'
+                      ? result.planExecutionMode
+                      : undefined,
+                }
+              : current,
+          );
         }
         return result;
       } catch (error) {
@@ -2660,23 +2853,25 @@ export function createDaemonSessionActions({
         'Load context failed',
         'load_context',
       );
-      const configGeneration = sessionConfigGeneration.get(session) ?? 0;
+      const configCurrent = beginSessionConfigRead(
+        sessionConfigGeneration,
+        session,
+      );
+      const isOwner = captureConfigOwner(session);
       try {
         const context = await withActionTimeout(
           session.context(),
           'Load context timed out',
         );
         setConnection((current) => {
-          if (
-            sessionRef.current !== session ||
-            configGeneration % 2 !== 0 ||
-            (sessionConfigGeneration.get(session) ?? 0) !== configGeneration
-          ) {
+          if (!isOwner(current) || !configCurrent()) {
             return current;
           }
+          if (context.sessionId !== session.sessionId)
+            return { ...current, workflowModeStatus: 'unknown' };
           const currentMode = getModeFromSessionContext(context);
           return {
-            ...current,
+            ...applyConfigOptions(current, context.state.configOptions ?? []),
             context: {
               ...context,
               recovery: current.context
@@ -2695,6 +2890,11 @@ export function createDaemonSessionActions({
         });
         return context;
       } catch (error) {
+        setConnection((current) =>
+          isOwner(current) && configCurrent()
+            ? { ...current, workflowModeStatus: 'unknown' }
+            : current,
+        );
         throw dispatchActionError(
           addNotice,
           'Load context failed',

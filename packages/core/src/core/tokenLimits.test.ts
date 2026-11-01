@@ -387,6 +387,22 @@ describe('tokenLimit', () => {
       expect(tokenLimit('kimi-k2-0905')).toBe(262144);
       expect(tokenLimit('kimi-k2-turbo')).toBe(262144);
     });
+
+    it('should return 1M for the K3 generation, prefixed or bare', () => {
+      expect(tokenLimit('kimi-k3')).toBe(1000000);
+      expect(tokenLimit('kimi-k3.1-pro')).toBe(1000000);
+      expect(tokenLimit('kimi-k3.1-pro-highspeed')).toBe(1000000);
+      expect(tokenLimit('k3.1-pro')).toBe(1000000);
+      expect(tokenLimit('k3.1-pro-highspeed')).toBe(1000000);
+      expect(tokenLimit('k3.1-pro-high-speed')).toBe(1000000);
+      expect(tokenLimit('moonshot/k3.1-pro')).toBe(1000000);
+    });
+
+    it('should keep the K3 256K variant out of the 1M rule', () => {
+      expect(tokenLimit('k3-256k')).toBe(262144);
+      expect(tokenLimit('kimi-k3-256k')).toBe(262144);
+      expect(tokenLimit('moonshot/k3-256k')).toBe(262144);
+    });
   });
 
   describe('Other models', () => {
