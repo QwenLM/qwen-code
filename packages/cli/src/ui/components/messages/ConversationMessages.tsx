@@ -201,7 +201,7 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
             isPending={isPending}
             availableTerminalHeight={availableTerminalHeight}
             contentWidth={contentWidth - prefixWidth}
-            constrainParagraphWidth
+            constrainBlockWidth
             textColor={textColor}
             sourceCopyIndexOffsets={sourceCopyIndexOffsets}
           />
@@ -255,7 +255,7 @@ const ContinuationMarkdownMessage: React.FC<
           isPending={isPending}
           availableTerminalHeight={availableTerminalHeight}
           contentWidth={contentWidth - prefixWidth}
-          constrainParagraphWidth
+          constrainBlockWidth
           textColor={textColor}
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
         />
@@ -386,7 +386,7 @@ const ThinkBody: React.FC<{
           isPending={isPending}
           availableTerminalHeight={availableTerminalHeight}
           contentWidth={contentWidth - 2}
-          constrainParagraphWidth
+          constrainBlockWidth
           textColor={theme.text.secondary}
         />
       </ErrorBoundary>
