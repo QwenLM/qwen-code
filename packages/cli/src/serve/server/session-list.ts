@@ -164,9 +164,11 @@ export function isPersistedSessionCursor(cursor: string): boolean {
   if (cursor === '') return false;
   const trimmed = cursor.trim();
   if (trimmed === '') return false;
-  // Composite cursors are opaque to this layer beyond their mtime prefix.
+  // Composite cursors are opaque to this layer beyond their mtime prefix. An
+  // empty prefix ("|name") is malformed: Number('') is 0, so without this
+  // guard it would pass as a real position and answer 200 with an empty page.
   const parts = trimmed.split('|');
-  if (parts.length === 2 && parts[1].length > 0) {
+  if (parts.length === 2 && parts[0].trim() !== '' && parts[1].length > 0) {
     const mtime = Number(parts[0]);
     if (Number.isFinite(mtime) && mtime >= 0) return true;
   }

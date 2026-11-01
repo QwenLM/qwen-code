@@ -559,11 +559,11 @@ export class QwenAgentManager {
    * Falls back to file system scan with equivalent pagination semantics.
    */
   async getSessionListPaged(params?: {
-    cursor?: number;
+    cursor?: number | string;
     size?: number;
   }): Promise<{
     sessions: Array<Record<string, unknown>>;
-    nextCursor?: number;
+    nextCursor?: number | string;
     hasMore: boolean;
   }> {
     const size = params?.size ?? 20;
@@ -590,22 +590,21 @@ export class QwenAgentManager {
         cwd: item.cwd,
       }));
 
-      // SDK returns nextCursor as string; convert to numeric cursor for paging
-      let nextCursorNum: number | undefined;
+      // Keep the daemon's cursor verbatim: the composite "<mtime>|<name>" form
+      // would become NaN under Number() and read as "no more pages".
+      let nextCursorValue: number | string | undefined;
       if (typeof res === 'object' && res !== null && 'nextCursor' in res) {
         const raw = (res as { nextCursor?: unknown }).nextCursor;
         if (typeof raw === 'number') {
-          nextCursorNum = raw;
-        } else if (typeof raw === 'string') {
+          nextCursorValue = raw;
+        } else if (typeof raw === 'string' && raw !== '') {
           const parsed = Number(raw);
-          if (!Number.isNaN(parsed)) {
-            nextCursorNum = parsed;
-          }
+          nextCursorValue = Number.isNaN(parsed) ? raw : parsed;
         }
       }
-      const hasMore = nextCursorNum !== undefined;
+      const hasMore = nextCursorValue !== undefined;
 
-      return { sessions: mapped, nextCursor: nextCursorNum, hasMore };
+      return { sessions: mapped, nextCursor: nextCursorValue, hasMore };
     } catch (error) {
       logger.warn('[QwenAgentManager] Paged ACP session list failed:', error);
       // fall through to file system
