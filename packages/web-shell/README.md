@@ -33,6 +33,33 @@ const shell = renderManagedAgentWebShell(container, {
 storageKey，旧 scope 沿用的 ID 会先丢弃，再由宿主显式给出新选择。详见
 [宿主接入设计](../../docs/design/2026-10-29-managed-host-webshell.zh-CN.md)。
 
+## 整页宿主入口
+
+需要完整 Web Shell（欢迎页、官方侧栏、composer）的非 React 宿主使用 `app-host` 入口：
+
+```ts
+import { renderWebShellApp } from './app-host/index.js';
+
+const shell = renderWebShellApp(container, {
+  baseUrl: daemonBaseUrl,
+  managedAgentProvider: provider, // 可选，省略时使用 daemon 本地会话
+  language: 'zh-CN',
+  theme: 'dark',
+});
+// update 接受完整的新 props；宿主销毁时调用 shell.unmount()。
+```
+
+在包内执行 `npx vite build --config vite.lib.config.ts --mode app-host`，输出
+`dist/app-host/index.js` 及相对 chunks。与 `managed-host` 一样 bundle React、React DOM 和
+运行时依赖，只需按 JavaScript MIME 类型提供整个输出目录，不需要 import map 或单独的 CSS
+import。
+
+`app-host` 有意跳过 CSS scoping：整页宿主的空态样式类挂在根元素本身，scoped 选择器以
+`[data-web-shell-root]` 作为祖先锚点，在这些根元素上永远不匹配，所以该模式直接注入全局
+样式。这个决定只作用于该产物，`index`、`transcript`、`managed-host` 三个入口仍走 scoped
+注入与 `@keyframes`/`@property` 重命名。两个宿主模式都不在 `npm run build` 里，都是按需
+构建的独立产物。
+
 ## Managed 工作区与模型
 
 完整 Web Shell 在配置 `managedAgentProvider` 后，在同一个工作区列表中同时显示本地和托管工作区，不再使用本地/托管 tab。名称旁的标志显示所属服务，工作区的新建会话使用统一的书写图标；顶部“新建会话”继承当前会话或草稿的服务。新会话的工作区菜单可双向选择两类服务已有的工作区，保留原身份和独立草稿，提交前不创建工作区或会话。添加工作区时可明确选择本地（daemon）或托管（Managed Agent），切换表单或取消不会改变当前会话。托管模式复用标准欢迎界面、输入框、对话和工具卡片、审批、停止按钮及侧栏，后台任务继续运行。未配置 provider 时保持原首页。Java Vite 演示入口 `?managedProvider=java` 默认托管，`managed=0` 可明确选择本地，`managed=1&managedSession=...` 深链继续有效；直接打开本地会话链接时保持本地。完整行为与边界见[统一工作区导航设计](../../docs/design/2026-10-21-unified-workspace-navigation.zh-CN.md)。

@@ -54,6 +54,16 @@ the existing CSS scoping and injection plugin. Serve the complete output directo
 with JavaScript MIME types; no import map or separate CSS import is required.
 The normal default and transcript builds keep their previous entry/external rules.
 
+The full-page host uses the sibling `--mode app-host`, which writes
+`dist/app-host/` and mounts the complete Web Shell through
+`renderWebShellApp(container, props)`. It intentionally skips CSS scoping: its
+empty-state classes sit on the root element itself, where the scope anchor
+(`[data-web-shell-root]` as an ancestor) never matches. That decision is scoped
+to this bundle only — the published `index`, `transcript` and `managed-host`
+entries keep scoped CSS and `@keyframes`/`@property` renaming. Neither host mode
+is part of `npm run build`; both are on-demand artifacts built with the same
+config and served as a complete directory.
+
 ## Validation and acceptance
 
 React integration tests cover existing-ID loading and sending, no catalog/create/
@@ -61,6 +71,5 @@ daemon access, no-ID waiting and removal, read-only capabilities, and scope rese
 Existing Java tests remain the compatibility regression. A regression that restores
 the unconditional catalog effect fails the host-only request assertion; restoring
 creation without an ID fails the no-ID composer assertion. Package typecheck and
-both default and managed-host builds validate integration. The local E2E plan in
-`.qwen/e2e-tests/managed-host-webshell.md` delegates real browser acceptance to the
-host agent; no browser or cloud operation is performed here.
+both default and managed-host builds validate integration. Real browser acceptance
+is delegated to the host agent; no browser or cloud operation is performed here.

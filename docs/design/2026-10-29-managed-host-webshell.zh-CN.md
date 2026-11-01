@@ -45,11 +45,17 @@ Session ID 隔离。短期 token 刷新应保持 provider 身份稳定。品牌�
 无需 import map 或单独 CSS import。普通 default 与 transcript 构建保持既有入口和 external
 规则。
 
+整页宿主使用同级的 `--mode app-host`，产物写入 `dist/app-host/`，通过
+`renderWebShellApp(container, props)` 挂载完整 Web Shell。该模式有意跳过 CSS scoping：
+它的空态样式类挂在根元素本身，而 scoped 选择器以 `[data-web-shell-root]` 作为祖先
+锚点，在这些根元素上永远不匹配。这个决定只作用于该产物 —— 已发布的 `index`、
+`transcript`、`managed-host` 入口仍保留 scoped CSS 与 `@keyframes`/`@property` 重命名。
+两个宿主模式都不在 `npm run build` 中，都是同一份配置下的按需构建产物，按完整目录提供。
+
 ## 验证与验收
 
 React 集成测试覆盖已有 ID 的加载和发送、不访问列表/创建/daemon、无 ID 等待与清除、
 只读能力和 scope 重置。既有 Java 测试作为兼容回归。恢复无条件列表 effect 会触发
 host-only 请求断言失败；恢复无 ID 创建会触发无 ID 输入框断言失败。包内 typecheck 与
-普通、managed-host 构建验证集成。本地 E2E 计划位于
-`.qwen/e2e-tests/managed-host-webshell.md`，真实浏览器验收由宿主 agent 执行；此处不进行
-浏览器或云端操作。
+普通、managed-host 构建验证集成。真实浏览器验收由宿主 agent 执行；此处不进行浏览器或
+云端操作。
