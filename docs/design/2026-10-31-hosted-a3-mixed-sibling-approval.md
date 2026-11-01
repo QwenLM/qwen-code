@@ -227,8 +227,12 @@ rewritten-input / Hook half.
   non-shell file profile (deduced from existing single-call capture); the .75
   head run must confirm the two-call plan actually captures.
 - **Hook inertness.** The hook must never affect production: env never set
-  outside the runner, fire-once, abort-aware hold. The unit suite pins the
-  non-matching session case before the matching one.
+  outside the runner, fire-once, abort-aware hold. Inertness is pinned by the
+  source-text contract pins (default-off flag, env passed only to the crashing
+  generation, the allowlisted `process.env` read) and the real-stack M1 red; the
+  non-optional `sessionId` type means an unset env can never match a real
+  session. A dedicated behavioral unit test (matching/non-matching/abort) is
+  deferred — see Open questions.
 - **CI budget.** One more arm raises the `hosted-failover-e2e` ceiling and
   timeout; the contract test pins both.
 
@@ -241,11 +245,18 @@ rewritten-input / Hook half.
   re-asked, recovery from MySQL alone after scrash.
 - **Demonstrated mutation reds** (green evidence requires a red). Real-stack:
   M1 hook disabled → barrier timeout; M2 pending sibling's decision skipped →
-  terminal timeout; M3 recovered plan reversed → recovery blocked; R1-4 recovery
-  re-asks the decided sibling → the pre-answer decided-sibling check reds; R1-5
-  reverse dispatch → the `settled_at` plan-order check reds. Fast-tier: R1-6 a
-  first-match plan-link selection → the behavioural ascending-link case reds;
-  R1-7 a narrowed execution-count branch → the anchored contract pin reds.
+  terminal timeout; M3 recovered plan reversed → recovery blocked. Fast-tier
+  contract pins: R1-4 the decided-sibling state check (`decided` → `requested`)
+  reds the pre-answer pin; R1-5 the execution-order column (`settled_at`)
+  mutation reds the plan-order pin; R1-6 a first-match plan-link selection → the
+  behavioural ascending-link case reds; R1-7 a narrowed execution-count branch →
+  the anchored contract pin reds. The R1-4/R1-5 checks are defense in depth, not
+  the first guard a real-stack mutation hits: a re-applied verdict keeps
+  Action[0] `decided` and a re-opened/cancelled Action[0] is caught by the load
+  route's cancelled/expired guard first, while a reverse dispatch reds at
+  recovery adoption (`Saved native request digest conflicts`) before reaching
+  the `settled_at` check. Their load-bearingness is therefore proven by the
+  fast-tier pins above, not by a real-stack red at the new assertion.
 - Contract suite + behavioural test green; serve `process-env-guard` green;
   `npm run build && npm run typecheck && npm run bundle`. A dedicated hook unit
   test (matching/non-matching/abort) is deferred — see Open questions.
@@ -268,7 +279,10 @@ rewritten-input / Hook half.
   after-results round; approval recovery reissues no inference), confirmed by the
   .75 head run (`initialRequests=1`, `modelAfterResults=1`).
 - The non-shell file-profile assumption held: the .75 head run captured the
-  two-call plan (`approvalOrdinal=1`, two calls in model order).
+  two-call plan (`approvalOrdinal=1`, two calls in plan order). Plan order is
+  request order — `captureNativeBatch` builds `plan.calls` from
+  `batch.requests.entries()` — not necessarily the model's part order, so the
+  arm's order assertion is a plan-order assertion.
 
 ## Open questions
 
