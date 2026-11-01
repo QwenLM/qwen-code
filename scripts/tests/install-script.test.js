@@ -1424,6 +1424,30 @@ describe('standalone release packaging', () => {
     );
   });
 
+  it('persists the Windows install bin unless PATH updates are disabled', () => {
+    const script = readScript(
+      'scripts/installation/install-qwen-standalone.bat',
+    );
+    const maybeUpdatePath = readBatchRoutine(script, 'MaybeUpdatePath');
+
+    expect(script).toContain(
+      'if not "!EXTRA_BIN!"=="" if /i not "!NO_MODIFY_PATH!"=="1" (',
+    );
+    expect(script).toContain(
+      'call :PrintFinalInstructions "!INSTALL_BIN_DIR!" "!INSTALL_DIR!" "standalone"',
+    );
+    expect(script).toContain('call :MaybeUpdatePath "!EXTRA_BIN!"');
+    expect(maybeUpdatePath).toContain(
+      'set "QWEN_PATH_SCOPE=!PATH_SCOPE!"',
+    );
+    expect(maybeUpdatePath).toContain(
+      "$target = if ($scope -ieq 'machine') { 'Machine' } else { 'User' }",
+    );
+    expect(maybeUpdatePath).toContain(
+      "[Environment]::SetEnvironmentVariable('Path', $newPath, $target)",
+    );
+  });
+
   it('stages hosted installation assets with checksums', async () => {
     const {
       HOSTED_INSTALLATION_ASSET_NAMES,
