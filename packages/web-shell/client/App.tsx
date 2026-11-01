@@ -463,6 +463,7 @@ import {
 } from './utils/copyCommand';
 import { getShadowAwareActiveElement, isEditableTarget } from './utils/dom';
 import {
+  hideNavDigitPreview,
   isOverviewCheckboxChord,
   modifierDigit,
   pressNavigationDigit,
@@ -470,6 +471,7 @@ import {
   pressOverviewRowCheckbox,
   pressPaneMaximizeToggle,
   pressSelectedRowsSplit,
+  showNavDigitPreview,
 } from './utils/viewNavHotkeys';
 import {
   invokeSlashCommandHandler,
@@ -20152,7 +20154,24 @@ export function App({
         pressOverviewRowCheckbox(e);
         return;
       }
+      // Alt held while Cmd/Ctrl is down ends the number preview before
+      // the chord gates: an Alt keydown with Meta held still carries
+      // metaKey, and the Alt+digit chords are not digit navigation.
+      if (e.altKey && (e.metaKey || e.ctrlKey)) {
+        hideNavDigitPreview();
+        return;
+      }
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      // The modifier key itself (Meta on macOS, Control on Windows/
+      // Linux): show the number preview over the surfaces the plain
+      // digits navigate. Re-fired on each press, so a list that changed
+      // while the modifier is held re-numbers itself.
+      if (e.key === 'Meta' || e.key === 'Control') {
+        if (shellHotkeyTargetsClear(e, { composerExempt: true })) {
+          showNavDigitPreview();
+        }
+        return;
+      }
       let open: (() => void) | undefined;
       if (e.shiftKey && e.code === 'KeyO') {
         if (sessionsOverviewHotkeyAvailable) {
@@ -20197,8 +20216,24 @@ export function App({
         return;
       }
     };
+    // Number-preview teardown. The real keyup of the released modifier
+    // still carries its own flag, so "still held" is judged by the other
+    // modifier (a naive !metaKey && !ctrlKey never fires on a real
+    // release); window blur covers switching away with the modifier held.
+    const onNavPreviewKeyup = (e: KeyboardEvent): void => {
+      if (e.key !== 'Meta' && e.key !== 'Control') return;
+      if (e.key === 'Meta' ? e.ctrlKey : e.metaKey) return;
+      hideNavDigitPreview();
+    };
+    const onNavPreviewBlur = (): void => hideNavDigitPreview();
     window.addEventListener('keydown', onViewShortcut, true);
-    return () => window.removeEventListener('keydown', onViewShortcut, true);
+    window.addEventListener('keyup', onNavPreviewKeyup, true);
+    window.addEventListener('blur', onNavPreviewBlur);
+    return () => {
+      window.removeEventListener('keydown', onViewShortcut, true);
+      window.removeEventListener('keyup', onNavPreviewKeyup, true);
+      window.removeEventListener('blur', onNavPreviewBlur);
+    };
   }, [
     artifactPanelFullscreen,
     modalDialogOpen,

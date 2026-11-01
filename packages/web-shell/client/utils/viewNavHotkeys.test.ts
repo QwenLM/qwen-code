@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  hideNavDigitPreview,
   isOverviewCheckboxChord,
   modifierDigit,
   pressNewTask,
@@ -9,6 +10,7 @@ import {
   pressOverviewRowCheckbox,
   pressPaneMaximizeToggle,
   pressSelectedRowsSplit,
+  showNavDigitPreview,
 } from './viewNavHotkeys';
 
 // jsdom has no PointerEvent constructor; the workspace picker opens on a
@@ -995,5 +997,230 @@ describe('pressNavigationDigit (Cmd/Ctrl+1..9)', () => {
       expect(pressNavigationDigit(event)).toBe(false);
       expect(event.defaultPrevented).toBe(false);
     });
+  });
+});
+
+describe('nav digit preview (Cmd/Ctrl hold)', () => {
+  // The current badge set in document order: target element + the number.
+  function badges(): Array<{ el: Element; n: string }> {
+    return Array.from(
+      document.querySelectorAll('[data-web-shell-nav-preview]'),
+    ).map((el) => ({
+      el,
+      n: el.getAttribute('data-web-shell-nav-preview') ?? '',
+    }));
+  }
+
+  it('numbers nothing on an empty surface and injects the style once', () => {
+    showNavDigitPreview();
+    expect(badges()).toEqual([]);
+    expect(
+      document.querySelectorAll('style#webShellNavPreviewStyle').length,
+    ).toBe(1);
+    // Repeat show/hide cycles keep exactly one style element.
+    for (let i = 0; i < 5; i++) {
+      showNavDigitPreview();
+      hideNavDigitPreview();
+    }
+    expect(
+      document.querySelectorAll('style#webShellNavPreviewStyle').length,
+    ).toBe(1);
+  });
+
+  it('numbers the expanded Pinned rows 1..N in DOM order', () => {
+    const { section } = makePinned({
+      label: 'Pinned',
+      expanded: true,
+      rows: 5,
+    });
+    showNavDigitPreview();
+    const rows = section.querySelectorAll('div[role="button"]');
+    expect(badges().map((b) => b.el)).toEqual(Array.from(rows));
+    expect(badges().map((b) => b.n)).toEqual(['1', '2', '3', '4', '5']);
+  });
+
+  it('numbers at most nine targets', () => {
+    const { section } = makePinned({
+      label: 'Pinned',
+      expanded: true,
+      rows: 12,
+    });
+    showNavDigitPreview();
+    expect(badges().map((b) => b.n)).toEqual([
+      '1',
+      '2',
+      '3',
+      '4',
+      '5',
+      '6',
+      '7',
+      '8',
+      '9',
+    ]);
+    // The tenth row stays unnumbered — the chord has no key for it.
+    expect(
+      section
+        .querySelectorAll('div[role="button"]')[9]
+        .hasAttribute('data-web-shell-nav-preview'),
+    ).toBe(false);
+  });
+
+  it('numbers nothing for a collapsed section, without falling through to the panes', () => {
+    const panes = makePanes(2);
+    makePinned({ label: 'Pinned', expanded: false, rows: 5 });
+    showNavDigitPreview();
+    expect(badges()).toEqual([]);
+    panes.forEach((p) =>
+      expect(p.hasAttribute('data-web-shell-nav-preview')).toBe(false),
+    );
+  });
+
+  it('numbers nothing for an expanded section with a hidden list, without falling through', () => {
+    const panes = makePanes(2);
+    makePinned({
+      label: 'Pinned',
+      expanded: true,
+      rows: 4,
+      visible: false,
+    });
+    showNavDigitPreview();
+    expect(badges()).toEqual([]);
+    panes.forEach((p) =>
+      expect(p.hasAttribute('data-web-shell-nav-preview')).toBe(false),
+    );
+  });
+
+  it('numbers the Pinned rows, not the panes, when both are present', () => {
+    const panes = makePanes(2);
+    const { section } = makePinned({
+      label: 'Pinned',
+      expanded: true,
+      rows: 3,
+    });
+    showNavDigitPreview();
+    expect(badges().map((b) => b.el)).toEqual(
+      Array.from(section.querySelectorAll('div[role="button"]')),
+    );
+    panes.forEach((p) =>
+      expect(p.hasAttribute('data-web-shell-nav-preview')).toBe(false),
+    );
+  });
+
+  it('numbers the split pane roots when they are the navigation target', () => {
+    const panes = makePanes(3);
+    showNavDigitPreview();
+    expect(badges().map((b) => b.el)).toEqual(panes);
+    panes[0].remove();
+    panes[1].remove();
+    showNavDigitPreview();
+    // A single pane is not a navigation target (the chord needs two).
+    expect(badges()).toEqual([]);
+  });
+
+  it('numbers the Overview rows on their last cell', () => {
+    const viewport = document.createElement('div');
+    viewport.setAttribute('data-web-shell-session-table-viewport', '');
+    const table = document.createElement('table');
+    const tbody = document.createElement('tbody');
+    for (let i = 0; i < 3; i++) {
+      const tr = document.createElement('tr');
+      for (let c = 0; c < 3; c++) {
+        const td = document.createElement('td');
+        td.textContent = `${i}.${c}`;
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    viewport.appendChild(table);
+    setWidth(viewport, 800);
+    document.body.appendChild(viewport);
+    showNavDigitPreview();
+    const rows = viewport.querySelectorAll('tbody tr');
+    expect(badges().map((b) => b.el)).toEqual(
+      Array.from(rows).map((r) => r.querySelector('td:last-child')!),
+    );
+    expect(badges().map((b) => b.n)).toEqual(['1', '2', '3']);
+  });
+
+  it('claims the Overview table even with no rows (the panes stay unnumbered)', () => {
+    const panes = makePanes(2);
+    const viewport = document.createElement('div');
+    viewport.setAttribute('data-web-shell-session-table-viewport', '');
+    viewport.appendChild(document.createElement('table'));
+    setWidth(viewport, 800);
+    document.body.appendChild(viewport);
+    showNavDigitPreview();
+    expect(badges()).toEqual([]);
+    panes.forEach((p) =>
+      expect(p.hasAttribute('data-web-shell-nav-preview')).toBe(false),
+    );
+  });
+
+  it('numbers the approval options when the card wins', () => {
+    const panes = makePanes(2);
+    makePinned({ label: 'Pinned', expanded: true, rows: 3 });
+    const [panel] = makeApprovalPanels(
+      [{ visible: true, pane: 1, buttons: 4 }],
+      panes,
+    );
+    showNavDigitPreview();
+    const options = panel.querySelectorAll('[role="radiogroup"] button');
+    expect(badges().map((b) => b.el)).toEqual(Array.from(options));
+    expect(badges().map((b) => b.n)).toEqual(['1', '2', '3', '4']);
+  });
+
+  it('claims the approval card even without an option group (no fall-through)', () => {
+    const panes = makePanes(2);
+    makePinned({ label: 'Pinned', expanded: true, rows: 3 });
+    makeApprovalPanels([{ visible: true, pane: 1, buttons: null }], panes);
+    showNavDigitPreview();
+    expect(badges()).toEqual([]);
+  });
+
+  it('numbers nothing while a dialog is open, and again after it closes', () => {
+    const { section } = makePinned({
+      label: 'Pinned',
+      expanded: true,
+      rows: 3,
+    });
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    document.body.appendChild(dialog);
+    showNavDigitPreview();
+    expect(badges()).toEqual([]);
+    dialog.remove();
+    showNavDigitPreview();
+    const rows = section.querySelectorAll('div[role="button"]');
+    expect(badges().map((b) => b.el)).toEqual(Array.from(rows));
+  });
+
+  it('re-numbers a changed list and leaves no orphan badge behind', () => {
+    const { section } = makePinned({
+      label: 'Pinned',
+      expanded: true,
+      rows: 2,
+    });
+    showNavDigitPreview();
+    expect(badges().map((b) => b.n)).toEqual(['1', '2']);
+    // The list changes under the held modifier (a re-render): one row is
+    // removed and a new one joins.
+    const rows = section.querySelectorAll('div[role="button"]');
+    rows[1].remove();
+    const extra = document.createElement('div');
+    extra.setAttribute('role', 'button');
+    rows[0].parentElement!.appendChild(extra);
+    showNavDigitPreview();
+    const fresh = section.querySelectorAll('div[role="button"]');
+    expect(badges().map((b) => b.el)).toEqual(Array.from(fresh));
+    expect(badges().map((b) => b.n)).toEqual(['1', '2']);
+  });
+
+  it('hide removes every badge', () => {
+    makePinned({ label: 'Pinned', expanded: true, rows: 4 });
+    showNavDigitPreview();
+    expect(badges()).toHaveLength(4);
+    hideNavDigitPreview();
+    expect(badges()).toEqual([]);
   });
 });

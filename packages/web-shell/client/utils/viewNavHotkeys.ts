@@ -222,6 +222,109 @@ export function pressNavigationDigit(e: KeyboardEvent): boolean {
   return false;
 }
 
+const NAV_PREVIEW_STYLE_ID = 'webShellNavPreviewStyle';
+
+function ensureNavPreviewStyle(): void {
+  if (document.getElementById(NAV_PREVIEW_STYLE_ID)) return;
+  const style = document.createElement('style');
+  style.id = NAV_PREVIEW_STYLE_ID;
+  style.textContent = `
+[data-web-shell-nav-preview] { position: relative; }
+[data-web-shell-nav-preview]::after {
+  content: attr(data-web-shell-nav-preview);
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--agent-blue-500, #3b82f6);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  pointer-events: none;
+  z-index: 1;
+}`;
+  document.head.appendChild(style);
+}
+
+/**
+ * The elements a plain (no-Shift) Cmd/Ctrl+1..9 press would act on —
+ * mirrors the priority and claim semantics of pressNavigationDigit: the
+ * approval card wins even with no options, the Overview table even with
+ * no rows, the Pinned section even when collapsed (the first press would
+ * expand it, not navigate, so it numbers nothing); only a missing or
+ * hidden Pinned header falls through to the split panes.
+ */
+function navPreviewTargets(): HTMLElement[] {
+  const panel = pickVisiblePanel(
+    document.querySelectorAll('[data-web-shell-permission-panel]'),
+  );
+  if (panel) {
+    const group = panel.querySelector('[role="radiogroup"]');
+    return group
+      ? Array.from(group.children).filter(
+          (child): child is HTMLElement => child instanceof HTMLButtonElement,
+        )
+      : [];
+  }
+  const viewport = document.querySelector(
+    '[data-web-shell-session-table-viewport]',
+  );
+  if (isVisible(viewport)) {
+    // Badge the row's last cell (it has the free right edge); fall back
+    // to the row itself for cells without a trailing td.
+    return Array.from(viewport.querySelectorAll<HTMLElement>('tbody tr')).map(
+      (row) => row.querySelector<HTMLElement>('td:last-child') ?? row,
+    );
+  }
+  const header = findPinnedHeader();
+  if (header) {
+    if (header.getAttribute('aria-expanded') !== 'true') return [];
+    const list = header.parentElement?.nextElementSibling;
+    if (!isVisible(list)) return [];
+    return Array.from(list.querySelectorAll<HTMLElement>('div[role="button"]'));
+  }
+  const panes = document.querySelectorAll<HTMLElement>(
+    '[data-pane-session-id]',
+  );
+  return panes.length > 1 ? Array.from(panes) : [];
+}
+
+/**
+ * Numbers 1..9 over the next digit-navigation targets — the macOS-menu
+ * canon for "what this modifier does next". Called on each Cmd/Ctrl
+ * (Windows/Linux) keydown, so a list that changed while the modifier is
+ * held re-numbers itself. The badge is a CSS ::after driven by a data
+ * attribute, not an extra DOM node: React re-renders of the rows cannot
+ * drop or duplicate it mid-hold. At most nine targets are numbered, in
+ * DOM order; the numbers are positions, matching the chord.
+ */
+export function showNavDigitPreview(): void {
+  ensureNavPreviewStyle();
+  hideNavDigitPreview();
+  if (document.querySelector('[role="dialog"]')) return;
+  navPreviewTargets()
+    .slice(0, 9)
+    .forEach((el, i) =>
+      el.setAttribute('data-web-shell-nav-preview', String(i + 1)),
+    );
+}
+
+/** Removes any number-preview badges. */
+export function hideNavDigitPreview(): void {
+  document
+    .querySelectorAll('[data-web-shell-nav-preview]')
+    .forEach((el) => el.removeAttribute('data-web-shell-nav-preview'));
+}
+
 /**
  * Cmd/Ctrl+Shift+F — maximizes/restores the focused split pane by
  * pressing its header button. A no-op without consumption when no pane

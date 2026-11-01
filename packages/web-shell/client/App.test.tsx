@@ -50739,6 +50739,35 @@ describe('App view navigation hotkeys — surface chords', () => {
     return event;
   }
 
+  // A real keyup of the released modifier still carries its own flag
+  // (the event of releasing Cmd has metaKey: true) — the tests send the
+  // same shape the browser does.
+  async function releaseKey(
+    init: KeyboardEventInit,
+    target: EventTarget = window,
+  ): Promise<void> {
+    await act(async () => {
+      target.dispatchEvent(
+        new KeyboardEvent('keyup', { bubbles: true, ...init }),
+      );
+      await Promise.resolve();
+    });
+  }
+
+  async function blurWindow(): Promise<void> {
+    await act(async () => {
+      window.dispatchEvent(new Event('blur'));
+      await Promise.resolve();
+    });
+  }
+
+  // The current number-preview badges in document order.
+  function badgeValues(): string[] {
+    return Array.from(
+      document.querySelectorAll('[data-web-shell-nav-preview]'),
+    ).map((el) => el.getAttribute('data-web-shell-nav-preview') ?? '');
+  }
+
   function renderViewApp(): Awaited<ReturnType<typeof renderApp>> {
     return renderApp({ sidebar: VIEW_SIDEBAR });
   }
@@ -50755,6 +50784,28 @@ describe('App view navigation hotkeys — surface chords', () => {
         <button type="button" role="radio">Allow</button>
       </div>
     </div>`;
+
+  // An expanded Pinned section: the header button's wrapper followed by
+  // the row list (the shape WebShellSidebar renders).
+  const PINNED_FIXTURE = `
+    <div>
+      <button type="button" data-web-shell-pinned-header
+        aria-expanded="true"></button>
+    </div>
+    <div>
+      <div role="button">one</div>
+      <div role="button">two</div>
+    </div>`;
+
+  // The row list is the parent of the first row (the fixture host may carry
+  // trailing nodes after it, so lastElementChild is not the list).
+  function sizePinnedFixture(host: HTMLElement): void {
+    setWidth(host.querySelector('[data-web-shell-pinned-header]')!, 800);
+    setWidth(
+      host.querySelector('[role="button"]')!.parentElement as Element,
+      800,
+    );
+  }
 
   it('focuses the Nth approval option with Cmd+1', async () => {
     renderViewApp();
@@ -51024,6 +51075,159 @@ describe('App view navigation hotkeys — surface chords', () => {
     expect(
       document.activeElement?.closest('[data-web-shell-permission-panel]'),
     ).toBeNull();
+  });
+
+  it('shows the number preview on the modifier keydown, clears on its keyup', async () => {
+    renderViewApp();
+    await flush();
+    const host = fixture(PINNED_FIXTURE);
+    sizePinnedFixture(host);
+    await pressChord({ key: 'Meta', code: 'Meta', metaKey: true });
+    expect(badgeValues()).toEqual(['1', '2']);
+    // Releasing the modifier: the keyup still carries its own flag.
+    await releaseKey({
+      key: 'Meta',
+      code: 'Meta',
+      metaKey: true,
+      ctrlKey: false,
+    });
+    expect(badgeValues()).toEqual([]);
+  });
+
+  it('keeps the preview while a second modifier joins, clears on the last release', async () => {
+    renderViewApp();
+    await flush();
+    const host = fixture(
+      PINNED_FIXTURE.replace(
+        '<div role="button">two</div>',
+        '<div role="button">two</div>\n      <div role="button">three</div>',
+      ),
+    );
+    sizePinnedFixture(host);
+    await pressChord({ key: 'Meta', code: 'Meta', metaKey: true });
+    expect(badgeValues()).toEqual(['1', '2', '3']);
+    // Ctrl joins: the preview re-numbers and stays.
+    await pressChord({
+      key: 'Control',
+      code: 'Control',
+      metaKey: true,
+      ctrlKey: true,
+    });
+    expect(badgeValues()).toEqual(['1', '2', '3']);
+    // Ctrl releases first: Meta is still held, so the preview stays.
+    await releaseKey({
+      key: 'Control',
+      code: 'Control',
+      metaKey: true,
+      ctrlKey: false,
+    });
+    expect(badgeValues()).toEqual(['1', '2', '3']);
+    // Meta releases: cleared.
+    await releaseKey({
+      key: 'Meta',
+      code: 'Meta',
+      metaKey: true,
+      ctrlKey: false,
+    });
+    expect(badgeValues()).toEqual([]);
+  });
+
+  it('hides the preview when Alt joins a held modifier', async () => {
+    renderViewApp();
+    await flush();
+    const host = fixture(PINNED_FIXTURE);
+    sizePinnedFixture(host);
+    await pressChord({ key: 'Meta', code: 'Meta', metaKey: true });
+    expect(badgeValues()).toEqual(['1', '2']);
+    // An Alt keydown while Meta is held still carries metaKey.
+    await pressChord({ key: 'Alt', code: 'Alt', altKey: true, metaKey: true });
+    expect(badgeValues()).toEqual([]);
+  });
+
+  it('hides the preview when the window blurs', async () => {
+    renderViewApp();
+    await flush();
+    const host = fixture(PINNED_FIXTURE);
+    sizePinnedFixture(host);
+    await pressChord({ key: 'Meta', code: 'Meta', metaKey: true });
+    expect(badgeValues()).toEqual(['1', '2']);
+    await blurWindow();
+    expect(badgeValues()).toEqual([]);
+  });
+
+  it('does not show the preview over an ordinary editable target', async () => {
+    renderViewApp();
+    await flush();
+    const host = fixture(PINNED_FIXTURE + '<input type="text" />');
+    sizePinnedFixture(host);
+    const input = host.querySelector('input')!;
+    input.focus();
+    await pressChord({ key: 'Meta', code: 'Meta', metaKey: true }, input);
+    expect(badgeValues()).toEqual([]);
+  });
+
+  it('does not show the preview over the composer (the digits stay live there)', async () => {
+    renderViewApp();
+    await flush();
+    const host = fixture(
+      PINNED_FIXTURE +
+        '<div data-web-shell-composer-editor><div class="cm-editor">' +
+        '<div class="cm-content" contenteditable="true"></div></div></div>',
+    );
+    sizePinnedFixture(host);
+    const content = host.querySelector('.cm-content')!;
+    content.focus();
+    await pressChord({ key: 'Meta', code: 'Meta', metaKey: true }, content);
+    // The plain-digit chord is exempt from the composer guard, so the
+    // preview shows there too — it previews a chord that will fire.
+    expect(badgeValues()).toEqual(['1', '2']);
+  });
+
+  it('does not number targets while a dialog is open', async () => {
+    renderViewApp();
+    await flush();
+    const host = fixture(PINNED_FIXTURE + '<div role="dialog"></div>');
+    sizePinnedFixture(host);
+    await pressChord({ key: 'Meta', code: 'Meta', metaKey: true });
+    expect(badgeValues()).toEqual([]);
+  });
+
+  it('re-numbers when the list changes under a held modifier', async () => {
+    renderViewApp();
+    await flush();
+    const host = fixture(PINNED_FIXTURE);
+    sizePinnedFixture(host);
+    await pressChord({ key: 'Meta', code: 'Meta', metaKey: true });
+    expect(badgeValues()).toEqual(['1', '2']);
+    // A row joins (a re-render); each modifier press re-numbers.
+    host
+      .querySelectorAll('[role="button"]')[0]
+      .parentElement!.insertAdjacentHTML(
+        'beforeend',
+        '<div role="button">three</div>',
+      );
+    await pressChord({ key: 'Meta', code: 'Meta', metaKey: true });
+    expect(badgeValues()).toEqual(['1', '2', '3']);
+  });
+
+  it('numbers the split panes when they are the navigation target', async () => {
+    renderViewApp();
+    await flush();
+    const host = fixture(`
+      <div data-pane-session-id="a" tabindex="-1"></div>
+      <div data-pane-session-id="b" tabindex="-1"></div>`);
+    host.querySelectorAll('[data-pane-session-id]').forEach((pane) => {
+      setWidth(pane, 800);
+    });
+    await pressChord({ key: 'Meta', code: 'Meta', metaKey: true });
+    expect(badgeValues()).toEqual(['1', '2']);
+    await releaseKey({
+      key: 'Meta',
+      code: 'Meta',
+      metaKey: true,
+      ctrlKey: false,
+    });
+    expect(badgeValues()).toEqual([]);
   });
 });
 
