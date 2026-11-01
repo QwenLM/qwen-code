@@ -495,8 +495,8 @@ class ExternalWorkspaceMaterializationTest {
             assertThat(registry.findReadable("tenant", "owner", List.of("ephemeral-workspace"))
                     .get("ephemeral-workspace").canCreateSession()).isTrue();
 
-            jdbc.update("UPDATE ma_storage SET registration_json = 'not-json'"
-                    + " WHERE storage_id = 'ephemeral-workspace'");
+            jdbc.update("UPDATE ma_storage SET registration_json = 'not-json' WHERE storage_id = ?",
+                    "ephemeral-workspace".getBytes(java.nio.charset.StandardCharsets.UTF_8));
             assertThat(registry.findReadable("tenant", "owner", "ephemeral-workspace").canCreateSession())
                     .isFalse();
             assertThat(registry.findReadable("tenant", "owner", List.of("ephemeral-workspace"))
