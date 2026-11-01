@@ -34,7 +34,7 @@ channel overview and synchronized English/Chinese design documents.
 - [x] Update the channel overview's request-vs-session permission contract.
 - [x] Run changed-file formatting and lint checks, package compilation, and
       independent compiled-code reproduction verification.
-- [ ] Complete whole-repository build, typecheck, and bundle after synchronizing
+- [x] Complete whole-repository build, typecheck, and bundle after synchronizing
       the installed dependencies and sibling build outputs with this checkout.
 - [x] Read the full diff in two clean self-audit passes, then obtain a fresh
       code review and fix correctness findings before reporting completion.
@@ -52,12 +52,22 @@ Submission does not authorize a release, merge, or deployment.
   Prettier and whitespace checks passed.
 - Independent compiled ChannelBase inbound/event verification passed 33
   scenarios, including a real isolated PairingStore. This is not live IM E2E.
-- Root `npm run build` and `npm run bundle` failed on missing dependencies such
-  as `@jitl/quickjs-singlefile-mjs-release-sync` and
-  `quickjs-emscripten-core`. Other new workspaces also lack installed packages.
-- Root `npm run typecheck` reported stale sibling declaration outputs and
-  installed-library API mismatches, then aborted at the Node heap limit.
-  No whole-repository green result or complete CLI acceptance is claimed.
+- After refreshing pinned dependencies and synchronizing main, root
+  `npm run build`, `npm run bundle`, and
+  `NODE_OPTIONS=--max-old-space-size=6144 npm run typecheck` passed. The refreshed
+  ChannelBase test file passed all 783 tests again.
+- Independent concurrent-session verification passed 13 scenarios, including
+  ordinary-member isolation and the existing operator delegation behavior.
+- A fresh bundled CLI, isolated extension transport, real ACP child, local
+  OpenAI-compatible fixture, and real edit tool passed five end-to-end cases:
+  direct approval, group approval after another member's rejection, group
+  denial, persistent/management rejection followed by one-time approval, and
+  privately paired approval. Approved edits changed files; denial preserved
+  the file and completed the attended lifecycle without a second request.
+- CI static checks, TUI snapshots, and no-AK integration passed on the tested
+  production head. Full Linux unit and Web Shell smoke jobs were still running
+  when this evidence was recorded. No live IM or all-platform acceptance is
+  claimed.
 - Independent review found no actionable correctness or security defects. Its
   suggested original-owner-versus-current-sender regression was added and
   included in the final 783-test run. An active unattended loop/webhook case
