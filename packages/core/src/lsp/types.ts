@@ -156,12 +156,13 @@ export interface LspFileDiagnostics {
 }
 
 /**
- * Diagnostics retrieved from the servers that answered. A non-empty
- * `failedServers` means another server's pull failed, so `items` is partial.
+ * Diagnostics retrieved from the servers that answered. `unqueried` is set
+ * when a server that could contribute failed its pull or was never reached,
+ * so `items` is partial; it is a bounded, human-readable description.
  */
 export interface LspDiagnosticsReport<T> {
   items: T[];
-  failedServers: Array<{ serverName: string; reason: string }>;
+  unqueried?: string;
 }
 
 /**

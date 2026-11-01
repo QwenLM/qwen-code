@@ -61,6 +61,15 @@ import { globSync } from 'glob';
 
 const debugLogger = createDebugLogger('LSP');
 
+/** The last non-empty line of an error message, capped at 200 characters. */
+function lastErrorLine(raw: string): string | undefined {
+  const lines = raw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  return lines.length > 0 ? lines[lines.length - 1]!.slice(-200) : undefined;
+}
+
 /**
  * Render one server a diagnostics query could not use, by name, state and the
  * cause the manager recorded. Every reachable FAILED transition assigns
@@ -78,15 +87,9 @@ function describeLspServerState(name: string, handle: LspServerHandle): string {
   // The recorded cause goes through `getErrorMessage` like the failures arm it
   // is joined with; the last-line bound below then keeps a stack-packed
   // message from flooding the tool result verbatim.
-  const raw = handle.error ? getErrorMessage(handle.error) : undefined;
-  const lines = raw
-    ?.split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-  const reason =
-    lines && lines.length > 0
-      ? lines[lines.length - 1]!.slice(-200)
-      : undefined;
+  const reason = handle.error
+    ? lastErrorLine(getErrorMessage(handle.error))
+    : undefined;
   const state = handle.status.toLowerCase().replace(/_/g, ' ');
   return `${name} is ${state}${reason ? ` (${reason})` : ''}`;
 }
@@ -147,6 +150,26 @@ function nothingRetrievedForDiagnostics(
   return new Error(
     `No LSP diagnostics could be retrieved (${boundedRejectionDetail(entries)})`,
   );
+}
+
+/**
+ * Describe what a diagnostics answer that did retrieve something is missing:
+ * the failed pulls and the servers never reached. Bounded like the rejection
+ * (last line per cause, aggregate budget) so a stack-packed cause or a long
+ * server list cannot flood the retrieved diagnostics.
+ */
+function unqueriedDiagnosticsDetail(
+  failures: Array<{ name: string; error: unknown }>,
+  skipped: string[],
+): string | undefined {
+  const entries = [
+    ...failures.map(
+      ({ name, error }) =>
+        `${name}: ${lastErrorLine(getErrorMessage(error)) ?? 'unknown error'}`,
+    ),
+    ...skipped,
+  ];
+  return entries.length > 0 ? boundedRejectionDetail(entries) : undefined;
 }
 
 /** JSON-RPC "method not found": the server does not implement the request. */
@@ -2386,12 +2409,12 @@ export class NativeLspService {
     const relevantFailures = failures.filter(
       ({ handle }) => !this.serverDeclaredIrrelevant(handle, extension),
     );
+    const unreachable = this.unreachableDiagnosticServers(
+      queried,
+      serverName,
+      uri,
+    );
     if (allDiagnostics.length === 0) {
-      const unreachable = this.unreachableDiagnosticServers(
-        queried,
-        serverName,
-        uri,
-      );
       if (relevantFailures.length > 0 || unreachable.length > 0) {
         throw nothingRetrievedForDiagnostics(relevantFailures, unreachable);
       }
@@ -2428,10 +2451,7 @@ export class NativeLspService {
     }
     return {
       items: allDiagnostics,
-      failedServers: relevantFailures.map(({ name, error }) => ({
-        serverName: name,
-        reason: getErrorMessage(error),
-      })),
+      unqueried: unqueriedDiagnosticsDetail(relevantFailures, unreachable),
     };
   }
 
@@ -2618,11 +2638,16 @@ export class NativeLspService {
       }
     }
 
+    // A sweep that stopped at `limit` left the remaining ready servers unasked
+    // on purpose; they are not unreachable, so only servers that still cannot
+    // be reached are named. Truncation itself is not reported here.
+    const unreachable = this.unreachableDiagnosticServers(
+      results.length >= limit
+        ? [...queried, ...this.getReadyHandles(serverName)]
+        : queried,
+      serverName,
+    );
     if (results.length === 0) {
-      const unreachable = this.unreachableDiagnosticServers(
-        queried,
-        serverName,
-      );
       if (failures.length > 0 || unreachable.length > 0) {
         // A workspace query covers every file, so no extension can attribute
         // a refusal to one: every collected `-32601` refusal is named beside
@@ -2635,10 +2660,7 @@ export class NativeLspService {
     }
     return {
       items: results.slice(0, limit),
-      failedServers: failures.map(({ name, error }) => ({
-        serverName: name,
-        reason: getErrorMessage(error),
-      })),
+      unqueried: unqueriedDiagnosticsDetail(failures, unreachable),
     };
   }
 

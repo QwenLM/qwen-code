@@ -680,27 +680,26 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
     const fileLabel = this.formatUriForDisplay(uri, workspaceRoot);
     const heading = `Diagnostics for ${fileLabel} (${diagnostics.length} issues):`;
     return {
-      llmContent: [
-        heading,
-        ...lines,
-        ...this.partialReportNotes(report.failedServers),
-      ].join('\n'),
+      llmContent: [heading, ...lines, ...this.partialReportNote(report)].join(
+        '\n',
+      ),
       returnDisplay: lines.join('\n'),
     };
   }
 
   /**
-   * A failed pull beside a successful one still yields a success, so the
-   * model must be told the list is incomplete; setting `error` instead would
-   * replace the retrieved diagnostics with the error message.
+   * A failed or unreached server beside a successful one still yields a
+   * success, so the model must be told the list is incomplete; setting
+   * `error` instead would replace the retrieved diagnostics with the error
+   * message. The note is model-facing only; `returnDisplay` keeps the plain
+   * list the user already sees.
    */
-  private partialReportNotes(
-    failedServers: LspDiagnosticsReport<unknown>['failedServers'],
-  ): string[] {
-    return failedServers.map(
-      ({ serverName, reason }) =>
-        `Note: ${serverName} could not be queried (${reason}); this report is partial.`,
-    );
+  private partialReportNote(report: LspDiagnosticsReport<unknown>): string[] {
+    return report.unqueried
+      ? [
+          `Note: some LSP servers could not be queried (${report.unqueried}); this report is partial.`,
+        ]
+      : [];
   }
 
   private async executeWorkspaceDiagnostics(
@@ -751,11 +750,9 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
 
     const heading = `Workspace diagnostics (${totalIssues} issues in ${fileDiagnostics.length} files):`;
     return {
-      llmContent: [
-        heading,
-        ...lines,
-        ...this.partialReportNotes(report.failedServers),
-      ].join('\n'),
+      llmContent: [heading, ...lines, ...this.partialReportNote(report)].join(
+        '\n',
+      ),
       returnDisplay: lines.join('\n'),
     };
   }
