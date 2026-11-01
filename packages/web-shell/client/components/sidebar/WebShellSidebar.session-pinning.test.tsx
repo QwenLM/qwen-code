@@ -224,6 +224,73 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar session pinning (issue #9465)', () => {
+  it('does not restore cleared activity unread when the legacy catalog catches up', async () => {
+    const running = makeSession('background', {
+      displayName: 'Background result',
+      hasActivePrompt: true,
+      updatedAt: new Date().toISOString(),
+    });
+    const completed = { ...running, hasActivePrompt: false };
+    const catalog = (session: DaemonSessionSummary) => {
+      useSessionCatalogQueries.mockReturnValue([
+        { loading: false, stale: false, page: { sessions: [session] } },
+      ]);
+    };
+    active.sessions = [running];
+    active.data = active.sessions;
+    catalog(running);
+    renderSidebar();
+    await flushSidebar();
+    await act(async () => {
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="View activity"]',
+        )!,
+      );
+    });
+    await flushSidebar();
+    catalog(completed);
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).not.toBeNull();
+    await act(async () => {
+      container
+        .querySelector('button[aria-label="Activity options"]')!
+        .dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        );
+    });
+    const markRead = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ].find((item) => item.textContent === 'Mark all as read');
+    expect(markRead).toBeDefined();
+    await act(async () => click(markRead!));
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    active.sessions = [completed];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    await act(async () => {
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Close activity view"]',
+        )!,
+      );
+    });
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    expect(workspaceActions.updateSessionOrganization).not.toHaveBeenCalled();
+  });
+
   it('orders the pinned section by pin time, not last activity', async () => {
     // The daemon returns the pinned page sorted by activity (updatedAt
     // descending): "recent" was active most recently but was pinned AFTER
