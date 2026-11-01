@@ -137,6 +137,7 @@ export class WeixinChannel extends ChannelBase {
           senderId: msg.fromUserId,
           senderName: msg.fromUserId,
           chatId: msg.fromUserId,
+          messageId: msg.messageId,
           text: msg.text,
           ...(msg.syntheticText ? { syntheticText: true as const } : {}),
           isGroup: false,

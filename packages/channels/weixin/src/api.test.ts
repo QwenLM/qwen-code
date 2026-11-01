@@ -1,5 +1,65 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { uploadToCdn } from './api.js';
+import { getUpdates, uploadToCdn } from './api.js';
+
+describe('getUpdates large message IDs', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('preserves message IDs larger than Number.MAX_SAFE_INTEGER', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          '{"ret":0,"msgs":[{"message_id":7489534892789344264,"message_type":1}]}',
+          { status: 200 },
+        ),
+      ),
+    );
+
+    const result = await getUpdates('https://ilink.example', 'token', '');
+
+    expect(result.msgs?.[0]?.message_id).toBe('7489534892789344264');
+    expect(result.ret).toBe(0);
+  });
+
+  it('keeps safe integers, floats, and string contents unchanged', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          '{"ret":0,"seq":42,"max":9007199254740991,"ratio":1.7976931348623157,"create_time_ms":1756500000000000,"text":"9007199254740993","msgs":[{"message_id":9007199254740993}]}',
+          { status: 200 },
+        ),
+      ),
+    );
+
+    const result = await getUpdates('https://ilink.example', 'token', '');
+
+    expect(result.msgs?.[0]?.message_id).toBe('9007199254740993');
+    expect(result).toEqual(
+      expect.objectContaining({
+        ret: 0,
+        seq: 42,
+        max: 9007199254740991,
+        ratio: 1.7976931348623157,
+        create_time_ms: 1756500000000000,
+        text: '9007199254740993',
+      }),
+    );
+  });
+
+  it('still throws on an empty successful response body', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response('', { status: 200 })),
+    );
+
+    await expect(
+      getUpdates('https://ilink.example', 'token', ''),
+    ).rejects.toBeInstanceOf(SyntaxError);
+  });
+});
 
 describe('uploadToCdn', () => {
   afterEach(() => {

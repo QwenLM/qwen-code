@@ -170,6 +170,25 @@ describe('WeixinChannel', () => {
     },
   );
 
+  it('forwards the platform message ID into the inbound envelope', async () => {
+    const channel = createChannel();
+    await channel.connect();
+    const onMessage = monitorMocks.startPollLoop.mock.calls[0]?.[0]
+      ?.onMessage as (parsed: ParsedMessage) => Promise<void>;
+
+    await onMessage({
+      fromUserId: 'user-1',
+      messageId: '7489534892789344264',
+      text: 'hello',
+    });
+
+    await vi.waitFor(() =>
+      expect(channel.inboundEnvelopes[0]?.messageId).toBe(
+        '7489534892789344264',
+      ),
+    );
+  });
+
   it('replaces a captionless image placeholder when the download fails', async () => {
     mediaMocks.downloadAndDecrypt.mockRejectedValue(
       new Error('download unavailable'),
