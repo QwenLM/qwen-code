@@ -47,8 +47,8 @@ import { LiveVoiceMenuItem } from '../../live/LiveVoiceMenuItem';
 import { ModeIcon } from '../ModeIcon';
 import {
   getWorkflowModeControlState,
-  type WorkflowModeControlProps,
-} from '../WorkflowModeControl';
+  type WorkflowModeControlOptions,
+} from '../workflow-mode-control-state';
 import { Button } from '../ui/button';
 import {
   Drawer,
@@ -90,7 +90,7 @@ export interface AddMenuProps {
    * Omitted when the host has not enabled Plan.
    */
   plan?: AddMenuPlanControl;
-  workflow?: WorkflowModeControlProps;
+  workflow?: WorkflowModeControlOptions;
   btw?: { onSelect: () => void; disabledReason?: string };
   mobileActions?: {
     commands: readonly CommandInfo[];

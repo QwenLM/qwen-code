@@ -224,6 +224,27 @@ describe('AddMenu', () => {
     ...overrides,
   });
 
+  it('requests a change without optimistically changing the confirmed value', async () => {
+    const onWorkflowModeChange = vi.fn();
+    renderWith(
+      baseProps({
+        workflow: {
+          workflowModeStatus: 'ready',
+          workflowMode: { requested: false, available: true, effective: false },
+          onWorkflowModeChange,
+        },
+      }),
+    );
+    await openMenu();
+    await act(async () => menuItem('composer-add-menu-workflow')!.click());
+    await settle();
+    expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(true);
+    await openMenu();
+    expect(
+      menuItem('composer-add-menu-workflow')!.getAttribute('aria-checked'),
+    ).toBe('false');
+  });
+
   it.each([false, true])(
     'toggles Workflow from the menu (simple: %s)',
     async (simpleMode) => {

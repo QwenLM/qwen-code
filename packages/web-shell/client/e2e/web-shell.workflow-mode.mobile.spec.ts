@@ -57,9 +57,6 @@ for (const { language, theme } of [
     await daemon.sendEvent(
       replayCompleteEvent({ sessionId: scenario.sessionId }),
     );
-    await expect(
-      page.locator('[data-web-shell-workflow-mode-control]'),
-    ).toHaveCount(0);
     const trigger = page.getByTestId('composer-add-menu-trigger');
     const toggle = page.getByTestId('composer-add-menu-workflow');
     await expect(toggle).toHaveCount(0);

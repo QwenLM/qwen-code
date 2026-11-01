@@ -6883,9 +6883,6 @@ describe('ChatEditor Workflow mode', () => {
       onTogglePlan: vi.fn(),
       onWorkflowModeChange,
     });
-    expect(
-      container.querySelector('[data-web-shell-workflow-mode-control]'),
-    ).toBeNull();
     const trigger = container.querySelector<HTMLButtonElement>(
       '[data-testid="composer-add-menu-trigger"]',
     )!;
@@ -6912,17 +6909,80 @@ describe('ChatEditor Workflow mode', () => {
     expect(composerCoreState.submitText).not.toHaveBeenCalled();
   });
 
-  it('honors explicit toolbar allowlists without fabricating support', () => {
+  it('hides Workflow when the host excludes the add menu', () => {
     const container = renderChatEditor({
       ...ready,
-      visibleToolbarActions: ['model'],
+      visibleToolbarActions: ['workflowMode', 'model'],
     });
     expect(
-      container.querySelector('[data-web-shell-workflow-mode-control]'),
-    ).toBeNull();
-    rerenderChatEditor(container, { visibleToolbarActions: ['workflowMode'] });
-    expect(
-      container.querySelector('[data-web-shell-workflow-mode-control]'),
+      container.querySelector('[data-testid="composer-add-menu-trigger"]'),
     ).toBeNull();
   });
+
+  it.each([
+    {
+      name: 'allowed and supported',
+      allowWorkflow: true,
+      status: 'ready' as const,
+      visible: true,
+    },
+    {
+      name: 'excluded by the host',
+      allowWorkflow: false,
+      status: 'ready' as const,
+      visible: false,
+    },
+    {
+      name: 'unsupported',
+      allowWorkflow: true,
+      status: 'unsupported' as const,
+      visible: false,
+    },
+    {
+      name: 'not reported',
+      allowWorkflow: true,
+      status: undefined,
+      visible: false,
+    },
+  ])(
+    'checks the opened menu when Workflow is $name',
+    async ({ allowWorkflow, status, visible }) => {
+      const onWorkflowModeChange = vi.fn();
+      const container = renderChatEditor({
+        ...ready,
+        workflowModeStatus: status,
+        visibleToolbarActions: allowWorkflow
+          ? ['addMenu', 'workflowMode']
+          : ['addMenu'],
+        onWorkflowModeChange,
+      });
+      const trigger = container.querySelector<HTMLButtonElement>(
+        '[data-testid="composer-add-menu-trigger"]',
+      )!;
+      await act(async () =>
+        trigger.dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        ),
+      );
+      const portal = mounted.find(
+        (entry) => entry.container === container,
+      )!.portalRoot;
+      expect(portal.querySelector('[role="menu"]')).not.toBeNull();
+      const row = portal.querySelector<HTMLElement>(
+        '[data-testid="composer-add-menu-workflow"]',
+      );
+      expect(Boolean(row)).toBe(visible);
+      if (row) {
+        expect(row.getAttribute('role')).toBe('menuitemcheckbox');
+        expect(row.getAttribute('aria-checked')).toBe('true');
+        await act(async () => row.click());
+        await act(
+          async () => new Promise((resolve) => setTimeout(resolve, 50)),
+        );
+        expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(false);
+      } else {
+        expect(onWorkflowModeChange).not.toHaveBeenCalled();
+      }
+    },
+  );
 });

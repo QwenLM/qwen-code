@@ -94,9 +94,6 @@ async function openSession(
   await daemon.sse.waitForConnection(sessionId);
   await daemon.sendEvent(replayCompleteEvent({ sessionId }));
   await expect(page.locator('[data-web-shell-composer-editor]')).toBeVisible();
-  await expect(
-    page.locator('[data-web-shell-workflow-mode-control]'),
-  ).toHaveCount(0);
   await expect(page.getByTestId('composer-add-menu-workflow')).toHaveCount(0);
 }
 
@@ -108,9 +105,6 @@ test('keeps new-chat Workflow informational without creating a session @smoke', 
     baseURL,
   });
   await gotoEmptyMobileWelcomeHarness(page);
-  await expect(
-    page.locator('[data-web-shell-workflow-mode-control]'),
-  ).toHaveCount(0);
   const row = await modeSwitch(page);
   await expect(row).toBeDisabled();
   await expect(row).toContainText(
@@ -554,9 +548,6 @@ test('split panes read and write their own Workflow owner', async ({
     await daemon.sse.waitForConnection(sessionId);
     await daemon.sendEvent(replayCompleteEvent({ sessionId }));
   }
-  await expect(
-    page.locator('[data-web-shell-workflow-mode-control]'),
-  ).toHaveCount(0);
   const leftTrigger = page
     .locator('[data-pane-session-id="workflow-left"]')
     .getByTestId('composer-add-menu-trigger');
