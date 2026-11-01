@@ -2019,8 +2019,9 @@ describe('WebShellSidebar content-search ghosts', () => {
     });
     await flushSidebar();
 
-    // R4-2: the ghost never renders in the Pinned section, so the section
-    // renderer's renameFormDisabled must not suppress the form here.
+    // R4-2: the ghost never renders in the Pinned section, so the identity-keyed
+    // editor host (pinnedSectionHostsEditing) must not claim it and suppress
+    // the form on this copy.
     expect(
       container.querySelectorAll('input[aria-label="Rename: Ghost pinned"]')
         .length,
