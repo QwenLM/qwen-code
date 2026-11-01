@@ -12,7 +12,8 @@ export function SidebarSectionHeader({
   expanded?: boolean;
   onToggle?: () => void;
   action?: ReactNode;
-  buttonProps?: ButtonHTMLAttributes<HTMLButtonElement>;
+  buttonProps?: ButtonHTMLAttributes<HTMLButtonElement> &
+    Record<`data-${string}`, string | undefined>;
 }) {
   return (
     <div className={`relative ${styles.projectsHeader}`}>
