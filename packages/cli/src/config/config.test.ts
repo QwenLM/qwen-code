@@ -2092,9 +2092,7 @@ describe('loadCliConfig', () => {
       const argv = await parseArguments();
 
       await loadCliConfig(
-        catalogRefresh === undefined
-          ? {}
-          : { model: { catalogRefresh } },
+        catalogRefresh === undefined ? {} : { model: { catalogRefresh } },
         argv,
       );
 

@@ -5311,11 +5311,7 @@ describe('Server Config (config.ts)', () => {
 
   describe('initialize', () => {
     it.each([
-      [
-        'the default',
-        { usageStatisticsEnabled: true },
-        true,
-      ],
+      ['the default', { usageStatisticsEnabled: true }, true],
       [
         'the operator refresh switch',
         { usageStatisticsEnabled: true, modelCatalogRefreshEnabled: false },

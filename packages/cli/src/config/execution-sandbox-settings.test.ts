@@ -209,7 +209,9 @@ describe('operator execution sandbox policy', () => {
   });
   it('bare mode leaves the model catalog refresh unset when no scope configures it', () => {
     write(user, { model: { catalogRefresh: 'no' } });
-    expect(createMinimalSettings().merged.model?.catalogRefresh).toBeUndefined();
+    expect(
+      createMinimalSettings().merged.model?.catalogRefresh,
+    ).toBeUndefined();
   });
   it('bare mode leaves usage statistics unset when no scope configures it', () => {
     write(user, { privacy: { usageStatisticsEnabled: 'no' } });

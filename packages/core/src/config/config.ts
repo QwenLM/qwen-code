@@ -3565,8 +3565,7 @@ export class Config {
       email: 'qwen-coder@alibabacloud.com',
     };
     this.usageStatisticsEnabled = params.usageStatisticsEnabled ?? true;
-    this.modelCatalogRefreshEnabled =
-      params.modelCatalogRefreshEnabled ?? true;
+    this.modelCatalogRefreshEnabled = params.modelCatalogRefreshEnabled ?? true;
     // A Managed session reads in its Runtime worker, so this process could
     // neither elide a repeated read nor prove the read an edit requires.
     this.fileReadCacheDisabled =
