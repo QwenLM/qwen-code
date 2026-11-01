@@ -92,10 +92,10 @@ const OFFICE_DOCUMENT_EXTENSIONS = new Set([
 
 const AUDIO_EXTENSIONS = new Set(['.m4a', '.mp3', '.ogg', '.wav']);
 
+// Previewable Office types are allowed before this shared fallback is checked.
 const DOWNLOAD_ONLY_EXTENSIONS = new Set([
   ...OFFICE_DOCUMENT_EXTENSIONS,
   ...AUDIO_EXTENSIONS,
-  '.pdf',
   '.mp4',
   '.mov',
   '.webm',
@@ -105,21 +105,54 @@ export function isOfficeDocumentPath(workspacePath?: string): boolean {
   return OFFICE_DOCUMENT_EXTENSIONS.has(pathExtension(workspacePath));
 }
 
+export function isExcelFile(
+  workspacePath?: string,
+  mimeType?: string,
+): boolean {
+  const extension = workspaceFileExtension(workspacePath);
+  return extension
+    ? extension === '.xlsx'
+    : normalizeArtifactMimeType(mimeType) ===
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+}
+
+export const DOCX_MIME_TYPE =
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+export function isDocxFile(workspacePath?: string, mimeType?: string): boolean {
+  const extension = workspaceFileExtension(workspacePath);
+  return extension
+    ? extension === '.docx'
+    : normalizeArtifactMimeType(mimeType) === DOCX_MIME_TYPE;
+}
+
+export function isPdfArtifact(artifact: {
+  kind?: string;
+  workspacePath?: string;
+  mimeType?: string;
+}): boolean {
+  return (
+    workspaceFileExtension(artifact.workspacePath) === '.pdf' ||
+    normalizeArtifactMimeType(artifact.mimeType) === 'application/pdf' ||
+    artifact.kind === 'pdf'
+  );
+}
+
 export function isDownloadOnlyWorkspaceArtifact(artifact: {
   kind?: string;
   workspacePath?: string;
   mimeType?: string;
 }): boolean {
-  const extension = pathExtension(artifact.workspacePath);
+  if (isExcelFile(artifact.workspacePath, artifact.mimeType)) return false;
+  const extension = workspaceFileExtension(artifact.workspacePath);
   const mimeType = normalizeArtifactMimeType(artifact.mimeType);
-  if (
-    extension === '.svg' ||
-    mimeType === 'image/svg+xml' ||
-    DOWNLOAD_ONLY_EXTENSIONS.has(extension)
-  ) {
+  if (extension === '.svg' || mimeType === 'image/svg+xml') {
     return true;
   }
+  if (isDocxFile(artifact.workspacePath, artifact.mimeType)) return false;
+  if (DOWNLOAD_ONLY_EXTENSIONS.has(extension)) return true;
   if (
+    isPdfArtifact(artifact) ||
     getArtifactImageMimeType(artifact) ||
     extension === '.md' ||
     extension === '.markdown' ||
@@ -133,7 +166,6 @@ export function isDownloadOnlyWorkspaceArtifact(artifact: {
   if (
     artifact.kind === 'image' ||
     artifact.kind === 'document' ||
-    artifact.kind === 'pdf' ||
     artifact.kind === 'video' ||
     artifact.kind === 'audio'
   ) {
@@ -143,8 +175,11 @@ export function isDownloadOnlyWorkspaceArtifact(artifact: {
 }
 
 export function pathExtension(workspacePath?: string): string {
-  const path = (workspacePath ?? '').split(/[?#]/, 1)[0];
-  const name = path.split(/[/\\]/).pop() ?? '';
+  return workspaceFileExtension((workspacePath ?? '').split(/[?#]/, 1)[0]);
+}
+
+function workspaceFileExtension(workspacePath?: string): string {
+  const name = (workspacePath ?? '').split(/[/\\]/).pop() ?? '';
   const dot = name.lastIndexOf('.');
   return dot >= 0 ? name.slice(dot).toLowerCase() : '';
 }

@@ -11,16 +11,30 @@
 import { existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 
-// Both locations resolve into Flyway's classpath:db/migration, so their
-// versions share one namespace. Flyway scans each location AND its
-// subdirectories, and nowhere else — a versioned-migration file anywhere
+// Registered locations cover the legacy upgrades and the fresh managed-schema
+// baseline in Managed Agent Server; versions are checked across dependencies.
+// Flyway scans each location AND its subdirectories, and nowhere else — a
+// versioned-migration file anywhere
 // else under the source root is invisible to it, so finding one there means
 // the location moved and check-flyway-migrations.js must say so instead of
 // passing on what is left. Its probes derive the db roots and source roots
 // from this table, so editing it cannot silently blind them.
 export const LOCATIONS = [
+  {
+    dir: ['persistence', 'src', 'main', 'resources', 'db', 'migration'],
+    suffix: '.sql',
+  },
+  {
+    dir: ['persistence', 'src', 'main', 'java', 'db', 'migration'],
+    suffix: '.java',
+  },
+  {
+    dir: ['persistence', 'src', 'main', 'resources', 'db', 'managed-schema'],
+    suffix: '.sql',
+  },
   { dir: ['src', 'main', 'resources', 'db', 'migration'], suffix: '.sql' },
   { dir: ['src', 'main', 'java', 'db', 'migration'], suffix: '.java' },
+  { dir: ['src', 'main', 'resources', 'db', 'managed-schema'], suffix: '.sql' },
 ];
 
 // A versioned migration is V<version>__<description>; the version is numeric

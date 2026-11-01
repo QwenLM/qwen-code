@@ -3267,9 +3267,13 @@ describe('SessionService', () => {
         message: userText('backend task'),
       };
 
-      expect(historyOf([realtimeUser, realtimeAssistant, backendUser])).toEqual(
-        [backendUser.message],
-      );
+      const history = historyOf([realtimeUser, realtimeAssistant, backendUser]);
+      expect(history.map(({ role, parts }) => ({ role, parts }))).toEqual([
+        backendUser.message,
+      ]);
+      expect(history.map(getApiHistoryPromptId)).toEqual([
+        'legacy-record:backend-user',
+      ]);
     });
 
     it('does not deep-clone stored messages when rebuilding resume API history', () => {
@@ -3298,7 +3302,14 @@ describe('SessionService', () => {
       const history = historyOf([recordA1, toolResult], '2024-01-01T00:02:00Z');
 
       expect(structuredCloneSpy).not.toHaveBeenCalled();
-      expect(history).toEqual([recordA1.message, toolResult.message]);
+      expect(history.map(({ role, parts }) => ({ role, parts }))).toEqual([
+        recordA1.message,
+        toolResult.message,
+      ]);
+      expect(history.map(getApiHistoryPromptId)).toEqual([
+        'legacy-record:a1',
+        undefined,
+      ]);
       expect(history[1]).not.toBe(toolResult.message);
       expect(history[1].parts).not.toBe(toolResult.message!.parts);
       const response = history[1].parts![0] as {
@@ -3344,10 +3355,15 @@ describe('SessionService', () => {
         '2024-01-01T00:03:00Z',
       );
 
-      expect(history).toEqual([
+      expect(history.map(({ role, parts }) => ({ role, parts }))).toEqual([
         recordA1.message,
         assistantWithToolCall.message,
         merged(toolResult, midTurnUserMessage),
+      ]);
+      expect(history.map(getApiHistoryPromptId)).toEqual([
+        'legacy-record:a1',
+        undefined,
+        undefined,
       ]);
     });
 
@@ -3373,11 +3389,17 @@ describe('SessionService', () => {
         '2024-01-02T04:00:00Z',
       );
 
-      expect(history).toEqual([
+      expect(history.map(({ role, parts }) => ({ role, parts }))).toEqual([
         userText('summary'),
         modelText('Got it. Thanks for the additional context!'),
         recordB2.message,
         postCompressionRecord.message,
+      ]);
+      expect(history.map(getApiHistoryPromptId)).toEqual([
+        undefined,
+        undefined,
+        undefined,
+        'legacy-record:c2',
       ]);
     });
 
@@ -5151,6 +5173,31 @@ describe('SessionService', () => {
               objective: 'injected',
             }),
           ),
+        }),
+      ]);
+
+      await expectUnlabelled();
+    });
+
+    it('ignores a nested Goal marker in a record carrying a Goal payload', async () => {
+      // The scan prefilters on the raw `"subtype":"goal_state"` substring, so a
+      // line whose nested content contains that marker is a candidate even when
+      // the record itself is not a Goal record. The case above cannot tell
+      // whether the reader's own type/subtype check rejected it, because its
+      // record has no top-level `systemPayload` to read an objective from; this
+      // one does, so only that check keeps the decoy's objective off the label.
+      write([
+        ...fillerLines(9 * 400).slice(0, 9),
+        msgLine(sessionId, 'payload-bearing-marker', null, 'assistant', 5, '', {
+          message: content(
+            'model',
+            fnCall('persist', {
+              type: 'system',
+              subtype: 'goal_state',
+              objective: 'injected',
+            }),
+          ),
+          systemPayload: goalPayload('Decoy objective'),
         }),
       ]);
 

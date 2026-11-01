@@ -14,11 +14,24 @@ const EXPIRY_GRACE_MS = 1_000;
 const LOAD_RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
 // The contract's codes for an Action that already ended: it expired, was
 // cancelled, or was answered elsewhere. Retrying the answer cannot succeed.
+// `action_response_delivery_failed` is deliberately absent: the service
+// re-admits a retried click whose Action is still requested, so a retry
+// after a delivery failure can succeed and the card must stay retryable.
+// `action_response_decision_expired` is absent too, although no retry of it
+// succeeds: the service records it while the Action is still requested, so
+// the list keeps returning the Action and a hidden card would come straight
+// back on the next read, only without the reason. The rejection keeps that
+// reason on screen until the Action's end projects (review round 1, R1-2;
+// the missing terminal signal is #14351).
 const ENDED_ACTION_CODES: ReadonlySet<string> = new Set([
   'action_expired',
   'action_cancelled',
   'action_already_resolved',
 ]);
+
+function actionKey(action: ManagedAgentPendingAction): string {
+  return `${action.sessionId}:${action.actionId}`;
+}
 
 function endedAction(failure: unknown): boolean {
   const code =
@@ -29,6 +42,7 @@ function endedAction(failure: unknown): boolean {
 }
 
 export interface ManagedActionsState {
+  actions: readonly ManagedAgentPendingAction[];
   /** The approval to show; answered ones stay hidden while they settle. */
   action?: ManagedAgentPendingAction;
   /** Reading the pending approvals failed; retries run in the background. */
@@ -67,10 +81,27 @@ export function useManagedActions(
   clientId: string,
   enabled: boolean | undefined,
   events: readonly ManagedAgentSessionEvent[],
+  includeChildren = false,
 ): ManagedActionsState {
   const reader = enabled === false ? undefined : provider.actions;
+  const credentials = useMemo(
+    () => ({ provider, clientId }),
+    [provider, clientId],
+  );
+  const owner = useMemo(
+    () => ({ credentials, sessionId }),
+    [credentials, sessionId],
+  );
+  const ownerRef = useRef(owner);
+  ownerRef.current = owner;
+  const [visible, setVisible] = useState(() => !document.hidden);
+  useEffect(() => {
+    const changed = () => setVisible(!document.hidden);
+    document.addEventListener('visibilitychange', changed);
+    return () => document.removeEventListener('visibilitychange', changed);
+  }, []);
   const [pending, setPending] = useState<{
-    sessionId?: string;
+    owner?: typeof owner;
     actions: ManagedAgentPendingAction[];
   }>({ actions: [] });
   const [answered, setAnswered] = useState<ReadonlySet<string>>(new Set());
@@ -108,7 +139,11 @@ export function useManagedActions(
     loadFailures.current = 0;
     answerFailure.current = undefined;
     endedAnswers.current.clear();
-  }, [sessionId]);
+  }, [owner]);
+
+  useEffect(() => {
+    setForbiddenSessions(new Set());
+  }, [credentials]);
 
   useEffect(() => {
     if (!reader || !sessionId) {
@@ -118,6 +153,7 @@ export function useManagedActions(
       loadFailures.current = 0;
       return undefined;
     }
+    if (includeChildren && !visible) return undefined;
     if (enabled === undefined) {
       // So is a reload, which is how a user retries from the page: the
       // reader comes back with the same Session and a fresh retry budget.
@@ -127,14 +163,18 @@ export function useManagedActions(
     const abort = new AbortController();
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     reader
-      .listPending(sessionId, { clientId, signal: abort.signal })
+      .listPending(sessionId, {
+        clientId,
+        signal: abort.signal,
+        ...(includeChildren ? { includeChildren: true } : {}),
+      })
       .then((actions) => {
-        if (abort.signal.aborted) return;
+        if (abort.signal.aborted || ownerRef.current !== owner) return;
         loadFailures.current = 0;
-        setPending({ sessionId, actions });
+        setPending({ owner, actions });
         setLoadError(undefined);
         const stillListed = actions
-          .map((entry) => entry.actionId)
+          .map(actionKey)
           .filter((id) => endedAnswers.current.has(id));
         endedAnswers.current.clear();
         if (stillListed.length > 0) {
@@ -149,21 +189,29 @@ export function useManagedActions(
         // would announce a stale failure beside an unrelated card.
         if (
           answerFailure.current !== undefined &&
-          !actions.some((entry) => entry.actionId === answerFailure.current)
+          !actions.some((entry) => actionKey(entry) === answerFailure.current)
         ) {
           answerFailure.current = undefined;
           setAnswerError(undefined);
         }
+        if (includeChildren) {
+          retryTimer = setTimeout(
+            () => setRevision((value) => value + 1),
+            3_000,
+          );
+        }
       })
       .catch((failure: unknown) => {
-        if (abort.signal.aborted) return;
+        if (abort.signal.aborted || ownerRef.current !== owner) return;
         setLoadError(failure);
         // A 4xx the service will answer the same way every time is not a
         // hiccup: retrying it only burns requests, and the Retry button would
         // keep offering an attempt that cannot succeed. Timeouts and rate
         // limits still back off as before.
         if (isNonRetryableClientError(failure)) return;
-        const delay = LOAD_RETRY_DELAYS_MS[loadFailures.current];
+        const delay =
+          LOAD_RETRY_DELAYS_MS[loadFailures.current] ??
+          (includeChildren ? 10_000 : undefined);
         loadFailures.current += 1;
         if (delay !== undefined) {
           retryTimer = setTimeout(
@@ -176,7 +224,17 @@ export function useManagedActions(
       abort.abort();
       clearTimeout(retryTimer);
     };
-  }, [reader, enabled, sessionId, clientId, trigger, revision]);
+  }, [
+    reader,
+    enabled,
+    sessionId,
+    clientId,
+    trigger,
+    revision,
+    owner,
+    includeChildren,
+    visible,
+  ]);
 
   const earliestExpiry = pending.actions.length
     ? Math.min(...pending.actions.map((action) => action.expiresAt))
@@ -191,23 +249,27 @@ export function useManagedActions(
   }, [earliestExpiry]);
 
   const actions = useMemo(
-    () => (pending.sessionId === sessionId ? pending.actions : []),
-    [pending.sessionId, pending.actions, sessionId],
+    () => (pending.owner === owner ? pending.actions : []),
+    [pending.owner, pending.actions, owner],
   );
   // `pending.sessionId` is set by the success branch of a read only.
-  const loaded = pending.sessionId === sessionId;
-  const action = actions.find((entry) => !answered.has(entry.actionId));
-  const current = useRef({ sessionId, actions });
-  current.current = { sessionId, actions };
+  const loaded = pending.owner === owner;
+  const action = actions.find((entry) => !answered.has(actionKey(entry)));
+  const current = useRef({ owner, actions });
+  current.current = { owner, actions };
 
   const respond = useCallback(
     async (actionId: string, optionId: string) => {
-      const target = actions.find((entry) => entry.actionId === actionId);
+      const target = actions.find(
+        (entry) =>
+          entry.actionId === actionId && !answered.has(actionKey(entry)),
+      );
       if (!target || !reader) return;
+      const key = actionKey(target);
       const isPending = () =>
-        current.current.sessionId === target.sessionId &&
-        current.current.actions.some((entry) => entry.actionId === actionId);
-      setAnswered((current) => new Set(current).add(actionId));
+        current.current.owner === owner &&
+        current.current.actions.some((entry) => actionKey(entry) === key);
+      setAnswered((current) => new Set(current).add(key));
       try {
         // One key per Action and option: a retried click replays the same
         // durable operation instead of answering twice.
@@ -216,7 +278,7 @@ export function useManagedActions(
           idempotencyKey: `${target.actionId}:${optionId}`,
         });
         if (!isPending()) return;
-        if (answerFailure.current === actionId) {
+        if (answerFailure.current === key) {
           setAnswerError(undefined);
           answerFailure.current = undefined;
         }
@@ -226,7 +288,8 @@ export function useManagedActions(
           typeof failure === 'object' &&
           failure !== null &&
           'code' in failure &&
-          (failure as { code?: unknown }).code === 'action_forbidden'
+          (failure as { code?: unknown }).code === 'action_forbidden' &&
+          ownerRef.current.credentials === credentials
         ) {
           // Responding requires the Session's owner or a Workspace operator,
           // which the service decides from the viewer's Workspace role row
@@ -243,8 +306,8 @@ export function useManagedActions(
         if (endedAction(failure)) {
           // No retry can succeed, so keep the card hidden and read the list
           // again instead of offering an answer the service will refuse.
-          endedAnswers.current.add(actionId);
-          if (answerFailure.current === actionId) {
+          endedAnswers.current.add(key);
+          if (answerFailure.current === key) {
             answerFailure.current = undefined;
             setAnswerError(undefined);
           }
@@ -253,15 +316,15 @@ export function useManagedActions(
         }
         setAnswered((current) => {
           const next = new Set(current);
-          next.delete(actionId);
+          next.delete(key);
           return next;
         });
         setAnswerError(failure);
-        answerFailure.current = actionId;
+        answerFailure.current = key;
         throw failure;
       }
     },
-    [actions, reader, clientId],
+    [actions, reader, clientId, owner, credentials, answered],
   );
 
   const retry = useCallback(() => {
@@ -277,13 +340,17 @@ export function useManagedActions(
   }, []);
 
   return {
+    actions,
     action,
     loadError,
     loaded,
     answerError:
-      answerFailure.current === action?.actionId ? answerError : undefined,
-    respondForbidden:
-      sessionId !== undefined && forbiddenSessions.has(sessionId),
+      action && answerFailure.current === actionKey(action)
+        ? answerError
+        : undefined,
+    respondForbidden: includeChildren
+      ? action !== undefined && forbiddenSessions.has(action.sessionId)
+      : sessionId !== undefined && forbiddenSessions.has(sessionId),
     respond,
     retry,
   };

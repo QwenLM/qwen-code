@@ -2,6 +2,7 @@ self-hosted-runner:
   labels:
     - 'ecs-qwen'
     - 'ecs-qwen-hk4-host'
+    - 'ecs-qwen-release-host'
     - 'ecs-win'
     - 'ecs-update-hk-1'
     - 'ecs-update-hk-2'
@@ -10,3 +11,18 @@ self-hosted-runner:
     - 'ecs-update-hk-5'
 
 config-variables: null
+
+paths:
+  .github/workflows/main-ci-failure-issue.yml:
+    ignore:
+      # GitHub supports queue: max; actionlint 1.7.12 does not recognize it yet.
+      # https://github.blog/changelog/2026-05-07-github-actions-concurrency-groups-now-allow-larger-queues/
+      - 'unexpected key "queue" for "concurrency" section'
+  # The release-runner preflight must wipe the workspace *before* actions/checkout,
+  # so it cannot use a './' local action (those resolve against GITHUB_WORKSPACE and
+  # need a prior checkout). GitHub's '$/' self-repository reference resolves at the
+  # running commit with no checkout; actionlint 1.7.12 does not recognize the form.
+  # https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/find-and-customize-actions#adding-an-action-from-the-same-repository
+  .github/workflows/**:
+    ignore:
+      - 'specifying action "\$/\.github/actions/prepare-release-runner" in invalid format because ref is missing'

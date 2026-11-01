@@ -20,6 +20,10 @@ export function verifyRuntimeIntegrity(runtimeRoot) {
     'node/LICENSE',
     'lib/cli-entry.js',
     'lib/web-shell/index.html',
+    'lib/generated-ui/main.js',
+    'lib/generated-ui/app.html',
+    'lib/generated-ui/skills/generated-ui/SKILL.md',
+    'lib/generated-ui/THIRD_PARTY_NOTICES.txt',
   ];
   for (const relative of required) {
     const file = path.join(runtimeRoot, relative);
@@ -45,6 +49,11 @@ export function verifyRuntimeIntegrity(runtimeRoot) {
     fs.readFileSync(path.join(runtimeRoot, 'checksums.json'), 'utf8'),
   );
   const mismatched = [];
+  for (const relative of required) {
+    if (relative !== 'checksums.json' && !checksums[relative]) {
+      throw new Error(`Bundled runtime checksum is missing: ${relative}`);
+    }
+  }
   for (const [relative, expected] of Object.entries(checksums)) {
     const file = path.join(runtimeRoot, relative);
     if (!fs.statSync(file, { throwIfNoEntry: false })?.isFile()) {

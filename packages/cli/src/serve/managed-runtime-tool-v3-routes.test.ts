@@ -397,6 +397,13 @@ describe('Tool v3 local worker routes', () => {
       deliveryStatus: 'committed',
       historyRevision: receiptEvent!.sequence,
     };
+    expect(
+      (
+        await post('acknowledge', {
+          receipt: { ...receipt, manifest: null, historyRevision: null },
+        })
+      ).status,
+    ).toBe(409);
     expect((await post('acknowledge', { receipt })).status).toBe(200);
     const changedAck = await post('acknowledge', {
       receipt: { ...receipt, historyRevision: receipt.historyRevision + 1 },

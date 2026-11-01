@@ -56,6 +56,8 @@ describe('useManagedActions', () => {
       enabled: boolean | undefined;
       events: ManagedAgentSessionEvent[];
       sessionId?: string;
+      includeChildren?: boolean;
+      clientId?: string;
     },
   ) {
     let latest: ReturnType<typeof useManagedActions> | undefined;
@@ -64,9 +66,10 @@ describe('useManagedActions', () => {
       latest = useManagedActions(
         provider,
         current.sessionId ?? 'session-1',
-        'client-1',
+        current.clientId ?? 'client-1',
         current.enabled,
         current.events,
+        current.includeChildren,
       );
       return null;
     }
@@ -82,6 +85,68 @@ describe('useManagedActions', () => {
       },
     };
   }
+
+  it('polls aggregate approvals serially, keeps retrying, and answers the child owner', async () => {
+    vi.useFakeTimers();
+    const child = { ...pending, sessionId: 'child-1' };
+    const listPending = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValue([child]);
+    const respond = vi.fn().mockResolvedValue(undefined);
+    const provider = {
+      actions: { listPending, respond },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, {
+      enabled: true,
+      events: [],
+      includeChildren: true,
+    });
+    for (const delay of [0, 2_000, 5_000, 10_000, 10_000]) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(delay);
+      });
+    }
+    expect(hook.latest?.action).toEqual(child);
+    expect(listPending).toHaveBeenLastCalledWith(
+      'session-1',
+      expect.objectContaining({ includeChildren: true }),
+    );
+    await act(async () => {
+      await hook.latest!.respond(child.actionId, 'allow');
+    });
+    expect(respond).toHaveBeenCalledWith(child, 'allow', expect.anything());
+    expect(hook.latest?.answerError).toBeUndefined();
+  });
+
+  it('drops an aggregate response after changing credentials even if the provider ignores abort', async () => {
+    let resolve!: (actions: ManagedAgentPendingAction[]) => void;
+    const listPending = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<ManagedAgentPendingAction[]>((done) => {
+            resolve = done;
+          }),
+      )
+      .mockResolvedValue([]);
+    const provider = {
+      actions: { listPending, respond: vi.fn() },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, {
+      enabled: true,
+      events: [],
+      includeChildren: true,
+    });
+    hook.rerender({ clientId: 'client-2' });
+    await act(async () => {
+      resolve([pending]);
+    });
+    expect(hook.latest?.action).toBeUndefined();
+  });
 
   it('reads nothing when the Session cannot serve Actions', () => {
     const listPending = vi.fn();
@@ -674,6 +739,44 @@ describe('useManagedActions', () => {
     expect(hook.latest?.answerError).toBeUndefined();
     await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
     expect(hook.latest?.action).toBeUndefined();
+  });
+
+  it('keeps the reason on screen when the answered delivery outlived the Action', async () => {
+    // The terminal a click returns once an answered delivery outlived its
+    // Action before the decision projected. The service records it only for
+    // an Action that is past its deadline and still requested, and its list
+    // keeps returning such an Action, so the fixture is what the service
+    // really sends. Hiding the card would bring it back on the next read
+    // without the reason; the answer rejects and the reason stays instead
+    // (review round 1, R1-2 and R1-9).
+    const expired = { ...pending, expiresAt: Date.now() - 1_000 };
+    const ended = Object.assign(new Error('Action decision expired'), {
+      code: 'action_response_decision_expired',
+    });
+    const listPending = vi.fn().mockResolvedValue([expired]);
+    const respond = vi.fn().mockRejectedValue(ended);
+    const provider = {
+      actions: { listPending, respond },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(expired));
+
+    await act(async () => {
+      await expect(
+        hook.latest!.respond('tool_approval_1', 'allow'),
+      ).rejects.toBe(ended);
+    });
+    expect(hook.latest?.action).toEqual(expired);
+    expect(hook.latest?.answerError).toBe(ended);
+
+    // A later read still lists the Action, and the reason survives it.
+    const reads = listPending.mock.calls.length;
+    hook.rerender({ events: [update(7)] });
+    await vi.waitFor(() =>
+      expect(listPending.mock.calls.length).toBeGreaterThan(reads),
+    );
+    expect(hook.latest?.action).toEqual(expired);
+    expect(hook.latest?.answerError).toBe(ended);
   });
 
   it('drops an approval another client already answered', async () => {

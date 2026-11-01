@@ -252,6 +252,7 @@ export const QueryOptionsSchema = z
       )
       .optional(),
     effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
+    workflowMode: z.boolean().optional(),
     includePartialMessages: z.boolean().optional(),
     continue: z.boolean().optional(),
     resume: z.string().optional(),

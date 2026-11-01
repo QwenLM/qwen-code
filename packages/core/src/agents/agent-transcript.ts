@@ -138,6 +138,8 @@ export interface AgentMeta {
    * are never exposed as reusable background agents.
    */
   isBackgrounded?: boolean;
+  /** Workflow children have no background registry entry to attest liveness. */
+  workflowOwner?: { pid: number; hostname: string };
   /** Container launches use this legacy field so older readers refuse resume. */
   isolation?: 'worktree' | 'container';
   executionBackend?: 'container';
@@ -146,6 +148,9 @@ export interface AgentMeta {
   lastUpdatedAt?: string;
   /** Resolved approval mode used when the agent was launched. */
   resolvedApprovalMode?: string;
+  /** Set at launch for a run that is never continued: a restart restores
+   * it as a task that cannot be resumed, for this reason. */
+  resumeBlockedReason?: string;
   /**
    * Immutable launch-time execution policy for a restricted fork.
    * Legacy absence allows every tool except the mandatory interaction-tool

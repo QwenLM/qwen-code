@@ -19,7 +19,7 @@ import {
 
 // The managed-tool-result/1 contract (O1a of #12723). The shared fixtures in
 // contracts/managed-tool-result-v1.fixtures.json pin it, and a conformance
-// test in packages/sdk-java/runtime-broker pins the same constants. The local
+// test in packages/managed-agent-server pins the same constants. The local
 // segment store consumes it in O1b; the worker follows in O1c.
 
 export const MANAGED_TOOL_RESULT_PROTOCOL = 'managed-tool-result/1';

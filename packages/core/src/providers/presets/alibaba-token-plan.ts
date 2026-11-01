@@ -62,31 +62,12 @@ const TOKEN_PLAN_MODELS: ModelSpec[] = [
     capabilities: {
       reasoning: {
         thinking: true,
-        efforts: ['low', 'medium', 'xhigh'],
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
         defaultEffort: 'xhigh',
-        canDisable: false,
         disableField: 'reasoning_effort',
       },
     },
     contextWindowSize: 1000000,
-    enableThinking: true,
-    thinkingMandatory: true,
-    modalities: { image: true, video: true },
-  },
-  {
-    id: 'qwen3.8-max-preview',
-    capabilities: {
-      reasoning: {
-        thinking: true,
-        efforts: ['low', 'medium', 'xhigh'],
-        defaultEffort: 'xhigh',
-        canDisable: false,
-        disableField: 'reasoning_effort',
-      },
-    },
-    contextWindowSize: 1000000,
-    enableThinking: true,
-    thinkingMandatory: true,
     modalities: { image: true, video: true },
   },
   {
@@ -126,15 +107,30 @@ const TOKEN_PLAN_MODELS: ModelSpec[] = [
     contextWindowSize: 1000000,
   },
   {
-    id: 'deepseek-v3.2',
+    id: 'deepseek-v4.1-flash',
     capabilities: {
       reasoning: {
         thinking: true,
-        toggleOnly: true,
+        efforts: ['low', 'high', 'max'],
+        defaultEffort: 'high',
         disableField: 'enable_thinking',
       },
     },
-    contextWindowSize: 131072,
+    contextWindowSize: 1000000,
+    modalities: { image: true },
+  },
+  {
+    id: 'deepseek-v4.1-flash-1017',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        efforts: ['low', 'high', 'max'],
+        defaultEffort: 'high',
+        disableField: 'enable_thinking',
+      },
+    },
+    contextWindowSize: 1000000,
+    modalities: { image: true },
   },
   {
     id: 'kimi-k2.7-code',
@@ -176,17 +172,77 @@ const TOKEN_PLAN_MODELS: ModelSpec[] = [
     enableThinking: true,
     modalities: { image: true, video: true },
   },
-  { id: 'glm-5.2', contextWindowSize: 1000000, enableThinking: true },
-  { id: 'glm-5.1', contextWindowSize: 202752, enableThinking: true },
-  { id: 'glm-5', contextWindowSize: 202752, enableThinking: true },
-  { id: 'MiniMax-M2.5', contextWindowSize: 196608 },
+  {
+    id: 'glm-5.3',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        canDisable: false,
+        disableField: 'enable_thinking',
+      },
+    },
+    contextWindowSize: 1000000,
+    enableThinking: true,
+    thinkingMandatory: true,
+  },
+  {
+    id: 'glm-5.2',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        disableField: 'enable_thinking',
+      },
+    },
+    contextWindowSize: 1000000,
+    enableThinking: true,
+  },
+  {
+    id: 'glm-5.1',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        disableField: 'enable_thinking',
+      },
+    },
+    contextWindowSize: 202752,
+    enableThinking: true,
+  },
+  {
+    id: 'glm-5',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        disableField: 'enable_thinking',
+      },
+    },
+    contextWindowSize: 202752,
+    enableThinking: true,
+  },
+  {
+    id: 'MiniMax-M2.5',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        canDisable: false,
+        disableField: 'enable_thinking',
+      },
+    },
+    contextWindowSize: 196608,
+    enableThinking: true,
+    thinkingMandatory: true,
+  },
   {
     id: 'qwen3.8-flash',
     contextWindowSize: 1000000,
     capabilities: {
       reasoning: {
         thinking: true,
-        efforts: ['low', 'medium', 'xhigh'],
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
         defaultEffort: 'xhigh',
         disableField: 'reasoning_effort',
       },
@@ -215,7 +271,7 @@ export const tokenPlanProvider: ProviderConfig = {
   id: 'token-plan',
   label: 'Token Plan',
   description:
-    'For teams and companies · Usage-based billing with dedicated endpoint',
+    'Subscription with a monthly Credit quota · Dedicated endpoint (Personal and Team editions)',
   protocol: AuthType.USE_OPENAI,
   baseUrl: [
     {

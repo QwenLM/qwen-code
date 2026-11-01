@@ -25,6 +25,8 @@ export default defineConfig({
             // YAML-parse workflow suites still do.
             'scripts/tests/qwen-*-workflow.test.js',
             'scripts/tests/serve-ab-workflow.test.js',
+            // Drives a bash script that manages process groups.
+            'scripts/tests/rocketmq-lite-broker-script.test.js',
           ]
         : [...configDefaults.exclude],
     setupFiles: ['scripts/tests/test-setup.ts'],

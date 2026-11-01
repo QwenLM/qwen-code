@@ -8,7 +8,7 @@ import { ManagedSessionRecordError } from './managed-session-records.js';
 
 // H6b of #12827: the slot evaluator of a Schedule definition — the minute
 // instants in a window at which a five-field cron fires in an IANA zone.
-// The Java scanner (`CronSlots` in packages/sdk-java/managed-agent-server)
+// The Java scanner (`CronSlots` in packages/managed-agent-server)
 // is the production evaluator; this twin pins the semantics as a contract
 // through contracts/managed-automation-slots-v1.fixtures.json, which both
 // replay. See docs/design/2026-10-07-managed-automation-runtime.md,

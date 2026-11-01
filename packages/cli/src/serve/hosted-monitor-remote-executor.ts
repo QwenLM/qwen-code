@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { HostedShellPublisher } from './hosted-shell-publisher.js';
+import type { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 import type {
   MonitorWatchExecutor,
   MonitorWatchHandle,
@@ -15,13 +17,23 @@ import type {
 // and its end arrive backwards through the session publisher's monitor
 // fan-out; this bridge binds those to the loop's executor shape. The watch
 // runs nowhere in this process, so the handle carries no supervised unit
-// and terminate is answered by the maintenance route (consumers of the
-// monitor-stop kind), not re-implemented here: it stops nothing itself and
-// reports no proof, which parks the record instead of settling a stop the
-// physical side never confirmed (#13856).
+// and its terminate asks the worker through the Runtime's `monitor-stop`:
+// only the worker's exit evidence proves the stop, and anything else —
+// an unproven answer, a refusal, no answer — parks the record instead of
+// settling a stop the physical side never confirmed (#13896).
 
 export class HostedMonitorRemoteExecutor implements MonitorWatchExecutor {
-  constructor(private readonly publisher: HostedShellPublisher) {}
+  constructor(
+    private readonly publisher: HostedShellPublisher,
+    private readonly watch: {
+      readonly broker: Pick<HostedWorkspaceBroker, 'monitorControl'>;
+      readonly sessionKey: ManagedSessionKey;
+      /** The execution that started the watch. */
+      readonly executionCallId: string;
+      /** The Runtime call the worker derived the watch's unit from. */
+      readonly runtimeCallId: string;
+    },
+  ) {}
 
   start(
     command: Readonly<Record<string, unknown>>,
@@ -35,7 +47,21 @@ export class HostedMonitorRemoteExecutor implements MonitorWatchExecutor {
         unitName: identity.unitName,
         started: true,
       },
-      terminate: () => Promise.resolve(false),
+      terminate: () => this.stop(),
     });
+  }
+
+  private async stop(): Promise<boolean> {
+    try {
+      const view = await this.watch.broker.monitorControl({
+        kind: 'monitor-stop',
+        sessionKey: this.watch.sessionKey,
+        operationId: this.watch.executionCallId,
+        targetOperationId: this.watch.runtimeCallId,
+      });
+      return view.state === 'exited';
+    } catch {
+      return false;
+    }
   }
 }

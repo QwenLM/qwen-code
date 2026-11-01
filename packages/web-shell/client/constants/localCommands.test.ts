@@ -124,6 +124,10 @@ describe('skillDescriptionKey', () => {
     expect(zh(skillDescriptionKey('goal-draft')!)).toBe(
       '将模糊意图改写为可验证的 /goal 目标',
     );
+    expect(skillDescriptionKey('autofix-pr')).toBe('skilldesc.autofixPr');
+    expect(zh(skillDescriptionKey('autofix-pr')!)).toBe(
+      '盯住一个 PR，修复其 CI、评审意见和冲突',
+    );
   });
 
   it('returns undefined for an unknown (user) skill', () => {

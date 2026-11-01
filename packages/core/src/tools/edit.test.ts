@@ -31,6 +31,15 @@ import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.j
 import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
+import {
+  canonicalWorktreePath,
+  grantUnattendedFixes,
+  openBackgroundFix,
+  recordConfirmedWatch,
+  recordWatchTask,
+  resetUnattendedFixGrantsForTests,
+} from './autofix-pr-grants.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 
 const readText = (filePath: string) => fs.readFileSync(filePath, 'utf8');
 
@@ -110,6 +119,7 @@ describe('EditTool', () => {
       getFileReadCache: () => fileReadCache,
       getFileReadCacheDisabled: vi.fn().mockReturnValue(false),
       getFileHistoryService: () => mockFileHistoryService,
+      isRecordArtifactEnabled: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     // Default to not skipping confirmation
@@ -149,6 +159,256 @@ describe('EditTool', () => {
     (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
       ApprovalMode.AUTO_EDIT,
     );
+
+  describe('fuzzy trailing-newline boundaries', () => {
+    it.each(
+      [
+        {
+          name: 'primary fuzzy match beside an indented line',
+          content: ' const x = 1 \nfoo\n\nconst x = 1 \n\nafter\n',
+          oldString: 'const x = 1\n',
+          newString: 'replacement\n',
+          expected: ' const x = 1 \nfoo\n\nreplacement\n\nafter\n',
+        },
+        {
+          name: 'fallback fuzzy match beside an indented line',
+          content: ' const x = 1 \nfoo\nconst x = 1 \nbar\n',
+          oldString: 'const x = 1\n',
+          newString: 'replacement\n',
+          expected: ' const x = 1 \nfoo\nreplacement\nbar\n',
+        },
+        {
+          name: 'fuzzy EOF match beside an indented line',
+          content: ' const x = 1 \nfoo\nconst x = 1 ',
+          oldString: 'const x = 1\n',
+          newString: 'replacement\n',
+          expected: ' const x = 1 \nfoo\nreplacement',
+        },
+        {
+          name: 'fuzzy EOF deletion beside an indented newline suffix',
+          content: ' a \nx\na ',
+          oldString: 'a\n',
+          newString: '',
+          expected: ' a \nx\n',
+        },
+        {
+          name: 'fuzzy match beside a longer line prefix',
+          content: 'const x = 1 extra\nconst x = 1 \n',
+          oldString: 'const x = 1  ',
+          newString: 'replacement',
+          expected: 'const x = 1 extra\nreplacement\n',
+        },
+        {
+          name: 'multiline fuzzy match beside an indented block',
+          content:
+            ' const x = 1 \nnext \nother\nconst x = 1 \nnext \n\nafter\n',
+          oldString: 'const x = 1\nnext\n',
+          newString: 'replacement\n',
+          expected: ' const x = 1 \nnext \nother\nreplacement\n\nafter\n',
+        },
+        {
+          name: 'multiline fuzzy match beside a longer final line',
+          content: 'first \nsecond extra\nx\nfirst \nsecond \ny\n',
+          oldString: 'first\nsecond\n',
+          newString: 'replacement\n',
+          expected: 'first \nsecond extra\nx\nreplacement\ny\n',
+        },
+        {
+          name: 'overlapping blank-line fuzzy match',
+          content: 'x\n\n\n',
+          oldString: '\n \n',
+          newString: 'replacement\n',
+          expected: 'x\nreplacement\n',
+        },
+        {
+          name: 'fuzzy replacement with literal dollar sequences',
+          content: ' const x = 1 \nfoo\n\nconst x = 1 \n\nafter\n',
+          oldString: 'const x = 1\n',
+          newString: "$& $` $' $$\n",
+          expected: " const x = 1 \nfoo\n\n$& $` $' $$\n\nafter\n",
+        },
+      ].flatMap((testCase) =>
+        [false, true].map((replaceAll) => ({ ...testCase, replaceAll })),
+      ),
+    )(
+      'preserves unmatched lines during $name (all: $replaceAll)',
+      async (testCase) => {
+        const filePath = path.join(rootDir, 'scoped-fuzzy-match.txt');
+        seedFile(filePath, testCase.content);
+
+        const result = await run(
+          edit(filePath, testCase.oldString, testCase.newString, {
+            replace_all: testCase.replaceAll,
+          }),
+        );
+
+        expect(result.error).toBeUndefined();
+        expect(readText(filePath)).toBe(testCase.expected);
+        expect(mockFileHistoryService.trackEdit).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each([false, true])(
+      'counts only repeated whole fuzzy lines (all: %s)',
+      async (replaceAll) => {
+        const content = ' a \nfoo\na \n\na \nb\n';
+        const filePath = path.join(rootDir, 'scoped-repeated-lines.txt');
+        seedFile(filePath, content);
+        const write = vi.spyOn(fsService, 'writeTextFile');
+
+        const result = await run(
+          edit(filePath, 'a\n', 'replacement\n', { replace_all: replaceAll }),
+        );
+
+        if (replaceAll) {
+          expect(result.error).toBeUndefined();
+          expect(readText(filePath)).toBe(
+            ' a \nfoo\nreplacement\n\nreplacement\nb\n',
+          );
+          expect(write).toHaveBeenCalledTimes(1);
+        } else {
+          expect(result.error?.type).toBe(
+            ToolErrorType.EDIT_EXPECTED_OCCURRENCE_MISMATCH,
+          );
+          expect(result.llmContent).toContain('Found 2 occurrences');
+          expect(readText(filePath)).toBe(content);
+          expect(write).not.toHaveBeenCalled();
+          expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+        }
+      },
+    );
+
+    it.each([
+      ['literal', 'prefix old\nold\n', 'old'],
+      ['character-normalized', 'prefix “old”\n“old”\n', '"old"'],
+    ])(
+      'retains %s mid-line replacements',
+      async (_mode, content, oldString) => {
+        const filePath = path.join(rootDir, 'mid-line.txt');
+        seedFile(filePath, content);
+
+        const result = await run(
+          edit(filePath, oldString, 'new', { replace_all: true }),
+        );
+
+        expect(result.error).toBeUndefined();
+        expect(readText(filePath)).toBe('prefix new\nnew\n');
+      },
+    );
+
+    it.each([
+      ['fuzzy', 'a \n\na \nb\n'],
+      ['literal', 'a\n\na\nb\n'],
+    ])('rejects repeated %s lines without writing', async (_mode, content) => {
+      const filePath = path.join(rootDir, 'repeated-lines.txt');
+      seedFile(filePath, content);
+      const write = vi.spyOn(fsService, 'writeTextFile');
+
+      const result = await run(edit(filePath, 'a\n', 'replacement\n'));
+
+      expect(result.error?.type).toBe(
+        ToolErrorType.EDIT_EXPECTED_OCCURRENCE_MISMATCH,
+      );
+      expect(result.llmContent).toContain('Found 2 occurrences');
+      expect(readText(filePath)).toBe(content);
+      expect(write).not.toHaveBeenCalled();
+      expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['fuzzy', 'a \n\na \nb\n'],
+      ['literal', 'a\n\na\nb\n'],
+    ])(
+      'replaces both repeated %s lines when explicitly enabled',
+      async (_mode, content) => {
+        const filePath = path.join(rootDir, 'repeated-lines.txt');
+        seedFile(filePath, content);
+
+        const result = await run(
+          edit(filePath, 'a\n', 'replacement\n', { replace_all: true }),
+        );
+
+        expect(result.error).toBeUndefined();
+        expect(readText(filePath)).toBe('replacement\n\nreplacement\nb\n');
+      },
+    );
+
+    it.each([
+      {
+        name: 'deletion before a blank line',
+        content: 'before\nremove-me \n\nafter\n',
+        oldString: 'remove-me\n',
+        newString: '',
+        expected: 'before\n\nafter\n',
+      },
+      {
+        name: 'replacement before a blank line',
+        content: 'before\nremove-me \n\nafter\n',
+        oldString: 'remove-me\n',
+        newString: 'replacement\n',
+        expected: 'before\nreplacement\n\nafter\n',
+      },
+      {
+        name: 'multiline string replacement',
+        content: 'before\nconst value = `first \nsecond`;\n\nafter\n',
+        oldString: 'const value = `first\nsecond`;\n',
+        newString: 'const value = `replacement`;\n',
+        expected: 'before\nconst value = `replacement`;\n\nafter\n',
+      },
+      {
+        name: 'deletion with multiple requested newlines',
+        content: 'before\nremove-me \n\n\nafter\n',
+        oldString: 'remove-me\n\n',
+        newString: '',
+        expected: 'before\n\nafter\n',
+      },
+      {
+        name: 'deletion before a whitespace-only line',
+        content: 'before\nremove-me \n \nafter\n',
+        oldString: 'remove-me\n',
+        newString: '',
+        expected: 'before\n \nafter\n',
+      },
+      {
+        name: 'deletion at EOF with a newline',
+        content: 'before\nremove-me \n',
+        oldString: 'remove-me\n',
+        newString: '',
+        expected: 'before\n',
+      },
+      {
+        name: 'replacement at EOF without a newline',
+        content: 'before\nremove-me ',
+        oldString: 'remove-me\n',
+        newString: 'replacement\n',
+        expected: 'before\nreplacement',
+      },
+      {
+        name: 'literal deletion before a blank line',
+        content: 'before\nremove-me\n\nafter\n',
+        oldString: 'remove-me\n',
+        newString: '',
+        expected: 'before\n\nafter\n',
+      },
+      {
+        name: 'implicit whole-line deletion without a requested newline',
+        content: 'before\nremove-me \n\nafter\n',
+        oldString: 'remove-me  ',
+        newString: '',
+        expected: 'before\n\nafter\n',
+      },
+    ])('preserves surrounding content during $name', async (testCase) => {
+      const filePath = path.join(rootDir, 'newline-boundary.txt');
+      seedFile(filePath, testCase.content);
+
+      const result = await run(
+        edit(filePath, testCase.oldString, testCase.newString),
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(readText(filePath)).toBe(testCase.expected);
+    });
+  });
 
   /** An invocation whose calculateEdit aborts `controller`, then throws `error`. */
   const abortingInvocation = (
@@ -287,6 +547,50 @@ describe('EditTool', () => {
           edit(teamFile(), '', 'Use real DBs in integration tests.'),
         ),
       ).toBeNull();
+    });
+
+    it("asks the user for a write into a background fix's worktree, but for its own agent", async () => {
+      const worktree = fs.mkdtempSync(path.join(os.tmpdir(), 'autofix-pr-wt-'));
+      try {
+        await openFixAt(worktree, 'fix-agent');
+        const file = path.join(worktree, 'src', 'a.ts');
+        expect(
+          tool
+            .build({ file_path: file, old_string: '', new_string: 'x' })
+            .requiresUserInteraction?.(),
+        ).toBe(true);
+        expect(
+          await runWithAgentContext('fix-agent', async () =>
+            tool
+              .build({ file_path: file, old_string: '', new_string: 'x' })
+              .requiresUserInteraction?.(),
+          ),
+        ).toBe(false);
+        // An agent the fix agent started is its own; another agent is not.
+        expect(
+          await runWithAgentContext('fix-agent-child', async () =>
+            tool
+              .build({ file_path: file, old_string: '', new_string: 'x' })
+              .requiresUserInteraction?.(),
+          ),
+        ).toBe(false);
+        expect(
+          await runWithAgentContext('session-agent', async () =>
+            tool
+              .build({ file_path: file, old_string: '', new_string: 'x' })
+              .requiresUserInteraction?.(),
+          ),
+        ).toBe(true);
+        const outside = path.join(path.dirname(worktree), 'elsewhere.ts');
+        expect(
+          tool
+            .build({ file_path: outside, old_string: '', new_string: 'x' })
+            .requiresUserInteraction?.(),
+        ).toBe(false);
+      } finally {
+        resetUnattendedFixGrantsForTests();
+        fs.rmSync(worktree, { recursive: true, force: true });
+      }
     });
 
     it('proposes (asks) team writes — never auto-allowed like private memory', async () => {
@@ -519,6 +823,117 @@ describe('EditTool', () => {
       expect(writeSpy).toHaveBeenCalledWith(
         expect.objectContaining({ toolWriteOrigin: 'edit' }),
       );
+    });
+
+    describe('session artifacts', () => {
+      beforeEach(() => {
+        (mockConfig.isRecordArtifactEnabled as Mock).mockReturnValue(true);
+      });
+
+      it('records an edited artifact-like file', async () => {
+        const csvPath = path.join(rootDir, 'orders.csv');
+        seedFile(csvPath, 'id,old\n1,a\n');
+
+        const result = await run(edit(csvPath, 'old', 'newer-col'));
+
+        expect(result.llmContent).toContain(
+          'automatically recorded as a workspace artifact with workspacePath "orders.csv"',
+        );
+        expect(result.llmContent).toMatch(
+          /recorded as a workspace artifact[^]*Showing lines/,
+        );
+        expect(result.artifacts).toEqual([
+          {
+            title: 'orders.csv',
+            kind: 'file',
+            storage: 'workspace',
+            workspacePath: 'orders.csv',
+            mimeType: 'text/csv',
+            sizeBytes: fs.statSync(csvPath).size,
+          },
+        ]);
+      });
+
+      it('records an artifact-like file created by edit', async () => {
+        const notePath = path.join(rootDir, 'notes', 'summary.md');
+        autoEditOnce();
+
+        const result = await run(edit(notePath, '', '# Summary\n'));
+
+        expect(result.llmContent).toMatch(/Created new file/);
+        expect(result.artifacts).toEqual([
+          expect.objectContaining({
+            title: 'summary.md',
+            kind: 'file',
+            workspacePath: 'notes/summary.md',
+          }),
+        ]);
+        expect(result.artifacts?.[0]).not.toHaveProperty('updateOnly');
+      });
+
+      it('only refreshes an existing artifact when record_as_artifact is false', async () => {
+        const csvPath = path.join(rootDir, 'orders.csv');
+        seedFile(csvPath, 'id,old\n1,a\n');
+
+        const result = await run(
+          edit(csvPath, 'old', 'new', { record_as_artifact: false }),
+        );
+
+        expect(result.llmContent).not.toContain('automatically recorded');
+        expect(result.artifacts).toEqual([
+          expect.objectContaining({
+            workspacePath: 'orders.csv',
+            updateOnly: true,
+          }),
+        ]);
+      });
+
+      it('only refreshes an existing artifact for other files', async () => {
+        const sourcePath = path.join(rootDir, 'src', 'index.ts');
+        fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+        seedFile(sourcePath, 'export const old = 1;\n');
+
+        const result = await run(edit(sourcePath));
+
+        expect(result.llmContent).not.toContain('automatically recorded');
+        expect(result.artifacts).toEqual([
+          expect.objectContaining({
+            workspacePath: 'src/index.ts',
+            updateOnly: true,
+          }),
+        ]);
+      });
+
+      it('does not record files outside the workspace', async () => {
+        const outsidePath = path.join(tempDir, 'outside.csv');
+        seedFile(outsidePath, 'old\n');
+
+        const result = await run(edit(outsidePath));
+
+        expect(readText(outsidePath)).toBe('new\n');
+        expect(result.artifacts).toBeUndefined();
+      });
+
+      it('does not record anything when the edit fails', async () => {
+        const csvPath = path.join(rootDir, 'orders.csv');
+        seedFile(csvPath, 'id,value\n');
+
+        const result = await run(edit(csvPath, 'missing', 'replacement'));
+
+        expect(result.error).toBeDefined();
+        expect(result.artifacts).toBeUndefined();
+      });
+
+      it('does not record anything when artifact recording is disabled', async () => {
+        (mockConfig.isRecordArtifactEnabled as Mock).mockReturnValue(false);
+        const csvPath = path.join(rootDir, 'orders.csv');
+        seedFile(csvPath, 'id,old\n');
+
+        const result = await run(edit(csvPath));
+
+        expect(result.llmContent).not.toContain('automatically recorded');
+        expect(result.artifacts).toBeUndefined();
+      });
     });
 
     // trackEdit is best-effort: a FileHistoryService failure (disk full,
@@ -1267,3 +1682,35 @@ describe('EditTool', () => {
     });
   });
 });
+
+async function openFixAt(worktree: string, agentId: string) {
+  grantUnattendedFixes('s-write', {
+    pr: 3,
+    worktree: canonicalWorktreePath(worktree),
+    check: async () => true,
+    open: async () => ({ task: 't' }),
+    close: async () => {},
+  });
+  recordConfirmedWatch('s-write', {
+    pr: 3,
+    repo: 'o/r',
+    host: null,
+    targetDir: path.dirname(worktree),
+    preparedAt: null,
+    worktree: canonicalWorktreePath(worktree),
+    authorCanPush: true,
+  });
+  recordWatchTask('s-write', 3, { task: 't', reply: true, instructions: '' });
+  const fix = await openBackgroundFix(
+    's-write',
+    worktree,
+    new AbortController().signal,
+  );
+  // The fix agent started `${agentId}-child`.
+  fix.attach(
+    agentId,
+    () => {},
+    (id) => id === `${agentId}-child`,
+  );
+  return fix;
+}

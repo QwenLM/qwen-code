@@ -2536,6 +2536,278 @@ describe('<ModelDialog />', () => {
     );
     expect(mockedSelect.mock.calls[1][0].initialIndex).toBe(expectedCoderIndex);
   });
+
+  // These five mirror the policy already pinned one layer down in
+  // ui/opentui/dialog-data.test.ts. Workspace settings land in the committed
+  // <project>/.qwen/settings.json, so `shareableAuxSelector` at the fast and
+  // compaction call sites is what decides whether a credential endpoint
+  // reaches disk. Nested here rather than at module scope so this suite's
+  // clearAllMocks/cleanup hooks apply — `mockedSelect.mock.calls[0]` is only
+  // this test's own render when they do.
+  describe('workspace-scope persistence', () => {
+    it('fast mode keeps a credential endpoint out of workspace-scope settings', async () => {
+      const setFastModel = vi.fn();
+      const { mockSettings, recordSlashCommand } = renderComponent(
+        { isFastModelMode: true, persistScope: 'workspace' },
+        {
+          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+          getModel: vi.fn(() => 'qwen3.7-max'),
+          getAllConfiguredModels: vi.fn(() => [
+            {
+              id: 'shared-fast',
+              label: 'shared-fast (corp proxy)',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://user:tok3n@proxy.corp.example/v1',
+            },
+            {
+              id: 'shared-fast',
+              label: 'shared-fast (free quota)',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://b.example/v1',
+            },
+          ]),
+          getContentGeneratorConfig: vi.fn(() => ({
+            authType: AuthType.USE_OPENAI,
+            model: 'qwen3.7-max',
+          })),
+          setFastModel,
+        } as unknown as Partial<Config>,
+        { isTrusted: true },
+      );
+
+      const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+      await childOnSelect(
+        `${AuthType.USE_OPENAI}::shared-fast\0https://user:tok3n@proxy.corp.example/v1`,
+      );
+
+      // The shareable .qwen/settings.json only gets the bare selector.
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'fastModel',
+        'openai:shared-fast',
+      );
+      // This session's in-memory pin still binds the row the user picked.
+      expect(setFastModel).toHaveBeenCalledWith(
+        'openai:shared-fast\0https://user:tok3n@proxy.corp.example/v1',
+      );
+      expect(recordSlashCommand).toHaveBeenCalledWith({
+        phase: 'result',
+        rawCommand: '/model',
+        outputHistoryItems: [
+          {
+            type: 'success',
+            text:
+              'Fast Model: openai:shared-fast (this project)' +
+              ' (endpoint not saved: project settings are shared)',
+          },
+        ],
+      });
+    });
+
+    it('fast mode keeps a public endpoint disambiguator in workspace-scope settings', async () => {
+      const setFastModel = vi.fn();
+      const { mockSettings, recordSlashCommand } = renderComponent(
+        { isFastModelMode: true, persistScope: 'workspace' },
+        {
+          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+          getModel: vi.fn(() => 'qwen3.7-max'),
+          getAllConfiguredModels: vi.fn(() => [
+            {
+              id: 'shared-fast',
+              label: 'shared-fast (a)',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://a.example/v1',
+            },
+            {
+              id: 'shared-fast',
+              label: 'shared-fast (b)',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://b.example/v1',
+            },
+          ]),
+          getContentGeneratorConfig: vi.fn(() => ({
+            authType: AuthType.USE_OPENAI,
+            model: 'qwen3.7-max',
+          })),
+          setFastModel,
+        } as unknown as Partial<Config>,
+        { isTrusted: true },
+      );
+
+      const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+      await childOnSelect(
+        `${AuthType.USE_OPENAI}::shared-fast\0https://b.example/v1`,
+      );
+
+      // A kept URL stays byte-identical, which Config.pinnedAuxEndpoint needs
+      // to resolve the pin by exact compare.
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'fastModel',
+        'openai:shared-fast\0https://b.example/v1',
+      );
+      expect(recordSlashCommand).toHaveBeenCalledWith({
+        phase: 'result',
+        rawCommand: '/model',
+        outputHistoryItems: [
+          {
+            type: 'success',
+            text: 'Fast Model: openai:shared-fast (this project)',
+          },
+        ],
+      });
+    });
+
+    it('fast mode keeps a query-secret endpoint out of workspace-scope settings', async () => {
+      const setFastModel = vi.fn();
+      const { mockSettings, recordSlashCommand } = renderComponent(
+        { isFastModelMode: true, persistScope: 'workspace' },
+        {
+          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+          getModel: vi.fn(() => 'qwen3.7-max'),
+          getAllConfiguredModels: vi.fn(() => [
+            {
+              id: 'shared-fast',
+              label: 'shared-fast (gateway)',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://gw.example/v1?key=sk-1',
+            },
+          ]),
+          getContentGeneratorConfig: vi.fn(() => ({
+            authType: AuthType.USE_OPENAI,
+            model: 'qwen3.7-max',
+          })),
+          setFastModel,
+        } as unknown as Partial<Config>,
+        { isTrusted: true },
+      );
+
+      const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+      await childOnSelect(
+        `${AuthType.USE_OPENAI}::shared-fast\0https://gw.example/v1?key=sk-1`,
+      );
+
+      // Fail closed: a userinfo-stripping predicate alone would call this URL
+      // clean and copy the query secret into the shared file.
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'fastModel',
+        'openai:shared-fast',
+      );
+      expect(recordSlashCommand).toHaveBeenCalledWith({
+        phase: 'result',
+        rawCommand: '/model',
+        outputHistoryItems: [
+          {
+            type: 'success',
+            text:
+              'Fast Model: openai:shared-fast (this project)' +
+              ' (endpoint not saved: project settings are shared)',
+          },
+        ],
+      });
+    });
+
+    it('fast mode keeps a credential endpoint byte-identical at user scope', async () => {
+      const setFastModel = vi.fn();
+      const { mockSettings, recordSlashCommand } = renderComponent(
+        { isFastModelMode: true, persistScope: 'user' },
+        {
+          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+          getModel: vi.fn(() => 'qwen3.7-max'),
+          getAllConfiguredModels: vi.fn(() => [
+            {
+              id: 'shared-fast',
+              label: 'shared-fast (corp proxy)',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://user:tok3n@proxy.corp.example/v1',
+            },
+          ]),
+          getContentGeneratorConfig: vi.fn(() => ({
+            authType: AuthType.USE_OPENAI,
+            model: 'qwen3.7-max',
+          })),
+          setFastModel,
+        } as unknown as Partial<Config>,
+        // User scope is never rewritten, so the trust fallback is not in play.
+        { isTrusted: false },
+      );
+
+      const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+      await childOnSelect(
+        `${AuthType.USE_OPENAI}::shared-fast\0https://user:tok3n@proxy.corp.example/v1`,
+      );
+
+      // The private user file keeps the suffix untouched.
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'fastModel',
+        'openai:shared-fast\0https://user:tok3n@proxy.corp.example/v1',
+      );
+      expect(setFastModel).toHaveBeenCalledWith(
+        'openai:shared-fast\0https://user:tok3n@proxy.corp.example/v1',
+      );
+      expect(recordSlashCommand).toHaveBeenCalledWith({
+        phase: 'result',
+        rawCommand: '/model',
+        outputHistoryItems: [
+          { type: 'success', text: 'Fast Model: openai:shared-fast (global)' },
+        ],
+      });
+    });
+
+    it('compaction mode keeps a credential endpoint out of workspace-scope settings', async () => {
+      const setCompactionModel = vi.fn();
+      const { mockSettings, recordSlashCommand } = renderComponent(
+        { isCompactionModelMode: true, persistScope: 'workspace' },
+        {
+          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+          getModel: vi.fn(() => 'gpt-4'),
+          getAllConfiguredModels: vi.fn(() => [
+            {
+              id: 'shared-fast',
+              label: 'shared-fast (corp proxy)',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://user:tok3n@proxy.corp.example/v1',
+            },
+          ]),
+          getContentGeneratorConfig: vi.fn(() => ({
+            authType: AuthType.USE_OPENAI,
+            model: 'gpt-4',
+          })),
+          isCurrentPrimaryModel: vi.fn(() => false),
+          setCompactionModel,
+        } as unknown as Partial<Config>,
+        { isTrusted: true },
+      );
+
+      const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+      await childOnSelect(
+        `${AuthType.USE_OPENAI}::shared-fast\0https://user:tok3n@proxy.corp.example/v1`,
+      );
+
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'compactionModel',
+        'openai:shared-fast',
+      );
+      expect(setCompactionModel).toHaveBeenCalledWith(
+        'openai:shared-fast\0https://user:tok3n@proxy.corp.example/v1',
+      );
+      expect(recordSlashCommand).toHaveBeenCalledWith({
+        phase: 'result',
+        rawCommand: '/model',
+        outputHistoryItems: [
+          {
+            type: 'success',
+            text:
+              'Compaction Model: openai:shared-fast (this project)' +
+              ' (endpoint not saved: project settings are shared)',
+          },
+        ],
+      });
+    });
+  });
 });
 
 describe('encodeAuxModelSelector', () => {

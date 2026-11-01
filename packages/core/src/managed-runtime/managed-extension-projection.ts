@@ -68,6 +68,11 @@ import {
   parseSessionMessage,
 } from './managed-session-message-record.js';
 import {
+  isSessionCommandStart,
+  isSessionCommandSuccessor,
+  parseSessionCommand,
+} from './managed-session-command-record.js';
+import {
   isTeamMessageStart,
   isTeamMessageSuccessor,
   isTeamPlanStart,
@@ -81,11 +86,21 @@ import {
   parseTeamState,
   parseTeamTask,
 } from './managed-team-record.js';
+import {
+  parseHistoryMaintenance,
+  isHistoryMaintenanceStart,
+  isHistoryMaintenanceSuccessor,
+} from './managed-history-maintenance-record.js';
+import {
+  parseManagedToolStage,
+  isManagedToolStageStart,
+  isManagedToolStageSuccessor,
+} from './managed-tool-stage-record.js';
 
 // H0c of #12827: how the Session authority keys, chains and projects the
 // Stage H records of managed-extension-record/1. The shared fixtures in
 // contracts/managed-extension-projection-v1.fixtures.json pin it, and
-// ManagedExtensionProjection in packages/sdk-java/managed-agent-server
+// ManagedExtensionProjection in packages/managed-agent-server
 // replays the same cases.
 
 export const MANAGED_TASK_KINDS = [
@@ -94,6 +109,7 @@ export const MANAGED_TASK_KINDS = [
   'background_shell',
   'monitor',
   'automation_run',
+  'channel_delivery',
 ] as const;
 export const MANAGED_TASK_STATES = [
   'pending',
@@ -167,6 +183,24 @@ function childRunTaskKind(record: AnyChildRun): ManagedTaskKind {
 export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
   Partial<Record<ManagedSessionDomain, ManagedExtensionRecordBody>>
 > = Object.freeze({
+  tool_stage: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseManagedToolStage(value);
+      return { record, recordId: record.toolStageId, run: record.run };
+    },
+    isStart: isManagedToolStageStart,
+    isSuccessor: isManagedToolStageSuccessor,
+  }),
+  history_maintenance: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseHistoryMaintenance(value);
+      return { record, recordId: record.operationId, run: record.run };
+    },
+    isStart: isHistoryMaintenanceStart,
+    isSuccessor: isHistoryMaintenanceSuccessor,
+  }),
   mcp_configuration: Object.freeze({
     taskKindOf: () => null,
     parse: (value: unknown) => {
@@ -235,7 +269,7 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isSuccessor: isChannelRouteSuccessor,
   }),
   channel_delivery: Object.freeze({
-    taskKindOf: () => null,
+    taskKindOf: () => 'channel_delivery',
     parse: (value: unknown) => {
       const record = parseChannelDelivery(value);
       return { record, recordId: record.deliveryId, run: record.run };
@@ -278,6 +312,15 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     },
     isStart: isSessionMessageStart,
     isSuccessor: isSessionMessageSuccessor,
+  }),
+  session_command: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseSessionCommand(value);
+      return { record, recordId: record.commandId, run: record.run };
+    },
+    isStart: isSessionCommandStart,
+    isSuccessor: isSessionCommandSuccessor,
   }),
   team_state: Object.freeze({
     taskKindOf: () => null,

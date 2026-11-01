@@ -37,6 +37,7 @@ import {
   SessionConflictError,
   SessionNotArchivedError,
   SessionNotFoundError,
+  SessionBusyError,
 } from '../acp-session-bridge.js';
 import {
   archiveDaemonSessions,
@@ -495,6 +496,60 @@ describe('archiveDaemonSessions', () => {
     expect(
       fs.existsSync(sessionPath(workspaceDir, sessionId, 'archived')),
     ).toBe(true);
+  });
+
+  it('keeps a busy session active when idle is required', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440102';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const service = new SessionService(workspaceDir);
+    const closeSession = vi
+      .fn()
+      .mockRejectedValue(new SessionBusyError(sessionId));
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: { closeSession },
+      coordinator: new SessionArchiveCoordinator(),
+      requireIdle: true,
+    });
+
+    expect(result.archived).toEqual([]);
+    expect(result.errors).toEqual([
+      { sessionId, error: expect.any(SessionBusyError) },
+    ]);
+    expect(closeSession).toHaveBeenCalledWith(sessionId, undefined, {
+      requireAgentClose: true,
+      requireIdle: true,
+    });
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      true,
+    );
+  });
+
+  it('keeps a closing session active instead of bypassing the idle guard', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440103';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const service = new SessionService(workspaceDir);
+    const closingError = new SessionNotFoundError(
+      sessionId,
+      'The session is already closing',
+      'session_closing',
+    );
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: { closeSession: vi.fn().mockRejectedValue(closingError) },
+      coordinator: new SessionArchiveCoordinator(),
+      requireIdle: true,
+    });
+
+    expect(result.archived).toEqual([]);
+    expect(result.errors).toEqual([{ sessionId, error: closingError }]);
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      true,
+    );
   });
 
   it('archives a sealed Managed session through the sealed-writer fallback', async () => {

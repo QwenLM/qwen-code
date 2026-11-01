@@ -161,7 +161,8 @@ export function csiFileHistoryEnvelope(
   installedContext: Record<string, unknown>,
   operation: CsiFileHistoryOperation,
 ) {
-  if (boot.version !== 5) throw new Error('Expected boot5 fixture.');
+  if (boot.version !== 5 && boot.version !== 6)
+    throw new Error('Expected boot5 or boot6 fixture.');
   const result = {
     protocolVersion: 2,
     managedCsi: MANAGED_CSI_FILE_PROTOCOL,

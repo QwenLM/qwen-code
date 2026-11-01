@@ -292,6 +292,7 @@ function toolBlock(
     parentToolCallId: overrides.parentToolCallId,
     subagentType: overrides.subagentType,
     subagentSessionReady: overrides.subagentSessionReady,
+    agent: overrides.agent,
     serverTimestamp: overrides.serverTimestamp,
     clientReceivedAt: createdAt,
     createdAt,
@@ -300,6 +301,35 @@ function toolBlock(
 }
 
 describe('transcriptBlocksToDaemonMessages', () => {
+  it('keeps producer identity across live/history projections and separates identical tool results', () => {
+    const output = {
+      resultDisplay: { type: 'mcp_app', documentId: 'same-content' },
+    };
+    const live = transcriptBlocksToDaemonMessages([
+      toolBlock('live-block', 'producer-a', 'completed', 1, {
+        rawOutput: output,
+      }),
+    ]);
+    const history = transcriptBlocksToDaemonMessages([
+      toolBlock('history-block', 'producer-a', 'completed', 1, {
+        rawOutput: output,
+      }),
+      toolBlock('history-block-2', 'producer-b', 'completed', 2, {
+        rawOutput: output,
+      }),
+    ]);
+    const ids = (
+      messages: ReturnType<typeof transcriptBlocksToDaemonMessages>,
+    ) =>
+      messages.flatMap((message) =>
+        message.role === 'tool_group'
+          ? message.tools.map((tool) => tool.generatedUiToolCallId)
+          : [],
+      );
+    expect(ids(live)).toEqual(['producer-a']);
+    expect(ids(history)).toEqual(['producer-a', 'producer-b']);
+  });
+
   it('keeps shell input previews out of output while preserving actual content', () => {
     const block = toolBlock('shell-live', 'shell-1', 'in_progress', 1000, {
       toolName: 'run_shell_command',
@@ -4029,6 +4059,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       status: 'in_progress',
       kind: 'fetch',
     });
+    expect(pendingTool?.generatedUiToolCallId).toBeUndefined();
 
     const messages = transcriptBlocksToDaemonMessages([
       {
@@ -4071,6 +4102,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       toolName: 'web_fetch',
       status: 'completed',
       rawOutput: 'Content processed successfully.',
+      generatedUiToolCallId: 'webfetch-1',
     });
   });
 
@@ -4378,6 +4410,41 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('prefers the cause label for a loop stop and falls back without one', () => {
+    const loopError = (loop?: { loopType: string; loopReason?: string }) => ({
+      id: 'err-loop',
+      kind: 'error' as const,
+      source: 'turn_error' as const,
+      errorKind: 'loop_detected' as const,
+      text: 'internal fallback',
+      ...(loop ? { loop } : {}),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const labels = {
+      loopDetected: 'Generic loop guidance.',
+      loopDetectedFor: (loop: { loopType?: string; loopReason?: string }) =>
+        loop.loopReason ? `Cause: ${loop.loopReason}` : undefined,
+    };
+
+    const [withCause] = transcriptBlocksToDaemonMessages(
+      [loopError({ loopType: 'turn_tool_call_cap', loopReason: 'backstop' })],
+      { labels },
+    );
+    const [unknownCause] = transcriptBlocksToDaemonMessages(
+      [loopError({ loopType: 'turn_tool_call_cap' })],
+      { labels },
+    );
+    const [noLoop] = transcriptBlocksToDaemonMessages([loopError()], {
+      labels,
+    });
+
+    expect(withCause.content).toBe('Cause: backstop');
+    expect(unknownCause.content).toBe('Generic loop guidance.');
+    expect(noLoop.content).toBe('Generic loop guidance.');
+  });
+
   it('renders model stream interruption errors from structured errorKind labels', () => {
     const messages = transcriptBlocksToDaemonMessages(
       [
@@ -4653,6 +4720,42 @@ describe('transcriptBlocksToDaemonMessages', () => {
   it('returns empty array for empty blocks', () => {
     const messages = transcriptBlocksToDaemonMessages([]);
     expect(messages).toEqual([]);
+  });
+
+  it.each([' ', '\n', '\r\n', '\t'])(
+    'omits a standalone whitespace assistant between tools and thinking: %j',
+    (whitespace) => {
+      const messages = transcriptBlocksToDaemonMessages([
+        toolBlock('tool-1', 'call-1', 'completed', 1),
+        textBlock('blank', 'assistant', whitespace, 2, true),
+        textBlock('thought', 'thought', 'Check the next file.', 3, true),
+        toolBlock('tool-2', 'call-2', 'completed', 4),
+      ]);
+
+      expect(messages.map((message) => message.role)).toEqual([
+        'tool_group',
+        'thinking',
+        'tool_group',
+      ]);
+    },
+  );
+
+  it('preserves whitespace chunks within existing assistant prose and usage', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('first', 'assistant', 'First paragraph.', 1, true),
+      textBlock('spacing', 'assistant', '\n\n', 2, true, {
+        usage: { inputTokens: 10, outputTokens: 2 },
+      }),
+      textBlock('last', 'assistant', 'Second paragraph.\n', 3),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'assistant',
+        content: 'First paragraph.\n\nSecond paragraph.\n',
+        usage: { inputTokens: 10, outputTokens: 2 },
+      },
+    ]);
   });
 
   it('keeps status blocks in the main transcript while subagent is active', () => {
@@ -5435,6 +5538,37 @@ describe('transcriptBlocksToDaemonMessages', () => {
       messages[1].role === 'tool_group' ? messages[1].tools[0] : undefined;
     expect(agentA!.subContent).toBeUndefined();
     expect(agentB!.subContent).toBeUndefined();
+  });
+});
+
+describe('replayed agent identity', () => {
+  function firstTool(blocks: DaemonTranscriptBlock[]) {
+    return transcriptBlocksToDaemonMessages(blocks).find(
+      (message) => message.role === 'tool_group',
+    )?.tools[0];
+  }
+
+  it('adopts the block agent path for a replayed Agent result', () => {
+    const tool = firstTool([
+      toolBlock('agent', 'agent-1', 'completed', 1_000, {
+        toolName: 'Agent',
+        agent: {
+          agentName: '/root/general-purpose',
+          depth: 1,
+          kind: 'subagent',
+        },
+      }),
+    ]);
+    expect(tool?.agentPath).toBe('/root/general-purpose');
+  });
+
+  it('stays unattributed when the replay carried no identity', () => {
+    const tool = firstTool([
+      toolBlock('agent', 'agent-1', 'completed', 1_000, {
+        toolName: 'Agent',
+      }),
+    ]);
+    expect(tool?.agentPath).toBeUndefined();
   });
 });
 

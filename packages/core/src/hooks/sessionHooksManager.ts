@@ -264,7 +264,7 @@ export class SessionHooksManager {
    * Returns true when any session (or just `sessionId`, when provided) has at
    * least one hook registered for `event`. Used as the fast-path skip check by
    * the turn engine so it knows to actually fire the event for session-scoped
-   * hooks like `/goal`.
+   * hooks, such as a skill's.
    */
   hasHooksForEvent(event: HookEventName, sessionId?: string): boolean {
     if (sessionId !== undefined) {

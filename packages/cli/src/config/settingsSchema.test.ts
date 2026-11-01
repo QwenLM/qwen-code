@@ -23,6 +23,8 @@ import {
   type Settings,
   type SettingsSchema,
 } from './settingsSchema.js';
+import { DAEMON_APPROVAL_MODES } from '@qwen-code/sdk/daemon';
+import { advertisedMaxSessions } from '../serve/server/serve-features.js';
 import { MergeStrategy } from '../utils/deepMerge.js';
 import {
   MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
@@ -31,6 +33,40 @@ import {
 } from '../serve/create-sub-session.js';
 
 describe('SettingsSchema', () => {
+  it('exposes a default-on Generated UI setting that requires restarting its owner', () => {
+    expect(
+      getSettingsSchema().experimental.properties.generatedUi,
+    ).toMatchObject({
+      type: 'boolean',
+      default: true,
+      category: 'Experimental',
+      requiresRestart: true,
+      showInDialog: true,
+    });
+  });
+
+  it('declares a replace-only Web Shell approval mode allowlist', () => {
+    const { allowedApprovalModes } = getSettingsSchema().ui.properties;
+    expect(allowedApprovalModes).toMatchObject({
+      type: 'array',
+      default: undefined,
+      mergeStrategy: MergeStrategy.REPLACE,
+      showInDialog: false,
+      items: {
+        type: 'string',
+        // Pinned to the SDK vocabulary rather than restated as a literal, so
+        // a permission mode added there without this schema following turns
+        // this assertion red instead of shipping a stale editor enum.
+        enum: DAEMON_APPROVAL_MODES.filter((mode) => mode !== 'plan'),
+      },
+    });
+    // The key is workspace-restricted; the description is the only in-editor
+    // signal, so it must say so (mirrored verbatim into the VSCode schema).
+    expect(allowedApprovalModes.description).toMatch(
+      /values set in Workspace settings are ignored/,
+    );
+  });
+
   describe('getSettingsSchema', () => {
     it('should describe prompt hooks supported by the runtime', () => {
       const hookProperties =
@@ -498,6 +534,18 @@ describe('SettingsSchema', () => {
       expect(model.maxToolCallsPerTurn.type).toBe('integer');
     });
 
+    it('should define model.loopProtection with warn as the default', () => {
+      const loopProtection =
+        getSettingsSchema().model.properties.loopProtection;
+
+      expect(loopProtection).toMatchObject({ type: 'enum', default: 'warn' });
+      expect(loopProtection.options?.map((option) => option.value)).toEqual([
+        'warn',
+        'stop',
+        'off',
+      ]);
+    });
+
     it('should define streamIdleTimeoutMs as a bounded generation setting', () => {
       const streamIdleTimeout =
         getSettingsSchema().model.properties.generationConfig.properties
@@ -771,6 +819,17 @@ describe('SettingsSchema', () => {
       expect(mouseTracking.requiresRestart).toBe(true);
     });
 
+    it('should have arrowKeysScrollTranscript in ui settings', () => {
+      const arrowKeysScrollTranscript =
+        getSettingsSchema().ui.properties.arrowKeysScrollTranscript;
+      expect(arrowKeysScrollTranscript).toBeDefined();
+      expect(arrowKeysScrollTranscript.type).toBe('boolean');
+      // Default must stay false — bare ↑/↓ are input-history keys.
+      expect(arrowKeysScrollTranscript.default).toBe(false);
+      expect(arrowKeysScrollTranscript.showInDialog).toBe(true);
+      expect(arrowKeysScrollTranscript.requiresRestart).toBe(false);
+    });
+
     it('should expose tool call details as a live UI setting', () => {
       const showToolCallDetails =
         getSettingsSchema().ui.properties.showToolCallDetails;
@@ -803,8 +862,12 @@ describe('SettingsSchema', () => {
       expect(responseTokensPerSecond.requiresRestart).toBe(true);
     });
 
-    it('should pin serve sub-session caps to the runtime defaults', () => {
+    it('should pin serve limits to the runtime defaults', () => {
       const serve = getSettingsSchema().serve.properties;
+      expect(serve.maxSessions.type).toBe('integer');
+      expect(serve.maxSessions.minimum).toBe(0);
+      expect(serve.maxSessions.default).toBe(advertisedMaxSessions(undefined));
+      expect(serve.maxSessions.requiresRestart).toBe(true);
       expect(serve.maxConcurrentSubSessionsPerCaller.default).toBe(
         MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
       );

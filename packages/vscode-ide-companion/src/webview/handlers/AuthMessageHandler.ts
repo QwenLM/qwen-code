@@ -12,6 +12,7 @@ import {
   ALL_PROVIDERS,
   ALIBABA_PROVIDERS,
   AuthType,
+  QWENCLOUD_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
   shouldShowStep,
   resolveBaseUrl,
@@ -195,6 +196,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
         }
       };
 
+      addGroup('QwenCloud', QWENCLOUD_PROVIDERS);
       addGroup('Alibaba Cloud', ALIBABA_PROVIDERS);
       addGroup('Third Party', THIRD_PARTY_PROVIDERS);
 

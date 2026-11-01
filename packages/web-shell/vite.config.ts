@@ -1,3 +1,4 @@
+import { pierreResources } from './pierre-build';
 import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 import type { PreviewServer, ProxyOptions, ViteDevServer } from 'vite';
@@ -127,7 +128,19 @@ function configureDevelopmentMiddleware(
 
 export default defineConfig(({ command }) => ({
   root: 'client',
+  // Worker-only imports otherwise trigger a dev-page reload on first preview.
+  optimizeDeps: {
+    exclude: ['@pierre/diffs', 'shiki/wasm'],
+    include: [
+      'exceljs',
+      'ssf',
+      'shiki-files/core',
+      'shiki-files/engine/javascript',
+      'shiki-files/engine/oniguruma',
+    ],
+  },
   plugins: [
+    pierreResources(),
     react(),
     tailwindcss(),
     {
@@ -249,6 +262,10 @@ export default defineConfig(({ command }) => ({
       // Goals page (`GET /goals`). Without it the SPA fallback returns
       // index.html in dev and the page fails JSON parsing on open.
       '/goals': daemonProxy,
+      // PR watches page (`GET /autofix-pr/watches`). Same reason as the routes
+      // above. The workspace-qualified form is already reached by the
+      // `/workspace` prefix; only the primary's unqualified route needs this.
+      '/autofix-pr': daemonProxy,
       // Token-usage dashboard (Daemon Status "统计" tab). Same reason as the
       // routes above — without it the SPA fallback returns index.html in dev and
       // the tab fails JSON parsing on `GET /usage/dashboard`.
