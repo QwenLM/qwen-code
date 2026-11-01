@@ -58,11 +58,15 @@ interface MarkdownDisplayProps {
    */
   enforceHeightBudget?: boolean;
   /**
-   * Give paragraph blocks an explicit width instead of letting yoga measure the
-   * wrapping `<Text>` implicitly. Pass it only where `contentWidth` is exactly
-   * the width the paragraph may use.
+   * Give the wrapping text blocks — paragraphs, list items and blockquotes — an
+   * explicit width instead of letting yoga measure the wrapping `<Text>`
+   * implicitly. Without it a block that fills the terminal can overrun the right
+   * margin and be hard-wrapped by the terminal mid-word. Pass it only where
+   * `contentWidth` is exactly the width those blocks may use; callers whose
+   * `contentWidth` already accounts for their own border and padding must not
+   * opt in, or the block gets clipped instead of overflowing.
    */
-  constrainParagraphWidth?: boolean;
+  constrainBlockWidth?: boolean;
 }
 
 export interface MarkdownSourceCopyIndexOffsets {
@@ -145,13 +149,13 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   textColor = theme.text.primary,
   sourceCopyIndexOffsets,
   enforceHeightBudget = false,
-  constrainParagraphWidth = false,
+  constrainBlockWidth = false,
 }) => {
   const { renderMode } = useRenderMode();
   if (!text) return <></>;
 
   const renderVisualBlocks = renderMode === 'render';
-  const paragraphWidth = constrainParagraphWidth
+  const blockWidth = constrainBlockWidth
     ? Math.max(0, contentWidth)
     : undefined;
   // Some models stream long runs of trailing newlines after useful content.
@@ -524,7 +528,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       } else {
         // Not a table, treat as regular text
         addContentBlock(
-          <Box key={key} width={paragraphWidth}>
+          <Box key={key} width={blockWidth}>
             <Text wrap="wrap">
               <RenderInline
                 text={line}
@@ -601,7 +605,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       // Process current line as normal
       if (line.trim().length > 0) {
         addContentBlock(
-          <Box key={key} width={paragraphWidth}>
+          <Box key={key} width={blockWidth}>
             <Text wrap="wrap">
               <RenderInline
                 text={line}
@@ -625,7 +629,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           quoteText={blockquoteMatch[1]}
           textColor={textColor}
           enableInlineMath={renderVisualBlocks}
-          availableWidth={paragraphWidth}
+          availableWidth={blockWidth}
         />,
       );
     } else if (headerMatch) {
@@ -703,7 +707,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           leadingWhitespace={leadingWhitespace}
           textColor={textColor}
           renderVisualBlocks={renderVisualBlocks}
-          availableWidth={paragraphWidth}
+          availableWidth={blockWidth}
         />,
       );
     } else if (olMatch) {
@@ -719,7 +723,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           leadingWhitespace={leadingWhitespace}
           textColor={textColor}
           renderVisualBlocks={renderVisualBlocks}
-          availableWidth={paragraphWidth}
+          availableWidth={blockWidth}
         />,
       );
     } else {
@@ -732,7 +736,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         }
       } else {
         addContentBlock(
-          <Box key={key} width={paragraphWidth}>
+          <Box key={key} width={blockWidth}>
             <Text wrap="wrap" color={textColor}>
               <RenderInline
                 text={line}

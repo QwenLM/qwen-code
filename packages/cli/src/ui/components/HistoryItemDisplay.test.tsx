@@ -108,10 +108,10 @@ describe('<HistoryItemDisplay />', () => {
     expect(output).toContain('◆\uFE0E Hello');
   });
 
-  // #14075: без собственной ширины абзац переносился по неявному измерению
-  // yoga и мог съесть правый маргин. Кадр тестовой библиотеки зафиксирован на
-  // 100 колонках (у `render` нет опций, у `stdout.columns` нет сеттера),
-  // поэтому ширину выше 100 здесь не проверить.
+  // #14075: without a width of its own a paragraph was wrapped by yoga's implicit
+  // measurement and could overrun the right margin. The test library pins its
+  // frame to 100 columns (`render` takes no options and `stdout.columns` has no
+  // setter), so widths above 100 cannot be exercised here.
   it.each(['gemini', 'user'] as const)(
     'keeps %s lines inside the right margin on the static path',
     (type) => {
@@ -136,9 +136,13 @@ describe('<HistoryItemDisplay />', () => {
           </Static>,
         );
 
+        const frame = stripAnsi(lastFrame() ?? '');
+        // Guards the check below: a blank frame would make it pass vacuously.
+        expect(frame).toContain('This is a long paragraph');
+
         // Row reserves marginLeft/marginRight=2, so nothing may render past
         // terminalWidth - 2.
-        const overWide = stripAnsi(lastFrame() ?? '')
+        const overWide = frame
           .split('\n')
           .filter((line) => stringWidth(line) > terminalWidth - 2);
         expect(overWide).toEqual([]);
@@ -170,9 +174,11 @@ describe('<HistoryItemDisplay />', () => {
       </Static>,
     );
 
-    const overWide = stripAnsi(lastFrame() ?? '')
-      .split('\n')
-      .filter((line) => stringWidth(line) > 98);
+    const frame = stripAnsi(lastFrame() ?? '');
+    // Guards the check below: a blank frame would make it pass vacuously.
+    expect(frame).toContain('first numbered item');
+
+    const overWide = frame.split('\n').filter((line) => stringWidth(line) > 98);
     expect(overWide).toEqual([]);
   });
 
@@ -200,9 +206,11 @@ describe('<HistoryItemDisplay />', () => {
       </Static>,
     );
 
-    const overWide = stripAnsi(lastFrame() ?? '')
-      .split('\n')
-      .filter((line) => stringWidth(line) > 98);
+    const frame = stripAnsi(lastFrame() ?? '');
+    // Guards the check below: a blank frame would make it pass vacuously.
+    expect(frame).toContain('inner numbered item');
+
+    const overWide = frame.split('\n').filter((line) => stringWidth(line) > 98);
     expect(overWide).toEqual([]);
   });
 
@@ -227,9 +235,11 @@ describe('<HistoryItemDisplay />', () => {
       </Static>,
     );
 
-    const overWide = stripAnsi(lastFrame() ?? '')
-      .split('\n')
-      .filter((line) => stringWidth(line) > 98);
+    const frame = stripAnsi(lastFrame() ?? '');
+    // Guards the check below: a blank frame would make it pass vacuously.
+    expect(frame).toContain('quoted passage');
+
+    const overWide = frame.split('\n').filter((line) => stringWidth(line) > 98);
     expect(overWide).toEqual([]);
   });
 
