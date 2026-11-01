@@ -240,6 +240,90 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
         return Optional.of(registration);
     }
 
+    /**
+     * Batch form of {@link #find(String, String)} for Workspace discovery.
+     * The caller evaluates the full registration against its Workspace row;
+     * this read only proves that the durable registration is present,
+     * unambiguous, and self-consistent.
+     */
+    java.util.Map<String, RegistrationState> states(String tenant,
+            java.util.Collection<String> tenantWorkspaceIds) {
+        if (tenantWorkspaceIds.isEmpty()) {
+            return java.util.Map.of();
+        }
+        List<Object> arguments = new java.util.ArrayList<>(tenantWorkspaceIds.size() + 1);
+        arguments.add(tenant);
+        arguments.addAll(tenantWorkspaceIds);
+        List<StoredRegistration> rows;
+        try {
+            rows = jdbc.query(
+                    "SELECT s.storage_id, s.registration_json, s.registration_revision,"
+                            + " s.physical_key, o.mount_root"
+                            + " FROM ma_storage s JOIN ma_storage_owner o"
+                            + " ON o.storage_key = s.physical_key"
+                            + " WHERE s.tenant_id = ? AND s.storage_id IN ("
+                            + String.join(",", java.util.Collections.nCopies(
+                                    tenantWorkspaceIds.size(), "?"))
+                            + ") AND s.storage_kind = 'EXTERNAL'"
+                            + " AND s.registration_state = 'REGISTERED'",
+                    (row, index) -> {
+                        Object revision = row.getObject("registration_revision");
+                        return new StoredRegistration(row.getString("storage_id"),
+                                row.getString("registration_json"),
+                                revision instanceof Number number ? number : null,
+                                row.getString("physical_key"), row.getString("mount_root"));
+                    },
+                    arguments.toArray());
+        } catch (RuntimeException failure) {
+            throw unavailable();
+        }
+        java.util.Map<String, RegistrationState> result = new java.util.HashMap<>();
+        java.util.Set<String> invalid = new java.util.HashSet<>();
+        for (StoredRegistration row : rows) {
+            String storage = row.storageId();
+            if (storage == null) {
+                continue;
+            }
+            if (invalid.contains(storage)) {
+                continue;
+            }
+            RegisteredExternalStorage registered;
+            try {
+                registered = ExternalStorageRegistry.decodeRegistration(row.encodedRegistration());
+            } catch (RuntimeException failure) {
+                // Workspace discovery is a batch. A record this build cannot
+                // decode disables only its Workspace; one malformed row must
+                // not hide every other readable Workspace on the page.
+                invalid.add(storage);
+                result.remove(storage);
+                continue;
+            }
+            if (result.containsKey(storage)
+                    || registered == null || row.registrationRevision() == null
+                    || !storage.equals(registered.tenantWorkspaceId())
+                    || !registered.ownerKey().equals(row.physicalKey())
+                    || registered.registrationRevision() != row.registrationRevision().longValue()
+                    || !registered.mountRoot().equals(row.mountRoot())) {
+                // The Workspace eligibility check already treats a missing
+                // state as false. Keep the same outcome for a malformed or
+                // ambiguous row without failing the whole page.
+                invalid.add(storage);
+                result.remove(storage);
+                continue;
+            }
+            result.put(storage, new RegistrationState(true, registered.providerId(),
+                    registered.tenantWorkspaceId()));
+        }
+        return result;
+    }
+
+    private record StoredRegistration(String storageId, String encodedRegistration,
+            Number registrationRevision, String physicalKey, String mountRoot) {
+    }
+
+    record RegistrationState(boolean current, String providerId, String tenantWorkspaceId) {
+    }
+
     private static RuntimeBrokerException registrationMismatch() {
         return new RuntimeBrokerException(409,
                 "external_storage_registration_mismatch",

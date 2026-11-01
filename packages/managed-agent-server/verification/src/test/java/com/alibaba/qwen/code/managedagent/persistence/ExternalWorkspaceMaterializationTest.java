@@ -370,6 +370,75 @@ class ExternalWorkspaceMaterializationTest {
     }
 
     @Test
+    void malformedExternalRegistrationIsANonRetryableWorkspaceAdmissionRefusal() {
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        var harness = mock(HarnessConnector.class);
+        when(harness.supportsLifecycle("hosted-workspace-external-files/1")).thenReturn(true);
+        var warmer = mock(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class);
+        when(warmer.supportsWorkspaceClose("hosted-workspace-external-files/1")).thenReturn(true);
+        try (var context = new org.springframework.context.annotation.AnnotationConfigApplicationContext()) {
+            context.registerBean(ManagedAgentProperties.class, () -> properties);
+            context.registerBean(ExternalStorageRegistrationStore.class, () -> registrations);
+            context.registerBean(HarnessConnector.class, () -> harness);
+            context.registerBean(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class, () -> warmer);
+            context.registerBean(ManagedWorkspaceRegistry.class, () -> registry);
+            context.refresh();
+            store.materialize("tenant", "workspace", "Name", "owner", "key");
+            assertThat(registry.findReadable("tenant", "owner", "workspace").canCreateSession()).isTrue();
+            String registered = jdbc.queryForObject("SELECT registration_json FROM ma_storage", String.class);
+            for (String malformed : List.of("not-json", "{}",
+                    registered.replace("\"registrationRevision\":1", "\"registrationRevision\":\"1\""))) {
+                jdbc.update("UPDATE ma_storage SET registration_json = ?", malformed);
+                assertThatThrownBy(() -> new TransactionTemplate(manager).executeWithoutResult(
+                        status -> WorkspaceMigrationAdmission.requireOpen(jdbc, "tenant", "workspace")))
+                        .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                            assertThat(error.getStatusCode()).isEqualTo(409);
+                            assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                            assertThat(error.isRetryable()).isFalse();
+                        });
+            }
+        }
+    }
+
+    @Test
+    void malformedExternalRegistrationOnlyDisablesItsWorkspaceInBatchDiscovery() {
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        var harness = mock(HarnessConnector.class);
+        when(harness.supportsLifecycle("hosted-workspace-external-files/1")).thenReturn(true);
+        var warmer = mock(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class);
+        when(warmer.supportsWorkspaceClose("hosted-workspace-external-files/1")).thenReturn(true);
+        try (var context = new org.springframework.context.annotation.AnnotationConfigApplicationContext()) {
+            context.registerBean(ManagedAgentProperties.class, () -> properties);
+            context.registerBean(ExternalStorageRegistrationStore.class, () -> registrations);
+            context.registerBean(HarnessConnector.class, () -> harness);
+            context.registerBean(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class, () -> warmer);
+            context.registerBean(ManagedWorkspaceRegistry.class, () -> registry);
+            context.refresh();
+            store.materialize("tenant", "workspace", "Name", "owner", "key");
+            register("tenant", "healthy");
+            store.materialize("tenant", "healthy", "Healthy", "owner", "healthy-key");
+            jdbc.update("UPDATE ma_storage SET registration_json = 'not-json' WHERE storage_id = 'workspace'");
+
+            assertThat(registry.listReadable("tenant", "owner", null, 10))
+                    .hasSize(2)
+                    .anySatisfy(row -> {
+                        assertThat(row.workspaceId()).isEqualTo("workspace");
+                        assertThat(row.canCreateSession()).isFalse();
+                    })
+                    .anySatisfy(row -> {
+                        assertThat(row.workspaceId()).isEqualTo("healthy");
+                        assertThat(row.canCreateSession()).isTrue();
+                    });
+            assertThat(registry.findReadable("tenant", "owner", "workspace").canCreateSession()).isFalse();
+            assertThat(registry.findReadable("tenant", "owner", List.of("workspace", "healthy")))
+                    .containsEntry("workspace", new com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.ReadableGrant(
+                            "workspace", 1, "workspace", false))
+                    .containsEntry("healthy", new com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.ReadableGrant(
+                            "healthy", 1, "healthy", true));
+        }
+    }
+
+    @Test
     void closedBoundedRequestRejectsUnknownDuplicateTrailingAndInvalidOwner() throws Exception {
         String valid = body("workspace", "Name", "owner", "key", null);
         for (String invalid : List.of(valid.replace("\"owner\"", "\"\""),

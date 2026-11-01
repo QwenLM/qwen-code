@@ -641,6 +641,39 @@ describe('ManagedSessionsPage', () => {
     },
   );
 
+  it.each(['archived', 'closed'])(
+    'does not ask for operator attention on a terminal %s Session',
+    async (lifecycleStatus) => {
+      mocks.client.getSession.mockResolvedValue(
+        summary('s1', {
+          lifecycleStatus,
+          capabilities: { canSend: false, canCancel: false },
+          recovery: {
+            state: 'operator_required',
+            reasonCode: 'session_not_active',
+            nextTurnAllowed: false,
+            actions: {
+              recheck: false,
+              cancel: false,
+              continueInNewSession: true,
+            },
+          },
+        }),
+      );
+
+      await render('s1');
+      expect(container.textContent).not.toContain(
+        'This Session needs operator attention',
+      );
+      expect(container.textContent).not.toContain('Ask an operator to inspect');
+      expect(
+        [...container.querySelectorAll('button')].some(
+          (button) => button.textContent === 'Continue in a new Session',
+        ),
+      ).toBe(true);
+    },
+  );
+
   it('keeps the handoff reachable on a closed Session', async () => {
     provider.workspaceBinding = {
       agentId: 'agent-a',

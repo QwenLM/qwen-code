@@ -1803,12 +1803,13 @@ function ManagedSessionsContent({
           )}
           {recovery.value && (
             <ManagedRecoveryPanel
-              // A closed Session always advertises the handoff, and this
-              // panel is the only renderer of that action: hide only the
-              // operator-attention framing, never the panel.
+              // A terminal Session still needs the panel for diagnostics and
+              // any handoff action. Only the terminal "not active" verdict is
+              // expected state, so it should not be framed as operator work.
               attention={
                 !(
-                  summary?.lifecycleStatus === 'closed' &&
+                  (summary?.lifecycleStatus === 'closed' ||
+                    summary?.lifecycleStatus === 'archived') &&
                   recovery.value.reasonCode === 'session_not_active'
                 )
               }

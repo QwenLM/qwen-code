@@ -137,7 +137,7 @@ public class WorkspaceExecutionStore
         try {
             WorkspaceLifecycleStore.requireClaim(jdbc, session.tenantId(), session.sessionId(), authority, false);
         } catch (ManagedAgentException error) {
-            throw new RuntimeBrokerException(error.getStatus(), error.getCode(), error.getMessage(), false, error);
+            throw lifecycleFailure(error);
         }
         authorizePassiveAttachment(session, authority);
         if (storageGuard != null && residents.find(session.workspace()) == null
@@ -269,9 +269,7 @@ public class WorkspaceExecutionStore
         // Verdicts per matched row: 0 structural mismatch, 1 refused only by
         // operator-mutable grant or registry state, 2 authorized.
         byte[] executionActor = cancellation || committedStop ? null
-                : external ? jdbc.queryForObject("SELECT COALESCE(owner_actor_key, creator_actor_key) FROM ma_session"
-                        + " WHERE tenant_id = ? AND session_id = ? AND parent_session_id IS NULL", byte[].class,
-                        binding.getTenantId(), session.sessionId())
+                : external ? externalExecutionActor(binding, session.sessionId())
                         : inheritedExecutionActor(jdbc, binding, session.sessionId());
         List<Integer> grants = jdbc.query("SELECT s.tenant_id, s.session_id,"
                 + " s.agent_id AS session_agent,"
@@ -420,9 +418,28 @@ public class WorkspaceExecutionStore
             throw unavailable();
         }
         if (authority != null) {
-            WorkspaceLifecycleStore.requireClaim(jdbc, session.tenantId(), session.sessionId(), authority, false);
+            try {
+                WorkspaceLifecycleStore.requireClaim(jdbc, session.tenantId(), session.sessionId(), authority, false);
+            } catch (ManagedAgentException error) {
+                throw lifecycleFailure(error);
+            }
         }
         authorizeAttachment(session, false, false, authority, false, false, true);
+    }
+
+    private static RuntimeBrokerException lifecycleFailure(ManagedAgentException error) {
+        return new RuntimeBrokerException(error.getStatus(), error.getCode(), error.getMessage(), false, error);
+    }
+
+    private byte[] externalExecutionActor(ContextBinding binding, String sessionId) {
+        var actors = jdbc.query("SELECT COALESCE(owner_actor_key, creator_actor_key) AS execution_actor"
+                + " FROM ma_session WHERE tenant_id = ? AND session_id = ? AND parent_session_id IS NULL",
+                (row, index) -> row.getBytes("execution_actor"),
+                binding.getTenantId(), sessionId);
+        if (actors.size() != 1 || actors.getFirst() == null) {
+            throw unavailable();
+        }
+        return actors.getFirst();
     }
 
     public void claim(ContextBinding context, RuntimeSessionRecord session, RuntimeBindingRecord binding,
