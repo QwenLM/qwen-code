@@ -10,18 +10,17 @@ import type { LoadedSettings } from '../../config/settings.js';
 import {
   getProjectHooksApprovalState,
   getProjectHooksForApproval,
-  getProjectHooksRoot,
   hashProjectHooks,
   loadHookApprovals,
   summarizeProjectHooks,
+  type ProjectHooksApproval,
 } from '../../config/hook-approvals.js';
 import { ProjectHooksApprovalChoice } from '../components/hooks/ProjectHooksApprovalDialog.js';
 import { appEvents, AppEvent } from '../../utils/events.js';
 import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
-import { t } from '../../i18n/index.js';
 
 export interface PendingProjectHooks {
-  hooks: Record<string, unknown>;
+  approval: ProjectHooksApproval;
   /** One sanitized display line per configured hook. */
   lines: string[];
 }
@@ -50,16 +49,18 @@ export const useProjectHooksApproval = (
 
   const computePending = useCallback((): PendingProjectHooks | undefined => {
     if (!config.isProjectHooksPendingApproval()) return undefined;
-    const hooks = getProjectHooksForApproval(settings);
+    const approval = getProjectHooksForApproval(settings);
     if (
-      !hooks ||
-      getProjectHooksApprovalState(hooks, getProjectHooksRoot(settings)) !==
-        'pending' ||
-      hashProjectHooks(hooks) === dismissedHashRef.current
+      !approval ||
+      getProjectHooksApprovalState(approval) !== 'pending' ||
+      hashProjectHooks(approval) === dismissedHashRef.current
     ) {
       return undefined;
     }
-    return { hooks, lines: summarizeProjectHooks(hooks) };
+    return {
+      approval,
+      lines: summarizeProjectHooks(approval.resolved, approval.hooks),
+    };
   }, [config, settings]);
 
   useEffect(() => {
@@ -84,31 +85,24 @@ export const useProjectHooksApproval = (
   const handleProjectHooksApprovalSelect = useCallback(
     async (choice: ProjectHooksApprovalChoice) => {
       if (!pending) return;
-      const root = getProjectHooksRoot(settings);
       setPending(undefined);
       if (choice === ProjectHooksApprovalChoice.DISMISS) {
-        dismissedHashRef.current = hashProjectHooks(pending.hooks);
+        dismissedHashRef.current = hashProjectHooks(pending.approval);
         addInfoRef.current?.(
-          t(
-            'Project hooks in .qwen/settings.json were not loaded. Open /hooks or restart Qwen Code to review them.',
-          ),
+          'Project hooks in .qwen/settings.json were not loaded. Open /hooks or restart Qwen Code to review them.',
         );
         return;
       }
       const approve = choice === ProjectHooksApprovalChoice.APPROVE;
       try {
         await loadHookApprovals().setState(
-          root,
-          pending.hooks,
+          pending.approval,
           approve ? 'approved' : 'rejected',
         );
       } catch (error) {
         // Nothing was saved: keep the hooks withheld and say so.
         addInfoRef.current?.(
-          t(
-            'Project hooks were not loaded: the decision could not be saved ({{error}}).',
-            { error: getErrorMessage(error) },
-          ),
+          `Project hooks were not loaded: the decision could not be saved (${getErrorMessage(error)}).`,
         );
         return;
       }
@@ -119,7 +113,7 @@ export const useProjectHooksApproval = (
         config.setProjectHooksPendingApproval(true, true);
       }
     },
-    [config, settings, pending],
+    [config, pending],
   );
 
   return {

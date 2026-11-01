@@ -83,6 +83,27 @@ describe('ProjectHooksApprovalDialog', () => {
     expect(frame).toContain('Reject');
   });
 
+  it.each([
+    [ProjectHooksApprovalChoice.APPROVE, ['\r']],
+    [ProjectHooksApprovalChoice.REJECT, ['\u001b[B', '\r']],
+  ])('emits %s for its row', async (choice, keys) => {
+    const onSelect = vi.fn();
+    const { stdin } = renderWithProviders(
+      <ProjectHooksApprovalDialog
+        lines={lines.slice(0, 1)}
+        terminalWidth={80}
+        onSelect={onSelect}
+      />,
+    );
+    for (const key of keys) {
+      act(() => {
+        stdin.write(key);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith(choice);
+  });
+
   it('dismisses on Esc without choosing reject', async () => {
     const onSelect = vi.fn();
     const { stdin } = renderWithProviders(

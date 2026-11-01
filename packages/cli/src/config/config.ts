@@ -112,7 +112,7 @@ import {
   validateExecutionSandboxSelection,
 } from './execution-sandbox-settings.js';
 import { createExecutionSandboxPolicy } from './execution-sandbox-config.js';
-import { appEvents } from '../utils/events.js';
+import { appEvents, AppEvent } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { memoryCommand } from '../commands/memory.js';
 import { channelCommand } from '../commands/channel.js';
@@ -133,7 +133,12 @@ export { isValidSessionId } from './session-id.js';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { assembleMcpServers } from './mcpServers.js';
 import { getPendingGatedMcpServers } from './mcpApprovals.js';
-import { getProjectHooksApprovalState } from './hook-approvals.js';
+import {
+  applyProjectHooksApproval,
+  getProjectHooksApprovalState,
+  summarizeProjectHooks,
+  type ProjectHooksApproval,
+} from './hook-approvals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
@@ -1719,8 +1724,8 @@ export async function loadCliConfig(
     systemHooks?: Record<string, unknown>;
     userHooks?: Record<string, unknown>;
     projectHooks?: Record<string, unknown>;
-    /** The unresolved `projectHooks` block the approval gate hashes, and its project. */
-    projectHooksApproval?: { root: string; hooks: Record<string, unknown> };
+    /** What the project hooks approval covers, when there is anything to gate. */
+    projectHooksApproval?: ProjectHooksApproval;
   },
   /**
    * Live-read provider for the set of disabled skill names. Forwarded to
@@ -2543,23 +2548,25 @@ export async function loadCliConfig(
   // repository's `.qwen/settings.json` must not run commands unreviewed. Only
   // a YOLO asked for on the command line skips it — a workspace can set
   // `tools.approvalMode` itself — and only while the session stays in YOLO.
-  // Without separated scopes core serves the merged block, so that is what
-  // gets gated.
   const commandLineYolo =
     approvalMode === ApprovalMode.YOLO &&
     (argv.approvalMode !== undefined || argv.yolo === true);
-  const gateHooks = !(bareMode || safeMode || settings.disableAllHooks);
+  // Core loads no hooks at all under a shell execution sandbox.
+  const gateHooks = !(
+    bareMode ||
+    safeMode ||
+    settings.disableAllHooks ||
+    shellExecutionSandbox
+  );
+  // The merged block cannot tell workspace hooks apart, so it can never be
+  // approved: callers that load workspace hooks pass separated scopes.
   const projectHooksState =
     gateHooks && !commandLineYolo
-      ? hooksConfig?.projectHooksApproval
-        ? getProjectHooksApprovalState(
-            hooksConfig.projectHooksApproval.hooks,
-            hooksConfig.projectHooksApproval.root,
-          )
-        : getProjectHooksApprovalState(
-            hooksConfig ? hooksConfig.projectHooks : settings.hooks,
-            cwd,
-          )
+      ? hooksConfig
+        ? getProjectHooksApprovalState(hooksConfig.projectHooksApproval)
+        : summarizeProjectHooks(settings.hooks ?? {}).length > 0
+          ? 'pending'
+          : undefined
       : undefined;
   const projectHooksPendingApproval = gateHooks
     ? projectHooksState !== undefined && projectHooksState !== 'approved'
@@ -3053,6 +3060,20 @@ export async function loadCliConfig(
   }
 
   const config = new Config(configParams);
+  if (gateHooks && commandLineYolo) {
+    // Leaving YOLO ends the exemption: gate the hooks now, not on the next
+    // `/hooks` reload.
+    const approval = hooksConfig?.projectHooksApproval;
+    const stop = config.onApprovalModeChange((mode) => {
+      if (mode === ApprovalMode.YOLO) return;
+      stop();
+      const state = applyProjectHooksApproval(config, approval);
+      void config.getHookSystem()?.reload();
+      if (state === 'pending') {
+        appEvents.emit(AppEvent.ProjectHooksPendingApprovalChanged);
+      }
+    });
+  }
   if (advisorModel) {
     validateCliAdvisorModel(config, advisorModel, {
       fastModel: settings.fastModel,

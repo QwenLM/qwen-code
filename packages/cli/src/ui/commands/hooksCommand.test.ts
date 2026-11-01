@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import { hooksCommand } from './hooksCommand.js';
 import {
   HOOK_APPROVALS_FILENAME,
+  getProjectHooksForApproval,
   loadHookApprovals,
   resetHookApprovalsForTesting,
 } from '../../config/hook-approvals.js';
@@ -176,6 +177,7 @@ describe('hooksCommand', () => {
         projectHooks?: Record<string, unknown>;
         /** What `${VAR}` resolution made of `projectHooks`. */
         resolvedProjectHooks?: Record<string, unknown>;
+        env?: Record<string, string>;
       } = {},
     ) {
       const hookSystem = {
@@ -217,6 +219,7 @@ describe('hooksCommand', () => {
               path: '/work/repo/.qwen/settings.json',
               originalSettings: {
                 hooks: (opts.projectHooks ?? projectHooks) as never,
+                env: opts.env,
               },
             },
           },
@@ -267,23 +270,29 @@ describe('hooksCommand', () => {
       ['unapproved', undefined, undefined, true, true],
       ['rejected', 'rejected', undefined, true, false],
       ['approved', 'approved', undefined, false, false],
-      ['approved before ${TOKEN} changed', 'approved', 'other', true, true],
+      ['approved before settings.env changed', 'approved', 'other', true, true],
     ] as const)(
       'gates %s project hooks before the registry reloads',
       async (_label, decision, tokenAfter, gated, prompted) => {
-        vi.stubEnv('TOKEN', 'secret');
-        if (decision) {
-          await loadHookApprovals().setState('/work/repo', runnable, decision);
-        }
-        if (tokenAfter) vi.stubEnv('TOKEN', tokenAfter);
-        const onPending = vi.fn();
-        appEvents.on(AppEvent.ProjectHooksPendingApprovalChanged, onPending);
         // The decision binds the unresolved block, as startup hashed it.
         const { context, config, hookSystem } = makeReloadContext({
           gated: true,
           projectHooks: runnable,
           resolvedProjectHooks: resolved,
+          env: { TOKEN: 'secret' },
         });
+        const settings = context.services.settings!;
+        if (decision) {
+          await loadHookApprovals().setState(
+            getProjectHooksForApproval(settings)!,
+            decision,
+          );
+        }
+        if (tokenAfter) {
+          settings.workspace.originalSettings.env = { TOKEN: tokenAfter };
+        }
+        const onPending = vi.fn();
+        appEvents.on(AppEvent.ProjectHooksPendingApprovalChanged, onPending);
 
         await hooksCommand.action!(context, '');
 

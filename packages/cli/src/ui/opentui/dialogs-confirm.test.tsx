@@ -114,6 +114,8 @@ import {
 } from './dialogs-confirm.js';
 import {
   layoutProjectHooksLines,
+  PROJECT_HOOKS_DIALOG_DESCRIPTION,
+  PROJECT_HOOKS_DIALOG_TITLE,
   ProjectHooksApprovalChoice,
 } from '../components/hooks/ProjectHooksApprovalDialog.js';
 
@@ -1600,8 +1602,8 @@ describe('OpenTuiProjectHooksApprovalDialog', () => {
       />,
     );
     const header = [
-      'Untrusted hooks in .qwen/settings.json',
-      'This workspace declares hooks: commands Qwen Code runs on events such as session start or before a tool call. Approving lets them run with your privileges. Approval is bound to this exact configuration — if .qwen/settings.json changes, you will be asked again.',
+      PROJECT_HOOKS_DIALOG_TITLE,
+      PROJECT_HOOKS_DIALOG_DESCRIPTION,
     ];
     const rows = (height: number) =>
       layoutProjectHooksLines(lines, header, 110, height);

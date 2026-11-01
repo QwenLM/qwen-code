@@ -91,7 +91,12 @@ describe('DialogManager', () => {
             terminalHeight: 24,
             isProjectHooksApprovalDialogOpen: true,
             pendingProjectHooks: {
-              hooks: {},
+              approval: {
+                root: '/r',
+                hooks: {},
+                resolved: {},
+                env: { files: {}, settings: null },
+              },
               lines: Array.from({ length: 40 }, (_, i) => `Stop  hook-${i}.sh`),
             },
           }),

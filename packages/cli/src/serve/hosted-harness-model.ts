@@ -37,6 +37,7 @@ import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-histo
 import { buildSessionHistoryFromConversation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
 import { loadSettings } from '../config/settings.js';
+import { getSeparatedHookSettings } from '../config/hook-approvals.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
 import {
@@ -341,7 +342,7 @@ export async function runHostedHarnessTextTurn(input: {
     argv,
     input.cwd,
     undefined,
-    undefined,
+    getSeparatedHookSettings(settings),
     undefined,
     undefined,
     undefined,

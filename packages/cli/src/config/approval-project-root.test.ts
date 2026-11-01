@@ -63,8 +63,19 @@ describe('hook approvals across project-root casing', () => {
     'on %s, a decision keyed D:\\project reads back for d:\\project as %s',
     async (os, state) => {
       platform.value = os;
-      await loadHookApprovals().setState('D:\\project', hooks, 'approved');
-      expect(loadHookApprovals().getState('d:\\project', hooks)).toBe(state);
+      const env = { files: {}, settings: null };
+      await loadHookApprovals().setState(
+        { root: 'D:\\project', hooks, resolved: hooks, env },
+        'approved',
+      );
+      expect(
+        loadHookApprovals().getState({
+          root: 'd:\\project',
+          hooks,
+          resolved: hooks,
+          env,
+        }),
+      ).toBe(state);
     },
   );
 });

@@ -2188,11 +2188,12 @@ describe('llm.tsx main function', () => {
   });
 
   it.each([
-    ['pending', 'Run qwen interactively'],
-    ['rejected', 'not asked about again'],
+    ['pending', true, 'Run qwen interactively'],
+    ['rejected', true, 'not asked about again'],
+    ['approved', false, undefined],
   ] as const)(
-    'warns on stderr that %s project hooks were not loaded',
-    async (state, expected) => {
+    'warns on stderr only when project hooks were withheld (%s)',
+    async (state, pending, expected) => {
       const dir = mkdtempSync(join(tmpdir(), 'llm-hooks-gate-'));
       const root = join(dir, 'repo');
       const hooks = {
@@ -2200,12 +2201,32 @@ describe('llm.tsx main function', () => {
       };
       vi.stubEnv('QWEN_CODE_NO_RELAUNCH', 'true');
       vi.stubEnv('QWEN_CODE_HOOK_APPROVALS_PATH', join(dir, 'approvals.json'));
-      const { loadHookApprovals, resetHookApprovalsForTesting } = await import(
-        './config/hook-approvals.js'
-      );
+      const {
+        getProjectHooksForApproval,
+        loadHookApprovals,
+        resetHookApprovalsForTesting,
+      } = await import('./config/hook-approvals.js');
       resetHookApprovalsForTesting();
-      if (state === 'rejected') {
-        await loadHookApprovals().setState(root, hooks, 'rejected');
+      const settings = {
+        errors: [],
+        merged: { advanced: {}, security: { auth: {} }, ui: {} },
+        setValue: vi.fn(),
+        forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+        migrationWarnings: [],
+        getSystemHooks: () => undefined,
+        getUserHooks: () => undefined,
+        getProjectHooks: () => hooks,
+        user: { originalSettings: {} },
+        workspace: {
+          path: join(root, '.qwen', 'settings.json'),
+          originalSettings: { hooks },
+        },
+      };
+      if (state !== 'pending') {
+        await loadHookApprovals().setState(
+          getProjectHooksForApproval(settings as never)!,
+          state,
+        );
       }
       const originalIsTTY = Object.getOwnPropertyDescriptor(
         process.stdin,
@@ -2239,7 +2260,7 @@ describe('llm.tsx main function', () => {
         .mockResolvedValue(0);
       const configStub = {
         isInteractive: () => false,
-        isProjectHooksPendingApproval: () => true,
+        isProjectHooksPendingApproval: () => pending,
         getQuestion: () => 'hello',
         getSandbox: () => false,
         getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -2268,21 +2289,7 @@ describe('llm.tsx main function', () => {
       vi.mocked(parseArguments).mockResolvedValue({
         extensions: [],
       } as unknown as CliArgs);
-      vi.mocked(loadSettings).mockReturnValue({
-        errors: [],
-        merged: { advanced: {}, security: { auth: {} }, ui: {} },
-        setValue: vi.fn(),
-        forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
-        migrationWarnings: [],
-        getSystemHooks: () => undefined,
-        getUserHooks: () => undefined,
-        getProjectHooks: () => hooks,
-        user: { originalSettings: {} },
-        workspace: {
-          path: join(root, '.qwen', 'settings.json'),
-          originalSettings: { hooks },
-        },
-      } as never);
+      vi.mocked(loadSettings).mockReturnValue(settings as never);
       vi.mocked(loadCliConfig).mockResolvedValue(configStub);
       vi.spyOn(validatorModule, 'validateNonInteractiveAuth').mockResolvedValue(
         configStub,
@@ -2304,9 +2311,15 @@ describe('llm.tsx main function', () => {
         rmSync(dir, { recursive: true, force: true });
       }
 
-      expect(mockWriteStderrLine).toHaveBeenCalledWith(
-        expect.stringContaining(expected),
-      );
+      if (expected) {
+        expect(mockWriteStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining(expected),
+        );
+      } else {
+        expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+          expect.stringContaining('.qwen/settings.json were not loaded'),
+        );
+      }
       // Warn and continue: the prompt still runs, only the hooks are withheld.
       expect(runNonInteractiveSpy).toHaveBeenCalledTimes(1);
     },

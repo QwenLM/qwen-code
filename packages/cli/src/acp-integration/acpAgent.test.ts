@@ -296,6 +296,7 @@ vi.mock('./btw-generation.js', async (importOriginal) => ({
 
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  QWEN_DIR: '.qwen',
   BTW_MAX_INPUT_LENGTH: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).BTW_MAX_INPUT_LENGTH,

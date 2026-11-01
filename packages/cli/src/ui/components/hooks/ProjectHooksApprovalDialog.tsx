@@ -20,9 +20,11 @@ export enum ProjectHooksApprovalChoice {
   DISMISS = 'dismiss',
 }
 
-const PROJECT_HOOKS_DIALOG_TITLE = 'Untrusted hooks in .qwen/settings.json';
-const PROJECT_HOOKS_DIALOG_DESCRIPTION =
-  'This workspace declares hooks: commands Qwen Code runs on events such as session start or before a tool call. Approving lets them run with your privileges. Approval is bound to this exact configuration — if .qwen/settings.json changes, you will be asked again.';
+// English-only, like the MCP server approval dialog.
+export const PROJECT_HOOKS_DIALOG_TITLE =
+  'Untrusted hooks in .qwen/settings.json';
+export const PROJECT_HOOKS_DIALOG_DESCRIPTION =
+  "This workspace declares hooks: commands Qwen Code runs on events such as session start or before a tool call. Approving lets them run with your privileges. Approval is bound to this exact configuration and the workspace's .env files — if either changes, you will be asked again.";
 
 /** Rows besides the title and description: border, padding, two margins, two options, the Esc hint. */
 const PROJECT_HOOKS_DIALOG_FIXED_ROWS = 9;

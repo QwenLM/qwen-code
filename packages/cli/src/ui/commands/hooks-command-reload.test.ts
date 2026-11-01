@@ -27,6 +27,13 @@ import { normalizeProjectRoot } from '../../config/approval-project-root.js';
 const hook = (command: string) => [
   { matcher: '*', hooks: [{ type: 'command' as const, command }] },
 ];
+// The repo ships no .env and no settings.env.
+const approvalFor = (root: string, hooks: Record<string, unknown>) => ({
+  root,
+  hooks,
+  resolved: hooks,
+  env: { files: {}, settings: null },
+});
 
 describe('/hooks reload with real settings files', () => {
   let directory: string;
@@ -150,8 +157,7 @@ describe('/hooks reload with real settings files', () => {
   it('keeps approved project hooks after a worktree move and withholds an edited block', async () => {
     const repo = path.join(directory, 'repo');
     await loadHookApprovals().setState(
-      repo,
-      { PreToolUse: hook('echo project') },
+      approvalFor(repo, { PreToolUse: hook('echo project') }),
       'approved',
     );
     const { settings, context, entries } = await setup(true, true, {}, false);
@@ -173,13 +179,13 @@ describe('/hooks reload with real settings files', () => {
   it('re-reads the approvals file, so a decision edited by hand applies', async () => {
     const repo = path.join(directory, 'repo');
     const block = { PreToolUse: hook('echo project') };
-    await loadHookApprovals().setState(repo, block, 'rejected');
+    await loadHookApprovals().setState(approvalFor(repo, block), 'rejected');
     const { context, entries } = await setup(false, true, {}, true);
     fs.writeFileSync(
       path.join(directory, 'hookApprovals.json'),
       JSON.stringify({
         [normalizeProjectRoot(repo)]: {
-          hash: hashProjectHooks(block),
+          hash: hashProjectHooks(approvalFor(repo, block)),
           status: 'approved',
         },
       }),

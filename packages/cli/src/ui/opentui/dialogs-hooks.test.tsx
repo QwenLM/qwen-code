@@ -300,6 +300,7 @@ describe('hooks dialog helpers', () => {
       'allHooksDisabled',
       'untrusted',
       'pendingApproval',
+      'rejected',
       'registryDisabled',
     ] as const;
     const texts = reasons.map((disabledReason) =>
@@ -314,6 +315,7 @@ describe('hooks dialog helpers', () => {
       'disabled (disableAllHooks)',
       'disabled (folder not trusted)',
       'disabled (not approved)',
+      'disabled (rejected)',
       'disabled (turned off for this session)',
     ]);
     expect(new Set(texts).size).toBe(reasons.length);

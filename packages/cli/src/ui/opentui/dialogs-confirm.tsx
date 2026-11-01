@@ -84,6 +84,8 @@ import type { ShellConfirmationResolution } from './commands-context.js';
 import { McpApprovalChoice } from '../components/mcp/MCPServerApprovalDialog.js';
 import {
   layoutProjectHooksLines,
+  PROJECT_HOOKS_DIALOG_DESCRIPTION,
+  PROJECT_HOOKS_DIALOG_TITLE,
   ProjectHooksApprovalChoice,
 } from '../components/hooks/ProjectHooksApprovalDialog.js';
 import { computeHeaderCap } from '../components/messages/AskUserQuestionDialog.js';
@@ -1501,10 +1503,8 @@ export function OpenTuiProjectHooksApprovalDialog(
       onSelect(ProjectHooksApprovalChoice.DISMISS);
     }
   });
-  const title = t('Untrusted hooks in .qwen/settings.json');
-  const description = t(
-    'This workspace declares hooks: commands Qwen Code runs on events such as session start or before a tool call. Approving lets them run with your privileges. Approval is bound to this exact configuration — if .qwen/settings.json changes, you will be asked again.',
-  );
+  const title = PROJECT_HOOKS_DIALOG_TITLE;
+  const description = PROJECT_HOOKS_DIALOG_DESCRIPTION;
 
   return (
     <box marginLeft={3} width={Math.max(0, dialogAreaWidth(width) - 1)}>
@@ -1537,12 +1537,12 @@ export function OpenTuiProjectHooksApprovalDialog(
             renderLabel={(item, { isSelected }) => (
               <text fg={isSelected ? C.accent : C.text}>
                 {item.value === ProjectHooksApprovalChoice.APPROVE
-                  ? t('Approve these hooks')
-                  : t('Reject')}
+                  ? 'Approve these hooks'
+                  : 'Reject'}
               </text>
             )}
           />
-          <text fg={C.dim}>{t('Esc to decide later')}</text>
+          <text fg={C.dim}>Esc to decide later</text>
         </box>
       </DialogFrame>
     </box>

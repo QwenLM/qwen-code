@@ -25,9 +25,8 @@ import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { MessageType } from '../types.js';
 import { resolveHookSettingsForConfig } from '../../config/hook-settings.js';
 import {
-  getProjectHooksApprovalState,
+  applyProjectHooksApproval,
   getProjectHooksForApproval,
-  getProjectHooksRoot,
 } from '../../config/hook-approvals.js';
 import { appEvents, AppEvent } from '../../utils/events.js';
 
@@ -81,19 +80,9 @@ async function reloadHooksFromSettings(
   // An edited project hooks block has a new hash and so no approval: keep it
   // out of the registry and let the approval dialog ask again. Keyed like
   // startup, by the project the settings came from, not the live cwd.
-  const gated = config.isProjectHooksApprovalGated();
-  const state = gated
-    ? getProjectHooksApprovalState(
-        getProjectHooksForApproval(settings),
-        getProjectHooksRoot(settings),
-      )
+  const state = config.isProjectHooksApprovalGated()
+    ? applyProjectHooksApproval(config, getProjectHooksForApproval(settings))
     : undefined;
-  if (gated) {
-    config.setProjectHooksPendingApproval(
-      state !== undefined && state !== 'approved',
-      state === 'rejected',
-    );
-  }
   await hookSystem.reload();
   if (state === 'pending') {
     appEvents.emit(AppEvent.ProjectHooksPendingApprovalChanged);

@@ -24,7 +24,7 @@
 
 ### 审批存储
 
-`packages/cli/src/config/hook-approvals.ts` 把决定持久化到 `~/.qwen/hookApprovals.json`（可用 `QWEN_CODE_HOOK_APPROVALS_PATH` 覆盖），每个项目根目录一条记录：`{ hash, status }`，`status` 为 `approved` 或 `rejected`。`hash` 是项目 `hooks` 对象按文件原文（`${VAR}` 解析之前；启动时在项目 `.env` 加载前解析、`/hooks` 在其后解析，解析后的块在两条路径上哈希不同）连同块中出现的每个 `$VAR`/`${VAR}` 的当前值（hook 运行器自己设置的变量如 `QWEN_PROJECT_DIR`、以及该 hook 自身 `env` 中的键除外），按键排序序列化后的 SHA-256（使用无原型对象，因此自有的 `__proto__` 键也会参与哈希），因此文件里的键顺序无关，但任何行为上的修改（包括只通过项目 `.env` 做的修改）都会改变它。两条路径都在项目 `.env` 加载之后从 `process.env` 读取这些值，因此结果一致。哈希与当前 hooks 不匹配、或状态不是这两个值之一的记录视为 `pending`。调用方交给 Config 的是解析后块的副本：hook 注册表会原地给已加载的定义标注来源，而 ACP daemon 会在多个会话间复用同一个设置实例。项目根目录是 hooks 所在 `.qwen/settings.json` 的目录，而不是会话的工作目录，因此 `/cd` 与 `--worktree` 不会改变键；其规范化方式与 `mcpApprovals.json` 相同。文件以 `0600` 写入（已有的更宽松权限会被收紧），`QWEN_CODE_HOOK_APPROVALS_PATH` 与同类存储路径一样不允许由项目 `.env` 设置，并会转发进沙箱容器。每次检查都重新读取文件，因此长期运行的 ACP daemon 能看到在别处做出的决定；保存时重新读取并只替换本项目的记录，读不了文件时直接失败（hooks 保持扣留），而不是覆盖它。
+`packages/cli/src/config/hook-approvals.ts` 把决定持久化到 `~/.qwen/hookApprovals.json`（可用 `QWEN_CODE_HOOK_APPROVALS_PATH` 覆盖），每个项目根目录一条记录：`{ hash, status }`，`status` 为 `approved` 或 `rejected`。`hash` 是项目 `hooks` 对象按文件原文（`${VAR}` 解析之前；启动时在项目 `.env` 加载前解析、`/hooks` 在其后解析，解析后的块在两条路径上哈希不同），连同工作区提供的环境变量来源——它自己的每个 `.env` 文件（`loadEnvironment` 读取的非用户级文件，取解析结果，读不了时为 `null`）以及它的 `settings.env`——按键排序序列化后的 SHA-256（使用无原型对象，因此自有的 `__proto__` 键也会参与哈希），因此键顺序无关，但任何行为上的修改（包括只通过项目 `.env` 做的修改）都会改变它。不从命令文本里解析变量名：hook 或它启动的脚本可以读取任何变量，对 shell 展开的任何模拟都不可能完整。用户在工作区之外设置的变量属于用户自己，不参与哈希。哈希与当前 hooks 不匹配、或状态不是这两个值之一的记录视为 `pending`。调用方交给 Config 的是解析后块的副本：hook 注册表会原地给已加载的定义标注来源，而 ACP daemon 会在多个会话间复用同一个设置实例。项目根目录是 hooks 所在 `.qwen/settings.json` 的目录，而不是会话的工作目录，因此 `/cd` 与 `--worktree` 不会改变键；其规范化方式与 `mcpApprovals.json` 相同。文件以 `0600` 写入（已有的更宽松权限会被收紧），`QWEN_CODE_HOOK_APPROVALS_PATH` 与同类存储路径一样不允许由项目 `.env` 设置，并会转发进沙箱容器。每次检查都重新读取文件，因此长期运行的 ACP daemon 能看到在别处做出的决定；保存时重新读取并只替换本项目的记录，读不了文件时直接失败（hooks 保持扣留），而不是覆盖它。
 
 `isProjectHooksPendingApproval(projectHooks, projectRoot)` 在 hooks 块至少声明了一个注册表会运行的 hook（已知事件，且为带有命令、URL 或 prompt 的 `command`、`http` 或 `prompt` hook）且状态不是 `approved`（待定或已拒绝）时为 `true`。不存在、为 `null`、为空或没有可运行内容的块永远不受闸门约束。
 
@@ -34,11 +34,11 @@
 
 ### CLI 启动
 
-`loadCliConfig` 根据调用方提供的未解析项目块及其项目根目录（未提供作用域时用合并后的 `hooks`）计算该标志。在 `--bare`、`--safe-mode` 和 `disableAllHooks` 下（此时不加载任何 hooks），该标志为 `undefined`。命令行要求的 YOLO 审批模式下（`--yolo`、`--approval-mode yolo`）该标志为 `false` 并带 `projectHooksYoloExempt`，闸门只在会话处于 YOLO 期间关闭：用户离开 YOLO 后，`/hooks` 重载会重新对该块设闸。来自设置的 YOLO 模式不豁免 hooks，因为工作区自己的 `tools.approvalMode` 就能设置它。
+`loadCliConfig` 根据调用方提供的未解析项目块及其项目根目录计算该标志（启动与 hosted 调用方都提供分离的作用域；单独的合并 `hooks` 块无法区分来源，只要其中有可运行的 hook 就设为 `true`）。在 `--bare`、`--safe-mode`、`disableAllHooks` 和 shell 执行沙箱下（此时不加载任何 hooks），该标志为 `undefined`。命令行要求的 YOLO 审批模式下（`--yolo`、`--approval-mode yolo`）该标志为 `false` 并带 `projectHooksYoloExempt`，闸门只在会话处于 YOLO 期间关闭：第一次切出 YOLO 时会重新读取决定、设置标志并重载 hooks。来自设置的 YOLO 模式不豁免 hooks，因为工作区自己的 `tools.approvalMode` 就能设置它。
 
 ### 交互式审批
 
-`useProjectHooksApproval`（ink 与 OpenTUI 共用）在状态严格为 `pending` 时显示对话框，基于未解析的块按 `Event  target [details]` 列出每个 hook：命令及其 `env`（以 `KEY=value` 显示）、`shell`、`async` 以及它引用的每个变量的当前值，使实际执行的命令可见；URL 及其请求头名称与 `allowedEnvVars`；prompt 文本及其 `model` 覆盖；matcher 放在最后，不会把执行目标挤出该行。仓库提供的每个字符串都压成一行，并去除转义序列、双向控制及其他格式字符；超过 200 个码点的值会被截断并标明原长度，被省略的尾部不会悄无声息。每个 hook 占一行，按对话框文本宽度截断并带 `… [+N chars]` 标记；列表按该宽度下换行后的标题所剩行数截断（两个渲染器都使用有限的列表对话框预算），最少只剩 "… and N more" 一行，保证选项始终可见。批准会持久化 `approved`、解除运行中 `Config` 的闸门并重载 hook 系统；拒绝会持久化 `rejected`，hooks 保持不加载；Esc 关闭对话框且不保存任何决定，并在会话记录中加一行说明 hooks 未加载；本会话内同一个块不再弹出，因此 `/hooks` 可以展示它，下次启动（或块被修改）时再次询问。保存失败时 hooks 保持扣留并给出提示。该对话框排在 MCP 审批对话框之后。ink 的 `/hooks` 浏览器把被扣留的项目 hooks 标为未批准或已拒绝。
+`useProjectHooksApproval`（ink 与 OpenTUI 共用）在状态严格为 `pending` 时显示对话框，按 `Event  target [details]` 列出每个 hook，文字取自未解析的块（hook 是否会运行、进而整个块是否需要设闸，按解析后的块判断，因此 `type` 里的 `${VAR}` 藏不住 hook）：命令及其 `env`（以 `KEY=value` 显示）、`shell` 与 `async`；URL 及其请求头名称与 `allowedEnvVars`；prompt 文本及其 `model` 覆盖；matcher 放在最后，不会把执行目标挤出该行。仓库提供的每个字符串都压成一行，并去除转义序列、双向控制及其他格式字符；超过 200 个码点的值会被截断并标明原长度，被省略的尾部不会悄无声息。每个 hook 占一行，按对话框文本宽度截断并带 `… [+N chars]` 标记；列表按该宽度下换行后的标题所剩行数截断（两个渲染器都使用有限的列表对话框预算），最少只剩 "… and N more" 一行，保证选项始终可见。批准会持久化 `approved`、解除运行中 `Config` 的闸门并重载 hook 系统；拒绝会持久化 `rejected`，hooks 保持不加载；Esc 关闭对话框且不保存任何决定，并在会话记录中加一行说明 hooks 未加载；本会话内同一个块不再弹出，因此 `/hooks` 可以展示它，下次启动（或块被修改）时再次询问。保存失败时 hooks 保持扣留并给出提示。该对话框排在 MCP 审批对话框之后。ink 的 `/hooks` 浏览器把被扣留的项目 hooks 标为未批准或已拒绝。
 
 ### `/hooks` 重载
 
@@ -54,7 +54,7 @@
 - **按项目而非按 hook 决定。** hooks 以文件声明的整个块为单位审阅；逐条排队只会增加 UI，不增加安全性。
 - **只有命令行的 YOLO 跳过闸门。** 那是用户自己选择批准一切；设置里的值可能是仓库选的。
 - **记住拒绝**，被拒绝的仓库不会每次启动都询问，但任何修改都会重新询问。Esc 不算拒绝，顺手关掉的对话框下次启动还会出现。
-- **被引用的变量属于批准内容。** shell 在运行时展开它们，否则项目 `.env` 可以不动文件就改变已批准的命令。轮换这类值会重新询问。
+- **工作区的环境变量按内容属于批准范围。** 否则项目 `.env` 或 `settings.env` 可以不动 hooks 块就改变已批准 hook 的行为。绑定整个来源而不是命令里提到的变量名，也覆盖了自行读取环境的脚本。修改其中任何值都会重新询问；对话框不显示任何值，因此不会把凭据显示出来。
 - **哈希只覆盖 `hooks` 块。** 项目可设置的其他 hook 相关设置，如 `stopHookBlockingCap`（上限钳制为 100），只调节已批准 hooks 的运行方式，本身不执行任何东西；把它们纳入哈希会让所有已批准项目重新询问，却没有新命令可审。
 
 ## 验证

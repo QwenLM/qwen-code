@@ -17,6 +17,7 @@ import { ProjectHooksApprovalChoice } from '../components/hooks/ProjectHooksAppr
 import { appEvents, AppEvent } from '../../utils/events.js';
 import {
   HOOK_APPROVALS_FILENAME,
+  getProjectHooksForApproval,
   loadHookApprovals,
   resetHookApprovalsForTesting,
 } from '../../config/hook-approvals.js';
@@ -26,12 +27,17 @@ describe('useProjectHooksApproval', () => {
   let pending: boolean;
   let rejected: boolean;
   let reload: ReturnType<typeof vi.fn>;
+  let gateAtReload: boolean[];
   const hooks = {
     SessionStart: [{ hooks: [{ type: 'command', command: './setup.sh' }] }],
   };
 
   const makeConfig = (): Config => {
-    reload = vi.fn().mockResolvedValue(undefined);
+    gateAtReload = [];
+    reload = vi.fn(() => {
+      gateAtReload.push(pending);
+      return Promise.resolve();
+    });
     return {
       isProjectHooksPendingApproval: () => pending,
       setProjectHooksPendingApproval: (value: boolean, rej = false) => {
@@ -44,6 +50,7 @@ describe('useProjectHooksApproval', () => {
   };
   const makeSettings = (projectHooks: Record<string, unknown> | undefined) =>
     ({
+      merged: {},
       getProjectHooks: () => projectHooks,
       workspace: {
         path: path.join(dir, '.qwen', 'settings.json'),
@@ -91,9 +98,12 @@ describe('useProjectHooksApproval', () => {
   });
 
   it('does not re-prompt a settled rejection', async () => {
-    await loadHookApprovals().setState(dir, hooks, 'rejected');
     const config = makeConfig();
     const settings = makeSettings(hooks);
+    await loadHookApprovals().setState(
+      getProjectHooksForApproval(settings)!,
+      'rejected',
+    );
     const { result } = renderHook(() =>
       useProjectHooksApproval(config, settings),
     );
@@ -131,9 +141,12 @@ describe('useProjectHooksApproval', () => {
     );
     expect(result.current.isProjectHooksApprovalDialogOpen).toBe(false);
     expect(pending).toBe(false);
-    expect(reload).toHaveBeenCalledTimes(1);
+    // Un-gated first, or the reload would leave the approved hooks out.
+    expect(gateAtReload).toEqual([false]);
     resetHookApprovalsForTesting();
-    expect(loadHookApprovals().getState(dir, hooks)).toBe('approved');
+    expect(
+      loadHookApprovals().getState(getProjectHooksForApproval(settings)!),
+    ).toBe('approved');
   });
 
   it('reject persists the rejection, keeps the gate and closes', async () => {
@@ -152,7 +165,9 @@ describe('useProjectHooksApproval', () => {
     expect(rejected).toBe(true);
     expect(reload).not.toHaveBeenCalled();
     resetHookApprovalsForTesting();
-    expect(loadHookApprovals().getState(dir, hooks)).toBe('rejected');
+    expect(
+      loadHookApprovals().getState(getProjectHooksForApproval(settings)!),
+    ).toBe('rejected');
   });
 
   it('keeps the hooks withheld and says so when the decision cannot be saved', async () => {
@@ -200,13 +215,16 @@ describe('useProjectHooksApproval', () => {
     expect(result.current.isProjectHooksApprovalDialogOpen).toBe(false);
     expect(pending).toBe(true);
     resetHookApprovalsForTesting();
-    expect(loadHookApprovals().getState(dir, hooks)).toBe('pending');
+    expect(
+      loadHookApprovals().getState(getProjectHooksForApproval(settings)!),
+    ).toBe('pending');
   });
 
   it('stays dismissed for the session until the block changes', async () => {
     const config = makeConfig();
     const current = { hooks: hooks as Record<string, unknown> };
     const settings = {
+      merged: {},
       getProjectHooks: () => current.hooks,
       workspace: {
         path: path.join(dir, '.qwen', 'settings.json'),

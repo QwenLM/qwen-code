@@ -45,9 +45,27 @@ import {
 } from '../peerMessaging/enabled.js';
 
 const sshWorkspaceProbe = vi.hoisted(() => vi.fn());
-vi.mock('./hook-approvals.js', () => ({
-  getProjectHooksApprovalState: vi.fn(() => undefined),
-}));
+vi.mock('./hook-approvals.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./hook-approvals.js')>();
+  const getProjectHooksApprovalState = vi.fn<
+    typeof actual.getProjectHooksApprovalState
+  >(() => undefined);
+  return {
+    ...actual,
+    getProjectHooksApprovalState,
+    applyProjectHooksApproval: (
+      config: Parameters<typeof actual.applyProjectHooksApproval>[0],
+      approval: Parameters<typeof actual.applyProjectHooksApproval>[1],
+    ) => {
+      const state = getProjectHooksApprovalState(approval);
+      config.setProjectHooksPendingApproval(
+        state !== undefined && state !== 'approved',
+        state === 'rejected',
+      );
+      return state;
+    },
+  };
+});
 
 vi.mock('../serve/ssh-workspace-store.js', () => ({
   readSshWorkspace: sshWorkspaceProbe,
@@ -5769,36 +5787,93 @@ describe('loadCliConfig with includeDirectories', () => {
       },
     );
 
-    it('gates the unresolved block under the project that supplied it', async () => {
+    const approval = {
+      root: path.resolve(path.sep, 'home', 'user', 'repo'),
+      hooks: projectHooks,
+      resolved: projectHooks,
+      env: { files: {}, settings: null },
+    };
+
+    it('asks the store about the approval the caller built', async () => {
       process.argv = ['node', 'script.js'];
       const argv = await parseArguments();
-      const root = path.resolve(path.sep, 'home', 'user', 'repo');
-      const unresolved = structuredClone(projectHooks);
 
       await loadCliConfig({}, argv, cwd, undefined, {
         projectHooks,
-        projectHooksApproval: { root, hooks: unresolved },
+        projectHooksApproval: approval,
       });
 
       expect(vi.mocked(getProjectHooksApprovalState).mock.calls).toEqual([
-        [unresolved, root],
+        [approval],
       ]);
-      expect(vi.mocked(getProjectHooksApprovalState).mock.calls[0]![0]).toBe(
-        unresolved,
-      );
     });
 
-    it('gates the merged hooks when no separated scopes are supplied', async () => {
+    it.each([
+      [{ Stop: [{ hooks: [{ type: 'command', command: 'x' }] }] }, true],
+      [projectHooks, undefined],
+    ])(
+      'withholds merged hooks it cannot attribute (%j → %s)',
+      async (hooks, pending) => {
+        vi.mocked(getProjectHooksApprovalState).mockReturnValue(undefined);
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
+
+        await loadCliConfig({ hooks } as Settings, argv, cwd);
+
+        expect(gateParam()).toBe(pending ?? false);
+      },
+    );
+
+    it('does not gate hooks a shell execution sandbox never loads', async () => {
+      vi.mocked(fs.statSync).mockReturnValue({
+        isDirectory: () => true,
+      } as import('node:fs').Stats);
+      vi.mocked(fs.realpathSync).mockImplementation((value) =>
+        value.toString(),
+      );
       process.argv = ['node', 'script.js'];
       const argv = await parseArguments();
+      const workspace = path.resolve(path.sep, 'sandbox-fixture', 'workspace');
 
-      await loadCliConfig({ hooks: projectHooks }, argv, cwd);
-
-      expect(getProjectHooksApprovalState).toHaveBeenCalledWith(
-        projectHooks,
-        cwd,
+      await loadCliConfig(
+        {},
+        argv,
+        workspace,
+        [],
+        { projectHooks, projectHooksApproval: approval },
+        undefined,
+        undefined,
+        undefined,
+        false,
+        {
+          shellExecutionSandbox: {
+            workspace,
+            installation: path.resolve('/trusted-install'),
+            state: path.resolve('/trusted-state'),
+            maskedPaths: [],
+            filesystem: 'workspace-write',
+            network: 'closed',
+          },
+        },
       );
-      expect(gateParam()).toBe(true);
+
+      expect(gateParam()).toBeUndefined();
+    });
+
+    it('gates a --yolo session as soon as it leaves YOLO', async () => {
+      process.argv = ['node', 'script.js', '--yolo'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv, cwd, undefined, {
+        projectHooks,
+        projectHooksApproval: approval,
+      });
+      expect(config.isProjectHooksPendingApproval()).toBe(false);
+
+      config.setApprovalMode(ServerConfig.ApprovalMode.DEFAULT);
+
+      expect(getProjectHooksApprovalState).toHaveBeenCalledWith(approval);
+      expect(config.isProjectHooksPendingApproval()).toBe(true);
+      expect(config.getProjectHooks()).toBeUndefined();
     });
 
     it.each([

@@ -13,6 +13,8 @@ import { atomicWriteFile } from '@qwen-code/qwen-code-core/utils/atomicFileWrite
 import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
 import stripJsonComments from 'strip-json-comments';
 import { normalizeProjectRoot } from './approval-project-root.js';
+import { readProjectEnvFiles } from './environment.js';
+import type { Settings } from './settingsSchema.js';
 import {
   clipToWidth,
   cpLen,
@@ -30,7 +32,7 @@ export type HookApprovalState = HookApprovalStatus | 'pending';
 /**
  * The user's persisted decision for the `hooks` block of a workspace
  * `.qwen/settings.json`. Like an MCP approval it is bound to the hash of the
- * exact configuration reviewed, and of the environment values it references:
+ * exact configuration reviewed, and of the env sources the workspace controls:
  * any change to either returns the block to `pending`.
  */
 export interface HookApprovalRecord {
@@ -40,6 +42,25 @@ export interface HookApprovalRecord {
 
 /** `{ [projectRoot]: record }` — user-local, one decision per project. */
 export type HookApprovalsConfig = Record<string, HookApprovalRecord>;
+
+/** What one approval decision covers. */
+export interface ProjectHooksApproval {
+  /** The project whose `.qwen/settings.json` the hooks come from. */
+  root: string;
+  /**
+   * The block before `${VAR}` resolution: startup and `/hooks` resolve
+   * against different environments, so only this text hashes the same.
+   */
+  hooks: Record<string, unknown>;
+  /** The resolved block: what the registry runs, so what the gate counts. */
+  resolved: Record<string, unknown>;
+  /**
+   * The env the workspace supplies: its `.env` files and `settings.env`. A
+   * hook, or a script it starts, can read any of it, so a change there can
+   * change what runs without touching the block.
+   */
+  env: { files: Record<string, unknown>; settings: unknown };
+}
 
 export function getHookApprovalsPath(): string {
   if (process.env['QWEN_CODE_HOOK_APPROVALS_PATH']) {
@@ -55,107 +76,74 @@ export function getProjectHooksRoot(settings: {
   return path.dirname(path.dirname(settings.workspace.path));
 }
 
-/**
- * The workspace hooks block as written in `.qwen/settings.json`, before
- * `${VAR}` resolution: startup and `/hooks` resolve against different
- * environments, so only the unresolved text hashes the same on both.
- */
+/** The workspace hooks the gate covers, or `undefined` when none would run. */
 export function getProjectHooksForApproval(settings: {
+  merged: Settings;
   getProjectHooks(): Record<string, unknown> | undefined;
-  workspace: { originalSettings: { hooks?: unknown } };
-}): Record<string, unknown> | undefined {
-  // Resolution keeps the structure, so the resolved block (already withheld
-  // in an untrusted folder) decides whether there is anything to gate.
+  workspace: {
+    path: string;
+    originalSettings: { hooks?: unknown; env?: unknown };
+  };
+}): ProjectHooksApproval | undefined {
+  // Already withheld in an untrusted folder.
   const resolved = settings.getProjectHooks();
   if (!isRecord(resolved) || summarizeProjectHooks(resolved).length === 0) {
     return undefined;
   }
   const hooks = settings.workspace.originalSettings.hooks;
-  return isRecord(hooks) ? hooks : undefined;
+  if (!isRecord(hooks)) return undefined;
+  const root = getProjectHooksRoot(settings);
+  return {
+    root,
+    hooks,
+    resolved,
+    env: {
+      files: readProjectEnvFiles(settings.merged, root),
+      settings: settings.workspace.originalSettings.env ?? null,
+    },
+  };
 }
 
 /** The separated hook scopes `loadCliConfig` takes, with the block it gates. */
-export function getSeparatedHookSettings(settings: {
-  getSystemHooks(): Record<string, unknown> | undefined;
-  getUserHooks(): Record<string, unknown> | undefined;
-  getProjectHooks(): Record<string, unknown> | undefined;
-  workspace: { path: string; originalSettings: { hooks?: unknown } };
-}) {
+export function getSeparatedHookSettings(
+  settings: Parameters<typeof getProjectHooksForApproval>[0] & {
+    getSystemHooks(): Record<string, unknown> | undefined;
+    getUserHooks(): Record<string, unknown> | undefined;
+  },
+) {
   // A copy: the hook registry tags loaded definitions in place, and an ACP
   // daemon reuses one settings instance.
   const projectHooks = structuredClone(settings.getProjectHooks());
-  const gated = getProjectHooksForApproval(settings);
+  const projectHooksApproval = getProjectHooksForApproval(settings);
   return {
     systemHooks: settings.getSystemHooks(),
     userHooks: settings.getUserHooks(),
     projectHooks,
-    ...(gated
-      ? {
-          projectHooksApproval: {
-            root: getProjectHooksRoot(settings),
-            hooks: gated,
-          },
-        }
-      : {}),
+    ...(projectHooksApproval ? { projectHooksApproval } : {}),
   };
-}
-
-// Set by the hook runner itself, so their launch-time values are not what runs.
-const RUNNER_ENV = new Set([
-  'ARGUMENTS',
-  'CLAUDE_PROJECT_DIR',
-  'GEMINI_PROJECT_DIR',
-  'QWEN_PROJECT_DIR',
-  'QWEN_CODE_CLI',
-  'QWEN_CODE_MODEL',
-  'QWEN_CODE_PROJECT_DIR',
-  'QWEN_CODE_SESSION_ID',
-]);
-
-function collectEnvRefs(value: unknown, names: Set<string>, own: Set<string>) {
-  if (typeof value === 'string') {
-    for (const m of value.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)) {
-      if (!RUNNER_ENV.has(m[1]) && !own.has(m[1])) names.add(m[1]);
-    }
-  } else if (Array.isArray(value)) {
-    for (const v of value) collectEnvRefs(v, names, own);
-  } else if (isRecord(value)) {
-    // A hook's own `env` is part of the block, so it is hashed already.
-    const scoped = isRecord(value['env'])
-      ? new Set([...own, ...Object.keys(value['env'])])
-      : own;
-    for (const v of Object.values(value)) collectEnvRefs(v, names, scoped);
-  }
-}
-
-/**
- * `$VAR`/`${VAR}` values the block reads from the environment (the project
- * `.env` included): they change what runs without changing the file.
- */
-function referencedEnv(value: unknown): Array<[string, string | null]> {
-  const names = new Set<string>();
-  collectEnvRefs(value, names, new Set());
-  return [...names].sort().map((n) => [n, process.env[n] ?? null]);
 }
 
 /**
  * Sorted-key canonical hash so key order in the file does not matter. Null
  * prototypes keep an own `__proto__` key in the hashed output.
  */
-export function hashProjectHooks(hooks: Record<string, unknown>): string {
-  const env = referencedEnv(hooks);
-  const input = env.length > 0 ? { hooks, env } : hooks;
-  const stable = JSON.stringify(input, (_key, value) => {
-    if (value && typeof value === 'object' && !Array.isArray(value)) {
-      const obj = value as Record<string, unknown>;
-      const sorted: Record<string, unknown> = Object.create(null);
-      for (const k of Object.keys(obj).sort()) {
-        sorted[k] = obj[k];
+export function hashProjectHooks(
+  approval: Pick<ProjectHooksApproval, 'hooks' | 'env'>,
+): string {
+  const stable = JSON.stringify(
+    { hooks: approval.hooks, env: approval.env },
+    (_key, value) => {
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const obj = value as Record<string, unknown>;
+        const sorted: Record<string, unknown> = Object.create(null);
+        for (const k of Object.keys(obj).sort()) {
+          sorted[k] = obj[k];
+        }
+        return sorted;
       }
-      return sorted;
-    }
-    return value;
-  });
+      return value;
+    },
+  );
   return crypto.createHash('sha256').update(stable).digest('hex');
 }
 
@@ -195,7 +183,15 @@ function keyList(value: unknown): string | undefined {
   return undefined;
 }
 
-function describeHook(hook: Record<string, unknown>, matcher: unknown): string {
+/**
+ * `hook` is the resolved entry, which decides what runs; the text shown is
+ * `raw`'s, as written, so resolved env values never reach the screen.
+ */
+function describeHook(
+  hook: Record<string, unknown>,
+  raw: Record<string, unknown>,
+  matcher: unknown,
+): string {
   const details: string[] = [];
   const add = (label: string, value: string | undefined) => {
     if (value) details.push(`${label}: ${value}`);
@@ -203,38 +199,28 @@ function describeHook(hook: Record<string, unknown>, matcher: unknown): string {
   let head: string;
   switch (hook['type']) {
     case 'command':
-      head = displayText(hook['command']);
-      add('env', envList(hook['env']));
-      if (hook['shell']) add('shell', displayText(hook['shell']));
+      head = displayText(raw['command']);
+      add('env', envList(raw['env']));
+      if (raw['shell']) add('shell', displayText(raw['shell']));
       if (hook['async'] === true) details.push('async');
-      // What the shell will substitute, so the effective command is visible.
-      add(
-        'vars',
-        referencedEnv(hook)
-          .map(
-            ([k, v]) => `${k}=${v === null ? '(unset)' : displayText(v, 80)}`,
-          )
-          .join(', '),
-      );
       break;
     case 'http':
-      head = `http ${displayText(hook['url'])}`;
-      add('headers', keyList(hook['headers']));
-      add('allowedEnvVars', keyList(hook['allowedEnvVars']));
-      break;
-    case 'prompt':
-      head = `prompt "${displayText(hook['prompt'])}"`;
-      if (hook['model']) add('model', displayText(hook['model'], 80));
+      head = `http ${displayText(raw['url'])}`;
+      add('headers', keyList(raw['headers']));
+      add('allowedEnvVars', keyList(raw['allowedEnvVars']));
       break;
     default:
-      head = displayText(hook['type'] ?? 'unknown');
+      head = `prompt "${displayText(raw['prompt'])}"`;
+      if (raw['model']) add('model', displayText(raw['model'], 80));
   }
+  if (raw['type'] !== hook['type']) add('type', displayText(raw['type']));
   // Last, so a long matcher cannot push what runs off the row.
   if (matcher) add('matcher', displayText(matcher, 80));
   return details.length > 0 ? `${head} [${details.join('; ')}]` : head;
 }
 
 const HOOK_EVENTS = new Set<string>(Object.values(HookEventName));
+// `function` hooks are absent: JSON settings cannot carry their callback.
 const REQUIRED_FIELD: Record<string, string> = {
   command: 'command',
   http: 'url',
@@ -248,28 +234,39 @@ function isRunnableHook(hook: unknown): hook is Record<string, unknown> {
   return field !== undefined && Boolean(hook[field]);
 }
 
+function entry(value: unknown, key: string | number): unknown {
+  if (Array.isArray(value) && typeof key === 'number') return value[key];
+  return isRecord(value) ? value[key] : undefined;
+}
+
 /**
- * One display line per hook the registry would run. A block with no such
- * line declares nothing executable and is not gated.
+ * One display line per hook the registry would run in `resolved`, worded
+ * from the matching entry of `raw` (the unresolved block) where it has one.
+ * A block with no such line declares nothing executable and is not gated.
  */
 export function summarizeProjectHooks(
-  hooks: Record<string, unknown>,
+  resolved: Record<string, unknown>,
+  raw: Record<string, unknown> = resolved,
 ): string[] {
   const lines: string[] = [];
-  for (const [event, definitions] of Object.entries(hooks)) {
+  for (const [event, definitions] of Object.entries(resolved)) {
     if (!HOOK_EVENTS.has(event) || !Array.isArray(definitions)) continue;
-    for (const definition of definitions) {
-      if (!isRecord(definition) || !Array.isArray(definition['hooks'])) {
-        continue;
-      }
-      for (const hook of definition['hooks']) {
-        if (isRunnableHook(hook)) {
-          lines.push(
-            `${displayText(event, 24)}  ${describeHook(hook, definition['matcher'])}`,
-          );
-        }
-      }
-    }
+    definitions.forEach((definition, i) => {
+      if (!isRecord(definition) || !Array.isArray(definition['hooks'])) return;
+      const rawDefinition = entry(entry(raw, event), i);
+      definition['hooks'].forEach((hook, j) => {
+        if (!isRunnableHook(hook)) return;
+        const rawHook = entry(entry(rawDefinition, 'hooks'), j);
+        const rawMatcher = entry(rawDefinition, 'matcher');
+        lines.push(
+          `${displayText(event, 24)}  ${describeHook(
+            hook,
+            isRecord(rawHook) ? rawHook : hook,
+            rawMatcher ?? definition['matcher'],
+          )}`,
+        );
+      });
+    });
   }
   return lines;
 }
@@ -306,12 +303,10 @@ export class LoadedHookApprovals {
     readonly errors: Array<{ message: string; path: string }>,
   ) {}
 
-  getState(
-    projectRoot: string,
-    hooks: Record<string, unknown>,
-  ): HookApprovalState {
-    const record: unknown = this.file.config[normalizeProjectRoot(projectRoot)];
-    if (!isRecord(record) || record['hash'] !== hashProjectHooks(hooks)) {
+  getState(approval: ProjectHooksApproval): HookApprovalState {
+    const record: unknown =
+      this.file.config[normalizeProjectRoot(approval.root)];
+    if (!isRecord(record) || record['hash'] !== hashProjectHooks(approval)) {
       return 'pending';
     }
     const status = record['status'];
@@ -324,16 +319,15 @@ export class LoadedHookApprovals {
    * read or written rather than overwrite it or report a decision unsaved.
    */
   async setState(
-    projectRoot: string,
-    hooks: Record<string, unknown>,
+    approval: ProjectHooksApproval,
     status: HookApprovalStatus,
   ): Promise<void> {
     const { config, errors } = readHookApprovals(this.file.path);
     if (errors.length > 0) {
       throw new Error(`${errors[0].message} (${this.file.path})`);
     }
-    Object.defineProperty(config, normalizeProjectRoot(projectRoot), {
-      value: { hash: hashProjectHooks(hooks), status },
+    Object.defineProperty(config, normalizeProjectRoot(approval.root), {
+      value: { hash: hashProjectHooks(approval), status },
       enumerable: true,
       configurable: true,
       writable: true,
@@ -403,25 +397,24 @@ export function loadHookApprovals(): LoadedHookApprovals {
  * configuration.
  */
 export function getProjectHooksApprovalState(
-  projectHooks: unknown,
-  projectRoot: string,
+  approval: ProjectHooksApproval | undefined,
 ): HookApprovalState | undefined {
-  if (
-    !isRecord(projectHooks) ||
-    summarizeProjectHooks(projectHooks).length === 0
-  ) {
-    return undefined;
-  }
-  return loadHookApprovals().getState(projectRoot, projectHooks);
+  return approval ? loadHookApprovals().getState(approval) : undefined;
 }
 
-/** True while project hooks must not load: no decision yet, or rejected. */
-export function isProjectHooksPendingApproval(
-  projectHooks: unknown,
-  projectRoot: string,
-): boolean {
-  const state = getProjectHooksApprovalState(projectHooks, projectRoot);
-  return state !== undefined && state !== 'approved';
+/** Sets the session's gate from the stored decision and returns it. */
+export function applyProjectHooksApproval(
+  config: {
+    setProjectHooksPendingApproval(pending: boolean, rejected?: boolean): void;
+  },
+  approval: ProjectHooksApproval | undefined,
+): HookApprovalState | undefined {
+  const state = getProjectHooksApprovalState(approval);
+  config.setProjectHooksPendingApproval(
+    state !== undefined && state !== 'approved',
+    state === 'rejected',
+  );
+  return state;
 }
 
 /** The stderr line a headless run prints for withheld project hooks. */

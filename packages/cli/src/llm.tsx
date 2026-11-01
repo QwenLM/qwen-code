@@ -117,7 +117,6 @@ import {
   getProjectHooksApprovalState,
   getProjectHooksForApproval,
   getProjectHooksHeadlessWarning,
-  getProjectHooksRoot,
   getSeparatedHookSettings,
 } from './config/hook-approvals.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
@@ -1566,10 +1565,7 @@ export async function main() {
       if (config.isProjectHooksPendingApproval()) {
         writeStderrLine(
           getProjectHooksHeadlessWarning(
-            getProjectHooksApprovalState(
-              getProjectHooksForApproval(settings),
-              getProjectHooksRoot(settings),
-            ),
+            getProjectHooksApprovalState(getProjectHooksForApproval(settings)),
           ),
         );
       }

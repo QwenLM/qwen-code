@@ -12,6 +12,7 @@ import { WorkflowRunner } from '@qwen-code/qwen-code-core/agents/runtime/workflo
 import type { WorkflowRunOutcome } from '@qwen-code/qwen-code-core/agents/runtime/workflow-orchestrator.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
 import { loadSettings } from '../config/settings.js';
+import { getSeparatedHookSettings } from '../config/hook-approvals.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
   applyHostedModelPin,
@@ -232,7 +233,7 @@ export async function runHostedWorkflowTurn(input: {
     argv,
     input.cwd,
     undefined,
-    undefined,
+    getSeparatedHookSettings(settings),
     undefined,
     undefined,
     undefined,
