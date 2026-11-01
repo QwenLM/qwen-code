@@ -12,6 +12,7 @@ import {
   useState,
   type CSSProperties,
 } from 'react';
+import { Gamepad2Icon } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { isCoarsePointerDevice } from '../hooks/useIsTouchComposer';
 import { formatTokenCount } from '../utils/formatTokenCount';
@@ -49,7 +50,6 @@ import {
   type WaitingSnakeDirection,
   type WaitingSnakeState,
 } from '../utils/waitingSnake';
-import { QwenLogoIcon } from './QwenLogoIcon';
 import styles from './WaitingMinigame.module.css';
 
 const BEST_SCORE_KEY = 'qwen-code-web-shell-waiting-minigame-best';
@@ -959,7 +959,7 @@ export function WaitingMinigame({
                 >
                   <button
                     type="button"
-                    className={styles.qwenStart}
+                    className={styles.gameStart}
                     data-component="waiting-minigame-start"
                     title={t('waitingGame.startGame')}
                     aria-label={t('waitingGame.startGame')}
@@ -969,7 +969,11 @@ export function WaitingMinigame({
                     }}
                     onClick={startRandomGame}
                   >
-                    <QwenLogoIcon className={styles.qwenLogo} />
+                    <Gamepad2Icon
+                      className={styles.gameIcon}
+                      strokeWidth={2.2}
+                      aria-hidden
+                    />
                   </button>
                 </div>
               )}

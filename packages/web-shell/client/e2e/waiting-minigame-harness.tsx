@@ -12,6 +12,7 @@ import {
   type WaitingActivityDay,
   type WaitingActivityMessage,
 } from '../utils/waitingActivity';
+import { readWaitingGamesEnabled } from '../utils/waitingGamesConfig';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -46,7 +47,9 @@ function Harness() {
   const [seed, setSeed] = useState(1);
   const [withTokens, setWithTokens] = useState(true);
   const [entryDelayMs, setEntryDelayMs] = useState(0);
-  const [gamesEnabled, setGamesEnabled] = useState(false);
+  const [gamesEnabled, setGamesEnabled] = useState(() =>
+    readWaitingGamesEnabled(),
+  );
   const [located, setLocated] = useState('');
   const [nextGame, setNextGame] = useState<'random' | 'tetris' | 'snake'>(
     'random',
@@ -55,7 +58,7 @@ function Harness() {
   const tokenUsage = withTokens ? TOKENS : { input: 0, output: 0, cached: 0 };
   const toggleTheme = () => setDark((value) => !value);
 
-  // 只在点击 Qwen 入口时替换第一次随机数，保证开局堆和后续逻辑仍是随机的
+  // 只在点击游戏入口时替换第一次随机数，保证开局堆和后续逻辑仍是随机的
   useEffect(() => {
     if (nextGame === 'random') return;
     const onPointerDown = (event: PointerEvent) => {
@@ -128,7 +131,7 @@ function Harness() {
               setEntryDelayMs((value) => (value === 0 ? 5_000 : 0))
             }
           >
-            {entryDelayMs === 0 ? 'Qwen entry: instant' : 'Qwen entry: 5s'}
+            {entryDelayMs === 0 ? 'Game entry: instant' : 'Game entry: 5s'}
           </button>
           <button
             type="button"

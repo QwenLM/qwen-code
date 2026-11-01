@@ -254,7 +254,7 @@
   pointer-events: none;
 }
 
-.qwenStart {
+.gameStart {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -265,12 +265,13 @@
   border-radius: 3px;
   background: #ffffff;
   box-shadow: none;
+  color: #1f2328;
   cursor: pointer;
   pointer-events: auto;
-  animation: waiting-qwen-in 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: waiting-game-in 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-@keyframes waiting-qwen-in {
+@keyframes waiting-game-in {
   from {
     opacity: 0;
     transform: scale(0.4);
@@ -282,22 +283,22 @@
 }
 
 /* Keep the visual box cell-sized but give the tiny target a forgiving hit area. */
-.qwenStart::after {
+.gameStart::after {
   content: '';
   position: absolute;
   inset: -6px;
 }
 
-.qwenStart:hover {
+.gameStart:hover {
   background: #f2f5ff;
 }
 
-.qwenStart:focus-visible {
+.gameStart:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
 }
 
-.qwenLogo {
+.gameIcon {
   width: 72%;
   height: 72%;
   display: block;
@@ -646,7 +647,7 @@
 @media (prefers-reduced-motion: reduce) {
   .card,
   .notice,
-  .qwenStart,
+  .gameStart,
   .board[data-intro='true'] .cell[data-state='2'],
   .board[data-intro='true'][data-landed='true'] .cell[data-state='1'] {
     animation: none;

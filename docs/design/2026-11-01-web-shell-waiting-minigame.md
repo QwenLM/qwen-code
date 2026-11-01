@@ -54,10 +54,10 @@ prompt is active. Clicking it mounts `WaitingMinigame` above the row:
    the grid, hovering a cell shows its date and count, and clicking a populated
    day scrolls the transcript to the first Q&A of that day and highlights the
    message.
-2. When the game entry is enabled, a white square with the blue Qwen mark
+2. When the game entry is enabled, a white square with a dark gamepad icon
    appears after five seconds on a randomly chosen cold day. Clicking it starts
    either horizontal Tetris or Snake at random; there is no picker or switch
-   control. Without the configuration, the Qwen mark and all game controls stay
+   control. Without the configuration, the gamepad mark and all game controls stay
    absent and the card remains an activity/usage readout.
 3. The `Usage` tab shows total tokens, input, output, cached, and context
    used/limit for the task. It replaces the credits view from the reference
@@ -86,7 +86,7 @@ timers.
   the card only appears on demand.
 - **Activity first.** The expanded card starts with the task's own daily
   calendar rather than the game. It gives the card a useful reading state and
-  makes the Qwen mark an intentional, optional game entry.
+  makes the gamepad mark an intentional, optional game entry.
 - **Activity primary, game opt-in.** The card's product purpose is to surface
   the task's Q&A activity by time; the game is a waiting-time extra. Keeping
   the game behind configuration avoids shipping an unexpected interactive
@@ -95,7 +95,7 @@ timers.
   Q&A count, and a bucket that contains messages becomes a navigation target.
   The anchor prefers the first user question so the transcript lands at the
   start of the exchange.
-- **Delayed entry on a cold cell.** Hiding the Qwen mark for five seconds keeps
+- **Delayed entry on a cold cell.** Hiding the gamepad mark for five seconds keeps
   the heatmap useful during the first moments of a turn. Placing it on the
   coldest day keeps the busiest dates unobstructed.
 - **Fixed daily cells.** Every cell is one calendar day instead of a bucket
@@ -168,6 +168,10 @@ data with the game entry off. The intro and game frames use the Chromium E2E
 | ------------------------------------------------------ | ---------------------------------------------------------------------- |
 | ![Usage](waiting-minigame/waiting-minigame-tokens.png) | ![Dark Chinese](waiting-minigame/waiting-minigame-dark-zh-heatmap.png) |
 
+When the game entry is configured, a gamepad icon appears on a cold day:
+
+![Game entry](waiting-minigame/waiting-minigame-game-entry.png)
+
 ## Validation plan
 
 - Activity/token tests: fixed calendar, day grouping, future placeholders,
@@ -197,7 +201,7 @@ data with the game entry off. The intro and game frames use the Chromium E2E
   turn.
 - The card opens on a fixed 44-week daily calendar, shows day details on
   hover, and locates a clicked day in the transcript.
-- The Qwen mark appears after five seconds on a cold day when the game entry
+- The gamepad mark appears after five seconds on a cold day when the game entry
   is configured; both games run in the same 44×7 board.
 - The game entry and game controls are hidden by default and only appear with
   the configuration enabled.
