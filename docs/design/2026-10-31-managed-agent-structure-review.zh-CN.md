@@ -217,22 +217,22 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
   `scanExecutions` 驱动 `reconcileInContext`，后台进程 settle 族拥有
   `SessionContext` 内存索引与 CAS settle 循环——现在提取会造出注入十来个
   回调的协作者而非干净的缝；它等待对账路径先成为独立协作者。取消遵循
-  同一原则：只在缝干净处提取。带入对账切片的已知覆盖缺口：`lookupOnce`
-  中"先 stamp 后释放
-  在途槽位"的顺序没有测试钉住（base 上即存在的缺口）；待对账路径提取
-  为独立协作者、该顺序成为缝级契约而非私有 lambda 内部时序时再钉。
-- 对账、恢复扫描与取消**不是**干净的独立缝（2026-10-31 调研）。与冷却、
-  hold 清单（各自拥有自己的状态）不同，这些路径共享服务的核心可变状态
-  与生命周期机制：`sessions`、`liveBindings`、`reconciliations` 三个并发
-  map，绑定生命周期助手（`requireAnswerableBinding`、`requireLiveBinding`、
-  `invalidateBinding`、`provisioner.isUsable`），以及 CAS 执行 settle
-  （`absorbRuntimeStatus` → `settleUnstartedBackgroundSiblings`）。现在
-  提取其中任何一个，都会把十来个 map/助手/回调注入一个换个名字的上帝类
-  "协作者"。前置条件是一个**共享状态注册表**切片：把三个 map 与绑定生命
-  周期助手移到一个拥有它们的 `RuntimeBindingRegistry`（或类似）之后，
-  服务转为委托。注册表就位后，对账/恢复/取消依赖的是一个窄所有者而非
-  服务内部，从而可提取，M6 顺序也成为测试可钉的缝级契约。该注册表切片
-  比两条干净缝更大、风险更高，应在实现前单独设计与评审。
+  同一原则：只在缝干净处提取。带入对账切片的覆盖缺口：base 中没有测试
+  固定 `lookupOnce` 先 stamp 后释放在途槽位的顺序。
+  [流程抽取](2026-11-01-runtime-execution-workflows.zh-CN.md) 现已在对账器边界
+  增加确定性阻塞 stamp 回归；其验证证据随该增量记录。
+- 对账、恢复扫描与取消**不是**干净的独立边界（2026-10-31 调研）。前置条件是
+  [Runtime Binding Registry](2026-10-31-runtime-binding-registry.zh-CN.md)
+  首片：它持有 `liveBindings`、`bindingOperations`、`sessions`、本地
+  Session context 及 Binding 校验/失效 helper。源码审计修正了最初三张 map
+  的草案：`bindingOperations` 必须随 Binding 生命周期操作迁移；按 execution
+  ID 索引的 `reconciliations` 则继续与 `ExecutionObservationCooldown` 放在
+  一起，在后续对账切片迁移。Registry 首片中，服务仍保留供应、排空、恢复、
+  execution 结算、续租和 scheduler 生命周期。这样无需注入 service 回调即可建立具体持有者。
+  M6 先 stamp 后移除槽位的覆盖缺口由[执行流程抽取](2026-11-01-runtime-execution-workflows.zh-CN.md)
+  中阻塞 stamp 的回归处理；该切片在 Registry 后实现对账、接管扫描和取消。
+  Registry 首片本身不宣称具备该覆盖。并发、清理与验收要求见所链接的双语
+  设计；本地与 CI 验证分别记录。
 - 之后对 `ManagedSessionStore` 与 `QwenHostedHarnessConnector` 做同样处理，
   各自独立成切片。
 
