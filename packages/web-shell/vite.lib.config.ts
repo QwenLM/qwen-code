@@ -88,7 +88,7 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function injectCssModules(mode: string): Plugin {
+function injectCssModules(): Plugin {
   return {
     name: 'inject-web-shell-css-modules',
     enforce: 'post',
@@ -262,7 +262,7 @@ export default defineConfig(({ mode }) => ({
     ...(mode === 'transcript' ? [stubTranscriptModules()] : []),
     react(),
     tailwindcss(),
-    injectCssModules(mode),
+    injectCssModules(),
   ],
   resolve: {
     alias: {
