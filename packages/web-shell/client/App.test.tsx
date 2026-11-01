@@ -17099,6 +17099,17 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('provides the Workflow menu by default and honors explicit action lists', () => {
+    const { rerender } = renderApp();
+    expect(testState.latestChatEditorProps?.visibleToolbarActions).toEqual(
+      expect.arrayContaining(['addMenu', 'workflowMode']),
+    );
+    rerender({ composerToolbarActions: ['workflowMode', 'model'] });
+    expect(
+      testState.latestChatEditorProps?.visibleToolbarActions,
+    ).not.toContain('addMenu');
+  });
+
   it('lets a custom renderer replace the complete persistent chat header', () => {
     mockConnection.gitBranch = 'main';
     mockConnection.gitStatus = {

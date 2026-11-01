@@ -44,8 +44,8 @@ class ManagedMessageSnapshotRemovalTest {
         jdbc = new ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
         transaction = new TransactionTemplate(manager);
-        store = VerificationFixtures.configure(new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new SdkHarnessRules()));
+        store = VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
+                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new SdkHarnessRules());
         session = transaction.execute(status -> store.insertSessionCommand(TENANT, "actor",
                 "CREATE_SESSION", "create", "digest", "qwen-code", null, "title", List.of(), null))
                 .sessionId();
