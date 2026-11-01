@@ -947,7 +947,7 @@ describe('WebShellSidebar session split action', () => {
     { label: 'missing callback', onAddSessionToSplitView: undefined },
     {
       label: 'action allowlist',
-      sessionActions: { items: ['rename'] as const },
+      sessionActions: { items: ['rename', 'delete'] as const },
     },
   ])(
     'hides the split action for $label',
@@ -1084,7 +1084,7 @@ describe('WebShellSidebar session split action', () => {
     await switchSessionSource('Channels');
     await expandWorkspace('other');
     const items = await openSessionMenuItems('Secondary channel');
-    expect(items).toContain('Rename');
+    expect(items).toContain('Delete');
     expect(items).not.toContain('Add to Split View');
   });
 
