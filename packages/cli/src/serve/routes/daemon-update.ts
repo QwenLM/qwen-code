@@ -9,7 +9,8 @@ import type { Application, Request, RequestHandler } from 'express';
 import { listenerIdentityOf } from '../local-control/listener-identity.js';
 import { singleTokenCredentials } from '../local-control/credentials.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import { readFile, realpath } from 'node:fs/promises';
+import { access, readFile, realpath } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
 const CHECK_CACHE_MS = 15 * 60_000;
@@ -52,6 +53,30 @@ interface PreparedUpdate {
   launcher: string;
   activate(): Promise<unknown>;
   cleanup(): void | Promise<void>;
+}
+
+async function standaloneUpdateLauncher(
+  standaloneDir: string,
+): Promise<string | undefined> {
+  // Prefer the PATH wrapper: it lives outside the install and is refreshed
+  // when an archive ships no launcher, so it survives either swap. Only a
+  // wrapper that names this install may restart it.
+  const wrapper = join(dirname(standaloneDir), '..', 'bin', 'qwen');
+  try {
+    await access(wrapper, constants.X_OK);
+    if ((await readFile(wrapper, 'utf8')).includes(standaloneDir)) {
+      return wrapper;
+    }
+  } catch {
+    // No wrapper; fall back to the archive's own launcher.
+  }
+  const launcher = join(standaloneDir, 'bin', 'qwen');
+  try {
+    await access(launcher, constants.X_OK);
+    return launcher;
+  } catch {
+    return undefined;
+  }
 }
 
 interface UpdateRouteDeps {
@@ -163,20 +188,32 @@ function createUpdateController(deps: UpdateRouteDeps) {
         const latestVersion = result.info.update.latest;
         if (installation.isStandalone && installation.standaloneDir) {
           const standaloneDir = installation.standaloneDir;
-          prepare = async () => {
-            const { prepareStandaloneUpdate } = await import(
-              '../../ui/standalone-update.js'
-            );
-            return {
-              ...(await prepareStandaloneUpdate(standaloneDir, latestVersion)),
-              launcher: join(standaloneDir, 'bin', 'qwen'),
+          const launcher = await standaloneUpdateLauncher(standaloneDir);
+          if (launcher) {
+            prepare = async () => {
+              const { prepareStandaloneUpdate } = await import(
+                '../../ui/standalone-update.js'
+              );
+              return {
+                ...(await prepareStandaloneUpdate(
+                  standaloneDir,
+                  latestVersion,
+                )),
+                launcher,
+              };
             };
-          };
+          }
         } else if (
           installation.isGlobal &&
-          installation.packageManager === PackageManager.NPM &&
-          installation.updateCommand
+          (installation.packageManager === PackageManager.NPM ||
+            installation.packageManager === PackageManager.PNPM ||
+            installation.packageManager === PackageManager.YARN ||
+            installation.packageManager === PackageManager.BUN)
         ) {
+          // Staging installs into a user-scoped isolated prefix and the
+          // shared cli-entry.js launcher resolves the pointer, so neither
+          // the installing package manager nor a root-owned global prefix
+          // bars one-click; the launcher identity check below is the gate.
           const launcher = await managedNpmLauncher(bootstrap, launcherStamp);
           if (launcher) {
             prepare = async () => {

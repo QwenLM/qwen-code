@@ -33,6 +33,9 @@ struct ProcessEnablement {
 }
 
 pub(crate) fn process_start_stamp(pid: i32) -> Option<ProcessStartStamp> {
+    if pid <= 0 {
+        return None;
+    }
     // SAFETY: proc_pidinfo writes at most `size` bytes into `info` and returns
     // the number of bytes filled (<= size) or <= 0 on failure.
     unsafe {
@@ -45,10 +48,71 @@ pub(crate) fn process_start_stamp(pid: i32) -> Option<ProcessStartStamp> {
             &mut info as *mut _ as *mut libc::c_void,
             size,
         );
-        if filled != size {
+        if filled == size {
+            return Some((info.pbi_start_tvsec, info.pbi_start_tvusec));
+        }
+    }
+    sysctl_process_start_stamp(pid)
+}
+
+// Darwin's public kinfo_proc begins with extern_proc, whose first union is
+// p_starttime. libc does not expose these structs. Keep only the ABI prefix
+// through p_pid; the kernel supplies the full buffer size at runtime.
+#[repr(C)]
+struct ProcessInfoPrefix {
+    start: libc::timeval,
+    _vmspace: *mut libc::c_void,
+    _sigacts: *mut libc::c_void,
+    _flag: libc::c_int,
+    _stat: libc::c_char,
+    pid: libc::pid_t,
+}
+
+fn sysctl_process_start_stamp(pid: i32) -> Option<ProcessStartStamp> {
+    if pid <= 0 {
+        return None;
+    }
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
+    let mut size = 0;
+    // PROC_PIDTBSDINFO can return EPERM across UIDs even when accessibility
+    // input is allowed. KERN_PROC_PID exposes the same birth identity without
+    // changing privileges. A successful query can still return zero bytes if
+    // the process exits between these calls.
+    unsafe {
+        if libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        ) != 0
+            || !(std::mem::size_of::<ProcessInfoPrefix>()..=1024 * 1024).contains(&size)
+        {
             return None;
         }
-        Some((info.pbi_start_tvsec, info.pbi_start_tvusec))
+        let mut buffer = vec![0u8; size];
+        if libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        ) != 0
+            || size < std::mem::size_of::<ProcessInfoPrefix>()
+            || size > buffer.len()
+        {
+            return None;
+        }
+        let info = buffer.as_ptr().cast::<ProcessInfoPrefix>().read_unaligned();
+        if info.pid != pid
+            || info.start.tv_sec <= 0
+            || !(0..1_000_000).contains(&info.start.tv_usec)
+        {
+            return None;
+        }
+        Some((info.start.tv_sec as u64, info.start.tv_usec as u64))
     }
 }
 
@@ -232,9 +296,27 @@ mod tests {
     fn start_stamp_reads_the_current_process_and_rejects_dead_pids() {
         let own = process_start_stamp(std::process::id() as i32);
         assert!(own.is_some(), "own process start time must be readable");
-        // Pid 0 is the kernel idle task; proc info for it is not readable from
-        // user space, so lifetime keying must fail closed (None).
+        // Pid 0 is the kernel idle task, not an application input target.
         assert_eq!(process_start_stamp(0), None);
+        assert_eq!(process_start_stamp(-1), None);
+        assert_eq!(sysctl_process_start_stamp(0), None);
+        assert_eq!(sysctl_process_start_stamp(-1), None);
+        assert_eq!(sysctl_process_start_stamp(i32::MAX), None);
+    }
+
+    #[test]
+    fn sysctl_birth_identity_matches_libproc_and_rejects_an_exited_child() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let stamp = process_start_stamp(pid).expect("child process birth time");
+        let observed = sysctl_process_start_stamp(pid);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(observed, Some(stamp));
+        assert_eq!(sysctl_process_start_stamp(pid), None);
     }
 
     #[test]

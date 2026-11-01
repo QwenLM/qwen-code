@@ -86,6 +86,8 @@ import type {
   DaemonSessionListPageOptions,
   DaemonSessionCatalogRequest,
   DaemonSessionCatalogResult,
+  DaemonSessionLiveStateBatchRequest,
+  DaemonSessionLiveStateBatchResult,
   DaemonSessionSearchOptions,
   DaemonSessionSearchResult,
   DaemonWorkspaceSessionInfo,
@@ -1279,6 +1281,45 @@ export class DaemonClient {
 
   workspaceByCwd(workspaceCwd: string): WorkspaceDaemonClient {
     return new WorkspaceDaemonClient(this, urlEncode(workspaceCwd));
+  }
+
+  /**
+   * Issue a native REST request for a daemon route without ACP translation.
+   * HTTP status and response-body handling belong to the caller. The timeout
+   * covers the connection through response headers, not a streaming body;
+   * pass a signal to cancel body consumption, or `0` to disable the timer.
+   */
+  async requestRest(
+    path: string,
+    init: RequestInit = {},
+    timeoutMs?: number,
+  ): Promise<Response> {
+    if (
+      !/^\/(?![/\\\t\r\n])/.test(path) ||
+      new URL(path, 'http://daemon.invalid').origin !== 'http://daemon.invalid'
+    ) {
+      throw new Error('Daemon REST requests require an absolute route path');
+    }
+    const base = new URL(`${this.baseUrl}/`, 'http://daemon.invalid');
+    if (
+      !new URL(
+        `${this.baseUrl}${path}`,
+        'http://daemon.invalid',
+      ).pathname.startsWith(base.pathname)
+    ) {
+      throw new Error('Daemon REST requests must stay within the base path');
+    }
+    const headers = new Headers(this.headers());
+    new Headers(init.headers).forEach((value, name) =>
+      headers.set(name, value),
+    );
+    return this.fetchWithTimeout(
+      `${this.baseUrl}${path}`,
+      { ...init, headers },
+      undefined,
+      timeoutMs,
+      'rest',
+    );
   }
 
   // -- Lifecycle / discovery ---------------------------------------------
@@ -3594,6 +3635,28 @@ export class DaemonClient {
     opts: { clientId?: string; timeoutMs?: number } = {},
   ): Promise<DaemonWorkspaceSessionLiveState> {
     return this.workspaceByCwd(workspaceCwd).getSessionLiveState(opts);
+  }
+
+  /**
+   * Read complete memory-only snapshots for selected workspaces in one native
+   * REST request. Callers pre-flight `workspace_session_live_state_batch` once
+   * and use the single-workspace route on older daemons.
+   */
+  getSessionsLiveState(
+    request: DaemonSessionLiveStateBatchRequest,
+    opts?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<DaemonSessionLiveStateBatchResult> {
+    return this.jsonRequest<DaemonSessionLiveStateBatchResult>(
+      '/sessions/live-state',
+      'POST /sessions/live-state',
+      {
+        method: 'POST',
+        body: request,
+        mode: 'rest',
+        signal: opts?.signal,
+        timeoutMs: opts?.timeoutMs,
+      },
+    );
   }
 
   async listSessionGroups(

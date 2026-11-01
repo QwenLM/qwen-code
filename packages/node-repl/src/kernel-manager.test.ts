@@ -38,7 +38,7 @@ function texts(outcome: NodeReplExecOutcome): string[] {
 
 function makeManager(
   overrides: Partial<
-    Pick<KernelManagerOptions, 'policy' | 'readableRoots'>
+    Pick<KernelManagerOptions, 'policy' | 'readableRoots' | 'preloadCua'>
   > = {},
 ): NodeReplKernelManager {
   return new NodeReplKernelManager({
@@ -137,6 +137,29 @@ beforeEach(() => {
 afterEach(async () => {
   await manager.dispose();
   fs.rmSync(workDir, { recursive: true, force: true });
+});
+
+it('forwards native UI disabling flags to the kernel without unrelated arguments', async () => {
+  await manager.dispose();
+  manager = makeManager({ preloadCua: false });
+  const original = process.argv.slice();
+  process.argv.push('--no-overlay', '--unrelated', '--no-pip');
+  try {
+    const root = path.join(workDir, 'node_modules');
+    createEsmPackage(
+      root,
+      'kernel-args',
+      'export const args = process.argv.slice(2);',
+    );
+    await manager.addModuleRoot(root);
+    const result = await run(
+      'nodeRepl.write(JSON.stringify((await import("kernel-args")).args))',
+    );
+    expect(result.status).toBe('ok');
+    expect(texts(result).join('')).toBe('["--no-overlay","--no-pip"]');
+  } finally {
+    process.argv.splice(0, process.argv.length, ...original);
+  }
 });
 
 describe('NodeReplKernelManager', () => {

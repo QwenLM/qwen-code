@@ -12658,31 +12658,137 @@ Other open files:
         );
       });
 
-      it('leaves the Stop hook and the memory tasks to a host that runs it after the round', async () => {
-        const request = blockStopOnce();
-        installMessageBus(request, 'Stop');
-        notDoneChat();
-        mockTurnRunFn.mockImplementation(() =>
-          (async function* () {
-            yield { type: LlmEventType.Content, value: 'not done' };
-          })(),
-        );
-        const memoryTasks = vi.spyOn(
-          client,
-          'runManagedAutoMemoryBackgroundTasks',
-        );
+      /** A stop policy that continues once with `text`, then lets it stop. */
+      const continueOnce = (text: string) => ({
+        continueAt: vi
+          .fn()
+          .mockResolvedValueOnce([{ text }])
+          .mockResolvedValue(undefined),
+        onStopHookCap: vi.fn(),
+      });
 
-        await run([{ text: 'Hi' }], 'prompt-stop-hook-by-host', {
+      it("continues a stopped response with a host's stop policy, as a Hook send", async () => {
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const policy = continueOnce('Finish the todos.');
+        const send = vi.spyOn(client, 'sendMessageStream');
+
+        await run([{ text: 'Hi' }], 'prompt-stop-policy', {
           type: SendMessageType.UserQuery,
-          stopHookRunByHost: true,
+          stopPolicies: [policy],
+        });
+
+        expect(policy.continueAt).toHaveBeenCalledTimes(2);
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        expect(mockTurnRunFn.mock.calls[1][1]).toContainEqual({
+          text: 'Finish the todos.',
+        });
+        expect(send.mock.calls[1][3]).toMatchObject({
+          type: SendMessageType.Hook,
+          stopPolicies: [policy],
+        });
+      });
+
+      it("keeps the host's steering on a stop policy's continuation", async () => {
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const policy = continueOnce('Finish the todos.');
+        const getSteerInput = vi.fn().mockResolvedValue(undefined);
+        const send = vi.spyOn(client, 'sendMessageStream');
+
+        await run([{ text: 'Hi' }], 'prompt-stop-policy-steer', {
+          type: SendMessageType.UserQuery,
+          stopPolicies: [policy],
+          getSteerInput,
+        });
+
+        expect(send.mock.calls[1][3]).toMatchObject({
+          type: SendMessageType.Hook,
+          getSteerInput,
+        });
+      });
+
+      it('lets the turn stop when a stop policy returns an empty request', async () => {
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const empty = { continueAt: vi.fn().mockResolvedValue([]) };
+        const next = continueOnce('Finish the todos.');
+
+        await run([{ text: 'Hi' }], 'prompt-stop-policy-empty', {
+          type: SendMessageType.UserQuery,
+          stopPolicies: [empty, next],
+        });
+
+        // The empty request sends nothing; the next policy is asked.
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        expect(mockTurnRunFn.mock.calls[1][1]).toContainEqual({
+          text: 'Finish the todos.',
+        });
+      });
+
+      it('asks the stop policies only once the Stop hook lets the response stop', async () => {
+        installMessageBus(blockStopOnce(), 'Stop');
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const policy = continueOnce('Finish the todos.');
+
+        await run([{ text: 'Hi' }], 'prompt-stop-policy-after-hook', {
+          type: SendMessageType.UserQuery,
+          stopPolicies: [policy],
+        });
+
+        // The hook's continuation, then the policy's, then the stop.
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(3);
+        expect(mockTurnRunFn.mock.calls[1][1]).toContainEqual({
+          text: 'Keep working',
+        });
+        expect(mockTurnRunFn.mock.calls[2][1]).toContainEqual({
+          text: 'Finish the todos.',
+        });
+        expect(policy.continueAt).toHaveBeenCalledTimes(2);
+      });
+
+      it('tells the stop policies when the Stop hook cap ends the turn', async () => {
+        installMessageBus(
+          vi.fn().mockResolvedValue({
+            output: { decision: 'block', reason: 'Keep working' },
+            stopHookCount: 1,
+          }),
+          'Stop',
+        );
+        vi.mocked(mockConfig.getStopHookBlockingCap).mockReturnValue(1);
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const policy = continueOnce('Finish the todos.');
+
+        await run([{ text: 'Hi' }], 'prompt-stop-policy-cap', {
+          type: SendMessageType.UserQuery,
+          stopPolicies: [policy],
         });
 
         expect(mockTurnRunFn).toHaveBeenCalledOnce();
-        expect(request).not.toHaveBeenCalledWith(
-          expect.objectContaining({ eventName: 'Stop' }),
-          expect.anything(),
-        );
-        expect(memoryTasks).not.toHaveBeenCalled();
+        expect(policy.onStopHookCap).toHaveBeenCalledOnce();
+        expect(policy.continueAt).not.toHaveBeenCalled();
+      });
+
+      it("keeps a host's span and guard options in a Stop hook continuation", async () => {
+        installMessageBus(blockStopOnce(), 'Stop');
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const send = vi.spyOn(client, 'sendMessageStream');
+
+        await run([{ text: 'Hi' }], 'prompt-stop-hook-host-options', {
+          type: SendMessageType.UserQuery,
+          interactionSpanByHost: true,
+          toolLoopGuardsByHost: true,
+        });
+
+        expect(send.mock.calls[1][3]).toMatchObject({
+          type: SendMessageType.Hook,
+          interactionSpanByHost: true,
+          toolLoopGuardsByHost: true,
+        });
+        expect(tel.startInteractionSpan).not.toHaveBeenCalled();
       });
 
       it('gives a blocking Stop hook continuation a fresh exploration phase', async () => {
