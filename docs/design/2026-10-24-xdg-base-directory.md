@@ -87,10 +87,13 @@ This change moves only the default location of the global directory. `QWEN_HOME`
 
 ## Acceptance criteria
 
+The [E2E plan](../plans/2026-10-24-xdg-base-directory-e2e.md) turns these into test groups.
+
 - On Linux with an empty home, the first run creates `~/.config/qwen` with the marker and no `~/.qwen`, whether it is the interactive CLI, a subcommand, `qwen serve` or a sandboxed run, also in bare mode with usage statistics off.
 - With only `~/.qwen`, it keeps being used.
 - With `~/.qwen` and a `~/.config/qwen` that has no marker, `~/.qwen` is used, including after a run with `QWEN_HOME` pointing at `~/.config/qwen`.
 - With `~/.qwen` and a `~/.config/qwen` that contains the marker, the XDG directory is used. This includes a `~/.qwen` recreated after a first run in the XDG directory.
 - An absolute `XDG_CONFIG_HOME` is honored, a relative one is ignored, a value from a `.env` file is ignored, and `QWEN_HOME` overrides everything. A `QWEN_HOME` in a `~/.qwen/.env` left behind on an XDG install is ignored.
+- With `settings.json` or `oauth_creds.json` in `~/.qwen` and not in the XDG directory in use, startup warns and names them, and the files are not read, copied or moved.
 - macOS and Windows use `~/.qwen` even when `~/.config/qwen` exists.
 - The product's independent resolvers listed under Decisions agree, and auto mode protects the global directory's settings, hooks and skills in either location, plus the XDG directory and its marker while `~/.qwen` is in use.

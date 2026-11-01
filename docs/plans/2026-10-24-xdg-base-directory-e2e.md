@@ -1,6 +1,8 @@
-# XDG Base Directory global directory verification
+# XDG Base Directory global directory E2E plan
 
-Design: [docs/design/2026-10-24-xdg-base-directory.md](../../docs/design/2026-10-24-xdg-base-directory.md)
+[English](2026-10-24-xdg-base-directory-e2e.md) | [简体中文](2026-10-24-xdg-base-directory-e2e.zh-CN.md)
+
+This plan verifies the [design note](../design/2026-10-24-xdg-base-directory.md) ([简体中文](../design/2026-10-24-xdg-base-directory.zh-CN.md)).
 
 Start every group from a fresh throwaway home, so the operator's real configuration is never read or written and no group sees another group's files. Two groups continue in the new-install group's home on purpose, because they need the marker its run wrote: the recreated `~/.qwen` group and the `~/.qwen/.env` group.
 

@@ -87,10 +87,13 @@ Qwen Code 在所有平台上都把设置、凭据和其他全局状态保存在 
 
 ## 验收标准
 
+[E2E 计划](../plans/2026-10-24-xdg-base-directory-e2e.zh-CN.md)把这些标准写成了测试组。
+
 - 在 Linux 上使用空主目录时，首次运行会创建带标记的 `~/.config/qwen`，且不会出现 `~/.qwen`，无论它是交互式 CLI、子命令、`qwen serve` 还是沙箱运行；在 bare 模式下关闭使用统计时也是如此。
 - 只有 `~/.qwen` 时，继续使用它。
 - 同时存在 `~/.qwen` 和不含标记的 `~/.config/qwen` 时，使用 `~/.qwen`，包括在某次运行把 `QWEN_HOME` 指向 `~/.config/qwen` 之后。
 - 同时存在 `~/.qwen` 和包含标记的 `~/.config/qwen` 时，使用 XDG 目录。这也包括在 XDG 目录首次运行之后又被重新创建的 `~/.qwen`。
 - 绝对路径的 `XDG_CONFIG_HOME` 会被采用，相对路径会被忽略，来自 `.env` 文件的值会被忽略，`QWEN_HOME` 优先于一切。XDG 安装上遗留的 `~/.qwen/.env` 中的 `QWEN_HOME` 会被忽略。
+- `~/.qwen` 中有 `settings.json` 或 `oauth_creds.json`，而正在使用的 XDG 目录中没有时，启动时会给出警告并列出这些文件，且不会读取、复制或移动这些文件。
 - macOS 和 Windows 即使存在 `~/.config/qwen` 也使用 `~/.qwen`。
 - “设计决策”中列出的产品内各独立解析逻辑结果一致，且无论全局目录在哪个位置，Auto 模式都会保护其中的 settings、hooks 和 skills；正在使用 `~/.qwen` 时，还会保护 XDG 目录及其标记。
