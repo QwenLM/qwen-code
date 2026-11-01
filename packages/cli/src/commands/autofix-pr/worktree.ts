@@ -21,7 +21,9 @@ import type { AutofixPrPaths } from './state.js';
  * any git command in the worktree, the file must name this clone's own
  * admin entry for a worktree, and that entry must point back at it. Read
  * from the files, not asked of git, which would read the config in
- * question; `root` is the clone's main worktree, whose git is the user's.
+ * question; `root` is the genuine clone (its main worktree), whose git is the
+ * user's — never a linked worktree the calling round could repoint at a
+ * replacement repository, which would vouch for itself.
  */
 export function untrustedGitfile(
   worktreePath: string,
@@ -60,6 +62,40 @@ export function untrustedGitfile(
     }
   } catch {
     return `${dotGit} points to ${pointer}, which is not this clone's entry for it`;
+  }
+  return null;
+}
+
+/**
+ * Why an in-place watch's checkout — the user's own, which may be the
+ * clone's main worktree — is not to be trusted, or null. A linked worktree
+ * is judged by `untrustedGitfile` as ever; the main worktree has a `.git`
+ * directory instead of a gitfile, and that directory must be this clone's
+ * own git directory, compared as the kernel resolves the paths — no git
+ * command runs in the checkout, which would read the config in question.
+ * `root` is the genuine clone (its main worktree), as for `untrustedGitfile`.
+ */
+export function untrustedCheckoutGit(
+  worktreePath: string,
+  root: string,
+): string | null {
+  const dotGit = join(worktreePath, '.git');
+  const kind = lstatSync(dotGit, { throwIfNoEntry: false });
+  if (!kind) return `${worktreePath} has no .git of its own`;
+  if (kind.isFile()) return untrustedGitfile(worktreePath, root);
+  if (!kind.isDirectory()) {
+    return `${dotGit} is neither a gitfile nor a git directory`;
+  }
+  const common = gitOpt('-C', root, 'rev-parse', '--git-common-dir');
+  if (common === null) return `git cannot find the git directory of ${root}`;
+  try {
+    if (
+      realpathSync.native(dotGit) !== realpathSync.native(resolve(root, common))
+    ) {
+      return `${dotGit} is not the git directory of this clone`;
+    }
+  } catch {
+    return `${dotGit} names a git directory this check cannot read`;
   }
   return null;
 }
@@ -207,16 +243,30 @@ function untrustedSubmodulesIn(
  * Throws unless the watch's worktree is a git worktree of its own, at its
  * own path, with the watch's branch checked out. Inside a directory that is
  * not a worktree, git finds the enclosing clone; through a symlink — the
- * worktree's own path or a directory above it, up to the clone's `root` —
- * another checkout; on another branch — the user's copy of the PR branch,
- * say — a push would publish that branch's commits and a reset would
- * discard them.
+ * worktree's own path or a directory above it, up to `root` — another
+ * checkout; on another branch — the user's copy of the PR branch, say — a
+ * push would publish that branch's commits and a reset would discard them.
+ *
+ * `root` is the watch's root worktree, the stop of the symlink walk. `trustRoot`
+ * is the genuine clone the gitfile is validated against — the clone's main
+ * worktree (`repoRoot()`), the stable identity of the clone, never a linked
+ * worktree a round could repoint at a replacement repository. They differ
+ * whenever a watch is rooted in a linked worktree, so the trust anchor is a
+ * separate parameter, not `root`. This is defense-in-depth against the
+ * git-level gitfile rewrite, not a boundary against a round that can write any
+ * same-user file (see `anchorStoreRoot` in state.ts).
+ *
+ * `inPlace` marks the user's own checkout (`prepare --in-place`): the git
+ * trust check accepts the clone's main worktree too, and `switchBack` is
+ * never honored — a checkout on another branch is the user's to switch back.
  */
 export function requireWorktree(
   paths: AutofixPrPaths,
   prNumber: number,
   root: string,
   switchBack = false,
+  trustRoot: string = root,
+  inPlace = false,
 ): void {
   const worktreePath = paths.worktreePath;
   if (!existsSync(worktreePath)) {
@@ -233,7 +283,9 @@ export function requireWorktree(
       `${worktreePath} resolves through the symlink ${redirected}; it is not the watch's worktree.`,
     );
   }
-  const untrusted = untrustedGitfile(worktreePath, root);
+  const untrusted = inPlace
+    ? untrustedCheckoutGit(worktreePath, trustRoot)
+    : untrustedGitfile(worktreePath, trustRoot);
   if (untrusted !== null) {
     throw new Error(
       `${untrusted}: no git command runs in ${worktreePath} until the worktree is checked and removed.`,
@@ -248,8 +300,9 @@ export function requireWorktree(
   // one a fix switched to: that branch keeps its commits, and what is not
   // committed is discarded anyway. A merge, rebase or cherry-pick a fix
   // left stopped refuses the switch (a rebase holds HEAD detached), so it is
-  // quit first; none of these touches a branch.
-  if (branch !== `refs/heads/${paths.branch}` && switchBack) {
+  // quit first; none of these touches a branch. Never in the user's own
+  // checkout (`inPlace`): switching it is the user's to do.
+  if (branch !== `refs/heads/${paths.branch}` && switchBack && !inPlace) {
     for (const quit of [
       ['merge', '--quit'],
       ['rebase', '--quit'],
@@ -263,6 +316,7 @@ export function requireWorktree(
   if (
     branch !== `refs/heads/${paths.branch}` &&
     switchBack &&
+    !inPlace &&
     gitOpt(
       '-c',
       'submodule.recurse=false',
@@ -348,6 +402,56 @@ export function remoteRef(
     if (name === ref && sha) return sha;
   }
   return null;
+}
+
+/**
+ * Whether a checkout holds work git reports, or null when git cannot read it.
+ * The flags override `status.showUntrackedFiles` and submodule `ignore`
+ * settings, as this directory's other scans do. Only `.qwen` is the watch's:
+ * anything beside its `tmp` directory under there is the user's work. An
+ * in-place watch's checkout holds the watch's own files under `.qwen/tmp`,
+ * so its dirty checks use this, not `hasUncommittedChanges`.
+ */
+export function checkoutHoldsWork(path: string): boolean | null {
+  // -z: porcelain v1 C-quotes a non-ASCII path, and a quoted `.qwen/tmp`
+  // watch file would read as the user's work. NUL-delimited records carry
+  // the path as git stores it; a rename's old path is its own record and,
+  // not starting `??`, still counts as work.
+  const status = gitOpt(
+    '--no-optional-locks',
+    '-C',
+    path,
+    'status',
+    '--porcelain',
+    '-z',
+    '--untracked-files=normal',
+    '--ignore-submodules=none',
+  );
+  if (status === null) return null;
+  const records = status.split('\0').filter((record) => record !== '');
+  const onlyWatchDir = (record: string) =>
+    record.startsWith('??') && isUnderQwen(record.slice(3));
+  if (records.some((record) => !onlyWatchDir(record))) return true;
+  if (records.length === 0) return false;
+  // Only `.qwen` is untracked: ask what it holds besides the watch's `tmp`.
+  const userFiles = gitOpt(
+    '--no-optional-locks',
+    '-C',
+    path,
+    'ls-files',
+    '--others',
+    '--exclude-standard',
+    '--',
+    '.qwen',
+    ':(exclude).qwen/tmp',
+  );
+  if (userFiles === null) return null;
+  return userFiles.trim() !== '';
+}
+
+/** A porcelain path at or under `.qwen`. */
+function isUnderQwen(file: string): boolean {
+  return file === '.qwen' || file.startsWith('.qwen/');
 }
 
 /**

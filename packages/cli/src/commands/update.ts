@@ -7,12 +7,32 @@
 import type { CommandModule } from 'yargs';
 import { initializeI18n, resolveLanguageSetting, t } from '../i18n/index.js';
 
-export const updateCommand: CommandModule = {
+interface UpdateArgs {
+  targetVersion?: string;
+}
+
+/** Longest rejected --target-version value echoed to stderr. */
+const UPDATE_ERROR_ECHO_LIMIT = 500;
+
+/**
+ * Longest updater failure echoed to stderr. The updater's own rollback
+ * failure carries a manual-recovery command, so the argv-sized bound above
+ * would cut off the only actionable part of the message.
+ */
+const UPDATE_FAILURE_ECHO_LIMIT = 4096;
+
+export const updateCommand: CommandModule<object, UpdateArgs> = {
   command: 'update',
   get describe() {
     return t('Check for Qwen Code updates and install if available');
   },
-  handler: async () => {
+  builder: (yargs) =>
+    yargs.option('target-version', {
+      type: 'string',
+      requiresArg: true,
+      description: t('Install an exact version without querying npm'),
+    }),
+  handler: async (argv) => {
     const [
       { loadSettings },
       { checkForUpdatesDetailed, describeUpdateCheckFailure },
@@ -20,6 +40,7 @@ export const updateCommand: CommandModule = {
       standaloneUpdate,
       stdioHelpers,
       { updateEventEmitter },
+      { stripAnsiAndControl },
     ] = await Promise.all([
       import('../config/settings.js'),
       import('../ui/utils/updateCheck.js'),
@@ -27,12 +48,25 @@ export const updateCommand: CommandModule = {
       import('../ui/standalone-update.js'),
       import('../utils/stdioHelpers.js'),
       import('../utils/updateEventEmitter.js'),
+      import('@qwen-code/qwen-code-core/utils/textUtils.js'),
     ]);
 
     const { formatUpdateInstructions, getInstallationInfo } =
       installationInfoModule;
-    const { performStandaloneUpdate } = standaloneUpdate;
+    const { performStandaloneUpdate, normalizeVersion } = standaloneUpdate;
     const { writeStdoutLine, writeStderrLine } = stdioHelpers;
+
+    // Echoed text is untrusted: the rejected flag is raw argv, and the
+    // updater's rollback message can carry mirror or filesystem text.
+    // Collapse whitespace, strip terminal escapes, control and Unicode
+    // format characters, then bound the length. Truncation runs after
+    // stripping, so a cut cannot leave an escape sequence's tail behind.
+    const sanitizeUpdateEcho = (text: string, limit: number): string => {
+      const clean = stripAnsiAndControl(text.replace(/\s+/g, ' '))
+        .replace(/\p{Cf}/gu, '')
+        .trim();
+      return clean.length > limit ? `${clean.slice(0, limit)}…` : clean;
+    };
 
     const cwd = process.cwd();
     const settings = loadSettings(cwd, false);
@@ -40,40 +74,55 @@ export const updateCommand: CommandModule = {
       resolveLanguageSetting(settings.merged.general?.language as string),
     );
 
-    const updateCheck = await checkForUpdatesDetailed();
+    let targetVersion: string;
+    if (argv.targetVersion !== undefined) {
+      try {
+        targetVersion = normalizeVersion(argv.targetVersion).slice(1);
+      } catch (err) {
+        const reason = sanitizeUpdateEcho(
+          err instanceof Error ? err.message : String(err),
+          UPDATE_ERROR_ECHO_LIMIT,
+        );
+        writeStderrLine(t('Update failed: {{error}}', { error: reason }));
+        process.exitCode = 1;
+        return;
+      }
+    } else {
+      const updateCheck = await checkForUpdatesDetailed();
 
-    if (updateCheck.status === 'up-to-date') {
-      writeStdoutLine(
-        t('Qwen Code {{version}} is up to date!', {
-          version: updateCheck.currentVersion,
-        }),
-      );
-      return;
+      if (updateCheck.status === 'up-to-date') {
+        writeStdoutLine(
+          t('Qwen Code {{version}} is up to date!', {
+            version: updateCheck.currentVersion,
+          }),
+        );
+        return;
+      }
+
+      if (updateCheck.status === 'error') {
+        writeStderrLine(
+          t(
+            'Failed to check for updates ({{reason}}). Please check your network or registry configuration.',
+            { reason: describeUpdateCheckFailure(updateCheck.error) },
+          ),
+        );
+        process.exitCode = 1;
+        return;
+      }
+
+      if (updateCheck.status === 'skipped') {
+        writeStderrLine(
+          t('Unable to check for updates: {{reason}}', {
+            reason: updateCheck.reason,
+          }),
+        );
+        process.exitCode = 1;
+        return;
+      }
+
+      targetVersion = updateCheck.info.update.latest;
+      writeStdoutLine(updateCheck.info.message);
     }
-
-    if (updateCheck.status === 'error') {
-      writeStderrLine(
-        t(
-          'Failed to check for updates ({{reason}}). Please check your network or registry configuration.',
-          { reason: describeUpdateCheckFailure(updateCheck.error) },
-        ),
-      );
-      process.exitCode = 1;
-      return;
-    }
-
-    if (updateCheck.status === 'skipped') {
-      writeStderrLine(
-        t('Unable to check for updates: {{reason}}', {
-          reason: updateCheck.reason,
-        }),
-      );
-      process.exitCode = 1;
-      return;
-    }
-
-    const info = updateCheck.info;
-    writeStdoutLine(info.message);
 
     const installationInfo = getInstallationInfo(cwd, true);
 
@@ -86,7 +135,7 @@ export const updateCommand: CommandModule = {
         writeStdoutLine(t('Downloading update...'));
         const result = await performStandaloneUpdate(
           installationInfo.standaloneDir,
-          info.update.latest,
+          targetVersion,
         );
         if (result === 'done') {
           writeStdoutLine(
@@ -104,7 +153,10 @@ export const updateCommand: CommandModule = {
       } catch (err) {
         writeStderrLine(
           t('Update failed: {{error}}', {
-            error: err instanceof Error ? err.message : String(err),
+            error: sanitizeUpdateEcho(
+              err instanceof Error ? err.message : String(err),
+              UPDATE_FAILURE_ECHO_LIMIT,
+            ),
           }),
         );
         process.exitCode = 1;
@@ -114,9 +166,20 @@ export const updateCommand: CommandModule = {
       return;
     }
 
+    if (argv.targetVersion !== undefined) {
+      writeStderrLine(
+        t(
+          'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.',
+          { version: targetVersion },
+        ),
+      );
+      process.exitCode = 1;
+      return;
+    }
+
     for (const line of formatUpdateInstructions(
       installationInfo,
-      info.update.latest,
+      targetVersion,
     )) {
       writeStdoutLine(t(line));
     }

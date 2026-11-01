@@ -26,6 +26,7 @@ import {
   ContextUsageMessage,
   parseContextUsageMessage,
 } from './ContextUsageMessage';
+import type { DaemonContextMemoryDetail } from '@qwen-code/web-shell/daemon-react-sdk';
 import { StatsMessage, parseStatsMessage } from './StatsMessage';
 import { StatusMessage, parseStatusMessage } from './StatusMessage';
 import { McpStatusMessage, parseMcpStatusMessage } from './McpStatusMessage';
@@ -54,6 +55,11 @@ interface SystemMessageProps {
   }>;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  /** Open a context instruction file in a read-only preview. */
+  onOpenMemoryFile?: (
+    file: DaemonContextMemoryDetail,
+    workspaceCwd: string,
+  ) => void;
   onLocateBackgroundSource?: (messageId: string, callId?: string) => boolean;
   /** Click an image to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
@@ -161,6 +167,7 @@ export const SystemMessage = memo(function SystemMessage({
   images,
   files,
   onShowContextDetail,
+  onOpenMemoryFile,
   onLocateBackgroundSource,
   onImagePreview,
   onAttachmentPreview,
@@ -312,6 +319,15 @@ export const SystemMessage = memo(function SystemMessage({
         <ContextUsageMessage
           status={contextUsage}
           onShowDetail={onShowContextDetail}
+          onOpenMemoryFile={
+            onOpenMemoryFile
+              ? (file) =>
+                  onOpenMemoryFile(
+                    file,
+                    contextUsage.workspaceRoot ?? contextUsage.workspaceCwd,
+                  )
+              : undefined
+          }
         />
       </div>
     );

@@ -63,7 +63,10 @@ Read the live composer buffer for Ctrl+D: nonempty D stays editing. C arms befor
 cleanup, so a fast second C exits. Empty D cancels a responding turn without
 pre-arming. At a pending approval, D preserves the confirmation and arms D/D exit;
 C cancels it while retaining the exit window. Reuse the existing expiry/mixed-key
-guard. Harness cleanup and exit-code differences are not graceful-exit parity.
+guard. Confirmed keyboard exits use 0 in all three renderer/runtime profiles,
+after the shared cleanup drain; actual OS-signal termination retains its signal
+code. Historical 0/130 observations remain baseline evidence, not acceptance
+of the mismatch. Harness cleanup is not a graceful exit.
 
 Composer cancel registers one callback on the current live-turn sequence. Keep
 the callback, structured queue pop, draft restore and start-level C/D dispatch

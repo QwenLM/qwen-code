@@ -3234,9 +3234,9 @@ describe('extension tests', () => {
 
       // Non-archive probe failures must keep the marketplace-specific
       // guidance rather than surfacing the raw install-source error.
-      await expect(
-        manager.addSource('invalid-format-no-slash'),
-      ).rejects.toThrow(/No marketplace found at/);
+      await expect(manager.addSource('invalid package name')).rejects.toThrow(
+        /No marketplace found at/,
+      );
 
       expect(events).toEqual([]);
     });

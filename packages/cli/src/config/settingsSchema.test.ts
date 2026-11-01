@@ -33,12 +33,12 @@ import {
 } from '../serve/create-sub-session.js';
 
 describe('SettingsSchema', () => {
-  it('exposes a default-off Generated UI setting that requires restarting its owner', () => {
+  it('exposes a default-on Generated UI setting that requires restarting its owner', () => {
     expect(
       getSettingsSchema().experimental.properties.generatedUi,
     ).toMatchObject({
       type: 'boolean',
-      default: false,
+      default: true,
       category: 'Experimental',
       requiresRestart: true,
       showInDialog: true,

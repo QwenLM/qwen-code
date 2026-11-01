@@ -2125,7 +2125,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     const preview = document.querySelector('[data-web-shell-home-popover]');
     expect(preview).not.toBeNull();
     expect(preview!.textContent).toContain('Qwen Code');
-    expect(preview!.textContent).toContain('New task');
+    expect(preview!.textContent).toContain('New session');
     expect(preview!.textContent).toContain('Release notes');
     expect(
       document.querySelectorAll('[data-web-shell-home-column]'),
@@ -2184,7 +2184,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       ).not.toBeNull();
       expect(
         document.querySelector('[data-web-shell-home-popover]')!.textContent,
-      ).toContain('New task');
+      ).toContain('New session');
       expect(
         container
           .querySelector('button[aria-current="page"]')
@@ -2889,7 +2889,7 @@ describe('Recent sessions shared rows', () => {
         '[data-testid="recent-sessions"]',
       )!;
       const create = recent.querySelector<HTMLButtonElement>(
-        '[aria-label="New task"]',
+        '[aria-label="New session"]',
       )!;
       click(create);
       await flushSidebar();
@@ -2946,7 +2946,7 @@ describe('Recent sessions shared rows', () => {
         '[data-testid="recent-sessions"]',
       )!;
       click(
-        recent.querySelector<HTMLButtonElement>('[aria-label="New task"]')!,
+        recent.querySelector<HTMLButtonElement>('[aria-label="New session"]')!,
       );
       await flushSidebar();
       renderSidebar(false, { onNewSession });
@@ -3056,7 +3056,9 @@ describe('Recent sessions shared rows', () => {
     renderSidebar(false, { onNewSession });
     await flushSidebar();
     const recent = container.querySelector('[data-testid="recent-sessions"]')!;
-    click(recent.querySelector<HTMLButtonElement>('[aria-label="New task"]')!);
+    click(
+      recent.querySelector<HTMLButtonElement>('[aria-label="New session"]')!,
+    );
     await flushSidebar();
     connection.sessionId = 'session-b';
     workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
@@ -3098,9 +3100,8 @@ describe('Recent sessions shared rows', () => {
     ]);
     expect(recent.textContent).not.toContain('Independent chat');
     expect(
-      container.querySelector('[data-testid="standalone-active-group"]')
-        ?.textContent,
-    ).not.toContain('Independent chat');
+      container.querySelector('[data-testid="standalone-active-group"]'),
+    ).toBeNull();
     expect(active.archiveSession).not.toHaveBeenCalled();
   });
 
