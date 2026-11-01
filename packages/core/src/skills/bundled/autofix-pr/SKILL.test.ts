@@ -378,8 +378,16 @@ describe('bundled autofix-pr skill', () => {
         /out of the brief's events, list (?:it|them) under `## The round's own items`/g,
       ),
     ).toHaveLength(2);
-    expect(ciLogs).toContain(
-      "never goes into the brief's events — only under `## The round's own items`",
+    // A workflow that could not start, and a check its fix pushes left red.
+    expect(
+      ciLogs.match(
+        /never goes into the brief's events — only under `## The round's own items`/g,
+      ),
+    ).toHaveLength(2);
+    // A spent check gets no log and no fix: a person's, recorded as handled.
+    expect(ciLogs).toContain('with a `runId` and no `exhausted`, run');
+    expect(ciLogs).toMatch(
+      /`exhausted: true`[^]*?it is not fixed again\. It is `needs_human`[^]*?its `key` goes into `handledChecks`/,
     );
     expect(ciLogs).not.toMatch(/out of the brief[ ,.]|into the brief[;.]/);
     expect(body).toContain(

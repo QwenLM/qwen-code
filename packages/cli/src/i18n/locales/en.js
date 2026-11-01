@@ -2790,6 +2790,8 @@ export default {
   out: 'out',
 
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.',
   'Check for Qwen Code updates and install if available':
     'Check for Qwen Code updates and install if available',
   'Qwen Code update available! {{current}} → {{latest}}':
