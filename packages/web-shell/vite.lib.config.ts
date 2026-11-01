@@ -89,10 +89,6 @@ function escapeRegExp(value: string): string {
 }
 
 function injectCssModules(mode: string): Plugin {
-  // app-host 作为整页宿主，直接用全局样式；scoped 选择器会依赖
-  // [data-web-shell-root] 作为祖先锚点，而 App 的 appChatEmpty 等状态类正好挂在该
-  // 根元素上，导致 .appChatEmpty .content 这类规则在 scoped 形态下永不匹配。
-  const skipScope = mode === 'app-host';
   return {
     name: 'inject-web-shell-css-modules',
     enforce: 'post',
@@ -107,7 +103,7 @@ function injectCssModules(mode: string): Plugin {
             typeof item.source === 'string'
               ? item.source
               : Buffer.from(item.source).toString('utf8');
-          return skipScope ? source : scopeComponentCss(source);
+          return scopeComponentCss(source);
         })
         .join('\n');
       if (!css) return;

@@ -56,13 +56,14 @@ The normal default and transcript builds keep their previous entry/external rule
 
 The full-page host uses the sibling `--mode app-host`, which writes
 `dist/app-host/` and mounts the complete Web Shell through
-`renderWebShellApp(container, props)`. It intentionally skips CSS scoping: its
-empty-state classes sit on the root element itself, where the scope anchor
-(`[data-web-shell-root]` as an ancestor) never matches. That decision is scoped
-to this bundle only — the published `index`, `transcript` and `managed-host`
-entries keep scoped CSS and `@keyframes`/`@property` renaming. Neither host mode
-is part of `npm run build`; both are on-demand artifacts built with the same
-config and served as a complete directory.
+`renderWebShellApp(container, props)`. Both host modes use scoped CSS injection
+and `@keyframes`/`@property` renaming. The scope selector's first two terms
+(`[data-web-shell-root][data-web-shell-shadcn]` and
+`[data-web-shell-portal-root][data-web-shell-shadcn]`) match the element itself,
+so state classes on the root element (such as `appChatEmpty`) also take effect
+in scoped bundles. Neither host mode is part of `npm run build`; both are
+on-demand artifacts built with the same config and served as a complete
+directory.
 
 ## Validation and acceptance
 

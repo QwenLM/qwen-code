@@ -46,11 +46,12 @@ Session ID 隔离。短期 token 刷新应保持 provider 身份稳定。品牌�
 规则。
 
 整页宿主使用同级的 `--mode app-host`，产物写入 `dist/app-host/`，通过
-`renderWebShellApp(container, props)` 挂载完整 Web Shell。该模式有意跳过 CSS scoping：
-它的空态样式类挂在根元素本身，而 scoped 选择器以 `[data-web-shell-root]` 作为祖先
-锚点，在这些根元素上永远不匹配。这个决定只作用于该产物 —— 已发布的 `index`、
-`transcript`、`managed-host` 入口仍保留 scoped CSS 与 `@keyframes`/`@property` 重命名。
-两个宿主模式都不在 `npm run build` 中，都是同一份配置下的按需构建产物，按完整目录提供。
+`renderWebShellApp(container, props)` 挂载完整 Web Shell。两个宿主模式都走 scoped CSS
+注入与 `@keyframes`/`@property` 重命名。scoped 选择器的前两项
+（`[data-web-shell-root][data-web-shell-shadcn]` 和
+`[data-web-shell-portal-root][data-web-shell-shadcn]`）匹配元素自身，所以根元素上的
+状态类（如 `appChatEmpty`）在 scoped 产物中同样生效。两个宿主模式都不在
+`npm run build` 中，都是同一份配置下的按需构建产物，按完整目录提供。
 
 ## 验证与验收
 

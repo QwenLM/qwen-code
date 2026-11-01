@@ -1938,16 +1938,7 @@ function ManagedSessionsContent({
             </p>
           )}
           {!(!sessionId && provider.workspaceBinding) && (
-            // 空态（未选中会话且无消息）时内容收缩，由 chatPane 垂直居中，
-            // 与 standalone 空态（.appChatEmpty .content { flex: 0 0 auto }）布局一致；
-            // 有会话/消息时保持铺满。注意 inline style 优先级高于样式表，不能写死。
-            <div
-              className={shellStyles.content}
-              style={{
-                flex:
-                  !sessionId && messages.length === 0 ? '0 0 auto' : '1 1 auto',
-              }}
-            >
+            <div className={shellStyles.content}>
               <ToolDetailsContext.Provider value={loadToolDetails}>
                 <MessageList
                   messages={messages}

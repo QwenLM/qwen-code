@@ -54,11 +54,11 @@ const shell = renderWebShellApp(container, {
 运行时依赖，只需按 JavaScript MIME 类型提供整个输出目录，不需要 import map 或单独的 CSS
 import。
 
-`app-host` 有意跳过 CSS scoping：整页宿主的空态样式类挂在根元素本身，scoped 选择器以
-`[data-web-shell-root]` 作为祖先锚点，在这些根元素上永远不匹配，所以该模式直接注入全局
-样式。这个决定只作用于该产物，`index`、`transcript`、`managed-host` 三个入口仍走 scoped
-注入与 `@keyframes`/`@property` 重命名。两个宿主模式都不在 `npm run build` 里，都是按需
-构建的独立产物。
+`app-host` 与 `managed-host` 都走 scoped CSS 注入与 `@keyframes`/`@property` 重命名。
+scoped 选择器的前两项（`[data-web-shell-root][data-web-shell-shadcn]` 和
+`[data-web-shell-portal-root][data-web-shell-shadcn]`）匹配元素自身，所以根元素上的
+状态类（如 `appChatEmpty`）在 scoped 产物中同样生效。两个宿主模式都不在
+`npm run build` 里，都是按需构建的独立产物。
 
 ## Managed 工作区与模型
 
