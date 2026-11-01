@@ -3200,8 +3200,9 @@ jobs:
               fi
             fi
 
-            # Park action for the convergence breaker: above the idle fast-path, below
-            # target emission. Full rationale → qwen-autofix.md#af-152
+            # Convergence-signal circuit breaker (#10107): the park action on the
+            # verdict derived above, above the idle fast-path and below target
+            # emission. Full rationale → qwen-autofix.md#af-152
             if [[ "${CONV_PARKED}" == 'true' ]]; then
               echo "🛑 #${PR}: convergence park active (streak ${CONV_STREAK}/${CONVERGENCE_BREAK_ROUNDS}) — paused until a human weighs in"
               fleet_row "${PR}" 'convergence-parked' "park active (streak ${CONV_STREAK}/${CONVERGENCE_BREAK_ROUNDS}) — a maintainer response or ${RETRY_COMMAND} resumes"
@@ -4476,7 +4477,8 @@ jobs:
               echo "🫥 conflict handoff pending: a growth audit returned conflict in this window and no trusted human has responded since — idling without an agent run or comment"
             fi
           fi
-          # Mirror the scan's convergence park before dispatching an address round.
+          # Convergence-break mirror (#10107): mirror the scan's convergence park
+          # before dispatching an address round.
           # Full rationale → qwen-autofix.md#af-153
           if [[ "${STALE}" != 'true' ]]; then
             [[ "${CONVERGENCE_BREAK_ROUNDS}" =~ ^[1-9][0-9]{0,2}$ ]] || CONVERGENCE_BREAK_ROUNDS=3
@@ -4921,7 +4923,7 @@ jobs:
               printf '%s\n' "${LAST_REJECTION}"
             fi
             # Warn when prior rounds exhausted their budget; idle timeouts are excluded.
-            # Full rationale → qwen-autofix.md#af-049, af-073
+            # Full rationale → qwen-autofix.md#af-049, qwen-autofix.md#af-073
             PRIOR_TIMEOUTS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '
               [ .[] | select((.user.login // "") == $ab)
                 | select((.body // "") | contains("<!-- autofix-eval "))
@@ -6050,7 +6052,7 @@ jobs:
                 STALE_BASE_DEFERRED=false
                 if [[ "${AUDIT_VERDICT:-}" != 'conflict' ]]; then
                   # Re-derive the convergence park before this report's stale-base retry.
-                  # Full rationale → qwen-autofix.md#af-152, af-153, af-154
+                  # Full rationale → qwen-autofix.md#af-152, qwen-autofix.md#af-153, qwen-autofix.md#af-154
                   CONV_PARKED_R='false'
                   # Each fetch sits in an errexit-exempt condition: under the
                   # step shell's -eo pipefail a transient gh failure (5xx,
@@ -6292,7 +6294,7 @@ jobs:
                 HEADLINE_ZH="🤖 AutoFix 已停止：连续 ${CONSEC_FAIL} 轮没有进展（失败轮次、超时、验证门拒绝、按指示停止，或推送后检查转红）。以相同的单轮预算重试并不收敛 —— 这通常意味着 PR 过大，或与快速变动的 \`main\` 冲突。应由人工 rebase、拆分或缩减它，然后评论 \`${RETRY_COMMAND}\` 重新武装。在此之前，后续扫描将跳过本 PR。"
               fi
               # Cumulative timeout breaker; idle (silent-sandbox) timeouts are excluded.
-              # Full rationale → qwen-autofix.md#af-145, af-073
+              # Full rationale → qwen-autofix.md#af-145, qwen-autofix.md#af-073
               IDLE_N="$(grep -c 'AutoFix ran out of time before finishing (idle-timeout' <<< "${PRIOR_HEADS}" || true)"
               if [[ "${AGENT_TIMEOUT:-}" == 'idle-timeout'* ]]; then
                 IDLE_N=$(( IDLE_N + 1 ))

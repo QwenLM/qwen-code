@@ -4726,7 +4726,7 @@ zero-round engagement is what 'stop' already means (af-007).
 
 In the workflow `env:` block.
 
-The workflow file is 451,358 bytes: under this repository's own 470 KB gate
+The workflow file is 451,536 bytes: under this repository's own 470 KB gate
 (`.github/scripts/check-workflow-size.sh`, env-overridable) and ~60 KB below
 GitHub's 512 KB start-runs limit. The gate is still close enough that the
 long-form commentary on the constants below lives here verbatim — with TWO
