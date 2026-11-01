@@ -543,7 +543,10 @@ class ExternalWorkspaceProvisionerTest {
         assertFalse(subject.supportsDrainedStop(saved));
         var wrongProvider = failure(subject.stopDrained(saved));
         assertEquals(409, wrongProvider.getStatusCode());
-        assertEquals("runtime_broker_resource_conflict", wrongProvider.getCode());
+        // A registration that names a different provider is a misconfiguration to
+        // read and confirm, not a transient conflict to retry, so the profile
+        // reports the mismatch by name rather than the generic broker conflict.
+        assertEquals("external_storage_registration_mismatch", wrongProvider.getCode());
         assertFalse(wrongProvider.isRetryable());
         assertEquals(observations, client.observes.size());
         assertEquals(1, client.provisions.size());
