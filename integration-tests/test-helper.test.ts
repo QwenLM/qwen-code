@@ -577,10 +577,16 @@ describe('TestRig', () => {
         },
       ]);
       expect(rig.readFile('captured.txt')).toBe('captured');
+      // The telemetry record must exist so the redaction witness below cannot
+      // pass vacuously on a missing entry (find() === undefined).
+      const telemetryWriteLog = rig
+        .readToolLogs()
+        .find((log) => log.toolRequest.name === 'write_file');
       expect(
-        rig.readToolLogs().find((log) => log.toolRequest.name === 'write_file')
-          ?.toolRequest.args,
-      ).not.toContain(targetPath);
+        telemetryWriteLog,
+        'expected a write_file telemetry record to witness redaction against',
+      ).toBeDefined();
+      expect(telemetryWriteLog?.toolRequest.args).not.toContain(targetPath);
     } finally {
       await fakeServer.close();
       await rig.cleanup();

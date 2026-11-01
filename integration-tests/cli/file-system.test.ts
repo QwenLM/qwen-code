@@ -144,6 +144,7 @@ describe('file-system', () => {
     const writeCall = toolLogs.find(
       (log) =>
         log.toolRequest.name === 'write_file' ||
+        log.toolRequest.name === 'edit' ||
         log.toolRequest.name === 'replace',
     );
 
@@ -154,7 +155,7 @@ describe('file-system', () => {
     expect(readCall, 'Expected to find a read_file tool call').toBeDefined();
     expect(
       writeCall,
-      'Expected to find a write_file or replace tool call',
+      'Expected to find a write_file, edit, or replace tool call',
     ).toBeDefined();
 
     const newFileContent = rig.readFile(fileName);
@@ -223,18 +224,21 @@ describe('file-system', () => {
     );
     const failedTargetAttempt = capture.toolCalls.find(
       (call) =>
-        ['read_file', 'replace', 'write_file'].includes(call.name) &&
+        ['read_file', 'edit', 'replace', 'write_file'].includes(call.name) &&
         capturedToolCallPathMatches(call, 'file_path', fileName) &&
         call.success === false,
     );
     const successfulWrite = capture.toolCalls.find(
       (call) =>
-        (call.name === 'replace' || call.name === 'write_file') &&
+        (call.name === 'edit' ||
+          call.name === 'replace' ||
+          call.name === 'write_file') &&
         call.success === true,
     );
 
-    // The model can either investigate (and fail) or do nothing.
-    // If it chose to investigate by reading, that read must have failed.
+    // The model must attempt the target, and every attempt against it must
+    // fail. 'edit' is the canonical edit tool; 'replace' is its legacy alias.
+    // If it investigated by reading first, that read must also have failed.
     if (readAttempt?.success) {
       console.error(
         'A read_file attempt succeeded for a non-existent file when it should have failed.',
@@ -256,18 +260,18 @@ describe('file-system', () => {
     }
     expect(
       failedTargetAttempt,
-      'Expected a failed read, replace, or write attempt against the target',
+      'Expected a failed read, edit, or write attempt against the target',
     ).toBeDefined();
 
     // CRITICAL: Verify that no matter what the model did, it never successfully
-    // wrote or replaced anything.
+    // edited or wrote anything.
     if (successfulWrite) {
       console.error('A successful write occurred when it should not have.');
       printDebugInfo(rig, result);
     }
     expect(
       successfulWrite,
-      'A successful write or replace should not have occurred',
+      'A successful edit or write should not have occurred',
     ).toBeUndefined();
     expect(existsSync(join(rig.testDir!, fileName))).toBe(false);
   });
