@@ -81,6 +81,22 @@ CREATE INDEX ix_ma_session_retirement ON ma_session (retired_at, recovery_protec
 
 CREATE INDEX ix_ma_session_storage_scope ON ma_session (tenant_id, workspace_storage_id, resource_gc_completed, session_id);
 
+-- Ownership of a non-Workspace Session: exactly one immutable row per
+-- unbound Session, written in the Session creation transaction. The owner is
+-- the full verified principal (tenant, user and DataAgent business actor);
+-- actor_present distinguishes a present business actor from none. Legacy
+-- Sessions without this row remain invisible to ownership-enforcing paths.
+CREATE TABLE ma_session_principal (
+    tenant_id VARBINARY(512) NOT NULL,
+    session_id VARBINARY(512) NOT NULL,
+    version BIGINT NOT NULL,
+    user_id VARBINARY(1024) NOT NULL,
+    actor_present BOOLEAN NOT NULL,
+    actor_subject_id VARBINARY(1024),
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    PRIMARY KEY (tenant_id, session_id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
 CREATE TABLE ma_user_message_queue (
     tenant_id VARBINARY(512) NOT NULL,
     session_id VARBINARY(512) NOT NULL,

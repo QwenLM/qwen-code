@@ -73,10 +73,16 @@ public class TenantContextFilter extends OncePerRequestFilter {
         }
         Principal principal = request.getUserPrincipal();
         String actorId = null;
+        String actorSubjectId = null;
         if (principal instanceof AuthenticatedTenantActor actor) {
             String claimedActorId = actor.actorId();
+            String claimedActorSubjectId = actor.actorSubjectId();
             if (!tenantId.equals(actor.tenantId())
-                    || !validActorId(tenantId, claimedActorId)) {
+                    || !validActorId(tenantId, claimedActorId)
+                    || claimedActorSubjectId != null
+                            && !validActorSubject(tenantId,
+                                    claimedActorId,
+                                    claimedActorSubjectId)) {
                 response.setStatus(HttpServletResponse.SC_FORBIDDEN);
                 response.setContentType(MediaType.APPLICATION_JSON_VALUE);
                 objectMapper.writeValue(response.getOutputStream(),
@@ -86,8 +92,10 @@ public class TenantContextFilter extends OncePerRequestFilter {
                 return;
             }
             actorId = claimedActorId;
+            actorSubjectId = claimedActorSubjectId;
         }
-        request.setAttribute(ATTRIBUTE, new TenantContext(tenantId, actorId));
+        request.setAttribute(ATTRIBUTE,
+                new TenantContext(tenantId, actorId, actorSubjectId));
         chain.doFilter(request, response);
     }
 
@@ -96,6 +104,21 @@ public class TenantContextFilter extends OncePerRequestFilter {
             new WorkspaceActor(tenantId, actorId);
             return true;
         } catch (IllegalArgumentException error) {
+            return false;
+        }
+    }
+
+    private static boolean validActorSubject(String tenantId, String actorId,
+            String actorSubjectId) {
+        if (actorId == null || actorId.isBlank()) {
+            return false;
+        }
+        try {
+            com.alibaba.qwen.code.managedagent.model.SessionPrincipal.of(
+                    tenantId, actorId, actorSubjectId);
+            return true;
+        } catch (com.alibaba.qwen.code.managedagent.exception.ManagedAgentException
+                error) {
             return false;
         }
     }

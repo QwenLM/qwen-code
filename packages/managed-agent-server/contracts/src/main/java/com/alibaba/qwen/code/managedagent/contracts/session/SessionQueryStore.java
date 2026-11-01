@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.contracts.session;
 
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleOperation;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
@@ -41,6 +42,28 @@ public interface SessionQueryStore {
 
     public SessionPage listSessions(String tenantId, String actorId, Long beforeCreatedAt,
             String beforeSessionId, int limit, String archiveState, String titleQuery);
+
+    /**
+     * A page whose ownership filter runs before the cursor and limit. Bound
+     * Sessions retain Workspace grants; unbound Sessions require an exact
+     * principal match and legacy rows without an ownership row stay hidden.
+     */
+    public default SessionPage listSessions(String tenantId,
+            SessionPrincipal principal, Long beforeCreatedAt,
+            String beforeSessionId, int limit, String archiveState,
+            String titleQuery) {
+        throw new UnsupportedOperationException(
+                "Ownership-filtered Session pages are unavailable");
+    }
+
+    /** A page restricted to Sessions owned by the principal. */
+    public default SessionPage listOwnedSessions(String tenantId,
+            SessionPrincipal principal, Long beforeCreatedAt,
+            String beforeSessionId, int limit, String archiveState,
+            String titleQuery) {
+        throw new UnsupportedOperationException(
+                "Owner-only Session pages are unavailable");
+    }
 
     public Map<String, WebShellLifecycleOperation> findLatestLifecycleOperations(String tenantId, List<String> sessionIds);
 

@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.contracts.session.SessionPolicyStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
@@ -47,7 +48,14 @@ public class ManagedExtensionManagementService {
     }
 
     public JsonNode query(String tenant, String actor, String sessionId, String operationId) {
-        SessionRecord session = sessions.requireReadableSession(tenant, actor, sessionId);
+        return query(principalOf(tenant, actor), sessionId, operationId);
+    }
+
+    public JsonNode query(SessionPrincipal principal, String sessionId,
+            String operationId) {
+        String tenant = principal.tenantId();
+        String actor = principal.userId();
+        SessionRecord session = sessions.requireReadableSession(principal, sessionId);
         if (session.workspace() == null) {
             return empty(sessionId, false);
         }
@@ -79,6 +87,11 @@ public class ManagedExtensionManagementService {
     }
 
     public JsonNode submit(String tenant, String actor, String sessionId, String key, JsonNode command) {
+        return submit(principalOf(tenant, actor), sessionId, key, command);
+    }
+
+    public JsonNode submit(SessionPrincipal principal, String sessionId, String key,
+            JsonNode command) {
         ManagedAgentService.validateIdempotencyKey(key);
         if (command == null || !command.isObject() || command.size() != 2 || !command.has("extensions")
                 || !command.path("expectedConfigRevision").isIntegralNumber()
@@ -92,39 +105,57 @@ public class ManagedExtensionManagementService {
         } catch (ManagedExtensionRecords.InvalidRecordException error) {
             throw invalid();
         }
-        String operationId = UUID.nameUUIDFromBytes(("managed-extension-apply\0" + tenant + "\0" + actor + "\0" + sessionId + "\0" + key)
+        String operationId = UUID.nameUUIDFromBytes(("managed-extension-apply\0"
+                + principal.tenantId() + "\0" + principal.userId() + "\0"
+                + principal.actorSubjectId() + "\0" + sessionId + "\0" + key)
                 .getBytes(StandardCharsets.UTF_8)).toString();
-        SessionRecord session = store.requireExtensionManagement(tenant, actor, sessionId, operationId, true);
-        packages.requireExecutionAccess(tenant, actor, session.workspace().getWorkspaceId());
+        sessions.requireReadableSession(principal, sessionId);
+        SessionRecord session = store.requireExtensionManagement(principal.tenantId(),
+                principal.userId(), sessionId, operationId, true);
+        packages.requireExecutionAccess(principal.tenantId(), principal.userId(),
+                session.workspace().getWorkspaceId());
         if (!harness.supportsSessionExtensions()) {
             throw unsupported();
         }
         for (JsonNode pin : command.get("extensions")) {
-            packages.get(tenant, actor, session.workspace().getWorkspaceId(), pin.get("extensionId").asText(),
+            packages.get(principal.tenantId(), principal.userId(),
+                    session.workspace().getWorkspaceId(), pin.get("extensionId").asText(),
                     pin.get("packageRevision").asLong(), pin.get("packageDigest").asText());
         }
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("operationId", operationId);
-        request.put("actorKey", DigestUtils.sha256Hex(actor));
+        request.put("actorKey", DigestUtils.sha256Hex(principal.userId()));
         request.put("expectedRevision", command.get("expectedConfigRevision").asLong());
         request.put("extensions", json.convertValue(command.get("extensions"), List.class));
-        return invoke(() -> harness.applyExtensions(tenant, sessionId, request), sessionId, operationId);
+        return invoke(() -> harness.applyExtensions(principal.tenantId(), sessionId,
+                request), sessionId, operationId);
     }
 
     public JsonNode resume(String tenant, String actor, String sessionId, String operationId, boolean recoverPrevious) {
+        return resume(principalOf(tenant, actor), sessionId, operationId,
+                recoverPrevious);
+    }
+
+    public JsonNode resume(SessionPrincipal principal, String sessionId,
+            String operationId, boolean recoverPrevious) {
         if (!ManagedConfigInstall.uuid(operationId)) {
             throw invalid();
         }
-        SessionRecord session = store.requireExtensionManagement(tenant, actor, sessionId, operationId, true);
-        JsonNode current = records.currentMcpSettings(tenant, sessionId);
+        sessions.requireReadableSession(principal, sessionId);
+        SessionRecord session = store.requireExtensionManagement(principal.tenantId(),
+                principal.userId(), sessionId, operationId, true);
+        JsonNode current = records.currentMcpSettings(principal.tenantId(),
+                sessionId);
         if (!ManagedConfigInstall.isPackageConfig(current) || !operationId.equals(current.path("operationId").asText())) {
             throw missing();
         }
         if (!harness.supportsSessionExtensions() || session.workspace() == null) {
             throw unsupported();
         }
-        packages.requireExecutionAccess(tenant, actor, session.workspace().getWorkspaceId());
-        return invoke(() -> harness.continueExtensionOperation(tenant, sessionId, operationId, recoverPrevious), sessionId, operationId);
+        packages.requireExecutionAccess(principal.tenantId(), principal.userId(),
+                session.workspace().getWorkspaceId());
+        return invoke(() -> harness.continueExtensionOperation(principal.tenantId(),
+                sessionId, operationId, recoverPrevious), sessionId, operationId);
     }
 
     private ObjectNode snapshot(String tenant, String sessionId, JsonNode body, boolean supported) {
@@ -214,4 +245,9 @@ public class ManagedExtensionManagementService {
     private static ManagedAgentException corrupt() { return new ManagedAgentException(409, "session_config_corrupt", "The saved configuration cannot be verified."); }
     private static ManagedAgentException unsupported() { return new ManagedAgentException(409, "unsupported_feature", "Extension configuration is unavailable."); }
     private static ManagedAgentException unavailable() { return new ManagedAgentException(503, "session_config_outcome_unknown", "Query or continue the original extension operation."); }
+
+    private static SessionPrincipal principalOf(String tenant, String actor) {
+        return actor == null || actor.isBlank()
+                ? null : SessionPrincipal.ofUser(tenant, actor);
+    }
 }

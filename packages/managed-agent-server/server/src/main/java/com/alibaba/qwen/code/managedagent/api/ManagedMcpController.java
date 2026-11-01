@@ -34,32 +34,34 @@ public class ManagedMcpController {
     @GetMapping("/v1/agents/sessions/{sessionId}/mcp-catalog")
     public ResponseEntity<JsonNode> get(TenantContext tenant, @PathVariable String sessionId) {
         return ResponseEntity.ok().cacheControl(CacheControl.noStore())
-                .body(service.get(tenant.tenantId(), tenant.actorId(), sessionId));
+                .body(service.get(tenant.requirePrincipal(), sessionId));
     }
 
     @PostMapping("/api/agent/web-shell/v1/session-mcp/query")
     public ResponseEntity<JsonNode> query(TenantContext tenant,
             @Valid @RequestBody WebShellSessionRequest request) {
         return ResponseEntity.ok().cacheControl(CacheControl.noStore())
-                .body(service.get(tenant.tenantId(), tenant.requireActorId(), request.sessionId()));
+                .body(service.get(tenant.requirePrincipal(), request.sessionId()));
     }
 
     @GetMapping("/v1/agents/sessions/{sessionId}/mcp-management")
     public ResponseEntity<JsonNode> management(TenantContext tenant, @PathVariable String sessionId) {
-        return noStore(management.get(tenant.tenantId(), tenant.requireActorId(), sessionId));
+        return noStore(management.get(tenant.requirePrincipal(), sessionId));
     }
 
     @PostMapping("/v1/agents/sessions/{sessionId}/mcp-management/commands")
     public ResponseEntity<JsonNode> submit(TenantContext tenant, @PathVariable String sessionId,
             @RequestHeader("Idempotency-Key") String idempotencyKey,
             @Valid @RequestBody ManagedMcpManagementCommand command) {
-        return noStore(management.submit(tenant.tenantId(), tenant.requireActorId(), sessionId, idempotencyKey, command));
+        return noStore(management.submit(tenant.requirePrincipal(), sessionId,
+                idempotencyKey, command));
     }
 
     @GetMapping("/v1/agents/sessions/{sessionId}/mcp-management/commands/{operationId}")
     public ResponseEntity<JsonNode> operation(TenantContext tenant, @PathVariable String sessionId,
             @PathVariable String operationId) {
-        return noStore(management.operation(tenant.tenantId(), tenant.requireActorId(), sessionId, operationId));
+        return noStore(management.operation(tenant.requirePrincipal(), sessionId,
+                operationId));
     }
 
     @PostMapping("/api/agent/web-shell/v1/session-mcp/management/query")
@@ -67,7 +69,8 @@ public class ManagedMcpController {
             @Valid @RequestBody WebShellMcpManagementQuery request,
             HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
         RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
-        return noStore(management.get(tenant.tenantId(), tenant.requireActorId(), request.sessionId()));
+        return noStore(management.get(tenant.requirePrincipal(),
+                request.sessionId()));
     }
 
     @PostMapping("/api/agent/web-shell/v1/session-mcp/management/submit")
@@ -75,8 +78,9 @@ public class ManagedMcpController {
             @Valid @RequestBody WebShellMcpManagementSubmit request,
             HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
         RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
-        return noStore(management.submit(tenant.tenantId(), tenant.requireActorId(), request.sessionId(),
-                request.idempotencyKey(), new ManagedMcpManagementCommand(request.action(), request.serverId(),
+        return noStore(management.submit(tenant.requirePrincipal(),
+                request.sessionId(), request.idempotencyKey(),
+                new ManagedMcpManagementCommand(request.action(), request.serverId(),
                         request.expectedRevision(), request.server())));
     }
 
@@ -85,7 +89,8 @@ public class ManagedMcpController {
             @Valid @RequestBody WebShellMcpManagementOperationQuery request,
             HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
         RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
-        return noStore(management.operation(tenant.tenantId(), tenant.requireActorId(), request.sessionId(), request.operationId()));
+        return noStore(management.operation(tenant.requirePrincipal(),
+                request.sessionId(), request.operationId()));
     }
 
     private static ResponseEntity<JsonNode> noStore(JsonNode body) {

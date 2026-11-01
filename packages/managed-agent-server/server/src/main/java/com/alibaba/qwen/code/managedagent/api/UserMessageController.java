@@ -22,13 +22,14 @@ public class UserMessageController {
 
     @GetMapping("/v1/agents/sessions/{sessionId}/user-messages")
     public Snapshot query(TenantContext tenant, @PathVariable String sessionId) {
-        return messages.queryMessages(tenant.tenantId(), tenant.actorId(), sessionId);
+        return messages.queryMessages(tenant.requirePrincipal(), sessionId);
     }
 
     @PostMapping("/v1/agents/sessions/{sessionId}/user-messages")
     public Snapshot command(TenantContext tenant, @PathVariable String sessionId,
             @RequestHeader("Idempotency-Key") String key, @RequestBody Command command) {
-        return messages.command(tenant.tenantId(), tenant.actorId(), sessionId, key, command);
+        return messages.command(tenant.requirePrincipal(), sessionId, key,
+                command);
     }
 
     @PostMapping("/api/agent/web-shell/v1/user-messages/query")

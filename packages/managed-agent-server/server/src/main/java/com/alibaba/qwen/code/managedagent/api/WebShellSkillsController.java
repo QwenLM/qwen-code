@@ -23,6 +23,6 @@ public class WebShellSkillsController {
     public ResponseEntity<WebShellSessionSkills> query(TenantContext tenant,
             @Valid @RequestBody WebShellSessionRequest request) {
         return ResponseEntity.ok().cacheControl(CacheControl.noStore())
-                .body(skills.get(tenant.tenantId(), tenant.requireActorId(), request.sessionId()));
+                .body(skills.get(tenant.requirePrincipal(), request.sessionId()));
     }
 }

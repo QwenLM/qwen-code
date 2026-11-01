@@ -25,6 +25,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelOption;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelSelection;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionOptions;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
@@ -399,12 +400,49 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest) {
+        return insertSessionCommand(tenantId,
+                actorId == null ? null
+                        : SessionPrincipal.ofUser(tenantId, actorId),
+                operation, idempotencyKey, requestDigest, agentId,
+                requestedRevision, title, input, payloadDigest);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertSessionCommand(String tenantId,
+            SessionPrincipal principal, String operation,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest) {
+        if (principal == null) {
+            throw new ManagedAgentException(401,
+                    "actor_required", "A trusted actor is required.");
+        }
+        requirePrincipalTenant(tenantId, principal);
         AgentPin pin = resolveAgentPin(tenantId, agentId, requestedRevision,
                 false);
         requireCreationScope(tenantId, idempotencyKey, false);
         return insertSession(tenantId, operation, idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
-                null, actorId, pin);
+                null, principal.userId(), pin, null, false, null, principal);
+    }
+
+    @Override
+    public void requireSessionOwnership(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        if (!ownsSession(tenantId, sessionId, principal)) {
+            throw new ManagedAgentException(404,
+                    "session_not_found", "The Session was not found.");
+        }
+    }
+
+    @Override
+    public boolean ownsSession(String tenantId, String sessionId,
+            SessionPrincipal principal) {
+        return principal != null && principal.tenantId().equals(tenantId)
+                && ManagedSessionPrincipal.matches(
+                        ManagedSessionPrincipal.find(jdbc, tenantId, sessionId),
+                        principal);
     }
 
     @Override
@@ -1465,8 +1503,22 @@ public class ManagedAgentStore implements AgentStateStore {
             String requestDigest, String agentId, String title, List<Map<String, Object>> input,
             String payloadDigest, ResolvedBinding resolved, String actorId, AgentPin pin,
             WorkspaceCsiRegistration registration, boolean planMode, String modelId) {
+        return insertSession(tenantId, operation, idempotencyKey, requestDigest,
+                agentId, title, input, payloadDigest, resolved, actorId, pin,
+                registration, planMode, modelId, null);
+    }
+
+    private Admission insertSession(String tenantId, String operation, String idempotencyKey,
+            String requestDigest, String agentId, String title, List<Map<String, Object>> input,
+            String payloadDigest, ResolvedBinding resolved, String actorId, AgentPin pin,
+            WorkspaceCsiRegistration registration, boolean planMode, String modelId,
+            SessionPrincipal principal) {
         ContextBinding workspace = resolved == null ? null
                 : resolved.binding();
+        if (resolved == null && principal == null) {
+            throw new ManagedAgentException(401,
+                    "actor_required", "A trusted actor is required.");
+        }
         long now = clock.millis();
         String sessionId = UUID.randomUUID().toString();
         String runtimeRequestKey =
@@ -1518,8 +1570,11 @@ public class ManagedAgentStore implements AgentStateStore {
                     payloadDigest, now);
         }
         if (resolved == null) {
+            ManagedSessionPrincipal.insert(jdbc, tenantId, sessionId,
+                    principal, now);
             insertCommand(tenantId, operation, idempotencyKey, requestDigest,
-                    sessionId, turnId, now);
+                    sessionId, turnId, "COMPLETED", null,
+                    ManagedSessionPrincipal.actorKey(principal), now);
         } else {
             ManagedReceipts.insertCreation(jdbc, tenantId, actorKey,
                     idempotencyKey, requestDigest, sessionId, turnId, now);
@@ -1538,7 +1593,8 @@ public class ManagedAgentStore implements AgentStateStore {
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest) {
         return insertTurnCommand(tenantId, operation, idempotencyKey,
-                requestDigest, sessionId, input, payloadDigest, null);
+                requestDigest, sessionId, input, payloadDigest,
+                (String) null);
     }
 
     // The actor-carrying variant records the caller on the command
@@ -1549,6 +1605,23 @@ public class ManagedAgentStore implements AgentStateStore {
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest,
             String actorId) {
+        return insertTurnCommand(tenantId, operation, idempotencyKey,
+                requestDigest, sessionId, input, payloadDigest,
+                actorId == null ? null
+                        : SessionPrincipal.ofUser(tenantId, actorId));
+    }
+
+    /**
+     * The principal-carrying Turn admission. An unbound Session requires
+     * the exact immutable ownership row and stamps the receipt with the
+     * complete principal; a bound Session keeps Workspace actor identity.
+     */
+    @Transactional
+    public Admission insertTurnCommand(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String sessionId,
+            List<Map<String, Object>> input, String payloadDigest,
+            SessionPrincipal principal) {
+        String actorId = principal == null ? null : principal.userId();
         // A per-turn admission: a long holder of the tenant's placement row
         // answers tenant_guard_contended within the hot-path bound instead
         // of parking the submit past the caller's budget (#13800).
@@ -1556,6 +1629,10 @@ public class ManagedAgentStore implements AgentStateStore {
                 ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
         SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
         requirePublicChildImmutable(session);
+        if (session.workspace() == null) {
+            principal = resolveWritePrincipal(tenantId, sessionId, principal);
+            actorId = principal.userId();
+        }
         // A bound Session's later Turn needs the same deployment opt-in as
         // its initial one; the service admits any caller holding OPERATOR
         // on the bound Workspace while the Session's creator-keyed
@@ -1572,6 +1649,8 @@ public class ManagedAgentStore implements AgentStateStore {
         Optional<CommandRecord> existing = findCommand(tenantId, operation,
                 idempotencyKey);
         if (existing.isPresent()) {
+            requireMutationReceiptGrant(tenantId, session, existing.get(),
+                    actorId, principal);
             return replayCommand(tenantId, operation, idempotencyKey,
                     requestDigest);
         }
@@ -1641,7 +1720,9 @@ public class ManagedAgentStore implements AgentStateStore {
         String turnId = publicId("turn");
         insertTurn(tenantId, sessionId, turnId,
                 UUID.randomUUID().toString(), input, payloadDigest, now);
-        byte[] actorKey = commandActorKey(tenantId, actorId);
+        byte[] actorKey = session.workspace() == null
+                ? ManagedSessionPrincipal.actorKey(principal)
+                : commandActorKey(tenantId, actorId);
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
                 sessionId, turnId, "COMPLETED", null, actorKey, now);
         String operationId = insertTurnCommandOperation(tenantId, sessionId,
@@ -1657,7 +1738,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId) {
         return insertCancelCommand(tenantId, operation, idempotencyKey,
-                requestDigest, sessionId, turnId, null);
+                requestDigest, sessionId, turnId, (String) null);
     }
 
     // The actor-carrying twin of insertTurnCommand's overload.
@@ -1665,13 +1746,31 @@ public class ManagedAgentStore implements AgentStateStore {
     public Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String actorId) {
+        return insertCancelCommand(tenantId, operation, idempotencyKey,
+                requestDigest, sessionId, turnId,
+                actorId == null ? null
+                        : SessionPrincipal.ofUser(tenantId, actorId));
+    }
+
+    /** The principal-carrying twin of the Turn admission. */
+    @Transactional
+    public Admission insertCancelCommand(String tenantId, String operation,
+            String idempotencyKey, String requestDigest, String sessionId,
+            String turnId, SessionPrincipal principal) {
+        String actorId = principal == null ? null : principal.userId();
         SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        if (session.workspace() == null) {
+            principal = resolveWritePrincipal(tenantId, sessionId, principal);
+            actorId = principal.userId();
+        }
         if (session.workspace() != null && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
         TurnRecord turn = requireTurn(tenantId, sessionId, turnId);
         long now = clock.millis();
-        byte[] actorKey = commandActorKey(tenantId, actorId);
+        byte[] actorKey = session.workspace() == null
+                ? ManagedSessionPrincipal.actorKey(principal)
+                : commandActorKey(tenantId, actorId);
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
                 sessionId, turnId, "COMPLETED", null, actorKey, now);
         String operationId = insertTurnCommandOperation(tenantId, sessionId,
@@ -1721,20 +1820,37 @@ public class ManagedAgentStore implements AgentStateStore {
     public SessionMutationCommand beginSessionRename(String tenantId, String key,
             String digest, String sessionId, String title) {
         return beginSessionRename(tenantId, key, digest, sessionId, title,
-                null);
+                (String) null);
     }
 
     @Override
     @Transactional
     public SessionMutationCommand beginSessionRename(String tenantId, String key,
             String digest, String sessionId, String title, String actorId) {
+        return beginSessionRename(tenantId, key, digest, sessionId, title,
+                actorId, actorId == null ? null
+                        : SessionPrincipal.ofUser(tenantId, actorId));
+    }
+
+    @Override
+    @Transactional
+    public SessionMutationCommand beginSessionRename(String tenantId, String key,
+            String digest, String sessionId, String title, String actorId,
+            SessionPrincipal principal) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        if (session.workspace() == null) {
+            requireSessionOwnership(tenantId, sessionId, principal);
+        }
         // Tenant and Session locks serialize admission without gap-locking missing index entries.
         Optional<CommandRecord> previous = findCommand(tenantId, "RENAME_SESSION", key, false);
-        if (previous.isPresent()
-                && sessionId.equals(previous.get().sessionId())) {
-            requireRenameReplayOwner(session, previous.get(), actorId);
+        if (previous.isPresent()) {
+            requireMutationReceiptGrant(tenantId, session, previous.get(),
+                    actorId, principal);
+            if (sessionId.equals(previous.get().sessionId())) {
+                requireRenameReplayOwner(session, previous.get(), actorId,
+                        principal);
+            }
         }
         var retained =
                 jdbc.queryForList(
@@ -1787,7 +1903,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         digest,
                         sessionId,
                         SessionMutationKind.RENAME,
-                        actorId);
+                        actorId, principal);
         if ("COMPLETED".equals(command.status())) {
             return command;
         }
@@ -1852,7 +1968,19 @@ public class ManagedAgentStore implements AgentStateStore {
     // live-Session refusal.
     private void requireRenameReplayOwner(SessionRecord session,
             CommandRecord previous, String actorId) {
-        if (!previous.admitsReplayBy(actorId) && session.workspace() != null
+        requireRenameReplayOwner(session, previous, actorId,
+                actorId == null ? null
+                        : SessionPrincipal.ofUser(session.tenantId(), actorId));
+    }
+
+    private void requireRenameReplayOwner(SessionRecord session,
+            CommandRecord previous, String actorId, SessionPrincipal principal) {
+        if (session.workspace() == null) {
+            requireSessionOwnership(session.tenantId(), session.sessionId(),
+                    principal);
+            return;
+        }
+        if (!previous.admitsReplayBy(actorId)
                 && !workspaces.createdSession(session.tenantId(), actorId,
                         session.sessionId())) {
             if ("DELETED".equals(session.status())) {
@@ -2117,7 +2245,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind) {
         return beginSessionMutation(tenantId, operation, idempotencyKey,
-                requestDigest, sessionId, kind, null);
+                requestDigest, sessionId, kind, (String) null);
     }
 
     // The actor-carrying twin of insertTurnCommand's overload.
@@ -2125,8 +2253,23 @@ public class ManagedAgentStore implements AgentStateStore {
     public SessionMutationCommand beginSessionMutation(String tenantId,
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind, String actorId) {
+        return beginSessionMutation(tenantId, operation, idempotencyKey,
+                requestDigest, sessionId, kind, actorId,
+                actorId == null ? null
+                        : SessionPrincipal.ofUser(tenantId, actorId));
+    }
+
+    @Override
+    @Transactional
+    public SessionMutationCommand beginSessionMutation(String tenantId,
+            String operation, String idempotencyKey, String requestDigest,
+            String sessionId, SessionMutationKind kind, String actorId,
+            SessionPrincipal principal) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        if (session.workspace() == null) {
+            requireSessionOwnership(tenantId, sessionId, principal);
+        }
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw workspaceExecutionUnavailable();
         }
@@ -2134,6 +2277,8 @@ public class ManagedAgentStore implements AgentStateStore {
                 idempotencyKey, kind != SessionMutationKind.RENAME);
         if (existing.isPresent()) {
             CommandRecord command = existing.get();
+            requireMutationReceiptGrant(tenantId, session, command, actorId,
+                    principal);
             if (!command.requestDigest().equals(requestDigest)
                     || !command.sessionId().equals(sessionId)) {
                 throw new ManagedAgentException(409,
@@ -2166,7 +2311,10 @@ public class ManagedAgentStore implements AgentStateStore {
         long now = clock.millis();
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
                 sessionId, null, "PENDING", session.status(),
-                commandActorKey(tenantId, actorId), now);
+                session.workspace() == null
+                        ? ManagedSessionPrincipal.actorKey(principal)
+                        : commandActorKey(tenantId, actorId),
+                now);
         jdbc.update("UPDATE ma_request_receipt SET gmt_modified = " + ManagedSchemaTime.SQL_NOW
                         + ", mutation_attempt_sequence"
                         + " = ? WHERE receipt_key = ? AND namespace = 'SESSION_COMMAND'",
@@ -4610,10 +4758,74 @@ public class ManagedAgentStore implements AgentStateStore {
 
     public SessionPage listSessions(String tenantId, String actorId,
             Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState, String titleQuery) {
+        return listSessions(tenantId, actorId == null ? null
+                : SessionPrincipal.ofUser(tenantId, actorId),
+                beforeCreatedAt, beforeSessionId, limit, archiveState,
+                titleQuery);
+    }
+
+    /**
+     * Bound Sessions keep Workspace read grants. Unbound Sessions require
+     * the immutable ownership row to match tenant, user and actor presence
+     * plus subject exactly; legacy rows without an ownership record remain
+     * invisible.
+     */
+    @Override
+    public SessionPage listSessions(String tenantId,
+            SessionPrincipal principal, Long beforeCreatedAt,
+            String beforeSessionId, int limit, String archiveState,
+            String titleQuery) {
+        return listSessionPage(tenantId, principal, beforeCreatedAt,
+                beforeSessionId, limit, archiveState, titleQuery, false);
+    }
+
+    @Override
+    public SessionPage listOwnedSessions(String tenantId,
+            SessionPrincipal principal, Long beforeCreatedAt,
+            String beforeSessionId, int limit, String archiveState,
+            String titleQuery) {
+        return listSessionPage(tenantId, principal, beforeCreatedAt,
+                beforeSessionId, limit, archiveState, titleQuery, true);
+    }
+
+    private SessionPage listSessionPage(String tenantId,
+            SessionPrincipal principal, Long beforeCreatedAt,
+            String beforeSessionId, int limit, String archiveState,
+            String titleQuery, boolean ownerOnly) {
+        if (principal != null) {
+            requirePrincipalTenant(tenantId, principal);
+        }
         List<Object> arguments = new ArrayList<>();
         arguments.add(tenantId);
-        arguments.add(actorId == null ? null
-                : com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
+        arguments.add(principal == null ? null
+                : com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(
+                        tenantId, principal.userId()));
+        String ownershipClause = "";
+        if (principal != null) {
+            ownershipClause = " OR EXISTS (SELECT 1 FROM"
+                    + " ma_session_principal sp WHERE"
+                    + " ma_session.workspace_id IS NULL AND sp.tenant_id ="
+                    + " ma_session.tenant_id AND sp.session_id ="
+                    + " ma_session.session_id AND sp.version = "
+                    + ManagedSessionPrincipal.VERSION
+                    + " AND sp.user_id = ? AND sp.actor_present = ? AND"
+                    + " (sp.actor_subject_id = ? OR"
+                    + " (sp.actor_subject_id IS NULL AND ? IS NULL)))";
+            arguments.add(principal.userId());
+            arguments.add(principal.actorPresent());
+            arguments.add(principal.actorSubjectId());
+            arguments.add(principal.actorSubjectId());
+        }
+        String ownerClause = "";
+        if (ownerOnly) {
+            ownerClause = " AND (ma_session.workspace_id IS NULL OR"
+                    + " (? = FALSE AND COALESCE(ma_session.owner_actor_key,"
+                    + " ma_session.creator_actor_key) = ?))";
+            arguments.add(principal == null || principal.actorPresent());
+            arguments.add(principal == null ? null
+                    : com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(
+                            tenantId, principal.userId()));
+        }
         String archiveClause = switch (archiveState) {
             case "archived" -> " AND ma_session.status = 'ARCHIVED'";
             case "unarchived" -> " AND ma_session.status <> 'ARCHIVED'";
@@ -4657,11 +4869,13 @@ public class ManagedAgentStore implements AgentStateStore {
                             + " ON o.operation_kind = 'SESSION_WORKTREE' AND o.tenant_id = w.tenant_id"
                             + " AND o.operation_id = w.operation_id WHERE"
                             + " ma_session.session_kind = 'PUBLIC' AND ma_session.tenant_id = ? AND"
-                            + " ma_session.status <> 'DELETED' AND (ma_session.workspace_id IS NULL OR EXISTS (SELECT 1"
+                            + " ma_session.status <> 'DELETED' AND (EXISTS (SELECT 1"
                             + " FROM ma_workspace_access wa WHERE wa.tenant_id ="
                             + " ma_session.tenant_id AND wa.workspace_id = ma_session.workspace_id"
                             + " AND wa.actor_id = ? AND wa.role IN ('READER', 'OPERATOR',"
-                            + " 'OWNER')))"
+                            + " 'OWNER'))"
+                                + ownershipClause + ")"
+                                + ownerClause
                                 + archiveClause + titleClause + cursorClause
                                 + " ORDER BY ma_session.gmt_create DESC, ma_session.session_id DESC"
                                 + " LIMIT ?",
@@ -7236,6 +7450,39 @@ public class ManagedAgentStore implements AgentStateStore {
             return com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         } catch (IllegalArgumentException error) {
             return null;
+        }
+    }
+
+    // Background execution continues already-admitted work through its
+    // operation and lease APIs. New commands on an unbound Session must
+    // carry the exact durable owner; a missing principal cannot borrow it.
+    private SessionPrincipal resolveWritePrincipal(String tenantId,
+            String sessionId, SessionPrincipal principal) {
+        requireSessionOwnership(tenantId, sessionId, principal);
+        return principal;
+    }
+
+    private void requireMutationReceiptGrant(String tenantId,
+            SessionRecord requested, CommandRecord command, String actorId,
+            SessionPrincipal principal) {
+        SessionRecord recorded = command.sessionId()
+                .equals(requested.sessionId()) ? requested
+                : requireSession(tenantId, command.sessionId());
+        if (recorded.workspace() == null) {
+            requireSessionOwnership(tenantId, recorded.sessionId(), principal);
+        } else if (!recorded.sessionId().equals(requested.sessionId())
+                && !workspaces.canRead(tenantId, actorId,
+                        recorded.workspace().getWorkspaceId())) {
+            throw new ManagedAgentException(404, "session_not_found",
+                    "The Session was not found.");
+        }
+    }
+
+    private static void requirePrincipalTenant(String tenantId,
+            SessionPrincipal principal) {
+        if (principal == null || !principal.tenantId().equals(tenantId)) {
+            throw new ManagedAgentException(404, "session_not_found",
+                    "The Session was not found.");
         }
     }
 

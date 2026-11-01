@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfi
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -44,7 +45,14 @@ public class ManagedUserMessageStore
 
     @Transactional
     public Snapshot queryMessages(String tenant, String actor, String session) {
-        agents.authorizeUserMessages(tenant, actor, session);
+        return queryMessages(actor == null ? null
+                : SessionPrincipal.ofUser(tenant, actor), session);
+    }
+
+    @Transactional
+    public Snapshot queryMessages(SessionPrincipal principal, String session) {
+        agents.authorizeUserMessages(principal, session);
+        String tenant = principal.tenantId();
         if (!agents.supportsUserMessageQueue()) {
             throw conflict("unsupported_feature");
         }
@@ -54,8 +62,18 @@ public class ManagedUserMessageStore
     }
 
     @Transactional
-    public Snapshot command(String tenant, String actor, String session, String key, Command command) {
-        agents.authorizeUserMessageActor(tenant, actor, session);
+    public Snapshot command(String tenant, String actor, String session,
+            String key, Command command) {
+        return command(actor == null ? null
+                : SessionPrincipal.ofUser(tenant, actor), session, key, command);
+    }
+
+    @Transactional
+    public Snapshot command(SessionPrincipal principal, String session,
+            String key, Command command) {
+        agents.authorizeUserMessageActor(principal, session);
+        String tenant = principal.tenantId();
+        String actor = principal.userId();
         if (key == null || key.isBlank() || key.length() > 128) {
             throw refusal("invalid_request", "A bounded Idempotency-Key is required.");
         }
@@ -63,7 +81,7 @@ public class ManagedUserMessageStore
         if (command == null || command.action() == null) {
             throw refusal("invalid_request", "A queue action is required.");
         }
-        String commandKey = DigestUtils.sha256Hex(actor + "\n" + key);
+        String commandKey = commandKey(principal, key);
         String digest = digests.digest(command);
         var replay = jdbc.query("SELECT request_digest, result_json FROM ma_user_message_command"
                         + " WHERE tenant_id = ? AND session_id = ? AND command_key = ?",
@@ -74,7 +92,7 @@ public class ManagedUserMessageStore
             }
             return decode(replay.getFirst().getValue(), Snapshot.class);
         }
-        agents.authorizeUserMessages(tenant, actor, session);
+        agents.authorizeUserMessages(principal, session);
         lock(tenant, session);
         if (!agents.supportsUserMessageQueue()) {
             throw conflict("unsupported_feature");
@@ -214,8 +232,7 @@ public class ManagedUserMessageStore
             return;
         }
         Message first = snapshot.messages().getFirst();
-        String actor = jdbc.queryForObject("SELECT actor_id FROM ma_user_message WHERE tenant_id = ? AND session_id = ? AND message_id = ?",
-                String.class, tenant, session, first.id());
+        SessionPrincipal principal = queuedPrincipal(tenant, session, first.id());
         List<InputBlock> input = first.input().stream().map(block -> {
             if ("text".equals(block.get("type"))) {
                 return new InputBlock("input_text", (String) block.get("text"));
@@ -225,7 +242,8 @@ public class ManagedUserMessageStore
             return new InputBlock("input_file", (String) resource.get("text"), (String) resource.get("mimeType"), null, name);
         }).toList();
         jdbc.update("UPDATE ma_user_message SET state = 'claimed' WHERE tenant_id = ? AND session_id = ? AND message_id = ? AND state = 'queued'", tenant, session, first.id());
-        var admission = submitter.submit(tenant, actor, "user-queue:" + first.id(), session, input);
+        var admission = submitter.submit(principal,
+                "user-queue:" + first.id(), session, input);
         String prompt = jdbc.queryForObject("SELECT prompt_id FROM ma_turn WHERE tenant_id = ? AND session_id = ? AND turn_id = ?",
                 String.class, tenant, session, admission.turnId());
         jdbc.update("UPDATE ma_user_message SET state = 'claimed', turn_id = ?, prompt_id = ? WHERE tenant_id = ?"
@@ -257,6 +275,49 @@ public class ManagedUserMessageStore
             throw new ManagedAgentException(404, "session_not_found", "Session not found.");
         }
         return status.getFirst();
+    }
+
+    private static String commandKey(SessionPrincipal principal, String key) {
+        if (!principal.actorPresent()) {
+            // Preserve the pre-ownership receipt keys for callers whose
+            // verified context carries no business actor.
+            return DigestUtils.sha256Hex(principal.userId() + "\n" + key);
+        }
+        return DigestUtils.sha256Hex("session-principal-v1\0"
+                + principal.userId() + "\0" + principal.actorSubjectId()
+                + "\0" + key);
+    }
+
+    private SessionPrincipal queuedPrincipal(String tenant, String session,
+            String messageId) {
+        record QueuedActor(String actorId, boolean unbound) { }
+        QueuedActor owner = jdbc.queryForObject(
+                "SELECT m.actor_id, s.workspace_id IS NULL"
+                        + " FROM ma_user_message m JOIN ma_session s"
+                        + " ON s.tenant_id = m.tenant_id"
+                        + " AND s.session_id = m.session_id"
+                        + " WHERE m.tenant_id = ? AND m.session_id = ?"
+                        + " AND m.message_id = ?",
+                (result, index) -> new QueuedActor(result.getString(1),
+                        result.getBoolean(2)),
+                tenant, session, messageId);
+        if (owner == null || owner.actorId() == null) {
+            throw new ManagedAgentException(404, "session_not_found",
+                    "The Session was not found.");
+        }
+        if (!owner.unbound()) {
+            return SessionPrincipal.ofUser(tenant, owner.actorId());
+        }
+        ManagedSessionPrincipal.Row row = ManagedSessionPrincipal.find(jdbc,
+                tenant, session);
+        if (row == null || !owner.actorId().equals(row.userId())) {
+            throw new ManagedAgentException(404, "session_not_found",
+                    "The Session was not found.");
+        }
+        return row.actorPresent()
+                ? SessionPrincipal.of(tenant, row.userId(),
+                        row.actorSubjectId())
+                : SessionPrincipal.ofUser(tenant, row.userId());
     }
 
     private void lock(String tenant, String session) {

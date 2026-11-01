@@ -29,7 +29,8 @@ public class ManagedToolDetailsService {
 
     private SessionRecord authorize(TenantContext tenant, String sessionId) {
         tenant.requireActorId();
-        SessionRecord session = sessions.requireReadableSession(tenant.tenantId(), tenant.actorId(), sessionId);
+        SessionRecord session = sessions.requireReadableSession(
+                tenant.requirePrincipal(), sessionId);
         if (session.workspace() == null || "DELETING".equals(session.status())) {
             throw new ManagedAgentException(404, "tool_details_not_found", "Tool details are unavailable.");
         }

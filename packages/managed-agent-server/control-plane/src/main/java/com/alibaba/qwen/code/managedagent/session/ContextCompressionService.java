@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicContextCompressionOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellContextCompressionOperation;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
@@ -17,15 +18,18 @@ import java.util.Map;
 
 @Service
 public class ContextCompressionService {
+    private final ManagedAgentService sessions;
     private final SessionLifecycleStore store;
     private final RequestDigests digests;
     private final HarnessConnector harness;
     private final ContextCompressionCoordinator coordinator;
     private final ManagedExtensionRecordStore records;
 
-    public ContextCompressionService(SessionLifecycleStore store, RequestDigests digests,
+    public ContextCompressionService(ManagedAgentService sessions,
+            SessionLifecycleStore store, RequestDigests digests,
             HarnessConnector harness, ContextCompressionCoordinator coordinator,
             ManagedExtensionRecordStore records) {
+        this.sessions = sessions;
         this.store = store;
         this.digests = digests;
         this.harness = harness;
@@ -35,22 +39,37 @@ public class ContextCompressionService {
 
     public PublicContextCompressionOperation admitPublic(String tenantId, String actorId,
             String sessionId, String key, Long revision) {
-        OperationAdmission admitted = admit(tenantId, actorId, sessionId, key, revision);
+        return admitPublic(principalOf(tenantId, actorId), sessionId, key,
+                revision);
+    }
+
+    public PublicContextCompressionOperation admitPublic(
+            SessionPrincipal principal, String sessionId, String key,
+            Long revision) {
+        OperationAdmission admitted = admit(principal, sessionId, key, revision);
         return publicOperation(admitted.operation(), admitted.replayed());
     }
 
     public WebShellContextCompressionOperation admitWebShell(String tenantId, String actorId,
             String sessionId, String key, Long revision) {
-        OperationAdmission admitted = admit(tenantId, actorId, sessionId, key, revision);
+        return admitWebShell(principalOf(tenantId, actorId), sessionId, key,
+                revision);
+    }
+
+    public WebShellContextCompressionOperation admitWebShell(
+            SessionPrincipal principal, String sessionId, String key,
+            Long revision) {
+        OperationAdmission admitted = admit(principal, sessionId, key, revision);
         return webOperation(admitted.operation(), admitted.replayed());
     }
 
-    private OperationAdmission admit(String tenantId, String actorId, String sessionId,
-            String key, Long revision) {
-        if (actorId == null || actorId.isEmpty()) {
+    private OperationAdmission admit(SessionPrincipal principal,
+            String sessionId, String key, Long revision) {
+        if (principal == null) {
             throw new ManagedAgentException(401, "actor_required",
                     "A trusted actor is required.");
         }
+        sessions.requireReadableSession(principal, sessionId);
         ManagedAgentService.validateIdempotencyKey(key);
         if (revision == null || revision < 0 || revision > 9_007_199_254_740_991L) {
             throw new ManagedAgentException(400, "invalid_request",
@@ -58,11 +77,13 @@ public class ContextCompressionService {
         }
         String digest = digests.digest(Map.of("sessionId", sessionId,
                 "operation", "CONTEXT_COMPRESSION", "expectedCompactionRevision", revision));
-        OperationAdmission admitted = store.beginContextCompression(tenantId, sessionId,
-                actorId, digests.digest(Map.of("actorId", actorId)), key, digest,
+        OperationAdmission admitted = store.beginContextCompression(
+                principal.tenantId(), sessionId, principal.userId(),
+                digests.digest(Map.of("actorId", principal.userId())), key, digest,
                 revision, harness.supportsContextCompression());
         if (!admitted.replayed() && "PENDING".equals(admitted.operation().state())) {
-            coordinator.dispatch(tenantId, sessionId, admitted.operation().operationId());
+            coordinator.dispatch(principal.tenantId(), sessionId,
+                    admitted.operation().operationId());
         }
         return admitted;
     }
@@ -102,5 +123,11 @@ public class ContextCompressionService {
         }
         String outcome = record.path("outcome").textValue();
         return "failed".equals(outcome) ? null : outcome;
+    }
+
+    private static SessionPrincipal principalOf(String tenantId,
+            String actorId) {
+        return actorId == null || actorId.isBlank()
+                ? null : SessionPrincipal.ofUser(tenantId, actorId);
     }
 }

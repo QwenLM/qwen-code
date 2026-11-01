@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCommandOperation
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCommandOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellPage;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedActionStore;
@@ -67,46 +68,68 @@ public class ManagedActionService {
 
     public PublicActionList listPublic(
             String tenant, String actor, String session, String cursor, int limit) {
-        List<Action> rows = page(tenant, actor, session, cursor, limit);
+        return listPublic(principalOf(tenant, actor), session, cursor, limit);
+    }
+
+    public PublicActionList listPublic(
+            SessionPrincipal principal, String session, String cursor, int limit) {
+        List<Action> rows = page(principal, session, cursor, limit);
         boolean more = rows.size() > limit;
         List<Action> page = rows.subList(0, Math.min(limit, rows.size()));
         return new PublicActionList(
-                page.stream().map(a -> view(tenant, session, a, false)).toList(),
+                page.stream().map(a -> view(principal.tenantId(), session, a, false)).toList(),
                 more,
                 more ? cursor(page.get(page.size() - 1)) : null);
     }
 
     public PublicActionList listPublic(String tenant, String actor, String session,
             String cursor, int limit, boolean includeChildren) {
+        return listPublic(principalOf(tenant, actor), session, cursor, limit,
+                includeChildren);
+    }
+
+    public PublicActionList listPublic(SessionPrincipal principal, String session,
+            String cursor, int limit, boolean includeChildren) {
         if (!includeChildren) {
-            return listPublic(tenant, actor, session, cursor, limit);
+            return listPublic(principal, session, cursor, limit);
         }
-        var rows = childPage(tenant, actor, session, cursor, limit);
+        var rows = childPage(principal, session, cursor, limit);
         boolean more = rows.size() > limit;
         var page = rows.subList(0, Math.min(limit, rows.size()));
-        return new PublicActionList(page.stream().map(row -> view(tenant, row.sessionId(), row.action(), false)).toList(),
-                more, more ? childCursor(tenant, session, page.getLast()) : null);
+        return new PublicActionList(page.stream().map(row -> view(principal.tenantId(),
+                row.sessionId(), row.action(), false)).toList(),
+                more, more ? childCursor(principal.tenantId(), session,
+                        page.getLast()) : null);
     }
 
     public WebShellPage<JsonNode> listWebShell(String tenant, String actor, String session,
             String cursor, int limit, boolean includeChildren) {
+        return listWebShell(principalOf(tenant, actor), session, cursor, limit,
+                includeChildren);
+    }
+
+    public WebShellPage<JsonNode> listWebShell(SessionPrincipal principal,
+            String session, String cursor, int limit, boolean includeChildren) {
         if (!includeChildren) {
-            return listWebShell(tenant, actor, session, cursor, limit);
+            return listWebShell(principal, session, cursor, limit);
         }
-        var rows = childPage(tenant, actor, session, cursor, limit);
+        var rows = childPage(principal, session, cursor, limit);
         boolean more = rows.size() > limit;
         var page = rows.subList(0, Math.min(limit, rows.size()));
-        return new WebShellPage<>(page.stream().map(row -> view(tenant, row.sessionId(), row.action(), true)).toList(),
-                more ? childCursor(tenant, session, page.getLast()) : null, more);
+        return new WebShellPage<>(page.stream().map(row -> view(principal.tenantId(),
+                row.sessionId(), row.action(), true)).toList(),
+                more ? childCursor(principal.tenantId(), session,
+                        page.getLast()) : null, more);
     }
 
     private String childCursorScope(String tenant, String session) {
         return "children:" + org.apache.commons.codec.digest.DigestUtils.sha256Hex(tenant + "\u0000" + session) + ":";
     }
 
-    private List<ManagedActionStore.ScopedAction> childPage(String tenant, String actor, String session,
+    private List<ManagedActionStore.ScopedAction> childPage(SessionPrincipal principal,
+            String session,
             String cursor, int limit) {
-        var root = sessions.requireReadableSession(tenant, actor, session);
+        var root = sessions.requireReadableSession(principal, session);
         if (root.publicChildAgentsVersion() != 1 || limit < 1 || limit > 100) {
             throw new ManagedAgentException(400, "unsupported_feature", "Child Action aggregation is unavailable");
         }
@@ -119,7 +142,7 @@ public class ManagedActionService {
                     throw new IllegalArgumentException();
                 }
                 String decoded = new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8);
-                String scope = childCursorScope(tenant, session);
+                String scope = childCursorScope(principal.tenantId(), session);
                 if (!decoded.startsWith(scope)) {
                     throw new IllegalArgumentException();
                 }
@@ -135,9 +158,10 @@ public class ManagedActionService {
                 throw new ManagedAgentException(400, "invalid_cursor", "Child Action cursor is invalid");
             }
         }
-        var rows = actions.listWithChildren(tenant, session, before, beforeSession, beforeId, limit + 1);
+        var rows = actions.listWithChildren(principal.tenantId(), session, before,
+                beforeSession, beforeId, limit + 1);
         for (var row : rows) {
-            sessions.requireReadableSession(tenant, actor, row.sessionId());
+            sessions.requireReadableSession(principal, row.sessionId());
         }
         return rows;
     }
@@ -150,21 +174,31 @@ public class ManagedActionService {
 
     public WebShellPage<JsonNode> listWebShell(
             String tenant, String actor, String session, String cursor, int limit) {
-        List<Action> rows = page(tenant, actor, session, cursor, limit);
+        return listWebShell(principalOf(tenant, actor), session, cursor, limit);
+    }
+
+    public WebShellPage<JsonNode> listWebShell(SessionPrincipal principal,
+            String session, String cursor, int limit) {
+        List<Action> rows = page(principal, session, cursor, limit);
         boolean more = rows.size() > limit;
         List<Action> page = rows.subList(0, Math.min(limit, rows.size()));
         return new WebShellPage<>(
-                page.stream().map(a -> view(tenant, session, a, true)).toList(),
+                page.stream().map(a -> view(principal.tenantId(), session, a, true)).toList(),
                 more ? cursor(page.get(page.size() - 1)) : null,
                 more);
     }
 
     public JsonNode get(String tenant, String actor, String session, String id, boolean web) {
-        sessions.requireReadableSession(tenant, actor, session);
+        return get(principalOf(tenant, actor), session, id, web);
+    }
+
+    public JsonNode get(SessionPrincipal principal, String session, String id,
+            boolean web) {
+        sessions.requireReadableSession(principal, session);
         return view(
-                tenant,
+                principal.tenantId(),
                 session,
-                actions.find(tenant, session, id)
+                actions.find(principal.tenantId(), session, id)
                         .orElseThrow(
                                 () ->
                                         new ManagedAgentException(
@@ -184,7 +218,20 @@ public class ManagedActionService {
             JsonNode revision,
             String policy,
             String option) {
-        sessions.requireReadableSession(tenant, actor, session);
+        return respond(principalOf(tenant, actor), session, id, key, kind,
+                revision, policy, option);
+    }
+
+    public OperationAdmission respond(
+            SessionPrincipal principal,
+            String session,
+            String id,
+            String key,
+            String kind,
+            JsonNode revision,
+            String policy,
+            String option) {
+        sessions.requireReadableSession(principal, session);
         ManagedAgentService.validateIdempotencyKey(key);
         if (!"permission".equals(kind)
                 || revision == null
@@ -202,17 +249,18 @@ public class ManagedActionService {
                         .put("policyRevision", policy);
         OperationAdmission admitted =
                 actions.admit(
-                        tenant,
+                        principal.tenantId(),
                         session,
-                        actor,
-                        digests.digest(Map.of("actorId", actor == null ? "" : actor)),
+                        principal.userId(),
+                        digests.digest(Map.of("actorId", principal.userId())),
                         key,
                         digests.digest(Map.of("actionId", id, "response", body)),
                         id,
                         body,
                         clock.millis());
         if (!List.of("COMPLETED", "FAILED").contains(admitted.operation().state())) {
-            coordinator.dispatch(tenant, session, admitted.operation().operationId());
+            coordinator.dispatch(principal.tenantId(), session,
+                    admitted.operation().operationId());
         }
         return admitted;
     }
@@ -262,8 +310,8 @@ public class ManagedActionService {
     }
 
     private List<Action> page(
-            String tenant, String actor, String session, String cursor, int limit) {
-        sessions.requireReadableSession(tenant, actor, session);
+            SessionPrincipal principal, String session, String cursor, int limit) {
+        sessions.requireReadableSession(principal, session);
         if (limit < 1 || limit > 100) {
             throw new ManagedAgentException(
                     400, "invalid_limit", "Limit must be between 1 and 100.");
@@ -288,7 +336,8 @@ public class ManagedActionService {
                         400, "invalid_cursor", "Action cursor is invalid.");
             }
         }
-        return actions.list(tenant, session, before, beforeId, limit + 1);
+        return actions.list(principal.tenantId(), session, before, beforeId,
+                limit + 1);
     }
 
     private String cursor(Action action) {
@@ -408,5 +457,10 @@ public class ManagedActionService {
 
     private static String lower(String value) {
         return value.toLowerCase(Locale.ROOT);
+    }
+
+    private static SessionPrincipal principalOf(String tenant, String actor) {
+        return actor == null || actor.isBlank()
+                ? null : SessionPrincipal.ofUser(tenant, actor);
     }
 }

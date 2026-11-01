@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCwdOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCommandOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCwdOperation;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
@@ -71,7 +72,8 @@ public class SessionLifecycleService {
     public PublicCommandOperation admitPublic(String tenantId,
             String actorId, String idempotencyKey, String sessionId,
             OperationKind kind) {
-        OperationAdmission admission = admit(tenantId, actorId,
+        OperationAdmission admission = admit(tenantId,
+                principal(tenantId, actorId),
                 idempotencyKey, sessionId, kind);
         return publicOperation(admission.operation(), admission.replayed());
     }
@@ -79,7 +81,26 @@ public class SessionLifecycleService {
     public WebShellCommandOperation admitWebShell(String tenantId,
             String actorId, String idempotencyKey, String sessionId,
             OperationKind kind) {
-        OperationAdmission admission = admit(tenantId, actorId,
+        OperationAdmission admission = admit(tenantId,
+                principal(tenantId, actorId),
+                idempotencyKey, sessionId, kind);
+        return webShellOperation(admission.operation(),
+                admission.replayed());
+    }
+
+    public PublicCommandOperation admitPublic(SessionPrincipal principal,
+            String idempotencyKey, String sessionId, OperationKind kind) {
+        OperationAdmission admission = admit(
+                principal == null ? null : principal.tenantId(), principal,
+                idempotencyKey, sessionId, kind);
+        return publicOperation(admission.operation(), admission.replayed());
+    }
+
+    public WebShellCommandOperation admitWebShell(
+            SessionPrincipal principal, String idempotencyKey,
+            String sessionId, OperationKind kind) {
+        OperationAdmission admission = admit(
+                principal == null ? null : principal.tenantId(), principal,
                 idempotencyKey, sessionId, kind);
         return webShellOperation(admission.operation(),
                 admission.replayed());
@@ -89,8 +110,15 @@ public class SessionLifecycleService {
     // own contract, every other kind with the command operation.
     public Object getPublicOperation(String tenantId, String actorId,
             String sessionId, String operationId) {
-        OperationRecord operation = operation(tenantId, actorId, sessionId,
+        return getPublicOperation(principal(tenantId, actorId), sessionId,
                 operationId);
+    }
+
+    public Object getPublicOperation(SessionPrincipal principal,
+            String sessionId, String operationId) {
+        OperationRecord operation = operation(
+                principal == null ? null : principal.tenantId(), principal,
+                sessionId, operationId);
         if (operation.kind() == OperationKind.CONTEXT_COMPRESSION) {
             return compressions.publicOperation(operation, false);
         }
@@ -101,8 +129,15 @@ public class SessionLifecycleService {
 
     public Object getWebShellOperation(String tenantId, String actorId,
             String sessionId, String operationId) {
-        OperationRecord operation = operation(tenantId, actorId, sessionId,
+        return getWebShellOperation(principal(tenantId, actorId), sessionId,
                 operationId);
+    }
+
+    public Object getWebShellOperation(SessionPrincipal principal,
+            String sessionId, String operationId) {
+        OperationRecord operation = operation(
+                principal == null ? null : principal.tenantId(), principal,
+                sessionId, operationId);
         if (operation.kind() == OperationKind.CONTEXT_COMPRESSION) {
             return compressions.webOperation(operation, false);
         }
@@ -153,11 +188,13 @@ public class SessionLifecycleService {
                 && WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) != 0;
     }
 
-    private OperationAdmission admit(String tenantId, String actorId,
+    private OperationAdmission admit(String tenantId,
+            SessionPrincipal principal,
             String idempotencyKey, String sessionId, OperationKind kind) {
+        String actorId = principal == null ? null : principal.userId();
         ManagedAgentService.validateIdempotencyKey(idempotencyKey);
         SessionRecord session = store.requireSession(tenantId, sessionId);
-        sessions.requireReadGrant(session, actorId);
+        sessions.requireReadGrant(session, principal);
         String digest = sessions.lifecycleDigest(sessionId, DIGEST_NAMES.get(kind));
         OperationAdmission admission;
         if (session.workspace() != null) {
@@ -167,8 +204,9 @@ public class SessionLifecycleService {
                             : kind == OperationKind.CLOSE && RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace()),
                     activeLifecycle ? WorkspaceToolProfiles.lifecycleProtocol(session.toolProfile()) : 0);
         } else {
-            sessions.requireLegacyWorkspace(tenantId, actorId, sessionId);
-            admission = store.beginOperation(tenantId, sessionId, kind, actorDigest(actorId), idempotencyKey, digest);
+            sessions.requireLegacyWorkspace(tenantId, principal, sessionId);
+            admission = store.beginOperation(tenantId, sessionId, kind,
+                    principalDigest(principal), idempotencyKey, digest);
         }
         OperationRecord operation = admission.operation();
         if (!"COMPLETED".equals(operation.state())) {
@@ -180,14 +218,15 @@ public class SessionLifecycleService {
 
     // A deleted Session's operations stay readable, so this does not hide
     // tombstones as the Session reads do.
-    private OperationRecord operation(String tenantId, String actorId,
+    private OperationRecord operation(String tenantId,
+            SessionPrincipal principal,
             String sessionId, String operationId) {
         if (operationId.length() > 64) {
             throw new ManagedAgentException(400, "invalid_request",
                     "The operation id is invalid.");
         }
         SessionRecord session = store.requireSession(tenantId, sessionId);
-        sessions.requireReadGrant(session, actorId);
+        sessions.requireReadGrant(session, principal);
         return store.findOperation(tenantId, sessionId, operationId)
                 .orElseThrow(() -> new ManagedAgentException(404,
                         "operation_not_found",
@@ -198,6 +237,27 @@ public class SessionLifecycleService {
     private String actorDigest(String actorId) {
         return actorId == null ? ""
                 : digests.digest(Map.of("actorId", actorId));
+    }
+
+    private static SessionPrincipal principal(String tenantId,
+            String actorId) {
+        return actorId == null ? null
+                : SessionPrincipal.ofUser(tenantId, actorId);
+    }
+
+    private String principalDigest(SessionPrincipal principal) {
+        if (principal == null) {
+            throw new ManagedAgentException(404, "session_not_found",
+                    "The Session was not found.");
+        }
+        Map<String, Object> identity = new java.util.LinkedHashMap<>();
+        identity.put("tenantId", principal.tenantId());
+        identity.put("userId", principal.userId());
+        identity.put("actorPresent", principal.actorPresent());
+        if (principal.actorPresent()) {
+            identity.put("actorSubjectId", principal.actorSubjectId());
+        }
+        return digests.digest(identity);
     }
 
     public PublicCommandOperation publicOperation(OperationRecord operation, boolean replayed) {

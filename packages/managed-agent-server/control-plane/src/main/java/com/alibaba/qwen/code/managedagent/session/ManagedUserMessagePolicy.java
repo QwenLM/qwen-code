@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.session.UserMessagePolicy;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore;
@@ -57,22 +58,48 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
     // has its own, narrower rule (requireCancellerRole/Shape).
     void requireSubmitterRole(SessionRecord session,
             String actorId) {
+        requireSubmitterRole(session,
+                principalOf(session.tenantId(), actorId,
+                        session.workspace() == null));
+    }
+
+    void requireSubmitterRole(SessionRecord session,
+            SessionPrincipal principal) {
+        if (session.workspace() == null) {
+            store.requireSessionOwnership(session.tenantId(),
+                    session.sessionId(), principal);
+            return;
+        }
         if (session.workspace() != null
-                && !workspaces.accessOf(session.tenantId(), actorId,
+                && !workspaces.accessOf(session.tenantId(),
+                        principal == null ? null : principal.userId(),
                         session.workspace().getWorkspaceId())
                         .atLeast(WorkspaceAccess.OPERATOR)) {
-            requireLegacyWorkspace(session, actorId);
+            requireLegacyWorkspace(session, principal);
         }
     }
 
     void requireSubmitterFacts(SessionRecord session,
             String actorId) {
+        requireSubmitterFacts(session,
+                principalOf(session.tenantId(), actorId,
+                        session.workspace() == null));
+    }
+
+    void requireSubmitterFacts(SessionRecord session,
+            SessionPrincipal principal) {
         if (session.publicChildAgentsVersion() == 1 && store.findChildLineage(session.tenantId(), session.sessionId()) != null) {
             throw new ManagedAgentException(409, "unsupported_feature", "Public child Sessions accept only their delegated input");
         }
+        if (session.workspace() == null) {
+            store.requireSessionOwnership(session.tenantId(),
+                    session.sessionId(), principal);
+            return;
+        }
         if (session.workspace() != null
-                && !maySubmitWorkspaceTurn(session, actorId)) {
-            requireLegacyWorkspace(session, actorId);
+                && !maySubmitWorkspaceTurn(session,
+                        principal == null ? null : principal.userId())) {
+            requireLegacyWorkspace(session, principal);
         }
     }
 
@@ -136,8 +163,14 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
 
     void requireLegacyWorkspace(String tenantId, String actorId,
             String sessionId) {
+        requireLegacyWorkspace(tenantId, actorId == null ? null
+                : SessionPrincipal.ofUser(tenantId, actorId), sessionId);
+    }
+
+    void requireLegacyWorkspace(String tenantId, SessionPrincipal principal,
+            String sessionId) {
         requireLegacyWorkspace(store.requireSession(tenantId, sessionId),
-                actorId);
+                principal);
     }
 
     // The submitter family's bound-refusal split: an actor without a read
@@ -146,6 +179,18 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
     // shape gates or the creator-keyed facts the family's domain 409.
     void requireLegacyWorkspace(SessionRecord session,
             String actorId) {
+        requireLegacyWorkspace(session,
+                principalOf(session.tenantId(), actorId,
+                        session.workspace() == null));
+    }
+
+    void requireLegacyWorkspace(SessionRecord session,
+            SessionPrincipal principal) {
+        if (session.workspace() == null) {
+            store.requireSessionOwnership(session.tenantId(),
+                    session.sessionId(), principal);
+            return;
+        }
         if (session.workspace() != null) {
             // A tombstone is invisible to every actor shape, as the reads
             // answer: the fence stands above the role split, whose 403/409
@@ -159,7 +204,8 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
             }
             String workspaceId = session.workspace().getWorkspaceId();
             WorkspaceAccess access = workspaces.accessOf(session.tenantId(),
-                    actorId, workspaceId);
+                    principal == null ? null : principal.userId(),
+                    workspaceId);
             if (!access.canRead()) {
                 throw new ManagedAgentException(404,
                         "session_not_found", "The Session was not found.");
@@ -195,15 +241,38 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
         if (actorId == null || actorId.isBlank()) {
             throw new ManagedAgentException(401, "actor_required", "An authenticated actor is required.");
         }
-        SessionRecord session = store.requireSession(tenantId, sessionId);
-        requireSubmitterRole(session, actorId);
+        return authorizeUserMessageActor(
+                SessionPrincipal.ofUser(tenantId, actorId), sessionId);
+    }
+
+    public SessionRecord authorizeUserMessageActor(
+            SessionPrincipal principal, String sessionId) {
+        if (principal == null) {
+            throw new ManagedAgentException(401, "actor_required",
+                    "An authenticated actor is required.");
+        }
+        SessionRecord session = store.requireSession(principal.tenantId(),
+                sessionId);
+        requireSubmitterRole(session, principal);
         return session;
     }
 
     public SessionRecord authorizeUserMessages(String tenantId, String actorId, String sessionId) {
         SessionRecord session = authorizeUserMessageActor(tenantId, actorId, sessionId);
+        return authorizeUserMessages(
+                SessionPrincipal.ofUser(tenantId, actorId), session);
+    }
+
+    public SessionRecord authorizeUserMessages(
+            SessionPrincipal principal, String sessionId) {
+        SessionRecord session = authorizeUserMessageActor(principal, sessionId);
+        return authorizeUserMessages(principal, session);
+    }
+
+    private SessionRecord authorizeUserMessages(SessionPrincipal principal,
+            SessionRecord session) {
         requireVisibleSession(session);
-        requireSubmitterFacts(session, actorId);
+        requireSubmitterFacts(session, principal);
         if (!"ACTIVE".equals(session.status())) {
             throw new ManagedAgentException(409, "session_not_active", "The Session does not accept messages.");
         }
@@ -216,6 +285,14 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
             throw new ManagedAgentException(400, "unsupported_input", "Images require an idle Turn.");
         }
         return normalized;
+    }
+
+    static SessionPrincipal principalOf(String tenantId, String actorId,
+            boolean ownershipQuestion) {
+        if (actorId == null || actorId.isBlank()) {
+            return null;
+        }
+        return SessionPrincipal.ofUser(tenantId, actorId);
     }
 
     List<Map<String, Object>> input(List<InputBlock> blocks,

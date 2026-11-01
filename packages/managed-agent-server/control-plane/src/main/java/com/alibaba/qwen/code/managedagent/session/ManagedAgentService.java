@@ -43,6 +43,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTurn;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellWorkspace;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.EventRecord;
@@ -196,14 +197,34 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             String idempotencyKey, String agentId, String agentRevision,
             String title, Map<String, Object> metadata,
             List<InputBlock> blocks) {
-        return createSession(tenantId, null, idempotencyKey, agentId,
-                agentRevision, title, metadata, blocks);
+        throw new ManagedAgentException(401, "actor_required",
+                "A trusted actor is required.");
     }
 
     public CommandAdmission createSession(String tenantId, String actorId,
             String idempotencyKey, String agentId, String agentRevision,
             String title, Map<String, Object> metadata,
             List<InputBlock> blocks) {
+        return createSession(actorId == null ? null
+                : SessionPrincipal.ofUser(tenantId, actorId), idempotencyKey,
+                agentId, agentRevision, title, metadata, blocks);
+    }
+
+    /**
+     * The ownership-enforcing unbound Session creation. The exact
+     * principal is checked on the pre-read replay, the fresh transaction
+     * and the concurrent duplicate-key replay before any recorded result
+     * is returned.
+     */
+    public CommandAdmission createSession(SessionPrincipal principal,
+            String idempotencyKey, String agentId, String agentRevision,
+            String title, Map<String, Object> metadata,
+            List<InputBlock> blocks) {
+        if (principal == null) {
+            throw new ManagedAgentException(401, "actor_required",
+                    "A trusted actor is required.");
+        }
+        String tenantId = principal.tenantId();
         validateIdempotencyKey(idempotencyKey);
         List<Map<String, Object>> input = inputPolicy.input(blocks, false);
         String effectiveTitle = metadataTitle(title, metadata);
@@ -218,8 +239,8 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         // Replay before the harness gate: re-serving an already-recorded
         // command admits nothing new and must not 503 during a harness
         // outage.
-        Admission replay = replay(tenantId, CREATE, idempotencyKey,
-                requestDigest);
+        Admission replay = replayOwned(tenantId, CREATE, idempotencyKey,
+                requestDigest, principal);
         if (replay != null) {
             dispatch(tenantId, replay);
             return response(replay);
@@ -231,15 +252,34 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 : harnessRules.payloadDigest(input);
         Admission admission;
         try {
-            admission = store.insertSessionCommand(tenantId, actorId, CREATE,
-                    idempotencyKey, requestDigest, agentId, agentRevision,
-                    effectiveTitle, input, payloadDigest);
+            admission = store.insertSessionCommand(tenantId, principal,
+                    CREATE, idempotencyKey, requestDigest, agentId,
+                    agentRevision, effectiveTitle, input, payloadDigest);
         } catch (DuplicateKeyException error) {
-            admission = store.replayCommand(tenantId, CREATE,
-                    idempotencyKey, requestDigest);
+            admission = replayOwned(tenantId, CREATE, idempotencyKey,
+                    requestDigest, principal);
+            if (admission == null) {
+                throw new ManagedAgentException(409,
+                        "idempotency_conflict",
+                        "The idempotency key is already in use.");
+            }
         }
         dispatch(tenantId, admission);
         return response(admission);
+    }
+
+    private Admission replayOwned(String tenantId, String operation,
+            String idempotencyKey, String requestDigest,
+            SessionPrincipal principal) {
+        StoreModels.CommandRecord command = store.findCommand(tenantId,
+                operation, idempotencyKey).orElse(null);
+        if (command == null) {
+            return null;
+        }
+        store.requireSessionOwnership(tenantId, command.sessionId(),
+                principal);
+        return store.replayCommand(tenantId, operation, idempotencyKey,
+                requestDigest);
     }
 
     public CommandAdmission createWorkspaceSession(String tenantId,
@@ -273,34 +313,58 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     public WebShellSessionModels queryWebShellSessionModels(String tenantId, String actorId,
             String sessionId) {
-        requireModelActor(actorId);
-        SessionRecord session = requireReadableSession(tenantId, actorId, sessionId);
+        return queryWebShellSessionModels(
+                principalOf(tenantId, actorId, true), sessionId);
+    }
+
+    public WebShellSessionModels queryWebShellSessionModels(
+            SessionPrincipal principal, String sessionId) {
+        requireModelActor(principal == null ? null : principal.userId());
+        SessionRecord session = requireReadableSession(principal, sessionId);
         boolean supported = session.workspace() != null && store.workspaceFilesEnabled()
                 && !store.modelOptions().isEmpty() && harness.supportsModelSelection();
         return new WebShellSessionModels(store.modelOptions(),
-                store.findModelSelections(tenantId, List.of(sessionId)).getOrDefault(sessionId,
+                store.findModelSelections(principal.tenantId(),
+                        List.of(sessionId)).getOrDefault(sessionId,
                         new WebShellModelSelection(null, 0)), supported);
     }
 
     public WebShellModelChangeResult changeWebShellSessionModel(String tenantId, String actorId,
             String sessionId, String key, String modelId, long expectedRevision) {
-        requireModelActor(actorId);
+        return changeWebShellSessionModel(
+                principalOf(tenantId, actorId, true), sessionId, key, modelId,
+                expectedRevision);
+    }
+
+    public WebShellModelChangeResult changeWebShellSessionModel(
+            SessionPrincipal principal, String sessionId, String key,
+            String modelId, long expectedRevision) {
+        requireModelActor(principal == null ? null : principal.userId());
+        requireReadableSession(principal, sessionId);
         validateIdempotencyKey(key);
         String digest = digests.digest(Map.of("sessionId", sessionId, "modelId", modelId,
                 "expectedRevision", expectedRevision));
-        return store.changeSessionModel(tenantId, actorId, sessionId, key, digest, modelId,
-                expectedRevision, harness.supportsModelSelection());
+        return store.changeSessionModel(principal.tenantId(), principal.userId(),
+                sessionId, key, digest, modelId, expectedRevision,
+                harness.supportsModelSelection());
     }
 
     public WebShellSessionApproval queryWebShellSessionApproval(String tenantId, String actorId, String sessionId) {
-        requireModelActor(actorId);
-        var summary = getWebShellSession(tenantId, actorId, sessionId);
+        return queryWebShellSessionApproval(
+                principalOf(tenantId, actorId, true), sessionId);
+    }
+
+    public WebShellSessionApproval queryWebShellSessionApproval(
+            SessionPrincipal principal, String sessionId) {
+        requireModelActor(principal == null ? null : principal.userId());
+        var summary = getWebShellSession(principal, sessionId);
         if (summary.workspace() == null) {
             throw new ManagedAgentException(400,
                     "unsupported_feature", "Approval selection requires a Workspace Session");
         }
         boolean supported = Boolean.TRUE.equals(summary.capabilities().approvalModeChange());
-        var selected = store.findApprovalSelections(tenantId, List.of(sessionId)).getOrDefault(sessionId,
+        var selected = store.findApprovalSelections(principal.tenantId(),
+                List.of(sessionId)).getOrDefault(sessionId,
                 new WebShellApprovalSelection(summary.approvalMode(), summary.approvalRevision() == null ? 0 : summary.approvalRevision(), summary.planMode()));
         return new WebShellSessionApproval(selected.mode(), selected.revision(),
                 supported ? harness.supportsAutoApproval() || "auto".equals(selected.mode())
@@ -312,17 +376,45 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     public WebShellApprovalChangeResult changeWebShellSessionApproval(String tenantId, String actorId,
             String sessionId, String key, String mode, long expectedRevision) {
-        return changeWebShellSessionApproval(tenantId, actorId, sessionId, key, mode, expectedRevision, null);
+        return changeWebShellSessionApproval(
+                principalOf(tenantId, actorId, true), sessionId, key, mode,
+                expectedRevision);
+    }
+
+    public WebShellApprovalChangeResult changeWebShellSessionApproval(
+            SessionPrincipal principal, String sessionId, String key, String mode,
+            long expectedRevision) {
+        return changeWebShellSessionApproval(principal, sessionId, key, mode,
+                expectedRevision, null);
     }
 
     public WebShellApprovalChangeResult changeWebShellSessionApproval(String tenantId, String actorId,
             String sessionId, String key, String mode, long expectedRevision, Boolean planMode) {
-        return changeWebShellSessionApproval(tenantId, actorId, sessionId, key, mode, expectedRevision, planMode, null);
+        return changeWebShellSessionApproval(
+                principalOf(tenantId, actorId, true), sessionId, key, mode,
+                expectedRevision, planMode);
+    }
+
+    public WebShellApprovalChangeResult changeWebShellSessionApproval(
+            SessionPrincipal principal, String sessionId, String key, String mode,
+            long expectedRevision, Boolean planMode) {
+        return changeWebShellSessionApproval(principal, sessionId, key, mode,
+                expectedRevision, planMode, null);
     }
 
     public WebShellApprovalChangeResult changeWebShellSessionApproval(String tenantId, String actorId,
             String sessionId, String key, String mode, long expectedRevision, Boolean planMode, Map<?, ?> requestedRules) {
-        requireModelActor(actorId);
+        return changeWebShellSessionApproval(
+                principalOf(tenantId, actorId, true), sessionId, key, mode,
+                expectedRevision, planMode, requestedRules);
+    }
+
+    public WebShellApprovalChangeResult changeWebShellSessionApproval(
+            SessionPrincipal principal, String sessionId, String key, String mode,
+            long expectedRevision, Boolean planMode,
+            Map<?, ?> requestedRules) {
+        requireModelActor(principal == null ? null : principal.userId());
+        requireReadableSession(principal, sessionId);
         Map<String, List<String>> rules;
         try {
             rules = harnessRules.permissionRules(requestedRules);
@@ -339,8 +431,10 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             semantic.put("permissionRules", rules);
         }
         String digest = digests.digest(semantic);
-        return store.changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode,
-                expectedRevision, harness.supportsApprovalSelection(), harness.supportsAgentDefinitionApprovalSelection(),
+        return store.changeSessionApproval(principal.tenantId(), principal.userId(),
+                sessionId, key, digest, mode, expectedRevision,
+                harness.supportsApprovalSelection(),
+                harness.supportsAgentDefinitionApprovalSelection(),
                 planMode, harness.supportsPlanMode(), harness.supportsLiveApprovalSelection(), rules,
                 harness.supportsPermissionRules(), harness.supportsAutoApproval());
     }
@@ -681,6 +775,43 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     public CommandAdmission submitTurn(String tenantId, String actorId,
             String idempotencyKey, String sessionId,
             List<InputBlock> blocks) {
+        return submitTurn(actorId == null ? null
+                : SessionPrincipal.ofUser(tenantId, actorId), tenantId,
+                idempotencyKey, sessionId, blocks);
+    }
+
+    public CommandAdmission submitTurn(SessionPrincipal principal,
+            String idempotencyKey, String sessionId,
+            List<InputBlock> blocks) {
+        return submitTurn(principal,
+                principal == null ? null : principal.tenantId(),
+                idempotencyKey, sessionId, blocks);
+    }
+
+    /**
+     * Read-only retry discovery for an embedding caller that must resolve
+     * model authorization before allowing a second attempt. It never
+     * creates a Turn or dispatches work.
+     */
+    public Optional<CommandAdmission> findSubmitTurnReplay(
+            SessionPrincipal principal, String idempotencyKey,
+            String sessionId, List<InputBlock> blocks) {
+        validateIdempotencyKey(idempotencyKey);
+        List<Map<String, Object>> input = inputPolicy.input(blocks, true);
+        String requestDigest = digests.digest(Map.of(
+                "sessionId", sessionId, "input", input));
+        String tenantId = principal == null ? null : principal.tenantId();
+        SessionRecord session = store.requireSession(tenantId, sessionId);
+        inputPolicy.requireSubmitterRole(session, principal);
+        Admission replay = replayForCreator(tenantId, SUBMIT,
+                idempotencyKey, requestDigest, session, principal);
+        return replay == null ? Optional.empty()
+                : Optional.of(response(tenantId, replay));
+    }
+
+    private CommandAdmission submitTurn(SessionPrincipal principal,
+            String tenantId, String idempotencyKey, String sessionId,
+            List<InputBlock> blocks) {
         validateIdempotencyKey(idempotencyKey);
         List<Map<String, Object>> input = inputPolicy.input(blocks, true);
         String requestDigest = digests.digest(Map.of(
@@ -692,7 +823,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         // would meet below the replay, so a reused key's 409 never leaks to
         // one, and a below-OPERATOR reader never reaches a recorded key —
         // the command family's replay is not actor-scoped (#13619).
-        inputPolicy.requireSubmitterRole(session, actorId);
+        inputPolicy.requireSubmitterRole(session, principal);
         // Replay before the visibility and availability gates, so a
         // recorded submit still answers after a delete and through a
         // Harness outage. See createSession. The gates above pass every
@@ -703,7 +834,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         // gate's own refusal still differs from a fresh key's for a
         // fellow OPERATOR; only the below-OPERATOR arms answer uniformly.
         Admission replay = replayForCreator(tenantId, SUBMIT,
-                idempotencyKey, requestDigest, session, actorId);
+                idempotencyKey, requestDigest, session, principal);
         if (replay != null) {
             CommandAdmission body = response(tenantId, replay);
             dispatch(tenantId, replay, session.workspace() != null);
@@ -717,7 +848,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         // a re-registration, a DRAINING row or a creator demotion must not
         // retire it.
         inputPolicy.requireVisibleSession(session);
-        inputPolicy.requireSubmitterFacts(session, actorId);
+        inputPolicy.requireSubmitterFacts(session, principal);
         requireReadyWorktree(session);
         requireHarness();
         String payloadDigest = harnessRules.payloadDigest(input);
@@ -725,13 +856,16 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         try {
             admission = store.insertTurnCommand(tenantId, SUBMIT,
                     idempotencyKey, requestDigest, sessionId, input,
-                    payloadDigest, actorId);
+                    payloadDigest, principal);
         } catch (DuplicateKeyException error) {
-            admission = store.replayCommand(tenantId, SUBMIT,
-                    idempotencyKey, requestDigest);
+            admission = replayForCreator(tenantId, SUBMIT, idempotencyKey,
+                    requestDigest, session, principal);
+            if (admission == null) {
+                throw error;
+            }
         }
         requireReplayedAdmission(tenantId, SUBMIT, idempotencyKey, admission,
-                session, actorId);
+                session, principal);
         // Built before the dispatcher runs, so the body reports the
         // operation as its admission saved it.
         CommandAdmission body = response(tenantId, admission);
@@ -741,6 +875,21 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     public CommandAdmission cancelTurn(String tenantId, String actorId,
             String idempotencyKey, String sessionId, String turnId) {
+        return cancelTurn(actorId == null ? null
+                : SessionPrincipal.ofUser(tenantId, actorId), tenantId,
+                idempotencyKey, sessionId, turnId);
+    }
+
+    public CommandAdmission cancelTurn(SessionPrincipal principal,
+            String idempotencyKey, String sessionId, String turnId) {
+        return cancelTurn(principal,
+                principal == null ? null : principal.tenantId(),
+                idempotencyKey, sessionId, turnId);
+    }
+
+    private CommandAdmission cancelTurn(SessionPrincipal principal,
+            String tenantId, String idempotencyKey, String sessionId,
+            String turnId) {
         validateIdempotencyKey(idempotencyKey);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "turnId", turnId));
@@ -751,27 +900,30 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         // recorded cancel still answers after the Session leaves ACTIVE or
         // Workspace files turn off, and only a fresh key meets the refusals
         // below.
-        requireCancellerRole(session, actorId);
+        requireCancellerRole(session, principal);
         Admission replay = replayForCreator(tenantId, CANCEL,
-                idempotencyKey, requestDigest, session, actorId);
+                idempotencyKey, requestDigest, session, principal);
         if (replay != null) {
             CommandAdmission body = response(tenantId, replay);
             dispatch(tenantId, replay, session.workspace() != null);
             return body;
         }
         inputPolicy.requireVisibleSession(session);
-        requireCancellerShape(session, actorId);
+        requireCancellerShape(session, principal);
         Admission admission;
         try {
             admission = store.insertCancelCommand(tenantId, CANCEL,
                     idempotencyKey, requestDigest, sessionId, turnId,
-                    actorId);
+                    principal);
         } catch (DuplicateKeyException error) {
-            admission = store.replayCommand(tenantId, CANCEL,
-                    idempotencyKey, requestDigest);
+            admission = replayForCreator(tenantId, CANCEL, idempotencyKey,
+                    requestDigest, session, principal);
+            if (admission == null) {
+                throw error;
+            }
         }
         requireReplayedAdmission(tenantId, CANCEL, idempotencyKey, admission,
-                session, actorId);
+                session, principal);
         CommandAdmission body = response(tenantId, admission);
         if (admission.commandEffect()) {
             coordinator.cancel(tenantId, admission.sessionId(),
@@ -824,6 +976,22 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     public SessionMutationResult<PublicSession> renameSession(
             String tenantId, String actorId, String idempotencyKey, String sessionId,
             String title) {
+        return renameSession(actorId == null ? null
+                : SessionPrincipal.ofUser(tenantId, actorId), tenantId,
+                idempotencyKey, sessionId, title);
+    }
+
+    public SessionMutationResult<PublicSession> renameSession(
+            SessionPrincipal principal, String idempotencyKey,
+            String sessionId, String title) {
+        return renameSession(principal,
+                principal == null ? null : principal.tenantId(),
+                idempotencyKey, sessionId, title);
+    }
+
+    private SessionMutationResult<PublicSession> renameSession(
+            SessionPrincipal principal, String tenantId,
+            String idempotencyKey, String sessionId, String title) {
         validateIdempotencyKey(idempotencyKey);
         // A recorded rename answers before the shape and availability gates
         // a deleted Session can no longer pass, but only when the recorded
@@ -837,6 +1005,11 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         // beginSessionRename would create for a fresh key.
         StoreModels.CommandRecord recorded = store.findCommand(tenantId,
                 RENAME, idempotencyKey).orElse(null);
+        if (recorded != null && !recorded.sessionId().equals(sessionId)) {
+            SessionRecord requested = store.requireSession(tenantId, sessionId);
+            inputPolicy.requireSubmitterRole(requested, principal);
+            requireRecordedSessionGrant(recorded, requested, principal);
+        }
         if (recorded != null && recorded.sessionId().equals(sessionId)) {
             // The actor gates run ahead of the digest comparison:
             // evaluating the digest first throws invalid_title for an
@@ -855,9 +1028,11 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             // from a fresh key's.
             SessionRecord session = store.requireSession(tenantId,
                     sessionId);
-            inputPolicy.requireSubmitterRole(session, actorId);
-            if (!recordedByCaller(recorded, actorId)) {
-                requireReplayCreator(session, actorId);
+            inputPolicy.requireSubmitterRole(session, principal);
+            if (session.workspace() == null
+                    || !recordedByCaller(recorded,
+                            principal == null ? null : principal.userId())) {
+                requireReplayCreator(session, principal);
             }
             // The replay comparison digests the title as sent, never the
             // validated form: a title that fails validation cannot match a
@@ -879,8 +1054,8 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         // Session read does; the recorded rename above is the only outcome
         // that survives the delete.
         SessionRecord current = inputPolicy.requireVisibleSession(tenantId, sessionId);
-        inputPolicy.requireSubmitterRole(current, actorId);
-        inputPolicy.requireSubmitterFacts(current, actorId);
+        inputPolicy.requireSubmitterRole(current, principal);
+        inputPolicy.requireSubmitterFacts(current, principal);
         requireReadyWorktree(current);
         String effectiveTitle = validRenameTitle(title);
         requireHarness();
@@ -890,7 +1065,8 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         }
         SessionMutationCommand command = store.beginSessionRename(tenantId,
                 idempotencyKey, renameDigest(sessionId, title), sessionId,
-                effectiveTitle, actorId);
+                effectiveTitle,
+                principal == null ? null : principal.userId(), principal);
         if (!"COMPLETED".equals(command.status())) {
             String owner = UUID.randomUUID().toString();
             var candidate = new StoreModels.RenameDelivery(tenantId, sessionId,
@@ -957,7 +1133,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         // otherwise answer the recorded outcome ungated.
         SessionRecord replayed = store.requireSession(tenantId, sessionId);
         requireReplayActor(tenantId, RENAME, idempotencyKey, replayed,
-                actorId);
+                principal);
         return new SessionMutationResult<>(publicSession(
                 asLastVisible(replayed)), true);
     }
@@ -973,6 +1149,18 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 result.replayed());
     }
 
+    public SessionMutationResult<PublicSession> unarchiveSession(
+            SessionPrincipal principal, String idempotencyKey,
+            String sessionId) {
+        var result = unarchive(principal,
+                principal == null ? null : principal.tenantId(),
+                idempotencyKey, sessionId);
+        SessionRecord session = result.replayed()
+                ? asLastVisible(result.session()) : result.session();
+        return new SessionMutationResult<>(publicSession(session),
+                result.replayed());
+    }
+
     public SessionMutationResult<WebShellSession> unarchiveWebShellSession(
             String tenantId, String actorId, String idempotencyKey, String sessionId) {
         var result = unarchive(tenantId, actorId, idempotencyKey, sessionId);
@@ -982,22 +1170,48 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 result.replayed());
     }
 
+    public SessionMutationResult<WebShellSession> unarchiveWebShellSession(
+            SessionPrincipal principal, String idempotencyKey,
+            String sessionId) {
+        var result = unarchive(principal,
+                principal == null ? null : principal.tenantId(),
+                idempotencyKey, sessionId);
+        SessionRecord session = result.replayed()
+                ? asLastVisible(result.session()) : result.session();
+        return new SessionMutationResult<>(webShellSession(session,
+                principal == null ? null : principal.userId()),
+                result.replayed());
+    }
+
     private StoreModels.SessionMutation unarchive(String tenantId, String actorId,
             String idempotencyKey, String sessionId) {
+        SessionRecord target = store.requireSession(tenantId, sessionId);
+        return unarchive(principalOf(tenantId, actorId,
+                target.workspace() == null), tenantId, idempotencyKey,
+                sessionId);
+    }
+
+    private StoreModels.SessionMutation unarchive(SessionPrincipal principal,
+            String tenantId, String idempotencyKey, String sessionId) {
         validateIdempotencyKey(idempotencyKey);
         SessionRecord target = store.requireSession(tenantId, sessionId);
         if (target.workspace() != null) {
-            requireReadGrant(target, actorId);
+            String actorId = principal == null ? null : principal.userId();
+            requireReadGrant(target, principal);
             String scopedKey = digests.digest(Map.of("sessionId", sessionId,
                     "actorDigest", digests.digest(Map.of("actorId", actorId)), "idempotencyKey", idempotencyKey));
             return store.unarchiveWorkspaceSession(tenantId, sessionId, actorId,
                     scopedKey, lifecycleDigest(sessionId, UNARCHIVE));
         }
-        inputPolicy.requireLegacyWorkspace(tenantId, actorId, sessionId);
+        inputPolicy.requireLegacyWorkspace(tenantId, principal, sessionId);
+        store.findCommand(tenantId, UNARCHIVE, idempotencyKey)
+                .ifPresent(command -> requireRecordedSessionGrant(command,
+                        target, principal));
         String requestDigest = lifecycleDigest(sessionId, UNARCHIVE);
         SessionMutationCommand command = store.beginSessionMutation(tenantId,
                 UNARCHIVE, idempotencyKey, requestDigest, sessionId,
-                SessionMutationKind.UNARCHIVE);
+                SessionMutationKind.UNARCHIVE,
+                principal == null ? null : principal.userId(), principal);
         if (!"COMPLETED".equals(command.status())) {
             SessionRecord session = store.completeSessionMutation(tenantId,
                     UNARCHIVE, idempotencyKey, sessionId,
@@ -1022,18 +1236,31 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     public PublicSession getPublicSession(String tenantId, String actorId,
             String sessionId) {
-        SessionRecord session = requireReadableSession(tenantId, actorId, sessionId);
+        return getPublicSession(principalOf(tenantId, actorId, true),
+                sessionId);
+    }
+
+    public PublicSession getPublicSession(SessionPrincipal principal,
+            String sessionId) {
+        SessionRecord session = requireReadableSession(principal, sessionId);
         var recovery = recoveryServices == null ? null : recoveryServices.getIfAvailable();
         return publicSession(session).withRecovery(recovery == null
-                ? null : recovery.projection(session, actorId));
+                ? null : recovery.projection(session, principal));
     }
 
     public WebShellSession getWebShellSession(String tenantId, String actorId,
             String sessionId) {
-        SessionRecord session = requireReadableSession(tenantId, actorId, sessionId);
+        return getWebShellSession(principalOf(tenantId, actorId, true),
+                sessionId);
+    }
+
+    public WebShellSession getWebShellSession(SessionPrincipal principal,
+            String sessionId) {
+        SessionRecord session = requireReadableSession(principal, sessionId);
+        String actorId = principal == null ? null : principal.userId();
         var recovery = recoveryServices == null ? null : recoveryServices.getIfAvailable();
         return webShellSession(session, actorId).withRecovery(recovery == null
-                ? null : recovery.projection(session, actorId));
+                ? null : recovery.projection(session, principal));
     }
 
     public PublicList<PublicSession> listPublicSessions(String tenantId,
@@ -1044,11 +1271,20 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     public PublicList<PublicSession> listPublicSessions(String tenantId,
             String actorId, String cursor, int requestedLimit, String requestedArchiveState,
             String requestedTitleQuery) {
+        return listPublicSessions(principalOf(tenantId, actorId, true),
+                cursor, requestedLimit, requestedArchiveState,
+                requestedTitleQuery);
+    }
+
+    public PublicList<PublicSession> listPublicSessions(
+            SessionPrincipal principal, String cursor, int requestedLimit,
+            String requestedArchiveState, String requestedTitleQuery) {
         String archiveState = archiveState(requestedArchiveState);
         String titleQuery = titleQuery(requestedTitleQuery);
         int limit = limit(requestedLimit);
         SessionCursor decoded = decodeCursor(cursor, archiveState, titleQuery);
-        SessionPage page = filteredSessions(tenantId, actorId, decoded, limit, archiveState, titleQuery);
+        SessionPage page = filteredSessions(principal, decoded, limit,
+                archiveState, titleQuery);
         return new PublicList<>("list", publicSessions(page.sessions(), page.worktrees()), page.hasMore(),
                 nextSessionCursor(page, archiveState, titleQuery));
     }
@@ -1067,22 +1303,56 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     public WebShellPage<WebShellSession> listWebShellSessions(
             String tenantId, String actorId, String cursor, int requestedLimit,
             String requestedArchiveState, String requestedTitleQuery) {
+        return listWebShellSessions(principalOf(tenantId, actorId, true),
+                cursor, requestedLimit, requestedArchiveState,
+                requestedTitleQuery);
+    }
+
+    public WebShellPage<WebShellSession> listWebShellSessions(
+            SessionPrincipal principal, String cursor, int requestedLimit,
+            String requestedArchiveState, String requestedTitleQuery) {
         String archiveState = archiveState(requestedArchiveState);
         String titleQuery = titleQuery(requestedTitleQuery);
         int limit = limit(requestedLimit);
         SessionCursor decoded = decodeCursor(cursor, archiveState, titleQuery);
-        SessionPage page = filteredSessions(tenantId, actorId, decoded, limit, archiveState, titleQuery);
-        return new WebShellPage<>(webShellSessions(page.sessions(), actorId, page.worktrees()),
+        SessionPage page = filteredSessions(principal, decoded, limit,
+                archiveState, titleQuery);
+        return new WebShellPage<>(webShellSessions(page.sessions(),
+                        principal == null ? null : principal.userId(),
+                        page.worktrees()),
                 nextSessionCursor(page, archiveState, titleQuery), page.hasMore());
     }
 
-    private SessionPage filteredSessions(String tenantId, String actorId, SessionCursor cursor,
+    public WebShellPage<WebShellSession> listOwnedWebShellSessions(
+            SessionPrincipal principal, String cursor, int requestedLimit,
+            String requestedArchiveState, String requestedTitleQuery) {
+        if (principal == null) {
+            throw new ManagedAgentException(401, "actor_required",
+                    "A trusted actor is required.");
+        }
+        String archiveState = archiveState(requestedArchiveState);
+        String titleQuery = titleQuery(requestedTitleQuery);
+        int limit = limit(requestedLimit);
+        SessionCursor decoded = decodeCursor(cursor, archiveState, titleQuery);
+        SessionPage page = store.listOwnedSessions(principal.tenantId(),
+                principal,
+                decoded == null ? null : decoded.createdAt(),
+                decoded == null ? null : decoded.sessionId(), limit,
+                archiveState, titleQuery);
+        return new WebShellPage<>(webShellSessions(page.sessions(),
+                principal.userId(), page.worktrees()),
+                nextSessionCursor(page, archiveState, titleQuery),
+                page.hasMore());
+    }
+
+    private SessionPage filteredSessions(SessionPrincipal principal,
+            SessionCursor cursor,
             int limit, String archiveState, String titleQuery) {
         Long createdAt = cursor == null ? null : cursor.createdAt();
         String sessionId = cursor == null ? null : cursor.sessionId();
-        return titleQuery.isEmpty()
-                ? store.listSessions(tenantId, actorId, createdAt, sessionId, limit, archiveState)
-                : store.listSessions(tenantId, actorId, createdAt, sessionId, limit, archiveState, titleQuery);
+        String tenantId = principal == null ? null : principal.tenantId();
+        return store.listSessions(tenantId, principal, createdAt, sessionId,
+                limit, archiveState, titleQuery);
     }
 
     private static String archiveState(String requested) {
@@ -1120,10 +1390,18 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     public PublicList<PublicTurn> listPublicTurns(String tenantId,
             String actorId, String sessionId, String cursor,
             int requestedLimit) {
+        return listPublicTurns(principalOf(tenantId, actorId, true),
+                sessionId, cursor, requestedLimit);
+    }
+
+    public PublicList<PublicTurn> listPublicTurns(
+            SessionPrincipal principal, String sessionId, String cursor,
+            int requestedLimit) {
         int limit = limit(requestedLimit);
         TurnCursor decoded = decodeTurnCursor(cursor);
-        requireReadableSession(tenantId, actorId, sessionId);
-        TurnPage page = store.listTurns(tenantId, sessionId,
+        SessionRecord session = requireReadableSession(principal, sessionId);
+        TurnPage page = store.listTurns(session.tenantId(),
+                session.sessionId(),
                 decoded == null ? null : decoded.createdAt(),
                 decoded == null ? null : decoded.turnId(), limit);
         return new PublicList<>("list", page.turns().stream()
@@ -1133,13 +1411,20 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     public PublicTurn getPublicTurn(String tenantId, String actorId,
             String sessionId, String turnId) {
+        return getPublicTurn(principalOf(tenantId, actorId, true),
+                sessionId, turnId);
+    }
+
+    public PublicTurn getPublicTurn(SessionPrincipal principal,
+            String sessionId, String turnId) {
         // The path schema counts characters, not UTF-16 units.
         if (turnId.codePointCount(0, turnId.length()) > TURN_ID_MAX_LENGTH) {
             throw new ManagedAgentException(400, "invalid_request",
                     "The Turn id is invalid.");
         }
-        requireReadableSession(tenantId, actorId, sessionId);
-        return store.findTurnSummary(tenantId, sessionId, turnId)
+        SessionRecord session = requireReadableSession(principal, sessionId);
+        return store.findTurnSummary(session.tenantId(), session.sessionId(),
+                turnId)
                 .map(ManagedAgentService::publicTurn)
                 .orElseThrow(() -> new ManagedAgentException(404,
                         "turn_not_found", "The Turn was not found."));
@@ -1148,8 +1433,14 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     public PublicList<PublicEvent> publicEvents(String tenantId,
             String actorId, String sessionId, long afterSequence,
             int requestedLimit) {
+        return publicEvents(principalOf(tenantId, actorId, true),
+                sessionId, afterSequence, requestedLimit);
+    }
+
+    public PublicList<PublicEvent> publicEvents(SessionPrincipal principal,
+            String sessionId, long afterSequence, int requestedLimit) {
         requireEventCursor(afterSequence);
-        SessionRecord session = requireReadableSession(tenantId, actorId,
+        SessionRecord session = requireReadableSession(principal,
                 sessionId);
         int limit = eventLimit(requestedLimit);
         List<EventRecord> rows = replayableEvents(session, afterSequence,
@@ -1169,11 +1460,20 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     public PublicItemList listPublicItems(String tenantId, String actorId, String sessionId,
             String cursor, long afterSequence, int requestedLimit) {
+        return listPublicItems(principalOf(tenantId, actorId, true),
+                sessionId, cursor, afterSequence, requestedLimit);
+    }
+
+    public PublicItemList listPublicItems(SessionPrincipal principal,
+            String sessionId, String cursor, long afterSequence,
+            int requestedLimit) {
         if (afterSequence < 0) {
             throw new ManagedAgentException(400, "invalid_event_cursor", "Item sequence must be non-negative.");
         }
-        requireReadableSession(tenantId, actorId, sessionId);
-        var page = store.findMessagePage(tenantId, sessionId, cursor, limit(requestedLimit), false, afterSequence);
+        SessionRecord session = requireReadableSession(principal, sessionId);
+        var page = store.findMessagePage(session.tenantId(),
+                session.sessionId(), cursor, limit(requestedLimit), false,
+                afterSequence);
         return new PublicItemList("list", page.items().stream().map(this::publicItem).toList(), page.hasMore(),
                 page.nextCursor(), page.throughSequence());
     }
@@ -1183,10 +1483,27 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         return messageExportPage(tenantId, actorId, sessionId, cursor, requestedLimit, false);
     }
 
+    public WebShellExportPage exportPage(SessionPrincipal principal,
+            String sessionId, String cursor, int requestedLimit) {
+        SessionRecord session = requireReadableSession(principal, sessionId);
+        var page = store.findMessagePage(session.tenantId(), sessionId,
+                cursor, requestedLimit, false);
+        return new WebShellExportPage(page.items().stream()
+                .map(this::webShellItem).toList(), page.nextCursor(),
+                page.hasMore(), page.throughSequence());
+    }
+
     public WebShellTranscript transcript(String tenantId, String actorId,
             String sessionId, String cursor, int requestedLimit) {
-        requireReadableSession(tenantId, actorId, sessionId);
-        var page = store.findMessagePage(tenantId, sessionId, cursor, requestedLimit, true);
+        return transcript(principalOf(tenantId, actorId, true), sessionId,
+                cursor, requestedLimit);
+    }
+
+    public WebShellTranscript transcript(SessionPrincipal principal,
+            String sessionId, String cursor, int requestedLimit) {
+        SessionRecord session = requireReadableSession(principal, sessionId);
+        var page = store.findMessagePage(session.tenantId(), sessionId, cursor,
+                requestedLimit, true);
         return new WebShellTranscript(page.items().stream().map(this::webShellItem).toList(),
                 page.events().stream().map(this::webShellEvent).toList(), page.coveredSequence(),
                 page.nextCursor(), page.hasMore(), page.coveredSequence());
@@ -1194,13 +1511,29 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     public WebShellExportPage recentTranscriptItems(String tenantId, String actorId,
             String sessionId, String cursor, int requestedLimit) {
-        return messageExportPage(tenantId, actorId, sessionId, cursor, requestedLimit, true);
+        return recentTranscriptItems(principalOf(tenantId, actorId, true),
+                sessionId, cursor, requestedLimit);
+    }
+
+    public WebShellExportPage recentTranscriptItems(
+            SessionPrincipal principal, String sessionId, String cursor,
+            int requestedLimit) {
+        return messageExportPage(principal, sessionId, cursor,
+                requestedLimit, true);
     }
 
     private WebShellExportPage messageExportPage(String tenantId, String actorId,
             String sessionId, String cursor, int requestedLimit, boolean backward) {
-        requireReadableSession(tenantId, actorId, sessionId);
-        var page = store.findMessagePage(tenantId, sessionId, cursor, requestedLimit, backward);
+        return messageExportPage(principalOf(tenantId, actorId, true),
+                sessionId, cursor, requestedLimit, backward);
+    }
+
+    private WebShellExportPage messageExportPage(SessionPrincipal principal,
+            String sessionId, String cursor, int requestedLimit,
+            boolean backward) {
+        SessionRecord session = requireReadableSession(principal, sessionId);
+        var page = store.findMessagePage(session.tenantId(), sessionId, cursor,
+                requestedLimit, backward);
         return new WebShellExportPage(page.items().stream().map(this::webShellItem).toList(),
                 page.nextCursor(), page.hasMore(), page.throughSequence());
     }
@@ -1703,9 +2036,21 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     // at all.
     private void requireReplayCreator(SessionRecord session,
             String actorId) {
-        if (session.workspace() != null
-                && !workspaces.createdSession(session.tenantId(), actorId,
-                        session.sessionId())) {
+        requireReplayCreator(session,
+                principalOf(session.tenantId(), actorId,
+                        session.workspace() == null));
+    }
+
+    private void requireReplayCreator(SessionRecord session,
+            SessionPrincipal principal) {
+        if (session.workspace() == null) {
+            store.requireSessionOwnership(session.tenantId(),
+                    session.sessionId(), principal);
+            return;
+        }
+        if (!workspaces.createdSession(session.tenantId(),
+                principal == null ? null : principal.userId(),
+                session.sessionId())) {
             // Below the recorder/creator pass, so a recorded outcome still
             // answers its own actors on a tombstone; every other actor
             // meets the reads' 404 there, never the live-Session 409 that
@@ -1728,24 +2073,56 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     // cancel still answers through an outage — the same split as submit.
     private void requireCancellerRole(SessionRecord session,
             String actorId) {
+        requireCancellerRole(session,
+                principalOf(session.tenantId(), actorId,
+                        session.workspace() == null));
+    }
+
+    private void requireCancellerRole(SessionRecord session,
+            SessionPrincipal principal) {
+        if (session.workspace() == null) {
+            store.requireSessionOwnership(session.tenantId(),
+                    session.sessionId(), principal);
+            return;
+        }
         if (session.workspace() != null
-                && !workspaces.accessOf(session.tenantId(), actorId,
+                && !workspaces.accessOf(session.tenantId(),
+                        principal == null ? null : principal.userId(),
                         session.workspace().getWorkspaceId())
                         .atLeast(WorkspaceAccess.OPERATOR)) {
-            inputPolicy.requireLegacyWorkspace(session, actorId);
+            inputPolicy.requireLegacyWorkspace(session, principal);
         }
     }
 
     private void requireCancellerShape(SessionRecord session,
             String actorId) {
+        requireCancellerShape(session,
+                principalOf(session.tenantId(), actorId,
+                        session.workspace() == null));
+    }
+
+    private void requireCancellerShape(SessionRecord session,
+            SessionPrincipal principal) {
+        if (session.workspace() == null) {
+            store.requireSessionOwnership(session.tenantId(),
+                    session.sessionId(), principal);
+            return;
+        }
         if (session.workspace() != null && !inputPolicy.maySubmitShape(session, null)) {
-            inputPolicy.requireLegacyWorkspace(session, actorId);
+            inputPolicy.requireLegacyWorkspace(session, principal);
         }
     }
 
     void requireRecoveryOperator(SessionRecord session, String actorId) {
-        requireCancellerRole(session, actorId);
-        requireCancellerShape(session, actorId);
+        requireRecoveryOperator(session,
+                principalOf(session.tenantId(), actorId,
+                        session.workspace() == null));
+    }
+
+    void requireRecoveryOperator(SessionRecord session,
+            SessionPrincipal principal) {
+        requireCancellerRole(session, principal);
+        requireCancellerShape(session, principal);
     }
 
     // The tenant-wide command namespace is shared with callers' keys,
@@ -1768,8 +2145,21 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
      * model beyond its read access.
      */
     void requireTaskCanceller(SessionRecord session, String actorId) {
+        requireTaskCanceller(session,
+                principalOf(session.tenantId(), actorId,
+                        session.workspace() == null));
+    }
+
+    void requireTaskCanceller(SessionRecord session,
+            SessionPrincipal principal) {
+        if (session.workspace() == null) {
+            store.requireSessionOwnership(session.tenantId(),
+                    session.sessionId(), principal);
+            return;
+        }
         if (session.workspace() != null
-                && !workspaces.accessOf(session.tenantId(), actorId,
+                && !workspaces.accessOf(session.tenantId(),
+                        principal == null ? null : principal.userId(),
                         session.workspace().getWorkspaceId())
                         .atLeast(WorkspaceAccess.OPERATOR)) {
             throw new ManagedAgentException(403, "task_forbidden",
@@ -1819,19 +2209,53 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         inputPolicy.requireLegacyWorkspace(tenantId, actorId, sessionId);
     }
 
+    void requireLegacyWorkspace(String tenantId, SessionPrincipal principal,
+            String sessionId) {
+        inputPolicy.requireLegacyWorkspace(tenantId, principal, sessionId);
+    }
+
     public SessionRecord requireReadableSession(String tenantId,
             String actorId, String sessionId) {
-        SessionRecord session = inputPolicy.requireVisibleSession(tenantId, sessionId);
-        requireReadGrant(session, actorId);
+        return requireReadableSession(
+                principalOf(tenantId, actorId, true), sessionId);
+    }
+
+    public SessionRecord requireReadableSession(SessionPrincipal principal,
+            String sessionId) {
+        String tenantId = principal == null ? null : principal.tenantId();
+        SessionRecord session = inputPolicy.requireVisibleSession(tenantId,
+                sessionId);
+        requireReadGrant(session, principal);
         return session;
     }
 
     void requireReadGrant(SessionRecord session, String actorId) {
-        if (session.workspace() != null && !workspaces.canRead(session.tenantId(),
-                actorId, session.workspace().getWorkspaceId())) {
+        requireReadGrant(session,
+                principalOf(session.tenantId(), actorId,
+                        session.workspace() == null));
+    }
+
+    void requireReadGrant(SessionRecord session,
+            SessionPrincipal principal) {
+        if (session.workspace() == null) {
+            store.requireSessionOwnership(session.tenantId(),
+                    session.sessionId(), principal);
+            return;
+        }
+        if (!workspaces.canRead(session.tenantId(),
+                principal == null ? null : principal.userId(),
+                session.workspace().getWorkspaceId())) {
             throw new ManagedAgentException(404,
                     "session_not_found", "The Session was not found.");
         }
+    }
+
+    private static SessionPrincipal principalOf(String tenantId,
+            String actorId, boolean ownershipQuestion) {
+        if (actorId == null || actorId.isBlank()) {
+            return null;
+        }
+        return SessionPrincipal.ofUser(tenantId, actorId);
     }
 
     /**
@@ -1868,13 +2292,26 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     private Admission replayForCreator(String tenantId, String operation,
             String idempotencyKey, String requestDigest,
             SessionRecord session, String actorId) {
+        return replayForCreator(tenantId, operation, idempotencyKey,
+                requestDigest, session,
+                principalOf(tenantId, actorId,
+                        session.workspace() == null));
+    }
+
+    private Admission replayForCreator(String tenantId, String operation,
+            String idempotencyKey, String requestDigest,
+            SessionRecord session, SessionPrincipal principal) {
         StoreModels.CommandRecord command = store.findCommand(tenantId,
                 operation, idempotencyKey).orElse(null);
         if (command == null) {
             return null;
         }
-        if (!recordedByCaller(command, actorId)) {
-            requireReplayCreator(session, actorId);
+        SessionRecord recordedSession = requireRecordedSessionGrant(command,
+                session, principal);
+        if (recordedSession.workspace() == null
+                || !recordedByCaller(command,
+                        principal == null ? null : principal.userId())) {
+            requireReplayCreator(recordedSession, principal);
         }
         return store.replayCommand(tenantId, operation, idempotencyKey,
                 requestDigest);
@@ -1889,11 +2326,20 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     private void requireReplayedAdmission(String tenantId, String operation,
             String idempotencyKey, Admission admission, SessionRecord session,
             String actorId) {
+        requireReplayedAdmission(tenantId, operation, idempotencyKey,
+                admission, session,
+                principalOf(tenantId, actorId,
+                        session.workspace() == null));
+    }
+
+    private void requireReplayedAdmission(String tenantId, String operation,
+            String idempotencyKey, Admission admission, SessionRecord session,
+            SessionPrincipal principal) {
         if (!admission.replayed()) {
             return;
         }
         requireReplayActor(tenantId, operation, idempotencyKey, session,
-                actorId);
+                principal);
     }
 
     // The probe half, standing alone for the mutation routes whose replay
@@ -1903,10 +2349,37 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     // holds.
     private void requireReplayActor(String tenantId, String operation,
             String idempotencyKey, SessionRecord session, String actorId) {
-        store.findCommand(tenantId, operation, idempotencyKey)
-                .filter(command -> !recordedByCaller(command, actorId))
-                .ifPresent(command -> requireReplayCreator(session,
-                        actorId));
+        requireReplayActor(tenantId, operation, idempotencyKey, session,
+                principalOf(tenantId, actorId,
+                        session.workspace() == null));
+    }
+
+    private void requireReplayActor(String tenantId, String operation,
+            String idempotencyKey, SessionRecord session,
+            SessionPrincipal principal) {
+        StoreModels.CommandRecord command = store.findCommand(tenantId,
+                operation, idempotencyKey).orElse(null);
+        if (command == null) {
+            return;
+        }
+        SessionRecord recordedSession = requireRecordedSessionGrant(command,
+                session, principal);
+        if (recordedSession.workspace() == null
+                || !recordedByCaller(command,
+                        principal == null ? null : principal.userId())) {
+            requireReplayCreator(recordedSession, principal);
+        }
+    }
+
+    private SessionRecord requireRecordedSessionGrant(
+            StoreModels.CommandRecord command, SessionRecord requested,
+            SessionPrincipal principal) {
+        SessionRecord recorded = command.sessionId()
+                .equals(requested.sessionId()) ? requested
+                : store.requireSession(requested.tenantId(),
+                        command.sessionId());
+        requireReadGrant(recorded, principal);
+        return recorded;
     }
 
     // The recorder half of the replay admission: a command receipt names
@@ -1925,18 +2398,35 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         }
     }
 
+    @Override
     public boolean supportsUserMessageQueue() {
         return inputPolicy.supportsUserMessageQueue();
     }
 
+    @Override
     public SessionRecord authorizeUserMessageActor(String tenantId, String actorId, String sessionId) {
-        return inputPolicy.authorizeUserMessageActor(tenantId, actorId, sessionId);
+        return inputPolicy.authorizeUserMessageActor(tenantId, actorId,
+                sessionId);
     }
 
+    @Override
+    public SessionRecord authorizeUserMessageActor(
+            SessionPrincipal principal, String sessionId) {
+        return inputPolicy.authorizeUserMessageActor(principal, sessionId);
+    }
+
+    @Override
     public SessionRecord authorizeUserMessages(String tenantId, String actorId, String sessionId) {
         return inputPolicy.authorizeUserMessages(tenantId, actorId, sessionId);
     }
 
+    @Override
+    public SessionRecord authorizeUserMessages(
+            SessionPrincipal principal, String sessionId) {
+        return inputPolicy.authorizeUserMessages(principal, sessionId);
+    }
+
+    @Override
     public List<Map<String, Object>> userMessageInput(List<InputBlock> blocks) {
         return inputPolicy.userMessageInput(blocks);
     }
