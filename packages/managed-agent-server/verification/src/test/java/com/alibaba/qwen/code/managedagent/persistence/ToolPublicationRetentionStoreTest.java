@@ -358,8 +358,8 @@ public class ToolPublicationRetentionStoreTest {
     @Test
     void publicDeleteAndPrivateRetirementCommitAtomicallyAfterWriterStops() {
         var props = new ManagedAgentProperties();
-        var publicStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), java.time.Clock.systemUTC(), events -> {},
-                org.mockito.Mockito.mock(ManagedWorkspaceRegistry.class), props, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var publicStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), java.time.Clock.systemUTC(), events -> {},
+                org.mockito.Mockito.mock(ManagedWorkspaceRegistry.class), props, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String original = session;
         session = tx.execute(status -> publicStore.insertSessionCommand(tenant, "CREATE_SESSION", "create", "digest",
                 "qwen-code", null, null, java.util.List.of(), null).sessionId());

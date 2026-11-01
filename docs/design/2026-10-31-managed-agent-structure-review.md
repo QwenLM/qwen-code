@@ -238,8 +238,11 @@ cross-cutting "how the system works today" tour.
   them to constructor `ObjectProvider` injection is a large change to this
   central 7,700-line class with ~30 test wiring sites, and its correctness
   depends on Spring runtime assembly that the manual-setter unit tests do
-  not fully exercise; it warrants a dedicated design pass and full
-  integration verification before implementation, not an incremental slice.
+  not fully exercise. The dedicated [constructor-wiring design](2026-11-01-managed-agent-store-wiring.md)
+  covers the required/optional dependencies, the additional lazy record-store
+  field and its Session-store cycle, final references, direct-fixture migration
+  and real Spring context verification. Its implementation is independent
+  of the Broker workflow extraction; full CI qualification remains required.
 - `RuntimeBrokerService`: extract module-internal collaborators for recovery
   scanning, cancellation, tool holds, and observation cooldown; the service
   becomes a facade. The module already exists, so no cross-module contract

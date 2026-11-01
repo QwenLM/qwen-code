@@ -206,7 +206,10 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
   供给；`VerificationFixtures` 里的直接调用是测试装配，不是生产接线）。
   改为构造 `ObjectProvider` 注入是对这个 7,700 行中心类的大改动，涉及约
   30 处测试装配点，且其正确性依赖 Spring 运行时装配——手动 setter 的单测
-  无法完全覆盖；应在实现前单独设计并做完整集成验证，而非作为增量切片。
+  无法完全覆盖。[专门的构造装配设计](2026-11-01-managed-agent-store-wiring.zh-CN.md)
+  覆盖必需/可选依赖、额外的延迟 record-store 字段及其 Session-store 回环、
+  final 引用、直接夹具迁移和真实 Spring context 验证。该实现独立于 Broker
+  流程抽取，完整 CI 验收仍是必要条件。
 - `RuntimeBrokerService`：为恢复扫描、取消、tool hold、observation 冷却
   提取模块内协作者；服务本体退为门面。模块已经存在，不需要动任何跨模块
   契约。这是风险最低、可读性收益最高的拆分。observation 冷却是第一条

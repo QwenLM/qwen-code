@@ -243,7 +243,7 @@ class WorkspaceProfileLifecycleTest {
         var f = fixture();
         f.jdbc.update("UPDATE ma_session SET tool_profile = ?", profile);
         var disabled = new ManagedAgentProperties();
-        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(f.jdbc, f.json, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(f.jdbc), disabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(f.jdbc, f.json, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(f.jdbc), disabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var admission = f.transactions.execute(ignored -> store.beginWorkspaceLifecycle("tenant", f.session, OperationKind.CLOSE,
                 "owner", "a".repeat(64), "cleanup", "digest", true, 2));
         assertThat(admission.operation().lifecycleProtocolVersion()).isEqualTo(2);

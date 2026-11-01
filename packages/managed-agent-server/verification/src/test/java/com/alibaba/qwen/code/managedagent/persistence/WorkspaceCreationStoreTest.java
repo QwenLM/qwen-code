@@ -184,8 +184,8 @@ class WorkspaceCreationStoreTest {
     void initialToolTurnAdmitsCompletedDynamicStorage() {
         var created = store(guard).create("tenant", "actor", "Tools", "tools");
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(),
-                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(),
+                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var admitted = new TransactionTemplate(new DataSourceTransactionManager(source)).execute(status ->
                 sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                         .tenantId("tenant")
@@ -412,7 +412,7 @@ class WorkspaceCreationStoreTest {
                 .isEqualTo(project.getParent());
         guard.verify(new ContextBinding("tenant", created.workspaceId(), 1, storage(created.workspaceId()), "first", "config", 1));
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var admitted = new TransactionTemplate(new DataSourceTransactionManager(source)).execute(status ->
                 sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                         .tenantId("tenant")

@@ -55,7 +55,7 @@ class WorkspaceCsiRetainedArtifactsTest {
         expected = fixture.historicalKeys();
         tx = new TransactionTemplate(new DataSourceTransactionManager(source));
         clock.advance(Duration.between(clock.instant(), Instant.now()));
-        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, clock, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, clock, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         accepted();
         jdbc.update("INSERT INTO ma_workspace (tenant_id,workspace_id,workspace_generation,storage_id,display_name,config_ref,policy_ref,state)"
                 + " VALUES ('foreign','workspace',1,'ordinary-storage','Fixture',?,?,'ACTIVE')", WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
