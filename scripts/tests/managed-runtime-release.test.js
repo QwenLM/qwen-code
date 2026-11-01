@@ -558,8 +558,12 @@ describe('Managed runtime publication gates', () => {
       'maven-gpg-plugin',
     ])
       expect(profile).toContain(plugin);
+    const serverPom = fs.readFileSync(
+      path.join(root, 'packages/managed-agent-server/server/pom.xml'),
+      'utf8',
+    );
     expect(
-      pom.match(/<attach>\$\{managed.operator-tools.attach\}<\/attach>/g),
+      serverPom.match(/<attach>\$\{managed.operator-tools.attach\}<\/attach>/g),
     ).toHaveLength(6);
   });
 });
@@ -606,7 +610,13 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
   const repairPatch = 'scripts/patches/managed-runtime-v0.26.3-tests.patch';
 
   function repairFixture() {
-    const fixed = fs.readFileSync(path.join(root, repairedTest), 'utf8');
+    const fixed = fs.readFileSync(
+      path.join(
+        root,
+        repairedTest.replace('/src/test/', '/verification/src/test/'),
+      ),
+      'utf8',
+    );
     const target = path.join(temporary, repairedTest);
     const patch = path.join(
       temporary,
@@ -697,7 +707,17 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
       ALIYUN_OSS_ACCESS_KEY_SECRET: '',
       ALIYUN_OSS_ENDPOINT: 'https://example.invalid',
     };
-    expect(run(configure, env).status).not.toBe(0);
+    for (const missing of [
+      'ALIYUN_OSS_ACCESS_KEY_ID',
+      'ALIYUN_OSS_ACCESS_KEY_SECRET',
+    ]) {
+      const result = run(configure, {
+        ...env,
+        ALIYUN_OSS_ACCESS_KEY_SECRET: 'fixture-secret',
+        [missing]: '',
+      });
+      expect(result.status, result.stderr).not.toBe(0);
+    }
     expect(fs.existsSync(path.join(temporary, 'oss-called'))).toBe(false);
     expect(
       run(configure, { ...env, ALIYUN_OSS_ACCESS_KEY_SECRET: 'fixture-secret' })

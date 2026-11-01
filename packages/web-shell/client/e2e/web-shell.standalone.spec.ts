@@ -19,6 +19,34 @@ const standaloneFeatures = [
 
 const WORKSPACE_CWD = '/tmp/qwen-web-shell-e2e';
 
+test('hides the empty no-workspace group while keeping New session available @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    capabilities: { features: standaloneFeatures },
+    standaloneSessions: [],
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+  await page.goto('/');
+  await waitForRequest(
+    daemon,
+    (request) =>
+      request.method === 'GET' && request.path === '/standalone/sessions',
+  );
+
+  await expect(page.getByTestId('standalone-active-group')).toHaveCount(0);
+  await clickNewTask(page);
+  await expect(page.locator('[data-web-shell-composer-submit]')).toBeVisible();
+  await selectNoWorkspaceTarget(page);
+  await fillComposer(page, 'Start the first standalone conversation');
+  await page.locator('[data-web-shell-composer-submit]').click();
+  await waitForRequest(
+    daemon,
+    (request) =>
+      request.method === 'POST' && request.path === '/standalone/sessions',
+  );
+});
+
 /** Standalone creation calls, ignoring the Recents list reads. */
 function standaloneCreates(
   daemon: MockDaemonController,
@@ -409,7 +437,16 @@ test('standalone Recents keeps lifecycle actions on exact standalone routes @smo
     page.getByText('Renamed conversation', { exact: true }),
   ).toBeVisible();
 
-  await openSessionAction(page, 'Renamed conversation', 'Restore');
+  const archivedRow = page
+    .locator(
+      '[data-web-shell-archived-sessions] [data-web-shell-session-title]',
+      { hasText: 'Renamed conversation' },
+    )
+    .locator('..');
+  await archivedRow.hover();
+  await archivedRow
+    .getByRole('button', { name: 'Restore', exact: true })
+    .click();
   await expect(
     page.locator('[data-web-shell-archived-sessions]'),
   ).not.toContainText('Renamed conversation');

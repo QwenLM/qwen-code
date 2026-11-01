@@ -56,7 +56,7 @@ const simpleName = (className) => className.split('.').at(-1);
 // class here, and keep the pom in agreement — the check below fails if a name
 // is not bound to a surefire include and a failsafe exclude in that module.
 const SUREFIRE_BOUND = new Map([
-  ['packages/managed-agent-server', ['ManagedAgentPackagingIT']],
+  ['packages/managed-agent-server/verification', ['ManagedAgentPackagingIT']],
 ]);
 
 // The module argument is whatever the job passed to Maven: relative on CI,
@@ -89,7 +89,11 @@ const javaFiles = (dir, prefix = []) =>
       : [[...prefix, entry.name].join('.')],
   );
 let failed = false;
-for (const module of modules) {
+for (const requestedModule of modules) {
+  const module =
+    path.basename(path.resolve(requestedModule)) === 'managed-agent-server'
+      ? path.join(requestedModule, 'verification')
+      : requestedModule;
   const expected = javaFiles(path.join(module, 'src', 'test', 'java'))
     .filter((file) => file.endsWith('.java'))
     .map((file) => file.slice(0, -'.java'.length))
@@ -107,6 +111,10 @@ for (const module of modules) {
         `::error::${module}: ${name} is listed as surefire-bound but its pom no longer binds it to a surefire include and a failsafe exclude`,
       );
     }
+  }
+  if (expected.length === 0) {
+    failed = true;
+    console.error(`::error::${module}: no ${family} test sources found`);
   }
   if (optIn && expected.length !== 1) {
     failed = true;

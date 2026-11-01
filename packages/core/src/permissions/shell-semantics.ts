@@ -220,30 +220,64 @@ function pushToken(
   sawQuotedContent: boolean,
   provenance: TokenProvenance,
 ): void {
-  const normalized = trimShellSyntax(token, bareChars);
-  let leadTrim = 0;
-  while (
-    leadTrim < token.length &&
-    token[leadTrim] === '(' &&
-    bareChars[leadTrim]
-  ) {
-    leadTrim++;
-  }
-  const normalizedBareChars = bareChars.slice(
-    leadTrim,
-    leadTrim + normalized.length,
-  );
-  // Empty quotes still form an operand (`cd ''` fails without moving), but a
-  // trailing backslash that consumed no character does not. Tracking actual
-  // quoted/escaped word syntax separately from `bare` keeps those states apart.
-  if (normalized || sawQuotedContent) {
-    tokens.push({
-      text: normalized,
-      bare,
-      bareChars: normalizedBareChars,
-      trailingSyntax,
-      ...provenance,
-    });
+  // Right after an unquoted `>&`, `N>&` or `<&`, bash reads an unquoted `-`
+  // as "close the descriptor" and starts a new word after it: `rm >&-notes.txt`
+  // closes stdout and removes `notes.txt`. The redirect token keeps the whole
+  // word and the rest of the word follows it as an argument. The new word can
+  // close again (`rm >&->&-notes.txt`), and this loop walks the chain so a long
+  // one cannot overflow the stack. Only the first redirect keeps the whole
+  // word: the closes after it open no file.
+  let chained = false;
+  for (;;) {
+    const normalized = trimShellSyntax(token, bareChars);
+    let leadTrim = 0;
+    while (
+      leadTrim < token.length &&
+      token[leadTrim] === '(' &&
+      bareChars[leadTrim]
+    ) {
+      leadTrim++;
+    }
+    const normalizedBareChars = bareChars.slice(
+      leadTrim,
+      leadTrim + normalized.length,
+    );
+    // Empty quotes still form an operand (`cd ''` fails without moving), but a
+    // trailing backslash that consumed no character does not. Tracking actual
+    // quoted/escaped word syntax separately from `bare` keeps those states apart.
+    const push = (): void => {
+      if (normalized || (sawQuotedContent && !chained)) {
+        tokens.push({
+          text: normalized,
+          bare,
+          bareChars: normalizedBareChars,
+          trailingSyntax,
+          ...provenance,
+        });
+      }
+    };
+
+    const op = /^[12]?>&|^<&/.exec(normalized)?.[0];
+    // The `>`/`<` and the `&` must both be unquoted to be descriptor syntax.
+    const opIsSyntax =
+      !!op &&
+      normalizedBareChars.slice(op.length - 2, op.length).every(Boolean);
+    const closes =
+      opIsSyntax &&
+      normalized[op.length] === '-' &&
+      normalizedBareChars[op.length] === true;
+    if (!closes || normalized.length === op!.length + 1) {
+      push();
+      return;
+    }
+    if (!chained) {
+      push();
+      chained = true;
+    }
+    token = normalized.slice(op!.length + 1);
+    bareChars = normalizedBareChars.slice(op!.length + 1);
+    trailingSyntax = false;
+    sawQuotedContent = false;
   }
 }
 
@@ -622,6 +656,8 @@ interface RedirectTokenMatch {
   operator: (typeof REDIRECT_OPERATORS)[number];
   target: string;
   targetInToken: boolean;
+  /** Per-character quoting of the target text, aligned with `target`. */
+  targetBareChars: boolean[];
   prefix: string;
   prefixIsOperand: boolean;
 }
@@ -641,6 +677,7 @@ function parseRedirectToken(token: ShellToken): RedirectTokenMatch | null {
       operator,
       target,
       targetInToken: target !== '' || token.trailingSyntax,
+      targetBareChars: token.bareChars.slice(start + operator.length),
       prefix,
       // A prefix is an operand to keep, not an fd specifier to drop, unless it
       // is the bare `2` / `{fd}` spelling. Quoting an fd-ish prefix turns it
@@ -652,6 +689,78 @@ function parseRedirectToken(token: ShellToken): RedirectTokenMatch | null {
     };
   }
   return null;
+}
+
+/**
+ * The file a redirect target names, or undefined when it only duplicates or
+ * closes a descriptor.
+ *
+ * `>&word`, `N>&word` and `<&word` where the `&` was typed bare follow bash: a
+ * whole number or `-` names a descriptor and opens nothing (`2>&1`, `>&-`,
+ * `<&0`), `/dev/null` and the `/dev/tcp`/`/dev/udp` pseudo-devices open
+ * nothing, and anything else names a file without the `&` (`>&settings.json`
+ * writes `settings.json`, not `&settings.json`). A `$` or backtick word may
+ * expand to either, so it keeps the literal `&word` write.
+ *
+ * An unquoted `-` right after the `&` closes the descriptor and starts a new
+ * word, so the redirect token keeps the whole `&-word` as its file operation
+ * (`my-tool >&-notes.txt` is checked against `&-notes.txt`) while `notes.txt`
+ * goes on to the command. A `-` that is still there after quoting or escaping
+ * is part of the name instead (`>&"-x"` writes `-x`), and is reported without
+ * the flag check that would have dropped it.
+ *
+ * Quoting the `&` removes the syntax: `>"&1"` writes a file named `&1`, so the
+ * `&` is part of the name. Quoting only the word after a bare `&` does not
+ * matter to bash (`>&"1"` still duplicates fd 1), which is why the decision
+ * keys off the `&` and not off the whole target.
+ */
+function redirectTargetFile(
+  target: string,
+  match: RedirectTokenMatch,
+): string | undefined {
+  if (target.startsWith('&') && match.targetBareChars[0]) {
+    const word = target.slice(1);
+    const wordBare = match.targetBareChars.slice(1);
+    if (/^(?:\d+|-)$/.test(word)) return undefined;
+    if (word.includes('$') || word.includes('`')) return target;
+    if (word === '/dev/null' || isNetworkPseudoDevice(word)) return undefined;
+    // An unquoted `-` right after a bare `&` is "close the descriptor", and
+    // bash starts a new word after it. The redirect token keeps the whole
+    // `&-word` as the file operation (that is what `main` reported), while the
+    // word after the `-` goes on to the command as an argument.
+    if (word.startsWith('-') && wordBare[0]) return target;
+    // A `-` still at the start of the word here was quoted or escaped, so it
+    // is part of the name and not a flag: `>&"-x"` writes `-x`. The flag check
+    // would have dropped that write.
+    if (word.startsWith('-') || looksLikePath(word)) return word;
+    return undefined;
+  }
+  if (target === '/dev/null') return undefined;
+  if (
+    !looksLikePath(target) ||
+    isProcessSubstitutionFragment(target) ||
+    isNetworkPseudoDevice(target)
+  ) {
+    return undefined;
+  }
+  return target;
+}
+
+/**
+ * The `&word` a token would name if its redirect operator were read straight
+ * through the quotes, or undefined when the token is not that shape.
+ *
+ * Only a word that really carries bare grouping or background syntax reaches
+ * this: that is the case where bash's reading and a quoting-oblivious reading
+ * come apart, and the check reports the conservative literal rather than
+ * picking one. A fully quoted word has no such syntax and stays an operand.
+ */
+function quoteHiddenFdOperand(token: ShellToken): string | undefined {
+  if (!token.unquotedSyntax) return undefined;
+  const target = /^(?:<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/.exec(
+    token.text,
+  )?.[1];
+  return target?.startsWith('&') ? target : undefined;
 }
 
 function extractRedirects(
@@ -666,7 +775,19 @@ function extractRedirects(
 
   for (let i = 0; i < tokens.length; i++) {
     const match = parseRedirectToken(detailed[i]!);
-    if (!match) continue;
+    if (!match) {
+      // A bare `&` inside a word is what makes the two readings disagree:
+      // bash reads `2">"&1` as a background separator between `2">"` and `1`,
+      // while a quoting-oblivious reader sees `2>&1`. Rather than let one
+      // reading decide, keep the literal `&1` write so a deny rule still
+      // matches it. A fully quoted word (`cd '>y'`) has no bare syntax and is
+      // left alone as a plain operand.
+      const literal = quoteHiddenFdOperand(detailed[i]!);
+      if (literal !== undefined) {
+        writeFiles.push(resolvePath(literal, cwd));
+      }
+      continue;
+    }
     const combined = match.targetInToken;
     const target = combined ? match.target : tokens[i + 1];
     const removeOperator = (): void => {
@@ -689,17 +810,10 @@ function extractRedirects(
       toRemove.add(i + 1);
       i++;
     }
-    if (
-      target === '/dev/null' ||
-      /^&(?:\d+|-)$/.test(target) ||
-      !looksLikePath(target) ||
-      isProcessSubstitutionFragment(target) ||
-      isNetworkPseudoDevice(target)
-    ) {
-      continue;
-    }
+    const file = redirectTargetFile(target, match);
+    if (file === undefined) continue;
 
-    const resolved = resolvePath(target, cwd);
+    const resolved = resolvePath(file, cwd);
     if (match.operator === '<') readFiles.push(resolved);
     else if (match.operator === '<>') {
       readFiles.push(resolved);
@@ -3112,8 +3226,12 @@ function hasAbsolutePathTokenForOperation(
   filePath: string,
 ): boolean {
   for (const token of tokenize(command)) {
+    // `[12]?>&` and `<&` come before `1>`, `>` and `<`, or those would match
+    // first and leave `&/abs/path`. A quoted `&` (`>"&"/tmp/x` writes the
+    // relative `&/tmp/x`) can't match by mistake: the resolved path must
+    // equal the operation's path.
     const redirectTarget = token.match(
-      /^(?:1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/,
+      /^(?:1>>|[12]?>&|<&|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/,
     )?.[1];
     const candidate = redirectTarget ?? token;
     if (

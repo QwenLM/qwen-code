@@ -58,6 +58,7 @@ import {
   isEnabled,
   listMcpPrompts,
   listMcpResources,
+  MCP_MAX_TOOL_LIST_PAGES,
   MCPServerStatus,
   McpClient,
   mcpServerRequiresOAuth,
@@ -160,6 +161,55 @@ function mockToolDecls(...decls: Array<string | Obj>) {
         ),
       }),
   } as unknown as GenAiLib.CallableTool);
+}
+
+/**
+ * Makes `mcpToTool().tool()` convert the adapter the way @google/genai does:
+ * follow `nextCursor` until it is falsy, then reject a duplicated name. The
+ * page cap turns an adapter that never terminates into a failure instead of a
+ * hang, and makes the adapter's terminal page (`nextCursor: undefined`)
+ * load-bearing — a live cursor here re-enters the adapter and duplicates every
+ * declaration.
+ */
+function mockGenAiDiscovery() {
+  const maxPages = 20;
+  const convert = (tools: Array<{ name: string; description?: string }>) => {
+    const names = new Set<string>();
+    for (const mcpTool of tools) {
+      if (names.has(mcpTool.name)) {
+        throw new Error(
+          `Duplicate function name ${mcpTool.name} found in MCP tools. Please ensure function names are unique.`,
+        );
+      }
+      names.add(mcpTool.name);
+    }
+    return {
+      functionDeclarations: tools.map((mcpTool) => ({
+        name: mcpTool.name,
+        description: mcpTool.description,
+      })),
+    };
+  };
+  return vi.mocked(GenAiLib.mcpToTool).mockImplementation(
+    ((client: { listTools: ClientLib.Client['listTools'] }) =>
+      ({
+        tool: async () => {
+          const tools: Array<{ name: string; description?: string }> = [];
+          let cursor: string | undefined;
+          for (let page = 0; page < maxPages; page++) {
+            const { tools: pageTools, nextCursor } = await client.listTools(
+              cursor === undefined ? undefined : { cursor },
+            );
+            tools.push(...pageTools);
+            if (!nextCursor) return convert(tools);
+            cursor = nextCursor;
+          }
+          throw new Error(
+            `listTools did not terminate after ${maxPages} pages`,
+          );
+        },
+      }) as unknown) as typeof GenAiLib.mcpToTool,
+  );
 }
 
 /** An McpClient (stdio `test-command` by default), not in debug mode. */
@@ -1427,6 +1477,219 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(tools[0].alwaysLoad).toBe(true);
     });
 
+    it('drops every declaration of a duplicated name instead of discarding the server', async () => {
+      const listed = (name: string, description: string) => ({
+        name,
+        description,
+        inputSchema: { type: 'object', properties: {} },
+      });
+      const mockedClient = {
+        listTools: vi.fn().mockResolvedValue({
+          tools: [
+            listed('create', 'create group A'),
+            listed('create', 'create group B'),
+            listed('other', 'other tool'),
+          ],
+        }),
+      } as unknown as ClientLib.Client;
+      // Mirror @google/genai: one duplicated declaration fails the whole
+      // conversion, so the discovery adapter must never hand it a duplicate.
+      mockGenAiDiscovery();
+
+      const tools = await discoverTools(
+        'unity',
+        { command: 'test-command' },
+        mockedClient,
+        cfgWithResources(),
+      );
+
+      // No single command sits behind `tools/call` for a duplicated name, so
+      // none of its declarations may be offered.
+      expect(tools.map((tool) => tool.serverToolName)).toEqual(['other']);
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining("'create' (2 conflicting declarations)"),
+      );
+    });
+
+    it('counts duplicates across pages and requests each cursor once', async () => {
+      const listed = (name: string, description: string) => ({
+        name,
+        description,
+        inputSchema: { type: 'object', properties: {} },
+      });
+      const listTools = vi.fn(async (params?: { cursor?: string }) =>
+        params?.cursor === 'c2'
+          ? {
+              tools: [
+                listed('create', 'create group B'),
+                listed('other', 'other tool'),
+              ],
+            }
+          : {
+              tools: [listed('create', 'create group A')],
+              nextCursor: 'c2',
+            },
+      );
+      mockGenAiDiscovery();
+
+      const tools = await discoverTools(
+        'unity',
+        { command: 'test-command' },
+        { listTools } as unknown as ClientLib.Client,
+        cfgWithResources(),
+      );
+
+      expect(tools.map((tool) => tool.serverToolName)).toEqual(['other']);
+      expect(listTools).toHaveBeenNthCalledWith(1, undefined);
+      expect(listTools).toHaveBeenNthCalledWith(2, { cursor: 'c2' });
+    });
+
+    it('restarts the duplicate bookkeeping when a transient failure retries listing', async () => {
+      const listed = (name: string, description: string) => ({
+        name,
+        description,
+        inputSchema: { type: 'object', properties: {} },
+      });
+      const listTools = vi
+        .fn()
+        .mockResolvedValueOnce({
+          tools: [listed('a', 'a tool')],
+          nextCursor: 'p2',
+        })
+        .mockRejectedValueOnce(
+          Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+        )
+        .mockResolvedValueOnce({
+          tools: [listed('a', 'a tool')],
+          nextCursor: 'p2',
+        })
+        .mockResolvedValueOnce({ tools: [listed('b', 'b tool')] });
+      mockGenAiDiscovery();
+
+      const tools = await discoverTools(
+        'unity',
+        { command: 'test-command' },
+        { listTools } as unknown as ClientLib.Client,
+        cfgWithResources(),
+      );
+
+      // The retry re-reads page 1; its names must not be treated as duplicates
+      // of the failed attempt's.
+      expect(tools.map((tool) => tool.serverToolName)).toEqual(['a', 'b']);
+      expect(listTools).toHaveBeenCalledTimes(4);
+    });
+
+    it('stops paging when a server repeats a cursor', async () => {
+      const listed = (name: string, description: string) => ({
+        name,
+        description,
+        inputSchema: { type: 'object', properties: {} },
+      });
+      const listTools = vi.fn().mockResolvedValue({
+        tools: [listed('a', 'a tool')],
+        nextCursor: 'same',
+      });
+      mockGenAiDiscovery();
+
+      const tools = await discoverTools(
+        'unity',
+        { command: 'test-command' },
+        { listTools } as unknown as ClientLib.Client,
+        cfgWithResources(),
+      );
+
+      // Two declarations of the same name, both dropped; the important part is
+      // that discovery returned at all.
+      expect(tools).toEqual([]);
+      expect(listTools).toHaveBeenCalledTimes(2);
+      // A truncated listing must not look like a complete one.
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining("repeated cursor 'same'"),
+      );
+    });
+
+    it('treats an empty nextCursor as the end of the chain', async () => {
+      const listed = (name: string, description: string) => ({
+        name,
+        description,
+        inputSchema: { type: 'object', properties: {} },
+      });
+      // ListToolsResultSchema accepts `nextCursor: ''`; the pager this walk
+      // replaced stopped on any falsy cursor.
+      const listTools = vi.fn().mockResolvedValue({
+        tools: [listed('a', 'a tool')],
+        nextCursor: '',
+      });
+      mockGenAiDiscovery();
+
+      const tools = await discoverTools(
+        'unity',
+        { command: 'test-command' },
+        { listTools } as unknown as ClientLib.Client,
+        cfgWithResources(),
+      );
+
+      expect(tools.map((tool) => tool.serverToolName)).toEqual(['a']);
+      expect(listTools).toHaveBeenCalledTimes(1);
+    });
+
+    it('bounds the page walk when a server keeps minting new cursors', async () => {
+      const listed = (name: string, description: string) => ({
+        name,
+        description,
+        inputSchema: { type: 'object', properties: {} },
+      });
+      let call = 0;
+      const listTools = vi.fn(async () => {
+        call++;
+        return {
+          tools: [listed(`tool-${call}`, 'a tool')],
+          nextCursor: `c${call}`,
+        };
+      });
+      mockGenAiDiscovery();
+
+      const tools = await discoverTools(
+        'unity',
+        { command: 'test-command' },
+        { listTools } as unknown as ClientLib.Client,
+        cfgWithResources(),
+      );
+
+      // Without the cap this walk never terminates.
+      expect(listTools).toHaveBeenCalledTimes(MCP_MAX_TOOL_LIST_PAGES);
+      expect(tools).toHaveLength(MCP_MAX_TOOL_LIST_PAGES);
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining(`after ${MCP_MAX_TOOL_LIST_PAGES} pages`),
+      );
+    });
+
+    it('reports an all-collision server as discovered instead of empty', async () => {
+      const listed = (name: string, description: string) => ({
+        name,
+        description,
+        inputSchema: { type: 'object', properties: {} },
+      });
+      // Every advertised name collides, so nothing survives the conversion.
+      promptServer([], {
+        listTools: vi.fn().mockResolvedValue({
+          tools: [listed('create', 'create A'), listed('create', 'create B')],
+        }),
+      });
+      mockGenAiDiscovery();
+
+      const client = await connectedClient('all-collision-server');
+      const snapshot = await client.discoverAndReturn(cfgWithResources());
+
+      expect(snapshot.tools).toEqual([]);
+      // Not "No prompts, tools, or resources found" — the server stays
+      // connected, and the collision warning is what tells the user why.
+      expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining("'create' (2 conflicting declarations)"),
+      );
+    });
+
     it('preserves App-only tools for the separate App registry', async () => {
       const appTool = (
         name: string,
@@ -2375,6 +2638,31 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         expect(fetchFn.mock.calls[3]?.[1]).toMatchObject({
           redirect: 'manual',
         });
+      });
+
+      // The assertion above only proves the inner fetch was told to stop.
+      // The SDK resolves redirects outside it, against `requestInit`, so the
+      // transport has to carry the same answer or a same-origin 30x is
+      // replayed with the credential attached.
+      it('carries the Agent Plugin redirect refusal into the transport', async () => {
+        const plugin = await transportFor(
+          {
+            httpUrl: 'https://example.com/mcp',
+            headers: { 'X-Api-Key': 'synthetic' },
+            agentPluginV1: true,
+          },
+          'plugin-redirect',
+        );
+        const plain = await transportFor(
+          {
+            httpUrl: 'https://example.com/mcp',
+            headers: { 'X-Api-Key': 'synthetic' },
+          },
+          'plain-redirect',
+        );
+
+        expect(plugin._requestInit?.redirect).toBe('manual');
+        expect(plain._requestInit?.redirect).toBeUndefined();
       });
 
       /**

@@ -114,3 +114,21 @@ v2 关闭被准入之后，store 会 fence 普通写者续租，而 Harness 要�
 使用全类统一租约后，在 JDK 21、MySQL 8.4.6、Linux aarch64 上复测：整类两次 9/9 通过（104.4 s 与 105.9 s）。R1-1 格耗时 10.8–11.4 s，此前记录为 11.4–11.9 s；其余用例都在原有区间内，因此上文的预算条目仍然成立。这两次运行早于按写者限定的置过期；改为按写者限定后，整类再次 9/9 通过（104.8 s；再加上租约已失效的检查后为 107.8 s），杀 Harness 的用例耗时 11.9–13.4 s。置过期由断言钉住，而不是靠耗时推断：没有它，每个杀 Harness 的用例仍会通过，但要先等满 30 s 租约（评审运行中每个用例约慢 27 s）。
 
 `HostedMcpStoreFaultGatesIT` 不在这次改动范围内，仍暴露在这个窗口下：它有三个格在 3 s 写者租约下跑同样的关闭前置（`prepareClose()`：先 `admitClose`，再在存活的 Harness 上执行 `effects`），且没有测量过。它的五处杀 Harness 都不做置过期，所以那里若改用更长的租约，必须同时带上同样的死写者置过期，否则每个杀 Harness 的用例都要等满租约。这一残留记录在 #15011。
+
+## 后续格：两个 server 时首次 release 被拒
+
+#15750 承接的 FG12d 格：Session 配置两个 server 时，第一次 `mcp-release` 在转发前被拒。现有 `firstReleaseRefusedBeforeForwardingResumesUnderTheSameId` 只覆盖一个 server；本后续格复用同一夹具，不新开类。
+
+| 用例                                | 注入                                                                                                                                                                                              | 期望                                                                                                                                                                                                                                                                                                                        |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `first-release-refused-two-servers` | Session pin `fixture` revision 1 与 `fixture2` revision 3；worker MCP 配置只为该用例加入 `fixture2` revision 3。`prepare_resources` 之后，proxy 在转发前拒绝下一次 `mcp-release`；settle 路由重试 | 第一个配置的 release 返回 503，并以同一个 `${configurationId}:release` id 重试；随后第二个配置以自己的 id 释放。恰好三个 release 控制（503、同 id 200、另一个 id 200），两个配置都 `released`，两个 fixture server 都退出（`mcp.start` revision 1 与 3，两次 `mcp.exit`），baseline 之后没有 `mcp-configure`/`mcp-invoke`。 |
+
+决策：
+
+1. **同一类，按用例配置。** `HostedMcpRestartFaultGatesIT` 只在该方法的 boot 中加入 `fixture2`；`baseline(session, 2)` 等待两个配置 settled。不新开类、不新增 profile，产物根仍是 `target/fg12-cases/fg12d/`。
+2. **两个 pin，两个配置。** Session 的 `mcpServers` 带 `mcpPin(1)` 与 `mcpPin("fixture2", 3)`；Harness 为每个 server 安装一个配置。revision 3 把第二个 server 的 fixture 事件与 `fixture` 的 revision 1 区分开。
+3. **同 id 重试是承重断言。** 第一个 503 与随后的 200 带同一个 `${configurationId}:release` id；第三个 200 带另一个配置的 id。只有第一个配置 settled 之后才会到达第二个配置。
+
+变异见证：在打包 CLI 的副本中让 `drainConfigurations` 只遍历 `configurations.slice(0, 1)`。两个 server 的用例在 `settle must complete` 处变红，因为第二个配置保持 active；一个 server 的用例仍绿，因此是这个用例钉住了第二个配置。还原后的 bundle 复绿。
+
+预算：两个 server 的用例在 JDK 21、MySQL 8.4.6、Linux x86_64 上单独实测 16.16–16.24 秒（两次），十用例整类 81.6 秒。按 2× 记 32 秒加入共享健康总和（11504 → 11536 秒），`hosted-harness-mysql` fork 移到 11536 秒，Verify 步骤移到 203 分钟（含 wrap 共 12136 秒），job 上限移到 326（293 + 33）。`hosted-mcp-gates` profile 与产物根不变。
