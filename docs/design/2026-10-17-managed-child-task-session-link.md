@@ -2,7 +2,7 @@
 
 [English](2026-10-17-managed-child-task-session-link.md) | [简体中文](2026-10-17-managed-child-task-session-link.zh-CN.md)
 
-Status: implemented in this change. A `child_agent` or `workflow` task names the child Session that runs it: `PublicTask.child_session_id` and `WebShellTask.childSessionId`, served in contract `1.55.0` (main is at `1.54.0`; renumber at merge if another pull request takes `1.55.0` first). No new route, authorization rule, migration or event type.
+Status: implemented in this change. A `child_agent` or `workflow` task names the child Session that runs it: `PublicTask.child_session_id` and `WebShellTask.childSessionId`, served in contract `1.55.0`. No new route, authorization rule, migration or event type.
 
 This is F2 of [#13746](https://github.com/QwenLM/qwen-code/issues/13746), slice H4f of [#12827](https://github.com/QwenLM/qwen-code/issues/12827), stage H of the Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380). [The H4f note](2026-10-10-managed-task-cancel.md) (decision 9) left two ways to expose a child task's output: link the task to its child Session, or relay the child's output as task events behind `read_output`. This change takes the link.
 

@@ -52,7 +52,9 @@ function taskErrorKey(code?: string): string {
   }
 }
 
-const TASK_KINDS = new Set([
+// Typed by the generated union, so a label for a kind the contract does
+// not name fails the type check; a newer server's kind still reads as other.
+const TASK_KINDS = new Set<ManagedTask['kind']>([
   'child_agent',
   'workflow',
   'background_shell',
@@ -61,7 +63,7 @@ const TASK_KINDS = new Set([
   'channel_delivery',
 ]);
 
-function taskKindKey(kind: string): string {
+function taskKindKey(kind: ManagedTask['kind']): string {
   return `managed.tasks.kind.${TASK_KINDS.has(kind) ? kind : 'other'}`;
 }
 
@@ -75,6 +77,8 @@ export function ManagedTaskPanel({
   sessionId,
   onClose,
   restoreFocus,
+  waitingSessions,
+  onOpenChild,
 }: {
   wide: boolean;
   tasks: ReturnType<typeof useManagedTasks>;
@@ -85,6 +89,8 @@ export function ManagedTaskPanel({
   sessionId: string;
   onClose: () => void;
   restoreFocus: () => void;
+  waitingSessions?: ReadonlySet<string>;
+  onOpenChild?: (sessionId: string) => void;
 }) {
   const { t, language } = useI18n();
   const heading = useId();
@@ -145,6 +151,7 @@ export function ManagedTaskPanel({
         {status(task.taskId)}
         {canCancel &&
           task.actionCapabilities.includes('cancel') &&
+          !task.stopRequested &&
           (confirm === task.taskId ? (
             <div className="space-y-2">
               <p>{t('managed.tasks.confirmDescription')}</p>
@@ -183,6 +190,23 @@ export function ManagedTaskPanel({
     );
   };
 
+  const childStatus = (task: ManagedTask) => (
+    <>
+      {task.childSessionId && waitingSessions?.has(task.childSessionId) && (
+        <Badge variant="outline">{t('managed.tasks.awaitingApproval')}</Badge>
+      )}
+      {task.stopRequested &&
+        !['completed', 'failed', 'cancelled'].includes(task.state) && (
+          <p role="status">{t('managed.tasks.cancel.stopping')}</p>
+        )}
+      {task.approvalMode && (
+        <p>
+          {t('managed.tasks.approvalMode')}: {task.approvalMode}
+        </p>
+      )}
+    </>
+  );
+
   const body = (
     <div
       ref={bodyRef}
@@ -218,6 +242,13 @@ export function ManagedTaskPanel({
           )}
         </p>
       )}
+      {tasks.page.activeChildCount !== undefined && (
+        <p role="status">
+          {t('managed.tasks.activeChildren', {
+            count: tasks.page.activeChildCount,
+          })}
+        </p>
+      )}
       {tasks.loading && <p role="status">{t('managed.loading')}</p>}
       {!tasks.selectedId ? (
         <div
@@ -240,6 +271,7 @@ export function ManagedTaskPanel({
               <Badge variant="secondary">
                 {t(`managed.tasks.state.${task.state}`)}
               </Badge>
+              {childStatus(task)}
               <p className="text-muted-foreground">{time(task.createdAt)}</p>
               {cancelControl(task)}
             </div>
@@ -294,6 +326,16 @@ export function ManagedTaskPanel({
               <Badge variant="secondary">
                 {t(`managed.tasks.state.${task.state}`)}
               </Badge>
+              {childStatus(task)}
+              {task.childSessionId && onOpenChild && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => onOpenChild(task.childSessionId!)}
+                >
+                  {t('managed.tasks.viewChild')}
+                </Button>
+              )}
               <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 [&>dt]:text-muted-foreground [&>dd]:break-all">
                 <dt>{t('managed.tasks.created')}</dt>
                 <dd>{time(task.createdAt)}</dd>

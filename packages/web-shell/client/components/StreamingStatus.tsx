@@ -160,10 +160,10 @@ export function StreamingStatus({
             : loadingPhrase}
         </span>
       )}
-      <span className={styles.meta}>
-        ({timeStr}
+      <span className={`${styles.meta} ${styles.streamingMeta}`}>
+        {timeStr}
         {tokenStr}
-        {tokenRateStr} · {t('stream.cancel')})
+        {tokenRateStr} · {t('stream.cancel')}
       </span>
     </div>
   );

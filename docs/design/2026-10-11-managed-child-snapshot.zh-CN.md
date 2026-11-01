@@ -75,7 +75,14 @@ Issue #13753 对 I3 提出两点：
 4. **“不能写”就是 profile，并由存储层设置。**
    - **Profile。** 新的 hosted profile `hosted-workspace-read/1` 只声明 `read_file` 与 `glob`，无论 Session 有什么 lane、child 编排或 MCP：不声明 `write_file`、`edit`、`run_shell_command` 或 `monitor`，不声明 Agent 或团队工具，不声明 `send_message`、MCP 工具或 `skill` 工具。只读 profile 的 Session 也不从 agent definition 获取 skill 目录：目录的说明会提到一个该 profile 拒绝的工具，而未声明的调用会让 Turn 失败。
    - **由谁设置。** 只要 child 绑定的 child Workspace 行记录的是 `snapshot`，`insertChildSession` 就给 child 只读 profile。它在检查该行就绪的同一个事务中读取该行，所以任何调用方都无法把快照副本绑定到可写的 profile 上。只有 profile 不同；审批模式仍是父的。
-   - **审批。** `read_file` 与 `glob` 在 `default` 与 `auto-edit` 下都预先批准，所以 snapshot child 自身不发起审批询问。自 #14319 起，它像任何 child 一样继承 agent definition 的 hook 目录：`PreToolUse` hook 仍可能发起询问，hook 命令作用于副本，而副本最终会被丢弃。
+   - **审批。** `read_file` 与 `glob` 在 `default` 与 `auto-edit` 下都预先批准，所以 snapshot child 自身不发起审批询问。
+   - **保留 hooks（#13905 第 37 项）。** child Session 沿用父的 agent definition，所以自 #14319 起，snapshot child 像任何 child 一样运行父的 hook 目录。
+     - **为什么。** hook 目录是运维的策略，不由模型选择。`PreToolUse` hook 可以拒绝 `read_file` 或 `glob` 调用，或改写其输入，例如阻止读取密钥。如果去掉 hooks，只要模型选择 `isolation: "snapshot"`，snapshot child 就能读到同一个 agent 在其他任何地方都被拒绝读取的内容。skill 目录被去掉另有原因：它的说明会提到该 profile 拒绝的工具，而 hook 不向模型提供任何工具。
+     - **代价。** 下面这些都不是 snapshot 特有的：
+       - `PreToolUse` hook 可能发起询问，所以 child 可能像任何 child 一样等待审批；
+       - hook 命令以副本为工作目录运行，所以它在副本内写入的内容随副本一起丢弃。但它没有隔离：写到副本之外的内容（例如写到绝对路径的日志）以及其他任何副作用，都不会随丢弃消失；
+       - Runtime 被替换后恢复的 turn 通过 Session 的 Hook owner 重新 acquire，而不走决策 8 的第 3 步路径；该路径只服务既没有 hooks 也没有 MCP 的 Session，`hosted-workspace-files/1` 也是如此；
+       - command、http 或 function 类 hook 一旦运行，child 的 Hook owner 就会一直占用 storage，直到 child Session 关闭，任何 Session 的 Hook owner 都是如此，所以父的工具回合以及其他 child 的工具回合都要等到那时。因恢复而阻塞的 turn 可以更早释放：一旦确认其 hook 工作已结束或从未派发，owner 就会归还 mount，而 Session 仍保持打开。
    - **凭什么成立。** 每一环本来就对所有 hosted Session 成立：
      - 声明集合中没有任何会写入的工具；
      - tool turn 在获取 Broker 之前拒绝任何其他名称，并结束该 Turn；
@@ -100,7 +107,7 @@ Issue #13753 对 I3 提出两点：
 8. **恢复能读取新的 profile。** `hosted-workspace-read/1` 加入已保存 profile 的词汇，所以创建、加载与 Workspace 恢复都接受它。
    - 恢复不认识的 profile 会中止整个共享 storage 的恢复。W1b 把 hosted 文件与 Shell profile 放在那个捕获闭包之内。
    - 存储迁移仍只接受 `files/1` Session，所以带有存活 snapshot child 的父会被拒绝，与带有任何 Shell child 的父一样。
-   - 已提交的读取结果在 Runtime 被替换后仍可恢复。G3 第 3 步的路径（#14059）不重新 acquire 已退役的 owner，直接恢复 `results_ready` checkpoint；它在 `hosted-workspace-files/1` 之外也接受只读 profile。只读 profile 的批次永远只有 `read_file` 与 `glob`，正是该路径本就允许没有文件历史而恢复的批次。
+   - 既没有 hooks 也没有 MCP 的 Session，其已提交的读取结果在 Runtime 被替换后仍可恢复（决策 4）。G3 第 3 步的路径（#14059）不重新 acquire 已退役的 owner，直接恢复 `results_ready` checkpoint；它在 `hosted-workspace-files/1` 之外也接受只读 profile。只读 profile 的批次永远只有 `read_file` 与 `glob`，正是该路径本就允许没有文件历史而恢复的批次。
 
 9. **串行共享不需要单独的取值（最终）。** 这确认了 I1 决策 15。
    - **保证。** storage lease 一次只接纳一个 holder，storage 的每个写入方在写入前都获取它：父、`shared` 与 `worktree` child，以及 child Workspace 维护。snapshot child 的读取也获取它。所以同一父的任何两个 child 都不能同时持有 storage。

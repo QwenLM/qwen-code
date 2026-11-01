@@ -11,6 +11,33 @@ class HostedAgentDefinitionRequestTest {
     private static final String SESSION = "22222222-2222-4222-8222-222222222222";
 
     @Test
+    void initialExtensionSelectionSurvivesCreateAndEveryLoadCopy() {
+        var selection = Map.<String, Object>of("operationId", SESSION, "actorKey", "a".repeat(64),
+                "expectedRevision", 0, "extensions", java.util.List.of());
+        assertFalse(CreateHarnessSession.builder().harnessSessionId(SESSION).build().toJson().containsKey("initialSelection"));
+        assertEquals(selection, CreateHarnessSession.builder().harnessSessionId(SESSION)
+                .initialSelection(selection).build().toJson().get("initialSelection"));
+        var original = new LoadHarnessSession(SESSION).withInitialSelection(selection);
+        for (var load : java.util.List.of(original, original.withChildWorkspaces(true), original.withForegroundOnly(true),
+                original.forLifecycle("close", 1), original.withStoppedMessages())) {
+            assertEquals(selection, load.toJson().get("initialSelection"));
+        }
+    }
+
+    @Test
+    void sessionSkillReferencesSurviveEveryLoadCopy() {
+        var ref = Map.<String, Object>of("resourceId", "skills", "kind", "managed-agent-skills",
+                "schemaVersion", 1, "byteLength", 128, "digest", "d".repeat(64));
+        assertEquals(ref, CreateHarnessSession.builder().harnessSessionId(SESSION)
+                .sessionSkillsRef(ref).build().toJson().get("sessionSkillsRef"));
+        var original = new LoadHarnessSession(SESSION).withSessionSkillsRef(ref);
+        for (var load : java.util.List.of(original, original.withChildWorkspaces(true),
+                original.withForegroundOnly(true), original.forLifecycle("close", 1), original.withStoppedMessages())) {
+            assertEquals(ref, load.toJson().get("sessionSkillsRef"));
+        }
+    }
+
+    @Test
     void shellLoadsRetainTheDefinitionAndSuppressionThroughEveryCopy() {
         Map<String, Object> identity = Map.of("agentId", "agent_" + "a".repeat(32),
                 "revision", "1", "digest", "b".repeat(64));

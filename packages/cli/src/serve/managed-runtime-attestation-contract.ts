@@ -363,7 +363,15 @@ export function isOwnedManagedRuntimeRoute(
   url: string | undefined,
   routes: readonly DeclaredManagedRuntimeRoute[],
 ): boolean {
-  return routes.some((route) => method === route.method && url === route.path);
+  return routes.some((route) => {
+    if (method !== route.method || !url) return false;
+    if (url === route.path) return true;
+    if (!route.path.endsWith('/:digest')) return false;
+    const prefix = route.path.slice(0, -':digest'.length);
+    return (
+      url.startsWith(prefix) && /^[0-9a-f]{64}$/u.test(url.slice(prefix.length))
+    );
+  });
 }
 
 /** Admits exactly the declared routes, by default those of boot v1. */

@@ -18,10 +18,22 @@ import {
   TrajectoryLiveContext,
   useTrajectoryLiveSnapshot,
 } from '../../trajectory/trajectory-live-context.js';
-import { McpAppToolsContext } from '../../mcpAppHostContext.js';
+import {
+  McpAppToolsContext,
+  McpAppGeneratedUiContext,
+  McpAppGeneratedUiOwnerContext,
+  type McpAppGeneratedUiInvalidation,
+} from '../../mcpAppHostContext.js';
 import { BrowserTurnNotifications } from '../../browser-turn-notifications';
 import { I18nProvider } from '../../i18n.js';
 import { SessionRecoveryBanner } from '../../components/SessionRecoveryBanner.js';
+import type { McpAppDisplay } from '../../components/messages/McpApp.js';
+import {
+  GeneratedUiInstanceStore,
+  instanceKey,
+  resourceKey,
+  type InstanceSlot,
+} from '../../generated-ui/instance-store.js';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
@@ -83,6 +95,8 @@ import {
   type TurnNotificationObserver,
 } from './turn-notification-context.js';
 import { persistStableClientId } from './clientLifecycle.js';
+import { DaemonAvailability } from '../availability.js';
+import { DaemonAvailabilityContext } from '../availability-context.js';
 
 interface MockSession {
   backgroundTurn?: import('@qwen-code/sdk/daemon').DaemonBackgroundTurn;
@@ -125,6 +139,9 @@ interface MockSession {
     state: Record<string, unknown>;
     recovery?: NonNullable<DaemonConnectionState['context']>['recovery'];
   }>;
+  subscribeGeneratedUiRevocation?: (
+    listener: (revision: number) => void,
+  ) => () => void;
   supportedCommands: () => Promise<{
     v: 1;
     sessionId: string;
@@ -171,6 +188,7 @@ interface MockSession {
     signal?: AbortSignal;
     maxQueued?: number;
     sseConnectReason?: DaemonSseConnectReason;
+    onEpoch?: (epoch: string) => void;
   }) => AsyncGenerator<DaemonEvent, void, unknown>;
 }
 
@@ -1369,6 +1387,7 @@ describe('DaemonSessionProvider', () => {
         block.kind === 'user' && block.text === 'Exact optimistic prompt',
     );
     expect(optimistic).toBeDefined();
+    expect(optimistic?.promptId).toBe('prompt-1');
     expect(navigation?.provisionalTurns).toMatchObject([
       { promptId: 'prompt-1', blockId: optimistic!.id },
     ]);
@@ -14826,6 +14845,96 @@ describe('DaemonSessionProvider', () => {
     expect(firstSession.detach).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['load', 'replay', 'iterator'] as const)(
+    'does not close a healthy daemon gate for a local %s TypeError',
+    async (mode) => {
+      let releaseHealth!: (response: Response) => void;
+      const native = vi
+        .fn()
+        .mockImplementationOnce(
+          () =>
+            new Promise<Response>((resolve) => {
+              releaseHealth = resolve;
+            }),
+        )
+        .mockResolvedValueOnce(Response.json({ features: [] }));
+      const availability = new DaemonAvailability(
+        'https://healthy.example',
+        undefined,
+        native,
+      );
+      const session = createMockSession();
+      if (mode === 'load') {
+        sdkMocks.MockDaemonSessionClient.load.mockRejectedValueOnce(
+          new TypeError('Local metadata decode failed'),
+        );
+      } else {
+        if (mode === 'replay')
+          session.replaySnapshot.compactedReplay =
+            null as unknown as DaemonEvent[];
+        if (mode === 'iterator')
+          session.events = async function* () {
+            throw new TypeError('Local event decode failed');
+            yield* [];
+          };
+        sdkMocks.sessions.push(session);
+      }
+      let connection: DaemonConnectionState | undefined;
+      function Harness() {
+        connection = useDaemonConnection();
+        return null;
+      }
+      try {
+        await renderWithProvider(
+          <Harness />,
+          { autoConnect: true, autoReconnect: false, sessionId: 'session-1' },
+          undefined,
+          availability,
+        );
+        await act(async () => {
+          for (let i = 0; i < 10; i++) await flushPromises();
+        });
+        expect(connection?.error).toBeDefined();
+        expect(native).toHaveBeenCalledOnce();
+        expect(availability.getSnapshot()).toBe('available');
+        expect(availability.getGeneration()).toBe(0);
+        releaseHealth(Response.json({ status: 'ok' }));
+        await act(async () => availability.check());
+        expect(availability.getSnapshot()).toBe('available');
+        expect(availability.getGeneration()).toBe(0);
+        expect(native).toHaveBeenCalledTimes(2);
+      } finally {
+        act(() => availability.dispose());
+      }
+    },
+  );
+
+  it('warns about cleanup detach failure without a workspace availability controller', async () => {
+    const detachFetch = vi.fn(async () => new Response(null, { status: 500 }));
+    vi.stubGlobal('fetch', detachFetch);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sdkMocks.sessions.push(
+      createMockSession({
+        clientId: 'cleanup-client',
+        events: createIdleEvents(),
+      }),
+    );
+    await renderWithProvider(null, {
+      autoConnect: true,
+      sessionId: 'session-1',
+    });
+    await act(async () => {
+      root?.unmount();
+      root = undefined;
+      await flushPromises();
+    });
+    expect(detachFetch).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      '[DaemonSessionProvider] detach failed:',
+      expect.any(Error),
+    );
+  });
+
   it('clears connection state when detaching the current session fails', async () => {
     const detachError = new Error('detach failed');
     const firstSession = createMockSession({
@@ -16432,6 +16541,83 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
+  it('keeps a refreshed model catalog when an older same-session load settles', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+    const catalog = (modelId: string): DaemonSessionContextStatus => ({
+      v: 1,
+      sessionId: 'session-a',
+      workspaceCwd: '/mock-workspace',
+      state: {
+        models: {
+          currentModelId: 'catalog-a0',
+          availableModels: [{ modelId }],
+        },
+      },
+    });
+    const initial = createMockSession({
+      sessionId: 'session-a',
+      context: vi.fn(async () => catalog('catalog-a0')),
+    });
+    sdkMocks.sessions.push(initial);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    expect(connection?.models?.map((m) => m.id)).toEqual(['catalog-a0']);
+    const goal = createDeferred<GoalStateResponse>();
+    const subscribed = createDeferred<void>();
+    const context = vi
+      .fn()
+      .mockResolvedValueOnce(catalog('catalog-a'))
+      .mockResolvedValue(catalog('catalog-b'));
+    const replacement = createMockSession({
+      sessionId: 'session-a',
+      context,
+      goal: vi.fn(() => goal.promise),
+      events: createPendingEvents(subscribed),
+    });
+    replacement.client = initial.client;
+    sdkMocks.MockDaemonSessionClient.load.mockResolvedValueOnce(replacement);
+    const originalWorkspace = sdkMocks.workspaceByCwd.getMockImplementation()!;
+    const reloadModelProviders = vi.fn(async () => ({
+      status: 'applied' as const,
+    }));
+    sdkMocks.workspaceByCwd.mockImplementation((cwd) => ({
+      ...originalWorkspace(cwd),
+      reloadModelProviders,
+      workspaceProviders: sdkMocks.workspaceProviders,
+    }));
+    let reload: Promise<void> | undefined;
+    act(() => {
+      reload = requireActions(actions).reloadSession(
+        new AbortController().signal,
+      );
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(context).toHaveBeenCalledOnce();
+    await act(async () => {
+      await requireActions(actions).refreshModels();
+    });
+    expect(connection?.models?.map((m) => m.id)).toEqual(['catalog-b']);
+    await act(async () => {
+      goal.resolve({ snapshot: { v: 2, goal: null, activity: 'idle' } });
+      await reload;
+      await subscribed.promise;
+      await flushPromises();
+    });
+    expect(connection?.models?.map((m) => m.id)).toEqual(['catalog-b']);
+    expect(connection?.currentModel).toBe('catalog-a0');
+  });
+
   it('keeps the current transcript when a same-session reload is aborted', async () => {
     vi.stubGlobal(
       'fetch',
@@ -17313,14 +17499,14 @@ describe('DaemonSessionProvider', () => {
         finish.resolve();
         await flushPromises();
       });
-      expect(context).toHaveBeenCalledTimes(2);
+      expect(context).toHaveBeenCalledTimes(3);
       await act(async () => {
         close.resolve();
         await resubscribed.promise;
         await flushPromises();
       });
       expect(events).toHaveBeenCalledTimes(2);
-      expect(context).toHaveBeenCalledTimes(3);
+      expect(context).toHaveBeenCalledTimes(4);
       expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledOnce();
       expect(connection?.context?.recovery).toEqual(current.recovery);
       await act(async () => {
@@ -17346,7 +17532,8 @@ describe('DaemonSessionProvider', () => {
     const context = vi
       .fn()
       .mockResolvedValueOnce(initial)
-      .mockReturnValueOnce(delayed.promise);
+      .mockReturnValueOnce(delayed.promise)
+      .mockResolvedValue(initial);
     sdkMocks.sessions.push(
       createMockSession({
         context,
@@ -17381,7 +17568,7 @@ describe('DaemonSessionProvider', () => {
       startAgain.resolve();
       await flushPromises();
     });
-    expect(context).toHaveBeenCalledTimes(2);
+    expect(context).toHaveBeenCalledTimes(3);
     await act(async () => {
       delayed.resolve(initial);
       await flushPromises();
@@ -17849,6 +18036,119 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('parks an archived session on its 409 session_archived error instead of retrying', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    let eventsCalls = 0;
+    const archived = new DaemonHttpError(
+      409,
+      {
+        error: 'Session "archived-1" is archived. Unarchive it before loading.',
+        code: 'session_archived',
+        sessionId: 'archived-1',
+      },
+      'Session "archived-1" is archived. Unarchive it before loading.',
+    );
+    sdkMocks.sessions.push(
+      createMockSession({
+        events: async function* archivedEvents() {
+          eventsCalls += 1;
+          await Promise.resolve();
+          yield* [];
+          throw archived;
+        },
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await wait(50);
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      status: 'disconnected',
+      error: 'Session "archived-1" is archived. Unarchive it before loading.',
+      errorStatus: 409,
+    });
+    // 409 is not a missing-session status: the pane must not render the
+    // session-deleted empty state, it shows the archived error.
+    expect(connection?.missingSession).not.toBe(true);
+    expect(connection?.sessionId).toBeUndefined();
+    // The structured signal a Split View pane reports from: `error` is a
+    // display string, so the archived park must be readable without it.
+    expect(connection?.sessionArchived).toBe(true);
+    // Terminal: the reconnect loop stops instead of hammering the daemon
+    // with 409s forever.
+    expect(eventsCalls).toBe(1);
+  });
+
+  it('keeps a plain 409 conflict error retriable (not terminal)', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    let eventsCalls = 0;
+    const conflict = new DaemonHttpError(
+      409,
+      {
+        error: 'Session "conflict-1" is open in another Qwen process.',
+        code: 'session_conflict',
+        sessionId: 'conflict-1',
+      },
+      'Session "conflict-1" is open in another Qwen process.',
+    );
+    sdkMocks.sessions.push(
+      createMockSession({
+        events: async function* conflictEvents() {
+          eventsCalls += 1;
+          await Promise.resolve();
+          yield* [];
+          throw conflict;
+        },
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await wait(50);
+      await flushPromises();
+    });
+
+    // A generic 409 can clear on its own, so the provider keeps retrying.
+    expect(eventsCalls).toBeGreaterThanOrEqual(2);
+    expect(connection?.errorStatus).toBe(409);
+    expect(connection?.sessionArchived).not.toBe(true);
+  });
+
   it('restores the workspace reasoning preview after an auth failure clears the stream', async () => {
     sdkMocks.workspaceProviders.mockResolvedValue(
       workspaceProvidersWithReasoningPreview(),
@@ -18263,6 +18563,2092 @@ describe('DaemonSessionProvider', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe('Generated UI retained owner lifecycle', () => {
+    describe('restore failures', () => {
+      const providerProps = {
+        baseUrl: 'http://127.0.0.1:4170',
+        token: 'token-a',
+        workspaceCwd: '/mock-workspace',
+        sessionId: 'session-a',
+        autoConnect: true,
+        autoReconnect: false,
+      };
+      const display: McpAppDisplay = {
+        type: 'mcp_app',
+        requiredFeature: 'generated-ui',
+        serverName: 'qwen-code-generated-ui',
+        resourceUri: 'ui://qwen-code-generated-ui/view-v1.html',
+        html: '<main>Retained parameters</main>',
+        toolResult: { content: [{ type: 'text', text: 'Ready' }] },
+        fallbackText: 'Retained parameters',
+      };
+      let retained: GeneratedUiInstanceStore;
+      let parking: HTMLDivElement;
+      let slotElement: HTMLDivElement;
+      let probes: Record<
+        string,
+        {
+          owner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+          actions: DaemonSessionActions;
+          connection: DaemonConnectionState;
+          receipt: ContextType<typeof McpAppGeneratedUiContext>;
+        }
+      >;
+
+      beforeEach(() => {
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async () => new Response(null, { status: 204 })),
+        );
+        retained = new GeneratedUiInstanceStore();
+        parking = document.createElement('div');
+        parking.hidden = true;
+        slotElement = document.createElement('div');
+        document.body.append(parking, slotElement);
+        retained.parking = parking;
+        probes = {};
+        const load = async (
+          client: unknown,
+          sessionId: string,
+          request?: unknown,
+        ) => {
+          const session = createMockSession({
+            sessionId,
+            workspaceCwd: (request as { workspaceCwd?: string } | undefined)
+              ?.workspaceCwd,
+            session: { generatedUi: { version: 1, enabled: true } },
+          });
+          session.client = client as MockClient;
+          return session;
+        };
+        sdkMocks.MockDaemonSessionClient.load.mockImplementation(load);
+        sdkMocks.MockDaemonSessionClient.resume.mockImplementation(load);
+      });
+
+      afterEach(() => {
+        retained.clear();
+        parking.remove();
+        slotElement.remove();
+      });
+
+      function Probe({
+        name,
+        children,
+      }: {
+        name: string;
+        children?: ReactNode;
+      }) {
+        const owner = useContext(McpAppGeneratedUiOwnerContext);
+        probes[name] = {
+          owner,
+          actions: useDaemonActions(),
+          connection: useDaemonConnection(),
+          receipt: useContext(McpAppGeneratedUiContext),
+        };
+        const subscribe = owner?.subscribeInvalidation;
+        useLayoutEffect(
+          () =>
+            name === 'main' ? subscribe?.(retained.invalidate) : undefined,
+          [name, subscribe],
+        );
+        return children ?? null;
+      }
+
+      function retainedSlot(name: string): InstanceSlot {
+        const source = requireActions(probes[name]?.owner?.source);
+        return {
+          key: instanceKey(source, 'call-a', display),
+          resourceKey: resourceKey(display, source.eventEpoch),
+          display,
+          source,
+          receipt: requireActions(probes[name].receipt),
+          baseUrl: providerProps.baseUrl,
+          token: {},
+          element: slotElement,
+          visible: true,
+          reset: vi.fn(),
+        };
+      }
+
+      function park(name: string) {
+        const slot = retainedSlot(name);
+        const entry = requireActions(retained.attach(slot));
+        entry.container.dataset.dirtyInput = '9';
+        retained.release(slot.key, slot.token);
+        expect(entry.container.parentElement).toBe(parking);
+        return entry;
+      }
+
+      async function switchSession(
+        name: string,
+        sessionId: string,
+        mode: 'load' | 'resume' = 'load',
+        options?: Parameters<DaemonSessionActions['loadSession']>[1],
+      ) {
+        let pending!: Promise<unknown>;
+        act(() => {
+          const actions = requireActions(probes[name]).actions;
+          pending = (
+            mode === 'resume'
+              ? actions.resumeSession(sessionId, options)
+              : actions.loadSession(sessionId, options)
+          ).catch((error: unknown) => error);
+        });
+        let result: unknown;
+        await act(async () => {
+          result = await pending;
+          await flushPromises();
+        });
+        return result;
+      }
+
+      async function useSdkContextReader(
+        sessionContext: MockSession['context'],
+        enabled = true,
+      ) {
+        const sdk = await vi.importActual<
+          typeof import('@qwen-code/sdk/daemon')
+        >('@qwen-code/sdk/daemon');
+        sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+          async (client, sessionId) => {
+            Object.assign(client as MockClient, { sessionContext });
+            const reader = new sdk.DaemonSessionClient({
+              client: client as InstanceType<typeof sdk.DaemonClient>,
+              session: {
+                sessionId,
+                workspaceCwd: providerProps.workspaceCwd,
+                clientId: 'client-1',
+                generatedUi: { version: 1, enabled },
+              },
+            });
+            const session = createMockSession({
+              sessionId,
+              workspaceCwd: providerProps.workspaceCwd,
+              session: reader.session as unknown as Record<string, unknown>,
+              context: vi.fn(() => reader.context()),
+              subscribeGeneratedUiRevocation:
+                reader.subscribeGeneratedUiRevocation?.bind(reader),
+            });
+            session.client = client as MockClient;
+            return session;
+          },
+        );
+      }
+
+      it.each(['action', 'controlled'] as const)(
+        'retains a card across %s empty-session navigation',
+        async (mode) => {
+          await renderWithProvider(<Probe name="main" />, providerProps);
+          const slot = retainedSlot('main');
+          const entry = requireActions(retained.attach(slot));
+          entry.container.dataset.dirtyInput = '9';
+          const signal = entry.runtime.getSignal();
+          if (mode === 'action') {
+            const detached = createDeferred<void>();
+            const session =
+              await sdkMocks.MockDaemonSessionClient.load.mock.results[0].value;
+            session.detach = vi.fn(() => detached.promise);
+            let clearing!: Promise<void>;
+            act(() => {
+              clearing = probes.main.actions.clearSession();
+            });
+            expect(signal.aborted).toBe(true);
+            expect(entry.container.parentElement).toBe(parking);
+            detached.resolve();
+            await act(async () => {
+              await clearing;
+              await flushPromises();
+            });
+          } else {
+            await act(async () => {
+              root!.render(
+                <DaemonSessionProvider {...providerProps} sessionId={undefined}>
+                  <Probe name="main" />
+                </DaemonSessionProvider>,
+              );
+              await flushPromises();
+            });
+          }
+          expect(signal.aborted).toBe(true);
+          expect(probes.main.owner?.source).toBeUndefined();
+          expect(retained.getEntries()).toEqual([entry]);
+          expect(
+            await entry.messages.requestMessage({
+              serverName: display.serverName,
+              resourceUri: display.resourceUri,
+              text: 'Hidden request',
+              signal: new AbortController().signal,
+            }),
+          ).toEqual({ isError: true });
+          if (mode === 'controlled') {
+            await act(async () => {
+              root!.render(
+                <DaemonSessionProvider {...providerProps}>
+                  <Probe name="main" />
+                </DaemonSessionProvider>,
+              );
+              await flushPromises();
+            });
+          } else {
+            expect(await switchSession('main', 'session-a')).toBeUndefined();
+          }
+          expect(retained.attach(retainedSlot('main'))).toBe(entry);
+          expect(entry.container.dataset.dirtyInput).toBe('9');
+          expect(entry.runtime.getSignal().aborted).toBe(false);
+        },
+      );
+
+      it('releases a parked card on a disabled load receipt and requires reopening after re-enable', async () => {
+        await renderWithProvider(<Probe name="main" />, providerProps);
+        const entry = park('main');
+        await switchSession('main', 'session-b');
+        sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+          async (client) => {
+            const session = createMockSession({
+              sessionId: 'session-a',
+              session: { generatedUi: { version: 1, enabled: false } },
+            });
+            session.client = client as MockClient;
+            return session;
+          },
+        );
+        await switchSession('main', 'session-a');
+        expect(retained.getEntries()).toEqual([]);
+        expect(entry.container.isConnected).toBe(false);
+        expect(retained.getRecord(entry.key)?.reason).toBe('policy');
+        await switchSession('main', 'session-b');
+        await switchSession('main', 'session-a');
+        const returned = retainedSlot('main');
+        expect(retained.attach(returned)).toBeUndefined();
+        expect(retained.attach(returned, true)?.runtime.reopened).toBe(true);
+      });
+
+      it('cannot regrant authority while clearing waits for persisted reasoning', async () => {
+        await renderWithProvider(<Probe name="main" />, providerProps);
+        const session: MockSession =
+          await sdkMocks.MockDaemonSessionClient.load.mock.results[0].value;
+        const persisted = createDeferred<{
+          configOptions: ReturnType<typeof reasoningConfigOptions>;
+          persisted: boolean;
+        }>();
+        session.setConfigOption = vi.fn(() => persisted.promise);
+        const slot = retainedSlot('main');
+        const entry = requireActions(retained.attach(slot));
+        const signal = entry.runtime.getSignal();
+        const captured = slot.source.captureOwner();
+        let reasoning!: Promise<void>;
+        let clearing!: Promise<void>;
+        act(() => {
+          reasoning = probes.main.actions.setReasoningEffort('medium', {
+            persist: true,
+          });
+          clearing = probes.main.actions.clearSession();
+        });
+        expect(signal.aborted).toBe(true);
+        expect(entry.container.parentElement).toBe(parking);
+        expect(captured.isCurrent()).toBe(false);
+        expect(slot.source.captureOwner().isCurrent()).toBe(false);
+        await act(async () => {
+          persisted.resolve({
+            configOptions: reasoningConfigOptions('medium'),
+            persisted: true,
+          });
+          await reasoning;
+          await clearing;
+          await flushPromises();
+        });
+        expect(retained.getEntries()).toEqual([entry]);
+        await switchSession('main', 'session-a');
+        expect(retained.attach(retainedSlot('main'))).toBe(entry);
+      });
+
+      it.each(['separate commits', 'one commit'])(
+        'observes disabled SDK receipts followed by enabled receipts in %s',
+        async (commits) => {
+          let enabled: boolean | undefined = true;
+          const sessionContext = vi.fn(async () => ({
+            v: 1 as const,
+            sessionId: 'session-a',
+            workspaceCwd: providerProps.workspaceCwd,
+            state: {
+              _meta:
+                enabled === undefined
+                  ? {}
+                  : { generatedUi: { version: 1, enabled } },
+            },
+          }));
+          await useSdkContextReader(sessionContext);
+          await renderWithProvider(<Probe name="main" />, providerProps);
+          const entry = park('main');
+          const scopeId = probes.main.owner!.scopeId;
+          const session: MockSession =
+            await sdkMocks.MockDaemonSessionClient.load.mock.results[0].value;
+          enabled = undefined;
+          await act(async () => {
+            await probes.main.actions.getContext();
+          });
+          expect(retained.getEntries()).toEqual([entry]);
+          sessionContext.mockRejectedValueOnce(
+            new DaemonHttpError(503, undefined, 'Context unavailable'),
+          );
+          await act(async () => {
+            await expect(probes.main.actions.getContext()).rejects.toThrow(
+              'Context unavailable',
+            );
+          });
+          expect(retained.getEntries()).toEqual([entry]);
+          enabled = false;
+          await act(async () => {
+            await probes.main.actions.getContext();
+            expect(session.session!['generatedUi']).toMatchObject({
+              enabled: false,
+            });
+            if (commits === 'one commit') {
+              expect(retained.getEntries()).toEqual([]);
+              enabled = true;
+              await probes.main.actions.getContext();
+            }
+          });
+          expect(sessionContext).toHaveBeenCalled();
+          expect(session.session!['generatedUi']).toMatchObject({
+            enabled: commits === 'one commit',
+          });
+          expect(retained.getEntries()).toEqual([]);
+          expect(entry.container.isConnected).toBe(false);
+          expect(retained.getRecord(entry.key)?.reason).toBe('policy');
+          if (commits === 'separate commits') {
+            enabled = true;
+            await act(async () => {
+              await probes.main.actions.getContext();
+            });
+          }
+          expect(probes.main.owner!.scopeId).toBe(scopeId);
+          const returned = retainedSlot('main');
+          expect(retained.attach(returned)).toBeUndefined();
+          const reopened = retained.attach(returned, true);
+          expect(reopened?.runtime.reopened).toBe(true);
+          expect(reopened).not.toBe(entry);
+        },
+      );
+
+      it('observes a disabled SDK load receipt before an enabled metadata read', async () => {
+        await renderWithProvider(<Probe name="main" />, providerProps);
+        const entry = park('main');
+        const scopeId = probes.main.owner!.scopeId;
+        await switchSession('main', 'session-b');
+        await useSdkContextReader(
+          async () => ({
+            v: 1,
+            sessionId: 'session-a',
+            workspaceCwd: providerProps.workspaceCwd,
+            state: { _meta: { generatedUi: { version: 1, enabled: true } } },
+          }),
+          false,
+        );
+        await switchSession('main', 'session-a');
+        expect(probes.main.receipt?.status.enabled).toBe(true);
+        expect(probes.main.owner!.scopeId).toBe(scopeId);
+        expect(retained.getEntries()).toEqual([]);
+        expect(entry.container.isConnected).toBe(false);
+        expect(retained.getRecord(entry.key)?.reason).toBe('policy');
+        const returned = retainedSlot('main');
+        expect(retained.attach(returned)).toBeUndefined();
+        expect(retained.attach(returned, true)?.runtime.reopened).toBe(true);
+      });
+
+      it.each(['/tmp', '/private/tmp'])(
+        'keeps a canonical owner after action creation commits before attachment from %s',
+        async (requested) => {
+          const session = createMockSession({
+            sessionId: 'created-session',
+            workspaceCwd: '/private/tmp',
+            session: { generatedUi: { version: 1, enabled: true } },
+          });
+          sdkMocks.MockDaemonSessionClient.createOrAttach.mockImplementationOnce(
+            async (client) => {
+              session.client = client as MockClient;
+              return session;
+            },
+          );
+          await renderWithProvider(<Probe name="main" />, {
+            ...providerProps,
+            sessionId: undefined,
+            workspaceCwd: requested,
+          });
+          await act(async () => {
+            await probes.main.actions.createSession({
+              workspaceCwd: requested,
+            });
+            await flushPromises();
+          });
+          expect(probes.main.connection).toMatchObject({
+            status: 'connected',
+            sessionId: session.sessionId,
+            workspaceCwd: '/private/tmp',
+          });
+
+          let attaching!: Promise<void>;
+          act(() => {
+            attaching = probes.main.actions.attachSession();
+          });
+          await act(async () => {
+            await attaching;
+            await flushPromises();
+          });
+          expect(probes.main.owner?.source).toBeDefined();
+          expect(probes.main.owner?.workspaceCwd).toBe('/private/tmp');
+          const entry = park('main');
+          const scopeId = probes.main.owner!.scopeId;
+          await act(async () => {
+            await probes.main.actions.submitPrompt('first prompt');
+            await flushPromises();
+          });
+          expect(session.submitPrompt).toHaveBeenCalledTimes(1);
+          expect(probes.main.owner?.scopeId).toBe(scopeId);
+          expect(probes.main.owner?.source?.captureOwner().isCurrent()).toBe(
+            true,
+          );
+          expect(retained.attach(retainedSlot('main'))).toBe(entry);
+          expect(entry.container.dataset.dirtyInput).toBe('9');
+          expect(entry.runtime.reopened).toBe(false);
+          expect(
+            sdkMocks.MockDaemonSessionClient.createOrAttach,
+          ).toHaveBeenCalledTimes(1);
+          expect(sdkMocks.MockDaemonSessionClient.load).not.toHaveBeenCalled();
+        },
+      );
+
+      it.each(['/tmp', '/private/tmp'])(
+        'keeps canonical scope through reconnect and detachment when requesting %s',
+        async (requested) => {
+          const disconnected = createDeferred<void>();
+          let subscriptions = 0;
+          sdkMocks.MockDaemonSessionClient.load.mockImplementation(
+            async (client) => {
+              const session = createMockSession({
+                sessionId: 'session-a',
+                workspaceCwd: '/private/tmp',
+                session: { generatedUi: { version: 1, enabled: true } },
+                async *events(opts) {
+                  subscriptions++;
+                  if (subscriptions === 1) {
+                    await disconnected.promise;
+                    throw new Error('Transient SSE disconnect');
+                  }
+                  yield* createIdleEvents()(opts);
+                },
+              });
+              session.client = client as MockClient;
+              return session;
+            },
+          );
+          await renderWithProvider(<Probe name="main" />, {
+            ...providerProps,
+            workspaceCwd: requested,
+            autoReconnect: true,
+            reconnectDelayMs: 10,
+            maxReconnectDelayMs: 10,
+          });
+          const entry = park('main');
+          const scope = probes.main.owner!.scopeId;
+          await act(async () => {
+            disconnected.resolve();
+            await flushPromises();
+          });
+          expect(probes.main.owner!.scopeId).toBe(scope);
+          await act(async () => {
+            await wait(30);
+            await flushPromises();
+          });
+          expect(subscriptions).toBe(2);
+          expect(probes.main.connection.status).toBe('connected');
+          expect(probes.main.owner!.scopeId).toBe(scope);
+          expect(retained.attach(retainedSlot('main'))).toBe(entry);
+          await act(async () => {
+            await probes.main.actions.clearSession();
+            await flushPromises();
+          });
+          expect(probes.main.owner!.scopeId).toBe(scope);
+          expect(await switchSession('main', 'session-a')).toBeUndefined();
+          expect(retained.attach(retainedSlot('main'))).toBe(entry);
+          expect(entry.container.dataset.dirtyInput).toBe('9');
+        },
+      );
+
+      it('targets the canonical scope after a second requested alias is confirmed', async () => {
+        sdkMocks.MockDaemonSessionClient.load.mockImplementation(
+          async (client, sessionId) => {
+            const session = createMockSession({
+              sessionId,
+              workspaceCwd: '/private/tmp',
+              session: { generatedUi: { version: 1, enabled: true } },
+            });
+            session.client = client as MockClient;
+            return session;
+          },
+        );
+        await renderWithProvider(<Probe name="main" />, {
+          ...providerProps,
+          workspaceCwd: '/tmp',
+        });
+        const first = park('main');
+        await switchSession('main', 'session-b', 'load', {
+          workspaceCwd: '/tmp/.',
+        });
+        const second = park('main');
+        expect(second.scopeId).toBe(first.scopeId);
+        const error = new DaemonHttpError(401, undefined, 'Unauthorized');
+        sdkMocks.MockDaemonSessionClient.load.mockRejectedValueOnce(error);
+        expect(
+          await switchSession('main', 'session-a', 'load', {
+            workspaceCwd: '/tmp/.',
+          }),
+        ).toBe(error);
+        expect(retained.getEntries()).toEqual([]);
+        for (const entry of [first, second]) {
+          expect(entry.container.isConnected).toBe(false);
+          expect(retained.getRecord(entry.key)?.reason).toBe('auth-failed');
+        }
+      });
+
+      it('preserves a canonical scope when controlled props catch up to a confirmed alias', async () => {
+        sdkMocks.MockDaemonSessionClient.load.mockImplementation(
+          async (client, sessionId) => {
+            const session = createMockSession({
+              sessionId,
+              workspaceCwd: '/private/tmp',
+              session: { generatedUi: { version: 1, enabled: true } },
+            });
+            session.client = client as MockClient;
+            return session;
+          },
+        );
+        await renderWithProvider(<Probe name="main" />, {
+          ...providerProps,
+          workspaceCwd: '/tmp',
+        });
+        await switchSession('main', 'session-b', 'load', {
+          workspaceCwd: '/tmp/.',
+        });
+        const entry = park('main');
+        await act(async () => {
+          root!.render(
+            <DaemonSessionProvider
+              {...providerProps}
+              workspaceCwd="/tmp/."
+              sessionId="session-b"
+            >
+              <Probe name="main" />
+            </DaemonSessionProvider>,
+          );
+          await flushPromises();
+        });
+        expect(probes.main.owner!.scopeId).toBe(entry.scopeId);
+        expect(retained.attach(retainedSlot('main'))).toBe(entry);
+        expect(entry.container.dataset.dirtyInput).toBe('9');
+      });
+
+      it.each([
+        { boundary: 'workspace', props: { workspaceCwd: '/workspace-b' } },
+        { boundary: 'host', props: { baseUrl: 'http://127.0.0.1:4171' } },
+        { boundary: 'credentials', props: { token: 'token-b' } },
+      ])(
+        'retires a canonical scope before an unconfirmed $boundary change can reuse it',
+        async ({ props }) => {
+          sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+            async (client) => {
+              const session = createMockSession({
+                sessionId: 'session-a',
+                workspaceCwd: '/private/tmp',
+                session: { generatedUi: { version: 1, enabled: true } },
+              });
+              session.client = client as MockClient;
+              return session;
+            },
+          );
+          await renderWithProvider(<Probe name="main" />, {
+            ...providerProps,
+            workspaceCwd: '/tmp',
+          });
+          const entry = park('main');
+          const pending = createDeferred<MockSession>();
+          sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+            () => pending.promise,
+          );
+          await act(async () => {
+            root!.render(
+              <DaemonSessionProvider
+                {...providerProps}
+                workspaceCwd="/tmp"
+                {...props}
+                sessionId="session-b"
+              >
+                <Probe name="main" />
+              </DaemonSessionProvider>,
+            );
+            await flushPromises();
+          });
+          expect(probes.main.owner!.scopeId).not.toBe(entry.scopeId);
+          expect(entry.container.isConnected).toBe(false);
+          await act(async () => {
+            pending.reject(new DaemonHttpError(401, undefined, 'Unauthorized'));
+            await flushPromises();
+          });
+          expect(probes.main.connection.errorStatus).toBe(401);
+          expect(retained.getRecord(entry.key)).toBeUndefined();
+        },
+      );
+
+      it.each([
+        { path: 'stream', status: 401 },
+        { path: 'stream', status: 403 },
+        { path: 'stream', status: 404 },
+        { path: 'heartbeat', status: 401 },
+        { path: 'heartbeat', status: 403 },
+        { path: 'heartbeat', status: 404 },
+      ] as const)(
+        'releases attached workspace instances after $path returns $status',
+        async ({ path, status }) => {
+          const failure = createDeferred<void>();
+          const heartbeat = vi.fn(async () => {
+            await failure.promise;
+            throw new DaemonHttpError(status, undefined, 'Access failed');
+          });
+          sdkMocks.capabilities.mockResolvedValue({
+            workspaceCwd: '/mock-workspace',
+            features: ['client_heartbeat'],
+          });
+          const children = (
+            <Probe name="main">
+              <DaemonSessionProvider {...providerProps} workspaceCwd="/foreign">
+                <Probe name="foreign" />
+              </DaemonSessionProvider>
+            </Probe>
+          );
+          await renderWithProvider(children, providerProps);
+          const sibling = park('main');
+          const foreign = park('foreign');
+          sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+            async (client) => {
+              const session = createMockSession({
+                sessionId: 'session-b',
+                session: { generatedUi: { version: 1, enabled: true } },
+                heartbeat: path === 'heartbeat' ? heartbeat : undefined,
+                async *events(opts) {
+                  if (path === 'stream') {
+                    await failure.promise;
+                    throw new DaemonHttpError(
+                      status,
+                      undefined,
+                      'Access failed',
+                    );
+                  }
+                  yield* createIdleEvents()(opts);
+                },
+              });
+              session.client = client as MockClient;
+              return session;
+            },
+          );
+          await switchSession('main', 'session-b');
+          const target = park('main');
+          const slot = retainedSlot('main');
+          if (path === 'heartbeat') {
+            await act(async () => {
+              root!.render(
+                <DaemonSessionProvider
+                  {...providerProps}
+                  sessionId="session-b"
+                  heartbeatIntervalMs={1}
+                  heartbeatFailureThreshold={1}
+                >
+                  {children}
+                </DaemonSessionProvider>,
+              );
+              await flushPromises();
+            });
+            await act(async () => {
+              await vi.waitFor(() => expect(heartbeat).toHaveBeenCalled());
+            });
+          }
+          await act(async () => {
+            failure.resolve();
+            await flushPromises();
+            await wait(5);
+          });
+          const auth = status !== 404;
+          expect(target.container.isConnected).toBe(false);
+          expect(retained.getRecord(target.key)?.reason).toBe(
+            auth ? 'auth-failed' : 'deleted',
+          );
+          expect(retained.getEntries().includes(sibling)).toBe(!auth);
+          expect(sibling.container.isConnected).toBe(!auth);
+          if (auth)
+            expect(retained.getRecord(sibling.key)?.reason).toBe('auth-failed');
+          expect(retained.getEntries()).toContain(foreign);
+          expect(foreign.container.isConnected).toBe(true);
+          expect(await switchSession('main', 'session-b')).toBeUndefined();
+          const returned = retainedSlot('main');
+          expect(returned.key).toBe(slot.key);
+          expect(retained.attach(returned)).toBeUndefined();
+          expect(retained.attach(returned, true)?.runtime.reopened).toBe(true);
+        },
+      );
+
+      it.each([
+        { mode: 'load', status: 404 },
+        { mode: 'load', status: 410 },
+        { mode: 'load', status: 401 },
+        { mode: 'load', status: 403 },
+        { mode: 'load', status: 503 },
+        { mode: 'resume', status: 404 },
+        { mode: 'resume', status: 401 },
+      ] as const)(
+        'releases the correct retained instances after $mode returns $status',
+        async ({ mode, status }) => {
+          await renderWithProvider(
+            <Probe name="main">
+              <DaemonSessionProvider {...providerProps} workspaceCwd="/foreign">
+                <Probe name="foreign" />
+              </DaemonSessionProvider>
+            </Probe>,
+            providerProps,
+          );
+          const target = park('main');
+          const foreign = park('foreign');
+          expect(target.sessionId).toBe(foreign.sessionId);
+          expect(target.scopeId).not.toBe(foreign.scopeId);
+          expect(await switchSession('main', 'session-c')).toBeUndefined();
+          const sibling = park('main');
+          expect(sibling.scopeId).toBe(target.scopeId);
+          expect(await switchSession('main', 'session-b')).toBeUndefined();
+          expect(retained.getEntries()).toHaveLength(3);
+
+          const error = new DaemonHttpError(
+            status,
+            undefined,
+            'Restore failed',
+          );
+          sdkMocks.MockDaemonSessionClient[mode].mockRejectedValueOnce(error);
+          expect(await switchSession('main', 'session-a', mode)).toBe(error);
+          expect(probes.main?.connection.errorStatus).toBe(status);
+          expect(probes.main?.owner?.scopeId).toBe(target.scopeId);
+          const authFailure = status === 401 || status === 403;
+          const temporaryFailure = status === 503;
+          expect(retained.getEntries().includes(target)).toBe(temporaryFailure);
+          expect(target.container.isConnected).toBe(temporaryFailure);
+          expect(retained.getEntries().includes(sibling)).toBe(!authFailure);
+          expect(sibling.container.isConnected).toBe(!authFailure);
+          expect(retained.getEntries()).toContain(foreign);
+          expect(foreign.container.isConnected).toBe(true);
+          expect(foreign.container.dataset.dirtyInput).toBe('9');
+          if (!temporaryFailure) {
+            expect(retained.getRecord(target.key)?.reason).toBe(
+              authFailure ? 'auth-failed' : 'deleted',
+            );
+            expect(await switchSession('main', 'session-a')).toBeUndefined();
+            const returned = retainedSlot('main');
+            expect(returned.key).toBe(target.key);
+            expect(retained.attach(returned)).toBeUndefined();
+            expect(retained.attach(returned, true)?.runtime.reopened).toBe(
+              true,
+            );
+          }
+        },
+      );
+
+      it.each([
+        {
+          boundary: 'matching ancestor',
+          baseUrl: providerProps.baseUrl,
+          token: 'token-a',
+          workspaceCwd: '/ancestor',
+          releases: true,
+        },
+        {
+          boundary: 'different workspace',
+          baseUrl: providerProps.baseUrl,
+          token: 'token-a',
+          workspaceCwd: '/other',
+          releases: false,
+        },
+        {
+          boundary: 'different daemon',
+          baseUrl: 'http://127.0.0.1:4171',
+          token: 'token-a',
+          workspaceCwd: '/ancestor',
+          releases: false,
+        },
+        {
+          boundary: 'different credentials',
+          baseUrl: providerProps.baseUrl,
+          token: 'token-b',
+          workspaceCwd: '/ancestor',
+          releases: false,
+        },
+      ])(
+        'isolates retained ancestor instances on failed restore: $boundary',
+        async ({ baseUrl, token, workspaceCwd, releases }) => {
+          await renderWithProvider(
+            <Probe name="main">
+              <DaemonSessionProvider
+                {...providerProps}
+                baseUrl={baseUrl}
+                token={token}
+                workspaceCwd="/child"
+                sessionId="child-a"
+              >
+                <Probe name="child" />
+              </DaemonSessionProvider>
+            </Probe>,
+            { ...providerProps, workspaceCwd: '/ancestor' },
+          );
+          const ancestor = park('main');
+          const child = park('child');
+          expect(child.scopeId).not.toBe(ancestor.scopeId);
+          const error = new DaemonHttpError(401, undefined, 'Unauthorized');
+          sdkMocks.MockDaemonSessionClient.load.mockRejectedValueOnce(error);
+          expect(
+            await switchSession('child', 'session-a', 'load', { workspaceCwd }),
+          ).toBe(error);
+          expect(probes.child?.connection.errorStatus).toBe(401);
+          expect(retained.getEntries().includes(ancestor)).toBe(!releases);
+          expect(ancestor.container.isConnected).toBe(!releases);
+          expect(retained.getEntries()).toContain(child);
+          expect(child.container.isConnected).toBe(true);
+        },
+      );
+
+      it.each(['standalone', 'live'] as const)(
+        'keeps workspace instances when a %s restore fails authentication',
+        async (kind) => {
+          sdkMocks.capabilities.mockResolvedValue({
+            workspaceCwd: '/primary',
+            features: ['standalone_sessions_v1', 'multi_workspace_sessions'],
+            workspaces: [
+              {
+                id: 'primary',
+                cwd: '/primary',
+                primary: true,
+                trusted: true,
+              },
+              {
+                id: 'live',
+                cwd: '/mock-workspace',
+                kind: 'live',
+                primary: false,
+                trusted: true,
+              },
+            ],
+          });
+          sdkMocks.MockDaemonSessionClient.loadStandalone.mockImplementation(
+            async (client, sessionId) => {
+              const session = createMockSession({
+                sessionId,
+                session: {
+                  generatedUi: { version: 1, enabled: true },
+                  sourceType: 'standalone',
+                  context: { kind: 'standalone' },
+                  projectlessOutputDirectory: '/output/non-workspace',
+                  workingDirectory: { state: 'ready' },
+                },
+              });
+              session.client = client as MockClient;
+              return session;
+            },
+          );
+          await renderWithProvider(
+            <Probe name="main">
+              <DaemonSessionProvider
+                baseUrl={providerProps.baseUrl}
+                token={providerProps.token}
+                sessionId="non-workspace"
+                sessionContext={{ kind }}
+                autoConnect
+                autoReconnect={false}
+              >
+                <Probe name="child" />
+              </DaemonSessionProvider>
+            </Probe>,
+            providerProps,
+          );
+          const workspace = park('main');
+          expect(probes.child?.connection).toMatchObject({
+            status: 'connected',
+            sessionContext: { kind },
+            workspaceCwd: undefined,
+          });
+          expect(probes.child?.owner?.source).toBeUndefined();
+          const error = new DaemonHttpError(401, undefined, 'Unauthorized');
+          (kind === 'standalone'
+            ? sdkMocks.MockDaemonSessionClient.loadStandalone
+            : sdkMocks.MockDaemonSessionClient.load
+          ).mockRejectedValueOnce(error);
+          expect(
+            await switchSession('child', 'non-workspace-next', 'load', {
+              sessionContext: { kind },
+            }),
+          ).toBe(error);
+          expect(probes.child?.connection.errorStatus).toBe(401);
+          expect(retained.getEntries()).toContain(workspace);
+          expect(workspace.container.isConnected).toBe(true);
+        },
+      );
+
+      it('ignores a late auth failure after another restore owns the effect', async () => {
+        await renderWithProvider(<Probe name="main" />, providerProps);
+        const old = park('main');
+        expect(await switchSession('main', 'session-b')).toBeUndefined();
+        const delayed = createDeferred<MockSession>();
+        sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+          () => delayed.promise,
+        );
+        let replaced!: Promise<unknown>;
+        await act(async () => {
+          replaced = requireActions(probes.main)
+            .actions.loadSession('session-a')
+            .catch((error: unknown) => error);
+          await flushPromises();
+        });
+        expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenLastCalledWith(
+          expect.anything(),
+          'session-a',
+          expect.anything(),
+          expect.any(String),
+        );
+        expect(await switchSession('main', 'session-c')).toBeUndefined();
+        expect(await replaced).toMatchObject({ name: 'AbortError' });
+        const current = park('main');
+        expect(current.scopeId).toBe(old.scopeId);
+        await act(async () => {
+          delayed.reject(
+            new DaemonHttpError(401, undefined, 'Late auth failure'),
+          );
+          await flushPromises();
+        });
+        expect(probes.main?.connection).toMatchObject({
+          status: 'connected',
+          sessionId: 'session-c',
+        });
+        expect(retained.getEntries()).toEqual(
+          expect.arrayContaining([old, current]),
+        );
+        expect(old.container.isConnected).toBe(true);
+        expect(current.container.isConnected).toBe(true);
+      });
+    });
+
+    it.each(['immediate', 'after-render'] as const)(
+      'disposes a parked activation when the next session receives a policy event %s',
+      async (timing) => {
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async () => new Response(null, { status: 204 })),
+        );
+        const retained = new GeneratedUiInstanceStore();
+        const parking = document.createElement('div');
+        parking.hidden = true;
+        document.body.appendChild(parking);
+        retained.parking = parking;
+        const slotElement = document.createElement('div');
+        document.body.appendChild(slotElement);
+        const delayedPolicy = createDeferred<DaemonEvent>();
+        const invalidations: McpAppGeneratedUiInvalidation[] = [];
+        let owner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+        let actions: DaemonSessionActions | undefined;
+        function Harness() {
+          owner = useContext(McpAppGeneratedUiOwnerContext);
+          actions = useDaemonActions();
+          const subscribe = owner?.subscribeInvalidation;
+          useLayoutEffect(
+            () =>
+              subscribe?.((event) => {
+                invalidations.push(event);
+                retained.invalidate(event);
+              }),
+            [subscribe],
+          );
+          return null;
+        }
+        try {
+          sdkMocks.sessions.push(
+            createMockSession({
+              sessionId: 'session-a',
+              session: { generatedUi: { version: 1, enabled: true } },
+            }),
+          );
+          await renderWithProvider(<Harness />, {
+            autoConnect: true,
+            workspaceCwd: '/mock-workspace',
+          });
+          const initialOwner = requireActions(owner?.source);
+          const display: McpAppDisplay = {
+            type: 'mcp_app',
+            requiredFeature: 'generated-ui',
+            serverName: 'qwen-code-generated-ui',
+            resourceUri: 'ui://qwen-code-generated-ui/view-v1.html',
+            html: '<main>retained parameters</main>',
+            toolResult: { content: [{ type: 'text', text: 'Ready' }] },
+            toolArguments: { rate: 7 },
+            fallbackText: 'Retained parameters',
+          };
+          const initialSlot: InstanceSlot = {
+            key: instanceKey(initialOwner, 'call-a', display),
+            resourceKey: resourceKey(display, initialOwner.eventEpoch),
+            display,
+            source: initialOwner,
+            receipt: {
+              sessionId: 'session-a',
+              status: { version: 1, enabled: true },
+            },
+            baseUrl: 'http://127.0.0.1:4170',
+            token: {},
+            element: slotElement,
+            visible: true,
+            reset: vi.fn(),
+          };
+          const activation = requireActions(retained.attach(initialSlot));
+          activation.container.dataset.dirtyInput = '9';
+          retained.release(initialSlot.key, initialSlot.token);
+          expect(activation.container.parentElement).toBe(parking);
+          invalidations.length = 0;
+
+          const policy: DaemonEvent = {
+            v: 1,
+            type: 'settings_reloaded',
+            data: {},
+          };
+          sdkMocks.sessions.push(
+            createMockSession({
+              sessionId: 'session-b',
+              session: { generatedUi: { version: 1, enabled: true } },
+              async *events(opts) {
+                yield timing === 'immediate'
+                  ? policy
+                  : await delayedPolicy.promise;
+                yield* createIdleEvents()(opts);
+              },
+            }),
+          );
+          let switchToB!: Promise<void>;
+          act(() => {
+            switchToB = requireActions(actions).loadSession('session-b');
+          });
+          await act(async () => {
+            await switchToB;
+            await flushPromises();
+          });
+          if (timing === 'after-render') {
+            expect(retained.getEntries()).toContain(activation);
+            await act(async () => {
+              delayedPolicy.resolve(policy);
+              await flushPromises();
+            });
+          }
+          expect(invalidations).toContainEqual({
+            scopeId: initialOwner.scopeId,
+            reason: 'policy',
+          });
+          expect(retained.getEntries()).not.toContain(activation);
+          expect(activation.container.isConnected).toBe(false);
+
+          sdkMocks.sessions.push(
+            createMockSession({
+              sessionId: 'session-a',
+              session: { generatedUi: { version: 1, enabled: true } },
+            }),
+          );
+          let switchToA!: Promise<void>;
+          act(() => {
+            switchToA = requireActions(actions).loadSession('session-a');
+          });
+          await act(async () => {
+            await switchToA;
+            await flushPromises();
+          });
+          const returnedOwner = requireActions(owner?.source);
+          expect(returnedOwner.scopeId).toBe(initialOwner.scopeId);
+          const returnedSlot: InstanceSlot = {
+            ...initialSlot,
+            source: returnedOwner,
+            token: {},
+            key: instanceKey(returnedOwner, 'call-a', display),
+            resourceKey: resourceKey(display, returnedOwner.eventEpoch),
+          };
+          expect(retained.attach(returnedSlot)).toBeUndefined();
+          const reopened = requireActions(retained.attach(returnedSlot, true));
+          expect(reopened).not.toBe(activation);
+          expect(reopened.runtime.reopened).toBe(true);
+          expect(reopened.container.dataset.dirtyInput).toBeUndefined();
+        } finally {
+          retained.clear();
+          parking.remove();
+          slotElement.remove();
+        }
+      },
+    );
+
+    it.each([
+      {
+        boundary: 'matching ancestor',
+        baseUrl: 'http://127.0.0.1:4170',
+        token: 'token-a',
+        workspaceCwd: '/ancestor',
+        inherits: true,
+      },
+      {
+        boundary: 'different workspace',
+        baseUrl: 'http://127.0.0.1:4170',
+        token: 'token-a',
+        workspaceCwd: '/other',
+        inherits: false,
+      },
+      {
+        boundary: 'different daemon',
+        baseUrl: 'http://127.0.0.1:4171',
+        token: 'token-a',
+        workspaceCwd: '/ancestor',
+        inherits: false,
+      },
+      {
+        boundary: 'different credentials',
+        baseUrl: 'http://127.0.0.1:4170',
+        token: 'token-b',
+        workspaceCwd: '/ancestor',
+        inherits: false,
+      },
+    ])(
+      'binds the first policy event across a nested workspace switch: $boundary',
+      async ({ baseUrl, token, workspaceCwd, inherits }) => {
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async () => new Response(null, { status: 204 })),
+        );
+        let outer: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+        let inner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+        let actions: DaemonSessionActions | undefined;
+        let connection: DaemonConnectionState | undefined;
+        const invalidations: McpAppGeneratedUiInvalidation[] = [];
+        function Inner() {
+          inner = useContext(McpAppGeneratedUiOwnerContext);
+          actions = useDaemonActions();
+          connection = useDaemonConnection();
+          return null;
+        }
+        function Outer() {
+          outer = useContext(McpAppGeneratedUiOwnerContext);
+          const subscribe = outer?.subscribeInvalidation;
+          useLayoutEffect(
+            () => subscribe?.((event) => invalidations.push(event)),
+            [subscribe],
+          );
+          return (
+            <DaemonSessionProvider
+              baseUrl={baseUrl}
+              token={token}
+              workspaceCwd="/child"
+              sessionId="child-a"
+              autoConnect={true}
+            >
+              <Inner />
+            </DaemonSessionProvider>
+          );
+        }
+        sdkMocks.sessions.push(
+          createMockSession({
+            sessionId: 'child-a',
+            workspaceCwd: '/child',
+            session: { generatedUi: { version: 1, enabled: true } },
+          }),
+        );
+        await renderWithProvider(<Outer />, {
+          workspaceCwd: '/ancestor',
+          token: 'token-a',
+        });
+        const ancestorScopeId = requireActions(outer).scopeId;
+        const childScopeId = requireActions(inner?.source).scopeId;
+        expect(childScopeId).not.toBe(ancestorScopeId);
+        invalidations.length = 0;
+        let receivedPolicy = false;
+        sdkMocks.sessions.push(
+          createMockSession({
+            sessionId: 'child-b',
+            workspaceCwd,
+            session: { generatedUi: { version: 1, enabled: true } },
+            async *events(opts) {
+              receivedPolicy = true;
+              yield { v: 1, type: 'settings_reloaded', data: {} };
+              yield* createIdleEvents()(opts);
+            },
+          }),
+        );
+        let switched!: Promise<void>;
+        act(() => {
+          switched = requireActions(actions).loadSession('child-b', {
+            workspaceCwd,
+          });
+        });
+        await act(async () => {
+          await switched;
+          await flushPromises();
+        });
+        expect(receivedPolicy).toBe(true);
+        expect(connection).toMatchObject({
+          status: 'connected',
+          sessionId: 'child-b',
+          workspaceCwd,
+        });
+        const connectedSource = requireActions(inner?.source);
+        expect(connectedSource.scopeId === ancestorScopeId).toBe(inherits);
+        expect(connectedSource.scopeId).not.toBe(childScopeId);
+        expect(
+          invalidations.filter(
+            (event) =>
+              event.reason === 'policy' && event.scopeId === ancestorScopeId,
+          ),
+        ).toEqual(
+          inherits ? [{ scopeId: ancestorScopeId, reason: 'policy' }] : [],
+        );
+      },
+    );
+
+    it.each(['standalone', 'live'] as const)(
+      'does not bind a first policy event in %s to an ancestor with the same SDK cwd',
+      async (kind) => {
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async () => new Response(null, { status: 204 })),
+        );
+        sdkMocks.capabilities.mockResolvedValue({
+          workspaceCwd: '/primary',
+          features: ['standalone_sessions_v1', 'multi_workspace_sessions'],
+          workspaces: [
+            { id: 'primary', cwd: '/primary', primary: true, trusted: true },
+            {
+              id: 'live',
+              cwd: '/ancestor',
+              kind: 'live',
+              primary: false,
+              trusted: true,
+            },
+          ],
+        });
+        let inner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+        let connection: DaemonConnectionState | undefined;
+        let receivedPolicy = false;
+        const invalidations: McpAppGeneratedUiInvalidation[] = [];
+        function Inner() {
+          inner = useContext(McpAppGeneratedUiOwnerContext);
+          connection = useDaemonConnection();
+          return null;
+        }
+        function Outer() {
+          const owner = useContext(McpAppGeneratedUiOwnerContext);
+          const subscribe = owner?.subscribeInvalidation;
+          useLayoutEffect(
+            () => subscribe?.((event) => invalidations.push(event)),
+            [subscribe],
+          );
+          return (
+            <DaemonSessionProvider
+              baseUrl="http://127.0.0.1:4170"
+              token="token-a"
+              sessionContext={{ kind }}
+              sessionId="non-workspace"
+              autoConnect={true}
+            >
+              <Inner />
+            </DaemonSessionProvider>
+          );
+        }
+        sdkMocks.sessions.push(
+          createMockSession({
+            sessionId: 'non-workspace',
+            workspaceCwd: '/ancestor',
+            session: {
+              generatedUi: { version: 1, enabled: true },
+              ...(kind === 'standalone'
+                ? {
+                    sourceType: 'standalone',
+                    context: { kind: 'standalone' },
+                    projectlessOutputDirectory: '/output/non-workspace',
+                    workingDirectory: { state: 'ready' },
+                  }
+                : {}),
+            },
+            async *events(opts) {
+              receivedPolicy = true;
+              yield { v: 1, type: 'settings_reloaded', data: {} };
+              yield* createIdleEvents()(opts);
+            },
+          }),
+        );
+        await renderWithProvider(<Outer />, {
+          workspaceCwd: '/ancestor',
+          token: 'token-a',
+        });
+        expect(receivedPolicy).toBe(true);
+        expect(connection).toMatchObject({
+          status: 'connected',
+          sessionId: 'non-workspace',
+          sessionContext: { kind },
+          workspaceCwd: undefined,
+        });
+        expect(inner?.source).toBeUndefined();
+        expect(
+          invalidations.filter((event) => event.reason === 'policy'),
+        ).toEqual([]);
+      },
+    );
+
+    it('captures deletion scopes by workspace, daemon and credentials before the response', async () => {
+      const owners: Record<
+        string,
+        ContextType<typeof McpAppGeneratedUiOwnerContext>
+      > = {};
+      const invalidations: McpAppGeneratedUiInvalidation[] = [];
+      let targetKey = 'initial';
+      let showInherited = true;
+      function Probe({ name }: { name: string }) {
+        owners[name] = useContext(McpAppGeneratedUiOwnerContext);
+        return null;
+      }
+      function Outer() {
+        owners.outer = useContext(McpAppGeneratedUiOwnerContext);
+        const subscribe = owners.outer?.subscribeInvalidation;
+        useLayoutEffect(
+          () => subscribe?.((event) => invalidations.push(event)),
+          [subscribe],
+        );
+        return [
+          ['target', '/target', 'http://127.0.0.1:4170', 'token-a'],
+          ['same-primary', '/primary', 'http://127.0.0.1:4170', 'token-a'],
+          ['other-workspace', '/other', 'http://127.0.0.1:4170', 'token-a'],
+          ['other-daemon', '/target', 'http://127.0.0.1:4171', 'token-a'],
+          ['other-credentials', '/target', 'http://127.0.0.1:4170', 'token-b'],
+        ]
+          .filter(([name]) => showInherited || name !== 'same-primary')
+          .map(([name, workspaceCwd, baseUrl, token]) => (
+            <DaemonSessionProvider
+              key={name === 'target' ? targetKey : name}
+              baseUrl={baseUrl}
+              token={token}
+              workspaceCwd={workspaceCwd}
+              autoConnect={false}
+            >
+              <Probe name={name!} />
+            </DaemonSessionProvider>
+          ));
+      }
+      await renderWithProvider(<Outer />, {
+        workspaceCwd: '/primary',
+        token: 'token-a',
+      });
+      const rerender = async () => {
+        await act(async () => {
+          root?.render(
+            <DaemonSessionProvider
+              baseUrl="http://127.0.0.1:4170"
+              token="token-a"
+              workspaceCwd="/primary"
+              autoConnect={false}
+            >
+              <Outer />
+            </DaemonSessionProvider>,
+          );
+          await flushPromises();
+        });
+      };
+      const outer = requireActions(owners.outer);
+      const originalTarget = requireActions(owners.target).scopeId;
+      expect(owners['same-primary']?.scopeId).toBe(outer.scopeId);
+      const deleted = outer.captureSessionDeletion('/target');
+      deleted(['removed', 'not-found']);
+      expect(invalidations).toEqual(
+        ['removed', 'not-found'].map((sessionId) => ({
+          scopeId: originalTarget,
+          sessionId,
+          reason: 'deleted',
+        })),
+      );
+      invalidations.length = 0;
+      outer.captureSessionDeletion('/primary')(['same-session-id']);
+      expect(invalidations).toEqual([
+        {
+          scopeId: outer.scopeId,
+          sessionId: 'same-session-id',
+          reason: 'deleted',
+        },
+      ]);
+      invalidations.length = 0;
+      outer.captureSessionDeletion(undefined)(['same-session-id']);
+      outer.captureSessionDeletion('/unknown')(['same-session-id']);
+      expect(invalidations).toEqual([]);
+
+      targetKey = 'replacement';
+      showInherited = false;
+      await rerender();
+      const replacement = requireActions(owners.target).scopeId;
+      expect(replacement).not.toBe(originalTarget);
+      invalidations.length = 0;
+      deleted(['late-result']);
+      expect(invalidations).toEqual([
+        {
+          scopeId: originalTarget,
+          sessionId: 'late-result',
+          reason: 'deleted',
+        },
+      ]);
+      invalidations.length = 0;
+      requireActions(owners.outer).captureSessionDeletion('/target')(['fresh']);
+      expect(invalidations).toEqual([
+        { scopeId: replacement, sessionId: 'fresh', reason: 'deleted' },
+      ]);
+      invalidations.length = 0;
+      outer.captureSessionDeletion('/primary')(['after-inherited-unmount']);
+      expect(invalidations).toEqual([
+        {
+          scopeId: outer.scopeId,
+          sessionId: 'after-inherited-unmount',
+          reason: 'deleted',
+        },
+      ]);
+    });
+
+    it.each(['randomUUID', 'crypto'])(
+      'creates distinct scopes without %s while Generated UI is disabled',
+      async (missing) => {
+        vi.stubGlobal(
+          'crypto',
+          missing === 'crypto'
+            ? undefined
+            : { getRandomValues: webcrypto.getRandomValues.bind(webcrypto) },
+        );
+        let owner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+        let connection: DaemonConnectionState | undefined;
+        function Harness() {
+          owner = useContext(McpAppGeneratedUiOwnerContext);
+          connection = useDaemonConnection();
+          return null;
+        }
+        await renderWithProvider(<Harness />, {
+          clientId: 'http-client',
+          workspaceCwd: '/workspace-a',
+        });
+        expect(connection?.status).toBe('idle');
+        expect(owner?.source).toBeUndefined();
+        const firstScope = requireActions(owner).scopeId;
+        for (const workspaceCwd of ['/workspace-a', '/workspace-b']) {
+          await act(async () => {
+            root?.render(
+              <DaemonSessionProvider
+                baseUrl="http://127.0.0.1:4170"
+                clientId="http-client"
+                workspaceCwd={workspaceCwd}
+                autoConnect={false}
+              >
+                <Harness />
+              </DaemonSessionProvider>,
+            );
+          });
+          expect(requireActions(owner).scopeId === firstScope).toBe(
+            workspaceCwd === '/workspace-a',
+          );
+        }
+      },
+    );
+
+    it.each(['/workspace-a', '/workspace-b'])(
+      'releases only an owned scope when a nested provider closes: %s',
+      async (workspaceCwd) => {
+        let outer: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+        let inner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+        let show = true;
+        const invalidations: McpAppGeneratedUiInvalidation[] = [];
+        const makeSession = () =>
+          createMockSession({
+            sessionId: 'nested-session',
+            workspaceCwd,
+            session: { generatedUi: { version: 1, enabled: true } },
+          });
+        sdkMocks.sessions.push(makeSession());
+        function Inner() {
+          inner = useContext(McpAppGeneratedUiOwnerContext);
+          return null;
+        }
+        function Outer() {
+          outer = useContext(McpAppGeneratedUiOwnerContext);
+          const subscribe = outer?.subscribeInvalidation;
+          useLayoutEffect(
+            () => subscribe?.((event) => invalidations.push(event)),
+            [subscribe],
+          );
+          return show ? (
+            <DaemonSessionProvider
+              baseUrl="http://127.0.0.1:4170"
+              workspaceCwd={workspaceCwd}
+              sessionId="nested-session"
+              autoConnect
+            >
+              <Inner />
+            </DaemonSessionProvider>
+          ) : null;
+        }
+        const tree = () => (
+          <DaemonSessionProvider
+            baseUrl="http://127.0.0.1:4170"
+            workspaceCwd="/workspace-a"
+            autoConnect={false}
+          >
+            <Outer />
+          </DaemonSessionProvider>
+        );
+        await renderWithProvider(<Outer />, { workspaceCwd: '/workspace-a' });
+        const first = requireActions(inner?.source);
+        expect(first.captureOwner().isCurrent()).toBe(true);
+        const shared = first.scopeId === requireActions(outer).scopeId;
+        expect(shared).toBe(workspaceCwd === '/workspace-a');
+        invalidations.length = 0;
+        show = false;
+        await act(async () => {
+          root?.render(tree());
+          await flushPromises();
+        });
+        expect(first.captureOwner().isCurrent()).toBe(false);
+        expect(invalidations).toEqual(
+          shared ? [] : [{ scopeId: first.scopeId, reason: 'scope-changed' }],
+        );
+        show = true;
+        sdkMocks.sessions.push(makeSession());
+        await act(async () => {
+          root?.render(tree());
+          await flushPromises();
+        });
+        const reopened = requireActions(inner?.source);
+        expect(reopened.scopeId === first.scopeId).toBe(shared);
+        expect(reopened.captureOwner().isCurrent()).toBe(true);
+      },
+    );
+
+    it('shares a same-workspace nested scope and its invalidation channel', async () => {
+      let outer: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+      let inner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+      const invalidations: McpAppGeneratedUiInvalidation[] = [];
+      function Inner() {
+        inner = useContext(McpAppGeneratedUiOwnerContext);
+        return null;
+      }
+      function Outer() {
+        outer = useContext(McpAppGeneratedUiOwnerContext);
+        const subscribe = outer?.subscribeInvalidation;
+        useLayoutEffect(
+          () => subscribe?.((event) => invalidations.push(event)),
+          [subscribe],
+        );
+        return (
+          <DaemonSessionProvider
+            baseUrl="http://127.0.0.1:4170"
+            workspaceCwd="/same-workspace"
+            autoConnect={false}
+          >
+            <Inner />
+          </DaemonSessionProvider>
+        );
+      }
+      await renderWithProvider(<Outer />, { workspaceCwd: '/same-workspace' });
+      expect(inner?.scopeId).toBe(outer?.scopeId);
+      const event = {
+        scopeId: requireActions(inner).scopeId,
+        sessionId: 'nested-session',
+        reason: 'deleted' as const,
+      };
+      inner?.invalidate(event);
+      expect(invalidations).toContainEqual(event);
+    });
+
+    it('keeps the scope across session switches and revokes the previous owner', async () => {
+      sdkMocks.sessions.push(
+        createMockSession({
+          session: { generatedUi: { version: 1, enabled: true } },
+        }),
+      );
+      let owner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+      let actions: DaemonSessionActions | undefined;
+      const invalidations: McpAppGeneratedUiInvalidation[] = [];
+      function Harness() {
+        owner = useContext(McpAppGeneratedUiOwnerContext);
+        actions = useDaemonActions();
+        const subscribe = owner?.subscribeInvalidation;
+        useLayoutEffect(
+          () => subscribe?.((event) => invalidations.push(event)),
+          [subscribe],
+        );
+        return null;
+      }
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      const first = requireActions(owner?.source);
+      const captured = first.captureOwner();
+      expect(first).toMatchObject({
+        sessionId: 'session-1',
+        clientId: 'client-1',
+        workspaceCwd: '/mock-workspace',
+        eventEpoch: 'epoch-1',
+      });
+      expect(captured.isCurrent()).toBe(true);
+      invalidations.length = 0;
+      sdkMocks.sessions.push(
+        createMockSession({
+          sessionId: 'session-2',
+          session: { generatedUi: { version: 1, enabled: true } },
+        }),
+      );
+      let switched!: Promise<void>;
+      act(() => {
+        switched = requireActions(actions).loadSession('session-2');
+      });
+      await act(async () => {
+        await switched;
+        await flushPromises();
+      });
+      expect(owner?.source?.scopeId).toBe(first.scopeId);
+      expect(owner?.source?.sessionId).toBe('session-2');
+      expect(captured.isCurrent()).toBe(false);
+      expect(invalidations).toEqual([]);
+      await act(async () => {
+        await requireActions(actions).clearSession();
+      });
+      expect(owner?.source).toBeUndefined();
+      expect(invalidations).toEqual([
+        { scopeId: first.scopeId, sessionId: 'session-2', reason: 'cleared' },
+      ]);
+    });
+
+    it.each(['client', 'epoch', 'receipt'] as const)(
+      'rejects a captured retained owner immediately after in-place %s changes',
+      async (change) => {
+        const session = createMockSession({
+          session: { generatedUi: { version: 1, enabled: true } },
+        });
+        sdkMocks.sessions.push(session);
+        let owner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+        function Harness() {
+          owner = useContext(McpAppGeneratedUiOwnerContext);
+          return null;
+        }
+        await renderWithProvider(<Harness />, { autoConnect: true });
+        const captured = requireActions(owner?.source).captureOwner();
+        expect(captured.isCurrent()).toBe(true);
+        if (change === 'client') session.clientId = 'reattached-client';
+        if (change === 'epoch') session.eventEpoch = 'epoch-2';
+        if (change === 'receipt') session.session!['generatedUi'] = undefined;
+        expect(captured.isCurrent()).toBe(false);
+      },
+    );
+
+    it.each([
+      ['policy', { v: 1, type: 'settings_reloaded', data: {} }, false],
+      [
+        'deleted',
+        {
+          v: 1,
+          type: 'session_messages_deleted',
+          originatorClientId: 'client-1',
+          data: {
+            deletedGroupIds: ['group-1'],
+            deletedPromptIds: ['prompt-1'],
+          },
+        },
+        true,
+      ],
+      ['rewound', { v: 1, type: 'session_rewound', data: {} }, true],
+      [
+        'epoch',
+        {
+          v: 1,
+          type: 'state_resync_required',
+          data: { reason: 'epoch_reset' },
+        },
+        false,
+      ],
+      [
+        'deleted',
+        { v: 1, type: 'session_closed', data: { reason: 'client_close' } },
+        true,
+      ],
+      [
+        'runtime-stopped',
+        {
+          v: 1,
+          type: 'session_closed',
+          data: { reason: 'client_close', cause: 'workspace_runtime_stop' },
+        },
+        false,
+      ],
+    ] satisfies Array<
+      [McpAppGeneratedUiInvalidation['reason'], DaemonEvent, boolean]
+    >)(
+      'publishes %s invalidation from the actual session event: %j',
+      async (reason, event, sessionOnly) => {
+        const change = createDeferred<DaemonEvent>();
+        sdkMocks.sessions.push(
+          createMockSession({
+            session: { generatedUi: { version: 1, enabled: true } },
+            async *events(opts) {
+              yield await change.promise;
+              yield* createIdleEvents()(opts);
+            },
+          }),
+        );
+        let owner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+        const invalidations: McpAppGeneratedUiInvalidation[] = [];
+        function Harness() {
+          owner = useContext(McpAppGeneratedUiOwnerContext);
+          const subscribe = owner?.subscribeInvalidation;
+          useLayoutEffect(
+            () =>
+              subscribe?.((invalidation) => invalidations.push(invalidation)),
+            [subscribe],
+          );
+          return null;
+        }
+        await renderWithProvider(<Harness />, { autoConnect: true });
+        const scopeId = requireActions(owner?.source).scopeId;
+        invalidations.length = 0;
+        await act(async () => {
+          change.resolve(event);
+          await flushPromises();
+        });
+        expect(invalidations).toContainEqual({
+          scopeId,
+          ...(sessionOnly ? { sessionId: 'session-1' } : {}),
+          reason,
+        });
+      },
+    );
+
+    it.each(['baseUrl', 'token', 'workspaceCwd'] as const)(
+      'invalidates the original scope when the confirmed %s changes',
+      async (field) => {
+        let owner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+        const invalidations: McpAppGeneratedUiInvalidation[] = [];
+        function Harness() {
+          owner = useContext(McpAppGeneratedUiOwnerContext);
+          const subscribe = owner?.subscribeInvalidation;
+          useLayoutEffect(
+            () => subscribe?.((event) => invalidations.push(event)),
+            [subscribe],
+          );
+          return null;
+        }
+        const props = {
+          baseUrl: 'http://127.0.0.1:4170',
+          token: 'first-token',
+          workspaceCwd: '/first-workspace',
+          autoConnect: false,
+        };
+        await renderWithProvider(<Harness />, props);
+        const scopeId = requireActions(owner).scopeId;
+        act(() => {
+          root?.render(
+            <DaemonSessionProvider {...props} {...{ [field]: 'changed' }}>
+              <Harness />
+            </DaemonSessionProvider>,
+          );
+        });
+        expect(owner?.scopeId).not.toBe(scopeId);
+        expect(invalidations).toContainEqual({
+          scopeId,
+          reason: 'scope-changed',
+        });
+      },
+    );
+  });
+
+  it('exposes Generated UI only from the attached session and clears it with the owner', async () => {
+    const session = createMockSession({
+      session: { generatedUi: { version: 1, enabled: true } },
+    });
+    sdkMocks.sessions.push(session);
+    let capability: ContextType<typeof McpAppGeneratedUiContext>;
+    let actions: DaemonSessionActions | undefined;
+    function Harness() {
+      capability = useContext(McpAppGeneratedUiContext);
+      actions = useDaemonActions();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    expect(capability).toEqual({
+      sessionId: session.sessionId,
+      status: { version: 1, enabled: true },
+    });
+    await act(async () => {
+      await requireActions(actions).clearSession();
+    });
+    expect(capability).toBeUndefined();
+  });
+
+  it.each(['success', 'failure', 'wrong owner'] as const)(
+    'clears Generated UI after a %s context refresh loses its receipt',
+    async (outcome) => {
+      const start = createDeferred<void>();
+      const refresh = createDeferred<DaemonSessionContextStatus>();
+      const initial = {
+        v: 1 as const,
+        sessionId: 'session-1',
+        workspaceCwd: '/mock-workspace',
+        state: {},
+        recovery: { kind: 'clean' as const, canContinue: false },
+      };
+      const context = vi
+        .fn()
+        .mockResolvedValueOnce(initial)
+        .mockImplementation(async () => {
+          try {
+            return await refresh.promise;
+          } finally {
+            // Match DaemonSessionClient.context()'s receipt invalidation.
+            session.session!['generatedUi'] = undefined;
+          }
+        });
+      const session = createMockSession({
+        session: { generatedUi: { version: 1, enabled: true } },
+        context,
+        lastEventId: 10,
+        async *events(opts) {
+          await start.promise;
+          yield {
+            v: 1,
+            id: 11,
+            type: 'turn_complete',
+            data: { promptId: 'observed', stopReason: 'end_turn' },
+          };
+          yield* createIdleEvents()(opts);
+        },
+      });
+      sdkMocks.sessions.push(session);
+      let capability: ContextType<typeof McpAppGeneratedUiContext>;
+      function Harness() {
+        capability = useContext(McpAppGeneratedUiContext);
+        return null;
+      }
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      expect(capability?.status.enabled).toBe(true);
+      await act(async () => {
+        start.resolve();
+        await flushPromises();
+      });
+      expect(context).toHaveBeenCalledTimes(2);
+      expect(capability?.status.enabled).toBe(true);
+      await act(async () => {
+        if (outcome === 'failure') refresh.reject(new Error('context failed'));
+        else
+          refresh.resolve({
+            ...initial,
+            sessionId:
+              outcome === 'wrong owner' ? 'other-session' : initial.sessionId,
+          });
+        await flushPromises();
+      });
+      expect(capability).toBeUndefined();
+    },
+  );
+
+  describe('idle Generated UI policy refresh', () => {
+    const reply = (enabled: boolean, sessionId = 'session-1') =>
+      new Response(
+        JSON.stringify({
+          v: 1,
+          sessionId,
+          workspaceCwd: '/mock-workspace',
+          state: { _meta: { generatedUi: { version: 1, enabled } } },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+
+    const policyEvent = {
+      v: 1,
+      type: 'settings_changed',
+      data: { key: 'mcp.allowed', scope: 'workspace', value: [] },
+    } satisfies DaemonEvent;
+
+    async function setupPolicySession(eventCount = 1) {
+      const sdk = await vi.importActual<typeof import('@qwen-code/sdk/daemon')>(
+        '@qwen-code/sdk/daemon',
+      );
+      const responses = Array.from({ length: eventCount }, () =>
+        createDeferred<Response>(),
+      );
+      const changes = Array.from({ length: eventCount }, () =>
+        createDeferred<DaemonEvent>(),
+      );
+      let reads = 0;
+      const owner = new sdk.DaemonSessionClient({
+        client: new sdk.DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch: async () =>
+            reads++ < 2 ? reply(true) : responses[reads - 3]!.promise,
+        }),
+        session: {
+          sessionId: 'session-1',
+          workspaceCwd: '/mock-workspace',
+          attached: false,
+          clientId: 'client-1',
+          generatedUi: { version: 1, enabled: true },
+        },
+      });
+      const context = vi.fn(() => owner.context());
+      sdkMocks.sessions.push(
+        createMockSession({
+          session: owner.session as unknown as Record<string, unknown>,
+          context,
+          async *events(opts) {
+            opts?.onEpoch?.('epoch-1');
+            for (const change of changes) {
+              const event = await change.promise;
+              if (opts?.signal?.aborted) return;
+              yield event;
+            }
+            yield* createIdleEvents()(opts);
+          },
+        }),
+      );
+      let capability: ContextType<typeof McpAppGeneratedUiContext>;
+      let actions: DaemonSessionActions | undefined;
+      function Harness() {
+        capability = useContext(McpAppGeneratedUiContext);
+        actions = useDaemonActions();
+        return null;
+      }
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      expect(capability?.status.enabled).toBe(true);
+      expect(context).toHaveBeenCalledTimes(2);
+      return {
+        context,
+        responses,
+        changes,
+        capability: () => capability,
+        actions: () => requireActions(actions),
+      };
+    }
+
+    it.each([
+      policyEvent,
+      {
+        ...policyEvent,
+        data: {
+          key: 'tools.disabled',
+          scope: 'workspace',
+          value: ['generated_ui_show'],
+        },
+      },
+      { v: 1, type: 'settings_reloaded', data: {} },
+      {
+        v: 1,
+        type: 'mcp_server_changed',
+        data: { serverName: 'generated-ui', action: 'disable' },
+      },
+      {
+        v: 1,
+        type: 'mcp_server_restarted',
+        data: { serverName: 'generated-ui', durationMs: 1 },
+      },
+      {
+        v: 1,
+        type: 'tool_toggled',
+        data: { toolName: 'generated_ui_show', enabled: false },
+      },
+      { v: 1, type: 'extensions_changed', data: { refreshed: 1, failed: 0 } },
+    ] satisfies DaemonEvent[])(
+      'withholds the cached capability until the idle owner confirms a policy event: %j',
+      async (event) => {
+        const fixture = await setupPolicySession();
+        await act(async () => {
+          fixture.changes[0]!.resolve(event);
+          await flushPromises();
+        });
+        expect(fixture.context).toHaveBeenCalledTimes(3);
+        expect(fixture.capability()).toBeUndefined();
+        await act(async () => {
+          fixture.responses[0]!.resolve(reply(false));
+          await flushPromises();
+        });
+        expect(fixture.capability()?.status.enabled).toBe(false);
+      },
+    );
+
+    it.each(['ui.theme', 'experimental.generatedUi'])(
+      'does not invalidate the live owner for a non-policy setting: %s',
+      async (key) => {
+        const fixture = await setupPolicySession();
+        await act(async () => {
+          fixture.changes[0]!.resolve({
+            ...policyEvent,
+            data: { key, scope: 'workspace', value: false },
+          });
+          await flushPromises();
+        });
+        expect(fixture.context).toHaveBeenCalledTimes(2);
+        expect(fixture.capability()?.status.enabled).toBe(true);
+      },
+    );
+
+    it('ignores an older enabled read after a newer policy disables the idle owner', async () => {
+      const fixture = await setupPolicySession(2);
+      await act(async () => {
+        fixture.changes[0]!.resolve(policyEvent);
+        await flushPromises();
+        fixture.changes[1]!.resolve(policyEvent);
+        await flushPromises();
+      });
+      expect(fixture.context).toHaveBeenCalledTimes(4);
+      expect(fixture.capability()).toBeUndefined();
+      await act(async () => {
+        fixture.responses[1]!.resolve(reply(false));
+        await flushPromises();
+      });
+      expect(fixture.capability()?.status.enabled).toBe(false);
+      await act(async () => {
+        fixture.responses[0]!.resolve(reply(true));
+        await flushPromises();
+      });
+      expect(fixture.capability()?.status.enabled).toBe(false);
+    });
+
+    it('does not publish an idle policy read after switching to a different owner', async () => {
+      const fixture = await setupPolicySession();
+      await act(async () => {
+        fixture.changes[0]!.resolve(policyEvent);
+        await flushPromises();
+      });
+      sdkMocks.sessions.push(
+        createMockSession({
+          sessionId: 'next-owner',
+          session: { generatedUi: { version: 1, enabled: false } },
+        }),
+      );
+      let switched!: Promise<void>;
+      act(() => {
+        switched = fixture.actions().loadSession('next-owner');
+      });
+      await act(async () => {
+        await switched;
+        await flushPromises();
+      });
+      expect(fixture.capability()).toMatchObject({
+        sessionId: 'next-owner',
+        status: { enabled: false },
+      });
+      await act(async () => {
+        fixture.responses[0]!.resolve(reply(true));
+        await flushPromises();
+      });
+      expect(fixture.capability()).toMatchObject({
+        sessionId: 'next-owner',
+        status: { enabled: false },
+      });
+    });
   });
 
   it('uses the current client id after an in-place session reattach', async () => {
@@ -21420,6 +23806,112 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
+  it.each(['same anchor', 'older prefix'] as const)(
+    'reopens a rejected history page after authoritative rewind with %s',
+    async (replacement) => {
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/mock-workspace',
+        features: ['session_transcript_pagination'],
+      });
+      const chunk = (
+        id: number,
+        kind: 'user_message_chunk' | 'agent_message_chunk',
+        recordId: string,
+      ): DaemonEvent => ({
+        v: 1,
+        id,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: kind,
+            content: { type: 'text', text: recordId },
+            _meta: {
+              'qwen.session.recordId': recordId,
+              qwenTranscript: { sourceRecordIds: [recordId] },
+            },
+          },
+        },
+      });
+      const turn = (id: number, name: string) => [
+        chunk(id, 'user_message_chunk', `${name}-user`),
+        chunk(id + 1, 'agent_message_chunk', `${name}-answer`),
+      ];
+      const rewind = createDeferred<void>();
+      const prefixName = replacement === 'same anchor' ? 'root' : 'earlier';
+      const prefix = turn(50, prefixName);
+      const session = createMockSession({
+        sessionId: 'rewind-capacity',
+        historyHasMore: true,
+        replaySnapshot: {
+          compactedReplay: [...turn(1, 'root'), ...turn(3, 'target')],
+          liveJournal: [],
+        },
+        async *events(opts) {
+          await rewind.promise;
+          yield {
+            v: 1,
+            id: 100,
+            type: 'session_rewound',
+            data: {
+              sessionId: 'rewind-capacity',
+              promptId: 'native-target',
+              targetTurnIndex: 1,
+              filesChanged: [],
+              filesFailed: [],
+              replay: prefix,
+            },
+          };
+          yield* createIdleEvents()(opts);
+        },
+      });
+      sdkMocks.sessions.push(session);
+      sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+        v: 1,
+        sessionId: session.sessionId,
+        events: turn(10, 'older-page'),
+        hasMore: false,
+      });
+      let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+      let blocks: readonly DaemonTranscriptBlock[] = [];
+      function Harness() {
+        history = useDaemonTranscriptHistory();
+        blocks = useDaemonTranscriptBlocks();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        historyPageSize: 2,
+        maxBlocks: 5,
+      });
+      await act(async () => {
+        await history?.loadMore();
+        await flushPromises();
+      });
+      expect(history).toMatchObject({ capacityReached: true, hasMore: false });
+      expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        rewind.resolve();
+        await flushTranscriptDispatch();
+      });
+      expect(blocks.map((block) => block.sourceRecordIds?.[0])).toEqual([
+        `${prefixName}-user`,
+        `${prefixName}-answer`,
+      ]);
+      expect(history).toMatchObject({ capacityReached: false, hasMore: true });
+      await act(async () => {
+        await history?.loadMore();
+        await flushPromises();
+      });
+      expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledTimes(2);
+      expect(sdkMocks.getSessionTranscriptPage.mock.calls[1]).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ beforeRecordId: `${prefixName}-user` }),
+        ]),
+      );
+      expect(blocks).toHaveLength(4);
+    },
+  );
+
   it('grows the latched rejected-page footprint by a re-anchoring trim’s evicted band and keeps the latch closed', async () => {
     // A byte-budget rejection stores the rejected page's footprint. A later
     // re-anchoring eviction trim re-serves the evicted band on the next fetch,
@@ -22512,7 +25004,7 @@ describe('DaemonSessionProvider', () => {
       expect(
         store?.getSnapshot().blocks.find((block) => block.kind === 'user')
           ?.promptId,
-      ).toBeUndefined();
+      ).toBe('live');
       await act(async () => {
         go.resolve();
         await flushPromises();
@@ -22647,7 +25139,7 @@ describe('DaemonSessionProvider', () => {
           v: 1 as const,
           sessionId,
           workspaceCwd: '/mock-workspace',
-          state: { models: { currentModelId: 'model-a' } },
+          state: { models: { currentModelId: 'model-a' }, configOptions: [] },
           recovery: { kind: 'clean' as const, canContinue: false },
         };
         const latest = {
@@ -22658,7 +25150,11 @@ describe('DaemonSessionProvider', () => {
           .fn()
           .mockResolvedValueOnce(initial)
           .mockReturnValueOnce(delayed.promise)
-          .mockResolvedValue({ ...initial, recovery: latest });
+          .mockResolvedValue({
+            ...initial,
+            state: { models: { currentModelId: 'model-b' }, configOptions: [] },
+            recovery: latest,
+          });
         sdkMocks.sessions.push(
           createMockSession({
             sessionId,
@@ -22706,12 +25202,12 @@ describe('DaemonSessionProvider', () => {
           finish.resolve();
           await flushPromises();
         });
-        expect(context).toHaveBeenCalledTimes(3);
+        expect(context).toHaveBeenCalledTimes(4);
         expect(connection?.context?.recovery).toEqual(latest);
         await act(async () => {
           delayed.resolve({
             ...initial,
-            state: { models: { currentModelId: 'model-b' } },
+            state: { models: { currentModelId: 'model-b' }, configOptions: [] },
           });
           await pending;
           await flushPromises();
@@ -22719,6 +25215,7 @@ describe('DaemonSessionProvider', () => {
         expect(connection?.currentModel).toBe('model-b');
         expect(connection?.context?.state).toEqual({
           models: { currentModelId: 'model-b' },
+          configOptions: [],
         });
         expect(connection?.context?.recovery).toEqual(latest);
       },
@@ -23285,7 +25782,7 @@ describe('DaemonSessionProvider', () => {
             await flushPromises();
           });
           await switched;
-          expect(context).toHaveBeenCalledTimes(immediateTerminal ? 2 : 1);
+          expect(context).toHaveBeenCalledTimes(immediateTerminal ? 3 : 2);
           expect(connection?.context?.sessionId).toBe(second.sessionId);
           expect(connection?.context?.recovery).toEqual(second.recovery);
           expect(
@@ -23306,6 +25803,7 @@ describe('DaemonSessionProvider', () => {
       const finish = createDeferred<void>();
       const close = createDeferred<void>();
       const resubscribed = createDeferred<void>();
+      const replay = createDeferred<void>();
       const oldRead =
         createDeferred<Awaited<ReturnType<MockSession['context']>>>();
       const config = createDeferred<{ mode: string }>();
@@ -23340,6 +25838,12 @@ describe('DaemonSessionProvider', () => {
           return;
         }
         resubscribed.resolve();
+        await replay.promise;
+        yield {
+          v: 1 as const,
+          type: 'replay_complete' as const,
+          data: { sessionId },
+        };
         yield* createIdleEvents()(opts);
       });
       const session = createMockSession({ sessionId, context, events });
@@ -23379,6 +25883,17 @@ describe('DaemonSessionProvider', () => {
         oldRead.resolve(latest);
         await flushPromises();
       });
+      expect(connection?.currentMode).toBe('default');
+      expect(connection?.context?.recovery).toEqual(latest.recovery);
+      context.mockResolvedValue({
+        ...latest,
+        state: { modes: { currentModeId: 'auto-edit' } },
+      });
+      await act(async () => {
+        replay.resolve();
+        await flushPromises();
+      });
+      expect(context).toHaveBeenCalledTimes(4);
       expect(connection?.currentMode).toBe('auto-edit');
       expect(connection?.context?.recovery).toEqual(latest.recovery);
     });
@@ -23439,7 +25954,7 @@ describe('DaemonSessionProvider', () => {
         finish.resolve();
         await flushPromises();
       });
-      expect(context).toHaveBeenCalledTimes(2);
+      expect(context).toHaveBeenCalledTimes(3);
       await act(async () => {
         await requireActions(actions).setModel('model-b');
       });
@@ -23487,7 +26002,8 @@ describe('DaemonSessionProvider', () => {
           .fn()
           .mockResolvedValueOnce(initial)
           .mockReturnValueOnce(rejectedRead.promise)
-          .mockReturnValueOnce(terminalRead.promise);
+          .mockReturnValueOnce(terminalRead.promise)
+          .mockResolvedValue(initial);
         const continued = vi.fn(async () => ({
           accepted: false,
           interruption: 'none',
@@ -23533,7 +26049,7 @@ describe('DaemonSessionProvider', () => {
           finish.resolve();
           await flushPromises();
         });
-        expect(context).toHaveBeenCalledTimes(3);
+        expect(context).toHaveBeenCalledTimes(4);
         if (order === 'terminal-first') {
           await act(async () => {
             terminalRead.resolve(initial);
@@ -23598,6 +26114,7 @@ describe('DaemonSessionProvider', () => {
         };
         const metadata = createDeferred<typeof initial>();
         const approval = createDeferred<{ mode: string }>();
+        const replay = createDeferred<void>();
         const context = vi
           .fn()
           .mockImplementationOnce(() =>
@@ -23624,6 +26141,14 @@ describe('DaemonSessionProvider', () => {
                 message: 'interrupted',
               },
             };
+            if (approvalPending) {
+              await replay.promise;
+              yield {
+                v: 1,
+                type: 'replay_complete',
+                data: { sessionId },
+              };
+            }
             yield* createIdleEvents()(opts);
           },
         });
@@ -23651,10 +26176,22 @@ describe('DaemonSessionProvider', () => {
             await changing;
             await flushPromises();
           });
+          expect(connection?.currentMode).toBeUndefined();
+          expect(connection?.context?.recovery).toEqual(latest.recovery);
+          context.mockResolvedValue({
+            ...latest,
+            state: { modes: { currentModeId: 'auto-edit' } },
+          });
+          await act(async () => {
+            replay.resolve();
+            await flushPromises();
+          });
           expect(connection?.currentMode).toBe('auto-edit');
         }
         expect(firstEventSeen).toBe(true);
-        expect(context).toHaveBeenCalledTimes(history ? 1 : 2);
+        expect(context).toHaveBeenCalledTimes(
+          (history ? 1 : 2) + (approvalPending ? 1 : 0),
+        );
         expect(connection?.context?.recovery).toEqual(
           history ? initial.recovery : latest.recovery,
         );
@@ -23928,7 +26465,7 @@ describe('DaemonSessionProvider', () => {
           expect(container!.querySelector('[role="alert"]')).not.toBeNull();
         }
         expect(continued).toHaveBeenCalledOnce();
-        expect(context).toHaveBeenCalledTimes(mode === 'no-new-work' ? 1 : 2);
+        expect(context).toHaveBeenCalledTimes(mode === 'no-new-work' ? 2 : 3);
         expect(container!.querySelector('button') !== null).toBe(
           mode === 'definite-rejection',
         );
@@ -24025,7 +26562,7 @@ describe('DaemonSessionProvider', () => {
       }
       try {
         await renderWithProvider(<Harness />, { autoConnect: true });
-        expect(context).toHaveBeenCalledOnce();
+        expect(context).toHaveBeenCalledTimes(2);
         expect(continued).not.toHaveBeenCalled();
         for (let i = 0; i < 2; i++) {
           expect(container!.querySelector('button')?.textContent).toBe(
@@ -24373,10 +26910,298 @@ describe('DaemonSessionProvider', () => {
     },
   );
 
+  describe('Workflow mode synchronization', () => {
+    function modeOptions(requested: boolean) {
+      return [
+        {
+          id: 'workflow_mode',
+          type: 'select',
+          currentValue: requested ? 'on' : 'off',
+          options: [{ value: 'off' }, { value: 'on' }],
+          _meta: {
+            'qwen.workflowMode': { available: true, effective: requested },
+          },
+        },
+      ];
+    }
+
+    function modeContext(requested: boolean): DaemonSessionContextStatus {
+      return {
+        v: 1,
+        sessionId: 'session-1',
+        workspaceCwd: '/mock-workspace',
+        state: { configOptions: modeOptions(requested) },
+      };
+    }
+
+    async function mountWorkflow(session: MockSession) {
+      sdkMocks.sessions.push(session);
+      let connection: DaemonConnectionState | undefined;
+      let actions: DaemonSessionActions | undefined;
+      const observed: Array<boolean | undefined> = [];
+      function Harness() {
+        connection = useDaemonConnection();
+        actions = useDaemonActions();
+        observed.push(connection.workflowMode?.requested);
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        autoReconnect: false,
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+      return {
+        getConnection: () => connection,
+        getActions: () => requireActions(actions),
+        observed,
+      };
+    }
+
+    it('makes a cursorless stream ready from its epoch header without replay_complete', async () => {
+      const context = vi.fn(async () => modeContext(true));
+      const session = createMockSession({
+        context,
+        async *events(opts = {}) {
+          opts.onEpoch?.('epoch-1');
+          yield* createIdleEvents()(opts);
+        },
+      });
+      const h = await mountWorkflow(session);
+      expect(h.getConnection()).toMatchObject({
+        workflowModeStatus: 'ready',
+        workflowMode: { requested: true, available: true, effective: true },
+      });
+      expect(context).toHaveBeenCalledTimes(2);
+    });
+
+    it('uses a headerless first frame, accepts own config echoes, and rejects a pre-push context', async () => {
+      const push = createDeferred<void>();
+      const snapshot = createDeferred<void>();
+      const omission = createDeferred<void>();
+      const context = vi.fn(async () => modeContext(false));
+      const session = createMockSession({
+        context,
+        async *events(opts = {}) {
+          yield {
+            v: 1,
+            id: 1,
+            type: 'session_snapshot',
+            data: { sessionId: 'session-1' },
+          };
+          await push.promise;
+          yield {
+            v: 1,
+            id: 2,
+            type: 'session_update',
+            originatorClientId: 'client-1',
+            data: {
+              update: {
+                sessionUpdate: 'config_option_update',
+                configOptions: modeOptions(true),
+              },
+            },
+          };
+          await snapshot.promise;
+          yield {
+            v: 1,
+            id: 3,
+            type: 'session_snapshot',
+            data: { sessionId: 'session-1' },
+          };
+          await omission.promise;
+          yield {
+            v: 1,
+            id: 4,
+            type: 'session_update',
+            data: { sessionUpdate: 'config_option_update', configOptions: [] },
+          };
+          yield* createIdleEvents()(opts);
+        },
+      });
+      const h = await mountWorkflow(session);
+      expect(h.getConnection()?.workflowModeStatus).toBe('ready');
+      const old = createDeferred<DaemonSessionContextStatus>();
+      context.mockReturnValueOnce(old.promise);
+      let read: Promise<unknown> | undefined;
+      await act(async () => {
+        read = h.getActions().getContext();
+        push.resolve();
+        await flushPromises();
+      });
+      expect(h.getConnection()?.workflowMode?.requested).toBe(true);
+      await act(async () => {
+        old.resolve(modeContext(false));
+        await read;
+        snapshot.resolve();
+        await flushPromises();
+      });
+      expect(h.getConnection()).toMatchObject({
+        workflowModeStatus: 'ready',
+        workflowMode: { requested: true },
+      });
+      await act(async () => {
+        omission.resolve();
+        await flushPromises();
+      });
+      expect(h.getConnection()?.workflowModeStatus).toBe('unsupported');
+      expect(h.getConnection()?.workflowMode).toBeUndefined();
+      expect(h.getConnection()?.context?.state.configOptions).toEqual([]);
+      expect(context).toHaveBeenCalledTimes(3);
+    });
+
+    it('keeps the projected mode and raw config array aligned after a policy refresh', async () => {
+      const reload = createDeferred<void>();
+      const context = vi.fn(async () => modeContext(false));
+      const session = createMockSession({
+        context,
+        async *events(opts = {}) {
+          opts.onEpoch?.('epoch-1');
+          await reload.promise;
+          yield { v: 1, id: 1, type: 'settings_reloaded', data: {} };
+          yield* createIdleEvents()(opts);
+        },
+      });
+      const h = await mountWorkflow(session);
+      expect(h.getConnection()?.workflowMode?.requested).toBe(false);
+      expect(context).toHaveBeenCalledTimes(2);
+      context.mockResolvedValue(modeContext(true));
+      await act(async () => {
+        reload.resolve();
+        await flushPromises();
+      });
+      expect(h.getConnection()).toMatchObject({
+        workflowModeStatus: 'ready',
+        workflowMode: { requested: true, effective: true },
+      });
+      expect(h.getConnection()?.context?.state.configOptions).toEqual(
+        modeOptions(true),
+      );
+      expect(context).toHaveBeenCalledTimes(3);
+    });
+
+    it.each(['success', 'rejected', 'wrong owner'] as const)(
+      'settles a policy config read after newer recovery on %s',
+      async (outcome) => {
+        const reload = createDeferred<void>();
+        const terminal = createDeferred<void>();
+        const initial = {
+          ...modeContext(false),
+          recovery: { kind: 'clean' as const, canContinue: false },
+        };
+        const context = vi.fn(async () => initial);
+        const session = createMockSession({
+          context,
+          async *events(opts = {}) {
+            opts.onEpoch?.('epoch-1');
+            await reload.promise;
+            yield { v: 1, id: 1, type: 'settings_reloaded', data: {} };
+            await terminal.promise;
+            yield {
+              v: 1,
+              id: 2,
+              type: 'turn_complete',
+              data: {
+                sessionId: 'session-1',
+                promptId: 'turn-1',
+                stopReason: 'end_turn',
+              },
+            };
+            yield* createIdleEvents()(opts);
+          },
+        });
+        const h = await mountWorkflow(session);
+        const older = createDeferred<DaemonSessionContextStatus>();
+        const policy = createDeferred<DaemonSessionContextStatus>();
+        context
+          .mockReturnValueOnce(older.promise as Promise<typeof initial>)
+          .mockReturnValueOnce(policy.promise as Promise<typeof initial>);
+        let pending: Promise<unknown>;
+        await act(async () => {
+          pending = h.getActions().getContext();
+          reload.resolve();
+          await flushPromises();
+        });
+        await act(async () => {
+          terminal.resolve();
+          await flushPromises();
+        });
+        expect(context).toHaveBeenCalledTimes(5);
+        await act(async () => {
+          if (outcome === 'rejected') policy.reject(new Error('read failed'));
+          else
+            policy.resolve({
+              ...modeContext(true),
+              ...(outcome === 'wrong owner'
+                ? { sessionId: 'another-owner' }
+                : {}),
+            });
+          older.resolve(modeContext(false));
+          await pending;
+          await flushPromises();
+        });
+        expect(h.getConnection()?.workflowModeStatus).toBe(
+          outcome === 'success' ? 'ready' : 'unknown',
+        );
+        expect(h.getConnection()?.workflowMode?.requested).toBe(
+          outcome === 'success',
+        );
+        expect(h.getConnection()?.context?.recovery).toEqual(initial.recovery);
+      },
+    );
+
+    it('ignores resumed config replay until the marker and reads the current value once', async () => {
+      const marker = createDeferred<void>();
+      const context = vi.fn(async () => modeContext(true));
+      const session = createMockSession({
+        lastEventId: 10,
+        context,
+        async *events(opts = {}) {
+          opts.onEpoch?.('epoch-1');
+          yield {
+            v: 1,
+            id: 11,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'config_option_update',
+                configOptions: modeOptions(false),
+              },
+            },
+          };
+          await marker.promise;
+          yield {
+            v: 1,
+            id: 12,
+            type: 'replay_complete',
+            data: { sessionId: 'session-1' },
+          };
+          yield* createIdleEvents()(opts);
+        },
+      });
+      const h = await mountWorkflow(session);
+      expect(h.getConnection()?.workflowModeStatus).toBe('syncing');
+      expect(h.observed).not.toContain(false);
+      expect(context).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        marker.resolve();
+        await flushPromises();
+      });
+      expect(h.getConnection()).toMatchObject({
+        workflowModeStatus: 'ready',
+        workflowMode: { requested: true },
+      });
+      expect(h.observed).not.toContain(false);
+      expect(context).toHaveBeenCalledTimes(2);
+    });
+  });
+
   async function renderWithProvider(
     children: ReactNode,
     props: Partial<DaemonSessionProviderProps> = {},
     notifications?: TurnNotificationObserver,
+    availability?: DaemonAvailability,
   ) {
     const defaultSessionId =
       props.autoConnect === true &&
@@ -24389,7 +27214,7 @@ describe('DaemonSessionProvider', () => {
     document.body.appendChild(container);
     root = createRoot(container);
 
-    const provider = (
+    const sessionProvider = (
       <DaemonSessionProvider
         baseUrl="http://127.0.0.1:4170"
         autoConnect={false}
@@ -24398,6 +27223,13 @@ describe('DaemonSessionProvider', () => {
       >
         {children}
       </DaemonSessionProvider>
+    );
+    const provider = availability ? (
+      <DaemonAvailabilityContext.Provider value={availability}>
+        {sessionProvider}
+      </DaemonAvailabilityContext.Provider>
+    ) : (
+      sessionProvider
     );
     act(() => {
       root?.render(
@@ -24581,6 +27413,7 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
         workspaceCwd: opts.workspaceCwd ?? '/mock-workspace',
         state: {},
       })),
+    subscribeGeneratedUiRevocation: opts.subscribeGeneratedUiRevocation,
     supportedCommands:
       opts.supportedCommands ??
       vi.fn(async () => ({

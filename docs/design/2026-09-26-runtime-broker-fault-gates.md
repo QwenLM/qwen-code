@@ -42,7 +42,8 @@ ownership row and grant rechecks (unit-tested in `WorkspaceRuntimeTest`),
 Kubernetes provisioning, and Stage G failover. The three failover modes of
 `scripts/run-managed-agent-server-e2e.ts` (`--session-failover`,
 `--inflight-failover`, `--continuation-failover`) and the `--big-output`
-long-answer/cold-restore mode run in the `hosted-harness-mysql` job (#13258);
+long-answer/cold-restore mode run in the `hosted-failover-e2e` job (first
+added to `hosted-harness-mysql` in #13258);
 only the real-model check stays outside CI (see [Hosted Turn failover E2E](2026-09-30-hosted-turn-failover-e2e.md)).
 
 ## 3. Design

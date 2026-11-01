@@ -3,7 +3,9 @@
 [English](2026-10-15-managed-workspace-resident-runtime.md) | [简体中文](2026-10-15-managed-workspace-resident-runtime.zh-CN.md)
 
 状态：4.1 节已由 PR1（[#14254](https://github.com/QwenLM/qwen-code/pull/14254)）实现，
-4.2 节由 PR2 实现，其余各节仍是提案。跟踪 issue：
+4.2 节由 PR2（[#14339](https://github.com/QwenLM/qwen-code/pull/14339)）实现，
+4.3 节由 PR3（[#14435](https://github.com/QwenLM/qwen-code/pull/14435)）实现，
+4.4 节（Session 创建时 warm）由 PR4 实现。4.5 节仍是提案。跟踪 issue：
 [#14211](https://github.com/QwenLM/qwen-code/issues/14211)。属于 Managed Agent 提案
 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)。代码引用基于 PR2 之前的
 `main` @ `c3012a523f`。
@@ -17,6 +19,31 @@
   - 接受 workspace 隔离下的 close 证据（原待确认问题 1）；
   - 推后空闲回收和 generation 预算（见 4.5 节）；
   - 切片重新排序：PR2 重建 Harness 归属，PR3 开启 Workspace 常驻，PR4 增加 Session 创建时 warm。
+- 修订 4（PR3，[#14435](https://github.com/QwenLM/qwen-code/pull/14435)）：
+  - close/恢复侧落地：正在关闭的 Session 在共享 binding 上只释放自己的 Runtime Session
+    （worker 与 binding 保持 `READY`），两个 close 协议都覆盖；v2 cleanup authority 由
+    Runtime Session 自己的 Harness Session 认领 fence；丢失的共享 worker 让 close 失败关闭，
+    而不是退役 binding；storage 退役仍会停掉共享 worker；恢复维护与 retention 放行共享 binding；
+  - 新发现：旧 close 在共享 binding 上失败开放——协议 v0/v1 只枚举 session 隔离的 binding，
+    带活跃共享 Runtime Session 的 Session 不释放它们就能进入 `CLOSED`（v2 会拒绝）。在策略允许
+    workspace 隔离之前不可达；v2 的 never-initialized 回执现在额外要求该 Session 从未有过
+    放置在共享 binding 上的 Runtime Session；
+  - 开启侧落地：`bound-session-isolation-class`（默认 `session`，可选 `workspace`）把绑定
+    Session 的放置切换到 workspace 隔离的 binding；共享 binding 上的生命周期 authority 由
+    Runtime Session 自己的 Harness Session 认领 fence，因此正在关闭的 Session 的生命周期 Hook
+    在常驻 worker 上放置并运行；
+  - 修正：枚举索引是 `V9` 迁移，单列 `harness_session_id` 索引——两个列都是
+    VARBINARY(2048)，4.3 节原先勾勒的 `(tenant_id, harness_session_id)` 组合超过 InnoDB
+    的 3072 字节键长（本 PR 原先的 `V7` 因 `main` 在评审期间占用 `V7`、`V8` 而改号）；
+  - 与 #14340 的关系：私有 Kubernetes CSI 的常驻 Workspace close 单独交付，其语义不变；
+  - 验证范围：本切片只有单元/H2 与变异证据；第 9 节的真实进程 Linux 场景留作后续。
+- 修订 5（PR4）：
+  - Session 创建时 warm 只在 workspace 隔离下生效：`session-create-warm=true` 要求
+    `bound-session-isolation-class=workspace` 且未配置 SSH 节点，否则启动失败。在 session
+    隔离下（SSH 绑定的 Session 总是使用 session 隔离），它会让每个创建了但从未使用的
+    Session 各占一个 worker，而且它建出的 session 隔离 binding 会让该 Session 失去 v2 的
+    never-initialized 回执（见 4.4 节）；
+  - 只有不带输入的创建才 warm：带输入的创建会立刻 dispatch 第一个 Turn，那个 Turn 本来就会 warm。
 
 ## 1. 问题
 
@@ -130,15 +157,16 @@ binding 才为真：workspace 隔离、managed-context、`local-process`、Works
 | `WorkspaceRuntimeTransport` 的 context 校验（server）                 | 匹配 Runtime Session 记录的 Harness Session。                                                                                                                  |
 | 人工恢复（server）                                                    | 把被持有的 Runtime Session 的 Harness Session 记为 owner。                                                                                                     |
 
-**保持不变**：CSI 专用代码；warm 放置（共享 binding 没有单一 owner，warm 也不准入任何工作）；
-要求生命周期 authority 的路径（它们在共享 binding 上继续拒绝）。
+**保持不变**：CSI 专用代码；warm 放置（共享 binding 没有单一 owner，warm 也不准入任何工作）。
+要求生命周期 authority 的路径在 PR2 中于共享 binding 上拒绝；PR3 起由 Runtime Session 自己的
+Harness Session 认领 fence 放行（见 4.3 节）。
 
-**留到 PR3**（只有策略允许 workspace 隔离后才能触达）：close 与生命周期证据
+**已在 PR3 交付**（策略允许 workspace 隔离后即可触达）：close 与生命周期证据
 （`findHarnessExecutions`、`verifyHarnessResources`、`verifyHarnessStopped`）、
 stopped release 与 `canStopDrained`、恢复维护的封锁、共享 binding 的 retention，
 以及 provisioning 的 scope 解析。
 
-### 4.3 workspace isolation（PR3）
+### 4.3 workspace 隔离（PR3）
 
 #### 配置
 
@@ -182,8 +210,10 @@ resolver 契约本来就允许这样做，因为 scope 变化本就要求新的 
    3. 有条件地清除原 storage holder；
    4. 记录 `RELEASED`。
 
-   按 Harness Session 枚举需要在 `ma_runtime_session` 上新增 `(tenant_id, harness_session_id)`
-   索引，以 `V4` 迁移的形式加入。该 Session 有未结算或 `UNKNOWN` 的执行时，与今天一样阻塞完成。
+   按 Harness Session 枚举需要在 `ma_runtime_session` 上新增索引，以 `V9` 迁移的形式加入。
+   它是单列 `harness_session_id` 索引：两个列都是 VARBINARY(2048)，原先勾勒的
+   `(tenant_id, harness_session_id)` 组合超过 InnoDB 的 3072 字节键长，tenant 改在查询里过滤。
+   该 Session 有未结算或 `UNKNOWN` 的执行时，与今天一样阻塞完成。
    binding 保持 `READY`，供其他 Session 使用。
 
 2. **binding 退役**。即现有的 `drainBinding` 路径：drain、释放剩余 Session、`stopDrained`、
@@ -215,14 +245,30 @@ archive、delete 和 unarchive 继承该 Session 隔离方式所提供的 close 
 
 ### 4.4 Session 创建时 warm（PR4）
 
-绑定 Workspace 的 Session 创建提交后，控制面通过现有 resolver 异步调用现有的
-`warm(sessionId)`。它只做放置：从不 acquire Runtime Session、不安装 context、不执行任何操作，
-所以 actor 授权仍像今天一样在 acquire 时检查。
+`session-create-warm=true` 时，绑定 Workspace 的 Session 以不带输入的方式创建并提交后，
+控制面通过现有 resolver 异步调用现有的 `warm(sessionId)`。与 Turn 时的 warm 一样，Runtime
+Broker 未开启或 Workspace files 不可用时跳过。它只做放置：从不 acquire Runtime Session、
+不安装 context、不执行任何操作。resolver 像 Turn 时的 warm 一样对该 Session 做授权，
+actor 授权仍在 acquire 时检查。
 
-- 在 session isolation 下，它会在第一个 Turn 之前启动该 Session 的 worker。
-- 在 workspace isolation 下，如果该 storage 的 binding 已经 `READY`，它什么都不做。
-
-此时还没有 Turn，所以不发公开事件。Turn 时的 warm 及其 `environment.*` 事件保持不变。
+- **只在 workspace 隔离下生效**。该配置要求 `bound-session-isolation-class=workspace`
+  且未配置 SSH 节点，因为 SSH 绑定的 Session 总是解析出 session 隔离的 scope；其他组合
+  启动即失败。storage 上还没有存活的 binding 时，warm 会启动共享 worker；binding
+  已经 `READY` 时，它只确认 worker，不启动任何进程。如果在 session 隔离下创建时 warm，会：
+  - 让每个创建出来的 Session 各占一个 worker，直到该 Session 关闭，包括从未跑过 Turn 的
+    Session，因为持久模式下 `release` 什么都不做，空闲回收也已推后；
+  - 建出一个以该 Session 为 key 的 session 隔离 binding。这会让该 Session 失去 v2 的
+    never-initialized 回执，于是关闭一个从未使用的 Session 需要 Harness settle，
+    而不是由 store 合成回执。
+- **只对不带输入的创建生效**。带输入的创建会立刻 dispatch 第一个 Turn，该 Turn 的 warm
+  本来就与模型推理并行进行。Web Shell 的空 Session 创建和 channel 建路由时的创建都不带输入。
+- **不在请求线程上执行**。resolver 和 `findOrCreate` 会在调用方线程上同步执行数据库和文件系统
+  检查，所以这次调用投递到执行 Turn 时 warm 的同一个 dispatch executor 上。
+- **失败**。warm 失败只记日志，从不让创建失败。没有任何机制重试它；第一个 Turn 会再次 warm。
+  此时还没有 Turn，所以不发公开事件。Turn 时的 warm 及其 `environment.*` 事件保持不变。
+- **close 不变**。warm 不写 `ma_runtime_session` 行，也不建 session 隔离的 binding，所以
+  从未跑过 Turn 的 Session 仍以 never-initialized 回执关闭。与 close 并发的 warm 最多只会启动
+  或确认其他 Session 也在用的共享 worker。
 
 ### 4.5 推后：空闲回收与 generation 预算
 
@@ -246,12 +292,12 @@ archive、delete 和 unarchive 继承该 Session 隔离方式所提供的 close 
 
 ### 4.6 配置汇总
 
-所有配置项均为提案，所有行为变化默认关闭。
+所有行为变化默认关闭。
 
-| 配置项（`qwen.managed-agent.runtime-broker.`）                                     | 默认值    | 切片 |
-| ---------------------------------------------------------------------------------- | --------- | ---- |
-| 绑定 Workspace 的 Session 的隔离（名称在 PR3 确定；与全局 `isolation-class` 分开） | `session` | PR3  |
-| `session-create-warm`                                                              | `false`   | PR4  |
+| 配置项（`qwen.managed-agent.runtime-broker.`）                                              | 默认值    | 切片 |
+| ------------------------------------------------------------------------------------------- | --------- | ---- |
+| `bound-session-isolation-class`（仅绑定 Workspace 的 Session；全局 `isolation-class` 不变） | `session` | PR3  |
+| `session-create-warm`（要求 `bound-session-isolation-class=workspace` 且未配置 SSH 节点）   | `false`   | PR4  |
 
 时长遵循现有的单位规则，必须写后缀。
 
@@ -270,17 +316,18 @@ archive、delete 和 unarchive 继承该 Session 隔离方式所提供的 close 
 | 第一次交付接受 worker 按 turn 的增长                                       | 每条都很小，退役该 storage 的 binding 即可重置。                                                                 | 先交付预算：它依赖被推后的退役机制。                                                          |
 | 排除 child Workspaces                                                      | 它们的 merge 需要已关闭的 child 停止自己的 worker，relay 也按 child 自己的 binding 定位它。                      | 在本工作中一并泛化 child close：那是另一项设计。                                              |
 | 推后 keep-warm                                                             | Session 创建时 warm 已解决用户可见的冷启动；keep-warm 需要测量数据。                                             | 现在交付 keep-warm：在测量数据就绪之前增加常驻成本。                                          |
+| Session 创建时 warm 只在 workspace 隔离下做                                | 每个 storage 最多启动一个 worker，且 close 不变。                                                                | session 隔离下也做：每个未用的 Session 常驻一个 worker，其关闭失去 never-initialized 回执。   |
 
 ## 6. 交付切片
 
-| PR   | 范围                                                      | 依赖     | 行为变化   |
-| ---- | --------------------------------------------------------- | -------- | ---------- |
-| PR0  | 中英文设计文档（#14214）                                  | —        | 无         |
-| PR1  | Kind 身份与隔离策略（4.1，#14254）                        | —        | 无         |
-| PR2  | 共享 binding 上的 Harness 归属（4.2）                     | PR1      | 无         |
-| PR3  | 绑定 Workspace 的 Session 使用 workspace isolation（4.3） | PR2      | 需显式开启 |
-| PR4  | Session 创建时 warm（4.4）                                | —        | 需显式开启 |
-| 之后 | 空闲回收与 generation 预算（4.5）、keep-warm              | 测量数据 | 需显式开启 |
+| PR   | 范围                                                                                                                | 依赖     | 行为变化   |
+| ---- | ------------------------------------------------------------------------------------------------------------------- | -------- | ---------- |
+| PR0  | 中英文设计文档（#14214）                                                                                            | —        | 无         |
+| PR1  | Kind 身份与隔离策略（4.1，#14254）                                                                                  | —        | 无         |
+| PR2  | 共享 binding 上的 Harness 归属（4.2）                                                                               | PR1      | 无         |
+| PR3  | 绑定 Workspace 的 Session 使用 workspace isolation（4.3，[#14435](https://github.com/QwenLM/qwen-code/pull/14435)） | PR2      | 需显式开启 |
+| PR4  | Session 创建时 warm（4.4）                                                                                          | —        | 需显式开启 |
+| 之后 | 空闲回收与 generation 预算（4.5）、keep-warm                                                                        | 测量数据 | 需显式开启 |
 
 PR3 如果超过约 1000 行生产代码，就拆成"provisioning 与放置"和"close 拆分与证据"两部分。
 每个切片都要同时更新本文档的中英文版本。由于 `sdk-java.yml` 不在 pull request 上运行，
@@ -329,7 +376,10 @@ PR3 如果超过约 1000 行生产代码，就拆成"provisioning 与放置"和"
   - server 测试覆盖共享 binding 上的 transport context 校验和人工恢复；
   - 关掉判定后，每个新测试都会失败；
   - 现有测试保持通过。
-- **PR3**：在 Linux 上用持久 local worker 和 MySQL 做真实进程测试：
+- **PR3**（已落地）：单元/H2 套件钉住共享 binding 上的 close 拆分（两个 close 协议）、
+  cleanup 认领 fence、丢失共享 worker 的失败关闭分支、never-initialized 失败开放修复、
+  配置闸门与 resolver 切换；每个新分支在定向变异下都会失败。下面的真实进程场景
+  （Linux、持久 local worker、MySQL）留作后续，在 #14211 跟踪：
   - 两个 Session 共享同一个 binding ID、generation 和 worker PID；
   - 同一 storage 上的 turn 以 `workspace_busy` 串行；
   - 关闭 A 之后 B 的下一个 Turn 仍在同一个 worker 上；
@@ -338,8 +388,12 @@ PR3 如果超过约 1000 行生产代码，就拆成"provisioning 与放置"和"
   - storage 退役带 drain 回执停掉共享 worker；
   - session isolation 的 close 行为不变；
   - unbound Session 保持原有隔离。
-- **PR4**：Session 创建时 warm 在第一次工具调用之前达到 `READY`，
-  对已经 `READY` 的 Workspace binding 不做任何事。
+- **PR4**：单元测试钉住配置闸门（要求 workspace 隔离且未配置 SSH 节点）、warm 的闸门
+  （配置开启、Runtime warmer 已启用、Workspace files 可用）、投递到 dispatch executor、
+  只有不带输入的创建才 warm，以及 warm 失败既不让创建失败也不发事件；每一项在定向变异下
+  都会失败。真实进程场景并入 #14211 中 PR3 的后续：
+  - 空 Session 的共享 worker 在第一次工具调用之前达到 `READY`；
+  - 同一 storage 上的第二个空 Session 不启动任何进程。
 - **全部**：build、typecheck、bundle、一次 dispatch 的 `SDK Java` 运行，以及连续两遍干净的全 diff 自审。
 
 ## 10. 验收标准
@@ -368,10 +422,13 @@ PR3 如果超过约 1000 行生产代码，就拆成"provisioning 与放置"和"
 ## 12. 待确认问题
 
 1. 用哪些测量数据来判断 worker 按 turn 的增长何时需要 generation 预算？
-2. 绑定 Workspace 的 Session 的隔离配置项叫什么名字？是否需要按 Workspace 覆盖？
 
 已解决：
+
+- 绑定 Workspace 的 Session 的隔离配置项：`bound-session-isolation-class`（PR3）；
+  本次交付不提供按 Workspace 覆盖。
 
 - workspace 隔离下的 close 证据：原 worker 的 activation release 确认加上 holder 释放（维护者，2026-10-16）。
 - 空闲回收与 generation 预算：推后（维护者，2026-10-16）。
 - 预热：只做 Session 创建时 warm；keep-warm 推后。
+- Session 创建时 warm 的范围：只在 workspace 隔离下、只对不带输入的创建（PR4）。

@@ -694,4 +694,46 @@ describe('workspace actions', () => {
       'Open directory picker failed: DaemonClient is not connected',
     );
   });
+
+  it('forwards workspace directory operations to the selected workspace', async () => {
+    const directories = vi.fn().mockResolvedValue({
+      v: 1,
+      primaryDirectory: '/ws',
+      directories: [],
+    });
+    const addDirectory = vi.fn().mockResolvedValue({
+      v: 1,
+      primaryDirectory: '/ws',
+      directories: ['/extra'],
+      changed: true,
+      warnings: [],
+    });
+    const removeDirectory = vi.fn().mockResolvedValue({
+      v: 1,
+      primaryDirectory: '/ws',
+      directories: [],
+      changed: true,
+      warnings: [],
+    });
+    const workspaceByCwd = vi.fn(() => ({
+      directories,
+      addDirectory,
+      removeDirectory,
+    }));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ workspaceByCwd }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    await actions.listWorkspaceDirectories('/ws');
+    await actions.addWorkspaceDirectory('/ws', '/extra');
+    await actions.removeWorkspaceDirectory('/ws', '/extra');
+
+    expect(workspaceByCwd).toHaveBeenCalledTimes(3);
+    expect(workspaceByCwd).toHaveBeenCalledWith('/ws');
+    expect(directories).toHaveBeenCalledOnce();
+    expect(addDirectory).toHaveBeenCalledWith('/extra');
+    expect(removeDirectory).toHaveBeenCalledWith('/extra');
+  });
 });

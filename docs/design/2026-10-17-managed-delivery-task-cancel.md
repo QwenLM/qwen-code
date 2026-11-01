@@ -2,7 +2,7 @@
 
 [English](2026-10-17-managed-delivery-task-cancel.md) | [简体中文](2026-10-17-managed-delivery-task-cancel.zh-CN.md)
 
-Status: implemented in this change. A channel delivery projects as a task of its route Session (kind `channel_delivery`), and the public task cancel serves it while no adapter has claimed it. The contract names the kind in `1.57.0` (main is at `1.56.0`: the child-Session-link slice took `1.55.0` and #14405 took `1.56.0`; renumber at merge if another pull request takes `1.57.0` first). There are no new routes, operation types or failure codes. The change builds on [H4f-c](2026-10-17-managed-h3-task-cancel.md) (merged), whose cancellable-kind rule and delivery switch it shares.
+Status: implemented in this change. A channel delivery projects as a task of its route Session (kind `channel_delivery`), and the public task cancel serves it while no adapter has claimed it. The contract names the kind in `1.57.0`. There are no new routes, operation types or failure codes. The change builds on [H4f-c](2026-10-17-managed-h3-task-cancel.md) (merged), whose cancellable-kind rule and delivery switch it shares.
 
 This is F3 of [#13746](https://github.com/QwenLM/qwen-code/issues/13746), "the H5 half": one cancellation path serves both a child task and a channel delivery, and neither grows its own vocabulary. It belongs to stage H of [#12380](https://github.com/QwenLM/qwen-code/issues/12380) under [#12827](https://github.com/QwenLM/qwen-code/issues/12827). It replaces decision 10 of the [H4f note](2026-10-10-managed-task-cancel.md), which kept deliveries out of the task model and left their cancel to H5's public mutation routes. The issue's own framing settles that question: channel deliveries are tasks with a delivery line.
 
@@ -93,7 +93,9 @@ Checked at H4f-c on `b4614845f0` (contract `1.54.0`):
 - **Delivery** (`TaskCancelCoordinatorTest`):
   - a pending delivery takes `cancel_delivery` through the channel route, never the child operation route, and completes from the flag;
   - a delivery claimed meanwhile completes with the flag recorded;
-  - a delivered one without the flag fails `task_already_settled` with no send.
+  - a delivered one without the flag fails `task_already_settled` with no send;
+  - a route the Workspace authority refuses retries, parks after its budget and is never sent again; the parked cancel fails `task_already_settled` once the delivery is sent without the flag.
+- **Connector** (`QwenHostedHarnessConnectorTest`): `cancel_delivery` takes the channel route's Workspace check on a cached attachment, as `submit_input` does, and nothing is forwarded while it fails.
 - **Real stack** (FG7d, `HostedChannelFaultGatesIT`, MySQL 8.4, packaged Harness, the email reference adapter):
   - `task-cancel-planned`: the route Session's task list shows the planned delivery as a `pending` task with `cancel`. The public cancel answers `202`, the operation completes and its key replays, and the task reads `cancelled`. The outbox pull reaches the control plane and sends nothing, and the ledger stays empty.
   - `task-cancel-claimed`: while the adapter's send is parked, the task reads `running` with no action, and a public cancel answers `409 task_action_unavailable`. Released, the delivery is sent once and the task reads `completed`.
@@ -104,13 +106,14 @@ Checked at H4f-c on `b4614845f0` (contract `1.54.0`):
 
 - **More rows in a route Session's task list.** Every reply of a channel Session is now one task there, and every revision is one task event. The journal's bounds and retention floor apply unchanged.
 - **The race is visible.** A cancel whose admission saw `pending` can complete while the reply still goes out, if an adapter claimed it first. The operation's `completed` is the recorded request, and the task's `completed` is the physical outcome, as the contract keeps them apart.
+- **A creator without the execution grant parks the cancel.** The channel operation route re-runs the route Session's Workspace execution authority on every operation, a cached attachment included (`QwenHostedHarnessConnector.runChannelOperation`), and `cancel_delivery` takes it like `submit_input`. While the creator lacks the grant, a delivery cancel sends nothing, retries on the budget and parks `recovery_blocked`. A parked cancel is never sent again ([H4f decision 5](2026-10-10-managed-task-cancel.md)). Once the grant returns, a new cancel can still stop a delivery that is still pending, since a parked one is not open; but an adapter may claim and send it first, and the parked cancel then fails `task_already_settled`. This is the H4f limitation for a creator who lost the grant, scoped to this route: a child task's cancel takes the child operation route, which runs no Workspace check of its own on a cached attachment.
 - **Legacy rows.** Deliveries planned before the upgrade are not tasks (decision 2).
 - **Rollback floor.** A server older than this change writes a null task state on every revision of a row it does not know projects a task. Rolled back, it would keep listing the delivery tasks inserted meanwhile (their kind is stored), with a null state and a kind its contract does not name. Roll back below this change only after those Sessions are closed, or accept such rows reading wrong until they are.
 
 ## Follow-up work
 
-| Item           | Scope                                                                                                                                           |
-| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| Public resend  | A resend of an `unknown` or `rejected` delivery is still a trusted-adapter verb; a public one needs its own contract work (H5 open question 4). |
-| WebShell panel | List delivery tasks and admit their cancel.                                                                                                     |
-| Partial stop   | Stopping the remaining segments of a `partial` delivery needs a record contract change; no adapter produces one today.                          |
+| Item           | Scope                                                                                                                                                             |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Public resend  | A resend of an `unknown` or `rejected` delivery is still a trusted-adapter verb; a public one needs its own contract work (H5 open question 4).                   |
+| WebShell panel | **Delivered by #14415:** the panel lists every kind under its label and admits cancel by `actionCapabilities` alone, so a pending delivery shows with its cancel. |
+| Partial stop   | Stopping the remaining segments of a `partial` delivery needs a record contract change; no adapter produces one today.                                            |

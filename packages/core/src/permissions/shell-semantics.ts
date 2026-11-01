@@ -101,6 +101,10 @@ interface ShellWord {
  *
  * The input should be a single simple command (already split from compound
  * commands via `splitCompoundCommand`).
+ *
+ * Quote removal hides whether a character was typed bare: `>&1` duplicates
+ * a file descriptor, but `>"&1"` and `>\&1` write a file named `&1`. Each
+ * word therefore keeps how every character was quoted.
  */
 function tokenizeCommand(command: string): ShellWord[] {
   const words: ShellWord[] = [];
@@ -2568,8 +2572,12 @@ function hasAbsolutePathTokenForOperation(
   filePath: string,
 ): boolean {
   for (const token of tokenize(command)) {
+    // `[12]?>&` and `<&` come before `1>`, `>` and `<`, or those would match
+    // first and leave `&/abs/path`. A quoted `&` (`>"&"/tmp/x` writes the
+    // relative `&/tmp/x`) can't match by mistake: the resolved path must
+    // equal the operation's path.
     const redirectTarget = token.match(
-      /^(?:1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/,
+      /^(?:1>>|[12]?>&|<&|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/,
     )?.[1];
     const candidate = redirectTarget ?? token;
     if (

@@ -8,6 +8,7 @@ import { createServer, type Server } from 'node:http';
 import { afterEach, expect, it, vi } from 'vitest';
 import {
   HostedWorkspaceBroker,
+  HostedWorkspaceBrokerExecutionUnresolved,
   HostedWorkspaceBrokerRejection,
 } from './hosted-workspace-broker.js';
 import { hostedRuntimeSessionId } from './hosted-workspace-tool-turn.js';
@@ -27,6 +28,109 @@ const identity = {
   harnessSessionId: 'session',
   runtimeSessionId: 'turn',
 };
+
+it('resolves and pins Harness capability once without acquiring or warming a Runtime', async () => {
+  const requests: string[] = [];
+  const broker = await fixture((path, body) => {
+    requests.push(path);
+    expect(body['runtimeSessionId']).toBeUndefined();
+    return {
+      body: {
+        protocolVersion: 1,
+        harnessSessionId: 'session',
+        scope: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          workspaceGeneration: '1',
+          capabilityDigest: RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+          isolationClass: 'workspace',
+        },
+      },
+    };
+  });
+  await Promise.all([
+    broker.resolveCapabilities(),
+    broker.resolveCapabilities(),
+  ]);
+  expect(broker.capabilityDigest).toBe(RESIDENT_WORKSPACE_CAPABILITY_DIGEST);
+  expect(requests).toEqual([
+    '/internal/runtime-broker/v1/runtimes:capabilities',
+  ]);
+  expect(broker.acquired).toBe(false);
+  expect(broker.runtime).toBeUndefined();
+});
+
+it.each(['http503', 'connection-drop', 'scope-mismatch'])(
+  'retries capability resolution after %s while sharing concurrent reads',
+  async (failure) => {
+    let requests = 0;
+    const broker = await fixture(() => {
+      requests++;
+      if (requests === 1 && failure === 'http503')
+        return { code: 503, body: { error: 'unavailable' } };
+      if (requests === 1 && failure === 'connection-drop')
+        return { drop: true };
+      return {
+        body: {
+          protocolVersion: 1,
+          harnessSessionId: 'session',
+          scope: {
+            tenantId:
+              requests === 1 && failure === 'scope-mismatch'
+                ? 'foreign'
+                : 'tenant',
+            workspaceId: 'workspace',
+            workspaceGeneration: '1',
+            capabilityDigest: RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+            isolationClass: 'workspace',
+          },
+        },
+      };
+    });
+    const failed = await Promise.allSettled([
+      broker.resolveCapabilities(),
+      broker.resolveCapabilities(),
+    ]);
+    expect(failed.map((result) => result.status)).toEqual([
+      'rejected',
+      'rejected',
+    ]);
+    expect(requests).toBe(1);
+    expect(() => broker.capabilityDigest).toThrow('unavailable');
+    await Promise.all([
+      broker.resolveCapabilities(),
+      broker.resolveCapabilities(),
+    ]);
+    await broker.resolveCapabilities();
+    expect(requests).toBe(2);
+    expect(broker.capabilityDigest).toBe(RESIDENT_WORKSPACE_CAPABILITY_DIGEST);
+    expect(broker.runtime).toBeUndefined();
+    expect(broker.acquired).toBe(false);
+  },
+);
+
+it.each(['tenantId', 'workspaceId', 'capabilityDigest', 'isolationClass'])(
+  'refuses a mismatched %s in Harness capability resolution',
+  async (field) => {
+    const broker = await fixture(() => ({
+      body: {
+        protocolVersion: 1,
+        harnessSessionId: 'session',
+        scope: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          workspaceGeneration: '1',
+          capabilityDigest: RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+          isolationClass: 'workspace',
+          [field]: 'wrong',
+        },
+      },
+    }));
+    await expect(broker.resolveCapabilities()).rejects.toThrow('scope');
+    expect(() => broker.capabilityDigest).toThrow('unavailable');
+    expect(broker.runtime).toBeUndefined();
+  },
+);
 async function fixture(
   handler: (
     path: string,
@@ -80,6 +184,21 @@ it.each([false, true])(
       cleanupGeneration: '7',
     });
     expect(requests[0]['drain']).toBe(drain ? true : undefined);
+  },
+);
+
+it.each([false, true])(
+  'carries the drain marker without a cleanup fence (drain=%s)',
+  async (drain) => {
+    const requests: Array<Record<string, unknown>> = [];
+    const broker = await fixture((_path, body) => {
+      requests.push(body);
+      return { body: { ...identity, released: true } };
+    });
+    await broker.release(drain ? { drain: true } : undefined);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]['drain']).toBe(drain ? true : undefined);
+    expect('cleanupBindingId' in requests[0]).toBe(false);
   },
 );
 
@@ -528,6 +647,128 @@ it('queries the original identity when start reports an unknown execution', asyn
   ]);
 });
 
+it('reconciles an unknown recovery read once and reports the settled result', async () => {
+  const paths: string[] = [];
+  const queries: Array<Record<string, unknown>> = [];
+  const broker = await fixture((path, fields) => {
+    paths.push(path);
+    if (path.endsWith(':start'))
+      return { code: 409, body: { code: 'runtime_broker_execution_unknown' } };
+    if (fields['reconcile'] !== 'true') {
+      queries.push(fields);
+      return { code: 409, body: { code: 'runtime_broker_execution_unknown' } };
+    }
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'execution',
+        status: {
+          state: 'settled',
+          result: { executionStatus: 'success', responseParts: [] },
+        },
+      },
+    };
+  });
+  await expect(
+    broker.execute(
+      'execution',
+      '{}',
+      new AbortController().signal,
+      undefined,
+      false,
+      true,
+    ),
+  ).resolves.toMatchObject({ executionStatus: 'success' });
+  expect(queries).toHaveLength(1);
+  expect(paths).toEqual([
+    '/internal/runtime-broker/v1/executions/execution:start',
+    '/internal/runtime-broker/v1/executions/execution',
+    '/internal/runtime-broker/v1/executions/execution',
+  ]);
+});
+
+it.each([{ state: 'executing' }, { state: 'unknown' }])(
+  'parks a recovery read reconciliation cannot settle (%o)',
+  async (observation) => {
+    const broker = await fixture((path, fields) => {
+      if (path.endsWith(':start'))
+        return {
+          code: 409,
+          body: { code: 'runtime_broker_execution_unknown' },
+        };
+      if (fields['reconcile'] !== 'true')
+        return {
+          code: 409,
+          body: { code: 'runtime_broker_execution_unknown' },
+        };
+      return {
+        body: {
+          ...identity,
+          executionCallId: 'execution',
+          status: observation,
+        },
+      };
+    });
+    await expect(
+      broker.execute(
+        'execution',
+        '{}',
+        new AbortController().signal,
+        undefined,
+        false,
+        true,
+      ),
+    ).rejects.toThrow(HostedWorkspaceBrokerExecutionUnresolved);
+  },
+);
+
+it('keeps the terminal fence when reconciliation reports the record abandoned', async () => {
+  const broker = await fixture((path, fields) => {
+    if (path.endsWith(':start') || fields['reconcile'] !== 'true')
+      return { code: 409, body: { code: 'runtime_broker_execution_unknown' } };
+    return {
+      code: 409,
+      body: {
+        code: 'runtime_broker_execution_unknown',
+        details: { terminal: true },
+      },
+    };
+  });
+  await expect(
+    broker.execute(
+      'execution',
+      '{}',
+      new AbortController().signal,
+      undefined,
+      false,
+      true,
+    ),
+  ).rejects.toMatchObject({
+    status: 409,
+    code: 'runtime_broker_execution_unknown',
+    details: { terminal: true },
+  });
+});
+
+it('asks for reconciliation only on a recovery status read', async () => {
+  const queries: Array<Record<string, unknown>> = [];
+  const broker = await fixture((_path, fields) => {
+    queries.push(fields);
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'execution',
+        status: { state: 'executing' },
+      },
+    };
+  });
+  await broker.status('execution');
+  await broker.status('execution', { reconcile: true });
+  expect(queries).toHaveLength(2);
+  expect(queries[0]?.['reconcile']).toBeUndefined();
+  expect(queries[1]?.['reconcile']).toBe('true');
+});
+
 it('observes a late original result after unknown cancellation without starting again', async () => {
   const paths: string[] = [];
   const queries: Array<Record<string, unknown>> = [];
@@ -903,6 +1144,7 @@ it('resolves a durable execution status for recovery reports', async () => {
   }));
   await expect(broker.status('execution')).resolves.toEqual({
     state: 'settled',
+    executionStatus: 'success',
   });
 });
 
@@ -1105,4 +1347,67 @@ it('owns the :process ledger key behind a plain execution id', async () => {
   await expect(unsuffixed.backgroundProcessStatus('call-1')).rejects.toThrow(
     'Runtime execution identity changed.',
   );
+});
+
+it('reserves a replayable execution afresh, or reads the terminal one back', async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  let settled = false;
+  const broker = await fixture((path, body) => {
+    expect(path).toBe('/internal/runtime-broker/v1/executions:prepare');
+    requests.push(body);
+    return {
+      body: {
+        ...identity,
+        executionCallId: 'gate-execution',
+        status: settled
+          ? {
+              state: 'settled',
+              result: {
+                executionStatus: 'success',
+                responseParts: [{ text: '{"kind":"quiet","durationMs":3}' }],
+              },
+            }
+          : { state: 'prepared' },
+      },
+    };
+  });
+  await expect(
+    broker.prepareReplayable('run:gate', 'sha256:digest'),
+  ).resolves.toEqual({ executionCallId: 'gate-execution' });
+  // Every part of the reservation is derived, so a retry sends the same.
+  expect(requests[0]).toMatchObject({
+    idempotencyKey: 'turn:run:gate',
+    turnId: 'turn',
+    toolCallId: 'run:gate',
+    requestDigest: 'sha256:digest',
+    reference: {
+      sessionId: 'turn',
+      promptId: 'turn',
+      callId: 'run:gate',
+      argsDigest: 'sha256:digest',
+    },
+  });
+  settled = true;
+  await expect(
+    broker.prepareReplayable('run:gate', 'sha256:digest'),
+  ).resolves.toEqual({
+    executionCallId: 'gate-execution',
+    settled: {
+      executionStatus: 'success',
+      responseParts: [{ text: '{"kind":"quiet","durationMs":3}' }],
+    },
+  });
+});
+
+it('refuses a replayable reservation the Broker answers mid-flight', async () => {
+  const broker = await fixture(() => ({
+    body: {
+      ...identity,
+      executionCallId: 'gate-execution',
+      status: { state: 'executing' },
+    },
+  }));
+  await expect(
+    broker.prepareReplayable('run:gate', 'sha256:digest'),
+  ).rejects.toThrow(/neither fresh nor settled/);
 });

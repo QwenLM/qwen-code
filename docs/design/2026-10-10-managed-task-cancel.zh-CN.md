@@ -222,7 +222,7 @@
 - **未运行：**
   - 所有者消失后的取消；
   - "已铸造但没有 Turn"的窗口：真实栈上 child 创建被拒后仍会生成一个 Turn，所以只有单元测试能覆盖到它。
-- **与中继共享、本次未改：** 投递经由 child 结果中继所用的同一个 Hosted 挂接到达父会话。凡是阻断这条路径的情况（父会话的创建者失去了执行所需的 Workspace 授权，或该 Session 仍被另一个进程挂接），都会以同样方式阻断中继自己的提交，此时取消在预算用尽后停放。
+- **与中继共享、本次未改：** 投递经由 child 结果中继所用的同一个 Hosted 挂接到达父会话。凡是阻断这条路径的情况（父会话的创建者失去了执行所需的 Workspace 授权，或该 Session 仍被另一个进程挂接），都会以同样方式阻断中继自己的提交，此时取消在预算用尽后停放。在已缓存的挂接上，child operation 路由不做自己的 Workspace 检查；投递的取消走 channel 路由，它在每次操作时都重新检查，所以对投递而言，无论缓存里有什么，停放都适用（[F3](2026-10-17-managed-delivery-task-cancel.zh-CN.md)）。
 
 ## 后续工作
 
@@ -235,4 +235,4 @@
 | WebShell         | 任务面板（#13936）及其客户端方法已为 `child_agent` 任务落地。**它现在列出所有任务类型，并在任务公布取消时提供取消（[面板文档](2026-10-12-managed-child-task-panel.zh-CN.md)）。**                                                                                                                         |
 | F 阶段           | 真实栈轮次剩下的时序：所有者消失后的取消。                                                                                                                                                                                                                                                                |
 | 关闭时停止 child | relay 的停止分支会跳过已不是 `ACTIVE` 的父会话，而关闭级联曾等每个 child 的 Turn 自己结束（H4b），所以取消后紧接着被接纳的关闭会让 child 继续运行。**已由 [#13875](2026-10-14-managed-close-stops-child-turn.zh-CN.md) 交付：级联自己取消每个 child 的活跃 Turn（方案 B），关闭不再等待 Turn 自然结束。** |
-| Hosted 流空闲    | Hosted Harness 的事件流不发心跳，Java 客户端分不清半开的流和安静的流。目前只有关闭能结束这样的读；要设空闲上限，得先让 Harness 发心跳。                                                                                                                                                                   |
+| Hosted 流空闲    | **已由 [#14135](2026-10-18-hosted-event-stream-liveness.zh-CN.md) 交付：** Harness 每 15 秒发一次 keepalive，并以 `event-keepalive/1` 声明。对这样的 Harness，Java 客户端在读取静默 45 秒后以 `HostedHarnessStreamIdleException` 结束这次读，Turn 经由现有的重新挂接重试。                                |

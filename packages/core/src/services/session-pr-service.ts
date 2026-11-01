@@ -47,7 +47,7 @@ export type SessionPrState = 'open' | 'merged' | 'closed';
 /**
  * Why a binding exists. The worktree slug/branch convention names the PR the
  * session EXISTS FOR; a gh-verified create names the PR the session CREATED;
- * a `/review` command names a PR it merely looked at.
+ * a `/review` or `/verify-pr` command names a PR it merely looked at.
  */
 export type SessionPrSource = 'create' | 'worktree' | 'review';
 

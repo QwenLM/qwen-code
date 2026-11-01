@@ -756,26 +756,13 @@ fn spawn_driver(label: &str) -> McpDriver {
     #[cfg(target_os = "macos")]
     let driver = McpDriver::spawn_macos_daemon_proxy_named(label);
     #[cfg(target_os = "linux")]
-    let driver = if std::env::var("CUA_E2E_WAYLAND_SESSION").as_deref() == Ok("generic") {
-        // Keep Sway IPC available to the out-of-band test oracle while the
-        // product under test sees only standard/generic Wayland capabilities.
-        McpDriver::spawn_named_with_env(
-            label,
-            &[
-                ("SWAYSOCK", "/dev/null/cua-e2e-withheld"),
-                ("CUA_DRIVER_PERMISSION_MODE", "unrestricted"),
-                ("CUA_DRIVER_DANGEROUSLY_BYPASS_APPROVALS", "1"),
-            ],
-        )
-    } else {
-        McpDriver::spawn_named_with_env(
-            label,
-            &[
-                ("CUA_DRIVER_PERMISSION_MODE", "unrestricted"),
-                ("CUA_DRIVER_DANGEROUSLY_BYPASS_APPROVALS", "1"),
-            ],
-        )
-    };
+    let driver = McpDriver::spawn_named_with_env(
+        label,
+        &[
+            ("CUA_DRIVER_PERMISSION_MODE", "unrestricted"),
+            ("CUA_DRIVER_DANGEROUSLY_BYPASS_APPROVALS", "1"),
+        ],
+    );
     #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
     let driver = McpDriver::spawn_named_with_env(
         label,
@@ -802,12 +789,7 @@ fn spawn_standard_driver(label: &str) -> McpDriver {
 #[cfg(target_os = "linux")]
 fn configure_linux_browser_command(command: &mut Command) {
     command.arg("--password-store=basic");
-    let native_wayland = std::env::var("XDG_SESSION_TYPE")
-        .is_ok_and(|session| session.eq_ignore_ascii_case("wayland"))
-        && std::env::var_os("WAYLAND_DISPLAY").is_some();
-    if native_wayland {
-        command.arg("--ozone-platform=wayland");
-    }
+    command.arg("--ozone-platform=x11");
 }
 
 fn configure_test_browser_sandbox(command: &mut Command) {
@@ -1432,11 +1414,7 @@ fn case(browser: &str, action: &str) -> CaseSpec {
         OracleKind::ZOrder,
         OracleKind::NoLeakedInput,
     ];
-    if cua_driver_testkit::e2e::DisplayServer::current()
-        != cua_driver_testkit::e2e::DisplayServer::Wayland
-    {
-        oracles.push(OracleKind::Cursor);
-    }
+    oracles.push(OracleKind::Cursor);
     CaseSpec::delivered(
         format!("{}-{browser}-standalone-{action}", std::env::consts::OS),
         browser,
@@ -2732,111 +2710,6 @@ fn run_existing_profile_setup(spec: &BrowserSpec) {
                 );
                 Observation::delivered(vec![OracleKind::FixtureState], Evidence::default())
             })
-        },
-    );
-}
-
-#[cfg(target_os = "linux")]
-fn run_generic_wayland_existing_profile_refusal(spec: &BrowserSpec) {
-    assert!(
-        std::env::var_os("WAYLAND_DISPLAY").is_some()
-            && std::env::var("CUA_E2E_WAYLAND_SESSION").as_deref() == Ok("generic"),
-        "the generic-Wayland refusal row requires its explicit native-Wayland lane"
-    );
-    assert!(
-        platform_linux::wayland::shell_helper::trusted_window_ids_for_pid(std::process::id())
-            .is_none(),
-        "the generic-Wayland refusal row requires the attested GNOME helper to be unavailable"
-    );
-    let scenario = format!(
-        "{}-{}-standalone-generic-wayland-existing-profile-refusal",
-        std::env::consts::OS,
-        spec.name
-    );
-    execute_case(
-        refusal_case(
-            &spec.name,
-            "browser_prepare_existing_profile_generic_wayland",
-            RefusalCode::BrowserRouteUnavailable,
-        ),
-        |evidence| {
-            let mut driver = spawn_driver(&scenario);
-            let server = BrowserFixtureServer::start(&standalone_fixture_html());
-            let profile = tempfile::Builder::new()
-                .prefix("cua-e2e-generic-wayland-browser-")
-                .tempdir()
-                .expect("create generic Wayland browser profile");
-            let mut command = command_for_unprepared_browser(
-                spec,
-                profile.path(),
-                server.page_url(),
-                TEST_BROWSER_INITIAL_POSITION,
-            );
-            let child = spawn_in_job(&mut command).expect("launch generic Wayland browser");
-            let pid = child.id();
-            driver.reaper().push(child);
-            driver.reaper().track_pid(pid);
-            wait_for_observed(&server, "WEB_HARNESS_MARKER_v1");
-
-            let windows = driver.call("list_windows", serde_json::json!({"pid": pid}));
-            let opaque_window = windows.structured()["windows"]
-                .as_array()
-                .and_then(|windows| windows.iter().find(|window| window["pid"] == pid))
-                .unwrap_or_else(|| {
-                    panic!(
-                        "generic Wayland did not expose the browser's opaque native window: {}",
-                        windows.raw
-                    )
-                });
-            let opaque_unattested_window_id = opaque_window["window_id"]
-                .as_u64()
-                .expect("opaque generic Wayland window id");
-            assert!(
-                opaque_window["z_index"].is_null(),
-                "generic Wayland must not treat an AT-SPI window as compositor-attested: {}",
-                windows.raw
-            );
-
-            let sentinel = ForegroundSentinel::launch(&mut driver);
-            *evidence = recording_evidence(driver.recording_dir());
-            driver.start_behavior_recording();
-            let (mut observation, passed) = sentinel
-                .observe_desktop(|| {
-                    let session = format!("generic-wayland-refusal-{pid}");
-                    let started =
-                        driver.call("start_session", serde_json::json!({ "session": session }));
-                    assert!(!started.is_error(), "start_session failed: {}", started.raw);
-                    let refused = driver.call(
-                        "browser_prepare",
-                        serde_json::json!({
-                            "pid": pid as i64,
-                            "window_id": opaque_unattested_window_id,
-                            "session": session,
-                            "strategy": {"kind": "existing_profile"},
-                        }),
-                    );
-                    assert_eq!(
-                        refused.structured()["refusal"]["code"],
-                        "browser_route_unavailable",
-                        "{}",
-                        refused.raw
-                    );
-                    assert!(
-                        refused.structured()["refusal"]["detail"]["setup_side_effects"].is_null(),
-                        "generic Wayland must refuse before setup mutation: {}",
-                        refused.raw
-                    );
-                    wait_for_text(&server, "lbl-counter", "counter=0");
-                    Observation::refused(
-                        RefusalCode::BrowserRouteUnavailable,
-                        vec![OracleKind::FixtureState],
-                        refused.text(),
-                        Evidence::default(),
-                    )
-                })
-                .expect("observe generic Wayland refusal desktop effects");
-            observation.passed_oracles.extend(passed);
-            observation
         },
     );
 }
@@ -4664,11 +4537,6 @@ standalone_browser_test!(
 standalone_browser_test!(
     standalone_browser_existing_profile_setup,
     run_existing_profile_setup
-);
-#[cfg(target_os = "linux")]
-standalone_browser_test!(
-    standalone_browser_generic_wayland_existing_profile_refusal,
-    run_generic_wayland_existing_profile_refusal
 );
 standalone_browser_test!(standalone_browser_stale_ref, run_stale_ref);
 standalone_browser_test!(standalone_browser_frames, run_frame_roundtrip);

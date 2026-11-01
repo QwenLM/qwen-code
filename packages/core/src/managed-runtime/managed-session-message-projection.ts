@@ -119,6 +119,17 @@ export class ManagedSessionMessageProjection {
    * (`ChatRecordingService.readActiveTranscriptChain`).
    */
   async project(throughSequence?: number): Promise<ChatRecord[]> {
+    return this.projectRecords(throughSequence, false);
+  }
+
+  async projectModelRecords(throughSequence?: number): Promise<ChatRecord[]> {
+    return this.projectRecords(throughSequence, true);
+  }
+
+  private async projectRecords(
+    throughSequence: number | undefined,
+    includeCompactions: boolean,
+  ): Promise<ChatRecord[]> {
     const records: ChatRecord[] = [];
     const checkpoints = new Map<string, number>();
     let after = 0;
@@ -146,12 +157,17 @@ export class ManagedSessionMessageProjection {
         }
         if (branch !== undefined) {
           records.push(branch);
-        } else if (event.kind === 'message.committed') {
+        } else if (
+          event.kind === 'message.committed' ||
+          (includeCompactions && event.kind === 'context.compacted')
+        ) {
           records.push(
             await readRecordBody(
               this.resources,
-              event.payload['contentRef'],
-              `message.committed event ${event.eventId} contentRef`,
+              event.payload[
+                event.kind === 'context.compacted' ? 'summaryRef' : 'contentRef'
+              ],
+              `${event.kind} event ${event.eventId} body`,
             ),
           );
         }
@@ -192,11 +208,7 @@ export async function readManagedSessionRecords(options: {
   /** Bounds the projection to a frozen snapshot's byte length. */
   readonly maxBytes?: number;
 }): Promise<ChatRecord[]> {
-  const scan = await readManagedSessionLog(
-    options.transcriptPath,
-    options.sessionKey,
-    options.maxBytes,
-  );
+  const scan = await readManagedSessionLog(options);
   const resources = LocalManagedSessionResourceStore.create({
     runtimeBaseDir: options.runtimeBaseDir,
     sessionKey: options.sessionKey,
@@ -221,11 +233,7 @@ export async function readManagedSessionRecordsAndTitle(options: {
   records: ChatRecord[];
   titleInfo: { title?: string; source?: 'auto' | 'manual' };
 }> {
-  const scan = await readManagedSessionLog(
-    options.transcriptPath,
-    options.sessionKey,
-    options.maxBytes,
-  );
+  const scan = await readManagedSessionLog(options);
   const resources = LocalManagedSessionResourceStore.create({
     runtimeBaseDir: options.runtimeBaseDir,
     sessionKey: options.sessionKey,

@@ -12,6 +12,7 @@ import { openManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/ma
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
+import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { LlmPreparedRequest } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import type { Part } from '@google/genai';
 import {
@@ -19,7 +20,10 @@ import {
   HostedWorkspaceBroker,
 } from './hosted-workspace-broker.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
-import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
+import {
+  HOSTED_WORKSPACE_FILE_TOOLS,
+  HostedWorkspaceToolTurn,
+} from './hosted-workspace-tool-turn.js';
 import { HostedApprovalWaiters } from './hosted-tool-approval.js';
 import {
   hasHostedCleanupDebt,
@@ -364,12 +368,23 @@ it.each([undefined, 'already loaded'])(
     try {
       vi.spyOn(f.broker, 'acquire').mockResolvedValue();
       const fetchWorkspaceContext = vi.fn().mockResolvedValue(undefined);
+      const definition = HOSTED_WORKSPACE_FILE_TOOLS.find(
+        (tool) => tool.name === 'read_file',
+      )!;
+      const input = { file_path: 'README.md' };
+      const bytes = Buffer.from(JSON.stringify(input));
+      const call = { callId: 'read-context', name: 'read_file', args: input };
+      const argsDigest = `sha256:${managedToolDigest(input)}`;
+      const definitionRef = await f.session.resources.publish(
+        'managed-tool-definition',
+        Buffer.from(JSON.stringify(definition)),
+      );
       const receiver = {
         session: f.session,
         broker: f.broker,
         warmed: Promise.resolve(),
         promptId: f.promptId,
-        declarations: vi.fn().mockResolvedValue([]),
+        declarations: vi.fn().mockResolvedValue([definition]),
         executeNative: vi.fn().mockResolvedValue([]),
         fetchWorkspaceContext,
         context: { read: () => context, write: vi.fn() },
@@ -381,13 +396,29 @@ it.each([undefined, 'already loaded'])(
           {
             plan: {
               promptId: f.promptId,
-              calls: [],
+              calls: [
+                {
+                  call,
+                  definitionRef,
+                  argsDigest,
+                  runtimeCallId: call.callId,
+                  requestDigest: argsDigest,
+                },
+              ],
               runtime: { runtimeSessionId: f.promptId, ...f.broker.runtime },
               round: 1,
               model: 'fixture',
             },
-            inputs: [],
-            parts: [],
+            inputs: [{ input, bytes, payloadJson: bytes.toString('utf8') }],
+            parts: [
+              {
+                functionCall: {
+                  id: call.callId,
+                  name: call.name,
+                  args: input,
+                },
+              },
+            ],
           },
           0,
           new AbortController().signal,
@@ -470,6 +501,10 @@ it.each([
         'capabilityDigest',
         'get',
       ).mockReturnValue(WORKSPACE_CAPABILITY_DIGEST);
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'resolveCapabilities',
+      ).mockResolvedValue();
       vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
         async function (this: HostedWorkspaceBroker) {
           this.runtime = runtime;
@@ -739,6 +774,45 @@ const prepared: LlmPreparedRequest = {
   promptTokensForClamp: 12,
 };
 
+it('restores a screenshot-sized model request from a cold session owner', async () => {
+  const f = await fixture();
+  const data = Buffer.alloc(5 * 1024 * 1024, 0x61).toString('base64');
+  const content = {
+    role: 'user',
+    parts: [{ inlineData: { mimeType: 'image/png', data } }],
+  };
+  const request = createHostedModelRequest(
+    f.session,
+    f.promptId,
+    {
+      ...prepared,
+      history: [content],
+      request: { ...prepared.request, contents: [content] },
+    },
+    0,
+    false,
+    undefined,
+    { bootId: 'source-boot', eventEpoch: 'source-epoch' },
+  );
+  await new ManagedHookActivationController(f.session).runTurn(
+    f.promptId,
+    async (scope) => {
+      const ref = await publishHostedModelRequest(f.session, request);
+      expect(ref?.byteLength).toBeGreaterThan(8 * 1024 * 1024);
+      await scope.beginMainAttempt('fixture', ref);
+    },
+  );
+  await f.session.close();
+  const replacement = await f.reopen();
+  try {
+    expect(await findHostedModelRequest(replacement, f.promptId)).toEqual(
+      request,
+    );
+  } finally {
+    await replacement.close();
+  }
+});
+
 it.each(
   [false, true].flatMap((finished) =>
     [0, 16].flatMap((round) =>
@@ -759,6 +833,14 @@ it.each(
       {
         ...prepared,
         ...(allowPersistentRetry === undefined ? {} : { allowPersistentRetry }),
+        ...(allowPersistentRetry === undefined
+          ? {}
+          : {
+              contextPrefixLength: allowPersistentRetry ? 5 : 0,
+              history: allowPersistentRetry
+                ? Array.from({ length: 5 }, () => prepared.history[0]!)
+                : prepared.history,
+            }),
       },
       round,
       false,
@@ -794,6 +876,38 @@ it.each(
   },
 );
 
+it.each([-1, 6, 0.5])(
+  'rejects an invalid saved context prefix %s',
+  async (contextPrefixLength) => {
+    const f = await fixture();
+    try {
+      const request = createHostedModelRequest(
+        f.session,
+        f.promptId,
+        { ...prepared, contextPrefixLength },
+        0,
+        false,
+        undefined,
+        { bootId: 'source-boot', eventEpoch: 'source-epoch' },
+      );
+      await new ManagedHookActivationController(f.session).runTurn(
+        f.promptId,
+        async (scope) => {
+          await scope.beginMainAttempt(
+            'fixture',
+            await publishHostedModelRequest(f.session, request),
+          );
+        },
+      );
+      await expect(
+        findHostedModelRequest(f.session, f.promptId),
+      ).rejects.toThrow('Invalid saved model request');
+    } finally {
+      await f.session.close();
+    }
+  },
+);
+
 it('does not reuse an older snapshot after a newer unsupported attempt', async () => {
   const f = await fixture();
   try {
@@ -820,7 +934,7 @@ it('does not reuse an older snapshot after a newer unsupported attempt', async (
     expect(
       await publishHostedModelRequest(f.session, {
         ...request,
-        workspaceContext: 'x'.repeat(64 * 1024),
+        workspaceContext: 'x'.repeat(32 * 1024 * 1024),
       }),
     ).toBeUndefined();
   } finally {

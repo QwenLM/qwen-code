@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { MessageTimestamp, formatTimestamp } from './MessageTimestamp';
+import { I18nProvider } from '../i18n';
+import { TranscriptRenderModeProvider } from '../transcriptRenderMode';
 import styles from './MessageTimestamp.module.css';
 
 (
@@ -22,9 +24,29 @@ function render(node: ReactNode): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
-  act(() => root.render(node));
+  act(() => root.render(<I18nProvider language="en">{node}</I18nProvider>));
   mounted.push({ root, container });
   return container;
+}
+
+function openMenu(container: HTMLElement) {
+  const trigger = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="More message actions"]',
+  );
+  expect(trigger).not.toBeNull();
+  act(() => {
+    trigger!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+    );
+  });
+}
+
+function menuItem(label: string): HTMLElement {
+  const item = [
+    ...document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+  ].find((element) => element.textContent === label);
+  expect(item).toBeDefined();
+  return item!;
 }
 
 describe('formatTimestamp', () => {
@@ -50,6 +72,24 @@ describe('formatTimestamp', () => {
 });
 
 describe('MessageTimestamp', () => {
+  it('omits the action row and menu in document mode', () => {
+    const container = render(
+      <TranscriptRenderModeProvider value="document">
+        <MessageTimestamp
+          timestamp={1}
+          chatMode
+          copyText="hello"
+          onEdit={vi.fn()}
+          onDelete={vi.fn()}
+        >
+          <div>body</div>
+        </MessageTimestamp>
+      </TranscriptRenderModeProvider>,
+    );
+    expect(container.textContent).toBe('body');
+    expect(container.querySelector('button')).toBeNull();
+  });
+
   it('reveals the wall-clock time as a hover tooltip when a timestamp is set', () => {
     const ts = new Date(2026, 5, 13, 9, 8, 7).getTime();
     const container = render(
@@ -99,7 +139,7 @@ describe('MessageTimestamp', () => {
     );
   });
 
-  it('renders the edit action after the copy action in the hover row', () => {
+  it('keeps only copy and overflow in the row and edits through the menu', () => {
     const onEdit = vi.fn();
     const ts = new Date(2026, 5, 13, 9, 8, 7).getTime();
     const container = render(
@@ -118,16 +158,13 @@ describe('MessageTimestamp', () => {
     const actions = container.querySelectorAll(`.${styles.chatActions} button`);
     expect(
       [...actions].map((button) => button.getAttribute('aria-label')),
-    ).toEqual(['Copy', 'Edit message']);
-    act(() => {
-      container
-        .querySelector<HTMLButtonElement>('button[aria-label="Edit message"]')
-        ?.click();
-    });
+    ).toEqual(['Copy', 'More message actions']);
+    openMenu(container);
+    act(() => menuItem('Edit message').click());
     expect(onEdit).toHaveBeenCalledTimes(1);
   });
 
-  it('uses the wrench action to open tool calls between copy and edit', () => {
+  it('moves tool calls and edit into the overflow menu', () => {
     const onOpenTurnCalls = vi.fn();
     const container = render(
       <MessageTimestamp
@@ -146,13 +183,49 @@ describe('MessageTimestamp', () => {
       [...container.querySelectorAll(`.${styles.chatActions} button`)].map(
         (button) => button.getAttribute('aria-label'),
       ),
-    ).toEqual(['Copy', 'View tool calls', 'Edit message']);
-    const toolCalls = container.querySelector<HTMLButtonElement>(
-      '[aria-label="View tool calls"]',
-    )!;
+    ).toEqual(['Copy', 'More message actions']);
+    openMenu(container);
+    const toolCalls = menuItem('View tool calls');
     expect(toolCalls.querySelector('.lucide-wrench')).not.toBeNull();
     act(() => toolCalls.click());
     expect(onOpenTurnCalls).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { timestamp: undefined },
+    { timestamp: 1, hideTimestamp: true },
+    { timestamp: 1, chatMode: true },
+    { timestamp: 1 },
+  ])('deletes through the menu with timestamp options %j', (options) => {
+    const onDelete = vi.fn();
+    const container = render(
+      <MessageTimestamp {...options} onDelete={onDelete}>
+        <div>body</div>
+      </MessageTimestamp>,
+    );
+    expect(container.querySelector('[role="menuitem"]')).toBeNull();
+    openMenu(container);
+    const trigger = container.querySelector('[aria-haspopup="menu"]')!;
+    expect(
+      document.querySelector('[role="menu"]')?.getAttribute('aria-labelledby'),
+    ).toBe(trigger.id);
+    act(() => menuItem('Delete messages').click());
+    expect(onDelete).toHaveBeenCalledTimes(1);
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+  });
+
+  it('keeps a disabled deletion entry visible without dispatching it', () => {
+    const onDelete = vi.fn();
+    const container = render(
+      <MessageTimestamp onDelete={onDelete} deleteDisabled>
+        <div>body</div>
+      </MessageTimestamp>,
+    );
+    openMenu(container);
+    const item = menuItem('Delete messages');
+    expect(item.getAttribute('aria-disabled')).toBe('true');
+    act(() => item.click());
+    expect(onDelete).not.toHaveBeenCalled();
   });
 
   it('omits the edit action when no handler is given', () => {
@@ -164,7 +237,7 @@ describe('MessageTimestamp', () => {
     );
 
     expect(
-      container.querySelector('button[aria-label="Edit message"]'),
+      container.querySelector('button[aria-label="More message actions"]'),
     ).toBeNull();
   });
 });
