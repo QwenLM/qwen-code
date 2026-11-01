@@ -1832,10 +1832,17 @@ Validation:
   rollup paging; the reviewer probe's events, filters and cursor pruning.
 - Push guard tests against a local bare repository: non-fast-forward refusal,
   default-branch refusal, lease rejection after an external push.
-- An integration test with a fake `gh` on `PATH` that drives `prepare` →
-  `snapshot` → `push` → `reply` → `cleanup` — not written yet; each helper
-  is tested on its own against real git with a bare remote and a stubbed
-  `gh`.
+- An integration test with a fake `gh` on `PATH`
+  (`autofix-pr/chain.integration.test.ts`) that runs the helpers in the
+  order a watch runs them — `prepare` and `schedule`; a round's `sync`,
+  `snapshot`, `ci-log`, `rerun`, `push` and `reply`; the gate exactly as
+  `schedule` printed it; `status` and `cleanup` — against real git with a
+  bare remote, the test making the fix agent's commits. Its cases: a watch
+  from start to merge, including a reply whose answer was lost; a push by
+  someone else during a round; a re-run spent, then refused; a check left
+  for a person after three pushes, one head's result asked of GitHub by
+  commit; and whether the PR's author can push, asked of GitHub. Each helper
+  is also tested on its own, with `gh` stubbed in-process.
 - Manual end-to-end on a sandbox repository: a failing test is fixed and
   pushed; a collaborator comment is fixed and answered; a stranger's comment is
   ignored; merging the PR ends the loop and removes the worktree.
