@@ -16,8 +16,8 @@ import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingReposit
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner;
-import com.alibaba.qwen.code.runtimebroker.spi.ExternalWorkspaceRecoveryGateway;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
+import com.alibaba.qwen.code.runtimebroker.spi.ExternalWorkspaceRecoveryGateway;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
