@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readEnvironmentVariable } from './storage-paths-lite.js';
 import type { Settings } from './settingsSchema.js';
 
 /**
@@ -25,10 +26,17 @@ export function isLspOptedIn(
   settings: Settings | undefined,
   env: Readonly<NodeJS.ProcessEnv> = process.env,
 ): boolean {
-  if (env['QWEN_CODE_DISABLE_LSP'] === '1') return false;
+  // `readEnvironmentVariable` folds case on Windows, where a spawned process
+  // sees `QWEN_CODE_ENABLE_LSP` however it was spelled. Without it a
+  // lower-cased home `.env` key would be invisible here while the session host
+  // honoured it, and the engine check would certify a session that starts
+  // language servers.
+  if (readEnvironmentVariable(env, 'QWEN_CODE_DISABLE_LSP') === '1') {
+    return false;
+  }
   return (
     argvExperimentalLsp === true ||
-    env['QWEN_CODE_ENABLE_LSP'] === '1' ||
+    readEnvironmentVariable(env, 'QWEN_CODE_ENABLE_LSP') === '1' ||
     settings?.tools?.lspEnabled === true
   );
 }

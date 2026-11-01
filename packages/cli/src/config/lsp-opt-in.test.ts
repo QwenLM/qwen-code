@@ -80,4 +80,41 @@ describe('isLspOptedIn', () => {
     } as unknown as Settings;
     expect(isLspOptedIn(undefined, settings)).toBe(false);
   });
+
+  describe('env spelling', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    const runOn = (value: string) =>
+      Object.defineProperty(process, 'platform', { value });
+    afterEach(() => {
+      Object.defineProperty(process, 'platform', platform);
+    });
+
+    it('reads a lower-cased enable key on Windows, as the child would', () => {
+      runOn('win32');
+      expect(
+        isLspOptedIn(undefined, settingsWith(false), {
+          qwen_code_enable_lsp: '1',
+        }),
+      ).toBe(true);
+    });
+
+    it('lets a lower-cased disable key win on Windows', () => {
+      runOn('win32');
+      expect(
+        isLspOptedIn(undefined, settingsWith(true), {
+          QWEN_CODE_ENABLE_LSP: '1',
+          qwen_code_disable_lsp: '1',
+        }),
+      ).toBe(false);
+    });
+
+    it('keeps a lower-cased key inert on POSIX', () => {
+      runOn('linux');
+      expect(
+        isLspOptedIn(undefined, settingsWith(false), {
+          qwen_code_enable_lsp: '1',
+        }),
+      ).toBe(false);
+    });
+  });
 });
