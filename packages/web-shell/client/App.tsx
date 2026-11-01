@@ -27,6 +27,7 @@ import {
   type WebShellMessageNavigationRequest,
   type WebShellMessageNavigationResult,
 } from './hooks/useMessageNavigation';
+import { isCoarsePointerDevice } from './hooks/useIsTouchComposer';
 import { ConversationSearch } from './components/ConversationSearch';
 import { useWebShellNavigation } from './navigation';
 import { isWebShellPage, type WebShellPage } from './utils/navigationUrl';
@@ -11030,14 +11031,36 @@ export function App({
     externalSplitControlled,
     sessionActions,
   ]);
+  // Restore focus after closing a panel, split view, or cockpit. On fine
+  // pointers, focus returns to the composer; on coarse/touch pointers, moving
+  // focus into the editable input opens the on-screen keyboard, so land on a
+  // non-editable composer toolbar control instead (matching ChatEditor).
+  const restoreComposerFocusAfterClose = useCallback(() => {
+    if (!isCoarsePointerDevice()) {
+      editorRef.current?.focus();
+      return;
+    }
+    document
+      .querySelector<HTMLElement>(
+        '[data-web-shell-mode-button]:not(:disabled), [data-web-shell-model-button], [data-web-shell-composer] button:not(:disabled)',
+      )
+      ?.focus();
+  }, []);
   // Land focus on the composer after a shrink-driven split close so keyboard
   // users aren't dropped onto <body> — but not when the chat now shows an
   // approval overlay (it owns the keyboard) or a panel (it manages focus).
   useEffect(() => {
     if (mainView !== 'chat' || !focusComposerAfterSplitCloseRef.current) return;
     focusComposerAfterSplitCloseRef.current = false;
-    if (!activePanel && !approvalOverlayActive) editorRef.current?.focus();
-  }, [mainView, activePanel, approvalOverlayActive]);
+    if (!activePanel && !approvalOverlayActive) {
+      restoreComposerFocusAfterClose();
+    }
+  }, [
+    mainView,
+    activePanel,
+    approvalOverlayActive,
+    restoreComposerFocusAfterClose,
+  ]);
   // The Settings / Daemon Status panel is a view, not a modal, so it lacks
   // DialogShell's focus trap/restore. Move focus into a panel when it opens (or
   // when switching directly between panels) and back to the composer when it
@@ -11080,7 +11103,7 @@ export function App({
       // editable targets, so focusing the composer here would swallow its
       // shortcuts and leave the user unable to respond by keyboard.
       if (!approvalOverlayActive) {
-        editorRef.current?.focus();
+        restoreComposerFocusAfterClose();
       }
     } else if (wasApprovalActive && !approvalOverlayActive) {
       // The panel was auto-closed for an approval (prev was consumed to null on
@@ -11088,9 +11111,9 @@ export function App({
       // no panel to return to, so restore the composer here. (useComposerCore's
       // dialogOpen effect also refocuses on this transition; this keeps the
       // panel focus effect self-contained instead of relying on that.)
-      editorRef.current?.focus();
+      restoreComposerFocusAfterClose();
     }
-  }, [activePanel, approvalOverlayActive]);
+  }, [activePanel, approvalOverlayActive, restoreComposerFocusAfterClose]);
   // A pending approval (a gated tool call or an AskUserQuestion) renders its
   // overlay in the chat footer, which is hidden (display:none) while a panel is
   // shown. Left alone, the turn would hang behind Settings/Status with no
@@ -17138,7 +17161,9 @@ export function App({
       !sessionWriteBlocked
     ) {
       setSidebarSwitchingSessionId(null);
-      scheduleComposerFocus(sidebarSwitchingSessionId);
+      if (!isCoarsePointerDevice()) {
+        scheduleComposerFocus(sidebarSwitchingSessionId);
+      }
     }
   }, [
     connection.catchingUp,
@@ -17429,8 +17454,15 @@ export function App({
       return;
     }
     focusComposerAfterCockpitCloseRef.current = false;
-    if (!activePanel && !approvalOverlayActive) editorRef.current?.focus();
-  }, [activePanel, approvalOverlayActive, mainView]);
+    if (!activePanel && !approvalOverlayActive) {
+      restoreComposerFocusAfterClose();
+    }
+  }, [
+    activePanel,
+    approvalOverlayActive,
+    mainView,
+    restoreComposerFocusAfterClose,
+  ]);
   useEffect(() => {
     if (navigationRef.current && navigationRef.current.route.page !== 'chat')
       return;

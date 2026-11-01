@@ -26744,6 +26744,41 @@ describe('App session callbacks', () => {
     expect(editorFocus).toHaveBeenCalledOnce();
   });
 
+  it('suppresses composer focus after loading an existing session on coarse pointers', async () => {
+    const origMatchMedia = window.matchMedia;
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: query === '(hover: none) and (pointer: coarse)',
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    }));
+    try {
+      const { container, rerender } = renderApp();
+      await flush();
+      editorFocus.mockClear();
+
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="load-session"]')
+          ?.click();
+        await Promise.resolve();
+      });
+
+      mockConnection.sessionId = 'session-2';
+      rerender();
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(editorFocus).not.toHaveBeenCalled();
+    } finally {
+      window.matchMedia = origMatchMedia;
+    }
+  });
+
   it('does not finish a same-id workspace switch before load', async () => {
     const load = deferred<void>();
     mockSessionActions.loadSession.mockImplementationOnce(() => {
@@ -41625,6 +41660,47 @@ describe('App session callbacks', () => {
     });
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
     expect(editorFocus).toHaveBeenCalled();
+  });
+
+  it('lands focus on a non-editable composer control instead of the editor when a panel closes on coarse pointers', async () => {
+    const origMatchMedia = window.matchMedia;
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: query === '(hover: none) and (pointer: coarse)',
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    }));
+    try {
+      const { container } = renderApp();
+      await flush();
+      testState.prompt = '/settings';
+      await clickSubmit(container);
+      await flush();
+      expect(
+        container.querySelector('[data-testid="inline-panel"]'),
+      ).not.toBeNull();
+      editorFocus.mockClear();
+
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="panel-back"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      expect(
+        container.querySelector('[data-testid="inline-panel"]'),
+      ).toBeNull();
+      expect(editorFocus).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(
+        container.querySelector('[data-testid="submit"]'),
+      );
+    } finally {
+      window.matchMedia = origMatchMedia;
+    }
   });
 
   it('loads existing Live settings from its rail entry only while open', async () => {
