@@ -9528,18 +9528,15 @@ describe('LlmChat', async () => {
           ),
         ]);
         mockStreamsOnce(
-          streamOf(
-            textChunk('Request refused.'),
-            {
-              candidates: [
-                {
-                  finishReason: FinishReason.SAFETY,
-                  finishMessage:
-                    'Response refused due to cyber-related safety policy.',
-                },
-              ],
-            } as GenerateContentResponse,
-          ),
+          streamOf(textChunk('Request refused.'), {
+            candidates: [
+              {
+                finishReason: FinishReason.SAFETY,
+                finishMessage:
+                  'Response refused due to cyber-related safety policy.',
+              },
+            ],
+          } as GenerateContentResponse),
         );
 
         const events = await collectStreamWithFakeTimers(

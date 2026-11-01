@@ -269,8 +269,7 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         type: 'finished',
         value: {
           reason: 'SAFETY',
-          finishMessage:
-            'Response refused due to cyber-related safety policy.',
+          finishMessage: 'Response refused due to cyber-related safety policy.',
         },
       } as unknown as AnyEv);
       expect(out).toContainEqual({

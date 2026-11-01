@@ -572,8 +572,7 @@ export class AnthropicContentConverter {
       candidate.finishReason = finishReason;
     }
     const finishMessage = this.mapAnthropicStopDetailsToFinishMessage(
-      (response as Anthropic.Message & { stop_details?: unknown })
-        .stop_details,
+      (response as Anthropic.Message & { stop_details?: unknown }).stop_details,
     );
     if (finishMessage) {
       candidate.finishMessage = finishMessage;

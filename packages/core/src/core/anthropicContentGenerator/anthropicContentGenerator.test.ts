@@ -2455,11 +2455,16 @@ describe('AnthropicContentGenerator', () => {
 
     it('surfaces a refusal stop-details category', async () => {
       const { chunks, error } = await collectEvents(
-        messageDelta('refusal', 1, {}, {
-          type: 'refusal',
-          category: 'cyber',
-          explanation: 'Provider-authored explanation',
-        }),
+        messageDelta(
+          'refusal',
+          1,
+          {},
+          {
+            type: 'refusal',
+            category: 'cyber',
+            explanation: 'Provider-authored explanation',
+          },
+        ),
       );
 
       expect(error).toBeUndefined();
