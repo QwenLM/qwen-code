@@ -29633,7 +29633,9 @@ describe('Session', () => {
             ).toBe(false);
             expect(sends).toHaveLength(2);
             expect(sends[1][0]).toEqual([
-              { text: `${responsePrefix}also check tests` },
+              core.markTypedPrompt({
+                text: `${responsePrefix}also check tests`,
+              }),
             ]);
             expect(sends[1][1]).toMatchObject({
               type: core.SendMessageType.Steer,
