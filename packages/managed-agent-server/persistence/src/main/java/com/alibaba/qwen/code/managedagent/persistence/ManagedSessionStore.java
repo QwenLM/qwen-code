@@ -28,7 +28,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiApplicationJson;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
@@ -199,10 +199,10 @@ public class ManagedSessionStore
     }
 
     private WorkspaceExecutionStore lifecycleExecution;
-    private AgentStateStore lifecycleSessions;
+    private SessionQueryStore lifecycleSessions;
 
     @Autowired(required = false)
-    public void setLifecycleExecution(WorkspaceExecutionStore execution, AgentStateStore sessions) {
+    public void setLifecycleExecution(WorkspaceExecutionStore execution, SessionQueryStore sessions) {
         this.lifecycleExecution = execution;
         this.lifecycleSessions = sessions;
     }

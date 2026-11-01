@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -224,8 +225,14 @@ class WorkspaceMigrationMySqlIT {
     }
 
     private StoreModels.Admission create(ManagedAgentStore store, TransactionTemplate transaction, String tenant, String key) {
-        return transaction.execute(status -> store.insertWorkspaceSessionCommand(tenant, "actor", key, "sha256:" + "a".repeat(64),
-                "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", ".")));
+        return transaction.execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor")
+                .idempotencyKey(key)
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("workspace", "."))
+                .build()));
     }
 
     @Test

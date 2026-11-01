@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
@@ -532,9 +533,14 @@ class WorkspaceRuntimeTest {
     @Test
     void boundSessionsConvergeOnOneSharedWorkspaceBinding() throws Exception {
         SessionRecord first = createSession("storage", ".");
-        SessionRecord second = sessions.findSessionById(sessions.insertWorkspaceSessionCommand(first.tenantId(),
-                "actor", "create-2", "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null,
-                new WorkspaceSelection("workspace", ".")).sessionId()).orElseThrow();
+        SessionRecord second = sessions.findSessionById(sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(first.tenantId())
+                .actorId("actor")
+                .idempotencyKey("create-2")
+                .requestDigest("sha256:" + "b".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("workspace", "."))
+                .build()).sessionId()).orElseThrow();
         Path root = Files.createDirectory(temp.resolve("root")).toRealPath();
         var properties = properties(List.of(new WorkspaceMount(first.tenantId(),
                 first.workspace().getStorageId(), root.toString())));
@@ -572,9 +578,14 @@ class WorkspaceRuntimeTest {
     @Test
     void independentSqlClientsShareStorageAndFenceStaleRelease() throws Exception {
         SessionRecord session = createSession("storage", ".");
-        var created = sessions.insertWorkspaceSessionCommand(session.tenantId(), "actor", "second-create",
-                "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null,
-                new WorkspaceSelection("workspace", "."));
+        var created = sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(session.tenantId())
+                .actorId("actor")
+                .idempotencyKey("second-create")
+                .requestDigest("sha256:" + "b".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("workspace", "."))
+                .build());
         var secondSession = sessions.findSessionById(created.sessionId()).orElseThrow();
         var binding = session.workspace();
         RuntimeSessionRecord first = holder(session, "first");
@@ -624,8 +635,14 @@ class WorkspaceRuntimeTest {
                         "promptId", "prompt", "callId", "call", "argsDigest", "digest")));
         var dispatched = executions.claimDispatch(prepared.getExecutionCallId(), "original", Duration.ofMinutes(1));
         var unknown = executions.compareAndSet(dispatched, dispatched.withUnknown(), "original", dispatched.getDispatchGeneration());
-        var created = sessions.insertWorkspaceSessionCommand(session.tenantId(), "actor", "neighbor",
-                "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", "."));
+        var created = sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(session.tenantId())
+                .actorId("actor")
+                .idempotencyKey("neighbor")
+                .requestDigest("sha256:" + "b".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("workspace", "."))
+                .build());
         var neighbor = holder(sessions.findSessionById(created.sessionId()).orElseThrow(), "neighbor");
         authority.claim(session.workspace(), neighbor);
         authority.assertHeld(session.workspace(), first);
@@ -643,8 +660,14 @@ class WorkspaceRuntimeTest {
         var session = createSession("storage", ".");
         var fixture = transport(session);
         var ready = acquireReady(fixture);
-        var created = sessions.insertWorkspaceSessionCommand(session.tenantId(), "actor", "neighbor",
-                "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", "."));
+        var created = sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(session.tenantId())
+                .actorId("actor")
+                .idempotencyKey("neighbor")
+                .requestDigest("sha256:" + "b".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("workspace", "."))
+                .build());
         var neighbor = holder(sessions.findSessionById(created.sessionId()).orElseThrow(), "neighbor");
         authority.claim(session.workspace(), neighbor);
         var rewind = Map.<String, Object>of("kind", "raw-file-history", "action", "rewind", "promptId", "prompt");
@@ -1262,9 +1285,14 @@ class WorkspaceRuntimeTest {
         SessionRecord session = createSession("storage", ".");
         var fixture = transport(session);
         authority.claim(session.workspace(), fixture.record());
-        var created = sessions.insertWorkspaceSessionCommand(session.tenantId(), "actor", "rival-create",
-                "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null,
-                new WorkspaceSelection("workspace", "."));
+        var created = sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(session.tenantId())
+                .actorId("actor")
+                .idempotencyKey("rival-create")
+                .requestDigest("sha256:" + "b".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("workspace", "."))
+                .build());
         var rival = holder(sessions.requireSession(session.tenantId(), created.sessionId()), "rival");
         authority.release(session.workspace(), fixture.record());
         authority.claim(session.workspace(), rival);
@@ -1375,8 +1403,14 @@ class WorkspaceRuntimeTest {
                 + " 'Workspace', ?, ?, 'ACTIVE')", tenant, storage, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                 + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
-        var created = sessions.insertWorkspaceSessionCommand(tenant, "actor", "create", "sha256:" + "a".repeat(64),
-                "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", cwd));
+        var created = sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor")
+                .idempotencyKey("create")
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("workspace", cwd))
+                .build());
         return sessions.findSessionById(created.sessionId()).orElseThrow();
     }
 

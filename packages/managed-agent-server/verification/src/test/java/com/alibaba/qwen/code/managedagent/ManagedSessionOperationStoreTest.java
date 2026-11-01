@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
@@ -219,9 +220,14 @@ class ManagedSessionOperationStoreTest {
         var transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(dataSource));
         String sessionId = transactions.execute(ignored ->
-                store.insertWorkspaceSessionCommand(TENANT, "owner", "create",
-                        "digest", "qwen-code", null, null, List.of(), null,
-                        new WorkspaceSelection("workspace", ".")).sessionId());
+                store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(TENANT)
+                        .actorId("owner")
+                        .idempotencyKey("create")
+                        .requestDigest("digest")
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection("workspace", "."))
+                        .build()).sessionId());
         String operationId = store.beginWorkspaceLifecycle(TENANT, sessionId,
                 OperationKind.CLOSE, "owner", "a".repeat(64), "close",
                 "digest", true, 1).operation().operationId();
@@ -269,9 +275,14 @@ class ManagedSessionOperationStoreTest {
         var transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(dataSource));
         String sessionId = transactions.execute(ignored ->
-                store.insertWorkspaceSessionCommand(TENANT, "owner", "create",
-                        "digest", "qwen-code", null, null, List.of(), null,
-                        new WorkspaceSelection("workspace", ".")).sessionId());
+                store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(TENANT)
+                        .actorId("owner")
+                        .idempotencyKey("create")
+                        .requestDigest("digest")
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection("workspace", "."))
+                        .build()).sessionId());
         String operationId = store.beginWorkspaceLifecycle(TENANT, sessionId,
                 OperationKind.CLOSE, "owner", "a".repeat(64), "close",
                 "digest", true, 1).operation().operationId();

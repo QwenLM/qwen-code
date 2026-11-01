@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.workspace.ChildResultRelay;
@@ -198,10 +199,14 @@ class HostedWorkflowFaultGatesIT {
                     + " workspace_id, actor_id, role) VALUES (?, ?, ?,"
                     + " 'OPERATOR')", tenant, workspaceId,
                     "actor".getBytes(StandardCharsets.UTF_8));
-            var created = store.insertWorkspaceSessionCommand(tenant, "actor",
-                    "create-" + index, "sha256:" + "a".repeat(64),
-                    "qwen-code", null, null, List.of(), null,
-                    new WorkspaceSelection(workspaceId, "child"));
+            var created = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                    .tenantId(tenant)
+                    .actorId("actor")
+                    .idempotencyKey("create-" + index)
+                    .requestDigest("sha256:" + "a".repeat(64))
+                    .agentId("qwen-code")
+                    .selection(new WorkspaceSelection(workspaceId, "child"))
+                    .build());
             sessions.add(Map.of("name", cases.get(index), "sessionId",
                     created.sessionId(), "workspaceId", workspaceId,
                     "directory",

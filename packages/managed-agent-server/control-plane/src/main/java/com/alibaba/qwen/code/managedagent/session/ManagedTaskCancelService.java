@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent.session;
 
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCommandOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCommandOperation;
@@ -24,14 +24,14 @@ import java.util.Map;
  */
 @Service
 public class ManagedTaskCancelService {
-    private final AgentStateStore store;
+    private final SessionLifecycleStore store;
     private final ManagedAgentService sessions;
     private final ManagedExtensionRecordStore records;
     private final RequestDigests digests;
     private final SessionLifecycleService operations;
     private final TaskCancelCoordinator coordinator;
 
-    public ManagedTaskCancelService(AgentStateStore store,
+    public ManagedTaskCancelService(SessionLifecycleStore store,
             ManagedAgentService sessions, ManagedExtensionRecordStore records,
             RequestDigests digests, SessionLifecycleService operations,
             TaskCancelCoordinator coordinator) {

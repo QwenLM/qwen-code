@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
@@ -48,8 +49,14 @@ class ManagedContextCompressionOperationTest {
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES (?, ?, ?, 'OPERATOR')", "tenant", "workspace", actor.getBytes(StandardCharsets.UTF_8));
         }
-        session = tx(() -> store.insertWorkspaceSessionCommand("tenant", "creator", "create", "create-digest",
-                "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", ".")).sessionId());
+        session = tx(() -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId("tenant")
+                .actorId("creator")
+                .idempotencyKey("create")
+                .requestDigest("create-digest")
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("workspace", "."))
+                .build()).sessionId());
     }
 
     protected javax.sql.DataSource testDataSource() {

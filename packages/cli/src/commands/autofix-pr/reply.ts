@@ -57,7 +57,8 @@ const MAX_NEEDS_HUMAN_CHARS = 300;
 export interface ReplyPlan {
   /** Replies to review threads, by the thread's first comment. */
   replies?: Array<{ replyTo: number; body: string; handled: string[] }>;
-  /** The round's PR comment: what the push addressed and how it was verified. */
+  /** The round's PR comment: what the push addressed and how it was
+   * verified, or — with nothing pushed — what blocks it and needs a person. */
   summary?: { body: string; handled?: string[] } | null;
   /** Comments handled without a reply of their own. */
   handled?: string[];
@@ -380,6 +381,7 @@ function replyLocked(
     const postedIds: string[] = [];
     const handledIds: string[] = [];
     let summarized: string | null = null;
+    let summarizedBlocked: string[] | null = null;
     for (const intent of state.pendingPosts ?? []) {
       const nodes =
         intent.where === 'summary'
@@ -397,7 +399,12 @@ function replyLocked(
       handledIds.push(...intent.handled);
       // The head the summary reported, not the current one: a later push
       // still needs a summary of its own.
-      if (intent.where === 'summary') summarized = intent.sha;
+      if (intent.where === 'summary') {
+        summarized = intent.sha;
+        // What that summary reported, from its own intent: a later plan's
+        // items are not covered by it.
+        summarizedBlocked = intent.needsHuman ?? [];
+      }
       adopted += 1;
     }
     record({
@@ -407,6 +414,25 @@ function replyLocked(
       ],
       pendingPosts: [],
       ...(summarized ? { summarizedSha: summarized } : {}),
+      ...(summarized !== null && summarizedBlocked !== null
+        ? {
+            reportedNeedsHuman: {
+              sha: summarized,
+              // A union, not a replacement: an earlier round may already have
+              // reported other items on this head, and adopting this summary
+              // must not make those reportable again. Another head's record
+              // is not merged — it is superseded.
+              texts: [
+                ...new Set([
+                  ...(state.reportedNeedsHuman?.sha === summarized
+                    ? state.reportedNeedsHuman.texts
+                    : []),
+                  ...summarizedBlocked,
+                ]),
+              ],
+            },
+          }
+        : {}),
     });
   }
 
@@ -500,19 +526,34 @@ function replyLocked(
   // comments handled at once, and a round after a later failure would not
   // see them again.
   const now = new Date().toISOString();
+  const freshNeedsHuman = [...new Set(plan.needsHuman)].filter(
+    (text) =>
+      text !== '' &&
+      !(state.needsHuman ?? []).some(
+        (item) => item.sha === head && item.text === text,
+      ),
+  );
   const needsHuman = [
     ...(state.needsHuman ?? []),
-    ...[...new Set(plan.needsHuman)]
-      .filter(
-        (text) =>
-          text !== '' &&
-          !(state.needsHuman ?? []).some(
-            (item) => item.sha === head && item.text === text,
-          ),
-      )
-      .map((text) => ({ sha: head, at: now, text })),
+    ...freshNeedsHuman.map((text) => ({ sha: head, at: now, text })),
   ].slice(-MAX_NEEDS_HUMAN);
   if (needsHuman.length > 0) record({ needsHuman });
+
+  // What this plan asks to report, against what a summary that reached the PR
+  // already reported on this head. Deliberately not `freshNeedsHuman`: the
+  // record above consumes that before any POST, so a run whose summary never
+  // arrived would find nothing left to report when it is run again.
+  const planNeedsHuman = [...new Set(plan.needsHuman)].filter(
+    (text) => text !== '',
+  );
+  const reportedBlocked = new Set(
+    state.reportedNeedsHuman?.sha === head
+      ? state.reportedNeedsHuman.texts
+      : [],
+  );
+  const unreportedNeedsHuman = planNeedsHuman.filter(
+    (text) => !reportedBlocked.has(text),
+  );
 
   const outcome: ReplyOutcome = {
     posted: [],
@@ -537,12 +578,16 @@ function replyLocked(
     handled: string[],
     path: string,
     body: string,
+    needsHuman?: string[],
   ) => {
     const intent: PendingPost = {
       where,
       handled,
       bodyHash: bodyHash(body),
       sha: head,
+      // What a summary reports, so a run that finds it on the PR after losing
+      // its answer marks exactly these as reported.
+      ...(needsHuman && needsHuman.length > 0 ? { needsHuman } : {}),
     };
     record({ pendingPosts: [...(state.pendingPosts ?? []), intent] });
     const posted = postComment(path, body);
@@ -582,7 +627,11 @@ function replyLocked(
   }
 
   // A summary is posted once: one that handles comments, while any of them
-  // is still open; one that only reports a push, once per head.
+  // is still open; one that answers none, once per head. A round that leaves
+  // something for a person which no delivered summary has reported gets one
+  // whatever was posted on this head before, so a blocked round is not silent
+  // where an earlier one already reported — and a report that never reached
+  // the PR is still due when the plan is run again.
   const summary = plan.summary;
   const summaryHandled = (summary?.handled ?? []).filter((id) => !done.has(id));
   // A head this watch pushed and has not summarized needs its summary even
@@ -591,9 +640,10 @@ function replyLocked(
     state.pushedShas.includes(head) && state.summarizedSha !== head;
   const summaryDue =
     summary !== null &&
-    ((summary.handled ?? []).length > 0
-      ? summaryHandled.length > 0 || pushUnsummarized
-      : state.summarizedSha !== head);
+    (unreportedNeedsHuman.length > 0 ||
+      ((summary.handled ?? []).length > 0
+        ? summaryHandled.length > 0 || pushUnsummarized
+        : state.summarizedSha !== head));
   if (summary && summaryDue) {
     // Its comments are recorded with it. `--no-post` records the same,
     // posting nothing.
@@ -603,6 +653,7 @@ function replyLocked(
           summaryHandled,
           `${base}/issues/${args.pr}/comments`,
           summary.body,
+          planNeedsHuman,
         )
       : null;
     record({
@@ -614,6 +665,17 @@ function replyLocked(
         ...addHandled(summaryHandled),
       ],
       summarizedSha: head,
+      // Only now, with the summary posted (or recorded for a watch that posts
+      // nothing), are its items reported: a failed POST above leaves this
+      // untouched, so the next run still owes the PR its report.
+      ...(planNeedsHuman.length > 0
+        ? {
+            reportedNeedsHuman: {
+              sha: head,
+              texts: [...new Set([...reportedBlocked, ...planNeedsHuman])],
+            },
+          }
+        : {}),
       ...(result ? { pendingPosts: result.settled } : {}),
     });
     if (result) outcome.posted.push({ kind: 'summary', ...result.posted });

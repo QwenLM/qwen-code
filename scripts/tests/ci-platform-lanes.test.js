@@ -98,9 +98,11 @@ describe('complete macOS test groups', () => {
 });
 
 // The extended ceilings below, except the test lane's, are scoped to the
-// self-hosted pool: `runs-on` falls back to ubuntu-latest for fork PRs from
-// untrusted authors and when MAINTAINER_ECS_RUNNER_DISABLED=true, so those
-// hosted paths keep the pre-contention ceiling. The ARM64 fleet renders
+// self-hosted pool: `runs-on` falls back to ubuntu-latest when
+// MAINTAINER_ECS_RUNNER_DISABLED=true (and, for the association-gated lanes,
+// for fork PRs from untrusted authors — lint_and_static reads lint_runner,
+// which routes every PR to the pool), so those hosted paths keep the
+// pre-contention ceiling. The ARM64 fleet renders
 // `["self-hosted", "linux", "arm64"]` — no `ecs-qwen` label — so the scope
 // cannot key on the x64 fleet's name. Evaluate the real timeout expression for
 // each routing instead of pinning a bare number -- the same
@@ -111,15 +113,42 @@ describe('complete macOS test groups', () => {
 const ECS_RUNNER = '["self-hosted", "linux", "x64", "ecs-qwen"]';
 const ARM_RUNNER = '["self-hosted", "linux", "arm64"]';
 const HOSTED_RUNNER = '["ubuntu-latest"]';
-const timeoutMinutesOn = (job, ubuntuRunner) => {
+// The classifier output a job's own `runs-on` reads. Deriving it is what makes
+// a ceiling pointed at the OTHER output red: only this name is substituted, so
+// `lint_runner` left inside a gate that runs on `ubuntu_runner` survives the
+// substitution and trips the unmodelled-term throw below.
+const runnerOutputOf = (job) => {
+  const names = [
+    ...new Set(
+      [
+        ...String(ci.jobs[job]['runs-on']).matchAll(
+          /needs\.classify_pr\.outputs\.(\w+)/g,
+        ),
+      ].map((match) => match[1]),
+    ),
+  ];
+  if (names.length !== 1) {
+    throw new Error(
+      `${job} runs-on names ${names.length} classifier outputs: ${names}`,
+    );
+  }
+  return names[0];
+};
+const timeoutMinutesOn = (job, runner) => {
   // The same `|| '["ubuntu-latest"]'` default the runs-on expression carries:
-  // a missing output (classify_pr skipped) is the hosted routing.
-  const effective = ubuntuRunner || HOSTED_RUNNER;
+  // a missing output (classify_pr skipped) is the hosted routing. The caller
+  // passes the value of the output the job itself reads — ubuntu_runner for
+  // the association-gated lanes, lint_runner for lint_and_static.
+  const effective = runner || HOSTED_RUNNER;
+  const output = runnerOutputOf(job);
   let expr = String(ci.jobs[job]['timeout-minutes'])
     .replace(/^\$\{\{\s*/, '')
     .replace(/\s*\}\}$/, '')
     .replace(
-      /contains\(needs\.classify_pr\.outputs\.ubuntu_runner \|\| '\["ubuntu-latest"\]', 'self-hosted'\)/g,
+      new RegExp(
+        `contains\\(needs\\.classify_pr\\.outputs\\.${output} \\|\\| '\\["ubuntu-latest"\\]', 'self-hosted'\\)`,
+        'g',
+      ),
       String(effective.includes('self-hosted')),
     )
     .replace(/fromJSON\(/g, '(');
@@ -237,6 +266,27 @@ describe('raw JUnit report retention', () => {
   });
 });
 
+// The smoke lane keeps the classifier's trust decision and hosted overrides
+// but picks its own architecture, so its `runs-on` cannot be compared with
+// another lane's. Evaluate the real expression the way
+// `.github/scripts/ci-runner-routing.test.mjs` does.
+const runnerOn = (job, runner) => {
+  const output = runnerOutputOf(job);
+  const expression = String(ci.jobs[job]['runs-on'])
+    .replace(/^\$\{\{\s*/, '')
+    .replace(/\s*\}\}$/, '');
+  return new Function(
+    'needs',
+    'fromJSON',
+    'contains',
+    `return (${expression});`,
+  )(
+    { classify_pr: { outputs: { [output]: runner } } },
+    JSON.parse,
+    (labels, label) => labels.includes(label),
+  );
+};
+
 it('gives the shared Linux test lane one ceiling on both pools', () => {
   // The full suite outgrew 60 minutes on hosted runners too: on 2026-10-17,
   // 17 of the 30 hosted runs that ended on their own were cancelled at 60.
@@ -276,8 +326,19 @@ it('gives the ARM64 fleet the same contended-pool ceilings as the x64 pool', () 
   expect(timeoutMinutesOn('integration_no_ak', ARM_RUNNER)).toBe(60);
 });
 
-it('keeps the browser smoke on an isolated hosted runner', () => {
-  expect(ci.jobs.web_shell_e2e_smoke['runs-on']).toBe('ubuntu-latest');
+it('routes the browser smoke to ARM64 independently of the shared Linux test lane', () => {
+  // The lane keeps the classifier's trust decision and hosted overrides, but
+  // it no longer inherits the ordinary Linux fleet's architecture.
+  expect(runnerOn('web_shell_e2e_smoke', ECS_RUNNER)).toEqual([
+    'self-hosted',
+    'linux',
+    'arm64',
+  ]);
+  expect(runnerOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toEqual([
+    'ubuntu-latest',
+  ]);
+  // A missing classifier output (classify_pr skipped) is the hosted routing.
+  expect(runnerOn('web_shell_e2e_smoke', '')).toEqual(['ubuntu-latest']);
   const smoke = ci.jobs.web_shell_e2e_smoke.steps.find(
     (step) => step.name === 'Run web-shell browser smoke',
   );
@@ -527,18 +588,19 @@ describe('post-merge push lane', () => {
     expect(condOf('lint_and_static')).toBe(condOf('test'));
   });
 
-  it('routes lint_and_static through the classify_pr fork-trust output', () => {
+  it('routes lint_and_static through the classify_pr lint output', () => {
     // runs-on is where the contributor code this describe's other pins talk
-    // about actually executes. classify_pr's pick_runner is the fork-trust
-    // boundary — untrusted fork PRs stay on hosted runners — and a literal
-    // pool label array here would bypass that indirection whole (and desync
-    // from timeout-minutes, which reads the same output). Whole-expression
-    // match, as no-ak-integration-ci does for test_windows.
+    // about actually executes. classify_pr's pick_runner publishes TWO
+    // routings: ubuntu_runner keeps the fork-trust boundary for test and the
+    // integration lanes, while lint_runner routes every pull request —
+    // untrusted forks included — to the fleet (maintainer decision
+    // 2026-10-31, shared-pool code-execution risk accepted). A literal pool
+    // label array here would bypass the classifier indirection whole (and
+    // desync from timeout-minutes, which reads the same output), and reading
+    // ubuntu_runner would silently restore the hosted fork lane. Whole-
+    // expression match, as no-ak-integration-ci does for test_windows.
     expect(String(ci.jobs.lint_and_static['runs-on'])).toBe(
-      String(ci.jobs.test['runs-on']),
-    );
-    expect(String(ci.jobs.lint_and_static['runs-on'])).toBe(
-      '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
+      '${{ fromJSON(needs.classify_pr.outputs.lint_runner || \'["ubuntu-latest"]\') }}',
     );
     // The needs edge is what makes every needs.classify_pr.outputs.* this
     // describe relies on non-empty at runtime. Drop it and the lane silently
@@ -550,6 +612,18 @@ describe('post-merge push lane', () => {
       [].concat(ci.jobs.lint_and_static.needs ?? []),
       'lint_and_static must consume the classifier',
     ).toContain('classify_pr');
+  });
+
+  it('keeps test on the association-gated output', () => {
+    // Nothing else reads test's runs-on: switching it to lint_runner would
+    // hand every untrusted fork the pool while the timeout pins above stayed
+    // green — timeoutMinutesOn derives each lane's output from its own
+    // runs-on, so it cannot catch a lane pointed at the wrong output. Pin the
+    // expression, not an equality with lint_and_static — the two are meant
+    // to differ.
+    expect(String(ci.jobs.test['runs-on'])).toBe(
+      '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
+    );
   });
 
   it('lint_and_static keeps the minimal token its required-check role needs', () => {
@@ -1225,6 +1299,32 @@ describe('GitHub helper tests', () => {
         expect(invocation, step.name).toContain('--test-concurrency=1');
       }
     }
+  });
+
+  it('routes the battery tmpdir off the host /tmp tmpfs', () => {
+    // #15965: e2e-build.test.mjs mkdtemps thousands of chunk files via
+    // os.tmpdir(); on the ECS pool that defaulted to the shared /tmp tmpfs,
+    // whose ~1M inode quota filled up and failed the lane with ENOSPC while
+    // 202G of capacity stayed free. RUNNER_TEMP sits on the roomy data disk,
+    // same routing the unit lanes already use (#10035).
+    const step = (ci.jobs.lint_and_static.steps ?? []).find(
+      (candidate) => candidate.name === 'Run .github/scripts helper tests',
+    );
+    expect(step, 'helper-tests step missing').toBeDefined();
+    // Comments stripped: the rationale above the export names it too, so a pin
+    // satisfied by prose would stay green with the routing commented out.
+    const run = String(step.run)
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n');
+    expect(run).toContain('export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"');
+    expect(run.indexOf('export TMPDIR')).toBeLessThan(
+      run.indexOf('node --test'),
+    );
+    // The routed dir is private to the run and reaped on exit: RUNNER_TEMP
+    // itself is shared with every other job on the host.
+    expect(run).toContain('mktemp -d "${TMPDIR}/helper-tests-XXXXXX"');
+    expect(run).toContain('trap \'rm -rf "$HELPER_TMPDIR"\' EXIT');
   });
 
   it('retries the full-profile battery once against pool contention', () => {

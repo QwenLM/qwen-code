@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.ResidentWorkspace;
 import com.alibaba.qwen.code.managedagent.contracts.event.CommittedEventPublisher;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -90,8 +91,15 @@ public final class ResidentRetirementFixture {
     public StoreModels.Admission create(String key) {
         var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), mock(CommittedEventPublisher.class),
                 new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
-        return new TransactionTemplate(manager).execute(status -> store.insertWorkspaceSessionCommand("tenant", "owner", key,
-                "digest-" + key, "qwen-code", null, "Session", List.of(), null, new WorkspaceSelection(mapping.workspaceId(), ".")));
+        return new TransactionTemplate(manager).execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId("tenant")
+                .actorId("owner")
+                .idempotencyKey(key)
+                .requestDigest("digest-" + key)
+                .agentId("qwen-code")
+                .title("Session")
+                .selection(new WorkspaceSelection(mapping.workspaceId(), "."))
+                .build()));
     }
 
     public RuntimeBindingRecord ready() {

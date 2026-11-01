@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -96,12 +97,22 @@ class HostedWorkspaceConcurrencyIT {
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
             var transaction = new TransactionTemplate(new DataSourceTransactionManager(source));
-            String firstSession = transaction.execute(status -> store.insertWorkspaceSessionCommand(tenant, "actor",
-                    "first", "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
-                    new WorkspaceSelection("workspace", ".")).sessionId());
-            String secondSession = transaction.execute(status -> store.insertWorkspaceSessionCommand(tenant, "actor",
-                    "second", "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null,
-                    new WorkspaceSelection("workspace", ".")).sessionId());
+            String firstSession = transaction.execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                    .tenantId(tenant)
+                    .actorId("actor")
+                    .idempotencyKey("first")
+                    .requestDigest("sha256:" + "a".repeat(64))
+                    .agentId("qwen-code")
+                    .selection(new WorkspaceSelection("workspace", "."))
+                    .build()).sessionId());
+            String secondSession = transaction.execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                    .tenantId(tenant)
+                    .actorId("actor")
+                    .idempotencyKey("second")
+                    .requestDigest("sha256:" + "b".repeat(64))
+                    .agentId("qwen-code")
+                    .selection(new WorkspaceSelection("workspace", "."))
+                    .build()).sessionId());
             guard(source, properties).register(tenant, "storage", UUID.randomUUID().toString());
             Map<String, Object> config = Map.of("url", url, "user", user, "password", password,
                     "tenant", tenant, "root", root.toString());
@@ -250,12 +261,22 @@ class HostedWorkspaceConcurrencyIT {
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
             var transaction = new TransactionTemplate(new DataSourceTransactionManager(source));
-            String firstSession = transaction.execute(status -> store.insertWorkspaceSessionCommand(tenant, "actor",
-                    "first", "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
-                    new WorkspaceSelection("workspace", ".")).sessionId());
-            String secondSession = transaction.execute(status -> store.insertWorkspaceSessionCommand(tenant, "actor",
-                    "second", "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null,
-                    new WorkspaceSelection("workspace", ".")).sessionId());
+            String firstSession = transaction.execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                    .tenantId(tenant)
+                    .actorId("actor")
+                    .idempotencyKey("first")
+                    .requestDigest("sha256:" + "a".repeat(64))
+                    .agentId("qwen-code")
+                    .selection(new WorkspaceSelection("workspace", "."))
+                    .build()).sessionId());
+            String secondSession = transaction.execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                    .tenantId(tenant)
+                    .actorId("actor")
+                    .idempotencyKey("second")
+                    .requestDigest("sha256:" + "b".repeat(64))
+                    .agentId("qwen-code")
+                    .selection(new WorkspaceSelection("workspace", "."))
+                    .build()).sessionId());
             guard(source, properties).register(tenant, "storage", UUID.randomUUID().toString());
             Map<String, Object> config = Map.of("url", url, "user", user, "password", password,
                     "tenant", tenant, "root", root.toString());

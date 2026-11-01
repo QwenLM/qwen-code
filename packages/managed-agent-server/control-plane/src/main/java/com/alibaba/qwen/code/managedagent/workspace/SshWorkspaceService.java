@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.workspace;
 
 import com.alibaba.qwen.code.managedagent.contracts.session.AcceptanceEvidence;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
@@ -357,7 +357,7 @@ public class SshWorkspaceService implements AutoCloseable, AcceptanceEvidence, c
     }
 
     @Override
-    public boolean settle(AgentStateStore ignored, ParkedOperation parked, AcceptanceVerdict verdict, long retryAt) {
+    public boolean settle(SessionLifecycleStore ignored, ParkedOperation parked, AcceptanceVerdict verdict, long retryAt) {
         return switch (verdict.acceptance()) {
             case COMMITTED -> store.completeParked(parked.tenantId(), parked.operationId());
             case NOT_COMMITTED -> store.releaseParked(parked.tenantId(), parked.operationId(), verdict.failureCode());

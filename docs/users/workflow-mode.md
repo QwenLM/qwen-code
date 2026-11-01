@@ -40,6 +40,26 @@ session-agent sessions, and sessions with chat recording disabled, do not
 support mode changes. Unsupported protocol sessions do not advertise the
 capability or option. A failed write leaves the published mode unchanged.
 
+## Web Shell and VS Code
+
+The composer in Web Shell, split panes, and the modern VS Code chat includes
+an independent **Workflow** control for supported sessions. The switch shows
+the saved preference, not whether the mode can currently take effect. If the
+preference is on but the tools are unavailable, it stays checked and can still
+be turned off. Click the Workflow label or focus and activate it to open its status details;
+the same details are available by tapping on touch devices.
+
+Before a session is created or restored, the control shows an availability
+placeholder. It does not create a session or save a future preference. Hosts
+that do not advertise support, including older servers, hide the mode switch.
+
+Changes from another client update the same session's control automatically.
+During a write or reconnection, the last confirmed value remains visible and
+the switch is disabled until state is confirmed. A timeout is an unconfirmed
+outcome, not a successful change; the client reads the current state instead
+of automatically repeating the write. An active response does not disable the
+switch: the change applies to the next fresh turn and leaves effort unchanged.
+
 ## Reminder and input behavior
 
 The first eligible submission receives a model-only reminder. With no other
@@ -107,5 +127,5 @@ Daemon clients use the existing session config-option endpoint or
 `setSessionConfigOption(sessionId, 'workflow_mode', 'on', clientId)`. The option
 does not accept a `persist` override: it is always session-persistent. Context
 readback and updates belong to the live owner of that session, including its
-lease and generation checks. Web/IDE-specific controls are not included in
-this implementation.
+lease and generation checks. Web Shell and the modern VS Code host consume
+these same session controls and updates.

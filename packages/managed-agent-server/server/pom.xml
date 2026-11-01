@@ -122,6 +122,30 @@
                         </path>
                     </annotationProcessorPaths>
                 </configuration>
+                <executions>
+                    <!-- Writes META-INF/spring-configuration-metadata.json, from
+                         which docs/users/managed-agent-configuration-reference.md
+                         is generated. Only ManagedAgentProperties: the two Druid
+                         beans share a prefix, which the processor refuses. It
+                         reads Lombok's annotations itself. -->
+                    <execution>
+                        <id>configuration-metadata</id>
+                        <phase>process-classes</phase>
+                        <goals><goal>compile</goal></goals>
+                        <configuration>
+                            <proc>only</proc>
+                            <includes>
+                                <include>com/alibaba/qwen/code/managedagent/config/ManagedAgentProperties.java</include>
+                            </includes>
+                            <annotationProcessorPaths combine.self="override">
+                                <path>
+                                    <groupId>org.springframework.boot</groupId>
+                                    <artifactId>spring-boot-configuration-processor</artifactId>
+                                </path>
+                            </annotationProcessorPaths>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

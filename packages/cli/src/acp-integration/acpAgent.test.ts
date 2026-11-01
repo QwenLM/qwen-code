@@ -312,6 +312,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).tryResolveModelProtocol,
 
+  Config: (await importOriginal<typeof import('@qwen-code/qwen-code-core')>())
+    .Config,
   SessionSourceService: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).SessionSourceService,
@@ -1121,6 +1123,8 @@ vi.mock('../ui/commands/contextCommand.js', () => ({
     skillToolDefinitionTokens: 0,
     loadedSkillBodiesTokens: 0,
     memoryFilesTokens: 50,
+    breakdown: { instructionFiles: 30, memoryFiles: 20 },
+    instructionFiles: [{ path: 'QWEN.md', tokens: 30 }],
     categories: [],
     builtinTools: [],
     mcpTools: [],
@@ -12718,14 +12722,30 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       },
     ]);
+    const routes = models.filter((model) =>
+      model.modelId.startsWith('qwen-route:v1:'),
+    );
+    expect(routes).toHaveLength(2);
+    // The tiered stable family keeps its manifest controls on opaque routes.
+    for (const route of routes) {
+      expect(route.configOptions).toMatchObject([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'xhigh',
+          options: [
+            { value: 'none' },
+            { value: 'low' },
+            { value: 'medium' },
+            { value: 'xhigh' },
+          ],
+        },
+      ]);
+    }
     expect(
       models
-        .filter((model) => model !== stable)
+        .filter((model) => model !== stable && !routes.includes(model))
         .every((model) => model.configOptions === undefined),
     ).toBe(true);
-    expect(
-      models.filter((model) => model.modelId.startsWith('qwen-route:v1:')),
-    ).toHaveLength(2);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -13751,6 +13771,96 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   );
 
+  it('keeps a declared Qwen capability on duplicate-endpoint routes in an ACP session', async () => {
+    const sessionId = 'qwen4-declared-routes';
+    const maasA =
+      'https://llm-a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+    const maasB =
+      'https://llm-b.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const generation = innerConfig.getContentGeneratorConfig();
+    Object.assign(generation, {
+      model: 'qwen4-plus',
+      authType: AuthType.USE_OPENAI,
+      baseUrl: maasA,
+    });
+    innerConfig.getModel = vi.fn(() => generation.model);
+    innerConfig.getAuthType = vi.fn(() => AuthType.USE_OPENAI);
+    innerConfig.getCurrentModelRegistryBaseUrl = vi.fn().mockReturnValue(maasA);
+    innerConfig.getAllConfiguredModels = vi.fn().mockReturnValue([
+      {
+        id: 'qwen4-plus',
+        label: 'Qwen4 A',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: maasA,
+        registryBaseUrl: maasA,
+      },
+      {
+        id: 'qwen4-plus',
+        label: 'Qwen4 B',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: maasB,
+        registryBaseUrl: maasB,
+      },
+    ]);
+    Object.assign(innerConfig, {
+      getResolvedModelConfig: vi.fn(() => ({
+        baseUrl: maasA,
+        generationConfig: {},
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            efforts: ['high'],
+            defaultEffort: 'high',
+            canDisable: false,
+            disableField: 'reasoning_effort',
+          },
+        },
+      })),
+    });
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      const response = (await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+      })) as NewSessionResponse;
+      // The duplicate endpoints make the selected route opaque; the declared
+      // high-only, non-disableable capability must survive the routing rather
+      // than being replaced by the tiered manifest. Pin the opaque selector
+      // first so the reasoning assertions provably exercise the routed branch.
+      expect(
+        response.configOptions?.find((entry) => entry.id === 'model')
+          ?.currentValue,
+      ).toMatch(/^qwen-route:v1:/);
+      const option = response.configOptions?.find(
+        (entry) => entry.id === 'reasoning_effort',
+      );
+      expect(option?.currentValue).toBe('high');
+      expect(
+        option?.options.flatMap((entry) =>
+          'value' in entry ? [entry.value] : [],
+        ),
+      ).toEqual(['high']);
+      await expect(
+        agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'low',
+        }),
+      ).rejects.toThrow('Unknown reasoning effort: low');
+      await expect(
+        agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'none',
+        }),
+      ).rejects.toThrow();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('exposes and applies the ACP reasoning effort selector', async () => {
     const sessionId = 'reasoning-effort-session';
     const innerConfig = await setupSessionMocks(sessionId);
@@ -14766,7 +14876,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
   it.each([
     { modelId: 'qwen-plus', value: 'high', opaque: false },
-    { modelId: 'qwen3.8-max', value: 'medium', opaque: true },
+    { modelId: 'qwen-plus', value: 'medium', opaque: true },
   ])(
     'hides and rejects unsupported reasoning for $modelId with opaque=$opaque',
     async ({ modelId, value, opaque }) => {
@@ -15418,10 +15528,18 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       SERVE_STATUS_EXT_METHODS.sessionAgents,
       { sessionId },
     );
+    // Distinguish the admission root from the live target dir so the
+    // workspaceRoot producer is pinned: a relocated session keeps its
+    // admission root while the live cwd moves. Applied after the context
+    // status read above so that assertion still sees the original cwd.
+    vi.mocked(innerConfig.storage.getProjectRoot).mockReturnValue('/repo');
+    vi.mocked(innerConfig.getTargetDir).mockReturnValue('/repo/sub');
     const contextUsage = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.sessionContextUsage,
       { sessionId, detail: true },
     );
+    // Restore the live cwd so the later LSP status assertion still sees /tmp.
+    vi.mocked(innerConfig.getTargetDir).mockReturnValue('/tmp');
     const lsp = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.sessionLspStatus,
       {
@@ -15543,12 +15661,33 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(contextUsage).toMatchObject({
       v: 1,
       sessionId,
-      workspaceCwd: '/tmp',
+      workspaceCwd: '/repo/sub',
+      workspaceRoot: '/repo',
       usage: {
         modelName: 'm',
         showDetails: true,
+        breakdown: { instructionFiles: 30, memoryFiles: 20 },
+        instructionFiles: [{ path: 'QWEN.md', tokens: 30 }],
       },
       formattedText: expect.stringContaining('## Context Usage'),
+    });
+    const { collectContextData } = await import(
+      '../ui/commands/contextCommand.js'
+    );
+    vi.mocked(collectContextData).mockRejectedValueOnce(
+      new Error('Context not initialized'),
+    );
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionContextUsage, {
+        sessionId,
+      }),
+    ).resolves.toMatchObject({
+      usage: {
+        breakdown: { instructionFiles: 0, memoryFiles: 0 },
+        instructionFiles: [],
+        memoryFiles: [],
+        isEstimated: true,
+      },
     });
     expect(lsp).toEqual({
       v: 1,
@@ -29800,6 +29939,42 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
       liveSessionId,
     );
     expect(innerConfig.shutdown).toHaveBeenCalledTimes(2);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('stops the session lsp client when an unstored config is cleaned up (#14751)', async () => {
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const { Config: RealConfig } = await import('@qwen-code/qwen-code-core');
+    const realConfig = new RealConfig({
+      targetDir: '/tmp',
+      cwd: '/tmp',
+      debugMode: false,
+      model: 'test-model',
+      chatRecording: false,
+      lspClient: { stop } as never,
+    });
+    await realConfig.initialize({
+      skipLlmInitialization: true,
+      skipHooks: true,
+      skipMcpDiscovery: true,
+      skipSkillManager: true,
+      skipFileCheckpointing: true,
+      // SkillTool's constructor requires the SkillManager this Config
+      // deliberately skips; warm the registry leniently so it is logged and
+      // skipped instead of aborting initialize().
+      lenientToolWarmup: true,
+    });
+
+    const { agent, agentPromise } = await bootAgent(
+      makeLiveSessionInnerConfig(makeRecordingService()),
+    );
+    const cleanup = agent as unknown as {
+      cleanupUnstoredConfig(config: Config): Promise<void>;
+    };
+    await cleanup.cleanupUnstoredConfig(realConfig);
+    expect(stop).toHaveBeenCalledTimes(1);
 
     mockConnectionState.resolve();
     await agentPromise;

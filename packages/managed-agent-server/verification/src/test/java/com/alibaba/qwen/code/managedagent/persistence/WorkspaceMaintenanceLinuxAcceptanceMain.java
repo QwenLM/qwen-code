@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -70,8 +71,14 @@ public final class WorkspaceMaintenanceLinuxAcceptanceMain {
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'OPERATOR')",
                     tenant, "native-actor".getBytes(java.nio.charset.StandardCharsets.UTF_8));
             var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
-            String parent = transactions.execute(ignored -> sessions.insertWorkspaceSessionCommand(tenant, "native-actor", "create", "digest",
-                    "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", "."))).sessionId();
+            String parent = transactions.execute(ignored -> sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                    .tenantId(tenant)
+                    .actorId("native-actor")
+                    .idempotencyKey("create")
+                    .requestDigest("digest")
+                    .agentId("qwen-code")
+                    .selection(new WorkspaceSelection("workspace", "."))
+                    .build())).sessionId();
             var child = children.admit(tenant, parent, "run", binding, System.currentTimeMillis());
             var claimed = children.claim(child, "original-native-worker", System.currentTimeMillis(), 60_000);
             authority.holdForMaintenance(binding, claimed.childWorkspaceId(), claimed.claimGeneration());
