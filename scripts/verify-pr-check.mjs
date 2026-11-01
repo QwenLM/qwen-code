@@ -76,7 +76,7 @@ and warns (without failing) when the report does not lead with its verdict and
 head OID, when the verdict line is a heading (GitHub renders the whole
 paragraph as one giant H1), when evidence/ carries no kebab-case PNG capture,
 when a round with failures carries no failures ledger at all, when over
-${SUITE_SIZED_TOTAL} assertions come with no gates (an existing test suite
+${SUITE_SIZED_TOTAL} assertions come with no gate results (an existing test suite
 counted as the round's own), or when comment.md — the exact body a local round
 posts, optional — repeats the heading shape or lacks the attribution footer.
 
@@ -292,31 +292,32 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
           Number.isInteger(value) &&
           value >= 0 &&
           value <= Number.MAX_SAFE_INTEGER;
-        if (
-          gates !== undefined &&
-          (!Array.isArray(gates) ||
-            gates.some(
-              (gate) =>
-                !gate ||
-                typeof gate.suite !== 'string' ||
-                gate.suite.trim() === '' ||
-                !isCount(gate.pass) ||
-                !isCount(gate.fail) ||
-                (gate.skipped !== undefined && !isCount(gate.skipped)),
-            ))
-        ) {
+        // Blank means JSON whitespace only: trim() and jq's \S disagree on
+        // U+0085 and U+FEFF.
+        const gatesValid =
+          Array.isArray(gates) &&
+          gates.every(
+            (gate) =>
+              !!gate &&
+              typeof gate.suite === 'string' &&
+              /[^ \t\n\r]/.test(gate.suite) &&
+              isCount(gate.pass) &&
+              isCount(gate.fail) &&
+              (gate.skipped === undefined || isCount(gate.skipped)),
+          );
+        if (gates !== undefined && !gatesValid) {
           errors.push(
             'assertions.json gates must be an array of { suite, pass, fail } entries with non-negative integer counts (skipped optional)',
           );
         }
-        // An empty list records no suites, so it must not silence the
-        // size warning either.
-        if (
-          counts.total > SUITE_SIZED_TOTAL &&
-          (gates === undefined || (Array.isArray(gates) && gates.length === 0))
-        ) {
+        // Only recorded results silence the size warning: an empty list, or
+        // entries that count nothing, moved no suite out of the counts.
+        const gateResults = gatesValid
+          ? gates.reduce((sum, gate) => sum + gate.pass + gate.fail, 0)
+          : 0;
+        if (counts.total > SUITE_SIZED_TOTAL && gateResults === 0) {
           warnings.push(
-            `assertions.json counts ${counts.total} assertions and records no gates: an existing test suite's results belong in gates, not in pass, fail and total`,
+            `assertions.json counts ${counts.total} assertions and records no gate results: an existing test suite's results belong in gates, not in pass, fail and total`,
           );
         }
       }
