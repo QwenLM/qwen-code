@@ -258,20 +258,21 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
         try {
             rows = jdbc.query(
                     "SELECT s.storage_id, s.registration_json, s.registration_revision,"
-                            + " s.physical_key, o.mount_root"
+                            + " s.physical_key, s.storage_kind, o.mount_root"
                             + " FROM ma_storage s JOIN ma_storage_owner o"
                             + " ON o.storage_key = s.physical_key"
                             + " WHERE s.tenant_id = ? AND s.storage_id IN ("
                             + String.join(",", java.util.Collections.nCopies(
                                     tenantWorkspaceIds.size(), "?"))
-                            + ") AND s.storage_kind = 'EXTERNAL'"
+                            + ") AND s.storage_kind IN ('EXTERNAL', 'EPHEMERAL')"
                             + " AND s.registration_state = 'REGISTERED'",
                     (row, index) -> {
                         Object revision = row.getObject("registration_revision");
                         return new StoredRegistration(row.getString("storage_id"),
                                 row.getString("registration_json"),
                                 revision instanceof Number number ? number : null,
-                                row.getString("physical_key"), row.getString("mount_root"));
+                                row.getString("physical_key"), row.getString("mount_root"),
+                                row.getString("storage_kind"));
                     },
                     arguments.toArray());
         } catch (RuntimeException failure) {
@@ -300,6 +301,8 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
             }
             if (result.containsKey(storage)
                     || registered == null || row.registrationRevision() == null
+                    || !registered.storageKind().equals(row.storageKind())
+                    || registered.ephemeral() && !tenant.equals(registered.ephemeralTenantId())
                     || !storage.equals(registered.tenantWorkspaceId())
                     || !registered.ownerKey().equals(row.physicalKey())
                     || registered.registrationRevision() != row.registrationRevision().longValue()
@@ -318,7 +321,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
     }
 
     private record StoredRegistration(String storageId, String encodedRegistration,
-            Number registrationRevision, String physicalKey, String mountRoot) {
+            Number registrationRevision, String physicalKey, String mountRoot, String storageKind) {
     }
 
     record RegistrationState(boolean current, String providerId, String tenantWorkspaceId) {

@@ -439,6 +439,42 @@ class ExternalWorkspaceMaterializationTest {
     }
 
     @Test
+    void ephemeralWorkspaceUsesTheSameRegistrationEligibilityAsExternal() {
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getRuntimeBroker().setExternalProviderId("provider");
+        var harness = mock(HarnessConnector.class);
+        when(harness.supportsLifecycle("hosted-workspace-external-files/1")).thenReturn(true);
+        var warmer = mock(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class);
+        when(warmer.supportsWorkspaceClose("hosted-workspace-external-files/1")).thenReturn(true);
+        try (var context = new org.springframework.context.annotation.AnnotationConfigApplicationContext()) {
+            context.registerBean(ManagedAgentProperties.class, () -> properties);
+            context.registerBean(ExternalStorageRegistrationStore.class, () -> registrations);
+            context.registerBean(HarnessConnector.class, () -> harness);
+            context.registerBean(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class, () -> warmer);
+            context.registerBean(ManagedWorkspaceRegistry.class, () -> registry);
+            context.refresh();
+            new ExternalWorkspaceRegistrationService(registrations, store).ensureEphemeralRegistered(
+                    "tenant", "owner", "ephemeral",
+                    new EphemeralWorkspaceRegistration(
+                            properties.getRuntimeBroker().getExternalProviderId(),
+                            "ephemeral-workspace", "/worker/ephemeral", 1),
+                    "Ephemeral");
+
+            assertThat(registry.findReadable("tenant", "owner", "ephemeral-workspace").canCreateSession())
+                    .isTrue();
+            assertThat(registry.findReadable("tenant", "owner", List.of("ephemeral-workspace"))
+                    .get("ephemeral-workspace").canCreateSession()).isTrue();
+
+            jdbc.update("UPDATE ma_storage SET registration_json = 'not-json'"
+                    + " WHERE storage_id = 'ephemeral-workspace'");
+            assertThat(registry.findReadable("tenant", "owner", "ephemeral-workspace").canCreateSession())
+                    .isFalse();
+            assertThat(registry.findReadable("tenant", "owner", List.of("ephemeral-workspace"))
+                    .get("ephemeral-workspace").canCreateSession()).isFalse();
+        }
+    }
+
+    @Test
     void closedBoundedRequestRejectsUnknownDuplicateTrailingAndInvalidOwner() throws Exception {
         String valid = body("workspace", "Name", "owner", "key", null);
         for (String invalid : List.of(valid.replace("\"owner\"", "\"\""),
