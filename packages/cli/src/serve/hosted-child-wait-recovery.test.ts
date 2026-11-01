@@ -1292,11 +1292,15 @@ describe('hosted child wait recovery (#13708)', () => {
           children: undefined,
         }),
       ).resolves.toBeDefined();
-      const folds = JSON.stringify(
-        toolResultEntries(await replacement.sink.project()),
-      );
+      const toolResults = toolResultEntries(await replacement.sink.project());
+      const folds = JSON.stringify(toolResults);
       expect(folds).toContain('outcome is unknown');
       expect(folds).not.toContain('never ran');
+      const callThreeResponse = toolResults
+        .flatMap((entry) => entry.message?.parts ?? [])
+        .find((part) => part.functionResponse?.id === 'call-3')
+        ?.functionResponse?.response;
+      expect(callThreeResponse).toMatchObject({ executionStatus: 'unknown' });
     } finally {
       await replacement.close();
     }
@@ -1411,10 +1415,6 @@ describe('hosted child wait recovery (#13708)', () => {
             (part) => part.functionResponse?.id === 'call-2',
           ),
         )?.message?.parts,
-      );
-      console.log(
-        'PROJECTION',
-        JSON.stringify(await first.sink.project(), null, 1).slice(0, 3000),
       );
       expect(callTwo).toContain('outcome is unknown');
       expect(callTwo).not.toContain('never ran');

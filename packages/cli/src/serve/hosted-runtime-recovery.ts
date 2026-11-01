@@ -126,6 +126,9 @@ export class RecoveryDeclined extends Error {}
 /** A temporary pool wait, distinct from a deterministic takeover decline. */
 export class HostedRecoveryQuiescingError extends Error {}
 
+/** The A6 evidence block whose pre-aborted cancel is still a terminal escape. */
+export class HostedChildLedgerRecoveryRequiredError extends HostedToolRecoveryRequiredError {}
+
 /** The states a recovery report may advertise: exactly the vocabulary the
  * hosted client's validator accepts (HostedHarnessClient's
  * RUNTIME_EXECUTION_STATES). The broker's wider union folds into it at the
@@ -872,7 +875,7 @@ async function answerAbandonedTurnCalls(input: {
       const ledgerUnknown =
         CHILD_LEDGER_TOOL_NAMES.has(call.name) && input.children === undefined;
       if (ledgerUnknown && uncommitted === 'hosted')
-        throw new HostedToolRecoveryRequiredError(
+        throw new HostedChildLedgerRecoveryRequiredError(
           'Child run ledger is unavailable; the gap cannot be proven never-started.',
         );
       // A call whose Runtime stop was never observed answers with the
@@ -1522,9 +1525,9 @@ export async function fillParkedRoundAgentGaps(input: {
     // (admitLaunch commits before dispatch). Block, never fold "never ran".
     // An already-journaled gap owes nothing: a replayed fill stays silent.
     // The cancel route and the interrupted-turn settle funnel pre-abort this
-    // fill so they terminate at once; their exempted fold keeps the
-    // pre-A6 story — but for a family call with no ledger it writes the
-    // unknown-outcome answer that claims nothing, never "never ran".
+    // fill so they terminate at once; for a family call with no ledger, their
+    // exempted fold writes the unknown-outcome answer that claims nothing,
+    // never "never ran".
     // Only the live-signal continue route blocks — its catch maps the
     // family to a retriable recovery block.
     if (
@@ -1533,7 +1536,7 @@ export async function fillParkedRoundAgentGaps(input: {
       CHILD_LEDGER_TOOL_NAMES.has(name)
     ) {
       if (input.signal?.aborted !== true)
-        throw new HostedToolRecoveryRequiredError(
+        throw new HostedChildLedgerRecoveryRequiredError(
           'Child run ledger is unavailable; the gap cannot be proven never-started.',
         );
       await writeFold(
@@ -1824,7 +1827,7 @@ export async function fillParkedRoundCommandGaps(input: {
       // a pre-aborted caller (cancel, settle) keeps terminating, on the
       // unknown-outcome answer that claims nothing.
       if (input.signal?.aborted !== true)
-        throw new HostedToolRecoveryRequiredError(
+        throw new HostedChildLedgerRecoveryRequiredError(
           'Child run ledger is unavailable; the gap cannot be proven never-started.',
         );
       await input.managed.sink.write({

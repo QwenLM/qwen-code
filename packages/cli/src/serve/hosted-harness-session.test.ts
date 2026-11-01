@@ -27672,7 +27672,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
   // continue route — the family error becomes a retriable recovery block,
   // never a fabricated never-ran fold. The drift is built into the load
   // (suppressChildAgents on a version-0 lane), not hand-passed.
-  it('blocks the ledger-less child gap on continue and keeps the block retriable (A6)', async () => {
+  it('blocks the ledger-less child gap on continue and still lets cancel terminate (A6)', async () => {
     await parkAgentWaitResumeShape('orphan');
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
     acquireSpy = vi
@@ -27737,6 +27737,48 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(JSON.stringify(transcript.body)).not.toContain(
       'interrupted before this child agent was admitted',
     );
+    const cancelled = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/cancel`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(cancelled.status).toBe(200);
+    expect(cancelled.body.accepted).toBe(true);
+    await vi.waitFor(
+      async () => {
+        const status = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    const settledTranscript = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    const settledBody = JSON.stringify(settledTranscript.body);
+    expect(settledBody).toContain('outcome is unknown');
+    expect(settledBody).not.toContain('never ran');
+    expect(settledTranscript.body.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'turn_complete',
+          promptId: PROMPT_ID,
+          data: expect.objectContaining({ stopReason: 'cancelled' }),
+        }),
+      ]),
+    );
+    await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/cancel`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({ promptId: PROMPT_ID })
+      .expect(204);
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
     );

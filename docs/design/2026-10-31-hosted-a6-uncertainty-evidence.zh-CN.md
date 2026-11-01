@@ -2,8 +2,9 @@
 
 状态：已实现。Issue #14481（G3 Step 3 恢复矩阵）的 **A6** 行切片
 （「MCP/Hook/child 不确定性」）。按父设计 §9.1，A6 属定向或集成证据：本切片
-补充定向行为化证据并加一处小的恢复守卫。不新增 CI 臂、不新增续接支持、不改
-Hook/MCP 拒绝策略本身。
+补充定向行为化证据，在每个恢复写入点守卫不确定 child 证据，并为由此产生的
+阻塞保留有边界的 cancel 出口。不新增 CI 臂、不新增续接支持、不改 Hook/MCP
+拒绝策略本身。
 
 父文档：[G3 Step 3 恢复](2026-10-09-hosted-g3-step3-recovery.zh-CN.md)。
 English: [2026-10-31-hosted-a6-uncertainty-evidence.md](2026-10-31-hosted-a6-uncertainty-evidence.md).
@@ -68,27 +69,27 @@ A6 要求三个观察：缺失或未知的 producer 证据必须阻塞；不重�
 
 ## 改动
 
-- **G1/G2（仅测试）。** 在 `hosted-approval-continuation.test.ts` 增加四行
+- **G1/G2（仅测试）。** 在 `hosted-approval-continuation.test.ts` 增加五行
   owner 门矩阵：hooks 拥有与 mcp 拥有的 turn 恢复非 commandStep 保存计划时以
-  `'Unsupported saved batch owner.'` cause 拒绝；`configRevision` 与 turn 的
+  `'Unsupported saved batch owner.'` cause 拒绝；Hook owner 带
+  `extensionConfig` 且无 commandStep 也被第一臂拒绝；`configRevision` 与 turn 的
   `extensionConfig.revision` 不再匹配的 commandStep 计划由门的第二臂拒绝；
   版本匹配的 commandStep 计划在 hooks owner 下越过该门（其拒绝是被包装的
   传输失败，绝非 owner cause）——钉住保住 A3 commandStep 后续可用的过度阻塞
   方向。先实证缺口：删除 owner 门子句后改动前的套件仍绿。
-- **G3（一处守卫 + 测试）。** 在 `fillParkedRoundAgentGaps` 中，仍欠折叠
-  （`foldOwed`）的账本家族调用（`agent` 或 `workflow`）在
-  `input.children === undefined` 且信号存活（未中止）时抛
-  `HostedToolRecoveryRequiredError` 而非折叠。三条边界保守卫诚实：已入日志的
-  缺口保持静默重放；cancel 路由与中断回合结算漏斗对该填充**预中止**以求立刻
-  终止，它们的丢弃折叠保留 pre-A6 故事（在那里抛错会把 cancel 楔进确定性
-  503 循环、把唤醒楔进 busy 重试——只有 continue 路由阻塞，其 catch 把该家族
-  映射为可重试恢复阻塞）；非家族滞留调用保留既有应答。见证：
-  `hosted-child-wait-recovery.test.ts` 的 agent 臂、workflow 臂、非 agent 臂、
-  重放静默与预中止豁免五个 fill 级用例，加上
-  `hosted-harness-session.test.ts` 的两个路由级用例——把漂移建进加载
-  （orphan 停靠形状 + `suppressChildAgents`）：continue 以可重试 409
-  `hosted_turn_recovery_required` 阻塞且无伪造折叠，cancel 仍以其 pre-A6
-  丢弃折叠结算。每个子句都有已验证的单子句删除对照。
+- **G3（恢复写入点 + 有边界的 cancel 出口）。** 在存活信号下，仍欠折叠的
+  账本家族调用（`agent` 或 `workflow`）若 `children === undefined`，
+  `fillParkedRoundAgentGaps`、`fillParkedRoundCommandGaps` 与 hosted
+  resumed-turn 应答都拒绝。共同的
+  `HostedChildLedgerRecoveryRequiredError` 子类型只为这种证据阻塞做路由标记。
+  已入日志缺口保持静默，非家族缺口保留既有应答，账本在场但无记录仍是
+  「从未启动」的肯定证据。预中止的终止性填充与 `'all'` 结算写入
+  `HOSTED_CHILD_LEDGER_UNKNOWN_TEXT` 和 `executionStatus: 'unknown'`，绝不伪造
+  never-ran 或 cancelled 结果。路由见证把漂移建进加载（orphan 停靠形状 +
+  `suppressChildAgents`）：continue 可重试地阻塞且无伪造折叠，随后
+  managed-runtime cancel 结算同一个被阻塞 Turn、写入 cancelled 终态、清除恢复
+  阻塞，公开 cancel 重放应答 204。其他恢复阻塞仍以 409 `turn_blocked` 拒绝
+  cancel。
 
 ## 设计决定
 
@@ -100,9 +101,12 @@ A6 要求三个观察：缺失或未知的 producer 证据必须阻塞；不重�
   滞留调用保留既有缺口应答，守卫不会回归合法没有 child funnel 的会话。
 - **终止路由的 abort 豁免。** cancel 与中断结算漏斗刻意预中止该填充
   （「立刻结算……而不是把 cancel 扣为人质」）；守卫豁免已中止信号，使这两条
-  路径保留 pre-A6 丢弃折叠并永远可终止。残余权衡是明确的：漂移下这两条路径
-  仍折叠近似的丢弃应答而非阻塞——阻塞它们会把被取消的 Turn 永远楔死，比那个
-  近似故事更糟，而自带账本的 child 仍可自行恢复。
+  路径永远可终止。无账本家族折叠明确说结果未知并保留记录，绝不声称调用从未
+  运行或已观察到取消。
+- **阻塞后的有边界终止出口。** 只有 A6 子类型会设置
+  `recoveryCancelPromptId`，也只有该 Turn 的 managed-runtime cancel 能越过
+  blocked 拒绝。失败的 continue admission 被删除，不能冒充 cancel 重放；只有
+  cancelled 终态持久化后才解除阻塞。其他恢复阻塞保留 409 拒绝与租约行为。
 - **不打包臂、不加续接支持。** §9.1 把 A6 归为定向或集成证据，且 native
   continuation 按设计拒绝 Hook/MCP 会话（commandStep 后续是 A3 的另一半）。
   打包 Hook/MCP 崩溃臂需要新的 e2e 夹具，属独立切片。
@@ -112,7 +116,8 @@ A6 要求三个观察：缺失或未知的 producer 证据必须阻塞；不重�
 
 ## 涉及文件
 
-- `packages/cli/src/serve/hosted-runtime-recovery.ts`（G3 守卫）
+- `packages/cli/src/serve/hosted-runtime-recovery.ts`（G3 写入点守卫与 A6 错误子类型）
+- `packages/cli/src/serve/hosted-harness-session.ts`（有边界的 cancel 出口）
 - `packages/cli/src/serve/hosted-child-wait-recovery.test.ts`（G3 fill 级用例）
 - `packages/cli/src/serve/hosted-harness-session.test.ts`（G3 路由级用例）
 - `packages/cli/src/serve/hosted-approval-continuation.test.ts`（G1/G2 矩阵）
@@ -126,11 +131,13 @@ A6 要求三个观察：缺失或未知的 producer 证据必须阻塞；不重�
   `extensions?.enabled` 子句（见下方后续工作）。
 - G3：缺席账本反例在守卫前折叠「never ran」，守卫后对 `agent` 与 `workflow`
   均抛错且不写任何折叠；账本在场/无记录臂仍折叠诚实应答；非家族缺口调用
-  不变；已入日志缺口静默重放；预中止填充保留其丢弃折叠。路由级内建漂移下：
-  continue 可重试地阻塞（409）且无伪造折叠，cancel 仍结算。守卫的每个合取项
-  （家族、foldOwed、abort 豁免）都有恰好使其命名用例变红的删除对照。
+  不变；已入日志缺口静默重放；预中止填充与 `'all'` 结算写入未知结果，并在
+  结算自己的应答臂上钉住 `executionStatus: 'unknown'`。路由级内建漂移下：
+  continue 可重试地阻塞（409）且无伪造折叠，随后 cancel 结算同一 Turn 并解除
+  阻塞；无关恢复阻塞仍拒绝 cancel。每个新增守卫或出口子句都有使命名用例变红
+  的删除对照。
 - 定向套件在净化环境（剥离 agent 会话环境变量）下绿；typecheck/ESLint/Prettier
-  绿；唯一的生产改动就是那一处守卫。
+  绿；生产改动只涉及恢复写入点与有边界的 cancel 出口。
 
 ## 开放问题
 
@@ -147,3 +154,27 @@ A6 要求三个观察：缺失或未知的 producer 证据必须阻塞；不重�
 - **extensions 行（R2-2）**：owner 门矩阵补上了注释所声称的那一行——Hook owner + `extensionConfig` + 无 `commandStep` 被第一臂拒绝；向门里偷运 `&& !this.extensionConfig` 恰好使该行变红。
 
 R2 删除对照（安静树、完整失败清单判定）：把家族常量在守卫处挖空为仅 `agent`；移除 resumed-answer 拒绝；把 `'all'` 结算的 unknown 措辞改回；移除 command-gaps 拒绝；向门里偷运 extensions 豁免——每行恰好杀于命名用例，还原逐字节一致。
+
+## R3 验证轮（1 条 Major + 3 条建议——全部修复）
+
+- **终止出口（F1）**：修复前按新路由顺序实证变红——continue 阻塞后，
+  managed-runtime cancel 应答 409。现在只有 A6 子类型会为同一 Turn 设置
+  cancel 豁免；失败的 continue admission 被删除，不能冒充 cancel 重放；
+  cancelled 终态持久化后才解除阻塞。见证断言未知结果折叠、cancelled 终态、
+  状态清锁与公开 cancel 204。既有普通 recovery-block 对照仍应答 409
+  `turn_blocked`。
+- **结算状态（F2）**：结算用例现在精确选择 `call-3`——由结算自己的应答臂
+  处理、而非兄弟填充处理的调用——并断言其 `executionStatus: 'unknown'`。
+- **调试残留（F3）**：删除命令等待用例的 projection `console.log`。
+- **过期描述（F4）**：PR 正文与双语设计文档都改为描述五行矩阵、全部恢复
+  写入点、诚实未知折叠与有边界的 cancel 出口，不再是 R2 之前的单守卫形状。
+
+R3 删除对照（安静树、每行只选一个用例）：第一道 blocked 门、第二道
+blocked 门、continue admission 删除、终态清锁与 A6 子类型各自使
+「先阻塞再 cancel」见证变红；把标记扩大到所有家族错误恰好只使普通
+blocked-cancel 对照变红；回退结算状态恰好只使 `call-3` 用例变红。7 行全部
+KILLED，每次还原 sha256 一致。
+
+门禁：8 个定向套件 1587/1587（harness 文件的 686 个用例在默认全文件运行
+无断言失败但达到 10 分钟执行上限后，分成 175 + 511 两个显式组完成）；
+typecheck RC=0；ESLint 与 Prettier 绿。
