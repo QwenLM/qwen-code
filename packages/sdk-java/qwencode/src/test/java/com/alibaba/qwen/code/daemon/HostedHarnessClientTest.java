@@ -9565,6 +9565,25 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void refusesClassifierAndRuleSelectionsWithoutTheirOwnMarkers() {
+        server.createContext("/session", exchange -> sendSessionJson(exchange, 200, sessionJson()));
+        capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
+                "\"hostedHarness\":{\"features\":[\"approval-selection/1\"],"));
+        Map<String, Object> block = Map.of("type", "text", "text", "hello");
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            String digest = SubmitHarnessTurn.computePayloadDigest(List.of(block));
+            var auto = SubmitHarnessTurn.builder().session(session).promptId(PROMPT_ID).addContent(block)
+                    .payloadDigest(digest).approvalSelection("auto", 1).build();
+            assertThrows(DaemonException.class, () -> client.submitTurn(auto));
+            var rules = Map.of("allow", List.of("Read"), "ask", List.<String>of(), "deny", List.<String>of());
+            var policy = SubmitHarnessTurn.builder().session(session).promptId(PROMPT_ID).addContent(block)
+                    .payloadDigest(digest).approvalSelection("yolo", 1, false, rules).build();
+            assertThrows(DaemonException.class, () -> client.submitTurn(policy));
+        }
+    }
+
+    @Test
     void refusesApprovalSelectionWhenTheHostDidNotAdvertiseIt() {
         server.createContext("/session", exchange -> sendSessionJson(exchange, 200, sessionJson()));
         Map<String, Object> block = Map.of("type", "text", "text", "hello");

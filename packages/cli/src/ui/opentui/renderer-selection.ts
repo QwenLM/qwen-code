@@ -7,7 +7,6 @@
 import {
   isOpenTuiRuntimeSupported,
   MIN_BUN_VERSION,
-  MIN_NODE_VERSION,
   OPEN_TUI_RENDERER_VALUE,
   TUI_RENDERER_ENV_VAR,
   TUI_RENDERER_STRICT_ENV_VAR,
@@ -111,13 +110,13 @@ export function selectTuiRenderer(
     if (strict) {
       throw new Error(
         `${TUI_RENDERER_ENV_VAR}=${OPEN_TUI_RENDERER_VALUE} was requested, but this runtime cannot initialize the OpenTUI native FFI ` +
-          `(needs Bun >= ${MIN_BUN_VERSION} or Node >= ${MIN_NODE_VERSION}) and ` +
+          `(needs Bun >= ${MIN_BUN_VERSION}) and ` +
           `${TUI_RENDERER_STRICT_ENV_VAR} forbids the silent ink fallback`,
       );
     }
     return {
       renderer: 'ink',
-      reason: `OpenTUI requested but the runtime cannot initialize its native FFI (needs Bun >= ${MIN_BUN_VERSION} or Node >= ${MIN_NODE_VERSION})`,
+      reason: `OpenTUI requested but the runtime cannot initialize its native FFI (needs Bun >= ${MIN_BUN_VERSION})`,
       strict,
     };
   }

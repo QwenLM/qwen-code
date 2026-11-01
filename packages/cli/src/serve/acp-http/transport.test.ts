@@ -391,6 +391,18 @@ class FakeBridge {
     return { modelServiceId: 'qwen-max' };
   }
 
+  lastWorkflowMode:
+    | { sessionId: string; value: string; context?: { clientId?: string } }
+    | undefined;
+  async setSessionConfigOption(
+    sessionId: string,
+    request: { value: string },
+    context?: { clientId?: string },
+  ) {
+    this.lastWorkflowMode = { sessionId, value: request.value, context };
+    return { configOptions: [] };
+  }
+
   lastApprovalMode: string | undefined;
   async setSessionApprovalMode(_s: string, mode: string) {
     this.lastApprovalMode = mode;
@@ -3829,6 +3841,254 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(bridge.lastSetModel).toMatchObject({ modelId: 'qwen-max' });
   });
 
+  it('session/set_config_option (workflow_mode) reaches the same session owner with its lease', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    const got = takeFrames(sessStream, 1);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 91,
+      method: 'session/set_config_option',
+      params: { sessionId: 'sess-1', configId: 'workflow_mode', value: 'on' },
+    });
+    const [frame] = (await got) as Array<{ id: number; result?: unknown }>;
+    expect(frame).toMatchObject({ id: 91, result: {} });
+    expect(bridge.lastWorkflowMode).toMatchObject({
+      sessionId: 'sess-1',
+      value: 'on',
+      context: { clientId: expect.any(String) },
+    });
+  });
+
+  it.each(['on', 'off'])(
+    'rejects Workflow mode %s on an untrusted primary but keeps other setters available',
+    async (value) => {
+      await restartServer({ primaryTrusted: false });
+      const connId = await initialize();
+      await newSession(connId);
+      const reader = frameReader(await openStream(connId, 'sess-1'));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 91,
+        method: 'session/set_config_option',
+        params: { sessionId: 'sess-1', configId: 'workflow_mode', value },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 91,
+        error: {
+          code: -32003,
+          data: { errorKind: 'untrusted_workspace', httpStatus: 403 },
+        },
+      });
+      expect(bridge.lastWorkflowMode).toBeUndefined();
+
+      for (const [id, configId, configValue] of [
+        [92, 'model', 'qwen-max'],
+        [93, 'mode', 'default'],
+      ] as const) {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id,
+          method: 'session/set_config_option',
+          params: { sessionId: 'sess-1', configId, value: configValue },
+        });
+        expect(await reader.next()).toMatchObject({ id, result: {} });
+      }
+      expect(bridge.lastSetModel).toMatchObject({ modelId: 'qwen-max' });
+      expect(bridge.lastApprovalMode).toBe('default');
+      reader.close();
+    },
+  );
+
+  it.each([false, true])(
+    'shapes Workflow mode across HTTP ACP surfaces for workspace trust %s',
+    async (trusted) => {
+      await restartServer({ primaryTrusted: trusted });
+      const context = await bridge.getSessionContextStatus('sess-1');
+      const workflow = {
+        id: 'workflow_mode',
+        name: 'Workflow mode',
+        category: 'other',
+        type: 'select',
+        currentValue: 'off',
+        options: [],
+        _meta: { 'qwen.workflowMode': { available: false, effective: false } },
+      };
+      const configOptions = [...context.state.configOptions, workflow];
+      const contextSpy = vi
+        .spyOn(bridge, 'getSessionContextStatus')
+        .mockImplementation(async (sessionId) => ({
+          ...context,
+          sessionId,
+          state: { configOptions },
+        }));
+      bridge.loadState = { configOptions, _meta: { marker: 'preserved' } };
+      const expectedRoutable = configOptions.filter(
+        (option) =>
+          option.id !== 'reasoning_effort' &&
+          (trusted || option.id !== 'workflow_mode'),
+      );
+      const expectedRaw = configOptions.filter(
+        (option) => trusted || option.id !== 'workflow_mode',
+      );
+      const connId = await initialize();
+      const connection = frameReader(await openStream(connId));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 90,
+        method: 'session/new',
+        params: {},
+      });
+      expect(await connection.next()).toMatchObject({
+        id: 90,
+        result: { configOptions: expectedRoutable },
+      });
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 91,
+        method: '_qwen/session/context',
+        params: { sessionId: 'sess-1' },
+      });
+      expect(await connection.next()).toMatchObject({
+        id: 91,
+        result: { state: { configOptions: expectedRaw } },
+      });
+
+      for (const [id, method] of [
+        [92, 'session/load'],
+        [93, 'session/resume'],
+        [94, 'session/fork'],
+      ] as const) {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id,
+          method,
+          params: { sessionId: 'sess-1' },
+        });
+        expect(await connection.next()).toMatchObject({
+          id,
+          result: { configOptions: expectedRoutable },
+        });
+      }
+
+      contextSpy.mockRejectedValueOnce(new Error('context unavailable'));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 95,
+        method: 'session/load',
+        params: { sessionId: 'sess-1' },
+      });
+      expect(await connection.next()).toMatchObject({
+        id: 95,
+        result: { configOptions: expectedRaw, _meta: { marker: 'preserved' } },
+      });
+
+      const session = frameReader(await openStream(connId, 'sess-1'));
+      const update = { sessionUpdate: 'config_option_update', configOptions };
+      bridge.queues.get('sess-1')?.push({
+        type: 'session_update',
+        data: { sessionId: 'sess-1', update },
+      });
+      expect(await session.next()).toMatchObject({
+        method: 'session/update',
+        params: { update: { configOptions: expectedRoutable } },
+      });
+      if (trusted) {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 96,
+          method: 'session/set_config_option',
+          params: {
+            sessionId: 'sess-1',
+            configId: 'workflow_mode',
+            value: 'off',
+          },
+        });
+        expect(await session.next()).toMatchObject({
+          id: 96,
+          result: { configOptions: expectedRoutable },
+        });
+        expect(bridge.lastWorkflowMode).toMatchObject({
+          value: 'off',
+          context: { clientId: expect.any(String) },
+        });
+      }
+      expect(configOptions).toHaveLength(4);
+      expect(update.configOptions).toBe(configOptions);
+      session.close();
+      connection.close();
+    },
+  );
+
+  it.each(['_qwen/session/context', 'session/load', 'session/resume'])(
+    'omits Workflow mode from trusted SSH raw state for %s',
+    async (method) => {
+      await restartServer({
+        fsFactory: {
+          sshWorkspace: { host: 'host', directory: '/srv/project' },
+        } as WorkspaceFileSystemFactory,
+      });
+      const context = await bridge.getSessionContextStatus('sess-1');
+      const workflow = {
+        id: 'workflow_mode',
+        name: 'Workflow mode',
+        category: 'other',
+        type: 'select',
+        currentValue: 'on',
+        options: [],
+      };
+      const configOptions = [...context.state.configOptions, workflow];
+      const contextSpy = vi
+        .spyOn(bridge, 'getSessionContextStatus')
+        .mockImplementation(async (sessionId) => ({
+          ...context,
+          sessionId,
+          state: { configOptions },
+        }));
+      bridge.loadState = { configOptions, _meta: { marker: 'preserved' } };
+      const resume = bridge.resumeSession.bind(bridge);
+      vi.spyOn(bridge, 'resumeSession').mockImplementation(async (request) => {
+        const session = await resume(request);
+        return { ...session, state: { ...session.state, ...bridge.loadState } };
+      });
+      const connId = await initialize();
+      const connection = frameReader(await openStream(connId));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 90,
+        method: 'session/new',
+        params: {},
+      });
+      expect(await connection.next()).toMatchObject({ id: 90, result: {} });
+
+      if (method !== '_qwen/session/context') {
+        contextSpy.mockRejectedValueOnce(new Error('context unavailable'));
+      }
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 91,
+        method,
+        params: { sessionId: 'sess-1' },
+      });
+      expect(await connection.next()).toMatchObject({
+        id: 91,
+        result:
+          method === '_qwen/session/context'
+            ? { state: { configOptions: context.state.configOptions } }
+            : {
+                configOptions: context.state.configOptions,
+                _meta: { marker: 'preserved' },
+              },
+      });
+      expect(configOptions.at(-1)).toBe(workflow);
+      expect(bridge.loadState['configOptions']).toBe(configOptions);
+      connection.close();
+    },
+  );
+
   it('session/set_config_option (mode) routes to setSessionApprovalMode', async () => {
     const connId = await initialize();
     await newSession(connId);
@@ -7086,7 +7346,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frame.error.message).toContain(
       'ConfigId not supported by this transport: reasoning_effort',
     );
-    expect(frame.error.message).toContain('(supported: model, mode)');
+    expect(frame.error.message).toContain(
+      '(supported: model, mode, workflow_mode)',
+    );
     expect(bridge.lastSetModel).toBeUndefined();
     expect(bridge.lastApprovalMode).toBeUndefined();
   });
@@ -8662,6 +8924,45 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect.arrayContaining(['stream_error', 'client_evicted']),
     );
     // (takeFrames already locked + aborted `sess`; afterEach force-closes.)
+  });
+
+  it('filters config_option_update through the same routable option allowlist', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const stream = await openStream(connId, 'sess-1');
+    const got = takeFrames(stream, 1);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const workflow = {
+      id: 'workflow_mode',
+      currentValue: 'on',
+      _meta: { 'qwen.workflowMode': { available: true, effective: true } },
+    };
+    bridge.queues.get('sess-1')?.push({
+      type: 'session_update',
+      data: {
+        sessionId: 'sess-1',
+        update: {
+          sessionUpdate: 'config_option_update',
+          configOptions: [
+            { id: 'model' },
+            { id: 'mode' },
+            workflow,
+            { id: 'reasoning_effort' },
+          ],
+        },
+      },
+    });
+    const [frame] = await got;
+    expect(frame).toMatchObject({
+      method: 'session/update',
+      params: {
+        sessionId: 'sess-1',
+        update: {
+          sessionUpdate: 'config_option_update',
+          configOptions: [{ id: 'model' }, { id: 'mode' }, workflow],
+        },
+      },
+    });
   });
 
   it('keeps availableSkillDetails verbatim on pumped session_update frames (#9234)', async () => {

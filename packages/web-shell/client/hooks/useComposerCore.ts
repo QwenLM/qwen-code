@@ -1676,7 +1676,6 @@ export function useComposerCore(
   const isTouchComposer = useIsTouchComposer();
   const mobileTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const expandedTextareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const mobileMaxHeightRef = useRef<number | null>(null);
   const [mobileText, setMobileTextState] = useState(() =>
     isTouchComposer
       ? (loadComposerDraftData(composerDraftStorageKey, persistFileReferences)
@@ -3189,19 +3188,9 @@ export function useComposerCore(
     [setMobileText],
   );
 
-  useLayoutEffect(() => {
-    if (!isTouchComposer) return;
-    const el = mobileTextareaRef.current;
-    if (!el) return;
-    const cap = parseFloat(getComputedStyle(el).maxHeight);
-    mobileMaxHeightRef.current =
-      Number.isFinite(cap) && cap > 0 ? cap : Number.POSITIVE_INFINITY;
-  }, [isTouchComposer]);
-
-  // Auto-grow the mobile textarea with its content, capped by the CSS
-  // max-height (the cap is read from the computed style so a deployment
-  // overriding --chat-editor-input-max-height stays authoritative). Without
-  // this the rows={1} textarea would show ~1.5 lines with inner scrolling.
+  // Grow to the content's height and let CSS max-height apply the cap,
+  // including percentage bounds and host overrides. Parsing a CSS percentage
+  // as pixels would incorrectly constrain the textarea.
   useEffect(() => {
     if (!isTouchComposer) return;
     const el = mobileTextareaRef.current;
@@ -3215,9 +3204,7 @@ export function useComposerCore(
     }
     el.style.height = 'auto';
     if (el.scrollHeight > 0) {
-      const cap = mobileMaxHeightRef.current ?? Number.POSITIVE_INFINITY;
-      const next = Math.min(el.scrollHeight, cap);
-      el.style.height = `${next}px`;
+      el.style.height = `${el.scrollHeight}px`;
     }
   }, [isTouchComposer, mobileText]);
 
@@ -4103,6 +4090,7 @@ export function useComposerCore(
         inputHighlight(
           () => commandsRef.current,
           () => languageRef.current,
+          () => skillsRef.current ?? [],
         ),
         inputHighlightTheme,
         inlineComposerTagField,

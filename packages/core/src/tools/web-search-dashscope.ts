@@ -8,6 +8,10 @@ import OpenAI from 'openai';
 import type { Config } from '../config/config.js';
 import { resolveRequestTimeout } from '../core/openaiContentGenerator/constants.js';
 import { buildSessionAwareFetch } from '../core/outbound-session-id.js';
+import {
+  withDashScopeSourceConfig,
+  withoutDashScopeSourceConfig,
+} from '../core/dashscope-source-config.js';
 import { buildRuntimeFetchOptions } from '../utils/runtimeFetchOptions.js';
 import { delay } from '../utils/retry.js';
 import { createDebugLogger, type DebugLogger } from '../utils/debugLogger.js';
@@ -248,16 +252,21 @@ export class DashScopeWebSearchBackend implements WebSearchBackend {
       baseURL: backend.baseUrl,
       timeout: resolveRequestTimeout(backend.timeoutMs),
       maxRetries: 1,
-      defaultHeaders: {
-        'User-Agent': `QwenCode/${this.config.getCliVersion() || 'unknown'} (${process.platform}; ${process.arch})`,
-        // Entry-declared headers win, matching the providers' merge order.
-        ...(backend.customHeaders ?? {}),
-      },
+      defaultHeaders: withDashScopeSourceConfig(
+        {
+          'User-Agent': `QwenCode/${this.config.getCliVersion() || 'unknown'} (${process.platform}; ${process.arch})`,
+          // Entry-declared headers win, matching the providers' merge order;
+          // only the source attribution below takes precedence over them.
+          ...(backend.customHeaders ?? {}),
+        },
+        backend.baseUrl,
+        this.config.getChannel?.(),
+      ),
       ...(runtimeOptions || {}),
       fetch: buildSessionAwareFetch(
         runtimeOptions?.fetch,
         this.config,
-        backend.customHeaders,
+        withoutDashScopeSourceConfig(backend.customHeaders),
       ),
     });
 

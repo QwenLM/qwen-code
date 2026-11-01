@@ -1,7 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import type { ChangeEvent } from 'react';
 import {
   ArrowLeftIcon,
+  GitBranchIcon,
   MessageCircleQuestionIcon,
   PlusIcon,
   SlashIcon,
@@ -37,6 +45,10 @@ import type {
 } from '../../hooks/useAtMentionSources';
 import { LiveVoiceMenuItem } from '../../live/LiveVoiceMenuItem';
 import { ModeIcon } from '../ModeIcon';
+import {
+  getWorkflowModeControlState,
+  type WorkflowModeControlOptions,
+} from '../workflow-mode-control-state';
 import { Button } from '../ui/button';
 import {
   Drawer,
@@ -78,6 +90,7 @@ export interface AddMenuProps {
    * Omitted when the host has not enabled Plan.
    */
   plan?: AddMenuPlanControl;
+  workflow?: WorkflowModeControlOptions;
   btw?: { onSelect: () => void; disabledReason?: string };
   mobileActions?: {
     commands: readonly CommandInfo[];
@@ -88,6 +101,7 @@ export interface AddMenuProps {
     onLiveVoice?: () => void;
   };
   commandsOnly?: boolean;
+  simpleMode?: boolean;
 }
 
 export interface AddMenuPlanControl {
@@ -316,11 +330,17 @@ export function AddMenu({
   skillsLoadError,
   skillsLoaded = false,
   plan,
+  workflow,
   btw,
   mobileActions,
   commandsOnly = false,
+  simpleMode = false,
 }: AddMenuProps) {
   const { t, language } = useI18n();
+  const workflowDescriptionId = useId();
+  const workflowControl = workflow
+    ? getWorkflowModeControlState(workflow, language)
+    : null;
   const [open, setOpen] = useState(false);
   const [page, setPage] = useState<MobilePage>('root');
   const [commandQuery, setCommandQuery] = useState('');
@@ -543,7 +563,7 @@ export function AddMenu({
             <button
               type="button"
               className={`${styles.toolBtn} ${styles.addMenuBtn}`}
-              disabled={disabled}
+              disabled={disabled && !workflowControl}
               aria-label={
                 commandsOnly
                   ? t('composerMobile.commands')
@@ -597,7 +617,18 @@ export function AddMenu({
             <div className="min-h-0 overflow-y-auto px-3" data-vaul-no-drag>
               {page === 'root' && (
                 <div className="flex flex-col gap-1">
-                  {addFileAvailable && (
+                  {!disabled &&
+                    simpleMode &&
+                    !anyAvailable &&
+                    !workflowControl && (
+                      <div
+                        className="p-3 text-muted-foreground"
+                        data-testid="composer-add-menu-empty"
+                      >
+                        {t('composerAdd.emptyState')}
+                      </div>
+                    )}
+                  {!disabled && addFileAvailable && (
                     <>
                       <Button
                         variant="ghost"
@@ -622,7 +653,7 @@ export function AddMenu({
                       </Button>
                     </>
                   )}
-                  {uploadAvailable && (
+                  {!disabled && uploadAvailable && (
                     <Button
                       variant="ghost"
                       className={mobileRowClass}
@@ -642,7 +673,7 @@ export function AddMenu({
                       ],
                     ] as const
                   )
-                    .filter(([, available]) => available)
+                    .filter(([, available]) => !disabled && available)
                     .map(([id]) => (
                       <Button
                         key={id}
@@ -657,42 +688,48 @@ export function AddMenu({
                         {pageLabels[id]}
                       </Button>
                     ))}
-                  <div className="my-1 border-t" />
-                  {!mobileActions.shellMode &&
-                    mobileActions.commands.length > 0 && (
+                  {!disabled && !simpleMode && (
+                    <>
+                      <div className="my-1 border-t" />
+                      {!mobileActions.shellMode &&
+                        mobileActions.commands.length > 0 && (
+                          <Button
+                            variant="ghost"
+                            className={mobileRowClass}
+                            onClick={() => setPage('commands')}
+                          >
+                            {t('composerMobile.commands')}
+                          </Button>
+                        )}
                       <Button
                         variant="ghost"
                         className={mobileRowClass}
-                        onClick={() => setPage('commands')}
+                        onClick={() => closeAndRun(mobileActions.onHistory)}
                       >
-                        {t('composerMobile.commands')}
+                        {t('composerMobile.history')}
                       </Button>
-                    )}
-                  <Button
-                    variant="ghost"
-                    className={mobileRowClass}
-                    onClick={() => closeAndRun(mobileActions.onHistory)}
-                  >
-                    {t('composerMobile.history')}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    className={mobileRowClass}
-                    onClick={() => closeAndRun(mobileActions.onToggleShell)}
-                  >
-                    {t(
-                      mobileActions.shellMode
-                        ? 'quickActions.exitShellMode'
-                        : 'quickActions.shellMode',
-                    )}
-                  </Button>
-                  {mobileActions.onLiveVoice && (
-                    <LiveVoiceMenuItem
-                      className={mobileRowClass}
-                      onClick={() => closeAndRun(mobileActions.onLiveVoice!)}
-                    />
+                      <Button
+                        variant="ghost"
+                        className={mobileRowClass}
+                        onClick={() => closeAndRun(mobileActions.onToggleShell)}
+                      >
+                        {t(
+                          mobileActions.shellMode
+                            ? 'quickActions.exitShellMode'
+                            : 'quickActions.shellMode',
+                        )}
+                      </Button>
+                      {mobileActions.onLiveVoice && (
+                        <LiveVoiceMenuItem
+                          className={mobileRowClass}
+                          onClick={() =>
+                            closeAndRun(mobileActions.onLiveVoice!)
+                          }
+                        />
+                      )}
+                    </>
                   )}
-                  {btw && (
+                  {!disabled && btw && !simpleMode && (
                     <Button
                       variant="ghost"
                       className={`${mobileRowClass} py-2`}
@@ -713,7 +750,7 @@ export function AddMenu({
                       </span>
                     </Button>
                   )}
-                  {plan && (
+                  {!disabled && plan && !simpleMode && (
                     <Button
                       variant="ghost"
                       className={mobileRowClass}
@@ -730,6 +767,37 @@ export function AddMenu({
                           {t('composerAdd.plan.busy')}
                         </span>
                       )}
+                    </Button>
+                  )}
+                  {workflowControl && (
+                    <Button
+                      variant="ghost"
+                      className={mobileRowClass}
+                      aria-label={workflowControl.messages.label}
+                      aria-describedby={workflowDescriptionId}
+                      title={workflowControl.description}
+                      aria-pressed={Boolean(workflowControl.mode?.requested)}
+                      aria-busy={workflowControl.pending || undefined}
+                      disabled={workflowControl.disabled}
+                      data-testid="composer-add-menu-workflow"
+                      data-workflow-state={workflowControl.status}
+                      onClick={() =>
+                        closeAndRun(() =>
+                          workflow?.onWorkflowModeChange?.(
+                            !workflowControl.mode?.requested,
+                          ),
+                        )
+                      }
+                    >
+                      <GitBranchIcon />
+                      <span className="min-w-0 flex-1 truncate text-left">
+                        <span>
+                          Workflow{workflowControl.mode?.requested ? ' ✓' : ''}
+                        </span>
+                        <span id={workflowDescriptionId} className="sr-only">
+                          {workflowControl.description}
+                        </span>
+                      </span>
                     </Button>
                   )}
                 </div>
@@ -851,7 +919,7 @@ export function AddMenu({
             <button
               type="button"
               className={`${styles.toolBtn} ${styles.addMenuBtn}`}
-              disabled={disabled}
+              disabled={disabled && !workflowControl}
               aria-label={t('composerAdd.trigger')}
               data-testid="composer-add-menu-trigger"
               onClick={(event) => event.stopPropagation()}
@@ -876,8 +944,9 @@ export function AddMenu({
               }
             }}
           >
-            {!anyAvailable ? (
-              !btw && (
+            {disabled ? null : !anyAvailable ? (
+              (simpleMode || !btw) &&
+              !workflowControl && (
                 <DropdownMenuLabel data-testid="composer-add-menu-empty">
                   {t('composerAdd.emptyState')}
                 </DropdownMenuLabel>
@@ -1056,7 +1125,7 @@ export function AddMenu({
                 </DropdownMenuSub>
               </>
             )}
-            {btw ? (
+            {!disabled && btw && !simpleMode ? (
               <>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
@@ -1075,7 +1144,7 @@ export function AddMenu({
                 </DropdownMenuItem>
               </>
             ) : null}
-            {plan ? (
+            {!disabled && plan && !simpleMode ? (
               <>
                 <DropdownMenuSeparator />
                 <DropdownMenuCheckboxItem
@@ -1103,6 +1172,36 @@ export function AddMenu({
                 </DropdownMenuCheckboxItem>
               </>
             ) : null}
+            {workflowControl && (
+              <>
+                {!disabled && <DropdownMenuSeparator />}
+                <DropdownMenuCheckboxItem
+                  checked={Boolean(workflowControl.mode?.requested)}
+                  disabled={workflowControl.disabled}
+                  aria-label={workflowControl.messages.label}
+                  aria-describedby={workflowDescriptionId}
+                  title={workflowControl.description}
+                  aria-busy={workflowControl.pending || undefined}
+                  data-testid="composer-add-menu-workflow"
+                  data-workflow-state={workflowControl.status}
+                  onSelect={() =>
+                    closeAndRun(() =>
+                      workflow?.onWorkflowModeChange?.(
+                        !workflowControl.mode?.requested,
+                      ),
+                    )
+                  }
+                >
+                  <GitBranchIcon />
+                  <span className="min-w-0 flex-1 truncate">
+                    <span>Workflow</span>
+                    <span id={workflowDescriptionId} className="sr-only">
+                      {workflowControl.description}
+                    </span>
+                  </span>
+                </DropdownMenuCheckboxItem>
+              </>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       )}

@@ -6,6 +6,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonClient } from '@qwen-code/sdk/daemon';
 import { useLiveVoice, type UseLiveVoiceResult } from './useLiveVoice';
 import { getLivePresence, setLivePresence } from './live-presence';
+import { offlineDaemon } from '../daemon/availability.test-fixtures.js';
+import { DaemonAvailabilityContext } from '../daemon/availability-context.js';
+import { I18nProvider } from '../i18n';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -69,6 +72,106 @@ afterEach(() => {
 });
 
 describe('useLiveVoice', () => {
+  it('parks offline polling, localizes the warning and ignores an old read after recovery', async () => {
+    vi.useFakeTimers();
+    const { server, availability } = offlineDaemon('https://daemon.example', [
+      'realtime_voice',
+    ]);
+    let resolveOld!: (value: unknown) => void;
+    const fresh = { v: 1, available: true, state: 'idle', shortcut: '' };
+    mocks.liveStatus
+      .mockReturnValueOnce(new Promise((resolve) => (resolveOld = resolve)))
+      .mockResolvedValue(fresh);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    let live!: UseLiveVoiceResult;
+    function Harness() {
+      live = useLiveVoice();
+      return <>{live.status?.message ?? live.status?.state}</>;
+    }
+    try {
+      await act(async () =>
+        root.render(
+          <DaemonAvailabilityContext.Provider value={availability}>
+            <I18nProvider language="zh-CN">
+              <Harness />
+            </I18nProvider>
+          </DaemonAvailabilityContext.Provider>,
+        ),
+      );
+      expect(mocks.liveStatus).toHaveBeenCalledOnce();
+      await act(async () => availability.check(true));
+      expect(container.textContent).toBe('无法连接服务。');
+      await act(async () => {
+        window.dispatchEvent(new Event('focus'));
+        await live.refresh();
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(mocks.liveStatus).toHaveBeenCalledOnce();
+      expect(live.loading).toBe(false);
+
+      server.healthy = true;
+      await act(async () => availability.check(true));
+      expect(mocks.liveStatus).toHaveBeenCalledTimes(2);
+      expect(live.status).toEqual(fresh);
+      await act(async () => resolveOld({ ...fresh, state: 'listening' }));
+      expect(live.status).toEqual(fresh);
+      expect(mocks.client.startLive).not.toHaveBeenCalled();
+      expect(mocks.client.stopLive).not.toHaveBeenCalled();
+      expect(mocks.client.setLiveMute).not.toHaveBeenCalled();
+    } finally {
+      act(() => root.unmount());
+      availability.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it('retires the published presence while the daemon is unavailable', async () => {
+    vi.useFakeTimers();
+    const { server, availability } = offlineDaemon('https://daemon.example', [
+      'realtime_voice',
+    ]);
+    mocks.liveStatus.mockResolvedValue({
+      v: 1,
+      available: true,
+      state: 'listening',
+      shortcut: '',
+      callId: 'call-1',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    function Harness() {
+      useLiveVoice();
+      return null;
+    }
+    try {
+      await act(async () =>
+        root.render(
+          <DaemonAvailabilityContext.Provider value={availability}>
+            <Harness />
+          </DaemonAvailabilityContext.Provider>,
+        ),
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(
+        getLivePresence(mocks.client as unknown as DaemonClient)?.state,
+      ).toBe('listening');
+      server.healthy = false;
+      await act(async () => availability.check(true));
+      expect(
+        getLivePresence(mocks.client as unknown as DaemonClient),
+      ).toBeUndefined();
+    } finally {
+      act(() => root.unmount());
+      availability.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it('publishes a pending voice row immediately and discovers its session without reload', async () => {
     mocks.liveStatus.mockResolvedValue({
       v: 1,

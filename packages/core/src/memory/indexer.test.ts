@@ -24,6 +24,7 @@ import {
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
 import { ensureAutoMemoryScaffold } from './store.js';
+import { scanUserAutoMemoryTopicDocuments } from './scan.js';
 import * as trustedMemoryFilesystem from './trusted-memory-filesystem.js';
 import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
@@ -213,6 +214,106 @@ describe('managed auto-memory indexer', () => {
       }
       clearAutoMemoryRootCache();
     }
+  });
+
+  it.each([
+    { nativeCount: 1, importedCount: 201, long: false },
+    { nativeCount: 200, importedCount: 1, long: false },
+    { nativeCount: 166, importedCount: 20, long: true },
+  ])(
+    'preserves native user memory against import capacity ($nativeCount/$importedCount/$long)',
+    async ({ nativeCount, importedCount, long }) => {
+      const previous = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'runtime');
+      clearAutoMemoryRootCache();
+      try {
+        const root = getUserAutoMemoryRoot();
+        await fs.mkdir(root, { recursive: true });
+        const old = new Date('2026-01-01T00:00:00Z');
+        const document = (name: string, description = name) =>
+          `---\nname: ${name}\ndescription: ${description}\ntype: user\n---\nSynthetic preference ${name}.\n`;
+        for (let i = 0; i < nativeCount; i++) {
+          const file = path.join(root, `native-${i}.md`);
+          await fs.writeFile(
+            file,
+            document(`N${i}`, long ? 'D'.repeat(120) : `N${i}`),
+          );
+          await fs.utimes(file, old, old);
+        }
+        if (long) {
+          const file = path.join(
+            root,
+            ...Array.from(
+              { length: 4 },
+              (_, i) => `long${i}-${'x'.repeat(174)}`,
+            ),
+            'long.md',
+          );
+          await fs.mkdir(path.dirname(file), { recursive: true });
+          await fs.writeFile(file, document('NativeLong'));
+          await fs.utimes(file, old, old);
+        }
+        const before = await rebuildUserAutoMemoryIndex();
+        const originalEntries = before
+          .split('\n')
+          .filter((line) => line.startsWith('- '));
+        expect(originalEntries).toHaveLength(nativeCount + Number(long));
+        const imported = path.join(root, 'imported', 'synthetic');
+        await fs.mkdir(imported, { recursive: true });
+        for (let i = 0; i < importedCount; i++)
+          await fs.writeFile(
+            path.join(imported, `${i}.md`),
+            document(`Imported${i}`),
+          );
+        const published = await rebuildAutoMemoryIndexAtRoot(root, 'user');
+        const rebuilt = await rebuildUserAutoMemoryIndex();
+        for (const entry of originalEntries) {
+          expect(published).toContain(entry);
+          expect(rebuilt).toContain(entry);
+        }
+        const scanned = await scanUserAutoMemoryTopicDocuments();
+        expect(scanned.length).toBeLessThanOrEqual(200);
+        expect(
+          scanned.filter((doc) => !doc.relativePath.startsWith('imported/')),
+        ).toHaveLength(nativeCount + Number(long));
+      } finally {
+        if (previous === undefined)
+          delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+        else process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previous;
+        clearAutoMemoryRootCache();
+      }
+    },
+  );
+
+  it('keeps native project memory ahead of imported project memory in the index', () => {
+    const doc = (
+      relativePath: string,
+      title: string,
+      mtimeMs: number,
+    ): Parameters<typeof buildManagedAutoMemoryIndex>[0][number] => ({
+      scope: 'project',
+      type: 'project',
+      filePath: `/tmp/project/${relativePath}`,
+      relativePath,
+      filename: path.basename(relativePath),
+      title,
+      description: title,
+      category: 'uncategorized',
+      keywords: [],
+      usageScenarios: [],
+      body: title,
+      mtimeMs,
+    });
+    const docs = [
+      ...Array.from({ length: 210 }, (_, index) =>
+        doc(`imported/group/${index}.md`, `Imported${index}`, 2_000 + index),
+      ),
+      doc('native.md', 'Native project memory', 1),
+    ];
+
+    const index = buildManagedAutoMemoryIndex(docs);
+
+    expect(index).toContain('native.md');
   });
 
   it('formats a compact file-based MEMORY.md index view', () => {

@@ -5,6 +5,8 @@
  */
 
 import path from 'node:path';
+import { validateTodos } from '@qwen-code/qwen-code-core/tools/todoWrite.js';
+import { checkHostedTodoWriteInput } from './hosted-workspace-tool-input.js';
 import { readHarnessCheckpoint } from '@qwen-code/qwen-code-core/managed-runtime/managed-checkpoint-history.js';
 import {
   HOSTED_RECOVERY_RESOURCE_KINDS,
@@ -173,6 +175,7 @@ const DOMAINS = [
   'session_metadata',
   'file_history',
   'goal_state',
+  'todo_state',
   'session_source',
 ];
 const RESOURCE_KINDS = new Set([
@@ -476,6 +479,12 @@ export async function verifyRecoverySession(
       requireValue(
         typeof body['title'] === 'string' && body['title'].length > 0,
         'invalid session title',
+      );
+    } else if (ref.kind === 'managed-todo_state') {
+      requireValue(
+        !checkHostedTodoWriteInput({ todos: body['todos'] }).error &&
+          !validateTodos(body['todos']),
+        'invalid Hosted Todo state',
       );
     } else {
       const record = readerRecord(body['record'], source.sessionId);

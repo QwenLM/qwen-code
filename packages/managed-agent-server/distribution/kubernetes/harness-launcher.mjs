@@ -33,7 +33,23 @@ try {
     )
   )
     throw new Error('A verified capability digest is required.');
-  const brokerUrl = new URL(process.env.QWEN_HOSTED_HARNESS_BROKER_URL);
+  // Name the variable, never its value: the name changed, and the v0.26.1
+  // manifest still sets QWEN_HOSTED_HARNESS_BROKER_URL.
+  const brokerUrlText = process.env.QWEN_MANAGED_RUNTIME_BROKER_URL;
+  if (!brokerUrlText)
+    throw new Error(
+      process.env.QWEN_HOSTED_HARNESS_BROKER_URL
+        ? 'The pool requires a Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL; rename QWEN_HOSTED_HARNESS_BROKER_URL in the Deployment.'
+        : 'The pool requires a Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL.',
+    );
+  let brokerUrl;
+  try {
+    brokerUrl = new URL(brokerUrlText);
+  } catch {
+    throw new Error(
+      'The pool requires a valid Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL.',
+    );
+  }
   if (
     brokerUrl.protocol !== 'https:' ||
     brokerUrl.username ||
@@ -41,7 +57,15 @@ try {
     brokerUrl.search ||
     brokerUrl.hash
   )
-    throw new Error('The pool requires an HTTPS Broker URL.');
+    throw new Error(
+      'The pool requires an HTTPS Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL.',
+    );
+  // qwen serve takes an origin only, and would stop at boot without naming
+  // the variable.
+  if (brokerUrl.pathname !== '/' && brokerUrl.pathname !== '')
+    throw new Error(
+      'The pool requires an origin-only Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL.',
+    );
   await Promise.all(
     ['home', 'state', 'workspace'].map((name) =>
       mkdir(`${runtime}/${name}`, { recursive: true, mode: 0o700 }),
@@ -71,7 +95,7 @@ try {
         QWEN_HOME: `${runtime}/state`,
         QWEN_CODE_SYSTEM_SETTINGS_PATH: '/etc/qwen/config/settings.json',
         QWEN_SERVER_TOKEN: await secret('harness-token'),
-        QWEN_HOSTED_HARNESS_BROKER_TOKEN: await secret('broker-token'),
+        QWEN_MANAGED_RUNTIME_BROKER_TOKEN: await secret('broker-token'),
         OPENAI_API_KEY: await secret('model-api-key'),
       },
     },

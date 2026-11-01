@@ -13,6 +13,7 @@ import {
 } from '../utils/message-deletion';
 import {
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -43,6 +44,8 @@ import { SubagentDetailsProvider } from '../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../monitorDetailsContext';
 import { WorkflowDetailsProvider } from '../workflowDetailsContext';
 import { useI18n } from '../i18n';
+import { getWorkflowModeMessages } from './workflow-mode-messages';
+import { McpAppVisibilityContext } from '../mcpAppHostContext';
 import { getSubagentDetailsUnavailableReason } from './messages/toolFormatting';
 import { useWebShellCustomization } from '../customization';
 import {
@@ -152,6 +155,7 @@ const PANE_TOOLBAR_ACTIONS: readonly ComposerToolbarAction[] = [
   'addMenu',
   'approvalMode',
   'plan',
+  'workflowMode',
   'contextUsage',
   'model',
   'voice',
@@ -315,7 +319,8 @@ export function ChatPane({
   showResponseTokensPerSecond = false,
   planControlVisible = false,
 }: ChatPaneProps) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
+  const parentSurfaceVisible = useContext(McpAppVisibilityContext);
   const {
     renderComposerFooter: CustomComposerFooter,
     askUserFreeTextLabel,
@@ -1544,6 +1549,24 @@ export function ChatPane({
     },
     [actions, reportError],
   );
+  const handleWorkflowModeChange = useCallback(
+    (requested: boolean) => {
+      if (connection.loadingTranscript || connection.catchingUp) return;
+      const owner = sessionOwnerGuard.capture();
+      void actions.setWorkflowMode(requested).catch((error: unknown) => {
+        if (owner.isCurrent())
+          reportError(error, getWorkflowModeMessages(language).updateFailed);
+      });
+    },
+    [
+      actions,
+      connection.loadingTranscript,
+      connection.catchingUp,
+      sessionOwnerGuard,
+      reportError,
+      language,
+    ],
+  );
   const handleSelectReasoningEffort = useCallback(
     (value: ReasoningSelection) =>
       actions
@@ -1777,55 +1800,59 @@ export function ChatPane({
                 : undefined
             }
           >
-            <WorkflowDetailsProvider tasks={sessionTasks}>
-              <TranscriptViewport
-                ref={transcriptViewportRef}
-                messages={messages}
-                sourceSessionId={connection.sessionId}
-                pendingApproval={pendingToolApproval}
-                loadingTranscript={connection.loadingTranscript}
-                catchingUp={connection.catchingUp}
-                hasOlderHistory={transcriptHistory.hasMore}
-                loadingOlderHistory={transcriptHistory.loading}
-                historyCapacityReached={transcriptHistory.capacityReached}
-                historyPaginationError={transcriptHistory.paginationError}
-                onLoadOlderHistory={transcriptHistory.loadMore}
-                transcriptBlockCount={blocks.length}
-                transcriptActivity={store}
-                onReloadTranscript={
-                  transcriptReloadSupported ? reloadTranscript : undefined
-                }
-                isResponding={isResponding}
-                workspaceCwd={connection.workspaceCwd || ''}
-                hideSessionTimeline
-                turnFileChanges={
-                  visibleTurnOutputKinds.has('file')
-                    ? fileChangesByTurn
-                    : undefined
-                }
-                turnArtifacts={
-                  visibleTurnOutputKinds.has('artifact')
-                    ? artifactsByTurn
-                    : undefined
-                }
-                turnScheduledTasks={
-                  visibleTurnOutputKinds.has('scheduled_task')
-                    ? scheduledTasksByTurn
-                    : undefined
-                }
-                onTurnOutputOpen={handleRightPanelOpen}
-                onImagePreview={handleImagePreview}
-                onAttachmentPreview={handleAttachmentPreview}
-                onError={reportError}
-                generateContent={
-                  connection.capabilities?.features.includes(
-                    'session_generation',
-                  )
-                    ? actions.generateSessionContent
-                    : undefined
-                }
-              />
-            </WorkflowDetailsProvider>
+            <McpAppVisibilityContext.Provider
+              value={parentSurfaceVisible && !hidden}
+            >
+              <WorkflowDetailsProvider tasks={sessionTasks}>
+                <TranscriptViewport
+                  ref={transcriptViewportRef}
+                  messages={messages}
+                  sourceSessionId={connection.sessionId}
+                  pendingApproval={pendingToolApproval}
+                  loadingTranscript={connection.loadingTranscript}
+                  catchingUp={connection.catchingUp}
+                  hasOlderHistory={transcriptHistory.hasMore}
+                  loadingOlderHistory={transcriptHistory.loading}
+                  historyCapacityReached={transcriptHistory.capacityReached}
+                  historyPaginationError={transcriptHistory.paginationError}
+                  onLoadOlderHistory={transcriptHistory.loadMore}
+                  transcriptBlockCount={blocks.length}
+                  transcriptActivity={store}
+                  onReloadTranscript={
+                    transcriptReloadSupported ? reloadTranscript : undefined
+                  }
+                  isResponding={isResponding}
+                  workspaceCwd={connection.workspaceCwd || ''}
+                  hideSessionTimeline
+                  turnFileChanges={
+                    visibleTurnOutputKinds.has('file')
+                      ? fileChangesByTurn
+                      : undefined
+                  }
+                  turnArtifacts={
+                    visibleTurnOutputKinds.has('artifact')
+                      ? artifactsByTurn
+                      : undefined
+                  }
+                  turnScheduledTasks={
+                    visibleTurnOutputKinds.has('scheduled_task')
+                      ? scheduledTasksByTurn
+                      : undefined
+                  }
+                  onTurnOutputOpen={handleRightPanelOpen}
+                  onImagePreview={handleImagePreview}
+                  onAttachmentPreview={handleAttachmentPreview}
+                  onError={reportError}
+                  generateContent={
+                    connection.capabilities?.features.includes(
+                      'session_generation',
+                    )
+                      ? actions.generateSessionContent
+                      : undefined
+                  }
+                />
+              </WorkflowDetailsProvider>
+            </McpAppVisibilityContext.Provider>
           </SubagentDetailsProvider>
         </OptionalMonitorDetailsProvider>
       </div>
@@ -2017,6 +2044,16 @@ export function ChatPane({
             mountUnavailableModelTooltip={mountUnavailableModelTooltip}
             onSelectMode={handleSelectMode}
             onSelectModel={handleSelectModel}
+            workflowMode={connection.workflowMode}
+            workflowModeStatus={
+              connection.loadingTranscript ||
+              connection.catchingUp ||
+              connection.status !== 'connected'
+                ? 'syncing'
+                : (connection.workflowModeStatus ?? 'unknown')
+            }
+            workflowModePending={connection.workflowModePending}
+            onWorkflowModeChange={handleWorkflowModeChange}
             reasoning={connection.reasoning}
             onSelectReasoningEffort={handleSelectReasoningEffort}
             dialogOpen={approvalActive}

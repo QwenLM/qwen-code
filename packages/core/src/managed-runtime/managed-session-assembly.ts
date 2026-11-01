@@ -261,6 +261,7 @@ export async function openManagedSession(
       runtimeBaseDir: options.runtimeBaseDir,
       sessionId: options.sessionId,
       transcriptPath: options.transcriptPath,
+      requireNew: options.requireNew,
       ...(options.lease === undefined ? {} : { lease: options.lease }),
     });
   const journal = await journalStore.open({ sessionKey: options.sessionKey });
