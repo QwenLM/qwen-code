@@ -230,6 +230,7 @@ public class ManagedWorkspaceRegistry
         List<WorkspaceRow> rows = jdbc.query(
                 "SELECT r.workspace_id, r.workspace_generation,"
                         + " r.storage_id, r.state, r.config_ref, r.policy_ref,"
+                        + " r.display_name, r.workspace_kind,"
                         + " s.storage_kind, a.role"
                         + " FROM ma_workspace r"
                         + " JOIN ma_workspace_access a ON"
