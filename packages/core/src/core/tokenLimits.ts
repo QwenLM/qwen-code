@@ -2,6 +2,7 @@ import {
   lookupModelCatalog,
   versionSpellingAlias,
 } from '../models/model-catalog.js';
+import { KIMI_K3_GENERATION } from '../models/constants.js';
 
 type Model = string;
 type TokenCount = number;
@@ -311,7 +312,8 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // Moonshot / Kimi
   // -------------------
-  [/^kimi-k3/, LIMITS['1m']], // Kimi K3: 1M
+  // Kimi K3 generation: 1M, including Kimi Code's bare `k3.1-pro` aliases.
+  [KIMI_K3_GENERATION, LIMITS['1m']],
   [/^kimi-/, LIMITS['256k']], // Kimi fallback: 256K
 
   // -------------------
