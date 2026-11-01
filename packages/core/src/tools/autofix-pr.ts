@@ -84,6 +84,7 @@ export interface AutofixPrParams {
   repo?: string;
   host?: string;
   take_over?: boolean;
+  in_place?: boolean;
   task?: string;
   run_id?: string;
   lines?: number;
@@ -101,7 +102,7 @@ type OptionName = Exclude<keyof AutofixPrParams, 'command' | 'pr'>;
 
 /** The options each command takes; any other is a refusal. */
 const OPTIONS: Readonly<Record<AutofixPrCommand, readonly OptionName[]>> = {
-  prepare: ['repo', 'host', 'take_over'],
+  prepare: ['repo', 'host', 'take_over', 'in_place'],
   snapshot: ['repo', 'host', 'task'],
   'ci-log': ['run_id', 'lines', 'task'],
   push: ['task'],
@@ -126,6 +127,7 @@ const REQUIRED: Partial<Record<AutofixPrCommand, readonly OptionName[]>> = {
 
 const BOOLEAN_OPTIONS = new Set<OptionName>([
   'take_over',
+  'in_place',
   'no_post',
   'discard',
   'no_reply',
@@ -256,6 +258,7 @@ export function autofixPrArgs(params: AutofixPrParams): string[] {
   value('task', params.task);
   value('attempt', params.attempt);
   flag('take-over', params.take_over);
+  flag('in-place', params.in_place);
   flag('no-post', params.no_post);
   flag('discard', params.discard);
   flag('no-reply', params.no_reply);
@@ -531,6 +534,7 @@ interface WatchStatusLike {
   worktreePath?: unknown;
   worktreeExists?: unknown;
   gitTrusted?: unknown;
+  inPlace?: unknown;
 }
 
 /** Whether `status` lists `watch` as the one `prepared` recorded. */
@@ -735,6 +739,11 @@ export async function checkUnattendedWatch(
   if (watch.ended !== null) {
     return { refused: `the watch of PR #${pr} was ended` };
   }
+  if (watch.inPlace === true) {
+    return {
+      refused: `PR #${pr} is an in-place watch: its fixes run in the user's own checkout, always attended`,
+    };
+  }
   if (
     watch.worktreeExists !== true ||
     typeof watch.worktreePath !== 'string' ||
@@ -751,6 +760,7 @@ interface PreparedLike {
   preparedAt?: unknown;
   authorCanPush?: unknown;
   tookOver?: unknown;
+  inPlace?: unknown;
 }
 
 /** How long `cleanup` waits for a stopped fix agent to end. */
@@ -1009,6 +1019,9 @@ class AutofixPrInvocation extends BaseToolInvocation<
       return `An ask rule for \`qwen ${this.getDescription()}\` as a shell command asks for it here too.`;
     }
     if (this.params.command === 'prepare') {
+      if (this.params.in_place) {
+        return `Starts an in-place watch of PR #${pr}: the fix agent works in your own checkout of the PR branch, in the foreground; the round pushes what the branch holds — your commits included — and replies on the PR.`;
+      }
       return this.params.take_over
         ? `Takes the watch of PR #${pr} over from any other session that holds it: from now on its rounds push to the PR branch and reply on the PR without asking.`
         : `Starts or resumes this session's watch of PR #${pr}: from now on its rounds push to the PR branch and reply on the PR without asking.`;
@@ -1283,18 +1296,20 @@ class AutofixPrInvocation extends BaseToolInvocation<
   }
 
   /**
-   * For a watch this session prepared, the plan must sit beside its
-   * worktree, as the skill writes it; null when it does.
+   * For a watch this session prepared, the plan must sit in the watch's
+   * `.qwen/tmp`, as the skill writes it; null when it does. A worktree
+   * watch's tmp is the worktree's parent; an in-place watch's worktree IS
+   * the user's checkout, so its tmp is inside it.
    */
   private misplacedPlan(): string | null {
     if (this.params.plan === undefined) return null;
     const pr = this.params.pr!;
     const watch = preparedWatch(this.config, pr);
     if (!watch) return null;
-    const expected = path.join(
-      path.dirname(watch.worktree),
-      `autofix-pr-${pr}-plan.json`,
-    );
+    const planDir = watch.inPlace
+      ? path.join(watch.worktree, '.qwen', 'tmp')
+      : path.dirname(watch.worktree);
+    const expected = path.join(planDir, `autofix-pr-${pr}-plan.json`);
     const given = path.join(
       canonicalWorktreePath(path.dirname(this.params.plan)),
       path.basename(this.params.plan),
@@ -1337,6 +1352,7 @@ class AutofixPrInvocation extends BaseToolInvocation<
       targetDir: this.config.getTargetDir(),
       preparedAt,
       worktree: canonicalWorktreePath(reported.worktreePath),
+      inPlace: reported.inPlace === true,
       authorCanPush: reported.authorCanPush === true,
     });
   }
@@ -1442,6 +1458,11 @@ export class AutofixPrTool extends BaseDeclarativeTool<
           take_over: {
             type: 'boolean',
             description: '--take-over (prepare, cleanup).',
+          },
+          in_place: {
+            type: 'boolean',
+            description:
+              "--in-place (prepare): fix in the user's own checkout of the PR head branch — attended, one round per start, nothing ever discarded.",
           },
           task: {
             type: 'string',

@@ -4090,6 +4090,7 @@ export function useComposerCore(
         inputHighlight(
           () => commandsRef.current,
           () => languageRef.current,
+          () => skillsRef.current ?? [],
         ),
         inputHighlightTheme,
         inlineComposerTagField,

@@ -30,7 +30,7 @@
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --write .",
     "test": "vitest run",
-    "test:ci": "vitest run",
+    "test:ci": "vitest run --bail=1",
     "typecheck": "tsc --noEmit",
     "check-i18n": "tsx ../../scripts/check-i18n.ts"
   },

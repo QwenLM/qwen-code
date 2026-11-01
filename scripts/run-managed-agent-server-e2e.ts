@@ -17,6 +17,7 @@ import {
   fakeToolCall,
   startFakeOpenAIServer,
 } from '../integration-tests/fake-openai-server.js';
+import { SseObserver } from '../integration-tests/helpers/hosted-sse-observer.js';
 import { isDeepStrictEqual } from 'node:util';
 
 const root = process.cwd();
@@ -35,8 +36,15 @@ interface SavedApprovalOptions {
   continuationRef: { resourceId: string };
 }
 interface SavedApprovalPlan {
-  calls: { prepareKey: string; requestDigest: string }[];
+  calls: {
+    prepareKey: string;
+    requestDigest: string;
+    runtimeCallId?: string;
+    partIndex?: number;
+    actionId?: string | null;
+  }[];
   actionId: string;
+  approvalOrdinal?: number;
   stage: string;
   batchId: string;
   runtime: {
@@ -48,13 +56,28 @@ interface SavedApprovalPlan {
 }
 let originalApprovalOptions: SavedApprovalOptions | undefined;
 let originalApprovalPlan: SavedApprovalPlan | undefined;
+// A3: the pending second sibling's Action, captured at the crash barrier and
+// re-decided by the recovery generation.
+let siblingApprovalId: string | undefined;
+let siblingApprovalOptions: SavedApprovalOptions | undefined;
+// B3: tool B's new Action, detected after Allow A and decided by the runner's
+// second Allow; both earlier Actions must end decided under their original IDs.
+let secondApprovalId: string | undefined;
 let verifiedOriginalTerminal: string | undefined;
-function saveEvidence(name: string, body: unknown): void {
-  if (!verificationMode) return;
+function writeEvidenceFile(
+  directory: string,
+  name: string,
+  body: unknown,
+): void {
+  mkdirSync(directory, { recursive: true });
   writeFileSync(
-    path.join(verificationDirectory, name),
+    path.join(directory, name),
     JSON.stringify(body, null, 2) + '\n',
   );
+}
+function saveEvidence(name: string, body: unknown): void {
+  if (!verificationMode) return;
+  writeEvidenceFile(verificationDirectory, name, body);
 }
 
 const argumentsList = process.argv.slice(2);
@@ -78,6 +101,9 @@ const approvalFaults = [
   'after-decision',
   'after-prepare',
   'after-result',
+  'finished-before-commit',
+  'sibling-approval',
+  'after-earlier-tools',
   'cleanup-failed',
   'decision-reply-lost',
   'admission-reply-lost',
@@ -124,7 +150,7 @@ for (let index = 0; index < argumentsList.length; index += 1) {
     index += 1;
   } else {
     throw new Error(
-      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|cleanup-failed|decision-reply-lost|admission-reply-lost|load-reply-lost|terminal-reply-lost|terminal-write-failed]',
+      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|finished-before-commit|sibling-approval|after-earlier-tools|cleanup-failed|decision-reply-lost|admission-reply-lost|load-reply-lost|terminal-reply-lost|terminal-write-failed]',
     );
   }
 }
@@ -161,6 +187,13 @@ const verificationDirectory = path.resolve(
   root,
   process.env['G3_VERIFY_REPORT_DIR'] ??
     `.qwen/investigations/g3-step3-implementation/packaged-${verificationMode}-${Date.now()}`,
+);
+// The model-round arm has no gate mode; name its evidence explicitly instead
+// of borrowing a packaged-undefined-<epoch> directory (R1-10).
+const modelRoundEvidenceDirectory = path.resolve(
+  root,
+  process.env['G3_VERIFY_REPORT_DIR'] ??
+    `.qwen/investigations/g3-step3-implementation/model-round-${Date.now()}`,
 );
 
 if (
@@ -246,7 +279,7 @@ if (!Number.isSafeInteger(runtimeDelayMs) || runtimeDelayMs < 0) {
 
 const cliBundle = path.join(root, 'dist', 'cli.js');
 const springModule = path.join(root, 'packages', 'managed-agent-server');
-const springTarget = path.join(springModule, 'target');
+const springTarget = path.join(springModule, 'server', 'target');
 // The pom attaches classified repackage executions alongside the
 // unclassified server jar, so a wildcard over target/ matches several
 // artifacts. Read the project version from the
@@ -257,7 +290,7 @@ const springTarget = path.join(springModule, 'target');
 // re-indenting the element cannot flow newlines into the jar path.
 const pomXml = readFileSync(path.join(springModule, 'pom.xml'), 'utf8');
 const pomVersion = pomXml.match(
-  /<artifactId>qwen-managed-agent-server<\/artifactId>\s*<version>\s*([^<]*?\S)\s*<\/version>/,
+  /<artifactId>qwen-managed-agent-parent<\/artifactId>\s*<version>\s*([^<]*?\S)\s*<\/version>/,
 )?.[1];
 if (!pomVersion) {
   throw new Error(
@@ -328,6 +361,20 @@ const trustedActor = 'e2e-actor';
 const inflightSideEffectName = 'managed-inflight-side-effect.txt';
 const inflightSideEffect = path.join(workspaceMount, inflightSideEffectName);
 const inflightSideEffectContent = 'MANAGED_INFLIGHT_TOOL_EXECUTED\n';
+// A3 mixed-sibling arm: the second sibling writes a distinct file so each
+// sibling's single execution has its own physical effect.
+const siblingSideEffectName = 'managed-sibling-side-effect.txt';
+const siblingSideEffect = path.join(workspaceMount, siblingSideEffectName);
+const siblingSideEffectContent = 'MANAGED_SIBLING_TOOL_EXECUTED\n';
+// B3 after-earlier-tools arm: a second, later tool round writes its own file so
+// each earlier round's single execution has its own physical effect. The +Nk
+// budget directive makes the TurnBudget snapshot non-null so its restoration is
+// numerically assertable (the default null budget hides a ledger reset). A round
+// reset is caught by the exactly-once / deep-equal / round-continuity assertions.
+const b3SecondSideEffectName = 'managed-b3-second-side-effect.txt';
+const b3SecondSideEffect = path.join(workspaceMount, b3SecondSideEffectName);
+const b3SecondSideEffectContent = 'MANAGED_B3_SECOND_TOOL_EXECUTED\n';
+const b3BudgetDirective = '+500k';
 const workspaceId = createHash('sha256')
   .update(workspace)
   .digest('hex')
@@ -1201,6 +1248,551 @@ function assertStoredAnswer(
     );
 }
 
+// B3a: assert the crash window from the same durable journal the recovery
+// reader reads, not from the hook's log line. The window's left boundary is
+// the post-tool main attempt's usage-only Finished marker (state
+// output_committed); its right boundary is the assistant message.committed
+// that has not landed yet. This mirrors findHostedCommittedModelOutput's own
+// discriminator — a latest main attempt that is not output_committed, or an
+// assistant commit at/after that attempt, both fall outside the window — so a
+// hold moved above the Finished commit reds here instead of passing vacuously
+// (the recovery reader also accepts a saved request whose attempt is still
+// started, so request count / parity / answer equality cannot tell that
+// earlier crash apart from B3a). The journal is UTF-8 JSON Lines in
+// ma_session_journal_tx.record_bytes; read it back as HEX like the stored
+// answer probe so embedded newlines never split a row.
+function finishedBeforeCommitWindow(
+  port: number,
+  sessionFilter: string,
+  promptId: string,
+): { attemptId: string; attemptSequence: number } {
+  const events = readJournalManagedEvents(port, sessionFilter)
+    .filter((event) => typeof event.sequence === 'number')
+    .map((event) => ({
+      kind: event.kind,
+      sequence: event.sequence as number,
+      payload: event.payload ?? {},
+    }));
+  events.sort((a, b) => a.sequence - b.sequence);
+  const mainAttempts = events.filter(
+    (event) =>
+      event.kind === 'model.attempt' &&
+      typeof event.payload['attemptId'] === 'string' &&
+      (event.payload['attemptId'] as string).startsWith(`${promptId}:main:`),
+  );
+  const latestAttempt = mainAttempts[mainAttempts.length - 1];
+  if (!latestAttempt)
+    throw new Error(
+      `Finished-before-commit crash window has no main model attempt: promptId=${promptId}`,
+    );
+  if (latestAttempt.payload['state'] !== 'output_committed')
+    throw new Error(
+      `Finished-before-commit crash landed before the model Finished marker committed: attemptState=${String(latestAttempt.payload['state'])} attemptId=${String(latestAttempt.payload['attemptId'])}`,
+    );
+  const assistantCommit = events.find(
+    (event) =>
+      event.kind === 'message.committed' &&
+      event.payload['role'] === 'assistant' &&
+      event.sequence > latestAttempt.sequence,
+  );
+  if (assistantCommit)
+    throw new Error(
+      `Finished-before-commit crash landed after the assistant commit: commitSequence=${assistantCommit.sequence} attemptSequence=${latestAttempt.sequence}`,
+    );
+  return {
+    attemptId: latestAttempt.payload['attemptId'] as string,
+    attemptSequence: latestAttempt.sequence,
+  };
+}
+
+// A3: read the recovered final batch plan the way recovery does — the latest
+// hosted.batch.planned link for the batch, then its continuation resource —
+// so the sibling order/identity assertion runs on the same durable plan the
+// next generation resumed from, not on the execution store's row order.
+interface SiblingFinalPlan {
+  stage: string;
+  calls: Array<{
+    runtimeCallId: string;
+    partIndex: number;
+    prepareKey: string;
+    requestDigest: string;
+    actionId: string | null;
+  }>;
+}
+function siblingFinalPlan(
+  port: number,
+  sessionFilter: string,
+  batchId: string,
+): SiblingFinalPlan {
+  let planRef: { resourceId?: string } | undefined;
+  let planSequence = -1;
+  for (const event of readJournalManagedEvents(port, sessionFilter)) {
+    if (
+      typeof event.sequence !== 'number' ||
+      event.kind !== 'hosted.batch.planned'
+    )
+      continue;
+    const payload = event.payload ?? {};
+    if (payload['batchId'] !== batchId) continue;
+    if (event.sequence > planSequence) {
+      planSequence = event.sequence;
+      planRef = payload['planRef'] as { resourceId?: string } | undefined;
+    }
+  }
+  if (!planRef?.resourceId)
+    throw new Error(
+      `Sibling recovery has no final batch plan link: batchId=${batchId}`,
+    );
+  const plan = JSON.parse(
+    runMysql(
+      port,
+      `SELECT CONVERT(inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource WHERE ${sessionFilter} AND resource_id=${sqlString(planRef.resourceId)}`,
+    ),
+  );
+  if (plan.stage !== 'final' || !Array.isArray(plan.calls))
+    throw new Error(
+      `Sibling recovered plan is not a final batch plan: stage=${String(plan.stage)}`,
+    );
+  return plan;
+}
+
+// B3: read the durable round and cost ledger the way recovery restores them.
+// The round comes from the latest hosted-model-request (model.attempt.recoveryRef);
+// the budget snapshot and per-model token metrics are reverse-scanned from the
+// route/usage resources exactly as bindBudget does on a cold load.
+interface B3RoundBudget {
+  round: number;
+  budget: unknown;
+  models: unknown;
+}
+function b3RoundAndBudget(port: number, sessionFilter: string): B3RoundBudget {
+  const attempts = readJournalManagedEvents(port, sessionFilter)
+    .filter(
+      (event) =>
+        event.kind === 'model.attempt' && typeof event.sequence === 'number',
+    )
+    .map((event) => ({
+      sequence: event.sequence as number,
+      payload: event.payload ?? {},
+    }));
+  attempts.sort((a, b) => a.sequence - b.sequence);
+  if (attempts.length === 0) throw new Error('B3 window has no model attempt');
+  const readResource = (ref: unknown): Record<string, unknown> | undefined => {
+    const resourceId = (ref as { resourceId?: string } | null)?.resourceId;
+    if (!resourceId) return undefined;
+    // HEX + decode avoids the mysql --batch backslash escaping that would
+    // corrupt the JSON's \" sequences — the saved request carries the full
+    // system prompt, unlike the small approval-continuation plan.
+    const hex = runMysql(
+      port,
+      `SELECT HEX(inline_bytes) FROM qwen_managed_agent.ma_resource WHERE ${sessionFilter} AND resource_id=${sqlString(resourceId)}`,
+    );
+    if (!hex || hex === 'NULL') return undefined;
+    return JSON.parse(Buffer.from(hex, 'hex').toString('utf8')) as Record<
+      string,
+      unknown
+    >;
+  };
+  let round = -1;
+  for (let i = attempts.length - 1; i >= 0; i -= 1) {
+    const req = readResource(attempts[i].payload['recoveryRef']);
+    if (req && typeof req['round'] === 'number') {
+      round = req['round'];
+      break;
+    }
+  }
+  let budget: unknown;
+  let models: unknown;
+  for (let i = attempts.length - 1; i >= 0; i -= 1) {
+    for (const field of ['usageRef', 'routeRef']) {
+      const saved = readResource(attempts[i].payload[field]);
+      if (!saved) continue;
+      if (budget === undefined && 'budget' in saved) budget = saved['budget'];
+      if (models === undefined && saved['models']) models = saved['models'];
+    }
+    if (budget !== undefined && models !== undefined) break;
+  }
+  if (round < 0) throw new Error('B3 window has no saved model-request round');
+  return { round, budget: budget ?? null, models: models ?? null };
+}
+
+// B3: the turn cost snapshot and per-model token ledger must survive the
+// replacement. The snapshot's NUMERIC budget must be present: a non-null
+// snapshot with budget: null is a legal production state (no +Nk directive
+// parsed), and an object-truthy guard would let null == null pass vacuously.
+// The ledger may grow as the held round completes, but every crash-boundary
+// model's output-token total must survive; an unrestored ledger is a truthy
+// {}, so a null check alone would let a zeroed restore pass too.
+function assertB3CostContinuity(
+  before: B3RoundBudget,
+  after: B3RoundBudget,
+): void {
+  const b3Budget = (before.budget as { budget?: number | null } | null)?.budget;
+  if (b3Budget === null || b3Budget === undefined)
+    throw new Error(
+      `B3 crash-boundary turn budget was not exercised: ${JSON.stringify(before.budget)}`,
+    );
+  if (!isDeepStrictEqual(after.budget, before.budget))
+    throw new Error(
+      `B3 recovery reset the turn budget snapshot: before=${JSON.stringify(before.budget)} after=${JSON.stringify(after.budget)}`,
+    );
+  const b3ModelsBefore = (before.models ?? {}) as Record<
+    string,
+    { tokens?: { candidates?: number } }
+  >;
+  const b3ModelsAfter = (after.models ?? {}) as Record<
+    string,
+    { tokens?: { candidates?: number } }
+  >;
+  const b3LedgerEntries = Object.entries(b3ModelsBefore);
+  if (
+    b3LedgerEntries.length === 0 ||
+    b3LedgerEntries.every(
+      ([, metric]) => (metric.tokens?.candidates ?? 0) === 0,
+    )
+  )
+    throw new Error(
+      'B3 crash-boundary per-model token ledger is empty: the fixture did not exercise the ledger',
+    );
+  for (const [model, metric] of b3LedgerEntries) {
+    const beforeTokens = metric.tokens?.candidates ?? 0;
+    const afterTokens = b3ModelsAfter[model]?.tokens?.candidates ?? 0;
+    if (afterTokens < beforeTokens)
+      throw new Error(
+        `B3 recovery wiped the per-model token ledger: model=${model} before=${beforeTokens} after=${afterTokens}`,
+      );
+  }
+}
+
+// The text-delta selector shared by deltaSequences (which throws on an empty
+// match) and b2DeltaIdentity (which tolerates it): one filter, two policies.
+function textDeltas(events: PublicEvent[], text: string): PublicEvent[] {
+  return events.filter(
+    (event) =>
+      event.type === 'item.output_text.delta' &&
+      eventText(event).includes(text),
+  );
+}
+
+// B2: one identity group per prefix text — the item/part ids the public deltas
+// carried while that prefix was live. After retraction the reload view blanks
+// those deltas, so the dead generations' identities survive only in the live
+// SSE capture; that is what makes the live view load-bearing.
+function b2DeltaIdentity(
+  events: PublicEvent[],
+  text: string,
+): { itemIds: string[]; partIds: string[]; sequences: number[] } {
+  const deltas = textDeltas(events, text);
+  const distinct = (values: Array<string | null | undefined>): string[] => [
+    ...new Set(values.filter((id): id is string => typeof id === 'string')),
+  ];
+  return {
+    itemIds: distinct(deltas.map((event) => event.item_id)),
+    partIds: distinct(deltas.map((event) => event.content_part_id)),
+    sequences: deltas.map((event) => event.sequence),
+  };
+}
+
+// The journal HEX decode shared by every window/identity reader: --batch text
+// would escape backslashes and corrupt the JSON, so rows are read as HEX and
+// decoded here, once.
+function readJournalManagedEvents(
+  port: number,
+  sessionFilter: string,
+): Array<{
+  kind?: unknown;
+  sequence?: unknown;
+  payload?: Record<string, unknown>;
+}> {
+  const rows = runMysql(
+    port,
+    `SELECT HEX(record_bytes) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} ORDER BY first_sequence`,
+  ).split('\n');
+  const events: Array<{
+    kind?: unknown;
+    sequence?: unknown;
+    payload?: Record<string, unknown>;
+  }> = [];
+  for (const row of rows) {
+    if (!row || row === 'NULL') continue;
+    for (const line of Buffer.from(row, 'hex').toString('utf8').split('\n')) {
+      if (!line) continue;
+      const record = JSON.parse(line) as {
+        subtype?: unknown;
+        managedSession?: {
+          kind?: unknown;
+          sequence?: unknown;
+          payload?: Record<string, unknown>;
+        };
+      };
+      if (record.subtype !== 'managed_session_event_v1') continue;
+      if (record.managedSession) events.push(record.managedSession);
+    }
+  }
+  return events;
+}
+
+// B2: the original prompt's model attempts, oldest first. Each streaming
+// generation must open a new attemptId.
+function b2ModelAttempts(
+  port: number,
+  sessionFilter: string,
+  promptId: string,
+): Array<{ attemptId: string; state: string; sequence: number }> {
+  const attempts: Array<{
+    attemptId: string;
+    state: string;
+    sequence: number;
+  }> = [];
+  for (const event of readJournalManagedEvents(port, sessionFilter)) {
+    if (event.kind !== 'model.attempt' || typeof event.sequence !== 'number')
+      continue;
+    const attemptId = event.payload?.['attemptId'];
+    if (
+      typeof attemptId !== 'string' ||
+      !attemptId.startsWith(`${promptId}:main:`)
+    )
+      continue;
+    attempts.push({
+      attemptId,
+      state: String(event.payload?.['state'] ?? ''),
+      sequence: event.sequence,
+    });
+  }
+  return attempts.sort((a, b) => a.sequence - b.sequence);
+}
+
+interface B2SseCapture {
+  events: PublicEvent[];
+  lastId: string;
+}
+
+// Open SSE observers must not hold the process open when the arm fails early:
+// the main finally aborts whatever is still pending.
+const b2SseObservers = new Set<SseObserver>();
+
+// B2: read the public SSE view through the shared SseObserver (wire-format
+// assertions included). One connection stays open across the Harness crashes
+// (the stream is control-plane-owned and reconciles from after=0 on connect).
+// `until` is a PROGRESS signal, not the exit: after it first holds, a bounded
+// drain window keeps reading so a double-projected terminal is still observed
+// (R1-2). SseObserver and waitUntil are free identifiers so behavioural tests
+// inject stubs.
+async function readPublicSse(
+  storeUrl: string,
+  sessionId: string,
+  options: {
+    tenantId: string;
+    after?: number;
+    lastEventId?: string;
+    until: (events: PublicEvent[]) => boolean;
+    timeoutMs: number;
+    drainMs?: number;
+  },
+): Promise<B2SseCapture> {
+  const observer = new SseObserver({
+    surface: 'public',
+    sessionId,
+    storeUrl,
+    tenantId: options.tenantId,
+    timeoutMs: options.timeoutMs,
+  });
+  b2SseObservers.add(observer);
+  const snapshot = (): PublicEvent[] =>
+    observer.frames.map((frame) => frame.data as unknown as PublicEvent);
+  const fail = (): void => {
+    if (observer.failure)
+      throw new Error(`B2 live SSE failed: ${String(observer.failure)}`);
+  };
+  try {
+    await observer.start(
+      options.lastEventId !== undefined
+        ? Number(options.lastEventId)
+        : options.after,
+    );
+    await waitUntil(
+      'B2 SSE capture progress',
+      () => {
+        fail();
+        return options.until(snapshot());
+      },
+      options.timeoutMs,
+    );
+    const drainMs = options.drainMs ?? 2_000;
+    const drainEnd = Date.now() + drainMs;
+    await waitUntil(
+      'B2 SSE capture drain',
+      () => {
+        fail();
+        return Date.now() >= drainEnd;
+      },
+      drainMs + 1_000,
+    );
+    fail();
+    const events = snapshot();
+    return { events, lastId: String(observer.frames.at(-1)?.id ?? '') };
+  } catch (error) {
+    if (observer.failure)
+      throw new Error(`B2 live SSE failed: ${String(observer.failure)}`);
+    if (observer.controller.signal.aborted)
+      throw new Error(
+        `B2 live SSE aborted (budget or teardown): ${String(error)}`,
+      );
+    throw new Error(`B2 live SSE capture incomplete: ${String(error)}`);
+  } finally {
+    observer.controller.abort();
+    await observer.task?.catch(() => undefined);
+    b2SseObservers.delete(observer);
+  }
+}
+
+// B2: the stream-view audit, lifted out of the arm's try block so behavioural
+// tests execute it (R1-6). The live capture holds the dead generations'
+// original identities; reload/replay hold the blanked prefixes and the
+// surviving answer. item_id is the Turn's ONE assistant item (stable across
+// the repair); the content Part is the stream identity — a delta continues the
+// previous Part only while that delta keeps its identity, so every retraction
+// must force a new Part (pairwise distinct Parts; every group must actually
+// carry the assistant item, R1-3; the replay compares Parts too, R1-4).
+function assertB2StreamViews(input: {
+  live: PublicEvent[];
+  reload: PublicEvent[];
+  replay: PublicEvent[];
+  partials: string[];
+  answer: string;
+  firstPrefixSequence: number;
+  secondPrefixSequence: number;
+  originalTurnId?: string;
+}): {
+  livePartial1: ReturnType<typeof b2DeltaIdentity>;
+  livePartial2: ReturnType<typeof b2DeltaIdentity>;
+  liveAnswer: ReturnType<typeof b2DeltaIdentity>;
+  reloadAnswer: ReturnType<typeof b2DeltaIdentity>;
+  replayAnswer: ReturnType<typeof b2DeltaIdentity>;
+} {
+  // The public stream.reconciled frame carries no payload: a client seeing one
+  // reloads. The converged view is the deltas after the LAST retraction.
+  const converged = (events: PublicEvent[]): string => {
+    const reconciled = events.filter(
+      (event) => event.type === 'stream.reconciled',
+    );
+    const last = reconciled.length
+      ? Math.max(...reconciled.map((event) => event.sequence))
+      : 0;
+    return events
+      .filter(
+        (event) =>
+          event.type === 'item.output_text.delta' && event.sequence > last,
+      )
+      .map(eventText)
+      .join('');
+  };
+  const terminalsOf = (events: PublicEvent[]): PublicEvent[] =>
+    events.filter(
+      (event) =>
+        event.terminal &&
+        (input.originalTurnId === undefined ||
+          event.turn_id === input.originalTurnId),
+    );
+  const livePartial1 = b2DeltaIdentity(input.live, input.partials[0]);
+  const livePartial2 = b2DeltaIdentity(input.live, input.partials[1]);
+  const liveAnswer = b2DeltaIdentity(input.live, input.answer);
+  const liveTerminals = terminalsOf(input.live);
+  const liveRetractions = input.live.filter(
+    (event) => event.type === 'stream.reconciled',
+  );
+  if (
+    converged(input.live) !== input.answer ||
+    liveTerminals.length !== 1 ||
+    liveTerminals[0].type !== 'turn.completed' ||
+    livePartial1.sequences.length === 0 ||
+    livePartial2.sequences.length === 0 ||
+    liveAnswer.sequences.length === 0 ||
+    liveRetractions.length < 2 ||
+    !reconciledBetween(
+      input.live,
+      Math.min(...livePartial1.sequences),
+      Math.min(...livePartial2.sequences),
+    ) ||
+    !reconciledBetween(
+      input.live,
+      Math.min(...livePartial2.sequences),
+      Math.min(...liveAnswer.sequences),
+    )
+  )
+    throw new Error(
+      `B2 live SSE: text=${JSON.stringify(converged(input.live))} terminals=${liveTerminals.length} partial1=${livePartial1.sequences.length} partial2=${livePartial2.sequences.length} answer=${liveAnswer.sequences.length} retractions=${liveRetractions.length} frames=${input.live.length}`,
+    );
+  const reloadAnswer = b2DeltaIdentity(input.reload, input.answer);
+  // F5: the live answer's identity is load-bearing — the persisted views being
+  // correct does not excuse a live stream that delivers the surviving answer
+  // under a dead Part, no identity, or a foreign item.
+  if (liveAnswer.itemIds.length === 0 || liveAnswer.partIds.length === 0)
+    throw new Error(
+      `B2 live SSE: the live answer carries no identity: ${JSON.stringify(liveAnswer)}`,
+    );
+  if (
+    liveAnswer.itemIds.join(',') !== reloadAnswer.itemIds.join(',') ||
+    liveAnswer.partIds.join(',') !== reloadAnswer.partIds.join(',')
+  )
+    throw new Error(
+      `B2 live SSE: the live answer identity differs from reload: live=${JSON.stringify(liveAnswer)} reload=${JSON.stringify(reloadAnswer)}`,
+    );
+  const groups = [livePartial1, livePartial2, reloadAnswer];
+  const itemIds = new Set(groups.flatMap((group) => group.itemIds));
+  if (
+    groups.some(
+      (group) => group.partIds.length === 0 || group.itemIds.length === 0,
+    ) ||
+    itemIds.size !== 1
+  )
+    throw new Error(
+      `B2 stream identities: expected one shared assistant item and a Part per generation: ${JSON.stringify(groups)}`,
+    );
+  for (let i = 0; i < groups.length; i += 1) {
+    for (let j = i + 1; j < groups.length; j += 1) {
+      if (groups[i].partIds.some((id) => groups[j].partIds.includes(id)))
+        throw new Error(
+          `B2 stream identities: generations ${i + 1} and ${j + 1} share a content Part (retraction did not break the continuation): ${JSON.stringify(groups)}`,
+        );
+    }
+  }
+  const blanked = (events: PublicEvent[], sequence: number): boolean => {
+    const delta = events.find((event) => event.sequence === sequence);
+    return (
+      !!delta &&
+      delta.type === 'item.output_text.delta' &&
+      eventText(delta) === '' &&
+      delta.item_id == null &&
+      delta.content_part_id == null
+    );
+  };
+  if (
+    !blanked(input.reload, input.firstPrefixSequence) ||
+    !blanked(input.reload, input.secondPrefixSequence)
+  )
+    throw new Error(
+      `B2 stream identities: retracted prefixes not blanked in reload at ${input.firstPrefixSequence}/${input.secondPrefixSequence}`,
+    );
+  const replayAnswer = b2DeltaIdentity(input.replay, input.answer);
+  const replayTerminals = terminalsOf(input.replay);
+  if (
+    converged(input.replay) !== input.answer ||
+    replayTerminals.length !== 1 ||
+    // F6: a reconnecting client shown a failure terminal while live/reload
+    // show success is not a passing B2.
+    replayTerminals[0].type !== 'turn.completed' ||
+    !blanked(input.replay, input.firstPrefixSequence) ||
+    !blanked(input.replay, input.secondPrefixSequence) ||
+    replayAnswer.itemIds.join(',') !== reloadAnswer.itemIds.join(',') ||
+    replayAnswer.partIds.join(',') !== reloadAnswer.partIds.join(',')
+  )
+    throw new Error(
+      `B2 replay view: text=${JSON.stringify(converged(input.replay))} terminals=${replayTerminals.length} answerIds=${replayAnswer.itemIds.join(',')} answerParts=${replayAnswer.partIds.join(',')} reloadIds=${reloadAnswer.itemIds.join(',')} reloadParts=${reloadAnswer.partIds.join(',')} frames=${input.replay.length}`,
+    );
+  return { livePartial1, livePartial2, liveAnswer, reloadAnswer, replayAnswer };
+}
+
 function assertPublicAnswer(events: PublicEvent[], expected: string): void {
   const terminal = events.filter((event) => event.terminal);
   const text = events
@@ -1240,6 +1832,9 @@ interface PublicEvent {
   sequence: number;
   terminal: boolean;
   type: string;
+  turn_id?: string | null;
+  item_id?: string | null;
+  content_part_id?: string | null;
   data?: unknown;
 }
 
@@ -1283,13 +1878,7 @@ async function publicTranscript(
 }
 
 function deltaSequences(events: PublicEvent[], text: string): number[] {
-  const sequences = events
-    .filter(
-      (event) =>
-        event.type === 'item.output_text.delta' &&
-        eventText(event).includes(text),
-    )
-    .map((event) => event.sequence);
+  const sequences = textDeltas(events, text).map((event) => event.sequence);
   // An empty list would turn Math.min into Infinity and every "before"
   // check into a vacuous pass.
   if (sequences.length === 0) {
@@ -1472,7 +2061,102 @@ try {
       }
 
       if (continuationFailover && serialized.includes(continuationMarker)) {
+        // B3: two earlier tool rounds, then a held post-tool round. The fake
+        // model decides by the number of tool results already in the history:
+        // 0 -> tool A (round 0), 1 -> tool B (round 1), >=2 -> the held final
+        // answer (round 2). The crash lands on the round-2 request so recovery
+        // must resume the saved round and cost ledger, not restart them.
+        if (approvalFault === 'after-earlier-tools') {
+          const toolResultCount = (serialized.match(/"role":"tool"/g) ?? [])
+            .length;
+          // Non-zero usage makes the token ledger numerically observable (the
+          // fake's default usage is all zeros). The earlier rounds outweigh the
+          // final round so a zeroed restore totals less than the crash-boundary
+          // ledger, not just the same sum re-counted.
+          if (toolResultCount === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: inflightSideEffectName,
+                    content: inflightSideEffectContent,
+                  },
+                  'call_managed_b3_first',
+                ),
+              ],
+              usage: {
+                prompt_tokens: 0,
+                completion_tokens: 300,
+                total_tokens: 300,
+              },
+            };
+          }
+          if (toolResultCount === 1) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: b3SecondSideEffectName,
+                    content: b3SecondSideEffectContent,
+                  },
+                  'call_managed_b3_second',
+                ),
+              ],
+              usage: {
+                prompt_tokens: 0,
+                completion_tokens: 300,
+                total_tokens: 300,
+              },
+            };
+          }
+          if (approvalResultHold) {
+            return {
+              contentChunks: [continuationPartial],
+              holdAfterChunks: 1,
+              holdUntil: approvalResultHold,
+              usage: {
+                prompt_tokens: 0,
+                completion_tokens: 100,
+                total_tokens: 100,
+              },
+            };
+          }
+          return {
+            content: continuationResponse,
+            usage: {
+              prompt_tokens: 0,
+              completion_tokens: 100,
+              total_tokens: 100,
+            },
+          };
+        }
         if (!serialized.includes('"role":"tool"')) {
+          // A3: a two-call batch so the replacement can be crashed in the
+          // approval gap between a decided sibling and a pending one.
+          if (approvalFault === 'sibling-approval') {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: inflightSideEffectName,
+                    content: inflightSideEffectContent,
+                  },
+                  'call_managed_continuation_failover',
+                ),
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: siblingSideEffectName,
+                    content: siblingSideEffectContent,
+                  },
+                  'call_managed_continuation_sibling',
+                ),
+              ],
+            };
+          }
           return {
             toolCalls: [
               fakeToolCall(
@@ -1741,7 +2425,7 @@ try {
       [
         '-cp',
         springJar,
-        '-Dloader.main=com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageRegistrationMain',
+        '-Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.WorkspaceStorageRegistrationMain',
         'org.springframework.boot.loader.launch.PropertiesLauncher',
         'register',
         tenant,
@@ -1848,7 +2532,9 @@ try {
           {
             type: 'text',
             text: continuationFailover
-              ? `${continuationMarker}. Execute the requested tool once and reply exactly ${continuationResponse}.`
+              ? approvalFault === 'after-earlier-tools'
+                ? `${continuationMarker}. ${b3BudgetDirective} Execute the requested tools and reply exactly ${continuationResponse}.`
+                : `${continuationMarker}. Execute the requested tool once and reply exactly ${continuationResponse}.`
               : inflightFailover
                 ? `${inflightMarker}. Execute the requested tool once and reply exactly ${inflightResponse}.`
                 : modelRoundFailover
@@ -1885,6 +2571,11 @@ try {
     let firstTurnLastSequence = 0;
     let formerDispatchOwner = '';
     let firstPrefixSequence = 0;
+    // B2: the live SSE capture stays open across both Harness crashes; the
+    // second prefix's sequence is hoisted so the audit can check its blanking.
+    let b2LiveCapture: Promise<B2SseCapture> | undefined;
+    let b2SecondPrefixSequence = 0;
+    let b2AttemptIds: string[] = [];
     let heldExecutionStartPath: string | undefined;
     let originalExecutionCallId: string | undefined;
     let originalRuntimeSessionId: string | undefined;
@@ -1977,14 +2668,18 @@ try {
           `SELECT CONVERT(inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND resource_id=${sqlString(originalApprovalOptions.continuationRef.resourceId)}`,
         ),
       );
+      const expectedOriginalPlanCalls =
+        approvalFault === 'sibling-approval' ? 2 : 1;
       if (
         !originalApprovalPlan ||
-        originalApprovalPlan.calls?.length !== 1 ||
+        originalApprovalPlan.calls?.length !== expectedOriginalPlanCalls ||
         originalApprovalPlan.actionId !== originalApprovalId ||
-        originalApprovalPlan.stage !== 'approval'
+        originalApprovalPlan.stage !== 'approval' ||
+        (approvalFault === 'sibling-approval' &&
+          originalApprovalPlan.approvalOrdinal !== 0)
       ) {
         throw new Error(
-          'Original saved approval plan does not identify exactly one original call',
+          `Original saved approval plan does not identify the original ${expectedOriginalPlanCalls} call(s) at the first approval`,
         );
       }
       originalRuntimeSessionId = originalApprovalPlan.runtime.runtimeSessionId;
@@ -2110,6 +2805,25 @@ try {
       // The crash point is the first model round of a Session with no
       // Workspace: the provider already streamed a prefix the public feed
       // shows, and nothing but the saved model request can continue it.
+      if (harnessOnly) {
+        // B2: subscribe to the live public view before the first prefix. The
+        // stream is control-plane-owned, so this one connection survives both
+        // Harness crashes; Spring reconciles from after=0 on connect, so a
+        // slightly late subscribe still sees every frame. The terminal is a
+        // progress signal; the drain window keeps reading so a double
+        // projection is observed (R1-2).
+        b2LiveCapture = readPublicSse(springUrl, session.id, {
+          tenantId: tenant,
+          after: 0,
+          until: (events) => events.some((event) => event.terminal),
+          timeoutMs: 240_000,
+        });
+        // Awaited only at the audit; without this observer a capture that
+        // fails — or that the teardown aborts on an early arm failure — is an
+        // unhandled rejection that exits before the children are stopped
+        // (R1-1). The audit's await still sees the real rejection.
+        b2LiveCapture.catch(() => undefined);
+      }
       await waitUntil(
         'First model round partial text',
         async () =>
@@ -2466,7 +3180,11 @@ try {
     // Every replacement generation answers on the same port with a fresh
     // home: the Harness-only model-round arm starts a third one after the
     // second dies mid-round.
-    const startReplacementHarness = async (name: string): Promise<Child> => {
+    const startReplacementHarness = async (
+      name: string,
+      crashBeforeAssistantCommit = false,
+      holdPendingSiblingApproval = false,
+    ): Promise<Child> => {
       const next = start(
         process.execPath,
         [
@@ -2511,6 +3229,19 @@ try {
             ...(approvalFault === 'load-reply-lost'
               ? { QWEN_E2E_DROP_LOAD_REPLY: session.id }
               : {}),
+            // B3a: only the generation that must crash carries this flag; the
+            // post-fault recovery generation must not inherit it, or it would
+            // crash in the same window forever.
+            ...(crashBeforeAssistantCommit
+              ? { QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT: session.id }
+              : {}),
+            // A3: only the generation that must crash carries this flag; it
+            // holds the first sibling approval it asks (the pending sibling
+            // after the decided one). The recovery generation must not inherit
+            // it, or it would hold the same approval forever.
+            ...(holdPendingSiblingApproval
+              ? { QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL: session.id }
+              : {}),
           },
         },
         name,
@@ -2531,6 +3262,8 @@ try {
     };
     let replacementHarness = await startReplacementHarness(
       'Replacement Hosted Harness',
+      approvalFault === 'finished-before-commit',
+      approvalFault === 'sibling-approval',
     );
 
     if (approvalRecovery) {
@@ -2606,7 +3339,10 @@ try {
           policy_revision: originalApprovalOptions!.policyRevision,
           option_id: verificationMode,
         });
-        if (approvalFault === 'after-result') {
+        if (
+          approvalFault === 'after-result' ||
+          approvalFault === 'after-earlier-tools'
+        ) {
           approvalResultHold = new Promise<void>((resolve) => {
             releaseApprovalResultHold = resolve;
           });
@@ -2646,6 +3382,60 @@ try {
               `Lost decision reply produced ${operations} ACTION_RESPONSE operations, not one`,
             );
         }
+        if (approvalFault === 'after-earlier-tools') {
+          // The first Allow drives tool A (round 0); the model then asks approval
+          // for tool B (round 1) under a NEW Action. Detect that requested Action
+          // and allow it so both earlier rounds execute before the held round 2.
+          await waitUntil(
+            'Second earlier-tool approval requested',
+            () => {
+              const rows = runMysql(
+                mysqlPort,
+                `SELECT action_id, state FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION'`,
+              );
+              const requested = (rows ? rows.split('\n') : [])
+                .map((row) => row.split('\t'))
+                .filter(
+                  ([id, state]) =>
+                    state === 'requested' && id !== originalApprovalId,
+                );
+              if (requested.length === 1) {
+                secondApprovalId = requested[0][0];
+                return true;
+              }
+              return false;
+            },
+            120_000,
+            replacementHarness,
+          );
+          const secondOptions = JSON.parse(
+            runMysql(
+              mysqlPort,
+              `SELECT options_json FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' AND action_id=${sqlString(secondApprovalId!)}`,
+            ),
+          );
+          const secondResponse = await fetch(
+            `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${secondApprovalId}/responses`,
+            {
+              method: 'POST',
+              headers: {
+                'content-type': 'application/json',
+                'idempotency-key': `g3-answer-${secondApprovalId}`,
+                ...tenantHeaders(tenant),
+              },
+              body: JSON.stringify({
+                kind: 'permission',
+                input_revision: secondOptions.inputRevision,
+                policy_revision: secondOptions.policyRevision,
+                option_id: 'allow',
+              }),
+            },
+          );
+          if (secondResponse.status !== 202)
+            throw new Error(
+              `Second earlier-tool response returned ${secondResponse.status}: ${await secondResponse.text()}`,
+            );
+        }
       } else if (verificationMode === 'cancel') {
         const response = await fetch(
           `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events`,
@@ -2669,10 +3459,14 @@ try {
       }
       let publishedPrefixSequences: number[] = [];
       let terminalAcceptsAtBarrier = 0;
+      let b3Before: B3RoundBudget | undefined;
       if (
         approvalFault === 'after-decision' ||
         approvalFault === 'after-prepare' ||
         approvalFault === 'after-result' ||
+        approvalFault === 'finished-before-commit' ||
+        approvalFault === 'sibling-approval' ||
+        approvalFault === 'after-earlier-tools' ||
         approvalFault === 'cleanup-failed' ||
         approvalFault === 'terminal-reply-lost' ||
         approvalFault === 'terminal-write-failed'
@@ -2734,6 +3528,45 @@ try {
             120_000,
             replacementHarness,
           );
+        } else if (approvalFault === 'after-earlier-tools') {
+          // Both earlier tool rounds must have committed their results and the
+          // round-2 post-tool request must be held with its prefix published, so
+          // the crash lands after the earlier tools but before the final output
+          // commits. Recovery must then resume the saved round and cost ledger.
+          await waitUntil(
+            'Earlier tools settled and the later round held',
+            async () => {
+              const rows = runMysql(
+                mysqlPort,
+                'SELECT execution_state, IF(result_json IS NULL, 0, 1) FROM qwen_managed_agent.ma_tool_execution ORDER BY execution_call_id',
+              );
+              const execs = rows ? rows.split('\n') : [];
+              if (execs.length !== 2 || execs.some((r) => r !== 'SETTLED\t1'))
+                return false;
+              const heldLaterRequest = (fake?.requests ?? []).some(
+                ({ body }) => {
+                  const messages = JSON.stringify(body['messages']);
+                  return (
+                    messages.includes(continuationMarker) &&
+                    (messages.match(/"role":"tool"/g) ?? []).length >= 2
+                  );
+                },
+              );
+              if (!heldLaterRequest) return false;
+              const view = await publicTranscript(
+                replacementSpringUrl,
+                tenant,
+                session.id,
+              );
+              return view.text.includes(continuationPartial);
+            },
+            120_000,
+            replacementHarness,
+          );
+          // Capture the durable round and cost ledger at the crash boundary so
+          // recovery can be proven to resume them rather than restart them.
+          b3Before = b3RoundAndBudget(mysqlPort, sessionFilter);
+          saveEvidence('b3-round-budget-before.json', b3Before);
         } else if (
           approvalFault === 'terminal-reply-lost' ||
           approvalFault === 'terminal-write-failed'
@@ -2788,6 +3621,88 @@ try {
             120_000,
             replacementHarness,
           );
+        } else if (approvalFault === 'finished-before-commit') {
+          // B3a: the replacement hooked the window after its post-tool stream
+          // Finished marker is durable but before the assistant commit. The
+          // barrier line proves the fault landed inside that window; the
+          // recovery parity check below proves the next generation reissued
+          // the saved request rather than compensating a committed terminal.
+          await waitUntil(
+            'Finished turn held before the assistant commit',
+            () =>
+              replacementHarness
+                .log()
+                .includes('E2E holding finished turn before assistant commit'),
+            120_000,
+            replacementHarness,
+          );
+        } else if (approvalFault === 'sibling-approval') {
+          // A3: the replacement decided sibling[0] (Allow[0]) and now holds
+          // the first approval it asks — the pending sibling[1]. The barrier
+          // line proves the hook fired; the durable shape proves the crash
+          // lands in the approval gap (sibling[0] decided, sibling[1] still
+          // requested), not after the whole batch finished approving.
+          await waitUntil(
+            'Pending sibling approval held',
+            () =>
+              replacementHarness
+                .log()
+                .includes('E2E holding pending sibling approval'),
+            120_000,
+            replacementHarness,
+          );
+          const siblingActionRows = runMysql(
+            mysqlPort,
+            `SELECT action_id, state FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' ORDER BY action_id`,
+          );
+          const siblingActions = siblingActionRows
+            ? siblingActionRows.split('\n').map((row) => row.split('\t'))
+            : [];
+          const decidedSibling = siblingActions.find(
+            ([id]) => id === originalApprovalId,
+          );
+          const pendingSibling = siblingActions.find(
+            ([id]) => id !== originalApprovalId,
+          );
+          if (
+            siblingActions.length !== 2 ||
+            decidedSibling?.[1] !== 'decided' ||
+            pendingSibling?.[1] !== 'requested'
+          ) {
+            throw new Error(
+              `Sibling-approval crash did not land in the approval gap: ${siblingActionRows}`,
+            );
+          }
+          siblingApprovalId = pendingSibling![0];
+          siblingApprovalOptions = JSON.parse(
+            runMysql(
+              mysqlPort,
+              `SELECT options_json FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' AND action_id=${sqlString(siblingApprovalId)}`,
+            ),
+          );
+          const siblingPlan = JSON.parse(
+            runMysql(
+              mysqlPort,
+              `SELECT CONVERT(inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND resource_id=${sqlString(siblingApprovalOptions!.continuationRef.resourceId)}`,
+            ),
+          );
+          if (
+            siblingPlan.stage !== 'approval' ||
+            siblingPlan.approvalOrdinal !== 1 ||
+            siblingPlan.calls?.length !== 2 ||
+            siblingPlan.actionId !== siblingApprovalId
+          ) {
+            throw new Error(
+              `Sibling-approval crash plan is not the pending second sibling: ${JSON.stringify(siblingPlan)}`,
+            );
+          }
+          saveEvidence('sibling-approval-barrier.json', {
+            fault: approvalFault,
+            decidedAction: decidedSibling,
+            pendingAction: pendingSibling,
+            approvalOrdinal: siblingPlan.approvalOrdinal,
+            calls: siblingPlan.calls,
+          });
         } else {
           // The enclosing condition lists every crash-type fault. A new one
           // added without a barrier here must fail loudly instead of
@@ -2800,8 +3715,36 @@ try {
           mysqlPort,
           'SELECT execution_state, dispatch_generation FROM qwen_managed_agent.ma_tool_execution',
         );
+        if (
+          approvalFault === 'finished-before-commit' &&
+          executionAtCrash !== 'SETTLED\t1'
+        ) {
+          // The crash must land after the approved result settled and its
+          // post-tool round reached the window, not before. Assert the durable
+          // precondition from MySQL like the sibling crash arms, rather than
+          // trusting the hook's log line alone.
+          throw new Error(
+            `Finished-before-commit crash did not land after the approved result settled: executionAtCrash=${executionAtCrash}`,
+          );
+        }
+        // The settled execution alone does not prove the crash landed inside
+        // B3a: the post-tool round could have been held before its durable
+        // Finished marker committed. Read the window from the same journal the
+        // recovery reads and retain the attempt identity as evidence.
+        const finishedWindow =
+          approvalFault === 'finished-before-commit'
+            ? finishedBeforeCommitWindow(
+                mysqlPort,
+                sessionFilter,
+                runMysql(
+                  mysqlPort,
+                  `SELECT prompt_id FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter} ORDER BY gmt_create DESC LIMIT 1`,
+                ),
+              )
+            : undefined;
         const publishedPrefix =
-          approvalFault === 'after-result'
+          approvalFault === 'after-result' ||
+          approvalFault === 'after-earlier-tools'
             ? await publicTranscript(replacementSpringUrl, tenant, session.id)
             : undefined;
         publishedPrefixSequences = (publishedPrefix?.events ?? [])
@@ -2815,6 +3758,7 @@ try {
           fault: approvalFault,
           crashedHarnessBootId: crashedBootId,
           executionAtCrash,
+          finishedBeforeCommitWindow: finishedWindow,
           heldExecutionStartPath: replacementBrokerProxy?.heldPath(),
           releaseFailures: replacementBrokerProxy?.releaseFailureCount(),
           turnStatusAtCrash:
@@ -2832,7 +3776,8 @@ try {
               }
             : undefined,
           publishedPrefix:
-            approvalFault === 'after-result'
+            approvalFault === 'after-result' ||
+            approvalFault === 'after-earlier-tools'
               ? {
                   sequences: publishedPrefixSequences,
                   text: publishedPrefix?.text,
@@ -2843,7 +3788,10 @@ try {
           replacementHarness.child,
           'Replacement Hosted Harness (fault barrier)',
         );
-        if (approvalFault === 'after-result') {
+        if (
+          approvalFault === 'after-result' ||
+          approvalFault === 'after-earlier-tools'
+        ) {
           releaseApprovalResultHold();
           approvalResultHold = undefined;
         }
@@ -2917,6 +3865,66 @@ try {
           );
         }
       }
+      if (approvalFault === 'sibling-approval') {
+        // The recovery generation must re-hang the ORIGINAL pending sibling
+        // Action (same ID, same deadline) and still require its own decision:
+        // it must not auto-allow sibling[1] from sibling[0]'s earlier Allow,
+        // nor re-ask the already-decided sibling[0]. Assert the preserved
+        // identity/deadline before answering, then decide the pending sibling.
+        // Read the decided sibling HERE, before answering the pending one: a
+        // recovery that resumes at the wrong ordinal and re-asks sibling[0]
+        // would flip it back to requested, and a post-terminal check could not
+        // tell "never touched" from "re-decided" once the state reconverges.
+        const decidedBefore = await fetchJson<Record<string, unknown>>(
+          `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${originalApprovalId}`,
+          { headers: tenantHeaders(tenant) },
+        );
+        if (
+          decidedBefore.id !== originalApprovalId ||
+          decidedBefore.state !== 'decided' ||
+          decidedBefore.created_at !== originalApprovalOptions!.createdAt ||
+          decidedBefore.expires_at !== originalApprovalOptions!.expiresAt
+        ) {
+          throw new Error(
+            `Recovery re-touched the decided sibling Action/deadline: ${JSON.stringify(decidedBefore)}`,
+          );
+        }
+        const siblingBefore = await fetchJson<Record<string, unknown>>(
+          `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${siblingApprovalId}`,
+          { headers: tenantHeaders(tenant) },
+        );
+        if (
+          siblingBefore.id !== siblingApprovalId ||
+          siblingBefore.state !== 'requested' ||
+          siblingBefore.created_at !== siblingApprovalOptions!.createdAt ||
+          siblingBefore.expires_at !== siblingApprovalOptions!.expiresAt
+        ) {
+          throw new Error(
+            `Recovery did not preserve the pending sibling Action/deadline: ${JSON.stringify(siblingBefore)}`,
+          );
+        }
+        const siblingResponse = await fetch(
+          `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${siblingApprovalId}/responses`,
+          {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'idempotency-key': `g3-answer-${siblingApprovalId}`,
+              ...tenantHeaders(tenant),
+            },
+            body: JSON.stringify({
+              kind: 'permission',
+              input_revision: siblingApprovalOptions!.inputRevision,
+              policy_revision: siblingApprovalOptions!.policyRevision,
+              option_id: 'allow',
+            }),
+          },
+        );
+        if (siblingResponse.status !== 202)
+          throw new Error(
+            `Pending sibling response returned ${siblingResponse.status}: ${await siblingResponse.text()}`,
+          );
+      }
       const recovered = await waitForTerminal(
         replacementSpringUrl,
         tenant,
@@ -2940,7 +3948,11 @@ try {
       // a compensation that only projects a terminal would pass. The
       // result-commit arm already owns the same check with its retraction
       // diagnostic, so it keeps that message.
-      if (verificationMode === 'allow' && approvalFault !== 'after-result') {
+      if (
+        verificationMode === 'allow' &&
+        approvalFault !== 'after-result' &&
+        approvalFault !== 'after-earlier-tools'
+      ) {
         const transcript = await publicTranscript(
           replacementSpringUrl,
           tenant,
@@ -2951,7 +3963,10 @@ try {
             `Approval recovery answer differs: ${JSON.stringify(transcript.text)}`,
           );
       }
-      if (approvalFault === 'after-result') {
+      if (
+        approvalFault === 'after-result' ||
+        approvalFault === 'after-earlier-tools'
+      ) {
         // The reissue must retract the held prefix: only the recovered
         // answer may remain in the public transcript.
         const transcript = await publicTranscript(
@@ -2979,31 +3994,83 @@ try {
       }
       const rows = runMysql(
         mysqlPort,
-        `SELECT execution_call_id, idempotency_key, binding_id, runtime_generation, runtime_session_id, execution_state, dispatch_generation, request_digest FROM qwen_managed_agent.ma_tool_execution ORDER BY execution_call_id`,
+        `SELECT execution_call_id, idempotency_key, binding_id, runtime_generation, runtime_session_id, execution_state, dispatch_generation, request_digest, settled_at FROM qwen_managed_agent.ma_tool_execution ORDER BY execution_call_id`,
       );
       const executions = rows
         ? rows.split('\n').map((row) => row.split('\t'))
         : [];
-      const expectedExecutions = verificationMode === 'allow' ? 1 : 0;
+      const expectedExecutions =
+        verificationMode === 'allow'
+          ? approvalFault === 'sibling-approval' ||
+            approvalFault === 'after-earlier-tools'
+            ? 2
+            : 1
+          : 0;
       if (executions.length !== expectedExecutions)
         throw new Error(
           `Approval execution count ${executions.length} differs from ${expectedExecutions}`,
         );
-      if (executions.length === 1) {
-        const execution = executions[0];
+      // Every approved call keeps its own original prepare key/digest and the
+      // original Runtime identity, settled once. Match by prepare key so the
+      // model's call order is checked, not the SQL row order; the A3 arm has
+      // two siblings and B3 two earlier rounds, every other allow arm has one.
+      if (approvalFault === 'after-earlier-tools') {
+        // B3's two earlier tools live in separate rounds, so the first approval
+        // plan carries only tool A. Assert both executions' Runtime identity and
+        // settled-once directly; the two physical file effects give per-tool
+        // evidence, and a re-run of either earlier tool reds the count above.
+        for (const [ordinal, execution] of executions.entries()) {
+          if (
+            execution[2] !== originalApprovalPlan!.runtime.bindingId ||
+            execution[3] !== originalApprovalPlan!.runtime.generation ||
+            execution[4] !== originalApprovalPlan!.runtime.runtimeSessionId ||
+            execution[5] !== 'SETTLED' ||
+            execution[6] !== '1'
+          ) {
+            throw new Error(
+              `B3 earlier execution ${ordinal} changed its identity or re-ran: ${execution.join(',')}`,
+            );
+          }
+        }
+      } else if (verificationMode === 'allow') {
         const plan = originalApprovalPlan!;
-        if (
-          execution[1] !== plan.calls[0].prepareKey ||
-          execution[2] !== plan.runtime.bindingId ||
-          execution[3] !== plan.runtime.generation ||
-          execution[4] !== plan.runtime.runtimeSessionId ||
-          execution[5] !== 'SETTLED' ||
-          execution[6] !== '1' ||
-          execution[7] !== plan.calls[0].requestDigest
-        ) {
-          throw new Error(
-            `Replacement changed the original prepared execution identity: ${execution.join(',')}`,
+        const settledAtByOrdinal: number[] = [];
+        for (const [ordinal, call] of plan.calls.entries()) {
+          const execution = executions.find(
+            (row) => row[1] === call.prepareKey,
           );
+          if (
+            !execution ||
+            execution[2] !== plan.runtime.bindingId ||
+            execution[3] !== plan.runtime.generation ||
+            execution[4] !== plan.runtime.runtimeSessionId ||
+            execution[5] !== 'SETTLED' ||
+            execution[6] !== '1' ||
+            execution[7] !== call.requestDigest
+          ) {
+            throw new Error(
+              `Replacement changed the original prepared execution identity for call ${ordinal}: ${(execution ?? []).join(',')}`,
+            );
+          }
+          settledAtByOrdinal.push(Number(execution[8]));
+        }
+        // The siblings must SETTLE in plan order, not merely exist with the
+        // right identities: a recovery that dispatches the batch in reverse
+        // keeps every identity assertion green. settled_at is epoch millis;
+        // require it non-decreasing along the plan so a reverse dispatch reds.
+        for (
+          let ordinal = 1;
+          ordinal < settledAtByOrdinal.length;
+          ordinal += 1
+        ) {
+          if (
+            !Number.isFinite(settledAtByOrdinal[ordinal]) ||
+            settledAtByOrdinal[ordinal] < settledAtByOrdinal[ordinal - 1]
+          ) {
+            throw new Error(
+              `Replacement settled the siblings out of plan order: settledAt=${settledAtByOrdinal.join(',')}`,
+            );
+          }
         }
       }
       const bytes = existsSync(inflightSideEffect)
@@ -3018,9 +4085,38 @@ try {
           `Approval physical file assertion failed for ${verificationMode}`,
         );
       }
+      if (approvalFault === 'sibling-approval') {
+        const siblingBytes = existsSync(siblingSideEffect)
+          ? readFileSync(siblingSideEffect, 'utf8')
+          : '';
+        if (siblingBytes !== siblingSideEffectContent)
+          throw new Error(
+            `Sibling physical file assertion failed: ${JSON.stringify(siblingBytes)}`,
+          );
+      }
+      if (approvalFault === 'after-earlier-tools') {
+        const b3Bytes = existsSync(b3SecondSideEffect)
+          ? readFileSync(b3SecondSideEffect, 'utf8')
+          : '';
+        if (b3Bytes !== b3SecondSideEffectContent)
+          throw new Error(
+            `B3 second physical file assertion failed: ${JSON.stringify(b3Bytes)}`,
+          );
+        // Round + cost ledger continuity: recovery must resume the saved round
+        // and restore the budget snapshot / token ledger, not restart them.
+        if (!b3Before)
+          throw new Error('B3 crash-boundary round/budget was not captured');
+        const b3After = b3RoundAndBudget(mysqlPort, sessionFilter);
+        saveEvidence('b3-round-budget-after.json', b3After);
+        if (b3After.round !== b3Before.round || b3After.round < 2)
+          throw new Error(
+            `B3 recovery reset the logical round: before=${b3Before.round} after=${b3After.round}`,
+          );
+        assertB3CostContinuity(b3Before, b3After);
+      }
       const actionRows = runMysql(
         mysqlPort,
-        `SELECT action_id, state FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION'`,
+        `SELECT action_id, state FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' ORDER BY action_id`,
       );
       const expectedActionState =
         verificationMode === 'expiry'
@@ -3028,10 +4124,36 @@ try {
           : verificationMode === 'cancel'
             ? 'cancelled'
             : 'decided';
-      if (actionRows !== `${originalApprovalId}\t${expectedActionState}`)
+      if (approvalFault === 'sibling-approval') {
+        // Both siblings end decided under their ORIGINAL Action IDs: the
+        // decided one was not re-asked, the pending one earned its own Allow.
+        const expectedSiblingActions = [
+          `${originalApprovalId}\t${expectedActionState}`,
+          `${siblingApprovalId}\t${expectedActionState}`,
+        ].sort();
+        if (actionRows !== expectedSiblingActions.join('\n'))
+          throw new Error(
+            `Sibling approval identities/states differ: ${actionRows}`,
+          );
+      } else if (approvalFault === 'after-earlier-tools') {
+        // Both earlier tools end decided under their ORIGINAL Action IDs: A by
+        // the first Allow, B by the runner's second Allow. Recovery must resume
+        // the saved model round, not re-ask either approval.
+        const expectedB3Actions = [
+          `${originalApprovalId}\t${expectedActionState}`,
+          `${secondApprovalId}\t${expectedActionState}`,
+        ].sort();
+        if (actionRows !== expectedB3Actions.join('\n'))
+          throw new Error(
+            `B3 approval identities/states differ: ${actionRows}`,
+          );
+      } else if (
+        actionRows !== `${originalApprovalId}\t${expectedActionState}`
+      ) {
         throw new Error(
           `Original approval identity/state differs: ${actionRows}`,
         );
+      }
       // State alone proves a decision was committed, not which option won.
       // Read the committed decision resource back for the browser-facing
       // intent, and hold it to the revision and policy the browser answered.
@@ -3055,6 +4177,62 @@ try {
         throw new Error(
           `Stored approval decision differs from the chosen option: ${JSON.stringify(decisionOption)}`,
         );
+      }
+      if (approvalFault === 'sibling-approval') {
+        // The pending sibling carries its OWN Allow decision bound to its own
+        // revisions — it was not auto-allowed from sibling[0]'s earlier Allow.
+        const siblingDecision = JSON.parse(
+          runMysql(
+            mysqlPort,
+            `SELECT CONVERT(r.inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource_ref rr JOIN qwen_managed_agent.ma_resource r ON r.resource_key = rr.resource_key WHERE rr.owner_kind='SESSION_RECORD' AND rr.owner_key = (SELECT record_key FROM qwen_managed_agent.ma_session_record WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND record_kind='ACTION' AND action_id=${sqlString(siblingApprovalId!)}) AND r.kind='managed-action-decision'`,
+          ),
+        );
+        if (
+          siblingDecision.optionId !== 'allow' ||
+          siblingDecision.inputRevision !==
+            siblingApprovalOptions!.inputRevision ||
+          siblingDecision.policyRevision !==
+            siblingApprovalOptions!.policyRevision
+        ) {
+          throw new Error(
+            `Stored sibling decision differs from the chosen option: ${JSON.stringify(siblingDecision)}`,
+          );
+        }
+        // Clause 2: the recovered final plan preserves the saved sibling
+        // order and identities, and each sibling keeps its original Action
+        // ID. Compare by position so a reordered or dropped sibling reds
+        // here, not only in the execution count.
+        const finalPlan = siblingFinalPlan(
+          mysqlPort,
+          sessionFilter,
+          originalApprovalPlan!.batchId,
+        );
+        const savedCalls = originalApprovalPlan!.calls;
+        if (finalPlan.calls.length !== savedCalls.length)
+          throw new Error(
+            `Sibling recovery changed the batch size: ${finalPlan.calls.length} != ${savedCalls.length}`,
+          );
+        for (const [ordinal, saved] of savedCalls.entries()) {
+          const recovered = finalPlan.calls[ordinal];
+          if (
+            recovered.runtimeCallId !== saved.runtimeCallId ||
+            recovered.partIndex !== saved.partIndex ||
+            recovered.prepareKey !== saved.prepareKey ||
+            recovered.requestDigest !== saved.requestDigest
+          ) {
+            throw new Error(
+              `Sibling recovery reordered or rewrote call ${ordinal}: ${JSON.stringify(recovered)} != ${JSON.stringify(saved)}`,
+            );
+          }
+        }
+        if (
+          finalPlan.calls[0].actionId !== originalApprovalId ||
+          finalPlan.calls[1].actionId !== siblingApprovalId
+        ) {
+          throw new Error(
+            `Sibling recovery changed the original Action IDs: ${JSON.stringify(finalPlan.calls.map((call) => call.actionId))}`,
+          );
+        }
       }
       // Expiry may only close the wait at or after the deadline it was
       // given; an early terminal would mean the replacement invented one.
@@ -3087,11 +4265,14 @@ try {
         JSON.stringify(request.body.messages).includes('"role":"tool"'),
       );
       const expectedModelsAfterResults =
-        approvalFault === 'after-result'
-          ? 2
-          : ['allow', 'deny'].includes(verificationMode)
-            ? 1
-            : 0;
+        approvalFault === 'after-earlier-tools'
+          ? 3
+          : approvalFault === 'after-result' ||
+              approvalFault === 'finished-before-commit'
+            ? 2
+            : ['allow', 'deny'].includes(verificationMode)
+              ? 1
+              : 0;
       if (
         initialRequests.length !== 1 ||
         modelAfterResults.length !== expectedModelsAfterResults
@@ -3099,7 +4280,10 @@ try {
         throw new Error(
           `Approval replayed inference or skipped result inference: ${initialRequests.length}+${modelAfterResults.length}`,
         );
-      if (approvalFault === 'after-result') {
+      if (
+        approvalFault === 'after-result' ||
+        approvalFault === 'finished-before-commit'
+      ) {
         const parity = isDeepStrictEqual(
           modelAfterResults[0]?.body,
           modelAfterResults[1]?.body,
@@ -3111,6 +4295,22 @@ try {
         if (!parity)
           throw new Error(
             'Result-commit recovery changed the saved model request',
+          );
+      }
+      if (approvalFault === 'after-earlier-tools') {
+        // The held round-2 request (index 1) must be reissued deep-equal by the
+        // recovery generation (index 2); index 0 is the earlier round-1 request.
+        const parity = isDeepStrictEqual(
+          modelAfterResults[1]?.body,
+          modelAfterResults[2]?.body,
+        );
+        saveEvidence('model-request-parity.json', {
+          requests: modelAfterResults.map((request) => request.body),
+          equal: parity,
+        });
+        if (!parity)
+          throw new Error(
+            'B3 recovery changed the saved later-round model request',
           );
       }
       if (responseOperation) {
@@ -3681,6 +4881,7 @@ try {
             secondPrefixSequence,
           );
         previousPrefixSequence = secondPrefixSequence;
+        b2SecondPrefixSequence = secondPrefixSequence;
         boots.push(currentBoot());
         heads.push(currentHead());
         await crashChild(
@@ -3776,6 +4977,24 @@ try {
           `SELECT COUNT(*) FROM qwen_managed_agent.ma_resource WHERE ${sessionFilter} AND kind='managed-admission'`,
         ),
       );
+      // B2: attempt identities are checked BEFORE the shared audit — a reused
+      // attemptId collides the journal command ids, dedups the later
+      // generations' attempts and breaks recovery routing itself; naming the
+      // identity root cause first keeps the diagnosis specific.
+      if (harnessOnly) {
+        const b2Attempts = b2ModelAttempts(
+          mysqlPort,
+          sessionFilter,
+          firstPromptId,
+        );
+        b2AttemptIds = [
+          ...new Set(b2Attempts.map((attempt) => attempt.attemptId)),
+        ];
+        if (b2AttemptIds.length !== modelRoundPartials.length + 1)
+          throw new Error(
+            `B2 attempt identities: expected ${modelRoundPartials.length + 1} distinct attempts, got ${b2AttemptIds.length}: ${b2Attempts.map((attempt) => `${attempt.attemptId}:${attempt.state}`).join(',')}`,
+          );
+      }
       if (
         recovered.terminals.length !== 1 ||
         recovered.terminals[0].type !== 'turn.completed' ||
@@ -3806,6 +5025,47 @@ try {
         throw new Error(
           `Model-round failover audit failed: terminals=${JSON.stringify(recovered.terminals)} text=${JSON.stringify(recovered.text)} retractedBeforeNewDeltas=${retractedBeforeNewDeltas} terminalRows=${terminalRows()} roundRequests=${roundRequests.length} equalRequests=${roundRequests.every((request) => isDeepStrictEqual(request.body, roundRequests[0]?.body))} executions=${executionCount} turns=${turnCount} admissions=${admissionCount} admissionResources=${admissionResources} boots=${boots.join('->')} heads=${heads.map((head) => head.join(',')).join('->')}`,
         );
+      }
+
+      if (harnessOnly) {
+        // B2: the live SSE view captured across both crashes (drained past the
+        // terminal so a double projection is observed) and a Last-Event-ID: 0
+        // replay; the shared view audit owns the identity/blanking/terminal
+        // assertions so behavioural tests execute them.
+        if (!b2LiveCapture)
+          throw new Error('B2 live SSE capture was not started');
+        const b2Live = await b2LiveCapture;
+        const b2Replay = await readPublicSse(replacementSpringUrl, session.id, {
+          tenantId: tenant,
+          lastEventId: '0',
+          until: (events) => events.some((event) => event.terminal),
+          timeoutMs: 60_000,
+        });
+        const b2Views = assertB2StreamViews({
+          live: b2Live.events,
+          reload: recovered.events,
+          replay: b2Replay.events,
+          partials: modelRoundPartials,
+          answer: modelRoundResponse,
+          firstPrefixSequence,
+          secondPrefixSequence: b2SecondPrefixSequence,
+          originalTurnId: recovered.terminals[0]?.turn_id ?? undefined,
+        });
+        writeEvidenceFile(modelRoundEvidenceDirectory, 'b2-identities.json', {
+          attemptIds: b2AttemptIds,
+          live: {
+            partial1: b2Views.livePartial1,
+            partial2: b2Views.livePartial2,
+            answer: b2Views.liveAnswer,
+            frames: b2Live.events.length,
+            lastId: b2Live.lastId,
+          },
+          reloadAnswer: b2Views.reloadAnswer,
+          replay: {
+            answer: b2Views.replayAnswer,
+            frames: b2Replay.events.length,
+          },
+        });
       }
 
       if (frozenControlPlane) {
@@ -4672,6 +5932,9 @@ try {
     );
   }
 } finally {
+  // Abort any pending B2 SSE capture so an early arm failure exits promptly
+  // instead of waiting out the capture's budget on an open socket.
+  for (const observer of b2SseObservers) observer.controller.abort();
   // A frozen Harness holds SIGTERM pending from stopChild; wake it before
   // teardown so teardown does not burn the 10-second stall on every path,
   // failure or success. `harness` is try-block scoped, so reach it through
