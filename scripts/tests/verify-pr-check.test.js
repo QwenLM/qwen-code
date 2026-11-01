@@ -354,29 +354,45 @@ describe('gates', () => {
     expect(raw('9007199254740991').errors).toEqual([]);
   });
 
-  it('warns when a suite-sized total comes with no gates', () => {
+  it('warns when a suite-sized total comes with no gate results', () => {
     const big = check({
       assertions: JSON.stringify({ pass: 1001, fail: 0, total: 1001 }),
     });
     expect(big.errors).toEqual([]);
     expect(big.warnings.join('\n')).toMatch(
-      /counts 1001 assertions and records no gates/,
+      /counts 1001 assertions and records no gate results/,
     );
     const edge = check({
       assertions: JSON.stringify({ pass: 1000, fail: 0, total: 1000 }),
     });
-    expect(edge.warnings.join('\n')).not.toMatch(/records no gates/);
+    expect(edge.warnings.join('\n')).not.toMatch(/records no gate results/);
     const split = withGates([{ suite: 'cli', pass: 1292, fail: 0 }], {
       pass: 1001,
       fail: 0,
       total: 1001,
     });
-    expect(split.warnings.join('\n')).not.toMatch(/records no gates/);
+    expect(split.warnings.join('\n')).not.toMatch(/records no gate results/);
     // An empty list records no suites, so it must not silence the warning
     // either: folding suites in and writing [] is the same smell.
     const empty = withGates([], { pass: 1001, fail: 0, total: 1001 });
     expect(empty.errors).toEqual([]);
-    expect(empty.warnings.join('\n')).toMatch(/records no gates/);
+    expect(empty.warnings.join('\n')).toMatch(/records no gate results/);
+    // Nor do entries that count nothing: a placeholder suite moved no test
+    // out of the counts. Skipped tests are not results either.
+    for (const gate of [
+      { suite: 'placeholder', pass: 0, fail: 0 },
+      { suite: 'cli', pass: 0, fail: 0, skipped: 12 },
+    ]) {
+      const hollow = withGates([gate], { pass: 1001, fail: 0, total: 1001 });
+      expect(hollow.errors).toEqual([]);
+      expect(hollow.warnings.join('\n')).toMatch(/records no gate results/);
+    }
+    const allRed = withGates([{ suite: 'cli', pass: 0, fail: 3 }], {
+      pass: 1001,
+      fail: 0,
+      total: 1001,
+    });
+    expect(allRed.warnings.join('\n')).not.toMatch(/records no gate results/);
   });
 });
 
