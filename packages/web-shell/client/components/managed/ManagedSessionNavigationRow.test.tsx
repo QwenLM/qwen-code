@@ -101,7 +101,19 @@ describe('Managed session navigation row', () => {
       configurable: true,
       value: { writeText },
     });
+    props.session.worktree = {
+      id: 'worktree-a',
+      sessionId: 'session-one',
+      workspaceId: 'workspace-one',
+      state: 'ready',
+      branch: 'worktree-managed-a',
+      baseCommit: 'a'.repeat(40),
+      cwdRelative: '.qwen-managed-worktrees/a',
+      operationId: 'operation-a',
+      revision: 1,
+    };
     await render();
+    expect(container.textContent).not.toContain('worktree-managed-a');
     await hover();
     const details = portal.querySelector('[role="dialog"]')!;
     expect(details.textContent).toContain('Task one');
@@ -109,6 +121,9 @@ describe('Managed session navigation row', () => {
     expect(details.textContent).toContain('Project / src');
     expect(details.textContent).toContain('Completed');
     expect(details.textContent).not.toContain('clients');
+    expect(details.textContent).toContain('Worktree ready');
+    expect(details.textContent).toContain('worktree-managed-a');
+    expect(details.textContent).toContain('Base commit: aaaaaaaaaaaa');
     await act(async () =>
       details
         .querySelector<HTMLButtonElement>('[data-web-shell-session-id-copy]')!

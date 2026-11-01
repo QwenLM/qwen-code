@@ -143,6 +143,41 @@ const toolItem = (overrides: Partial<LiveToolItem> = {}): LiveToolItem => ({
 });
 
 describe('OpenTuiTranscriptView', () => {
+  it('shows the exact executing shell focus hint and removes it from completed or unrelated cards', () => {
+    const view = render(
+      <OpenTuiTranscriptView items={[toolItem()]} activeShellCallId="t1" />,
+    );
+    expect(view.container.textContent).toContain('(ctrl+f to focus)');
+    expect(view.container.textContent).not.toContain('(Focused)');
+    view.rerender(
+      <OpenTuiTranscriptView
+        items={[toolItem()]}
+        activeShellCallId="t1"
+        focusedShellCallId="t1"
+      />,
+    );
+    expect(view.container.textContent).toContain('(Focused)');
+    expect(view.container.textContent).not.toContain('(ctrl+f to focus)');
+    view.rerender(
+      <OpenTuiTranscriptView
+        items={[toolItem({ done: true })]}
+        activeShellCallId="t1"
+        focusedShellCallId="t1"
+      />,
+    );
+    expect(view.container.textContent).not.toContain('(Focused)');
+    view.rerender(
+      <OpenTuiTranscriptView
+        items={[toolItem()]}
+        activeShellCallId="other"
+        focusedShellCallId="other"
+      />,
+    );
+    expect(view.container.textContent).not.toContain('(Focused)');
+    expect(view.container.textContent).not.toContain('(ctrl+f to focus)');
+    view.unmount();
+  });
+
   it('keeps replayed batches with the same wire call ID in distinct height slots', () => {
     const group = (id: number, result: string): HistoryItem => ({
       id,

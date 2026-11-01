@@ -4,9 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApprovalMode } from '../config/approval-mode.js';
-import type { ConfigParameters } from '../config/config.js';
+import type { Config, ConfigParameters } from '../config/config.js';
+import { Storage } from '../config/storage.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { MessageBusType } from '../confirmation-bus/types.js';
 import type {
@@ -17,11 +22,13 @@ import type {
 import { InputFormat } from '../output/types.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import type { ChatRecord } from '../services/chatRecordingService.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ExecTool } from '../tools/exec.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
+import { WorkflowTool } from '../tools/workflow/workflow.js';
 import {
   Kind,
   ToolConfirmationOutcome,
@@ -530,5 +537,156 @@ describe('headless-owned Mod tool.check restriction', () => {
     expect(call.status).toBe('success');
     expect(harness.execute).toHaveBeenCalledWith({ value: 'nested' });
     expect(check.mock.calls.map(([input]) => input.tool)).toEqual(['exec']);
+  });
+
+  describe.each([false, true])('durable workflow mode %s', (enabled) => {
+    let root: string;
+    let config: Config | undefined;
+
+    beforeEach(async () => {
+      root = await mkdtemp(path.join(os.tmpdir(), 'qwen-mod-workflow-mode-'));
+      config = undefined;
+      vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', '');
+    });
+
+    afterEach(async () => {
+      await config?.closeSessionWriter();
+      vi.unstubAllEnvs();
+      await rm(root, { recursive: true, force: true });
+    });
+
+    async function setupWithMode(
+      check: ModToolCheck,
+      permission: PermissionDecision,
+      approvalMode: ApprovalMode,
+      approver?: 'person' | 'host',
+    ) {
+      const harness = Storage.runWithResolvedRuntimeBaseDir(
+        path.join(root, 'runtime'),
+        () =>
+          setup(check, {
+            name: 'read_file',
+            permission,
+            config: {
+              sessionId: randomUUID(),
+              cwd: root,
+              targetDir: root,
+              usageStatisticsEnabled: false,
+              chatRecording: true,
+              workflowsEnabled: true,
+              workflowNameOnly: true,
+              approvalMode,
+              interactive: approver === 'person',
+              inputFormat:
+                approver === 'host'
+                  ? InputFormat.STREAM_JSON
+                  : InputFormat.TEXT,
+            },
+          }),
+      );
+      config = harness.config;
+      config.getToolRegistry().registerTool(new WorkflowTool(config));
+      vi.spyOn(
+        config as unknown as { initializeInternal(): Promise<void> },
+        'initializeInternal',
+      ).mockResolvedValue();
+      await config.initialize();
+      await config.setWorkflowMode(enabled);
+      expect(config.getWorkflowMode()).toEqual({
+        requested: enabled,
+        available: true,
+        effective: enabled,
+      });
+      const records = (await readFile(config.getTranscriptPath(), 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as ChatRecord);
+      expect(records).toContainEqual(
+        expect.objectContaining({
+          subtype: 'session_workflow_mode',
+          systemPayload: { enabled },
+        }),
+      );
+      vi.spyOn(config.getLlmClient(), 'getHistoryTail').mockReturnValue([]);
+      vi.spyOn(config.getLlmClient(), 'getTrustedUserAnswers').mockReturnValue(
+        [],
+      );
+      return harness;
+    }
+
+    const approvalModes = [
+      ApprovalMode.YOLO,
+      ApprovalMode.AUTO_EDIT,
+      ApprovalMode.AUTO,
+    ];
+    it.each(
+      approvalModes.flatMap((approvalMode) =>
+        (['own', 'rewritten'] as const).flatMap((ask) =>
+          (['person', 'host', undefined] as const).map((approver) => ({
+            approvalMode,
+            ask,
+            approver,
+          })),
+        ),
+      ),
+    )(
+      'keeps $ask Mod ask under $approvalMode with approver=$approver',
+      async ({ approvalMode, ask, approver }) => {
+        const permission = ask === 'own' ? 'allow' : 'ask';
+        const reason = ask === 'own' ? 'Check the branch' : 'Reworded ask';
+        const check = vi.fn<ModToolCheck>(async (_input, verdict) => ({
+          ...(ask === 'rewritten' ? verdict : {}),
+          decision: 'ask',
+          reason,
+          plugin: 'guard',
+        }));
+        const harness = await setupWithMode(
+          check,
+          permission,
+          approvalMode,
+          approver,
+        );
+        await harness.schedule();
+        expect(check).toHaveBeenCalledOnce();
+        expect(check.mock.calls[0][0].approver).toBe(approver);
+        expect(check.mock.calls[0][1]).toEqual({ decision: permission });
+        expect(harness.execute).not.toHaveBeenCalled();
+        if (approver) {
+          const waiting = harness.waiting();
+          expect(waiting?.confirmationDetails).toMatchObject({
+            hideAlwaysAllow: true,
+            prompt: expect.stringContaining(`Mod guard: ${reason}`),
+          });
+          await waiting!.confirmationDetails.onConfirm(
+            ToolConfirmationOutcome.Cancel,
+          );
+          expect((await harness.settled()).status).toBe('cancelled');
+        } else {
+          const call = await harness.settled();
+          expect(harness.waiting()).toBeUndefined();
+          expect(call.status).toBe('error');
+          expect(call.response.executionStatus).toBe('not_started');
+          expect(call.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
+          expect(call.response.error?.message).toContain(
+            `in non-interactive mode, so it was not run. Mod guard: ${reason}`,
+          );
+          expect(call.response.approvalRequired).toBeUndefined();
+        }
+        expect(harness.execute).not.toHaveBeenCalled();
+        expect(harness.config.getWorkflowMode().effective).toBe(enabled);
+      },
+    );
+
+    it.each(approvalModes)(
+      'keeps the unchanged native ask executable under %s',
+      async (approvalMode) => {
+        const check = vi.fn<ModToolCheck>(async (_input, verdict) => verdict);
+        const harness = await setupWithMode(check, 'ask', approvalMode);
+        expect((await harness.run()).status).toBe('success');
+        expect(check.mock.calls[0][1]).toEqual({ decision: 'ask' });
+        expect(harness.waiting()).toBeUndefined();
+        expect(harness.execute).toHaveBeenCalledOnce();
+      },
+    );
   });
 });

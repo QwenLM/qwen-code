@@ -219,6 +219,7 @@ import {
   registerWorkspaceSettingsRoutes,
   withSessionWorkflowWriteLock,
 } from './routes/workspace-settings.js';
+import { registerWorkspaceDirectoriesRoutes } from './routes/workspace-directories.js';
 import { registerUserLanguageRoutes } from './routes/user-language.js';
 import {
   getActiveSseCount,
@@ -338,6 +339,10 @@ import {
 } from './routes/workspace-git-branches.js';
 import { registerWorkspaceQualifiedGitRemotesRoutes } from './routes/workspace-git-remotes.js';
 import { registerWorkspaceQualifiedGitHubPrsRoutes } from './routes/workspace-github-prs.js';
+import {
+  registerAutofixPrWatchesRoutes,
+  registerWorkspaceQualifiedAutofixPrWatchesRoutes,
+} from './routes/autofix-pr-watches.js';
 import { registerWorkspaceQualifiedGitWorktreeRoutes } from './routes/workspace-git-worktrees.js';
 import { registerWorkspaceLocalOpenRoutes } from './routes/workspace-local-open.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
@@ -1179,6 +1184,15 @@ export function createServeApp(
           )
         );
       },
+      sessionBtwStreamAvailable: () => {
+        const runtimes = workspaceRegistry.listAll();
+        return (
+          runtimes.length > 0 &&
+          runtimes.every(
+            (runtime) => runtime.bridge.generateSessionBtwStream !== undefined,
+          )
+        );
+      },
       currentSessionSchedulingAvailable:
         deps.manageScheduledTaskSessions === true &&
         deps.currentSessionSchedulingAvailable === true,
@@ -1254,6 +1268,9 @@ export function createServeApp(
       acpHttpEnabled: acpHttpEnabledAtBoot,
       workspaceRuntimeRemovalAvailable:
         deps.workspaceRuntimeRemoval !== undefined,
+      workspaceDirectoriesAvailable:
+        deps.persistSetting !== undefined &&
+        opts.experimentalPairedEngines !== true,
       nativeDirectoryPickerAvailable:
         deps.nativeDirectoryPickerAvailable ??
         isNativeDirectoryPickerAvailable(),
@@ -1352,6 +1369,20 @@ export function createServeApp(
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
     createAcpSessionBridge({
+      isWorkflowModeWriteAllowed: (sessionId): boolean => {
+        const registry = primaryTrustRegistry;
+        if (!registry) return false;
+        const owner = registry.resolveLiveSessionOwner(sessionId);
+        const entry = registry.primaryEntry;
+        return (
+          owner.kind === 'found' &&
+          owner.runtime.trusted &&
+          owner.runtime.bridge === defaultBridgeForAdmission &&
+          entry.state === 'active' &&
+          entry.current?.runtime === owner.runtime &&
+          !entry.current.guard.closed
+        );
+      },
       artifactSnapshotRuntimeBaseDir: Storage.getRuntimeBaseDir(),
       sessionAttachmentsRoot: attachmentsRoots.root,
       sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
@@ -3010,6 +3041,9 @@ export function createServeApp(
     sendBridgeError,
     mutate,
   });
+  // The /autofix-pr watches of a registered workspace's clone (the Web
+  // Shell's "PR watches" page and scheduled-task cards). Read-only.
+  registerWorkspaceQualifiedAutofixPrWatchesRoutes(app, { workspaceRegistry });
   registerWorkspaceQualifiedGitWorktreeRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
@@ -3381,6 +3415,16 @@ export function createServeApp(
       },
       invalidateServeFeaturesCache,
     });
+    // Experimental paired engines put managed sessions on a second ACP child
+    // this workspace-scoped mutation cannot reach; omit the route (and the
+    // capability below) rather than apply it to one engine only.
+    if (!opts.experimentalPairedEngines) {
+      registerWorkspaceDirectoriesRoutes(app, {
+        workspaceRegistry,
+        mutate,
+        sendBridgeError,
+      });
+    }
     // Process-global user-level language sync (issue #10234). Registered
     // under the same `persistSetting` availability gate as the workspace
     // settings routes and advertised as the conditional
@@ -3753,6 +3797,14 @@ export function createServeApp(
   registerGoalsRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+  });
+
+  // The primary workspace's /autofix-pr watches, read from the clone's files
+  // (as `qwen autofix-pr status` lists them). Read-only.
+  registerAutofixPrWatchesRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
     isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });

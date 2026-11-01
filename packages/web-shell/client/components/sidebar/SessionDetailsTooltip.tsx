@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type ReactElement,
+  type ReactNode,
 } from 'react';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import {
@@ -41,6 +42,7 @@ interface SessionDetailsTooltipProps {
   completedUnread: boolean;
   statusLabel?: string;
   workspaceLabel?: string;
+  details?: ReactNode;
   openOnClick?: boolean;
   ownerToken?: string;
   open?: boolean;
@@ -56,6 +58,7 @@ export function SessionDetailsTooltip({
   completedUnread,
   statusLabel,
   workspaceLabel,
+  details,
   openOnClick = false,
   ownerToken,
   open: controlledOpen,
@@ -347,6 +350,7 @@ export function SessionDetailsTooltip({
             <RadioTowerIcon aria-hidden="true" />
             <span>{statusLabel ?? status}</span>
           </div>
+          {details}
           <div className={styles.sessionDetailsIdRow}>
             <span
               className="!whitespace-normal break-all"

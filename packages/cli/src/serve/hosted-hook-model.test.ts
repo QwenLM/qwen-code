@@ -124,6 +124,11 @@ describe('Hosted Hook model boundary', () => {
       (runner) => runner(hook, HookEventName.SessionEnd, input, signal),
     );
     expect(result).toMatchObject({ success: true, outcome: 'success' });
+    expect(vi.mocked(loadCliConfig).mock.calls[0]?.[1]).toMatchObject({
+      sessionId: 'session-1',
+      sessionIdGenerated: true,
+      chatRecording: false,
+    });
     expect(config.initialize).toHaveBeenCalledWith(
       expect.objectContaining({
         skipHooks: true,

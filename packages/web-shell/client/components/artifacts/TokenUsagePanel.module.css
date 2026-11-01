@@ -194,14 +194,6 @@ details[open] > summary > .collapseIcon {
   --model-color: #9468ed;
 }
 
-.modelInfo {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 1;
-  min-width: 0;
-}
-
 .modelHeader {
   display: flex;
   gap: 10px;
@@ -344,30 +336,33 @@ details[open] > summary > .collapseIcon {
   font-variant-numeric: tabular-nums;
 }
 
-.modelInfoButton {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  border: none;
-  border-radius: 3px;
-  background: transparent;
-  color: var(--foreground);
-  cursor: default;
-}
-.modelInfoButton:focus-visible {
-  outline: 2px solid var(--foreground);
-  outline-offset: 3px;
-}
-.modelApiMeta {
+.modelStats {
   display: grid;
-  gap: 4px;
-  font-size: 12px;
-  line-height: 1.6;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px 8px;
+  margin: 10px 0 0;
   font-variant-numeric: tabular-nums;
+}
+.modelStats > div {
+  min-width: 0;
+}
+.modelStats dt {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--foreground) 70%, var(--card));
+  font-size: 11px;
+  line-height: 1.4;
+}
+.modelStats dd {
+  margin: 2px 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
 }
 
 .shareRow {

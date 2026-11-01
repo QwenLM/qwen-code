@@ -14,8 +14,13 @@ import {
 } from '../../../core/permission-helpers.js';
 import { PermissionManager } from '../../../permissions/permission-manager.js';
 import { applySkillAllowedTools } from '../../../tools/skill-utils.js';
+import {
+  autofixPrWatchMatch,
+  type AutofixPrParams,
+} from '../../../tools/autofix-pr.js';
 import { parseSkillContent } from '../../skill-load.js';
 import { BuiltinAgentRegistry } from '../../../subagents/builtin-agents.js';
+import { BackgroundFix } from '../../../tools/autofix-pr-grants.js';
 
 const PROJECT = '/work/repo';
 
@@ -74,6 +79,50 @@ describe('bundled autofix-pr skill', () => {
       'gh run rerun 50 --failed',
     ]) {
       await expect(shell(command)).resolves.toBe('ask');
+    }
+  });
+
+  it("lets a round's helpers run through autofix_pr, and keeps a start, a take-over and unattended asking", async () => {
+    const pm = grantedManager();
+    // As the tool presents a call: `confirmed` when this session prepared
+    // the PR's watch through it and status still lists it so.
+    const helper = (params: AutofixPrParams, confirmed = true) =>
+      decide(pm, 'autofix_pr', {
+        ...params,
+        watch: autofixPrWatchMatch(params, confirmed),
+      });
+    for (const command of [
+      'snapshot',
+      'ci-log',
+      'sync',
+      'push',
+      'reply',
+      'rerun',
+      'fix-end',
+      'status',
+      'cleanup',
+    ] as const) {
+      await expect(helper({ command, pr: 7 })).resolves.toBe('allow');
+    }
+    // A watch this session did not start or resume asks, as the start, a
+    // re-schedule, a take-over and unattended do.
+    for (const command of [
+      'push',
+      'reply',
+      'sync',
+      'fix-end',
+      'cleanup',
+    ] as const) {
+      await expect(helper({ command, pr: 7 }, false)).resolves.toBe('ask');
+    }
+    for (const params of [
+      { command: 'prepare', pr: 7, repo: 'o/r' },
+      { command: 'schedule', pr: 7, again: true },
+      { command: 'prepare', pr: 7, repo: 'o/r', take_over: true },
+      { command: 'cleanup', pr: 7, take_over: true },
+      { command: 'unattended', pr: 7 },
+    ] as AutofixPrParams[]) {
+      await expect(helper(params)).resolves.toBe('ask');
     }
   });
 
@@ -144,7 +193,39 @@ describe('bundled autofix-pr skill', () => {
       '**Only a start or a resume asks the user anything.**',
     );
     expect(body).toContain('merge, never rebase');
+    // A failed check on a branch behind its base: the round snapshot says
+    // so, and the brief merges the base before fixing anything else.
+    expect(body).toContain(
+      '`baseBehind: true` means a check fails while the branch is behind its base',
+    );
+    expect(body).toContain('When the snapshot says `baseBehind: true`');
+    expect(body).toContain('already fixed needs no code change');
+    // A failure that survives the merge is not presumed the PR's defect:
+    // it goes through the same classification as any failed check.
+    expect(body).toContain('handle the rest as failed checks');
+    expect(body).toContain(
+      'the base merged when the snapshot said `baseBehind: true`',
+    );
     expect(body).toContain('Never list an `untrusted_comment` id');
+    // A bot's PR conversation comment is dropped, not listed as untrusted.
+    expect(body).toContain(
+      "a bot's `issue_comment` (a report, not a request) is dropped",
+    );
+    // A round of a watch whose fix is still running says so and ends.
+    expect(body).toContain(
+      "a fix agent is working in the PR's worktree → nothing was read or written",
+    );
+    // Work in the user's own copy of the head branch keeps a start from
+    // racing the user's push to that branch.
+    expect(body).toContain(
+      "the user's own copy of the head branch could not be squared with the PR",
+    );
+    expect(body).toContain('do not start, `--once` included');
+    expect(body).toContain('`localWorkUnknown` is true');
+    expect(body).toContain('have them fetch the branch or fix the checkout');
+    // A --once round of a watch this session already runs spends its budget.
+    expect(body).toContain("its push counts against that watch's budget");
+    expect(body).toContain('`--no-work` skips its git scan');
     // One task drives a watch: each schedule mints its id, every other task
     // of the PR — from before a take-over, a /clear or a later start — is
     // deleted before the new one is made, and a round woken by one deletes it.
@@ -173,6 +254,37 @@ describe('bundled autofix-pr skill', () => {
     // A start that cannot record the user's instructions does not run on.
     expect(body).toContain(
       'if that write is refused or fails, the watch cannot carry them',
+    );
+    // Fixes run unattended only on the user's own answer, confirmed by the
+    // tool's dialog; --yes never makes that choice.
+    expect(body).toContain('"Start, fixes run without asking"');
+    expect(body).toContain('"Resume, fixes run without asking"');
+    expect(body).toContain(
+      'call `autofix_pr` with `command: "unattended"` and `pr`: its dialog confirms the answer',
+    );
+    expect(body).toContain(
+      'and with `--yes` when it skipped the question (so no choice was made), call `autofix_pr` with `command: "attended"` and `pr` instead',
+    );
+    expect(body).toContain(
+      'On plain "Resume": `autofix_pr` with `command: "attended"` and `pr`.',
+    );
+    // A durable task a daemon restart brought back is resumed, not skipped.
+    expect(body).toContain(
+      'unless `status` came through the `autofix_pr` tool with `preparedHere` false',
+    );
+    // A round of a watch no longer this session's (a task left after
+    // /clear) ends at the status that never asks, not at a helper that
+    // would; one this process has not confirmed (a daemon restart) goes on
+    // under the approval mode.
+    expect(body).toContain(
+      'Unless it lists the watch with `thisSession` true and `ended` null, delete (`cron_delete`) this task and end',
+    );
+    expect(body).toContain(
+      'go on with the round, whose helpers and fix follow the approval mode',
+    );
+    // A round's push goes through the tool, never the shell, when it can.
+    expect(body).toContain(
+      'when it has to run through the shell, with no `autofix_pr` tool, set the shell tool',
     );
     // The start reports a watch only when its task exists.
     expect(body).toContain('When step 8 created the task, tell the user');
@@ -220,9 +332,131 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain('whose `## Never` it is told to follow too');
   });
 
+  it('draws the line at ready to merge: no approval, no review state, no merge, no auto-merge', () => {
+    const { body } = loadSkill();
+    expect(body).toContain(
+      'The watch gets the PR ready to merge and keeps it there',
+    );
+    expect(body).toContain(
+      'It never approves a PR, changes its review state, merges or closes it, or turns on auto-merge',
+    );
+    expect(body).toContain(
+      "It combines with the repository's auto-merge, which merges once those requirements are met.",
+    );
+    // The start confirmation says it too, not the opening paragraph alone.
+    const confirm =
+      /\n5\. \*\*Confirm\*\*([\s\S]*?)\n6\. /.exec(body)?.[1] ?? '';
+    expect(confirm).toContain('it gets the PR ready to merge, and no further');
+    expect(confirm).toContain("merging stays the user's");
+  });
+
+  it('reports a round that pushed nothing but left something for a person', () => {
+    const { body } = loadSkill();
+    expect(body).toContain(
+      'With nothing pushed, post one anyway when `needsHuman` is not empty',
+    );
+    // What keeps the report from repeating is the helper's, not the round's.
+    expect(body).toContain(
+      'a summary that answers no comments goes out once per head, and a later round posts one again only when it leaves something new for a person',
+    );
+    // A report that never reached the PR is not spent: the round runs again.
+    expect(body).toContain(
+      'One that never reached the PR is still owed, so a failed `reply` is run again with the same plan.',
+    );
+    expect(body).toContain(
+      'Omit it (`null`) only when nothing was pushed, no review or issue comment was answered, and `needsHuman` is empty.',
+    );
+    expect(body).toContain('and the summary reports them on the PR');
+  });
+
+  it("lists every item step 3 sets aside under the brief's own items, which the after-fix turn answers from", () => {
+    const { body } = loadSkill();
+    const ciLogs = /3\. \*\*CI logs\.\*\*([^\n]*)/.exec(body)?.[1] ?? '';
+    // A workflow that could not start, a run with no log, a log unavailable.
+    expect(
+      ciLogs.match(
+        /out of the brief's events, list (?:it|them) under `## The round's own items`/g,
+      ),
+    ).toHaveLength(2);
+    // A workflow that could not start, and a check its fix pushes left red.
+    expect(
+      ciLogs.match(
+        /never goes into the brief's events — only under `## The round's own items`/g,
+      ),
+    ).toHaveLength(2);
+    // A spent check gets no log and no fix: a person's, recorded as handled.
+    expect(ciLogs).toContain('with a `runId` and no `exhausted`, run');
+    expect(ciLogs).toMatch(
+      /`exhausted: true`[^]*?it is not fixed again\. It is `needs_human`[^]*?its `key` goes into `handledChecks`/,
+    );
+    expect(ciLogs).not.toMatch(/out of the brief[ ,.]|into the brief[;.]/);
+    expect(body).toContain(
+      "and `## The round's own items`, when there, the ones step 3",
+    );
+  });
+
+  it('runs a fix in the background only as step 5 says, and goes on from the follow-up Qwen Code writes', () => {
+    const { body } = loadSkill();
+    const step5 = /\n5\. \*\*Fix\*\*([\s\S]*?)\n6\. /.exec(body)?.[1] ?? '';
+    for (const condition of [
+      'not a `--once` one',
+      'its `status` said `unattended: true`',
+      'step 1 reported no `abandonedFix`',
+      'did not restart in this turn',
+      'add `run_in_background: true`',
+    ]) {
+      expect(step5).toContain(condition);
+    }
+    expect(body).toContain(
+      '- `after-fix <owner>/<repo>#<n> --task <id> --attempt <id>` followed by optional `--no-reply` and `-- <instructions>`',
+    );
+    const after =
+      /\n## After a background fix\n([\s\S]*?)(?:\n## |$)/.exec(body)?.[1] ??
+      '';
+    expect(after).toContain(
+      'autofix-pr fix-end <n> --task <task> --attempt <attempt>',
+    );
+    // What the session writes into the notification has that shape.
+    const fix = new BackgroundFix(
+      'session-a',
+      12,
+      'o/r',
+      '/work/repo/.qwen/tmp/autofix-pr-12',
+      { task: 'feedc0ffee12', reply: false, instructions: 'keep the API' },
+      {
+        pr: 12,
+        worktree: '/work/repo/.qwen/tmp/autofix-pr-12',
+        check: async () => true,
+        open: async () => ({ task: 'feedc0ffee12' }),
+        close: async () => {},
+      },
+    );
+    expect(fix.followUp()!.split('\n').at(-1)).toMatch(
+      /^after-fix o\/r#12 --task feedc0ffee12 --attempt [0-9a-f]{12} --no-reply -- keep the API$/,
+    );
+  });
+
   it('names a built-in subagent type for the fix agent, as working_dir requires', () => {
     const { body } = loadSkill();
     expect(body).toContain('`subagent_type` = `general-purpose`');
     expect(BuiltinAgentRegistry.isBuiltinAgent('general-purpose')).toBe(true);
+  });
+
+  it("keeps the brief's Events scoping consistent with the fields its instructions name", () => {
+    const { body } = loadSkill();
+    // The brief is the skill's only ```markdown block.
+    const template = body.split('```markdown')[1]?.split('```')[0] ?? '';
+    const named = [
+      ...template.matchAll(/the snapshot says `(\w+): true`/g),
+    ].map((match) => match[1]);
+    // The stale-base hint is a top-level snapshot field, not an event: the
+    // scoping sentence must exempt the fields the instructions name, or the
+    // brief forbids the very merge it commands.
+    expect(named).toContain('baseBehind');
+    const scoping = /Nothing else in that file is yours to act on([^\n]*)/.exec(
+      template,
+    );
+    expect(scoping).not.toBeNull();
+    expect(scoping![1]).toContain('beyond the fields these instructions name');
   });
 });

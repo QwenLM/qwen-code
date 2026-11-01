@@ -31,12 +31,13 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  realpathSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { isEntryPoint } from './lib/entry-point.js';
+
+export { isEntryPoint } from './lib/entry-point.js';
 
 /** The probe's action values that justify a model turn. */
 export const PASSING_ACTIONS = new Set(['resync', 'stop']);
@@ -161,25 +162,6 @@ export function mainWorktree(cwd = process.cwd()) {
     .split('\n')
     .find((line) => line.startsWith('worktree '));
   return first ? first.slice('worktree '.length).trim() : cwd;
-}
-
-/**
- * Whether this module is the executed entry point. `import.meta.url` is a
- * percent-encoded file URL, so comparing it to a plain `file://` + path breaks
- * on spaces or non-ASCII characters — and a wrapper that silently does nothing
- * looks exactly like a quiet tick to the scheduler. Both sides are resolved
- * through `realpath`, because Node resolves the entry module's symlinks while
- * `argv[1]` keeps the path the shell was given.
- */
-export function isEntryPoint(metaUrl, argv1) {
-  if (!argv1) return false;
-  try {
-    return (
-      realpathSync(resolve(argv1)) === realpathSync(fileURLToPath(metaUrl))
-    );
-  } catch {
-    return false;
-  }
 }
 
 function parseArgs(argv) {

@@ -27,6 +27,7 @@ on:
       - 'SDK Python'
       - 'Qwen Code CI'
       - 'Desktop Checks'
+      - 'tui-parity'
     types: ['completed']
     # PR approval runs can finish after merge and still need a failure report.
 
@@ -47,7 +48,7 @@ jobs:
       ((github.event.workflow_run.head_branch == 'main' &&
       (github.event.workflow_run.event == 'push' ||
       (github.event.workflow_run.event == 'schedule' &&
-      contains(fromJSON('["Qwen Code CI","SDK Java","Desktop Checks"]'), github.event.workflow.name)))) ||
+      contains(fromJSON('["Qwen Code CI","SDK Java","Desktop Checks","tui-parity"]'), github.event.workflow.name)))) ||
       (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') ||
       (github.event.workflow.name == 'Managed Agent gate' &&
       contains(fromJSON('["pull_request","pull_request_review"]'), github.event.workflow_run.event))) }}
@@ -297,7 +298,10 @@ jobs:
           # Both bodies read this list; the flag lets them say when it is short.
           echo "jobs_complete=${jobs_complete}" >> "${GITHUB_OUTPUT}"
 
-          mapfile -t job_ids < <(
+          job_ids=()
+          while IFS= read -r job_id; do
+            job_ids+=("${job_id}")
+          done < <(
             jq -r '.jobs[] | select(.conclusion == "failure") | .id' \
               "${jobs_json}" 2>/dev/null
           )
@@ -315,7 +319,7 @@ jobs:
           # every download fails. Logs feed analyze, whose tests populate the
           # comment renderer's Failing tests section; without them the summary
           # degrades to job/step names. The analyzer strips ANSI before matching.
-          for job_id in "${job_ids[@]}"; do
+          for job_id in ${job_ids[@]+"${job_ids[@]}"}; do
             if ! gh api "repos/${REPO}/actions/jobs/${job_id}/logs" \
               --allow-escape-sequences > "${log_dir}/${job_id}.log"; then
               # A missing log costs test details, not the job/step summary.
@@ -368,14 +372,14 @@ jobs:
                 echo "Failed job ${job_id} carries no infrastructure annotation; the run gets an issue."
               fi
             done < <(
-              # The gate workflow's reporter job is always() and fails with
-              # only the tier-result error, which carries no infrastructure
-              # signature; excluding it by its failing step keeps a lane's
+              # The gate reporter and macOS aggregate mirror lane failures
+              # without an infrastructure signature of their own; excluding
+              # them by their failing step keeps a lane's
               # infra death classifiable. Filtering the step rather than the
               # job keeps the legitimate rerun: when the reporter's own
               # runner dies no step has failed, so the job still counts and
               # its GitHub-generated annotation still matches.
-              jq -r '.jobs[] | select(.conclusion == "failure") | select(([(.steps // [])[] | select(.conclusion == "failure") | .name] | index("Report the tier result")) | not) | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv' \
+              jq -r '.jobs[] | select(.conclusion == "failure") | select(([(.steps // [])[] | select(.conclusion == "failure") | .name] | map(select(. == "Report the tier result" or . == "Require every macOS test group to pass")) | length) == 0) | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv' \
                 "${jobs_json}" 2>/dev/null
             )
             if [[ "${total}" -gt 0 && "${infra}" -eq "${total}" ]]; then
@@ -590,7 +594,7 @@ jobs:
             existing_issue=''
             matched_body=''
             signature_unresolved=false
-            for family_line in "${family[@]}"; do
+            for family_line in ${family[@]+"${family[@]}"}; do
               candidate="${family_line%%$'\t'*}"
               candidate_body="${RUNNER_TEMP}/candidate-${candidate}.md"
               if ! gh issue view "${candidate}" --repo "${REPO}" \
@@ -718,7 +722,7 @@ jobs:
                   siblings_ok=true
                   siblings_corpus="${RUNNER_TEMP}/sibling-bodies.md"
                   : > "${siblings_corpus}"
-                  for family_line in "${family[@]}"; do
+                  for family_line in ${family[@]+"${family[@]}"}; do
                     sibling="${family_line%%$'\t'*}"
                     [[ "${sibling}" == "${existing_issue}" ]] && continue
                     sibling_body="${RUNNER_TEMP}/candidate-${sibling}.md"
@@ -827,13 +831,13 @@ jobs:
           # enough: a human can retitle a per-signature issue to the exact
           # shape, so every candidate passes the same body screen in order.
           family_ordered=()
-          for family_line in "${family[@]}"; do
+          for family_line in ${family[@]+"${family[@]}"}; do
             [[ "${family_line#*$'\t'}" == exact ]] && family_ordered+=("${family_line}")
           done
-          for family_line in "${family[@]}"; do
+          for family_line in ${family[@]+"${family[@]}"}; do
             [[ "${family_line#*$'\t'}" == exact ]] || family_ordered+=("${family_line}")
           done
-          for family_line in "${family_ordered[@]}"; do
+          for family_line in ${family_ordered[@]+"${family_ordered[@]}"}; do
             candidate="${family_line%%$'\t'*}"
             candidate_body="${RUNNER_TEMP}/family-${candidate}.md"
             if ! gh issue view "${candidate}" --repo "${REPO}" \

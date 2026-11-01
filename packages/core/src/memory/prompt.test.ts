@@ -275,7 +275,8 @@ describe('managed auto-memory prompt helpers', () => {
       for (const entry of entries) {
         expect(result).toContain(entry);
       }
-      expect(result).toContain('Only part of it was loaded.');
+      expect(result).toContain('only part of it was written.');
+      expect(result).not.toContain('Only part of it was loaded.');
     },
   );
 
@@ -290,7 +291,8 @@ describe('managed auto-memory prompt helpers', () => {
     for (const entry of entries) {
       expect(result).toContain(entry);
     }
-    expect(result).toContain('202 lines (limit: 200)');
+    expect(result).toContain(INDEX_TRUNCATION_WARNING);
+    expect(result).not.toContain('Only part of it was loaded.');
   });
 
   it('does not strip handwritten warning-like text from an over-budget index', () => {
@@ -377,7 +379,8 @@ describe('managed auto-memory prompt helpers', () => {
       );
       expect(result).toContain(first);
       expect(result).toContain(ordinary);
-      expect(result).not.toContain(INDEX_TRUNCATION_WARNING);
+      expect(result).toContain(INDEX_TRUNCATION_WARNING);
+      expect(result).not.toContain('Only part of it was loaded.');
     },
   );
 

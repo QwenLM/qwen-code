@@ -1,3 +1,23 @@
+# 0.27.0 (2026-10-26)
+
+- Enable the native agent cursor for same-process Node SDK and main-thread MCP hosts by default.
+- Add local macOS live previews for recently authorized windows, with session cursor mapping and nonactivating controls.
+- Keep preview sampling and native UI cleanup scoped to the owning runtime and session.
+- Present previews as draggable, borderless card stacks with hover controls and animated card switching.
+
+- Windows UIA click and secondary actions return an unconfirmed receipt when the target popup closes or an ownerless modal appears. The original native operation retains its window, session and runtime cleanup guards until it ends; ambiguous results are not replayed through another actuator.
+- Bound SDK sessions wait through intermediate `session_cleanup_pending` results and preserve final cleanup failures.
+- macOS discovers live menu-bar Accessory apps outside standard installation directories without including uninstalled Prohibited-policy background helpers.
+- macOS process identity checks can read the same PID/birth identity through `KERN_PROC_PID` when `PROC_PIDTBSDINFO` is unavailable. Synthetic events use the combined-session source, and failed focus-guard setup rolls back without running post-action restoration.
+- Clipboard transactions refuse an unserviced main-thread start after three seconds without a late clipboard write. Already-started transactions retain their completion and restoration semantics.
+- macOS accepts the case-preserved advertised secondary-action aliases. Windows recognizes writable Edit children inside ComboBoxEx controls and honors TokenUIAccess only for the foreground SendInput preflight.
+- Windows app observations prefer a visible owner over an idle owned helper, retaining active-popup selection. Unbound PostMessage input avoids system-focused UIA value probes and keeps delivery unverified.
+- macOS literal app text uses verified AX insertion when supported. Editing keys resolve an exact focused AX auxiliary recipient while Command shortcuts keep the logical app PID; Objective-C class factories are checked on the class.
+- Public keyboard refusals recommend supported recovery actions and default explicit refused effects to `sent: false` without overriding explicit dispatch evidence.
+- Clarify the Node REPL's initial API documentation and app-option examples. Native driver, CUA SDK, Browser SDK and Node REPL remain version-aligned.
+
+Scoped Windows direct/embedded modal, cleanup and real Medium Node REPL window-capture checks passed. Six earlier macOS TextEdit editing checks passed on their test host; review of the previous PR head on macOS 26.6.2 found Save-sheet keyboard recipient routing unreachable. Main changes window-identity ancestry resolution, but the combined Save-sheet path has not been retested. That case, original FX/JSONExport case acceptance, optional UIAccess-worker coverage, Linux GUI parity and public signed 0.27.0 installation remain unaccepted. Windows paste and derived-Medium-host app-launch compatibility are known limits; this release does not claim complete benchmark quality or input parity.
+
 # 0.26.0 (2026-10-16)
 
 Qwen Computer Use release; no longer follows the upstream version number. The SDK, native payload, browser SDK and Node REPL use this same version.

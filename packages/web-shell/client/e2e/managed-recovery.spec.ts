@@ -94,6 +94,9 @@ async function installRecovery(page: Page, running = false) {
     sessionId: 'source',
     eventId: `event-${event.sequence}`,
     createdAt: event.sequence,
+    terminal: ['turn.completed', 'turn.failed', 'turn.cancelled'].includes(
+      event.type,
+    ),
   }));
   page.on('pageerror', (error) => errors.push(error.message));
   await page.route('**/api/agent/web-shell/v1/**', async (route) => {
@@ -101,6 +104,12 @@ async function installRecovery(page: Page, running = false) {
     const body = route.request().postDataJSON();
     if (path.endsWith('/user-messages/query'))
       return route.fulfill({ json: { paused: false, messages: [] } });
+    if (path.endsWith('/workspace-extensions/query'))
+      return route.fulfill({ json: { supported: false, extensions: [] } });
+    if (path.endsWith('/workspaces/worktrees/options'))
+      return route.fulfill({
+        json: { supported: true, currentBranch: 'main', branches: ['main'] },
+      });
     if (path.endsWith('/runtime-nodes/query'))
       return route.fulfill({ json: { supported: false, data: [] } });
     if (path.endsWith('/sessions/query'))
@@ -139,7 +148,13 @@ async function installRecovery(page: Page, running = false) {
       });
     if (path.endsWith('/transcript/query'))
       return route.fulfill({
-        json: { items: [], events, lastSequence: 6, hasMore: false },
+        json: {
+          items: [],
+          events,
+          coveredSequence: 6,
+          lastSequence: 6,
+          hasMore: false,
+        },
       });
     if (path.endsWith('/events/stream'))
       return route.fulfill({ contentType: 'text/event-stream', body: '' });
@@ -287,6 +302,9 @@ test('new Session handoff is editable, preselected and never automatically sent 
   page,
 }) => {
   const scenario = await installRecovery(page);
+  await expect(
+    page.getByText('Confirmed inspection complete', { exact: true }),
+  ).toBeVisible();
   await page
     .getByRole('button', { name: 'Continue in a new Session', exact: true })
     .click();

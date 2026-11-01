@@ -56,6 +56,13 @@ export interface ManagedSessionActivationState {
   readonly installRef: ManagedSessionDurableRef | null;
 }
 
+export interface ManagedSessionActivationLease {
+  readonly activationId: string;
+  readonly epoch: number;
+  readonly renewalSeq: number;
+  readonly expiresAt: number;
+}
+
 export interface ManagedSessionCommittedTransaction {
   readonly receipt: ManagedSessionCommitReceipt;
   readonly contentDigest: string;
@@ -108,6 +115,13 @@ export interface ManagedSessionCommitProof {
 export interface ManagedSessionJournalHandle
   extends ManagedSessionJournalReader {
   appendTransaction(records: readonly unknown[]): Promise<void>;
+  /** Undefined means the store requires event-based activation renewal. */
+  renewActivation?(request: {
+    readonly activationId: string;
+    readonly epoch: number;
+    readonly renewalSeq: number;
+    readonly leaseDurationMs: number;
+  }): Promise<ManagedSessionActivationLease | undefined>;
   /**
    * Settles the append that last failed with an unknown outcome, by comparing
    * the durable head against the attempt it kept. `landed` means those exact

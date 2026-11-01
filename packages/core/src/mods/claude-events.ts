@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export const CLAUDE_CODE_EVENTS_VERSION = '2.1.308';
+export const CLAUDE_CODE_EVENTS_VERSION = '2.1.310';
 
 // Claude Code's engine events, `$` API events and `classic.*` settings hook
 // events, so registrations for events Qwen does not run yet can be skipped

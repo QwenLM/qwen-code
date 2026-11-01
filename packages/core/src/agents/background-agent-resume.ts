@@ -577,6 +577,8 @@ export class BackgroundAgentResumeService {
           )
         ) {
           retainedStateBlockedReason = TRANSCRIPT_IDENTITY_BLOCKED_REASON;
+        } else if (meta.resumeBlockedReason) {
+          retainedStateBlockedReason = meta.resumeBlockedReason;
         } else if (
           meta.isolation === 'container' ||
           meta.executionBackend !== undefined
@@ -754,6 +756,10 @@ export class BackgroundAgentResumeService {
       debugLogger.warn(
         `[BackgroundAgentResume] Cannot revive "${agentId}": metadata could not be read.`,
       );
+      return undefined;
+    }
+    if (meta.resumeBlockedReason) {
+      entry.resumeBlockedReason = meta.resumeBlockedReason;
       return undefined;
     }
     if (meta.isolation === 'container' || meta.executionBackend !== undefined) {

@@ -270,6 +270,10 @@ export {
   type DaemonBackgroundTurn,
   parseDaemonBackgroundTurn,
   type DaemonWorkspaceSessionLiveState,
+  type DaemonSessionLiveStateBatchRequest,
+  type DaemonSessionLiveStateBatchSnapshot,
+  type DaemonSessionLiveStateBatchError,
+  type DaemonSessionLiveStateBatchResult,
   type DaemonSessionOrganizationResult,
   type DaemonSessionOrganizationUpdate,
   type DaemonSessionSubscribeOptions,
@@ -506,6 +510,7 @@ export type { QueryOptions } from './query/createQuery.js';
 export type {
   EffortOverride,
   EffortStatus,
+  WorkflowModeState,
   EffortTier,
 } from './types/types.js';
 export type { LogLevel, LoggerConfig, ScopedLogger } from './utils/logger.js';
