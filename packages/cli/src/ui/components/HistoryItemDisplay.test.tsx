@@ -206,6 +206,33 @@ describe('<HistoryItemDisplay />', () => {
     expect(overWide).toEqual([]);
   });
 
+  it('keeps markdown blockquote lines inside the right margin', () => {
+    const item = {
+      id: 1,
+      type: 'gemini',
+      text: '> This is a quoted passage about the history of computing from the earliest mechanical counting machines and engines through vacuum tube computers and transistor machines.',
+    } as HistoryItem;
+    const { lastFrame } = renderWithProviders(
+      <Static
+        items={[
+          <HistoryItemDisplay
+            key="row"
+            item={item}
+            terminalWidth={100}
+            isPending={false}
+          />,
+        ]}
+      >
+        {(row) => row}
+      </Static>,
+    );
+
+    const overWide = stripAnsi(lastFrame() ?? '')
+      .split('\n')
+      .filter((line) => stringWidth(line) > 98);
+    expect(overWide).toEqual([]);
+  });
+
   it.each(['gemini', 'gemini_content'] as const)(
     'passes images from a %s history item to the assistant renderer',
     (type) => {
