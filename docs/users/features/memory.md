@@ -291,3 +291,52 @@ Run `/memory` and select **Open auto-memory folder**. All saved memories are rea
 If auto-memory is on but Qwen doesn't seem to remember things across sessions, try running `/dream` to force a cleanup pass. Also check `/memory` to confirm both toggles are enabled.
 
 For things you always want Qwen to remember, add them to QWEN.md instead — auto-memory is best-effort, QWEN.md is guaranteed.
+
+---
+
+## External Memory (`context_search`)
+
+In addition to `QWEN.md` and auto-memory, Qwen Code can query external memory services and local session indexes through the `context_search` MCP tool:
+
+- **Mem0 (built-in adapter):** Configure `memory.mem0` in `~/.qwen/settings.json` to connect to Mem0 Platform V3, PolarDB, or self-hosted Mem0 OSS. See [Mem0](./mem0.md) for setup and optional write confirmation.
+- **External Context MCP Profile v1 servers:** Any stdio or HTTP MCP server implementing the `context_search({ query })` contract can be registered directly with `qwen mcp add`.
+
+### deja-vu
+
+A local, offline CLI and MCP server that indexes the session transcripts coding agents (Qwen Code, Claude Code, Codex, Cursor, and others) already write to disk using local BM25 search, with no model calls or API keys.
+
+- **Repository:** https://github.com/vshulcz/deja-vu
+- **Cost:** Free and open source (MIT, runs locally)
+- **Best for:** Searching past sessions across Qwen Code and other local coding agents without network calls
+
+#### Available Tools
+
+- `context_search` — Search indexed local session transcripts (`deja mcp --context-search`)
+
+#### Setup
+
+After installing the `deja` binary and building the initial index (`deja index`), register the server:
+
+**Method 1: CLI command**
+
+```bash
+qwen mcp add deja-context deja mcp --context-search \
+  --timeout 8000 \
+  --include-tools context_search
+```
+
+**Method 2: `settings.json`**
+
+```json
+{
+  "mcpServers": {
+    "deja-context": {
+      "command": "deja",
+      "args": ["mcp", "--context-search"],
+      "timeout": 8000,
+      "includeTools": ["context_search"]
+    }
+  }
+}
+```
+
