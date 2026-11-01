@@ -208,6 +208,12 @@ afterEach(() => {
 });
 
 describe('EmbeddedApp host wiring', () => {
+  it('allows the shared Workflow mode control in the modern webview', async () => {
+    const props = await renderApp();
+    expect(props.composerToolbarActions).toContain('workflowMode');
+    expect(props.composerToolbarActions).toContain('addMenu');
+  });
+
   it('attributes new sessions to the VS Code channel', async () => {
     const initialSessionId = document.body.dataset.qwenSessionId;
     delete document.body.dataset.qwenSessionId;

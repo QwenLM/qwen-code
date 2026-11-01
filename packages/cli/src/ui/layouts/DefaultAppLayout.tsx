@@ -30,7 +30,10 @@ import { useAgentViewState } from '../contexts/AgentViewContext.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { StreamingState } from '../types.js';
 import { getStickyTodoMaxVisibleItemsForMode } from '../utils/todoSnapshot.js';
-import { getDialogMaxHeight } from '../utils/layoutUtils.js';
+import {
+  getDialogMaxHeight,
+  getBtwAnswerMaxRows,
+} from '../utils/layoutUtils.js';
 
 export const DefaultAppLayout: React.FC = () => {
   const uiState = useUIState();
@@ -59,6 +62,13 @@ export const DefaultAppLayout: React.FC = () => {
     uiState.staticExtraHeight,
   );
   const dialogHeight = uiState.constrainHeight ? dialogMaxHeight : undefined;
+  // The /btw answer viewport only exists in VP mode. Its ScrollableList arms
+  // SGR mouse tracking (bypassVpGate), which must not happen on the non-VP
+  // main screen where the terminal keeps native scrollback — so the row budget
+  // stays undefined there and the panel renders the whole answer.
+  const btwAnswerMaxRows = uiState.useTerminalBuffer
+    ? getBtwAnswerMaxRows(uiState.terminalHeight)
+    : undefined;
   const shouldShowStickyTodos =
     uiState.stickyTodos !== null &&
     !uiState.dialogsVisible &&
@@ -129,6 +139,7 @@ export const DefaultAppLayout: React.FC = () => {
                     <BtwMessage
                       btw={uiState.btwItem.btw}
                       containerWidth={uiState.mainAreaWidth}
+                      maxAnswerRows={btwAnswerMaxRows}
                     />
                   </Box>
                 )}

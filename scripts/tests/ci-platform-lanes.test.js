@@ -98,9 +98,11 @@ describe('complete macOS test groups', () => {
 });
 
 // The extended ceilings below, except the test lane's, are scoped to the
-// self-hosted pool: `runs-on` falls back to ubuntu-latest for fork PRs from
-// untrusted authors and when MAINTAINER_ECS_RUNNER_DISABLED=true, so those
-// hosted paths keep the pre-contention ceiling. The ARM64 fleet renders
+// self-hosted pool: `runs-on` falls back to ubuntu-latest when
+// MAINTAINER_ECS_RUNNER_DISABLED=true (and, for the association-gated lanes,
+// for fork PRs from untrusted authors — lint_and_static reads lint_runner,
+// which routes every PR to the pool), so those hosted paths keep the
+// pre-contention ceiling. The ARM64 fleet renders
 // `["self-hosted", "linux", "arm64"]` — no `ecs-qwen` label — so the scope
 // cannot key on the x64 fleet's name. Evaluate the real timeout expression for
 // each routing instead of pinning a bare number -- the same
@@ -111,15 +113,42 @@ describe('complete macOS test groups', () => {
 const ECS_RUNNER = '["self-hosted", "linux", "x64", "ecs-qwen"]';
 const ARM_RUNNER = '["self-hosted", "linux", "arm64"]';
 const HOSTED_RUNNER = '["ubuntu-latest"]';
-const timeoutMinutesOn = (job, ubuntuRunner) => {
+// The classifier output a job's own `runs-on` reads. Deriving it is what makes
+// a ceiling pointed at the OTHER output red: only this name is substituted, so
+// `lint_runner` left inside a gate that runs on `ubuntu_runner` survives the
+// substitution and trips the unmodelled-term throw below.
+const runnerOutputOf = (job) => {
+  const names = [
+    ...new Set(
+      [
+        ...String(ci.jobs[job]['runs-on']).matchAll(
+          /needs\.classify_pr\.outputs\.(\w+)/g,
+        ),
+      ].map((match) => match[1]),
+    ),
+  ];
+  if (names.length !== 1) {
+    throw new Error(
+      `${job} runs-on names ${names.length} classifier outputs: ${names}`,
+    );
+  }
+  return names[0];
+};
+const timeoutMinutesOn = (job, runner) => {
   // The same `|| '["ubuntu-latest"]'` default the runs-on expression carries:
-  // a missing output (classify_pr skipped) is the hosted routing.
-  const effective = ubuntuRunner || HOSTED_RUNNER;
+  // a missing output (classify_pr skipped) is the hosted routing. The caller
+  // passes the value of the output the job itself reads — ubuntu_runner for
+  // the association-gated lanes, lint_runner for lint_and_static.
+  const effective = runner || HOSTED_RUNNER;
+  const output = runnerOutputOf(job);
   let expr = String(ci.jobs[job]['timeout-minutes'])
     .replace(/^\$\{\{\s*/, '')
     .replace(/\s*\}\}$/, '')
     .replace(
-      /contains\(needs\.classify_pr\.outputs\.ubuntu_runner \|\| '\["ubuntu-latest"\]', 'self-hosted'\)/g,
+      new RegExp(
+        `contains\\(needs\\.classify_pr\\.outputs\\.${output} \\|\\| '\\["ubuntu-latest"\\]', 'self-hosted'\\)`,
+        'g',
+      ),
       String(effective.includes('self-hosted')),
     )
     .replace(/fromJSON\(/g, '(');
@@ -241,7 +270,8 @@ describe('raw JUnit report retention', () => {
 // but picks its own architecture, so its `runs-on` cannot be compared with
 // another lane's. Evaluate the real expression the way
 // `.github/scripts/ci-runner-routing.test.mjs` does.
-const runnerOn = (job, ubuntuRunner) => {
+const runnerOn = (job, runner) => {
+  const output = runnerOutputOf(job);
   const expression = String(ci.jobs[job]['runs-on'])
     .replace(/^\$\{\{\s*/, '')
     .replace(/\s*\}\}$/, '');
@@ -251,7 +281,7 @@ const runnerOn = (job, ubuntuRunner) => {
     'contains',
     `return (${expression});`,
   )(
-    { classify_pr: { outputs: { ubuntu_runner: ubuntuRunner } } },
+    { classify_pr: { outputs: { [output]: runner } } },
     JSON.parse,
     (labels, label) => labels.includes(label),
   );
@@ -558,18 +588,19 @@ describe('post-merge push lane', () => {
     expect(condOf('lint_and_static')).toBe(condOf('test'));
   });
 
-  it('routes lint_and_static through the classify_pr fork-trust output', () => {
+  it('routes lint_and_static through the classify_pr lint output', () => {
     // runs-on is where the contributor code this describe's other pins talk
-    // about actually executes. classify_pr's pick_runner is the fork-trust
-    // boundary — untrusted fork PRs stay on hosted runners — and a literal
-    // pool label array here would bypass that indirection whole (and desync
-    // from timeout-minutes, which reads the same output). Whole-expression
-    // match, as no-ak-integration-ci does for test_windows.
+    // about actually executes. classify_pr's pick_runner publishes TWO
+    // routings: ubuntu_runner keeps the fork-trust boundary for test and the
+    // integration lanes, while lint_runner routes every pull request —
+    // untrusted forks included — to the fleet (maintainer decision
+    // 2026-10-31, shared-pool code-execution risk accepted). A literal pool
+    // label array here would bypass the classifier indirection whole (and
+    // desync from timeout-minutes, which reads the same output), and reading
+    // ubuntu_runner would silently restore the hosted fork lane. Whole-
+    // expression match, as no-ak-integration-ci does for test_windows.
     expect(String(ci.jobs.lint_and_static['runs-on'])).toBe(
-      String(ci.jobs.test['runs-on']),
-    );
-    expect(String(ci.jobs.lint_and_static['runs-on'])).toBe(
-      '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
+      '${{ fromJSON(needs.classify_pr.outputs.lint_runner || \'["ubuntu-latest"]\') }}',
     );
     // The needs edge is what makes every needs.classify_pr.outputs.* this
     // describe relies on non-empty at runtime. Drop it and the lane silently
@@ -581,6 +612,18 @@ describe('post-merge push lane', () => {
       [].concat(ci.jobs.lint_and_static.needs ?? []),
       'lint_and_static must consume the classifier',
     ).toContain('classify_pr');
+  });
+
+  it('keeps test on the association-gated output', () => {
+    // Nothing else reads test's runs-on: switching it to lint_runner would
+    // hand every untrusted fork the pool while the timeout pins above stayed
+    // green — timeoutMinutesOn derives each lane's output from its own
+    // runs-on, so it cannot catch a lane pointed at the wrong output. Pin the
+    // expression, not an equality with lint_and_static — the two are meant
+    // to differ.
+    expect(String(ci.jobs.test['runs-on'])).toBe(
+      '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
+    );
   });
 
   it('lint_and_static keeps the minimal token its required-check role needs', () => {
