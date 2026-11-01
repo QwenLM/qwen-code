@@ -621,10 +621,13 @@ export class QwenAgentManager {
         raw: s,
         mtime: new Date(s.lastUpdated).getTime(),
       }));
-      const filtered =
-        cursor !== undefined
-          ? allWithMtime.filter((x) => x.mtime < cursor)
-          : allWithMtime;
+      // A cursor may arrive in the composite "<mtime>|<name>" form the daemon
+      // emits; only its mtime prefix can filter this file-system listing.
+      const cursorMtime =
+        typeof cursor === 'number' ? cursor : Number(cursor?.split('|')[0]);
+      const filtered = Number.isFinite(cursorMtime)
+        ? allWithMtime.filter((x) => x.mtime < cursorMtime)
+        : allWithMtime;
       const page = filtered.slice(0, size);
       const sessions = page.map((x) => ({
         id: x.raw.sessionId,
