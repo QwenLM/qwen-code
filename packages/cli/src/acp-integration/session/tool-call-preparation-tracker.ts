@@ -5,7 +5,10 @@
  */
 
 import type { FunctionCall, GenerateContentResponse } from '@google/genai';
-import { getToolCallPreparations } from '@qwen-code/qwen-code-core';
+import {
+  getToolCallPreparations,
+  type ToolCallPreparation,
+} from '@qwen-code/qwen-code-core';
 import type { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 
 /**
@@ -40,25 +43,31 @@ export class ToolCallPreparationTracker {
       this.sawToolCall = true;
     }
     for (const preparation of preparations) {
-      if (
-        this.pending.has(preparation.callId) ||
-        this.suppressed.has(preparation.callId)
-      ) {
-        continue;
-      }
+      await this.prepare(preparation);
+    }
+  }
 
-      const emitted = await this.emitter.emitStart({
-        callId: preparation.callId,
-        toolName: preparation.toolName,
-        args: {},
-        status: 'pending',
-        phase: 'preparing',
-      });
-      if (emitted) {
-        this.pending.set(preparation.callId, preparation.toolName);
-      } else {
-        this.suppressed.add(preparation.callId);
-      }
+  /** Emits the preparing frame of one streamed call, at most once per call ID. */
+  async prepare(preparation: ToolCallPreparation): Promise<void> {
+    this.sawToolCall = true;
+    if (
+      this.pending.has(preparation.callId) ||
+      this.suppressed.has(preparation.callId)
+    ) {
+      return;
+    }
+
+    const emitted = await this.emitter.emitStart({
+      callId: preparation.callId,
+      toolName: preparation.toolName,
+      args: {},
+      status: 'pending',
+      phase: 'preparing',
+    });
+    if (emitted) {
+      this.pending.set(preparation.callId, preparation.toolName);
+    } else {
+      this.suppressed.add(preparation.callId);
     }
   }
 
@@ -69,6 +78,17 @@ export class ToolCallPreparationTracker {
         this.resolved.add(functionCall.id);
       }
     }
+  }
+
+  /** Takes every call still shown as preparing, for its owner to settle. */
+  takePending(): Array<{ callId: string; toolName: string }> {
+    const pending = [...this.pending].map(([callId, toolName]) => ({
+      callId,
+      toolName,
+    }));
+    this.pending.clear();
+    this.resolved.clear();
+    return pending;
   }
 
   /**

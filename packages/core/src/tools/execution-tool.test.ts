@@ -437,6 +437,24 @@ describe('execution tool facade', () => {
     },
   );
 
+  it('carries a producer-declared truncation bit through the wrapper', async () => {
+    const file = await writeWorkspaceFile('file.txt', 'content');
+    vi.spyOn(environment, 'execute').mockResolvedValueOnce({
+      llmContent: 'bounded body',
+      returnDisplay: 'bounded body',
+      outputBudgetApplied: true,
+      rawOutputSize: null,
+      truncatedByProducer: true,
+    });
+
+    const result = await run(wrap(), file);
+
+    // The SSH environment bounds its own body; dropping this bit at the facade
+    // is what losing the truncation fact looked like (#14742).
+    expect(result.rawOutputSize).toBeNull();
+    expect(result.truncatedByProducer).toBe(true);
+  });
+
   it.each([false, true])(
     'scopes cloned notebook edits to their call (abandoned=%s)',
     async (abandoned) => {

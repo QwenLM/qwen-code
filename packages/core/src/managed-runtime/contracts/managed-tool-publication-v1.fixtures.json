@@ -1128,7 +1128,7 @@
           "resourceId": "checkpoint-1",
           "kind": "managed-checkpoint",
           "schemaVersion": 1,
-          "byteLength": 65537,
+          "byteLength": 1048577,
           "digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
         }
       },
@@ -1905,6 +1905,33 @@
       "payloadJson": "{\"toolName\":\"monitor\",\"input\":{\"command\":\"while true; do echo tick; sleep 5; done\",\"description\":\"watch ticks\",\"max_events\":100,\"idle_timeout_ms\":300000,\"is_monitor\":true}}",
       "requestDigest": "sha256:06dade6f696f7d0182c24280475d93c19d2efe72bcc8e7580ddf604b9b6bf0d4",
       "argsDigest": "sha256:c126dbf7eb742625012b1feb10f1be9bb504d93a135f6f253d0779d3a1130a8e"
+    }
+  ],
+  "referenceSizeCases": [
+    {
+      "field": "checkpointRef",
+      "byteLength": 65537,
+      "valid": true
+    },
+    {
+      "field": "checkpointRef",
+      "byteLength": 1048576,
+      "valid": true
+    },
+    {
+      "field": "checkpointRef",
+      "byteLength": 1048577,
+      "valid": false
+    },
+    {
+      "field": "argsRef",
+      "byteLength": 65536,
+      "valid": true
+    },
+    {
+      "field": "argsRef",
+      "byteLength": 65537,
+      "valid": false
     }
   ]
 }

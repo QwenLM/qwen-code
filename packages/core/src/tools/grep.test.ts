@@ -383,6 +383,8 @@ describe('GrepTool', () => {
       const bounded = await run({ pattern: 'world', limit: 1 });
       expect(bounded.llmContent).toContain('truncated');
       expect(bounded.rawOutputSize).toBeNull();
+      expect(bounded.truncatedByProducer).toBe(true);
+      expect(whole.truncatedByProducer).toBeUndefined();
     });
 
     it('should find matches in a specific path', async () => {

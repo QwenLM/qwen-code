@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as messageDeletion from '../utils/message-deletion';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, forwardRef, useImperativeHandle } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
@@ -77,6 +78,7 @@ const cancel = vi.fn(async () => {});
 const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
 const setReasoningEffort = vi.fn(async () => {});
+const setWorkflowMode = vi.fn(async (_requested: boolean) => {});
 const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
 const getTasks = vi.fn();
 const getWorkflowTasks = vi.fn();
@@ -94,6 +96,7 @@ const daemonActions = {
   setApprovalMode,
   setModel,
   setReasoningEffort,
+  setWorkflowMode,
   loadArtifacts,
   getTasks,
   getWorkflowTasks,
@@ -491,6 +494,7 @@ beforeEach(() => {
   setApprovalMode.mockClear();
   setModel.mockClear();
   setReasoningEffort.mockClear();
+  setWorkflowMode.mockReset().mockResolvedValue(undefined);
   enqueuePrompt.mockClear();
   enqueuePrompt.mockReturnValue(true);
   removeQueuedPrompt.mockClear();
@@ -1121,6 +1125,8 @@ describe('ChatPane', () => {
     });
     expect(appendLocalUserMessage).toHaveBeenCalledWith(
       '/goal set ship the other thing',
+      undefined,
+      { localCommandId: expect.stringMatching(/^local-command:/) },
     );
   });
 
@@ -1671,6 +1677,18 @@ describe('ChatPane', () => {
     render({ title: 'Side task', embedded: true });
     expect(container!.querySelector('header')).toBeNull();
     expect(testid('pane-messages')).not.toBeNull();
+  });
+
+  it('threads unavailable models onto its composer', () => {
+    const unavailableModels = [
+      { id: 'qwen-max', label: 'Qwen Max', tooltip: 'Need Pro' },
+    ];
+    const mountUnavailableModelTooltip = () => null;
+    render({ unavailableModels, mountUnavailableModelTooltip });
+    expect(latestChatEditorProps.unavailableModels).toEqual(unavailableModels);
+    expect(latestChatEditorProps.mountUnavailableModelTooltip).toBe(
+      mountUnavailableModelTooltip,
+    );
   });
 
   it('shows the Plan entry only when explicitly enabled and hides it on removal', () => {
@@ -2871,6 +2889,41 @@ describe('ChatPane', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('passes this pane owner mode and allows changing it while a turn is active', async () => {
+    connectionState.workflowMode = {
+      requested: true,
+      available: false,
+      effective: false,
+    };
+    connectionState.workflowModeStatus = 'ready';
+    streamingStateValue = 'responding';
+    sessionHasActivePromptValue = true;
+    render();
+    expect(latestChatEditorProps.workflowMode).toBe(
+      connectionState.workflowMode,
+    );
+    expect(latestChatEditorProps.workflowModeStatus).toBe('ready');
+    expect(latestChatEditorProps.visibleToolbarActions).toContain(
+      'workflowMode',
+    );
+    await act(async () => latestChatEditorProps.onWorkflowModeChange(false));
+    expect(setWorkflowMode).toHaveBeenCalledExactlyOnceWith(false);
+    expect(setReasoningEffort).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it('does not publish a failed mode action after the pane owner changes', async () => {
+    const failure = deferred<void>();
+    setWorkflowMode.mockReturnValueOnce(failure.promise);
+    const onError = vi.fn();
+    render({ onError });
+    act(() => latestChatEditorProps.onWorkflowModeChange(true));
+    ownerVersion += 1;
+    await act(async () => failure.reject(new Error('Old owner disconnected')));
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])(
     'keeps reasoning persistence scoped with standalone=%s',
     async (standalone) => {
@@ -3057,6 +3110,7 @@ describe('ChatPane', () => {
       JSON.stringify([
         'addMenu',
         'approvalMode',
+        'workflowMode',
         'contextUsage',
         'model',
         'voice',
@@ -3120,6 +3174,29 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.contextUsageControls).toBeUndefined();
   });
 
+  it('keeps the local context group unavailable for deletion until its result settles', async () => {
+    let resolve!: (value: unknown) => void;
+    getContextUsage.mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
+      }),
+    );
+    const begin = vi.spyOn(messageDeletion, 'beginLocalCommand');
+    render();
+    act(() => latestChatEditorProps.onShowContextUsage());
+    expect(begin).toHaveBeenCalledTimes(1);
+    const [store] = begin.mock.calls[0]!;
+    expect(messageDeletion.hasPendingLocalCommands(store)).toBe(true);
+    transcriptDispatch.mockImplementationOnce(() => {
+      expect(messageDeletion.hasPendingLocalCommands(store)).toBe(false);
+    });
+    await act(async () => {
+      resolve({ usage: {} });
+    });
+    expect(messageDeletion.hasPendingLocalCommands(store)).toBe(false);
+    begin.mockRestore();
+  });
+
   it.each(['idle', 'responding'])(
     'shows context usage for this pane session while %s',
     async (state) => {
@@ -3131,7 +3208,11 @@ describe('ChatPane', () => {
       });
 
       if (state === 'idle')
-        expect(appendLocalUserMessage).toHaveBeenCalledWith('/context');
+        expect(appendLocalUserMessage).toHaveBeenCalledWith(
+          '/context',
+          undefined,
+          { localCommandId: expect.stringMatching(/^local-command:/) },
+        );
       else expect(appendLocalUserMessage).not.toHaveBeenCalled();
       expect(getContextUsage).toHaveBeenCalledWith({ detail: false });
       expect(transcriptDispatch).toHaveBeenCalledWith([

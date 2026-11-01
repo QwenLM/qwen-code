@@ -589,6 +589,12 @@ export interface ToolResult {
   /** Numeric size before a producer reduces its semantic result. */
   rawOutputSize?: ToolOutputSize | null;
   /**
+   * Set when the producer bounded its own render: the returned body is
+   * shortened. `rawOutputSize` may still be `null` (the pre-reduction size is
+   * unrecoverable), but the truncation fact itself is known here.
+   */
+  truncatedByProducer?: boolean;
+  /**
    * Content meant to be included in LLM history.
    * This should represent the factual outcome of the tool execution.
    */
@@ -605,6 +611,9 @@ export interface ToolResult {
    * later.
    */
   persistedOutputFiles?: string[];
+
+  /** Producer-owned reason and recovery handle, preserved as one unit. */
+  recoveryText?: string;
 
   /**
    * Internal runtime marker: the producer already sized `llmContent` against
@@ -842,6 +851,7 @@ export interface McpAppToolResult {
 /** A completed MCP tool call with an interactive MCP Apps resource. */
 export interface McpAppResultDisplay {
   type: 'mcp_app';
+  requiredFeature?: 'generated-ui';
   serverName: string;
   resourceUri: string;
   html: string;

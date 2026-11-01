@@ -72,6 +72,8 @@ import {
   buildWorkspaceArtifactCandidate,
   formatRecordArtifactReminder,
 } from './artifact/workspace-auto-record.js';
+import { backgroundFixHolding } from './autofix-pr-grants.js';
+import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 
 const debugLogger = createDebugLogger('EDIT_PRIOR_READ');
 
@@ -450,6 +452,19 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       encoding: detectedEncoding,
       lineEnding: detectedLineEnding,
     };
+  }
+
+  /**
+   * A write into the worktree of a fix of /autofix-pr running in the
+   * background, by anyone but its own agent, is the user's to approve: that
+   * agent builds and runs what is there without asking.
+   */
+  requiresUserInteraction(): boolean {
+    return (
+      // As written: resolved as the kernel will.
+      backgroundFixHolding(this.params.file_path, getCurrentAgentId()) !==
+      undefined
+    );
   }
 
   /**

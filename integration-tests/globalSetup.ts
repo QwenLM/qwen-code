@@ -93,13 +93,17 @@ let originalMemoryContent: string | null = null;
  * the files without gambling on where CI's auth comes from.
  */
 async function carryOverHostConfig() {
+  // CI supplies auth through the environment. A pool host's live settings can
+  // select an auth type that conflicts with the tests' credentials, failing
+  // every spawned CLI; keep CI runs independent of that state.
+  if (process.env['CI']) return;
   for (const fileName of ['settings.json', 'oauth_creds.json']) {
     await copyFile(
       join(hostQwenDir, fileName),
       join(hermeticQwenHome, fileName),
     ).catch(() => {
-      // Absent on CI and on a machine that has never run the CLI, and absent
-      // for whichever auth type the developer is not using.
+      // Absent on a machine that has never run the CLI, and absent for
+      // whichever auth type the developer is not using.
     });
   }
 }

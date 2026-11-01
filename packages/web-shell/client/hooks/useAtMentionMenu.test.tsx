@@ -1863,11 +1863,12 @@ describe('useAtMentionMenu', () => {
     });
   });
 
-  it('shows an empty MCP resource list when resource loading is unavailable', async () => {
+  it('inserts an MCP server reference when resource loading is unavailable', async () => {
     vi.useFakeTimers();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const view = makeView('@');
     mount({
-      view: makeView('@'),
+      view,
       actions: {
         loadMcpStatus: vi.fn().mockResolvedValue({
           servers: [
@@ -1890,16 +1891,11 @@ describe('useAtMentionMenu', () => {
     });
     await runDebounce();
 
-    expect(warn).toHaveBeenCalledWith(
-      '[@mention] loadMcpResources not available for server="docs"',
-    );
-    expect(latest!.state).toMatchObject({
-      level: 'items',
-      selectedProviderId: 'mcp-resources',
-      itemMode: 'mcpResources',
-      mcpServerName: 'docs',
-      items: [],
-      loading: false,
+    expect(warn).not.toHaveBeenCalled();
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: { from: 0, to: 1, insert: '@mcp:docs ' },
+      selection: { anchor: 10 },
+      scrollIntoView: true,
     });
     warn.mockRestore();
   });

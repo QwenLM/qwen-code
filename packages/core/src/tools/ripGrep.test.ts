@@ -624,6 +624,8 @@ describe('RipGrepTool', () => {
       const bounded = await searchWith(`${longMatch}${EOL}`, { pattern: 'a+' });
       expect(bounded.llmContent).toMatch(/\[\d+ lines? truncated\] \.\.\./);
       expect(bounded.rawOutputSize).toBeNull();
+      expect(bounded.truncatedByProducer).toBe(true);
+      expect(whole.truncatedByProducer).toBeUndefined();
     });
 
     it('should return "No matches found" when pattern does not exist', async () => {

@@ -18,19 +18,23 @@ import type {
 } from '../core/turn.js';
 import { LlmEventType } from '../core/turn.js';
 import * as loggers from '../telemetry/loggers.js';
-import { LoopType } from '../telemetry/types.js';
+import { LoopReason, LoopType } from '../telemetry/types.js';
+import type { LoopStopDetail } from '../telemetry/types.js';
 import type { DebugLogger } from '../utils/debugLogger.js';
+import type { LoopProtectionMode } from './loop-protection.js';
 import { FULL_OUTPUT_DIGEST_LABEL } from '../tools/truncation.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   LoopDetectionService,
+  getTurnToolCallCapHalt,
 } from './loopDetectionService.js';
 import { fnResponse } from '../test-utils/model-fixtures.js';
 
 vi.mock('../telemetry/loggers.js', () => ({
   logLoopDetected: vi.fn(),
   logLoopDetectionDisabled: vi.fn(),
+  logLoopProtection: vi.fn(),
 }));
 
 const TOOL_CALL_LOOP_THRESHOLD = 5;
@@ -91,8 +95,10 @@ describe('LoopDetectionService', () => {
     cap: number = DEFAULT_MAX_TOOL_CALLS_PER_TURN,
     explicit = false,
     skipLoopDetection = true,
+    loopProtection: LoopProtectionMode = 'stop',
   ): Config =>
     ({
+      getLoopProtection: () => loopProtection,
       getTelemetryEnabled: () => true,
       getMaxToolCallsPerTurn: () => cap,
       isMaxToolCallsPerTurnExplicit: () => explicit,
@@ -1688,6 +1694,115 @@ describe('LoopDetectionService', () => {
       const svc = capOfTwo(false);
       expect(guardTool('t', { a: 3 }, svc)).toBe(false);
     });
+
+    // The reason and numbers ride the bubbled event (getLastLoopDetail) and
+    // the loop_detected telemetry, so both are asserted.
+    const expectCapDetail = (detail: LoopStopDetail, svc = service) => {
+      expect(svc.getLastLoopDetail()).toEqual(detail);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          loop_type: 'turn_tool_call_cap',
+          loop_reason: detail.loopReason,
+          tool_call_count: detail.toolCallCount,
+          tool_call_limit: detail.toolCallLimit,
+        }),
+      );
+    };
+
+    it('names an explicit cap with the call count and the cap', () => {
+      const svc = capOfTwo(true);
+      expectFired(guardTool('t', { a: 3 }, svc), CAP, svc);
+      expectCapDetail(
+        {
+          loopReason: LoopReason.EXPLICIT_CAP,
+          toolCallCount: 3,
+          toolCallLimit: 2,
+        },
+        svc,
+      );
+    });
+
+    it('names the adaptive backstop with the backstop as its limit', () => {
+      service.reset('');
+      diverse(HARD_CAP);
+      expectFired(guardTool('t', { last: true }), CAP);
+      expectCapDetail({
+        loopReason: LoopReason.BACKSTOP,
+        toolCallCount: HARD_CAP + 1,
+        toolCallLimit: HARD_CAP,
+      });
+    });
+
+    it('names a stuck halt with the soft cap as its limit', () => {
+      service.reset('');
+      // As in 'fires at the soft cap when a stuck-repetition signal is
+      // present': the first call past the soft cap halts.
+      const fired = fires(SOFT_CAP + GLOBAL_DUPLICATE_THRESHOLD, (i) =>
+        guardTool('any_tool', i % 2 === 0 ? { stuck: true } : { distinct: i }),
+      );
+      expectFired(fired, CAP);
+      expectCapDetail({
+        loopReason: LoopReason.STUCK_REPETITION,
+        toolCallCount: SOFT_CAP + 1,
+        toolCallLimit: SOFT_CAP,
+      });
+    });
+
+    it('clears the stop detail on reset', () => {
+      const svc = capOfTwo(true);
+      expect(guardTool('t', { a: 3 }, svc)).toBe(true);
+      svc.reset('next-prompt');
+      expect(svc.getLastLoopType()).toBeNull();
+      expect(svc.getLastLoopDetail()).toEqual({});
+    });
+  });
+
+  describe('getTurnToolCallCapHalt', () => {
+    const SOFT = DEFAULT_MAX_TOOL_CALLS_PER_TURN;
+    const HARD = SOFT * 10;
+    const STUCK = GLOBAL_DUPLICATE_THRESHOLD;
+
+    it('lets the turn continue at or below the cap', () => {
+      expect(getTurnToolCallCapHalt(SOFT, STUCK, SOFT, true)).toBeNull();
+      expect(getTurnToolCallCapHalt(SOFT, STUCK, SOFT, false)).toBeNull();
+    });
+
+    it('stops past an explicit cap whatever the repetition', () => {
+      const explicit = { reason: LoopReason.EXPLICIT_CAP, limit: SOFT };
+      expect(getTurnToolCallCapHalt(SOFT + 1, 1, SOFT, true)).toEqual(explicit);
+      expect(getTurnToolCallCapHalt(HARD + 1, STUCK, SOFT, true)).toEqual(
+        explicit,
+      );
+    });
+
+    it('lets a diverse adaptive turn run to the backstop', () => {
+      expect(getTurnToolCallCapHalt(HARD, STUCK - 1, SOFT, false)).toBeNull();
+      expect(getTurnToolCallCapHalt(HARD + 1, 1, SOFT, false)).toEqual({
+        reason: LoopReason.BACKSTOP,
+        limit: HARD,
+      });
+    });
+
+    it('reports the backstop, not the repetition, past the backstop', () => {
+      expect(getTurnToolCallCapHalt(HARD + 1, STUCK, SOFT, false)).toEqual({
+        reason: LoopReason.BACKSTOP,
+        limit: HARD,
+      });
+    });
+
+    it('stops a stuck adaptive turn with the soft cap as its limit', () => {
+      expect(getTurnToolCallCapHalt(SOFT + 1, STUCK, SOFT, false)).toEqual({
+        reason: LoopReason.STUCK_REPETITION,
+        limit: SOFT,
+      });
+    });
+
+    it('never stops when the cap is disabled', () => {
+      expect(
+        getTurnToolCallCapHalt(HARD * 10, STUCK * 10, Infinity, false),
+      ).toBeNull();
+    });
   });
 
   describe('Global Tool Call Duplicate Detection', () => {
@@ -1717,6 +1832,31 @@ describe('LoopDetectionService', () => {
       // getLastLoopType() is the getter the client uses to populate the
       // bubbled LoopDetected event, so assert it too — not just the logged one.
       expectType(LoopType.GLOBAL_TOOL_CALL_DUPLICATE);
+      expect(service.getLastLoopDetail()).toEqual({
+        loopReason: LoopReason.REPEATED_CALL,
+      });
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'global_tool_call_duplicate',
+          loop_reason: 'repeated_call',
+        }),
+      );
+    });
+
+    it('drops the reason when a later detector in the same pass sets the type', () => {
+      // One heuristic pass runs every detector: on the 8th call the 6th
+      // repeat trips global-duplicate and the 8-call same-name streak trips
+      // action stagnation, which sets the last loop type. The repeated-call
+      // reason belongs to global-duplicate only, so it must not leak.
+      service.reset('');
+      heur(toolCall('t', { a: 1 }));
+      heur(toolCall('t', { a: 2 }));
+      run(GLOBAL_DUPLICATE_THRESHOLD - 1, () => heur(toolCall('t', { x: 1 })));
+      expect(heur(toolCall('t', { x: 1 }))).toBe(true);
+      expectLogged('global_tool_call_duplicate');
+      expectType(LoopType.ACTION_STAGNATION);
+      expect(service.getLastLoopDetail()).toEqual({});
     });
 
     it('should not fire for different (tool, args) pairs', () => {
@@ -1798,6 +1938,17 @@ describe('LoopDetectionService', () => {
           : false;
       });
       expect(alternatingFired).toBe(false);
+    });
+
+    it('leaves the pattern to a host that checks tool calls itself', () => {
+      service.reset('');
+      const hostChecked = (event: ServerLlmStreamEvent) =>
+        service.addAndCheckHeuristicLoops(event, { toolCallPatterns: false });
+      for (let i = 0; i < ALTERNATING_PATTERN_CYCLES + 2; i++) {
+        expect(hostChecked(eventA)).toBe(false);
+        expect(hostChecked(eventB)).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
 
     it('should reset alternating window after a different third pattern', () => {
@@ -1976,6 +2127,24 @@ describe('LoopDetectionService', () => {
       });
       expect(fired).toBe(false);
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('names a frozen board halted by its recorded results a repeated call', () => {
+      // With heuristics on, the result-aware global-duplicate count halts an
+      // interleaved frozen board from recordToolResult.
+      const svc = newService(heuristicsOn(), 'frozen-global');
+      const fired = fires(
+        GLOBAL_DUPLICATE_THRESHOLD,
+        (i) =>
+          guardTool('filler', { i }, svc) ||
+          guard(taskListEvent(`call-${i}`), svc) ||
+          record(taskListResult('frozen board'), svc),
+      );
+      expect(fired).toBe(true);
+      expect(svc.getLastLoopType()).toBe(LoopType.GLOBAL_TOOL_CALL_DUPLICATE);
+      expect(svc.getLastLoopDetail()).toEqual({
+        loopReason: LoopReason.REPEATED_CALL,
+      });
     });
 
     it('still halts an interleaved frozen board via the adaptive cap', () => {
@@ -2243,6 +2412,387 @@ ${boardState}
         taskListResult(`fresh v${i}`),
       );
       expect(fired).toBe(false);
+    });
+  });
+
+  describe('Loop protection modes (#14828)', () => {
+    const IDENTICAL = LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS;
+    const withMode = (
+      mode: LoopProtectionMode,
+      {
+        cap = DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+        explicit = false,
+        skipLoopDetection = true,
+      } = {},
+    ) => {
+      service = newService(
+        makeConfig(cap, explicit, skipLoopDetection, mode),
+        'loop-protection',
+      );
+    };
+    const same = () => guardTool('read_file', { file_path: 'a.txt' });
+    const decisions = () =>
+      vi
+        .mocked(loggers.logLoopProtection)
+        .mock.calls.map(([, event]) => `${event.loop_type}:${event.decision}`);
+    // Calls fn(i) for i < n and collects the reminder queued after each call.
+    const reminders = (n: number, fn: (i: number) => boolean) => {
+      const queued: Array<string | undefined> = [];
+      for (let i = 0; i < n; i++) {
+        expect(fn(i)).toBe(false);
+        queued.push(service.takeLoopReminder());
+      }
+      return queued;
+    };
+
+    it('reminds on the 3rd identical call and still stops on the 5th under stop', () => {
+      withMode('stop');
+      const queued = reminders(4, same);
+      expect(queued.slice(0, 2)).toEqual([undefined, undefined]);
+      expect(queued[2]).toBe(
+        'System: `read_file` has been called 3 times in a row with identical arguments, so its result will not change. Use the result you already have, or change the approach. Repeating the same call stops this turn.',
+      );
+      expect(queued[3]).toBeUndefined();
+      expect(same()).toBe(true);
+      expect(service.getLastLoopType()).toBe(IDENTICAL);
+      expect(decisions()).toEqual([
+        `${IDENTICAL}:reminded`,
+        `${IDENTICAL}:stopped`,
+      ]);
+      expect(loggers.logLoopDetected).toHaveBeenCalledTimes(1);
+    });
+
+    it('reminds once and never stops identical calls under warn', () => {
+      withMode('warn');
+      const queued = reminders(20, same).filter(Boolean);
+      expect(queued).toHaveLength(1);
+      expect(queued[0]).not.toContain('stops this turn');
+      expect(service.getLastLoopType()).toBeNull();
+      expect(decisions()).toEqual([`${IDENTICAL}:reminded`]);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('neither reminds nor stops under off, and records the detection once', () => {
+      withMode('off');
+      expect(reminders(20, same).filter(Boolean)).toEqual([]);
+      expect(decisions()).toEqual([`${IDENTICAL}:observed`]);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('reminds again for a new streak', () => {
+      withMode('warn');
+      const queued = reminders(8, (i) =>
+        guardTool('read_file', { file_path: i < 4 ? 'a.txt' : 'b.txt' }),
+      );
+      expect(queued.filter(Boolean)).toHaveLength(2);
+      expect(queued[2]).toBeDefined();
+      expect(queued[6]).toBeDefined();
+    });
+
+    it('sends reminders of different patterns together', () => {
+      withMode('stop');
+      const commands = [
+        'git status',
+        'git status --short',
+        'git status -sb',
+        'git status --porcelain',
+      ];
+      for (let i = 0; i < 6; i++) {
+        expect(
+          guardTool('run_shell_command', { command: commands[i % 4] }),
+        ).toBe(false);
+      }
+      for (let i = 0; i < 3; i++) expect(same()).toBe(false);
+      const sent = service.takeLoopReminder()?.split('\n\n');
+      expect(sent).toHaveLength(2);
+      expect(sent?.[0]).toContain('only inspected');
+      expect(sent?.[1]).toContain('3 times in a row');
+      expect(service.takeLoopReminder()).toBeUndefined();
+    });
+
+    it('logs a reminder when it is sent, not when it is queued', () => {
+      withMode('stop');
+      reminders(2, same);
+      expect(same()).toBe(false);
+      expect(decisions()).toEqual([]);
+      service.takeLoopReminder();
+      expect(decisions()).toEqual([`${IDENTICAL}:reminded`]);
+    });
+
+    it('does not log a reminder cut off by a stop in the same batch', () => {
+      withMode('stop');
+      expect(fires(5, () => same())).toBe(true);
+      expect(decisions()).toEqual([`${IDENTICAL}:stopped`]);
+    });
+
+    it('queues no reminder from a side query', () => {
+      withMode('stop');
+      for (let i = 0; i < 3; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            toolCall('read_file', { file_path: 'a.txt' }),
+            { queueReminders: false },
+          ),
+        ).toBe(false);
+      }
+      expect(service.takeLoopReminder()).toBeUndefined();
+      // The pattern is not marked handled, so the turn's own call reminds.
+      expect(same()).toBe(false);
+      expect(service.takeLoopReminder()).toContain('4 times in a row');
+    });
+
+    it("keeps the turn's pending reminder on a side query's retry", () => {
+      withMode('stop');
+      reminders(2, same);
+      expect(same()).toBe(false);
+      expect(
+        service.checkAlwaysOnSafeties(RETRY, { queueReminders: false }),
+      ).toBe(false);
+      expect(service.takeLoopReminder()).toContain('3 times in a row');
+    });
+
+    it("queues no reminder from a side query's stateful results", () => {
+      withMode('warn', { skipLoopDetection: false });
+      const args = { status: 'open' };
+      for (let i = 0; i < 6; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            toolCall('task_list', args, `side-${i}`),
+            { queueReminders: false },
+          ),
+        ).toBe(false);
+        expect(
+          service.recordToolResultByCallId(
+            `side-${i}`,
+            [fnResponse('task_list', { output: 'board' }, `side-${i}`)],
+            { queueReminders: false },
+          ),
+        ).toBe(false);
+      }
+      expect(service.takeLoopReminder()).toBeUndefined();
+      expect(decisions()).toEqual([]);
+    });
+
+    it('records no observed decision from a side query under off', () => {
+      withMode('off');
+      for (let i = 0; i < 5; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            toolCall('read_file', { file_path: 'a.txt' }),
+            { queueReminders: false },
+          ),
+        ).toBe(false);
+      }
+      expect(decisions()).toEqual([]);
+      // The pattern is not marked handled, so the turn's own streak is
+      // observed.
+      expect(same()).toBe(false);
+      expect(decisions()).toEqual([`${IDENTICAL}:observed`]);
+    });
+
+    it("keeps the turn's pending reminder across a side query's reset", () => {
+      withMode('warn');
+      reminders(2, same);
+      expect(same()).toBe(false);
+      service.reset('side-prompt', { keepReminders: true });
+      expect(service.takeLoopReminder()).toContain('3 times in a row');
+      const [[, event]] = vi.mocked(loggers.logLoopProtection).mock.calls;
+      expect(event.decision).toBe('reminded');
+      expect(event.prompt_id).toBe('loop-protection');
+    });
+
+    it('drops pending reminders on a new prompt', () => {
+      withMode('warn');
+      reminders(2, same);
+      expect(same()).toBe(false);
+      service.reset('next-prompt');
+      expect(service.takeLoopReminder()).toBeUndefined();
+    });
+
+    it('records but does not remind a stateful read with no result evidence under warn', () => {
+      withMode('warn');
+      const queued = reminders(TOOL_CALL_LOOP_THRESHOLD, () =>
+        guardTool('task_list', { status: 'open' }),
+      );
+      expect(queued).toEqual(Array(TOOL_CALL_LOOP_THRESHOLD).fill(undefined));
+      expect(decisions()).toEqual([`${IDENTICAL}:observed`]);
+    });
+
+    it('reminds a stateful read once late results show it unchanged under warn', () => {
+      withMode('warn');
+      const args = { status: 'open' };
+      // One response repeats the call before any result is recorded.
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(toolCall('task_list', args, `b-${i}`)),
+        ).toBe(false);
+      }
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+        service.recordToolResultByCallId(`b-${i}`, [
+          fnResponse('task_list', { output: 'board' }, `b-${i}`),
+        ]);
+      }
+      expect(service.takeLoopReminder()).toBeUndefined();
+      expect(
+        service.checkAlwaysOnSafeties(toolCall('task_list', args, 'p-0')),
+      ).toBe(false);
+      expect(service.takeLoopReminder()).toContain('task_list');
+      expect(decisions()).toEqual([
+        `${IDENTICAL}:observed`,
+        `${IDENTICAL}:reminded`,
+      ]);
+    });
+
+    it('still stops a stateful read with no result evidence under stop', () => {
+      withMode('stop');
+      for (let i = 1; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+        expect(guardTool('task_list', { status: 'open' })).toBe(false);
+      }
+      expect(guardTool('task_list', { status: 'open' })).toBe(true);
+    });
+
+    it('drops the pending reminder on retry and queues it again on replay', () => {
+      withMode('stop');
+      reminders(2, same);
+      expect(same()).toBe(false);
+      expect(guard(RETRY)).toBe(false);
+      expect(service.takeLoopReminder()).toBeUndefined();
+      expect(reminders(3, same)[2]).toContain('3 times in a row');
+      expect(decisions()).toEqual([`${IDENTICAL}:reminded`]);
+    });
+
+    it('reminds a stateful read only on unchanged results', () => {
+      const poll = (board: (i: number) => string) =>
+        reminders(4, (i) => {
+          const fired = guardTool('task_list', { status: 'open' });
+          service.recordToolResult(
+            { name: 'task_list', args: { status: 'open' } },
+            [fnResponse('task_list', { output: board(i) }, `call-${i}`)],
+          );
+          return fired;
+        }).filter(Boolean);
+      withMode('stop');
+      expect(poll((i) => `board ${i}`)).toEqual([]);
+      withMode('stop');
+      expect(poll(() => 'board')).toHaveLength(1);
+    });
+
+    it('reminds on the 6th shell inspection and stops on the 8th under stop', () => {
+      withMode('stop');
+      const commands = [
+        'git status',
+        'git status --short',
+        'git status -sb',
+        'git status --porcelain',
+      ];
+      const shell = (i: number) =>
+        guardTool('run_shell_command', { command: commands[i % 4] });
+      const queued = reminders(7, shell);
+      expect(queued.findIndex(Boolean)).toBe(5);
+      expect(queued[5]).toBe(
+        'System: The last 6 shell commands only inspected the repository (git status, diff or ls-files) without acting on the result. Act on what they showed, or explain what is blocking you. More of the same inspection stops this turn.',
+      );
+      expect(shell(7)).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.SHELL_COMMAND_STAGNATION);
+    });
+
+    describe('adaptive cap', () => {
+      const SOFT_CAP = 10;
+      // Diverse calls up to the soft cap, then one call repeated between
+      // distinct fillers, so only the cap's repeat tracker accumulates.
+      const stuckTurn = (i: number) =>
+        i < SOFT_CAP
+          ? guardTool('t', { i })
+          : guardTool('t', i % 2 === 0 ? { stuck: true } : { filler: i });
+
+      it('reminds at 4 repeats past the soft cap and stops at 6 under stop', () => {
+        withMode('stop', { cap: SOFT_CAP });
+        const queued = reminders(SOFT_CAP + 7, stuckTurn);
+        expect(queued.filter(Boolean)).toEqual([
+          'System: This turn has made more than 10 tool calls and has called `t` 4 times with identical arguments. Stop repeating it: use the results you have, change the approach, or explain what is blocking you. Repeating it further stops this turn.',
+        ]);
+        // Repeats land on even calls: the 4th at SOFT_CAP + 6, the 6th at
+        // SOFT_CAP + 10.
+        for (let i = SOFT_CAP + 7; i < SOFT_CAP + 10; i++) {
+          expect(stuckTurn(i)).toBe(false);
+        }
+        expect(stuckTurn(SOFT_CAP + 10)).toBe(true);
+        expect(service.getLastLoopDetail()).toMatchObject({
+          loopReason: LoopReason.STUCK_REPETITION,
+        });
+      });
+
+      it('runs to the backstop under warn', () => {
+        withMode('warn', { cap: SOFT_CAP });
+        const queued = reminders(SOFT_CAP * 10, stuckTurn);
+        expect(queued.filter(Boolean)).toHaveLength(1);
+        expect(stuckTurn(SOFT_CAP * 10)).toBe(true);
+        expect(service.getLastLoopDetail()).toMatchObject({
+          loopReason: LoopReason.BACKSTOP,
+        });
+      });
+
+      it('stops an explicit cap in every mode', () => {
+        withMode('off', { cap: 3, explicit: true });
+        expect(reminders(3, (i) => guardTool('t', { i }))).toEqual([
+          undefined,
+          undefined,
+          undefined,
+        ]);
+        expect(guardTool('t', { i: 3 })).toBe(true);
+        expect(service.getLastLoopDetail()).toMatchObject({
+          loopReason: LoopReason.EXPLICIT_CAP,
+        });
+        expect(loggers.logLoopProtection).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('heuristics', () => {
+      // The same call between distinct tools, so only the global duplicate
+      // count reaches its threshold.
+      const interleaved = (i: number) =>
+        i % 2 === 0
+          ? addTool('lookup', { q: 'same' })
+          : addTool(`tool_${i}`, { i });
+
+      it('reminds instead of stopping a global duplicate under warn', () => {
+        withMode('warn', { skipLoopDetection: false });
+        const queued = reminders(
+          GLOBAL_DUPLICATE_THRESHOLD * 2 + 4,
+          interleaved,
+        );
+        expect(queued.filter(Boolean)).toEqual([
+          'System: Loop protection noticed that the same tool call keeps repeating in this turn. Change the approach, or explain what is blocking you.',
+        ]);
+        expect(decisions()).toEqual([
+          `${LoopType.GLOBAL_TOOL_CALL_DUPLICATE}:reminded`,
+        ]);
+      });
+
+      it('stops a global duplicate under stop without a reminder', () => {
+        withMode('stop', { skipLoopDetection: false });
+        expect(
+          fires(GLOBAL_DUPLICATE_THRESHOLD * 2, (i) => {
+            const fired = interleaved(i);
+            expect(service.takeLoopReminder()).toBeUndefined();
+            return fired;
+          }),
+        ).toBe(true);
+        expect(service.getLastLoopType()).toBe(
+          LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+        );
+      });
+
+      it('still stops content repetition under warn, but not under off', () => {
+        withMode('warn', { skipLoopDetection: false });
+        expect(feed(REPEATED, CONTENT_LOOP_THRESHOLD)).toBe(true);
+        expect(service.getLastLoopType()).toBe(
+          LoopType.CHANTING_IDENTICAL_SENTENCES,
+        );
+        withMode('off', { skipLoopDetection: false });
+        expect(feed(REPEATED, CONTENT_LOOP_THRESHOLD * 3)).toBe(false);
+        expect(service.getLastLoopType()).toBeNull();
+      });
     });
   });
 });

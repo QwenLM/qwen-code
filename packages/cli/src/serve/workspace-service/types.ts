@@ -128,6 +128,12 @@ export interface DaemonWorkspaceService {
   /** Skill status for the bound workspace. */
   getWorkspaceSkillsStatus(
     ctx: WorkspaceRequestContext,
+    /**
+     * Await a new observation, bypassing the warm snapshot path and read
+     * throttling. A retained observation may still answer if both fresh
+     * sources fail.
+     */
+    opts?: { requireFresh?: boolean },
   ): Promise<ServeWorkspaceSkillsStatus>;
 
   /** Live runtime Skills catalog without daemon-local fallback. */

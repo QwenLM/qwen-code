@@ -3127,6 +3127,10 @@ export abstract class ChannelBase {
     return this.activePrompts.get(sessionId)?.senderId;
   }
 
+  protected getResponseIsGroup(sessionId: string): boolean | undefined {
+    return this.activePrompts.get(sessionId)?.isGroup;
+  }
+
   protected getResponseMetadata(sessionId: string): string | undefined {
     return this.activePrompts.get(sessionId)?.metadata;
   }

@@ -32,11 +32,17 @@ self.onmessage = async (message: MessageEvent<UiWorkerRequest>) => {
       respond({
         sequence,
         patches: runtime.initialize(request.javascript, request.inputs),
+        execution: 'initialized',
       });
     } else if (request.type === 'event' && runtime) {
+      const { patches, handled } = runtime.dispatch(
+        request.event,
+        request.inputs,
+      );
       respond({
         sequence,
-        patches: runtime.dispatch(request.event, request.inputs),
+        patches,
+        execution: handled ? 'handled' : 'unhandled',
       });
     } else {
       throw new Error('UI runtime requires one initialization.');

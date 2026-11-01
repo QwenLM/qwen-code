@@ -131,7 +131,9 @@ class ReadMcpResourceToolInvocation extends BaseToolInvocation<
         // it reports truncation this body is not the raw one — declare the
         // size unknown rather than let the scheduler measure the bounded body
         // and certify it as the producer's raw size (#13652 R2-5).
-        ...(formatted.truncated ? { rawOutputSize: null } : {}),
+        ...(formatted.truncated
+          ? { rawOutputSize: null, truncatedByProducer: true }
+          : {}),
         returnDisplay: `Read resource ${label} — ${summarizeMcpResource(
           formatted,
         )}`,
