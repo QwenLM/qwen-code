@@ -106,12 +106,16 @@
 
 .board {
   position: relative;
+  width: 100%;
+  aspect-ratio: 44 / 7;
+}
+
+.cells {
   display: grid;
   grid-auto-rows: 1fr;
   gap: 2px;
   width: 100%;
-  aspect-ratio: 44 / 7;
-  border-radius: 6px;
+  height: 100%;
 }
 
 .cell {

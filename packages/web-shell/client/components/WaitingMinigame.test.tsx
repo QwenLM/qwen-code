@@ -22,6 +22,10 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.spyOn(Math, 'random').mockReturnValue(0);
   window.localStorage.clear();
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    value: 'visible',
+  });
 });
 
 afterEach(() => {
@@ -51,9 +55,9 @@ function render(props: WaitingMinigameProps): Rendered {
   return { container, rerender };
 }
 
-function key(keyName: string): void {
+function keyOn(target: EventTarget, keyName: string): void {
   act(() => {
-    window.dispatchEvent(
+    target.dispatchEvent(
       new KeyboardEvent('keydown', {
         key: keyName,
         bubbles: true,
@@ -61,6 +65,10 @@ function key(keyName: string): void {
       }),
     );
   });
+}
+
+function key(keyName: string): void {
+  keyOn(window, keyName);
 }
 
 describe('WaitingMinigame', () => {
@@ -109,6 +117,60 @@ describe('WaitingMinigame', () => {
     rerender({ open: true, onClose: vi.fn() });
     expect(container.textContent).not.toContain('Paused');
   });
+
+  it('resumes gravity after the tab becomes visible again', () => {
+    const { container } = render({ open: true, onClose: vi.fn() });
+    expect(activeCellIndexes(container)).toEqual([0, 1, 2, 3]);
+
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      value: 'hidden',
+    });
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(container.textContent).toContain('Paused');
+
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      value: 'visible',
+    });
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    key(' ');
+    act(() => {
+      vi.advanceTimersByTime(140);
+    });
+    expect(container.textContent).not.toContain('Paused');
+    expect(activeCellIndexes(container)).toEqual([1, 2, 3, 4]);
+  });
+
+  it('leaves Space and Escape to focused controls and open dialogs', () => {
+    const onClose = vi.fn();
+    const { container } = render({ open: true, onClose });
+    const mute = container.querySelector<HTMLButtonElement>('[aria-pressed]');
+    expect(mute).not.toBeNull();
+    act(() => mute?.focus());
+    keyOn(mute!, ' ');
+    expect(container.textContent).not.toContain('Paused');
+
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    const dialogButton = document.createElement('button');
+    dialog.appendChild(dialogButton);
+    container.appendChild(dialog);
+    keyOn(dialogButton, 'Escape');
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('keeps the restart button out of the aria-hidden board', () => {
+    const { container } = render({ open: true, onClose: vi.fn() });
+    expect(container.querySelector('[aria-hidden="true"] button')).toBeNull();
+    expect(
+      container.querySelectorAll('[aria-hidden="true"] [data-state]'),
+    ).toHaveLength(44 * 7);
+  });
 });
 
 describe('WaitingMinigameButton', () => {
@@ -153,3 +215,10 @@ describe('WaitingMinigameButton', () => {
     ).toBe('true');
   });
 });
+
+function activeCellIndexes(container: HTMLElement): number[] {
+  return Array.from(container.querySelectorAll('[data-state]')).flatMap(
+    (element, index) =>
+      element.getAttribute('data-state') === '2' ? [index] : [],
+  );
+}
