@@ -6013,10 +6013,12 @@ jobs:
                 # table pins the parity: a blank suite or a non-count skipped
                 # (false/null) is refused, not defaulted, and counts stop at
                 # 2^53-1, the last integer JSON literals parse to exactly.
+                # Blank means JSON whitespace only: jq's \S and JS's trim()
+                # disagree on U+0085 and U+FEFF.
                 GATES_META="$(
                   jq -r 'def count: type == "number" and . >= 0 and . == floor and . <= 9007199254740991;
                          if (.gates | type) == "array" and (.gates | length) > 0
-                            and (.gates | all(type == "object" and (.suite | type) == "string" and (.suite | test("\\S")) and (.pass | count) and (.fail | count) and ((has("skipped") | not) or (.skipped | count))))
+                            and (.gates | all(type == "object" and (.suite | type) == "string" and (.suite | test("[^ \t\n\r]")) and (.pass | count) and (.fail | count) and ((has("skipped") | not) or (.skipped | count))))
                          then "\(.gates | length) \(.gates | map(.pass) | add | floor) \(.gates | map(.fail) | add | floor) \(.gates | map(.skipped // 0) | add | floor) \(.gates | map(select(.skipped != null)) | length)"
                          else empty end' "$ASSERTIONS_FILE" 2>/dev/null || true
                 )"
@@ -6338,6 +6340,14 @@ jobs:
           )"
           if [ "$OWN_SUBSTANTIVE" = true ] && [ "$BODY_SUBSTANTIVE" != true ]; then
             OWN_ID=''
+          fi
+          # A round can queue for hours: a notice with no status of its own
+          # to finalize is noise on a PR that closed meanwhile. A failed
+          # lookup posts.
+          if [ -z "$OWN_ID" ] && [ "$BODY_SUBSTANTIVE" != true ] &&
+            [ "$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.state' 2>/dev/null || true)" = closed ]; then
+            echo "PR #${PR_NUMBER} closed before this round published; notice not posted (verdict=${VERDICT})." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
           # A failed PATCH (comment deleted, or ownership changed under us)
           # must still leave a terminal report on the PR, never silence.
