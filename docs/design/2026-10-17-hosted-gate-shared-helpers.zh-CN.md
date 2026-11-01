@@ -43,10 +43,11 @@
 - `integration-tests/helpers/hosted-sse-observer.ts` —— `Observer` 类(SSE fetch、块解析、`frames`、`through`、`terminalOfOtherTurn`、`turnIdOf`、`close`),`surface`、`sessionId`、`storeUrl`、`tenantId` 与超时全部经构造器注入;外加 `projectEvents(rows, surface)`,逐字承载 FG6e/FG8 的字段映射。FG6e 的 driver 不再为 observer 读模块级 config;两个 driver 都改为 import 该类。
 - `integration-tests/helpers/hosted-shell-quote.ts` —— `quotePosix(value)`。四个调用点把本地 const 换成 import。
 
-### Java:一个包级私有的测试支撑类
+### Java:一个共享的测试支撑类
 
-`com.alibaba.qwen.code.managedagent.HostedGateTestSupport`(final class、静态方法、test 作用域),加入既有测试支撑先例(`CoordinatorTestSupport`)之列:
+`com.alibaba.qwen.code.managedagent.HostedGateTestSupport`(public final class、静态方法、test 作用域),加入既有测试支撑先例(`CoordinatorTestSupport`)之列。它原本是包级私有,直到下面这个 connector owner 解析器需要与 `harness` 子包里的一条门禁共享;只有该解析器是 public,其余仍为包级私有:
 
+- `connectorOwning(HarnessConnector)` —— 沿 delegate 链走到持有「门禁要读的私有状态」的那个 connector,因为 wiring 交出的 bean 是装饰器而不是该 connector。`attachmentsOf` 与 pool 门禁的具体类型查找都走它,因此只有一份走链,而不是每个读取点一份拷贝。
 - `authentication(String tenant, String fixtureName)` —— `FilterRegistrationBean` 工厂;两个 probe 都改为委托,fixture 名是唯一参数。
 - relay 循环的共享机制:用钉死的 fixture token 与 capability digest 构建 client、boot-id 能力校验、`parseSession` 反射桥,以及「流 → 投影 → 落库」的行走,源键为 `bootId:epoch:eventId`。各 letter 的循环控制留在一个小策略缝后面,恰好三个钩子——事件属于哪个 turn(FG6e 的固定 `promptId` 对 FG8 的每事件 prompt id)、一个允许阻塞的落库前钩子(FG6e 的 terminal 闩)、以及 terminal 是否停下的决定(FG6e 遇 terminal 跳出;FG8 从不,靠流关闭停下)。FG8 关闭流引发的 `IllegalStateException` 吞留处理留在 FG8 的 probe 里。
 - `toolPublicationArgs(int servicePort, String bucket, long executionBytes)` —— 那 16 行属性。

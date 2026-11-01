@@ -8,6 +8,10 @@ import {
 } from './components/managed/managed-lifecycle-messages.js';
 import { plural } from './utils/plural.js';
 import {
+  ACTIVITY_MESSAGES_EN,
+  ACTIVITY_MESSAGES_ZH,
+} from './components/sidebar/activity-messages.js';
+import {
   MESSAGE_DELETION_MESSAGES_EN,
   MESSAGE_DELETION_MESSAGES_ZH,
 } from './components/message-deletion-messages.js';
@@ -1141,6 +1145,8 @@ const EN: Messages = {
   'session.contextConflict':
     'A standalone or Live conversation link cannot include a workspace target.',
   'session.loadFailed': 'Failed to load conversation',
+  'session.splitAddFailed':
+    'Some sessions could not be added to Split View. Please try again.',
   'session.notFound': 'Conversation not found',
   'session.notFoundDescription':
     'This standalone conversation no longer exists.',
@@ -1366,6 +1372,8 @@ const EN: Messages = {
   'contextUsage.estimatedUntilProviderUsage':
     'Token usage is estimated until provider usage is received.',
   'contextUsage.free': 'Free',
+  'contextUsage.instructionFiles': 'Instruction files',
+  'contextUsage.autoMemory': 'Auto memory',
   'contextUsage.memoryFiles': 'Memory files',
   'contextUsage.messages': 'Messages',
   'contextUsage.startupContext': 'Startup context',
@@ -2085,6 +2093,7 @@ const EN: Messages = {
   'localFiles.blocker.unsupportedDaemon':
     'This daemon does not advertise the client filesystem bridge (client_mcp_over_ws). Start the daemon with QWEN_SERVE_CLIENT_MCP_OVER_WS=1 to enable local files.',
   ...FILES_MESSAGES_EN,
+  ...ACTIVITY_MESSAGES_EN,
   'rightPanel.add': 'Add panel',
   'attachment.showPreview': 'Preview',
   'attachment.showSource': 'Source',
@@ -2329,6 +2338,12 @@ const EN: Messages = {
   'sidebar.projectFallback': 'Workspace',
   'sidebar.sessionsOverview': 'Session Overview',
   'sidebar.splitView': 'Split View',
+  'sidebar.addToSplitView': 'Add to Split View',
+  'sidebar.splitAtCapacity': (v) =>
+    `Split View already shows ${v?.max ?? 6} sessions — close a pane to add another`,
+  'sidebar.splitAlreadyOpen': 'This session is already open in Split View',
+  'sidebar.splitCurrentDisabled':
+    'The current session cannot be added while Split View is closed',
   'sidebar.settings': 'Settings',
   'update.button': 'Update',
   'update.restarting': 'Restarting…',
@@ -3548,6 +3563,7 @@ const EN: Messages = {
   'skills.toggleUnsupported':
     'The connected daemon does not support skill enable or disable actions.',
   'skills.title': 'Skills',
+  'plugins.backToChat': 'Back to conversation',
   'plugins.extensions': 'Extensions',
   'plugins.agents': 'Agents',
   'plugins.mcp': 'MCP',
@@ -3622,6 +3638,8 @@ const EN: Messages = {
   'contextUsage.compressInterrupted':
     'Connection changed during compression. Refresh to check current usage.',
   'contextUsage.compressFailed': 'Compression failed. You can try again.',
+  'contextUsage.previewTruncated':
+    'This file is large; the preview shows only its beginning.',
   'contextUsage.compressRefreshFailed':
     'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
   'contextUsage.compressUnavailable':
@@ -4295,6 +4313,7 @@ const EN: Messages = {
   'splitView.goToApproval': 'Go to it',
   'splitView.pendingCount': (v) => `${v?.count ?? 0} awaiting input`,
   'splitView.nextPending': 'Go to the next session awaiting input',
+  'splitView.noOtherSessions': 'No other sessions',
   'splitView.empty': 'No sessions in the split. Add one to get started.',
   'splitView.composerPlaceholder': 'Message this session…',
   'channels.title': 'Channels',
@@ -5723,6 +5742,7 @@ const ZH: Messages = {
   'session.capabilitiesFailed': '无法加载 Daemon 能力。请重试后再打开该会话。',
   'session.contextConflict': 'Standalone 或 Live 会话链接不能同时指定工作区。',
   'session.loadFailed': '会话加载失败',
+  'session.splitAddFailed': '部分会话无法添加到分屏视图，请重试。',
   'session.notFound': '会话不存在',
   'session.notFoundDescription': '该 Standalone 会话已不存在。',
   'session.resolving': '正在打开会话...',
@@ -5923,6 +5943,8 @@ const ZH: Messages = {
   'contextUsage.estimatedUntilProviderUsage':
     'Token 使用量为估算值，直到收到服务商返回的使用量。',
   'contextUsage.free': '空闲',
+  'contextUsage.instructionFiles': '指令文件',
+  'contextUsage.autoMemory': '自动记忆',
   'contextUsage.memoryFiles': 'Memory 文件',
   'contextUsage.messages': '消息',
   'contextUsage.startupContext': '启动上下文',
@@ -6594,6 +6616,7 @@ const ZH: Messages = {
   'localFiles.blocker.unsupportedDaemon':
     '该 daemon 未启用客户端文件桥（client_mcp_over_ws）。以 QWEN_SERVE_CLIENT_MCP_OVER_WS=1 启动 daemon 即可启用本地文件。',
   ...FILES_MESSAGES_ZH,
+  ...ACTIVITY_MESSAGES_ZH,
   'rightPanel.add': '添加页签',
   'attachment.showPreview': '预览',
   'attachment.showSource': '源码',
@@ -6812,6 +6835,11 @@ const ZH: Messages = {
   'sidebar.projectFallback': '工作区',
   'sidebar.sessionsOverview': '会话总览',
   'sidebar.splitView': '分屏',
+  'sidebar.addToSplitView': '添加到分屏视图',
+  'sidebar.splitAtCapacity': (v) =>
+    `分屏视图已显示 ${v?.max ?? 6} 个会话 — 请先关闭一个面板再添加`,
+  'sidebar.splitAlreadyOpen': '该会话已在分屏视图中打开',
+  'sidebar.splitCurrentDisabled': '分屏视图关闭时，无法添加当前会话',
   'sidebar.settings': '设置',
   'update.button': '更新',
   'update.restarting': '重启中…',
@@ -7932,6 +7960,7 @@ const ZH: Messages = {
     '该技能所属扩展当前未启用，请先启用对应扩展。',
   'skills.toggleUnsupported': '当前连接的 daemon 不支持启用或禁用 Skill。',
   'skills.title': 'Skills',
+  'plugins.backToChat': '返回对话',
   'plugins.extensions': '扩展',
   'plugins.agents': '智能体',
   'plugins.mcp': 'MCP',
@@ -8000,6 +8029,7 @@ const ZH: Messages = {
   'contextUsage.compressInterrupted':
     '压缩期间连接发生变化，请刷新查看当前使用量。',
   'contextUsage.compressFailed': '压缩失败，可以重试。',
+  'contextUsage.previewTruncated': '文件较大，预览仅显示开头部分。',
   'contextUsage.compressRefreshFailed':
     '压缩已完成，但用量刷新失败。请点击刷新重试。',
   'contextUsage.compressUnavailable':
@@ -8620,6 +8650,7 @@ const ZH: Messages = {
   'splitView.goToApproval': '前往处理',
   'splitView.pendingCount': (v) => `${v?.count ?? 0} 个会话待处理`,
   'splitView.nextPending': '前往下一个待处理会话',
+  'splitView.noOtherSessions': '没有其他会话',
   'splitView.empty': '分屏中还没有会话，添加一个开始。',
   'splitView.composerPlaceholder': '给这个会话发消息…',
   'channels.title': '频道',

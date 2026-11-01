@@ -46,11 +46,11 @@ bin/qwen-managed-agent-admin csi-protection \
   /absolute/path/registration.json resident-protection resident-binding
 ```
 
-在模块构建中，从可执行的 server jar 运行同一个入口：
+使用模块构建产物时，在仓库根目录运行同一个入口：
 
 ```bash
-java -Dloader.main=com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceCsiProtectionMain \
-  -cp target/qwen-managed-agent-server-<version>-exec.jar \
+java -Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.WorkspaceCsiProtectionMain \
+  -cp packages/managed-agent-server/server/target/qwen-managed-agent-server-<version>-exec.jar \
   org.springframework.boot.loader.launch.PropertiesLauncher \
   /absolute/path/registration.json resident-protection resident-binding
 ```
@@ -103,11 +103,11 @@ bin/qwen-managed-agent-admin resident-retirement \
   --spring.config.additional-location=file:/absolute/path/application.yaml
 ```
 
-在模块构建中，使用可执行的 server jar 和相同的参数：
+使用模块构建产物时，在仓库根目录运行，并使用相同的参数：
 
 ```bash
-java -Dloader.main=com.alibaba.qwen.code.managedagent.persistence.ResidentWorkspaceRetirementMain \
-  -cp target/qwen-managed-agent-server-<version>-exec.jar \
+java -Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.ResidentWorkspaceRetirementMain \
+  -cp packages/managed-agent-server/server/target/qwen-managed-agent-server-<version>-exec.jar \
   org.springframework.boot.loader.launch.PropertiesLauncher \
   inspect /absolute/path/retirement.json \
   --spring.config.additional-location=file:/absolute/path/application.yaml
