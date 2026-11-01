@@ -388,6 +388,11 @@ for (const footerPosition of ['static', 'sticky'] as const) {
     });
     await expect(archive).toBeEnabled();
 
+    // Preserve the fixture's resting density as well as rename stability.
+    const restingRow = await row.boundingBox();
+    expect(restingRow).not.toBeNull();
+    expect(restingRow!.height).toBe(68.5);
+
     for (const edge of ['bottom', 'top']) {
       await row.getByRole('button', { name: 'Rename', exact: true }).click();
       const editor = panel.locator('input[aria-label="Rename: Idle fixture"]');

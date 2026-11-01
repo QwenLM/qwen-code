@@ -971,6 +971,7 @@ describe('WebShellSidebar workspace removal', () => {
         archiveState?: string;
         group?: string;
         sourceType?: string;
+        pageSize?: number;
       }) => {
         if (options?.group === 'pinned') {
           return [
@@ -1042,11 +1043,25 @@ describe('WebShellSidebar workspace removal', () => {
         ([options]) => options?.sourceType === 'default',
       ),
     ).toBe(true);
+    const ordinaryCalls = listSecondarySessions.mock.calls.filter(
+      ([options]) => options?.pageSize !== 100,
+    );
+    expect(ordinaryCalls.length).toBeGreaterThan(0);
     expect(
-      listSecondarySessions.mock.calls.every(
-        ([options]) => options?.sourceType === 'default',
-      ),
+      ordinaryCalls.every(([options]) => options?.sourceType === 'default'),
     ).toBe(true);
+    const activityCalls = listSecondarySessions.mock.calls.filter(
+      ([options]) => options?.pageSize === 100,
+    );
+    expect(activityCalls.length).toBeGreaterThan(0);
+    for (const [options] of activityCalls) {
+      expect(options).toEqual({
+        pageSize: 100,
+        archiveState: 'active',
+        view: 'organized',
+        group: 'all',
+      });
+    }
   });
 
   it('gives a locked trusted secondary active row normal actions through its workspace', async () => {
