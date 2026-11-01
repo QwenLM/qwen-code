@@ -24,7 +24,7 @@ vi.mock('node:os', async (importOriginal) => {
   return {
     ...original,
     homedir: () => isolated.home,
-    default: { ...original.default, homedir: () => isolated.home },
+    default: { ...original, homedir: () => isolated.home },
   };
 });
 
@@ -119,7 +119,7 @@ describe('local batch commands with real settings loading', () => {
       {
         schemaVersion: 1,
         name,
-        kind: 'text',
+        kind: 'document-transform',
         shared: { instructions: 'Translate' },
         items: [{ id: 'a', source: 'a.md', target: 'b.md' }],
       },
