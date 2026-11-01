@@ -1,6 +1,6 @@
 # Web Search
 
-> Development builds (`npm run dev`) also support built-in search after Qwen Plus/Pro subscription login. They use the staging MCP service at `https://pre-api.qwen.ai/api/v1/mcp/web_search` with the current device access token; no separate search key or `mcpServers` configuration is needed. CLI, VS Code and Desktop share this Core implementation.
+Development builds (`npm run dev`) support built-in search after Qwen Plus/Pro subscription login. They use the staging MCP service at `https://pre-api.qwen.ai/api/v1/mcp/web_search` with the current device access token; no separate search key or `mcpServers` configuration is needed. CLI, VS Code and Desktop share this Core implementation. Subscription search is not enabled in normal releases.
 
 Qwen Code provides web search two ways:
 
@@ -37,6 +37,8 @@ To turn it off:
 or `ENABLE_WEB_SEARCH=false`. Bare mode and safe mode always disable it.
 
 ### Configuring it explicitly
+
+This section configures DashScope search. Subscription search reuses membership credentials and does not require an auxiliary search model.
 
 Point the tool at a ModelStudio Standard/Token Plan or another verified DashScope Responses entry. This is useful when your main model runs on another provider and you also hold a separate supported DashScope key. Coding Plan hosts are excluded from automatic activation because the Responses search tools are not verified there. You can opt in explicitly with `tools.webSearch.model`; if the endpoint does not serve them, the first search fails loudly. Use an MCP search provider if you do not want to rely on that unverified path.
 
@@ -94,11 +96,11 @@ still surfaces as a startup notice.
 
 Notes:
 
-- The selector must resolve to a DashScope-compatible `modelProviders` entry carrying a direct API key via `envKey`. Your main model can be any provider — only the search side request needs a DashScope entry. Qwen OAuth cannot back the tool.
+- For explicit DashScope search, the selector must resolve to a DashScope-compatible `modelProviders` entry carrying a direct API key via `envKey`. Your main model can be any provider. The discontinued free Qwen OAuth provider cannot back this path; development subscription search uses the separate MCP backend described above.
 - Search registration is re-evaluated after successful authentication changes. Subscription login activates it in the current session without restarting. Explicit disabling, bare/safe mode and tool permission rules still apply. An explicit alternate search model or endpoint retains precedence over subscription search.
 - Automatic host detection intentionally accepts only known DashScope regional hosts, Model Studio and QwenCloud MaaS hosts (including their `token-plan.` subscription subdomains), and internal Alibaba hosts. Generic `*.alicloudapi.com` gateways, `DASHSCOPE_PROXY_BASE_URL` and any host you only added to `allowedHosts` are excluded from that automatic path, because it runs without your involvement and would otherwise hand your main provider's key to a host nobody declared. For a gateway you do declare, list it in `tools.webSearch.allowedHosts` and point `WEB_SEARCH_BASE_URL` (or a `modelProviders` entry) at it.
 - If enabled explicitly but misconfigured, the tool stays off and a startup notice explains which condition failed. Automatic activation never emits a notice.
-- Searches bill your DashScope key (`usage.x_tools` counts). Auto approval mode (the default) lets the classifier approve searches without prompting; in `default` approval mode the tool asks, and approving with "always allow" persists a standard `WebSearch` permission rule, like other tools.
+- DashScope searches bill your DashScope key (`usage.x_tools` counts). Auto approval mode (the default) lets the classifier approve searches without prompting; in `default` approval mode the tool asks, and approving with "always allow" persists a standard `WebSearch` permission rule, like other tools.
 - There is no client-side model allowlist; a model the Responses endpoint does not serve fails loudly on first use.
 - A search that exceeds its time budget returns what arrived as a partial result once at least one search call has completed; if the budget expires before the first search call finishes, the tool reports a timeout error instead, because narration with no executed search is not auditable evidence. When a search call did complete but the narrated answer never arrived, the result carries at most 6,000 characters of the page text the agent had read, labeled as raw page content.
 - The per-session cap counts `web_search` tool calls, not the searches one call runs internally, and a call that fails still counts because the request was sent. A skipped call is not an error: it tells the model the budget is used and to ask you to raise `tools.webSearch.maxPerSession` if more searches are genuinely needed.
