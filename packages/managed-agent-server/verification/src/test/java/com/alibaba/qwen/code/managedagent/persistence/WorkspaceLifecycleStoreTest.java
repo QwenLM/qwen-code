@@ -218,8 +218,10 @@ class WorkspaceLifecycleStoreTest {
     void externalAuthorizationPreservesThePermanentLifecycleFence() {
         var fixture = fixture();
         String storage = fixture.jdbc.queryForObject(
-                "SELECT storage_id FROM ma_workspace WHERE tenant_id = 'tenant' AND workspace_id = 'workspace'",
-                String.class);
+                "SELECT storage_id FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?",
+                (row, index) -> new String(row.getBytes(1), java.nio.charset.StandardCharsets.UTF_8),
+                "tenant".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                "workspace".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         fixture.jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
                         + " tenant_id, storage_id, storage_kind) VALUES (?, ?, ?, 'tenant', ?, 'EXTERNAL')",
                 JdbcRuntimeBindingRepository.storageAliasKey("tenant", storage),

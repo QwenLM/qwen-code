@@ -514,16 +514,23 @@ public class WorkspaceExecutionStore
     public void releaseStopped(ContextBinding context, RuntimeSessionRecord session, RuntimeBindingRecord binding,
             RuntimeBindingRepository repository) {
         external(context, binding, repository, session.getSession().getScope(),
-                session.getSession().getHarnessSessionId(), false,
+                session.getSession().getHarnessSessionId(), false, true,
                 (connection, owner, current) -> {
-                JdbcExternalWorkspaceOwnership.releaseStopped(connection, owner, current, binding, session);
-                return null;
-            });
+            JdbcExternalWorkspaceOwnership.releaseStopped(connection, owner, current, binding, session);
+            return null;
+        });
     }
 
     private <T> T external(ContextBinding context, RuntimeBindingRecord binding, RuntimeBindingRepository repository,
             com.alibaba.qwen.code.runtimebroker.RuntimeScope scope,
             String harnessSessionId, boolean acquiring, ExternalWork<T> work) {
+        return external(context, binding, repository, scope, harnessSessionId, acquiring, false, work);
+    }
+
+    private <T> T external(ContextBinding context, RuntimeBindingRecord binding, RuntimeBindingRepository repository,
+            com.alibaba.qwen.code.runtimebroker.RuntimeScope scope,
+            String harnessSessionId, boolean acquiring, boolean claimDriftRetryable,
+            ExternalWork<T> work) {
         if (!(repository instanceof JdbcRuntimeBindingRepository original) || !original.usesDataSource(jdbc.getDataSource())) {
             throw unavailable();
         }
@@ -538,6 +545,9 @@ public class WorkspaceExecutionStore
             JdbcRuntimeBindingRepository.requireExternalHarnessAdmission(
                     connection, binding.getRequest(), scope,
                     harnessSessionId, !acquiring);
+            if (claimDriftRetryable) {
+                JdbcExternalWorkspaceOwnership.requireUnchangedClaimOrRetry(connection, original, binding);
+            }
             var current = JdbcExternalWorkspaceOwnership.requireCurrent(connection, original, binding, acquiring);
             return work.apply(connection, owner, current);
         }));

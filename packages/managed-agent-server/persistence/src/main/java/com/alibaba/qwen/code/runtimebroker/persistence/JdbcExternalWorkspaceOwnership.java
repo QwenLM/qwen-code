@@ -135,6 +135,24 @@ public final class JdbcExternalWorkspaceOwnership {
         }
     }
 
+    /**
+     * A caller that can retry must not be told its record is unrecoverably stale
+     * merely because another owner took the claim meanwhile: the same release
+     * against the current claim can settle. Only the claim is compared here;
+     * every other identity check stays with {@link #requireCurrent}.
+     */
+    public static void requireUnchangedClaimOrRetry(Connection connection, JdbcRuntimeBindingRepository repository,
+            RuntimeBindingRecord original) throws SQLException {
+        var current = repository.findByIdForUpdate(connection, original.getBindingId());
+        if (current != null && (!Objects.equals(current.getOperationOwner(), original.getOperationOwner())
+                || current.getOperationGeneration() != original.getOperationGeneration())
+                && original.getState() == RuntimeBindingRecord.State.DRAINING
+                && original.isDrainRequested()) {
+            throw new RuntimeBrokerException(503, "runtime_close_claim_pending",
+                    "Original stopped Session release was fenced", true);
+        }
+    }
+
     public static RuntimeBindingRecord requireCurrent(Connection connection, JdbcRuntimeBindingRepository repository,
             RuntimeBindingRecord original, boolean acquiring) throws SQLException {
         var current = repository.findByIdForUpdate(connection, original.getBindingId());
