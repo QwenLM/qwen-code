@@ -75,6 +75,8 @@ still builds and still works for its own purpose.
 | `packages/cli/src/serve/hosted-hook-model.ts`                            | One hosted hook operation                                | Yes         |
 | `packages/cli/src/serve/hosted-workflow-turn.ts`                         | One hosted workflow turn                                 | Yes         |
 | `packages/cli/scripts/opentui-command-parity.ts`                         | Read-only command-surface parity probe                   | Yes         |
+| `packages/cli/src/memory-import/local.ts`                                | One memory-import run                                    | Yes         |
+| `packages/cli/src/serve/hosted-context-compression.ts`                   | One hosted context-compression turn                      | Yes         |
 
 A new production `loadCliConfig` call site must decide which row it belongs to.
 If it exists to run no tools, it owes the guard.
@@ -120,9 +122,6 @@ a workspace `.lsp.json` is exactly that.
 
 ## Follow-ups
 
-- `Config.shutdown()` does not stop an LSP client, so a daemon-spawned session
-  leaves its language servers to process exit. Tracked separately; the fix
-  widens the core `LspClient` interface and `Config.shutdown`.
 - The startup execution-sandbox guard in `llm.tsx` still reads the flag only;
   it fails closed through `loadCliConfig`, but the two guards answer different
   questions.

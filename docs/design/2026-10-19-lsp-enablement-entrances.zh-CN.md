@@ -47,6 +47,8 @@
 | `packages/cli/src/serve/hosted-hook-model.ts`                     | 一次宿主钩子操作                  | 是       |
 | `packages/cli/src/serve/hosted-workflow-turn.ts`                  | 一次宿主 workflow 轮次            | 是       |
 | `packages/cli/scripts/opentui-command-parity.ts`                  | 只读的命令面 parity 探针          | 是       |
+| `packages/cli/src/memory-import/local.ts`                         | 一次 memory import 运行           | 是       |
+| `packages/cli/src/serve/hosted-context-compression.ts`            | 一次宿主上下文压缩轮次            | 是       |
 
 新增的生产 `loadCliConfig` 调用点必须判定自己属于哪一行。若它的存在意义是不运行任何工具，它就有义务传守卫。
 
@@ -68,6 +70,5 @@
 
 ## 后续项
 
-- `Config.shutdown()` 不会停止 LSP 客户端，因此守护进程 spawn 的会话把语言服务器留给进程退出回收。另行跟踪；修复需要扩宽 core 的 `LspClient` 接口与 `Config.shutdown`。
 - `llm.tsx` 中启动期的执行沙箱守卫仍只读参数；它经由 `loadCliConfig` 失败关闭，但两个守卫回答的是不同问题。
 - `docs/design/hot-reload/lsp-runtime-reinitialization.md` 仍把参数描述为唯一开关。修正它必须补齐其缺失的简体中文版，因此另起纯文档变更。
