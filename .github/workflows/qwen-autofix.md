@@ -4726,10 +4726,11 @@ zero-round engagement is what 'stop' already means (af-007).
 
 In the workflow `env:` block.
 
-The workflow file sits against this repository's own 470 KB gate
-(`.github/scripts/check-workflow-size.sh`, env-overridable, ~42 KB below
-GitHub's 512 KB start-runs limit), so the long-form commentary on the constants
-below lives here verbatim — with TWO exceptions, each marked at its entry: the
+The workflow file is 451,358 bytes: under this repository's own 470 KB gate
+(`.github/scripts/check-workflow-size.sh`, env-overridable) and ~60 KB below
+GitHub's 512 KB start-runs limit. The gate is still close enough that the
+long-form commentary on the constants below lives here verbatim — with TWO
+exceptions, each marked at its entry: the
 `TAKEOVER_COMMAND` entry was updated to name the second parameterized form, and
 the `TRUSTED_ASSOC` entry gained the note on where the constant is read and what
 widening it would do. Neither is a byte-for-byte copy of the base block. Each
