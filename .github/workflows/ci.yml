@@ -114,18 +114,20 @@ jobs:
   classify_pr:
     name: 'Classify PR'
     if: "${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event_name == 'push' }}"
-    # Gate runs on ECS for in-repo PRs, fork PRs whose author has write access
-    # (OWNER/MEMBER/COLLABORATOR association — a write-access author is as
-    # trusted as an in-repo branch), the merge queue, and pushes to main,
-    # else a busy hosted pool delays it and blocks the ECS-bound jobs. The
-    # kill-switch is read here, so flipping it reverts everything to hosted.
-    # This runs-on and the pick_runner step below are the canonical home of
-    # the association routing; sdk-java.yml and serve-ab.yml mirror it (the
-    # routing tests hold the mirrors to it). test_windows deliberately does
-    # not: a pull_request run executes the PR's own YAML, so no runs-on trust
-    # clause is enforceable there and its lane never admits pull requests to
-    # the pool.
-    runs-on: '${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association) || github.event_name == ''merge_group'' || github.event_name == ''push'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Gate runs on ECS for EVERY event it accepts — pull requests (untrusted
+    # forks included), merge queue, pushes to main, and dispatch — unless the
+    # kill-switch forces hosted. classify executes only trusted base-SHA code
+    # with a read-only token; the residual PR-YAML risk is the same class
+    # accepted for lint_and_static (2026-10-31 decision, see
+    # docs/design/2026-10-31-lint-static-ecs-routing.md). Keeping the gate on
+    # hosted for forks queued the entire fork CI chain behind a scarce pool.
+    # The association routing for the downstream lanes lives in pick_runner
+    # (ubuntu_runner) below; sdk-java.yml and serve-ab.yml mirror that form
+    # (the routing tests hold the mirrors to it). test_windows deliberately
+    # does not: a pull_request run executes the PR's own YAML, so no runs-on
+    # trust clause is enforceable there and its lane never admits pull
+    # requests to the pool.
+    runs-on: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     continue-on-error: true
     permissions:
       contents: 'read'
