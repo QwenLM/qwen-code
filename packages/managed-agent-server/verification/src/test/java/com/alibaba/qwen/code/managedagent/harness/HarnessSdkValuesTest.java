@@ -4,17 +4,20 @@ import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.DaemonProtocolException;
 import com.alibaba.qwen.code.daemon.DaemonTransportException;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
+import com.alibaba.qwen.code.daemon.HostedHarnessStreamIdleException;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessGenerationFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessProtocolFailure;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessStreamIdleFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessTransportFailure;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.CompletionException;
 
@@ -66,6 +69,31 @@ class HarnessSdkValuesTest {
         var unrelated = new IllegalArgumentException("invalid");
         assertThat(HarnessSdkValues.failure(unrelated)).isSameAs(unrelated);
         assertThat(HarnessSdkValues.recovery(null)).isNull();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void streamIdleFailuresKeepTheirTypedReasonAndBoundOnDeferredReads(boolean observe) throws Exception {
+        var idle = sdk(HostedHarnessStreamIdleException.class,
+                new Class<?>[] {Duration.class, Throwable.class}, Duration.ofSeconds(45),
+                new IOException("silent stream"));
+        var delegate = mock(HarnessConnector.class);
+        var source = mock(HarnessConnector.SourceStream.class);
+        if (observe) {
+            when(delegate.observeStream("tenant", "session", "boot", 7L, "epoch")).thenReturn(source);
+        } else {
+            when(delegate.stream("tenant", "session", 7L, "epoch")).thenReturn(source);
+        }
+        when(source.next()).thenThrow(idle);
+        var boundary = new SdkHarnessBoundary(delegate);
+        var stream = observe ? boundary.observeStream("tenant", "session", "boot", 7L, "epoch")
+                : boundary.stream("tenant", "session", 7L, "epoch");
+
+        assertThatThrownBy(stream::next).isInstanceOfSatisfying(HarnessStreamIdleFailure.class, failure -> {
+            assertThat(failure).isInstanceOf(HarnessTransportFailure.class)
+                    .hasMessage(idle.getMessage()).hasCause(idle.getCause());
+            assertThat(failure.getIdleTimeout()).isEqualTo(Duration.ofSeconds(45));
+        });
     }
 
     @Test

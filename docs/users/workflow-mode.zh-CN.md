@@ -31,6 +31,21 @@ qwen --resume <session-id> --workflow-mode off
 Managed、SSH、派生/子代理、session-agent 及关闭聊天录制的会话不支持模式修改。
 这些协议会话不广告相应能力或选项。持久化写入失败时，公开状态保持不变。
 
+## Web Shell 与 VS Code
+
+Web Shell、分屏和现代 VS Code 聊天的输入栏为受支持会话提供独立的 **Workflow**
+控件。开关表示已保存的偏好，而不是当前是否实际生效。偏好已开启但工具不可用时，
+开关仍保持选中，并允许关闭。点击 Workflow 标签可打开状态详情；键盘聚焦后激活标签
+或在触屏设备上轻点，也能查看相同详情。
+
+尚未创建或恢复会话时，控件只显示可用性占位提示，不会创建会话或保存将来的偏好。
+未广告支持能力的宿主（包括旧版服务端）不显示模式开关。
+
+其他客户端的更改会自动同步到同一会话的控件。写入或重连期间保留最后确认值，
+直到状态重新确认前禁用开关。超时表示结果尚未确认，不是修改成功；客户端读取当前
+状态，而不会自动重复写入。正在输出回复不会禁用开关：更改对下一轮新输入生效，
+并保持思考强度不变。
+
 ## 提醒与输入行为
 
 第一个符合条件的输入收到仅提供给模型的提醒。无其他变化时，稀疏提醒在第 11、21
@@ -82,4 +97,5 @@ ACP 广告标准 `workflow_mode` 配置选项，值为 `on` 和 `off`。`current
 Daemon 客户端使用现有会话 config-option 接口或
 `setSessionConfigOption(sessionId, 'workflow_mode', 'on', clientId)`。
 该选项不接受 `persist` 覆盖参数，始终持久化到当前会话。上下文读回与更新属于该会话的
-真实 live owner，受 lease 与 generation 检查约束。本次实现不包含 Web/IDE 专属控件。
+真实 live owner，受 lease 与 generation 检查约束。Web Shell 和现代 VS Code 宿主使用
+同一套会话控制与更新。
