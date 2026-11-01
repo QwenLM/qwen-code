@@ -22615,6 +22615,10 @@ export function App({
                     managedAgentProvider ? setManagedNavigationSearch : undefined
                   }
                   currentSessionActive={!managedMode}
+                  onSessionArchived={(sessionId, workspaceCwd) => {
+                    closeUsageTabs([sessionId]);
+                    void handleCurrentSessionRemoved({ sessionId, workspaceCwd });
+                  }}
                   onNewStandaloneSession={() =>
                     createNewSession({ kind: 'global' })
                   }
