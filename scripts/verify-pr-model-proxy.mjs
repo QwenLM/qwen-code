@@ -13,10 +13,13 @@
  * executes untrusted PR code, so the real model credential must stay outside
  * it. This proxy holds the real key on the host and lets the container reach
  * the model with a per-run bearer token instead. It mirrors the CI lane's
- * inline proxy (qwen-triage.yml `start_openai_proxy`), with two changes the
- * local shape needs: the listen address is a flag (a container cannot reach
- * the host's loopback, so bind the Docker bridge address instead), and the
+ * inline proxy (qwen-triage.yml `start_openai_proxy`), with changes the local
+ * shape needs: the listen address is a flag (a container cannot reach the
+ * host's loopback, so bind the Docker bridge address instead), and the
  * coordinates are printed as one JSON line for the maintainer to consume.
+ * Hop-by-hop request headers are stripped rather than forwarded.
+ * The printed baseUrl uses the listen address, so bind the address clients
+ * dial — 0.0.0.0 listens on every interface but is not a dialable URL.
  *
  * The CI lane deliberately keeps its own inline copy: the proxy handles the
  * real key, so it must not execute a script from the PR-head checkout.
@@ -46,6 +49,24 @@ import { Readable } from 'node:stream';
 import { isEntryPoint } from './lib/entry-point.js';
 
 const DEFAULT_IDLE_TIMEOUT_MS = 120_000;
+
+// RFC 7230 hop-by-hop headers describe the client's connection to us, not the
+// upstream one. Forwarding them is never correct, and a copied
+// transfer-encoding or expect also fights the framing undici chooses for the
+// relayed stream. `host` and `content-length` ride along for the same reason.
+const STRIPPED_REQUEST_HEADERS = [
+  'host',
+  'content-length',
+  'connection',
+  'keep-alive',
+  'proxy-authorization',
+  'proxy-authenticate',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+  'expect',
+];
 
 export function parseArgs(argv) {
   const options = { listen: '127.0.0.1', port: 0 };
@@ -134,8 +155,7 @@ export function createModelProxy({
       }
 
       const headers = new Headers(req.headers);
-      headers.delete('host');
-      headers.delete('content-length');
+      for (const name of STRIPPED_REQUEST_HEADERS) headers.delete(name);
       headers.set('authorization', `Bearer ${apiKey}`);
 
       const init = { method: req.method, headers };

@@ -208,7 +208,8 @@ The boundary and the model credential are separate problems: the container
 isolates PR code, and a host-side proxy keeps the real model key out of the
 container. `scripts/verify-pr-model-proxy.mjs` is that proxy — the same relay
 rules as the CI lane's inline one (only `POST /chat/completions`, a per-run
-bearer token, a per-chunk idle watchdog). The CI lane deliberately keeps its
+bearer token, a per-chunk idle watchdog), plus hop-by-hop request header
+stripping. The CI lane deliberately keeps its
 own inline copy: the proxy holds the real key, so it must never execute a
 script from the PR-head checkout.
 

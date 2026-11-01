@@ -4,12 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawn, spawnSync } from 'node:child_process';
 import http from 'node:http';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createModelProxy,
   parseArgs,
 } from '../../scripts/verify-pr-model-proxy.mjs';
+
+const SCRIPT = fileURLToPath(
+  new URL('../../scripts/verify-pr-model-proxy.mjs', import.meta.url),
+);
 
 const TOKEN = 'test-proxy-token';
 const NONCE = 'test-nonce';
@@ -51,6 +57,7 @@ async function startUpstream({ status = 200, chunks = ['data: ok\n\n'] } = {}) {
       requests.push({
         method: req.method,
         url: req.url,
+        headers: req.headers,
         authorization: req.headers.authorization,
         body: Buffer.concat(body).toString('utf8'),
       });
@@ -148,6 +155,44 @@ describe('verify-pr-model-proxy', () => {
     expect(upstream.requests[0].url).toBe('/v1/chat/completions');
   });
 
+  it('strips hop-by-hop headers and relays a chunked request body', async () => {
+    const upstream = await startUpstream();
+    const proxy = await startProxy(upstream);
+    const { port } = new URL(proxy);
+    const status = await new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          host: '127.0.0.1',
+          port,
+          path: '/chat/completions',
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${TOKEN}`,
+            connection: 'x-client-hop',
+            'proxy-authorization': 'Basic client-proxy-secret',
+            'transfer-encoding': 'chunked',
+            expect: '100-continue',
+            'content-type': 'application/json',
+          },
+        },
+        (res) => {
+          res.resume();
+          res.on('end', () => resolve(res.statusCode));
+        },
+      );
+      req.on('error', reject);
+      req.write('{"model":');
+      req.end('"m"}');
+    });
+    expect(status).toBe(200);
+    const seen = upstream.requests[0];
+    expect(seen.body).toBe('{"model":"m"}');
+    expect(seen.authorization).toBe(`Bearer ${REAL_KEY}`);
+    expect(seen.headers['proxy-authorization']).toBeUndefined();
+    expect(seen.headers.expect).toBeUndefined();
+    expect(seen.headers.connection).not.toBe('x-client-hop');
+  });
+
   it('propagates an upstream error status and body', async () => {
     const upstream = await startUpstream({
       status: 429,
@@ -199,5 +244,52 @@ describe('parseArgs', () => {
     expect(() => parseArgs(['--port', 'abc'])).toThrow('--port');
     expect(() => parseArgs(['--port', '70000'])).toThrow('--port');
     expect(() => parseArgs(['--port', '-1'])).toThrow('--port');
+  });
+});
+
+describe('CLI', () => {
+  it('exits 2 when the upstream configuration is missing', () => {
+    const res = spawnSync(process.execPath, [SCRIPT], {
+      env: { PATH: process.env.PATH },
+      encoding: 'utf8',
+    });
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain('REVIEW_OPENAI_BASE_URL');
+  });
+
+  it('prints the listen coordinates as JSON and honors the token override', async () => {
+    const upstream = await startUpstream();
+    const child = spawn(process.execPath, [SCRIPT], {
+      env: {
+        PATH: process.env.PATH,
+        REVIEW_OPENAI_BASE_URL: `http://127.0.0.1:${upstream.port}/v1`,
+        REVIEW_OPENAI_API_KEY: REAL_KEY,
+        QWEN_VERIFY_PROXY_TOKEN: 'fixed-token',
+      },
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
+    cleanups.push(async () => {
+      child.kill('SIGTERM');
+    });
+    const line = await new Promise((resolve, reject) => {
+      let buffer = '';
+      child.stdout.on('data', (data) => {
+        buffer += data;
+        if (buffer.includes('\n')) resolve(buffer.split('\n')[0]);
+      });
+      child.on('error', reject);
+      child.on('exit', (code) =>
+        reject(new Error(`proxy exited before printing: ${code}`)),
+      );
+    });
+    const info = JSON.parse(line);
+    expect(info.token).toBe('fixed-token');
+    expect(info.baseUrl).toBe(`http://127.0.0.1:${info.port}/v1`);
+    expect(info.nonce).toMatch(/^[0-9a-f]{48}$/);
+    // The printed baseUrl must not leak the real key, and the health
+    // endpoint must echo the printed nonce.
+    expect(line).not.toContain(REAL_KEY);
+    const health = await fetch(`http://127.0.0.1:${info.port}/__health`);
+    expect(await health.text()).toBe(info.nonce);
   });
 });
