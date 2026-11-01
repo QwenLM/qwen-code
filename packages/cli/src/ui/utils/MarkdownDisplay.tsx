@@ -701,6 +701,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           leadingWhitespace={leadingWhitespace}
           textColor={textColor}
           renderVisualBlocks={renderVisualBlocks}
+          availableWidth={paragraphWidth}
         />,
       );
     } else if (olMatch) {
@@ -716,6 +717,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           leadingWhitespace={leadingWhitespace}
           textColor={textColor}
           renderVisualBlocks={renderVisualBlocks}
+          availableWidth={paragraphWidth}
         />,
       );
     } else {
@@ -1084,6 +1086,12 @@ interface RenderListItemProps {
   leadingWhitespace?: string;
   textColor?: string;
   renderVisualBlocks?: boolean;
+  /**
+   * Width the whole item may use, marker and indentation included. Pass it only
+   * where `contentWidth` is exactly the width the item may use; without it the
+   * text box is measured implicitly by yoga and can consume the right margin.
+   */
+  availableWidth?: number;
 }
 
 const RenderListItemInternal: React.FC<RenderListItemProps> = ({
@@ -1093,6 +1101,7 @@ const RenderListItemInternal: React.FC<RenderListItemProps> = ({
   leadingWhitespace = '',
   textColor = theme.text.primary,
   renderVisualBlocks = true,
+  availableWidth,
 }) => {
   const taskMatch = itemText.match(/^\[([ xX])\]\s+(.*)$/);
   const isTaskItem = taskMatch !== null && renderVisualBlocks;
@@ -1105,6 +1114,17 @@ const RenderListItemInternal: React.FC<RenderListItemProps> = ({
       : `${marker} `;
   const prefixWidth = stringWidth(prefix);
   const indentation = leadingWhitespace.length;
+  const textWidth =
+    availableWidth === undefined
+      ? undefined
+      : Math.max(
+          0,
+          availableWidth - indentation - LIST_ITEM_PREFIX_PADDING - prefixWidth,
+        );
+  const textContainerProps =
+    textWidth === undefined
+      ? { flexGrow: LIST_ITEM_TEXT_FLEX_GROW }
+      : { width: textWidth };
 
   return (
     <Box
@@ -1114,7 +1134,7 @@ const RenderListItemInternal: React.FC<RenderListItemProps> = ({
       <Box width={prefixWidth}>
         <Text color={textColor}>{prefix}</Text>
       </Box>
-      <Box flexGrow={LIST_ITEM_TEXT_FLEX_GROW}>
+      <Box {...textContainerProps}>
         <Text wrap="wrap" color={textColor}>
           <RenderInline
             text={effectiveItemText}

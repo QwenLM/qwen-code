@@ -146,6 +146,66 @@ describe('<HistoryItemDisplay />', () => {
     },
   );
 
+  it('keeps markdown list items inside the right margin on the static path', () => {
+    const item = {
+      id: 1,
+      type: 'gemini',
+      text: [
+        '1. This is the first numbered item about the history of computing from the earliest mechanical counting machines and engines.',
+        '2. This is the second numbered item about vacuum tube computers and transistor machines through integrated circuits and processors.',
+      ].join('\n'),
+    } as HistoryItem;
+    const { lastFrame } = renderWithProviders(
+      <Static
+        items={[
+          <HistoryItemDisplay
+            key="row"
+            item={item}
+            terminalWidth={100}
+            isPending={false}
+          />,
+        ]}
+      >
+        {(row) => row}
+      </Static>,
+    );
+
+    const overWide = stripAnsi(lastFrame() ?? '')
+      .split('\n')
+      .filter((line) => stringWidth(line) > 98);
+    expect(overWide).toEqual([]);
+  });
+
+  it('keeps nested markdown list items inside the right margin', () => {
+    const item = {
+      id: 1,
+      type: 'gemini',
+      text: [
+        '1. This is the outer numbered item about the history of computing from the earliest mechanical machines.',
+        '   1. This is the inner numbered item about vacuum tube computers and transistor machines through circuits.',
+      ].join('\n'),
+    } as HistoryItem;
+    const { lastFrame } = renderWithProviders(
+      <Static
+        items={[
+          <HistoryItemDisplay
+            key="row"
+            item={item}
+            terminalWidth={100}
+            isPending={false}
+          />,
+        ]}
+      >
+        {(row) => row}
+      </Static>,
+    );
+
+    const overWide = stripAnsi(lastFrame() ?? '')
+      .split('\n')
+      .filter((line) => stringWidth(line) > 98);
+    expect(overWide).toEqual([]);
+  });
+
   it.each(['gemini', 'gemini_content'] as const)(
     'passes images from a %s history item to the assistant renderer',
     (type) => {
