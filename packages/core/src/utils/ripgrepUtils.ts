@@ -274,33 +274,21 @@ export async function ensureRipgrepHealthy(
 ): Promise<void> {
   if (cachedHealth.get(selection.command)?.working) return;
 
-  let working = false;
-  let probeOutput = '';
-  let probeCode = -1;
-  try {
-    const { stdout, code } = await execCommand(
-      selection.command,
-      ['--version'],
-      {
-        timeout: RIPGREP_TEST_TIMEOUT_MS,
-      },
-    );
-    probeOutput = stdout;
-    probeCode = code;
-    working = code === 0 && stdout.startsWith('ripgrep');
-    cachedHealth.set(selection.command, {
-      working,
-      lastTested: Date.now(),
-      selection,
-    });
-  } catch (error) {
-    cachedHealth.set(selection.command, {
-      working: false,
-      lastTested: Date.now(),
-      selection,
-    });
-    throw error;
-  }
+  // A probe that throws leaves no record behind, so the next caller probes
+  // again; the cache only ever answers "known working".
+  const { stdout: probeOutput, code: probeCode } = await execCommand(
+    selection.command,
+    ['--version'],
+    {
+      timeout: RIPGREP_TEST_TIMEOUT_MS,
+    },
+  );
+  const working = probeCode === 0 && probeOutput.startsWith('ripgrep');
+  cachedHealth.set(selection.command, {
+    working,
+    lastTested: Date.now(),
+    selection,
+  });
 
   // Callers only tell healthy from unhealthy by the throw, so a probe that
   // returns without identifying itself as ripgrep must not read as success.
