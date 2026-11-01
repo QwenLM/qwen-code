@@ -304,7 +304,7 @@ jobs:
     # before the build. publish joins on both, so nothing is released
     # unchecked.
     runs-on: '${{ matrix.os }}'
-    container: ${{ matrix.container || null }}
+    container: ${{ matrix.container || null }}  # yamllint disable-line rule:quoted-strings
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -319,6 +319,7 @@ jobs:
             epel: 'false'
             legacy_arch: 'arm64'
             rust_target: 'aarch64-apple-darwin'
+            tauri_config: ''
             tauri_args: '--target aarch64-apple-darwin --bundles app,dmg'
           - name: 'macOS x64'
             os: 'macos-15'
@@ -329,6 +330,7 @@ jobs:
             epel: 'false'
             legacy_arch: 'x64'
             rust_target: 'x86_64-apple-darwin'
+            tauri_config: ''
             tauri_args: '--target x86_64-apple-darwin --bundles app,dmg'
           - name: 'Windows x64'
             os: 'windows-latest'
@@ -339,6 +341,7 @@ jobs:
             epel: 'false'
             legacy_arch: ''
             rust_target: 'x86_64-pc-windows-msvc'
+            tauri_config: ''
             tauri_args: '--target x86_64-pc-windows-msvc --bundles nsis'
           - name: 'Linux x64'
             os: 'ubuntu-22.04'
@@ -349,6 +352,7 @@ jobs:
             epel: 'false'
             legacy_arch: ''
             rust_target: 'x86_64-unknown-linux-gnu'
+            tauri_config: ''
             tauri_args: '--target x86_64-unknown-linux-gnu --bundles appimage,deb'
           # 22.04's ARM image, not 24.04's, so both Linux legs share a glibc
           # floor (2.35): an arm64 artifact built on 24.04 would need 2.39 and
@@ -363,6 +367,7 @@ jobs:
             epel: 'false'
             legacy_arch: ''
             rust_target: 'aarch64-unknown-linux-gnu'
+            tauri_config: ''
             tauri_args: '--target aarch64-unknown-linux-gnu --bundles appimage,deb'
           # RPM is a per-root artifact: it links against the glibc and
           # WebKitGTK of the root that builds it, so these two legs cannot
@@ -378,6 +383,7 @@ jobs:
             epel: 'false'
             legacy_arch: ''
             rust_target: 'x86_64-unknown-linux-gnu'
+            tauri_config: 'src-tauri/rpm-fedora44.conf.json'
             tauri_args: '--target x86_64-unknown-linux-gnu --bundles rpm'
           # RHEL 9 is deliberately absent: its webkit2gtk3 provides only the
           # legacy 4.0 API, and Tauri needs libwebkit2gtk-4.1.so.0.
@@ -390,6 +396,7 @@ jobs:
             epel: 'true'
             legacy_arch: ''
             rust_target: 'x86_64-unknown-linux-gnu'
+            tauri_config: 'src-tauri/rpm-rhel10.conf.json'
             tauri_args: '--target x86_64-unknown-linux-gnu --bundles rpm'
     env:
       QWEN_CODE_COMMIT: '${{ needs.prepare.outputs.qwen_code_sha }}'
@@ -715,6 +722,12 @@ jobs:
             args+=(--no-sign)
           elif [ "$RUNNER_OS" = 'Windows' ] && [ -n "$WINDOWS_CONFIG" ]; then
             args+=(--config "$WINDOWS_CONFIG")
+          fi
+          # The rpm legs carry their runtime dependencies and glibc floor in a
+          # per-leg overlay: Tauri's rpm bundler writes `Requires:` only from
+          # `bundle.linux.rpm.depends`, and the two roots cannot share one floor.
+          if [ -n '${{ matrix.tauri_config }}' ]; then
+            args+=(--config '${{ matrix.tauri_config }}')
           fi
           npm run tauri -- build "${args[@]}"
 

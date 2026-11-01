@@ -373,7 +373,7 @@ function testLinuxReleaseLegsHaveGlibcContracts() {
   );
   assert.match(
     workflow,
-    /^ {4}container: \$\{\{ matrix\.container \|\| null \}\}$/m,
+    /^ {4}container: \$\{\{ matrix\.container \|\| null \}\}[ ]{2}# yamllint disable-line rule:quoted-strings$/m,
     'the build job must only add a container when the matrix leg names one',
   );
   const legs = [];
@@ -862,10 +862,7 @@ function testLinuxInstallerSmokeArguments() {
     [['bundle', '--expect-glibc', 'latest'], /--expect-glibc needs/],
     [['bundle', '--unknown'], /Unknown installer smoke option/],
     [['first', 'second'], /Expected one bundle root/],
-    [
-      ['bundle', '--require', 'rpm'],
-      /RPM smoke checks require --expect-glibc/,
-    ],
+    [['bundle', '--require', 'rpm'], /RPM smoke checks require --expect-glibc/],
     [
       ['bundle', '--expect-glibc', '2.43'],
       /--expect-glibc is only valid with --require rpm/,
@@ -877,7 +874,8 @@ function testLinuxInstallerSmokeArguments() {
 
 function testRpmDependencyVerification() {
   const installer = '/tmp/qwen-code.rpm';
-  const runWith = ({ arch = 'x86_64', requires, files }) =>
+  const runWith =
+    ({ arch = 'x86_64', requires, files }) =>
     (command, args) => {
       assert.equal(command, 'rpm');
       if (args[0] === '-qpl') return `${files.join('\n')}\n`;
