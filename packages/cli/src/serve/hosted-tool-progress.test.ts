@@ -15,6 +15,8 @@ import { hostedToolProgress } from './hosted-tool-progress.js';
 
 function fixture(
   outcome: unknown = { envelope: { executionStatus: 'success' } },
+  resultName = 'read_file',
+  resultBody: Record<string, unknown> = { output: 'private file contents' },
 ) {
   const bodies = new Map<string, Buffer>();
   const resource = (id: string, body: unknown) => {
@@ -64,8 +66,8 @@ function fixture(
         {
           functionResponse: {
             id: 'model-call-2',
-            name: 'read_file',
-            response: { output: 'private file contents' },
+            name: resultName,
+            response: resultBody,
           },
         },
       ],
@@ -212,4 +214,23 @@ describe('Hosted tool lifecycle metadata', () => {
     expect(await hostedToolProgress(session, events[0])).toBeUndefined();
     expect(read).not.toHaveBeenCalled();
   });
+});
+
+it('carries only the committed Todo list on the journal completion feed', async () => {
+  const todos = [{ id: 'a', content: 'first', status: 'pending' }];
+  const success = fixture(undefined, 'todo_write', {
+    executionStatus: 'success',
+    todos,
+    privateField: 'must-not-leak',
+  });
+  const progress = await hostedToolProgress(success.session, success.events[4]);
+  expect(progress?.update.todoSnapshot).toBe(JSON.stringify(todos));
+  expect(JSON.stringify(progress)).not.toContain('must-not-leak');
+  const failure = fixture(undefined, 'todo_write', {
+    executionStatus: 'error',
+    todos,
+  });
+  expect(
+    (await hostedToolProgress(failure.session, failure.events[4]))?.update,
+  ).not.toHaveProperty('todoSnapshot');
 });

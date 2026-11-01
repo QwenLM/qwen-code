@@ -43,6 +43,7 @@ import { normalizeServeChannelSelection } from '../../serve/channel-selection.js
 import {
   CHANNEL_DAEMON_WORKER_SENTINEL,
   CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS,
+  MANAGED_RUNTIME_BROKER_TOKEN_ENV,
   QWEN_DAEMON_TOKEN_ENV,
   QWEN_DAEMON_URL_ENV,
   QWEN_DAEMON_WORKSPACE_ENV,
@@ -346,6 +347,10 @@ export function createDaemonChannelBridgeFacade(
   if (bridge.registerChannelLoopToolHandler) {
     facade.registerChannelLoopToolHandler =
       bridge.registerChannelLoopToolHandler.bind(bridge);
+  }
+
+  if (bridge.registerChannelTool) {
+    facade.registerChannelTool = bridge.registerChannelTool.bind(bridge);
   }
 
   return facade;
@@ -664,9 +669,7 @@ export async function runChannelDaemonWorker(
     for (const { name, config } of parsed) {
       createdRouter.setChannelScope(name, config.sessionScope);
       createdRouter.setChannelLoopsEnabled(name, !config.multiSession);
-      if (config['webhooks']) {
-        createdRouter.setChannelApprovalMode(name, config.approvalMode);
-      }
+      createdRouter.setChannelApprovalMode(name, config.approvalMode);
     }
     const restoredRoutes = createdRouter.restoreRoutes();
     writeStdoutLine(
@@ -914,6 +917,7 @@ function scrubDaemonWorkerEnv(): void {
   delete process.env[QWEN_DAEMON_WORKSPACE_ENV];
   delete process.env[QWEN_SERVER_TOKEN_ENV];
   delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
+  delete process.env[MANAGED_RUNTIME_BROKER_TOKEN_ENV];
 }
 
 function readDaemonWorkerEnv(): {

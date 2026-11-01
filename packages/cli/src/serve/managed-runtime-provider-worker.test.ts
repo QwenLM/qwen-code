@@ -55,6 +55,7 @@ import {
   MANAGED_RUNTIME_PROVIDER_ROUTE,
   MANAGED_WORKSPACE_CONTEXT_FILE_CHARS,
   managedRuntimeProviderLimit,
+  MAX_PROVIDER_INLINE_MEDIA_BASE64_BYTES,
   type ManagedRuntimeProviderSession,
 } from './managed-runtime-provider-protocol.js';
 import { MANAGED_CONTEXT_PROTOCOL } from './managed-context-envelope.js';
@@ -435,6 +436,30 @@ function reference(
   };
 }
 
+function providerPdf(): Buffer {
+  const stream = 'BT /F1 12 Tf 20 100 Td (Provider media fixture) Tj ET';
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
+  ];
+  const offsets: number[] = [];
+  let pdf = '%PDF-1.4\n';
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.byteLength(pdf));
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+  const xref = Buffer.byteLength(pdf);
+  pdf += `xref\n0 6\n0000000000 65535 f \n`;
+  pdf += offsets
+    .map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`)
+    .join('');
+  pdf += `trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(pdf);
+}
+
 describe('Managed Runtime provider worker', () => {
   let workspace: string;
   let storage: string;
@@ -544,6 +569,215 @@ describe('Managed Runtime provider worker', () => {
     await control({ kind: 'preflight', reference: ref });
     return control<T>({ kind: 'execute', reference: ref });
   }
+
+  it('delivers invocation-local images without inheriting Omni uploads or later file bytes', async () => {
+    vi.stubEnv('QWEN_CODE_ENABLE_OMNI', '1');
+    onTestFinished(() => {
+      vi.unstubAllEnvs();
+    });
+    const upload = vi
+      .spyOn(Config.prototype, 'loadOmniMediaReader')
+      .mockRejectedValue(
+        new Error('Execution worker must not load the upload pipeline.'),
+      );
+    const data = 'R0lGODlhAQABAIAAAP8AAP///yH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==';
+    const file = path.join(workspace, 'pixel.gif');
+    fs.writeFileSync(file, Buffer.from(data, 'base64'));
+    await begin();
+    const prepareImage = (callId: string, enabled?: boolean) =>
+      control<ManagedToolPrepareResponse>({
+        kind: 'prepare',
+        identity: { ...identity, callId },
+        toolName: 'read_file',
+        input: { file_path: file },
+        ...(enabled === undefined
+          ? {}
+          : { mediaContext: { inputModalities: { image: enabled } } }),
+      });
+    const [enabled, disabled, missing] = await Promise.all([
+      prepareImage('image-enabled', true),
+      prepareImage('image-disabled', false),
+      prepareImage('image-missing'),
+    ]);
+    type Execution = {
+      executionStatus: string;
+      result: { llmContent: unknown; returnDisplay: unknown };
+    };
+    const first = await execute<Execution>(reference(enabled));
+    expect(first.executionStatus).toBe('success');
+    expect(first.result.llmContent).toMatchObject({
+      inlineData: { mimeType: 'image/gif', data },
+    });
+    for (const prepared of [disabled, missing]) {
+      const answer = await execute<Execution>(reference(prepared));
+      expect(answer.executionStatus).toBe('success');
+      expect(answer.result.llmContent).toContain('Unsupported image file');
+    }
+    fs.writeFileSync(file, 'changed after settlement');
+    const ref = reference(enabled);
+    expect(await control({ kind: 'execute', reference: ref })).toEqual(first);
+    for (const kind of ['status', 'cancel']) {
+      expect(await control({ kind, reference: ref })).toMatchObject({
+        state: 'settled',
+        result: first,
+      });
+    }
+    expect(upload).not.toHaveBeenCalled();
+    expect(await control({ kind: 'release' })).toBe(true);
+  });
+
+  it('delivers native PDF bytes and settles an oversized PDF as a tool error', async () => {
+    const file = path.join(workspace, 'document.pdf');
+    const pdf = providerPdf();
+    fs.writeFileSync(file, pdf);
+    await begin();
+    const preparePdf = (callId: string) =>
+      control<ManagedToolPrepareResponse>({
+        kind: 'prepare',
+        identity: { ...identity, callId },
+        toolName: 'read_file',
+        input: { file_path: file },
+        mediaContext: { inputModalities: { pdf: true } },
+      });
+    const ref = reference(await preparePdf('native-pdf'));
+    const answer = await execute(ref);
+    expect(answer).toMatchObject({
+      executionStatus: 'success',
+      result: {
+        llmContent: {
+          inlineData: {
+            mimeType: 'application/pdf',
+            data: pdf.toString('base64'),
+          },
+        },
+      },
+    });
+    fs.appendFileSync(
+      file,
+      Buffer.alloc(MAX_PROVIDER_INLINE_MEDIA_BASE64_BYTES),
+    );
+    const large = reference(await preparePdf('large-pdf'));
+    const refused = await execute(large);
+    expect(refused).toMatchObject({
+      executionStatus: 'error',
+      result: { error: { type: 'file_too_large' } },
+    });
+    expect(await control({ kind: 'status', reference: large })).toMatchObject({
+      state: 'settled',
+      result: refused,
+    });
+    expect(await control({ kind: 'release' })).toBe(true);
+  });
+
+  it('isolates media capabilities across concurrently prepared and executed Sessions', async () => {
+    const data = 'R0lGODlhAQABAIAAAP8AAP///yH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==';
+    const file = path.join(workspace, 'shared.gif');
+    fs.writeFileSync(file, Buffer.from(data, 'base64'));
+    await begin();
+    const second: ManagedRuntimeProviderSession = {
+      harnessSessionId: '550e8400-e29b-41d4-a716-446655440011',
+      runtimeSessionId: '550e8400-e29b-41d4-a716-446655440012',
+      turnKind: 'bootstrap',
+    };
+    await control({ kind: 'acquire' }, second);
+    const manifest = await control<{
+      capabilityDigest: string;
+      policyRevision: string;
+    }>({ kind: 'manifest' }, second);
+    const otherIdentity = {
+      ...identity,
+      sessionId: second.runtimeSessionId,
+      capabilityDigest: manifest.capabilityDigest,
+      policyRevision: manifest.policyRevision,
+    };
+    await control(
+      {
+        kind: 'bind-history',
+        binding: {
+          ...binding(),
+          ownerSessionId: second.harnessSessionId,
+          ownerRuntimeSessionId: second.runtimeSessionId,
+        },
+      },
+      second,
+    );
+    await control({ kind: 'begin-turn', identity: otherIdentity }, second);
+    const prepareFor = (
+      session: ManagedRuntimeProviderSession,
+      call: ManagedToolCallIdentity,
+      image: boolean,
+    ) =>
+      control<ManagedToolPrepareResponse>(
+        {
+          kind: 'prepare',
+          identity: call,
+          toolName: 'read_file',
+          input: { file_path: file },
+          mediaContext: { inputModalities: { image } },
+        },
+        session,
+      );
+    const [enabled, disabled] = await Promise.all([
+      prepareFor(SESSION, identity, true),
+      prepareFor(second, otherIdentity, false),
+    ]);
+    const executeFor = async (
+      session: ManagedRuntimeProviderSession,
+      prepared: ManagedToolPrepareResponse,
+    ) => {
+      const ref = reference(prepared);
+      await control({ kind: 'preflight', reference: ref }, session);
+      return control<{
+        executionStatus: string;
+        result: { llmContent: unknown };
+      }>({ kind: 'execute', reference: ref }, session);
+    };
+    const [first, other] = await Promise.all([
+      executeFor(SESSION, enabled),
+      executeFor(second, disabled),
+    ]);
+    expect(first.executionStatus).toBe('success');
+    expect(first.result.llmContent).toMatchObject({
+      inlineData: { mimeType: 'image/gif', data },
+    });
+    expect(other.executionStatus).toBe('success');
+    expect(other.result.llmContent).toContain('Unsupported image file');
+    expect(await control({ kind: 'release' })).toBe(true);
+    expect(await control({ kind: 'release' }, second)).toBe(true);
+  });
+
+  it.each([
+    ['audio', 'mp3'],
+    ['video', 'mp4'],
+  ])(
+    'does not enable %s from a multimodal provider context',
+    async (modality, extension) => {
+      const file = path.join(workspace, `clip.${extension}`);
+      fs.writeFileSync(
+        file,
+        Buffer.from('ID3\u0000\u0000\u0000\u0000\u0000\u0000\u0000'),
+      );
+      await begin();
+      const prepared = await control<ManagedToolPrepareResponse>({
+        kind: 'prepare',
+        identity,
+        toolName: 'read_file',
+        input: { file_path: file },
+        mediaContext: {
+          inputModalities: { image: true, pdf: true, audio: true, video: true },
+        },
+      });
+      const answer = await execute<{
+        executionStatus: string;
+        result: { llmContent: unknown };
+      }>(reference(prepared));
+      expect(answer.executionStatus).toBe('success');
+      expect(answer.result.llmContent).toContain(
+        `Unsupported ${modality} file`,
+      );
+      expect(await control({ kind: 'release' })).toBe(true);
+    },
+  );
 
   it('reports input errors separately from identity conflicts and permits corrected preparation', async () => {
     await begin();

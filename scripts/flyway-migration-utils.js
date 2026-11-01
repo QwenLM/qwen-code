@@ -20,6 +20,18 @@ import path from 'node:path';
 // passing on what is left. Its probes derive the db roots and source roots
 // from this table, so editing it cannot silently blind them.
 export const LOCATIONS = [
+  {
+    dir: ['persistence', 'src', 'main', 'resources', 'db', 'migration'],
+    suffix: '.sql',
+  },
+  {
+    dir: ['persistence', 'src', 'main', 'java', 'db', 'migration'],
+    suffix: '.java',
+  },
+  {
+    dir: ['persistence', 'src', 'main', 'resources', 'db', 'managed-schema'],
+    suffix: '.sql',
+  },
   { dir: ['src', 'main', 'resources', 'db', 'migration'], suffix: '.sql' },
   { dir: ['src', 'main', 'java', 'db', 'migration'], suffix: '.java' },
   { dir: ['src', 'main', 'resources', 'db', 'managed-schema'], suffix: '.sql' },

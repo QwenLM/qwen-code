@@ -45,9 +45,10 @@ core 只对 `notebook_edit` 应用内容修改，而本 profile 只暴露 `read_
 工作区之外的 `run_shell_command` 同样以此拒绝，因为 core 的 shell 工具只会询问，而预先
 批准的 Session 从不询问。调用执行前 worker 会再检查一次，按内核跟随链接的方式重新解析
 路径；若链接已把它移出工作区，该调用以错误结算。`mediaContext` 只对
-`read_file` 生效：它把该工具面向模型的描述绑定到 Harness 的模态上，而读取本身按本
-worker 自己的 content-generator 模态决定是否交付媒体；本 worker 没有这些模态，所以
-媒体文件仍以“不支持的类型”占位文本作答。经 worker 交付媒体留作后续工作。派发前拒绝外来 Session
+`read_file` 生效：invocation 独立的有效模态视图同时决定描述和真实读取，只按请求
+开启图片/PDF，音视频仍关闭。worker 不初始化模型，也不因继承 Omni 环境开关而上传。
+PDF 在[provider 媒体预算](2026-10-07-managed-runtime-provider-media.zh-CN.md)内保留
+原生字节、文本优先和页面渲染行为。派发前拒绝外来 Session
 reference 和未知字段。Broker 还会以 400 `runtime_control_operation_invalid` 拒绝任何键或
 字符串中含未配对代理项的操作，否则 JSON 写入器会把它发成 `?`。
 不支持的版本与操作明确失败，不回退到旧路由。
@@ -59,13 +60,17 @@ Content-Encoding。TypeScript 客户端保留限长原因。这些诊断信息�
 
 `bind-history`、`checkpoint` 和 `history` 的控制请求与响应限制为 8 MiB，其他操作为
 1 MiB。工具参数还受 core 既有的 256 KiB 规范化 JSON 限制；满足外层信封限制并不绕过
-参数限制。`execute`、`status` 或 `cancel` 的结果超出所属操作响应预算时会被适配而非
+参数限制。`execute`、`status` 或 `cancel` 的非媒体结果超出所属操作响应预算时会被适配而非
 拒绝：worker 先淘汰最旧的 progress 事件（通过 `firstAvailableSeq`/`progressGap`
 告知），再把大文本字段按首尾截断并内联标记，shell 展示置 `truncated`；若大文本
 全部截到最短，仍放不下截断够不到的部分，则在截断任何文本之前，先丢弃结构化的展示
 （例如 edit 的文件 diff，它只供界面使用），再丢弃同样只供客户端界面使用的 artifacts，
-最后丢弃 hook 结果；截断完全够不到的内容
-（内联媒体）会让模型内容变为明确的占位存根。截断按 JSON
+最后丢弃 hook 结果；截断完全够不到的非媒体内容会变为明确的占位存根。
+媒体读取固定限制为聚合 base64 768 KiB、完整 ToolResult 896 KiB。ReadFile 在
+Runtime 保留终态前把预算错误结算为 `FILE_TOO_LARGE`。已接受的含媒体 ToolResult
+在 execute/status/cancel fitting 中保持相同；可以省略进度和 Hook 辅助内容，但
+保留 Hook 停止决定。畸形或未经准入的媒体属于协议故障，不能改写为成功占位文本。
+1 MiB 包装上限保持不变，这不开放公开 Hosted raw 文件循环的媒体路径。截断按 JSON
 编码后的 UTF-8 字节计量，与线上限制的单位一致；删除时以完整码点为单位，因此不会拆开
 代理对；标记注明省略了多少个字符（按码点计）。多个字段同时超长时，截到同一个大小，
 不会出现一个字段被清空、另一个字段仍保留大部分文本的情况。因此已结算的执行始终保有终态观察，

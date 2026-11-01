@@ -57,6 +57,8 @@ const TRANSIENT_TYPES = new Set([
   'client_evicted',
   'replay_complete',
   'stream_error',
+  // The surviving prefix is already seeded; never nest it in later snapshots.
+  'session_rewound',
 ]);
 const LATEST_WINS_UPDATES = new Set([
   'available_commands_update',
@@ -1322,6 +1324,13 @@ function hasUnmodeledTextMeta(meta: unknown): boolean {
       // latest meta carry the label, so the live view must match instead
       // of splitting on it.
       if (typeof value !== 'string') return true;
+      continue;
+    }
+    if (key === 'agent') {
+      // Identity stamp SubAgentTracker pairs with the same two keys. Merging
+      // never reads it, so an unenrolled key would split every streamed
+      // subagent delta in the live view only.
+      if (typeof value !== 'object' || value === null) return true;
       continue;
     }
     if (key === 'qwenTranscript') {

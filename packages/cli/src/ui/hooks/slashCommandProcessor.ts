@@ -51,6 +51,7 @@ import {
 } from '../commands/types.js';
 import type { RecentSlashCommand } from './useSlashCompletion.js';
 import { CommandService } from '../../services/CommandService.js';
+import { rewindCommand } from '../commands/rewindCommand.js';
 import {
   getInteractiveModSession,
   isModRecoveryCommand,
@@ -215,7 +216,7 @@ export interface SlashCommandProcessorActions {
   openMcpDialog: () => void;
   openHooksDialog: () => void;
   openStatsDialog: () => void;
-  openRewindSelector: () => void;
+  openRewindSelector: (origin?: 'slash-command') => void;
   openDiffDialog: () => void;
   openHelpDialog: () => void;
   clearPendingState: () => void;
@@ -895,6 +896,7 @@ export const useSlashCommandProcessor = (
       existingInvocationItemId?: number,
       // Identity shared by the invocation item and submitted prompt.
       invocationPromptId?: string,
+      isCurrentSubmission?: () => boolean,
     ): Promise<SlashCommandProcessorResult | false> => {
       if (typeof rawQuery !== 'string') {
         return false;
@@ -1123,12 +1125,29 @@ export const useSlashCommandProcessor = (
               ...commandContext,
               ui: {
                 ...commandContext.ui,
+                get history() {
+                  return commandContext.ui.history;
+                },
                 addItem: addItemWithRecording,
+                isIdleRef:
+                  commandToExecute.kind === CommandKind.BUILT_IN &&
+                  commandToExecute.name === 'restore' &&
+                  isCurrentSubmission
+                    ? {
+                        get current() {
+                          return (
+                            activeCommandRef.current === activeCommand &&
+                            isCurrentSubmission()
+                          );
+                        },
+                      }
+                    : commandContext.ui.isIdleRef,
               },
               invocation: {
                 raw: trimmed,
                 name: commandToExecute.name,
                 args,
+                historyItemId: invocationItemId,
               },
               overwriteConfirmed,
               abortSignal: abortController.signal,
@@ -1177,6 +1196,11 @@ export const useSlashCommandProcessor = (
                     type: 'schedule_tool',
                     toolName: result.toolName,
                     toolArgs: result.toolArgs,
+                    ...(result.restoreResponseBinding
+                      ? {
+                          restoreResponseBinding: result.restoreResponseBinding,
+                        }
+                      : {}),
                   };
                 case 'message':
                   // Picker-shaped commands can still reject their arguments
@@ -1356,7 +1380,12 @@ export const useSlashCommandProcessor = (
                       actions.openExtensionsManagerDialog();
                       return { type: 'handled' };
                     case 'rewind':
-                      actions.openRewindSelector();
+                      actions.openRewindSelector(
+                        commandToExecute.kind === CommandKind.BUILT_IN &&
+                          commandToExecute.action === rewindCommand.action
+                          ? 'slash-command'
+                          : undefined,
+                      );
                       return { type: 'handled' };
                     case 'diff':
                       actions.openDiffDialog();
@@ -1490,6 +1519,7 @@ export const useSlashCommandProcessor = (
                     undefined,
                     invocationItemId,
                     invocationPromptId,
+                    isCurrentSubmission,
                   );
                 }
                 case 'confirm_action': {
@@ -1523,6 +1553,7 @@ export const useSlashCommandProcessor = (
                     true,
                     invocationItemId,
                     invocationPromptId,
+                    isCurrentSubmission,
                   );
                 }
                 case 'stream_messages': {

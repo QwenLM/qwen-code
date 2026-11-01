@@ -12,7 +12,10 @@ import { ExtensionUpdateState } from './extensionManager.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { redactUrlCredentials } from './redaction.js';
 import { clientForUrl } from './http-client.js';
-import { assertTarArchiveLinksAreSafe } from './archive-safety.js';
+import {
+  assertTarArchiveLinksAreSafe,
+  type TarArchiveSafetyOptions,
+} from './archive-safety.js';
 import { resolveNetworkTarget } from './network-policy.js';
 
 const debugLogger = createDebugLogger('EXT_NPM');
@@ -50,7 +53,7 @@ function resolveNpmRedirectUrl(currentUrl: string, location: string): URL {
 }
 
 /**
- * Parse a scoped npm package source string into name and optional version.
+ * Parse an npm package source string into name and optional version.
  * Examples:
  *   "@ali/openclaw-tmcp-dingtalk" → { name: "@ali/openclaw-tmcp-dingtalk" }
  *   "@ali/openclaw-tmcp-dingtalk@1.2.0" → { name: "@ali/openclaw-tmcp-dingtalk", version: "1.2.0" }
@@ -60,12 +63,12 @@ export function parseNpmPackageSource(source: string): {
   name: string;
   version?: string;
 } {
-  // Scoped package: @scope/name[@version]
-  // First @ is the scope prefix, last @ (after scope/) is the version delimiter
-  const match = source.match(/^(@[^/]+\/[^@]+)(?:@(.+))?$/);
+  const match = source.match(
+    /^(@[^/]+\/[^@]+|[a-zA-Z0-9-][a-zA-Z0-9_.-]*)(?:@(.+))?$/,
+  );
   if (!match) {
     throw new Error(
-      `Invalid scoped npm package source: ${redactUrlCredentials(source)}`,
+      `Invalid npm package source: ${redactUrlCredentials(source)}`,
     );
   }
   return {
@@ -81,8 +84,15 @@ export function isScopedNpmPackage(source: string): boolean {
   return /^@[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+(@.+)?$/.test(source);
 }
 
+export function isNpmPackage(source: string): boolean {
+  return (
+    isScopedNpmPackage(source) ||
+    /^[a-zA-Z0-9-][a-zA-Z0-9_.-]*(@[^/\\:@]+)?$/.test(source)
+  );
+}
+
 /**
- * Resolve the npm registry URL for a scoped package.
+ * Resolve the npm registry URL for a package.
  *
  * Priority:
  * 1. Explicit CLI override (registryOverride parameter)
@@ -91,7 +101,7 @@ export function isScopedNpmPackage(source: string): boolean {
  * 4. Fallback: https://registry.npmjs.org/
  */
 export function resolveNpmRegistry(
-  scope: string,
+  scope: string | undefined,
   registryOverride?: string,
 ): string {
   if (registryOverride) {
@@ -113,11 +123,13 @@ export function resolveNpmRegistry(
       for (const line of lines) {
         const trimmed = line.trim();
         // Scoped registry: @scope:registry=https://...
-        const scopeMatch = trimmed.match(
-          new RegExp(
-            `^${scope.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:registry\\s*=\\s*(.+)`,
-          ),
-        );
+        const scopeMatch = scope
+          ? trimmed.match(
+              new RegExp(
+                `^${scope.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:registry\\s*=\\s*(.+)`,
+              ),
+            )
+          : null;
         if (scopeMatch && !scopedRegistry) {
           scopedRegistry = scopeMatch[1].trim().replace(/\/$/, '');
         }
@@ -524,11 +536,12 @@ export async function downloadFromNpmRegistry(
   installMetadata: ExtensionInstallMetadata,
   destination: string,
   signal?: AbortSignal,
+  archiveSafety: TarArchiveSafetyOptions = {},
 ): Promise<NpmDownloadResult> {
   const { name, version: requestedVersion } = parseNpmPackageSource(
     installMetadata.source,
   );
-  const scope = name.split('/')[0];
+  const scope = name.startsWith('@') ? name.split('/')[0] : undefined;
   const configuredRegistryUrl = resolveNpmRegistry(scope, undefined);
   const registryUrl = installMetadata.registryUrl || configuredRegistryUrl;
 
@@ -602,7 +615,7 @@ export async function downloadFromNpmRegistry(
   signal?.throwIfAborted();
 
   // Extract tarball
-  await assertTarArchiveLinksAreSafe(tarballPath);
+  await assertTarArchiveLinksAreSafe(tarballPath, signal, archiveSafety);
   signal?.throwIfAborted();
   await tar.x({
     file: tarballPath,
@@ -648,7 +661,7 @@ export async function checkNpmUpdate(
 ): Promise<ExtensionUpdateState> {
   try {
     const { name } = parseNpmPackageSource(installMetadata.source);
-    const scope = name.split('/')[0];
+    const scope = name.startsWith('@') ? name.split('/')[0] : undefined;
     const configuredRegistryUrl = resolveNpmRegistry(scope, undefined);
     const registryUrl = installMetadata.registryUrl || configuredRegistryUrl;
     const authToken = getNpmAuthToken(registryUrl, configuredRegistryUrl);

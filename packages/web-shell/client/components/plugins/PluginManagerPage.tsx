@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useMemo, useState, type Ref } from 'react';
+import { ArrowLeftIcon } from 'lucide-react';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import { AgentsManagerPage } from '../agents/AgentsManagerPage';
 import { ExtensionsManagerPage } from '../extensions/ExtensionsManagerPage';
+import type { ManagedExtensionsManagerPageProps } from '../managed/ManagedExtensionsManagerPage';
 import { McpManagerPage } from '../mcp/McpManagerPage';
 import {
   ManagedMcpManagerPage,
   type ManagedMcpManagerPageProps,
 } from '../managed/ManagedMcpManagerPage';
 import { SkillsManagerPage } from '../skills/SkillsManagerPage';
+import { Button } from '../ui/button';
 import {
   Select,
   SelectContent,
@@ -25,22 +28,26 @@ type PluginTab = 'extensions' | 'mcp' | 'skills' | 'agents';
 interface PluginManagerPageProps {
   onClose: () => void;
   onUseSkill: (name: string) => void;
+  showBackButton?: boolean;
   initialFocusRef?: Ref<HTMLButtonElement>;
   initialTab?: PluginTab;
   skillsWorkspaceCwd?: string;
   onSkillsWorkspaceChange?: (cwd: string) => void;
   managedSkills?: boolean;
+  managedExtensions?: Omit<ManagedExtensionsManagerPageProps, 'onClose'>;
   managedMcp?: ManagedMcpManagerPageProps;
 }
 
 export function PluginManagerPage({
   onClose,
   onUseSkill,
+  showBackButton = false,
   initialFocusRef,
   initialTab = 'extensions',
   skillsWorkspaceCwd,
   onSkillsWorkspaceChange,
   managedSkills = false,
+  managedExtensions,
   managedMcp,
 }: PluginManagerPageProps) {
   const { t } = useI18n();
@@ -103,8 +110,12 @@ export function PluginManagerPage({
     setPageRevision((revision) => revision + 1);
   }, []);
   const embedded = useMemo<EmbeddedManagerPage>(
-    () => ({ onRoot: resetToRoot, onDetailChange: setDetailOpen }),
-    [resetToRoot],
+    () => ({
+      onRoot: resetToRoot,
+      onDetailChange: setDetailOpen,
+      onBack: showBackButton ? onClose : undefined,
+    }),
+    [onClose, resetToRoot, showBackButton],
   );
 
   const handleTabChange = (value: string) => {
@@ -150,33 +161,45 @@ export function PluginManagerPage({
   return (
     <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
       {!detailOpen ? (
-        <div className="sticky -top-4 z-10 -mx-5 -mt-4 flex items-center justify-between gap-3 border-b bg-background px-5 py-3">
-          <TabsList className="h-8" aria-label={t('plugins.sections')}>
-            <TabsTrigger
-              ref={activeTab === 'extensions' ? initialFocusRef : undefined}
-              value="extensions"
-            >
-              {t('plugins.extensions')}
-            </TabsTrigger>
-            <TabsTrigger
-              ref={activeTab === 'mcp' ? initialFocusRef : undefined}
-              value="mcp"
-            >
-              {t('plugins.mcp')}
-            </TabsTrigger>
-            <TabsTrigger
-              ref={activeTab === 'skills' ? initialFocusRef : undefined}
-              value="skills"
-            >
-              {t('plugins.skills')}
-            </TabsTrigger>
-            <TabsTrigger
-              ref={activeTab === 'agents' ? initialFocusRef : undefined}
-              value="agents"
-            >
-              {t('plugins.agents')}
-            </TabsTrigger>
-          </TabsList>
+        <div className="sticky -top-4 z-10 -mx-5 -mt-4 flex flex-wrap items-center justify-between gap-3 border-b bg-background px-5 py-3">
+          <div className="flex items-center gap-2">
+            {showBackButton ? (
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={onClose}
+                aria-label={t('plugins.backToChat')}
+              >
+                <ArrowLeftIcon />
+              </Button>
+            ) : null}
+            <TabsList className="h-8" aria-label={t('plugins.sections')}>
+              <TabsTrigger
+                ref={activeTab === 'extensions' ? initialFocusRef : undefined}
+                value="extensions"
+              >
+                {t('plugins.extensions')}
+              </TabsTrigger>
+              <TabsTrigger
+                ref={activeTab === 'mcp' ? initialFocusRef : undefined}
+                value="mcp"
+              >
+                {t('plugins.mcp')}
+              </TabsTrigger>
+              <TabsTrigger
+                ref={activeTab === 'skills' ? initialFocusRef : undefined}
+                value="skills"
+              >
+                {t('plugins.skills')}
+              </TabsTrigger>
+              <TabsTrigger
+                ref={activeTab === 'agents' ? initialFocusRef : undefined}
+                value="agents"
+              >
+                {t('plugins.agents')}
+              </TabsTrigger>
+            </TabsList>
+          </div>
           {workspaceSelect(false)}
         </div>
       ) : null}
@@ -190,6 +213,7 @@ export function PluginManagerPage({
         {activeTab === 'extensions' ? (
           <ExtensionsManagerPage
             key={`extensions-${pageRevision}`}
+            managed={managedExtensions}
             onClose={onClose}
             embedded={embedded}
           />

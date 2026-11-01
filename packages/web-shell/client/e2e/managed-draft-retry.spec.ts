@@ -31,6 +31,8 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
         return route.fulfill({ json: { supported: false, data: [] } });
       const path = new URL(route.request().url()).pathname;
       const body = route.request().postDataJSON();
+      if (path.endsWith('/user-messages/query'))
+        return route.fulfill({ json: { paused: false, messages: [] } });
       if (path.endsWith('/sessions/query'))
         return route.fulfill({ json: { data: sessions, hasMore: false } });
       if (path.endsWith('/sessions/get'))

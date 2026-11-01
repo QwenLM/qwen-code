@@ -2,6 +2,8 @@
 
 [English](2026-10-02-managed-workspace-w2-cwd-change.md) | [简体中文](2026-10-02-managed-workspace-w2-cwd-change.zh-CN.md)
 
+Current status: new directory-change admission and UI are retired; only existing operation query/settlement remains. See [retirement design](2026-10-26-retire-managed-cwd-change.md).
+
 Status: implemented in this change. Part of [proposal #12380](https://github.com/QwenLM/qwen-code/issues/12380) ("W2 same-Workspace cwd change: controlled directory-change admission and settlement; public/WebShell routes remain `planned`" in the 2026-10-02 delivery snapshot).
 Research baseline: main `d5c22d336b` (2026-10-02); integrated onto the later merges #13138 (W1b, V31), #13135 + #13223 (bound close, V32), #13142 (D8a, contract v1.29.0, V33), #13194 (bound archive/delete) and #13112 (bound later turns) — the PR merges origin/main past all of them, and the migration renumbered to V46 after #13090 took V34, the tool profile took V35, the session-journal chain took V36–V39 (`V36` activation, `V37` event-type index, `V38` deferral marker, `V39` sequence index), the session-creator record plus the CSI chain took V40–V44, and the task journal took V45 meanwhile.
 The target contract is [Workspace v1.12, section 4](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-context.en.md) and the in-repo reviewed OpenAPI contract v1.27.0, which already pins the two `planned` routes and their schemas.
