@@ -556,8 +556,12 @@ export class SkillManager {
         // that empty array would empty the level for every reader, so keep the
         // last good list instead. A partial scan keeps what it read, so a
         // single unreadable skill does not hide the rest of the level.
+        // Extension skills come from the loaded extension snapshot, which
+        // reports a failed plugin root by dropping its own skills; retaining
+        // the previous list there would advertise skills the extension no
+        // longer loads.
         const retained =
-          levelHasErrors && levelSkills.length === 0
+          level !== 'extension' && levelHasErrors && levelSkills.length === 0
             ? previousCache?.get(level)
             : undefined;
         skillsCache.set(level, retained ?? levelSkills);
