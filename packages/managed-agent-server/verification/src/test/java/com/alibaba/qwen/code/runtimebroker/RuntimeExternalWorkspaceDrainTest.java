@@ -30,6 +30,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -246,6 +247,42 @@ class RuntimeExternalWorkspaceDrainTest {
             assertEquals(ToolExecutionRecord.State.PREPARED,
                     fixture.executions.findByExecutionCallId(prepared.getExecutionCallId()).getState());
             assertTrue(fixture.events.isEmpty());
+        }
+    }
+
+    @Test
+    void restartLostWithCommittedReceiptDrainsPastTheStaleSessionAndReleases() {
+        try (var fixture = new Fixture()) {
+            fixture.acquireAndExecute();
+            fixture.failCleanup = true;
+            fixture.service.requestHarnessDrain("tenant", "harness");
+            assertThrows(CompletionException.class, fixture::drain);
+            var receipt = fixture.binding().getDrainReceipt();
+            assertNotNull(receipt);
+            fixture.service.close();
+            // The broker restart fences the drained binding LOST (invalidateBinding)
+            // while its committed stop receipt survives; the close must admit that
+            // receipt instead of permanently refusing and fencing the storage holder.
+            var lost = fixture.bindings.findById("binding");
+            assertEquals(RuntimeBindingRecord.State.DRAINING, lost.getState());
+            fixture.clock.now = fixture.clock.now.plusSeconds(120);
+            // invalidateBinding claims the operation before fencing READY to LOST,
+            // and the fence CAS requires that live operation.
+            var claim = fixture.bindings.claimOperation("binding", "broker", Duration.ofMinutes(1));
+            assertNotNull(claim);
+            var fenced = fixture.bindings.compareAndSet(claim, claim.withState(
+                    RuntimeBindingRecord.State.LOST, claim.getLease(), fixture.clock.instant()));
+            assertNotNull(fenced);
+            fixture.service = fixture.newService();
+            fixture.events.clear();
+            fixture.failCleanup = false;
+            // R2-1: the close of a receipt-backed LOST binding must NOT be
+            // refused with the permanent workspace_close_execution_unsettled.
+            assertDoesNotThrow(fixture::drain);
+            // No new worker stop: the saved receipt is reused for the retired cleanup.
+            assertEquals(List.of("cleanup"), fixture.events);
+            assertEquals(receipt, fixture.binding().getDrainReceipt());
+            assertEquals(RuntimeBindingRecord.State.RELEASED, fixture.binding().getState());
         }
     }
 
