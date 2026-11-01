@@ -1028,6 +1028,7 @@ export function createMinimalSettings(): LoadedSettings {
         }
       : {}),
     ...(operator.privacy ? { privacy: operator.privacy } : {}),
+    ...(operator.model ? { model: operator.model } : {}),
   };
   const emptySettingsFile: SettingsFile = {
     path: '',

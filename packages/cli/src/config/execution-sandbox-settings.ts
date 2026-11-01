@@ -66,6 +66,7 @@ type OperatorSettingsScope = SandboxSettingsInput & {
   /** Settings format version, used to date the legacy usage-statistics key. */
   $version?: unknown;
   privacy?: { usageStatisticsEnabled?: unknown };
+  model?: { catalogRefresh?: unknown };
   /** Pre-v2 location, migrated to `privacy.*` by a normal settings load. */
   usageStatisticsEnabled?: unknown;
 };
@@ -103,12 +104,14 @@ export function readOperatorSandboxSettings(): SandboxSettingsInput {
 }
 
 /**
- * The operator settings bare mode keeps: sandbox confinement, plus the
- * usage-statistics choice so `--bare` cannot turn a privacy opt-out back on.
+ * The operator settings bare mode keeps: sandbox confinement, the
+ * usage-statistics choice so `--bare` cannot turn a privacy opt-out back on,
+ * and the models.dev refresh choice.
  * Scopes resolve like a normal load (system over user over system defaults).
  */
 export function readBareModeOperatorSettings(): SandboxSettingsInput & {
   privacy?: { usageStatisticsEnabled: boolean };
+  model?: { catalogRefresh: boolean };
 } {
   const scopes = readOperatorSettingsScopes();
   const usageStatisticsEnabled = scopes.reduce<boolean | undefined>(
@@ -125,11 +128,19 @@ export function readBareModeOperatorSettings(): SandboxSettingsInput & {
     },
     undefined,
   );
+  const catalogRefresh = scopes.reduce<boolean | undefined>(
+    (current, scope) =>
+      typeof scope.model?.catalogRefresh === 'boolean'
+        ? scope.model.catalogRefresh
+        : current,
+    undefined,
+  );
   return {
     ...sandboxSettingsFromScopes(scopes),
     ...(usageStatisticsEnabled === undefined
       ? {}
       : { privacy: { usageStatisticsEnabled } }),
+    ...(catalogRefresh === undefined ? {} : { model: { catalogRefresh } }),
   };
 }
 

@@ -195,6 +195,22 @@ describe('operator execution sandbox policy', () => {
       expect(merged.privacy?.usageStatisticsEnabled).toBe(true);
     }
   });
+  it('bare mode resolves the model catalog refresh with normal scope precedence', () => {
+    write(defaults, { model: { catalogRefresh: false } });
+    write(user, { model: { catalogRefresh: true } });
+    write(system, { model: { catalogRefresh: false } });
+    for (const merged of normalAndBareMerged()) {
+      expect(merged.model?.catalogRefresh).toBe(false);
+    }
+    write(system, {});
+    for (const merged of normalAndBareMerged()) {
+      expect(merged.model?.catalogRefresh).toBe(true);
+    }
+  });
+  it('bare mode leaves the model catalog refresh unset when no scope configures it', () => {
+    write(user, { model: { catalogRefresh: 'no' } });
+    expect(createMinimalSettings().merged.model?.catalogRefresh).toBeUndefined();
+  });
   it('bare mode leaves usage statistics unset when no scope configures it', () => {
     write(user, { privacy: { usageStatisticsEnabled: 'no' } });
     expect(
