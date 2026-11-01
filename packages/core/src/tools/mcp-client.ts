@@ -106,6 +106,12 @@ export const MCP_VERSION_NEGOTIATION_FALLBACK_HEADROOM_MS =
   MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS;
 export const MCP_APPS_EXTENSION_ID = 'io.modelcontextprotocol/ui';
 export const MCP_APP_RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
+/**
+ * Upper bound on `tools/list` round-trips for one server. The @google/genai
+ * pager this walk replaced stopped after 100 tools, so a 100-page ceiling is
+ * never stricter for a server that returns at least one tool per page.
+ */
+export const MCP_MAX_TOOL_LIST_PAGES = 100;
 
 const debugLogger = createDebugLogger('MCP');
 const AUTOMATIC_MCP_OAUTH_TIMEOUT_MS = 60_000;
@@ -273,6 +279,27 @@ function isStreamableHttpGetSseRequest(init?: RequestInit): boolean {
 }
 
 /**
+ * Whether the Agent Plugin transport must refuse redirects: it may only reach
+ * the address it was configured with, and a configured or bearer credential
+ * makes a forwarded 30x a credential leak.
+ *
+ * The SDK resolves redirects outside the compatibility fetch, against
+ * `requestInit.redirect`, so both layers have to be told. Asking the same
+ * question in one place keeps them from disagreeing.
+ */
+function agentPluginForbidsRedirect(
+  mcpServerConfig: MCPServerConfig | undefined,
+  headers: Headers | undefined,
+): boolean {
+  return (
+    mcpServerConfig?.agentPluginV1 === true &&
+    ((mcpServerConfig.headers !== undefined &&
+      Object.keys(mcpServerConfig.headers).length > 0) ||
+      headers?.has('authorization') === true)
+  );
+}
+
+/**
  * Wraps fetch to preserve OAuth challenges before the SDK discards response
  * metadata and to normalize conventional "GET not supported" rejections of
  * the optional Streamable HTTP GET SSE request to the SDK's unsupported
@@ -297,11 +324,10 @@ export function createStreamableHttpCompatibilityFetch(
     const requestHeaders = new Headers(
       init?.headers ?? (input instanceof Request ? input.headers : undefined),
     );
-    const stopAgentPluginRedirect =
-      mcpServerConfig?.agentPluginV1 === true &&
-      ((mcpServerConfig.headers !== undefined &&
-        Object.keys(mcpServerConfig.headers).length > 0) ||
-        requestHeaders.has('authorization'));
+    const stopAgentPluginRedirect = agentPluginForbidsRedirect(
+      mcpServerConfig,
+      requestHeaders,
+    );
     const effectiveInit = stopAgentPluginRedirect
       ? { ...init, redirect: 'manual' as const }
       : init;
@@ -1352,13 +1378,20 @@ async function createTransportWithOAuth(
   try {
     if (mcpServerConfig.httpUrl) {
       // Create HTTP transport with OAuth token
+      const oauthHeaders = {
+        ...mcpServerConfig.headers,
+        Authorization: `Bearer ${accessToken}`,
+      };
       const oauthTransportOptions: StreamableHTTPClientTransportOptions = {
         fetch: createMcpStreamableHttpFetch(mcpServerName, mcpServerConfig),
         requestInit: {
-          headers: {
-            ...mcpServerConfig.headers,
-            Authorization: `Bearer ${accessToken}`,
-          },
+          headers: oauthHeaders,
+          ...(agentPluginForbidsRedirect(
+            mcpServerConfig,
+            new Headers(oauthHeaders),
+          )
+            ? { redirect: 'manual' as const }
+            : {}),
         },
       };
 
@@ -1634,22 +1667,83 @@ async function discoverToolsWithMetadata(
     const listedTools: Array<
       Awaited<ReturnType<Client['listTools']>>['tools'][number]
     > = [];
+    let collidedToolNames: string[] = [];
     let didListTools = false;
-    const listTools = async (params?: { cursor?: string }) => {
-      // Clients without getProtocolEra (tests and the genai adapter) keep
-      // the typed helper. Modern sessions use it only when `tools` is
-      // declared; otherwise the v2 helper returns [] without a wire request.
-      const result =
-        typeof mcpClient.getProtocolEra !== 'function' ||
-        canUseModernTypedHelper(mcpClient, 'tools')
-          ? await mcpClient.listTools(params)
-          : await mcpClient.request(
-              { method: 'tools/list', params: params ?? {} },
-              ListToolsResultSchema,
-            );
+    // Clients without getProtocolEra (tests and the genai adapter) keep the
+    // typed helper. Modern sessions use it only when `tools` is declared;
+    // otherwise the v2 helper returns [] without a wire request.
+    const requestTools = async (params?: { cursor?: string }) =>
+      typeof mcpClient.getProtocolEra !== 'function' ||
+      canUseModernTypedHelper(mcpClient, 'tools')
+        ? await mcpClient.listTools(params)
+        : await mcpClient.request(
+            { method: 'tools/list', params: params ?? {} },
+            ListToolsResultSchema,
+          );
+    // Walk the whole cursor chain inside one call: the duplicate counts have to
+    // span every page, and a retry (which restarts at the first page) must
+    // start from empty bookkeeping. @google/genai is then handed a single
+    // terminal page — its pager terminates by counting yielded tools, so a page
+    // filtered down to nothing would leave it issuing tools/list forever when a
+    // server repeats a cursor.
+    const listTools = async () => {
+      const tools: typeof listedTools = [];
+      const declarationCounts = new Map<string, number>();
+      const seenCursors = new Set<string>();
+      let pages = 0;
+      let cursor: string | undefined;
+      do {
+        if (pages >= MCP_MAX_TOOL_LIST_PAGES) {
+          // A server that mints a fresh cursor per call never repeats one and
+          // never terminates the chain, so bound the walk itself.
+          debugLogger.warn(
+            `MCP server '${mcpServerName}' stopped paginating tools/list ` +
+              `after ${MCP_MAX_TOOL_LIST_PAGES} pages.`,
+          );
+          break;
+        }
+        pages++;
+        const result = await requestTools(
+          cursor === undefined ? undefined : { cursor },
+        );
+        for (const tool of result.tools) {
+          tools.push(tool);
+          declarationCounts.set(
+            tool.name,
+            (declarationCounts.get(tool.name) ?? 0) + 1,
+          );
+        }
+        const next = result.nextCursor;
+        // @google/genai's pager treats a falsy cursor as the end of the chain,
+        // so `''` is terminal here too — otherwise the last page is fetched
+        // twice and every tool on it is counted as a duplicate.
+        if (!next) break;
+        // A server that ignores the cursor would otherwise loop here forever.
+        if (seenCursors.has(next)) {
+          debugLogger.warn(
+            `MCP server '${mcpServerName}' repeated cursor '${next}' while ` +
+              `listing tools; stopping after ${tools.length} declarations.`,
+          );
+          break;
+        }
+        seenCursors.add(next);
+        cursor = next;
+      } while (cursor !== undefined);
       didListTools = true;
-      listedTools.push(...result.tools);
-      return result;
+      listedTools.length = 0;
+      listedTools.push(...tools);
+      collidedToolNames = [...declarationCounts]
+        .filter(([, count]) => count > 1)
+        .map(
+          ([name, count]) => `'${name}' (${count} conflicting declarations)`,
+        );
+      // A duplicated name has no single command behind `tools/call`, so no
+      // declaration of it can be advertised safely: drop the whole group
+      // rather than electing an arbitrary one (#15741).
+      return {
+        tools: tools.filter((tool) => declarationCounts.get(tool.name) === 1),
+        nextCursor: undefined,
+      };
     };
     // @google/genai still types this structural adapter against SDK v1. Its
     // discovery path only calls listTools(); execution stays on the v2 client.
@@ -1667,6 +1761,14 @@ async function discoverToolsWithMetadata(
     if (!Array.isArray(tool.functionDeclarations)) {
       // This is a valid case for a prompt-only server
       return { tools: [], hadVisibilityFilteredTools: false };
+    }
+
+    if (collidedToolNames.length > 0) {
+      debugLogger.warn(
+        `MCP server '${mcpServerName}' returned duplicate tool names ` +
+          `${collidedToolNames.join(', ')}. Skipping every declaration of ` +
+          `each duplicated name.`,
+      );
     }
 
     // Fetch raw tool list from MCP client to get annotations (readOnlyHint, etc.)
@@ -1762,7 +1864,14 @@ async function discoverToolsWithMetadata(
         );
       }
     }
-    return { tools: discoveredTools, hadVisibilityFilteredTools };
+    // A server whose every declaration collided is not an empty server: the
+    // caller must not report it as "found nothing" and mark it DISCONNECTED,
+    // since the warning above already named the colliding tools.
+    return {
+      tools: discoveredTools,
+      hadVisibilityFilteredTools:
+        hadVisibilityFilteredTools || collidedToolNames.length > 0,
+    };
   } catch (error) {
     if (!isMethodNotFound(error)) {
       debugLogger.error(
@@ -2642,6 +2751,18 @@ export async function createTransport(
       transportOptions.requestInit = {
         headers: mcpServerConfig.headers,
       };
+    }
+
+    // The compatibility fetch answers the request it issues, but the SDK
+    // resolves a redirect before that, against this field.
+    if (
+      transportOptions.requestInit &&
+      agentPluginForbidsRedirect(
+        mcpServerConfig,
+        new Headers(transportOptions.requestInit.headers as HeadersInit),
+      )
+    ) {
+      transportOptions.requestInit.redirect = 'manual';
     }
 
     return new StreamableHTTPClientTransport(
