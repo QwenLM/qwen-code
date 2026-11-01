@@ -152,6 +152,25 @@ export function isQwenFamilyWireModel(model: string | undefined): boolean {
 }
 
 /**
+ * Qwen families beyond the legacy qwen3.8-max prefix that speak the same
+ * tiered `reasoning_effort` contract: the invitation-only latest-series
+ * previews and the qwen4 family. Shared by the wire gate and the CLI
+ * controls fallback so the family fact lives in one place. The `qwen4`
+ * prefix is intentionally unanchored (maintainer directive): every current
+ * and future qwen4 variant takes the tiered contract.
+ */
+export function isTieredEffortQwenPrefix(model: string | undefined): boolean {
+  if (!model) {
+    return false;
+  }
+  const normalized = model.toLowerCase();
+  return (
+    normalized.startsWith('qwen-latest-series-invite-') ||
+    normalized.startsWith('qwen4')
+  );
+}
+
+/**
  * A configured Qwen reasoning protocol takes precedence over the legacy
  * qwen3.8-max family fallback. Other providers use independent wire rules.
  */
@@ -170,5 +189,8 @@ export function isTieredEffortWireModel(
       reasoning.disableField === 'reasoning_effort'
     );
   }
-  return model.toLowerCase().startsWith('qwen3.8-max');
+  return (
+    model.toLowerCase().startsWith('qwen3.8-max') ||
+    isTieredEffortQwenPrefix(model)
+  );
 }
