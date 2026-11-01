@@ -816,6 +816,81 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     }
   });
 
+  it('does not revalidate project Skills into a safe-mode catalog', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-safe-refresh-'),
+    );
+    try {
+      const directory = path.join(workspace, '.qwen', 'skills', 'hidden');
+      await fsp.mkdir(directory, { recursive: true });
+      await fsp.writeFile(
+        path.join(directory, 'SKILL.md'),
+        '---\nname: hidden\ndescription: Hidden\n---\nBODY_hidden',
+      );
+      vi.stubEnv('QWEN_CODE_SAFE_MODE', '1');
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      const refresh = vi.spyOn(SkillManager.prototype, 'refreshCache');
+      const provider = createWorkspaceSkillsStatusProvider();
+      expect(
+        (await provider(workspace)).skills.map((skill) => skill.name),
+      ).not.toContain('hidden');
+      // One revalidation window later: the fallback scan must not run, since
+      // its explicit levels would bypass the safe-mode restriction.
+      clock.mockReturnValue(1_000_000 + SKILLS_REVALIDATE_INTERVAL_MS);
+      expect(
+        (await provider(workspace)).skills.map((skill) => skill.name),
+      ).not.toContain('hidden');
+      expect(
+        refresh.mock.calls.filter(([options]) => options?.levels),
+      ).toHaveLength(0);
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('does not rebuild or watch after dispose', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-disposed-'),
+    );
+    try {
+      const provider = createWorkspaceSkillsStatusProvider();
+      await provider(workspace);
+      provider.dispose?.();
+      const startWatching = vi.spyOn(SkillManager.prototype, 'startWatching');
+      expect((await provider(workspace)).initialized).toBe(false);
+      expect(startWatching).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('lists Skills from settings.skills.directories', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-custom-catalog-'),
+    );
+    const custom = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-custom-dir-'),
+    );
+    try {
+      const directory = path.join(custom, 'extra');
+      await fsp.mkdir(directory, { recursive: true });
+      await fsp.writeFile(
+        path.join(directory, 'SKILL.md'),
+        '---\nname: extra\ndescription: Extra\n---\nBODY_extra',
+      );
+      await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
+      await fsp.writeFile(
+        path.join(workspace, '.qwen', 'settings.json'),
+        JSON.stringify({ skills: { directories: [custom] } }),
+      );
+      const status = await createWorkspaceSkillsStatusProvider()(workspace);
+      expect(status.skills.map((skill) => skill.name)).toContain('extra');
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+      await fsp.rm(custom, { recursive: true, force: true });
+    }
+  });
+
   it('does not leave a watcher behind when an invalidation discards the build', async () => {
     const workspace = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'qwen-skills-discard-'),
@@ -1264,6 +1339,63 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       await fsp.rm(workspace, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'keeps the retained catalog when a revalidation cannot read a level',
+    async () => {
+      const workspace = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-skills-unreadable-'),
+      );
+      const startedAt = 1_000_000;
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(startedAt);
+      try {
+        const skillsRoot = path.join(workspace, '.qwen', 'skills');
+        await fsp.mkdir(path.join(skillsRoot, 'kept'), { recursive: true });
+        await fsp.writeFile(
+          path.join(skillsRoot, 'kept', 'SKILL.md'),
+          '---\nname: kept\ndescription: Kept\n---\nBODY_kept',
+        );
+        const provider = createWorkspaceSkillsStatusProvider();
+        expect(
+          (await provider(workspace)).skills.map((skill) => skill.name),
+        ).toContain('kept');
+
+        await fsp.chmod(skillsRoot, 0o000);
+        try {
+          let rescanDone: () => void = () => {};
+          const rescan = new Promise<void>((resolve) => {
+            rescanDone = resolve;
+          });
+          const originalRefreshCache = SkillManager.prototype.refreshCache;
+          vi.spyOn(SkillManager.prototype, 'refreshCache').mockImplementation(
+            async function (
+              this: SkillManager,
+              options?: Parameters<SkillManager['refreshCache']>[0],
+            ) {
+              try {
+                return await originalRefreshCache.call(this, options);
+              } finally {
+                if (options?.levels) rescanDone();
+              }
+            },
+          );
+          clock.mockReturnValue(startedAt + SKILLS_REVALIDATE_INTERVAL_MS);
+          await provider(workspace);
+          await rescan;
+          // The unreadable directory reports through onDiscoveryError and
+          // yields [], which must not replace the last good list.
+          expect(
+            (await provider(workspace)).skills.map((skill) => skill.name),
+          ).toContain('kept');
+        } finally {
+          await fsp.chmod(skillsRoot, 0o755);
+        }
+      } finally {
+        clock.mockRestore();
+        await fsp.rm(workspace, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.each(['safe', 'untrusted', 'inert-untrusted'] as const)(
     'does not load extensions in %s mode',

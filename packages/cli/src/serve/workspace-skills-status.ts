@@ -162,6 +162,7 @@ type SkillManagerConfigShim = Pick<
   | 'getProjectRoot'
   | 'getActiveExtensions'
   | 'getDisabledSkillLevels'
+  | 'getCustomSkillDirs'
 >;
 
 interface WorkspaceSkillManagers {
@@ -191,7 +192,18 @@ export function createWorkspaceSkillsStatusProvider(
   // settings, so it must not install its managers; the next read rebuilds.
   const epochs = new Map<string, number>();
   const inFlight = new Map<string, Promise<ServeWorkspaceSkillsStatus>>();
+  let disposed = false;
   const provider = ((workspaceCwd: string) => {
+    // A read that lands after `dispose()` must not rebuild a manager and start
+    // a watcher the teardown sweep has already passed.
+    if (disposed) {
+      return Promise.resolve({
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd,
+        initialized: false,
+        skills: [],
+      } satisfies ServeWorkspaceSkillsStatus);
+    }
     const pending = inFlight.get(workspaceCwd);
     if (pending) return pending;
     const epoch = epochs.get(workspaceCwd) ?? 0;
@@ -222,6 +234,7 @@ export function createWorkspaceSkillsStatusProvider(
     inFlight.delete(workspaceCwd);
   };
   provider.dispose = () => {
+    disposed = true;
     for (const workspaceCwd of [...managers.keys()]) {
       provider.invalidate?.(workspaceCwd);
     }
@@ -324,6 +337,19 @@ async function buildWorkspaceSkillsStatus(
             )
           : [],
       );
+      // Same normalization as loadCliConfig, which drops custom directories in
+      // safe mode. The child loads them, so the catalog has to scan them too.
+      const customSkillDirs = safeMode
+        ? []
+        : (Array.isArray(settings.merged.skills?.directories)
+            ? settings.merged.skills.directories
+            : []
+          )
+            .filter(
+              (dir): dir is string =>
+                typeof dir === 'string' && dir.trim().length > 0,
+            )
+            .map((dir) => dir.trim());
       let extensionManager: ExtensionManager | undefined;
       const extensionSkillStates = new Map<Extension, Map<string, boolean>>();
       if (workspaceTrusted && !safeMode) {
@@ -380,6 +406,7 @@ async function buildWorkspaceSkillsStatus(
           extensionManager?.getLoadedExtensions().filter((e) => e.isActive) ??
           [],
         getDisabledSkillLevels: () => disabledLevels,
+        getCustomSkillDirs: () => customSkillDirs,
       };
       const skillManager = new SkillManager(shim as Config);
       if (!safeMode) {
@@ -425,7 +452,9 @@ async function buildWorkspaceSkillsStatus(
       await startSkillsWatcher(workspaceCwd, skillManager);
     }
     const extensions = extensionManager?.getLoadedExtensions() ?? [];
-    if (watch && managers.get(workspaceCwd) === cached) {
+    // The fallback scan passes explicit levels, which bypass the manager's
+    // safe-mode default, so it must follow the same trust gate as the watcher.
+    if (watchEnabled && managers.get(workspaceCwd) === cached) {
       scheduleSkillsRevalidation(workspaceCwd, cached, managers);
     }
     const skills = await skillManager.listSkills({});

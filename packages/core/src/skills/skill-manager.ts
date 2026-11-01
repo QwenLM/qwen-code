@@ -535,12 +535,13 @@ export class SkillManager {
     // bubble up to the level boundary.
     const settled = await Promise.allSettled(
       levels.map(async (level) => {
-        const levelSkills = await this.listSkillsAtLevel(
-          level,
-          onDiscoveryError,
-        );
+        let levelHasErrors = false;
+        const levelSkills = await this.listSkillsAtLevel(level, () => {
+          levelHasErrors = true;
+          onDiscoveryError();
+        });
         debugLogger.debug(`Loaded ${levelSkills.length} ${level} level skills`);
-        return [level, levelSkills] as const;
+        return [level, levelSkills, levelHasErrors] as const;
       }),
     );
 
@@ -549,9 +550,18 @@ export class SkillManager {
     for (let i = 0; i < settled.length; i++) {
       const result = settled[i];
       if (result.status === 'fulfilled') {
-        const [level, levelSkills] = result.value;
-        skillsCache.set(level, levelSkills);
-        totalSkills += levelSkills.length;
+        const [level, levelSkills, levelHasErrors] = result.value;
+        // An unreadable directory is not a rejection: `loadSkillsFromDir`
+        // reports it through `onDiscoveryError` and returns `[]`. Publishing
+        // that empty array would empty the level for every reader, so keep the
+        // last good list instead. A partial scan keeps what it read, so a
+        // single unreadable skill does not hide the rest of the level.
+        const retained =
+          levelHasErrors && levelSkills.length === 0
+            ? previousCache?.get(level)
+            : undefined;
+        skillsCache.set(level, retained ?? levelSkills);
+        totalSkills += (retained ?? levelSkills).length;
       } else {
         errors.push(result.reason);
         onDiscoveryError();
