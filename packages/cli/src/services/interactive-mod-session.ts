@@ -7,6 +7,11 @@
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { ModToolCall } from '@qwen-code/qwen-code-core/mods/tool-events.js';
 import type { ModCommandPresentation } from '@qwen-code/qwen-code-core/mods/types.js';
+import type {
+  ModRenderElement,
+  ModRenderInput,
+  ModRenderSite,
+} from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { CommandKind, type SlashCommand } from '../ui/commands/types.js';
 import { sanitizeTerminalLine } from '../ui/utils/textUtils.js';
@@ -44,6 +49,14 @@ export function getInteractiveModSession(
   return config ? sessions.get(config) : undefined;
 }
 
+/** A tree the band draws, and the plugin, or `hooks`, that drew it. */
+export interface ModBand {
+  readonly tree: ModRenderElement;
+  readonly owner: string;
+  /** Counts the answers drawn, so each is drawn afresh. */
+  readonly revision: number;
+}
+
 export class InteractiveModSession implements ICommandLoader {
   private readonly session: ModSession;
   private readonly lifetime = new AbortController();
@@ -61,6 +74,11 @@ export class InteractiveModSession implements ICommandLoader {
     isFullscreen: false,
     columns: 80,
   };
+  private sites: readonly ModRenderSite[] = [];
+  // The band's last tree, kept until a new answer lands; none draws nothing.
+  private band?: ModBand;
+  private revision = 0;
+  private readonly bandListeners = new Set<() => void>();
   private unregisterCleanup: () => void;
 
   constructor(
@@ -71,6 +89,16 @@ export class InteractiveModSession implements ICommandLoader {
     this.session = ModSession.create(config, settings, {
       surface: 'terminal',
       presentation: () => this.presentation,
+      sites: () => this.sites,
+      draw: (tree, owner) => {
+        const band =
+          tree.type === 'engine'
+            ? undefined
+            : { tree, owner, revision: ++this.revision };
+        if (!band && !this.band) return;
+        this.band = band;
+        for (const listener of this.bandListeners) listener();
+      },
       log: (entry, plugin, sessionId) =>
         this.emit(
           `[Mod ${sanitizeTerminalLine(plugin)}] ${entry.text}`,
@@ -83,7 +111,9 @@ export class InteractiveModSession implements ICommandLoader {
     });
   }
 
-  initialize(): Promise<void> {
+  /** Loads the Mods once; `sites` names the render sites the host draws. */
+  initialize(sites: readonly ModRenderSite[] = []): Promise<void> {
+    if (!this.initialization) this.sites = sites;
     this.initialization ??= this.session.initialize(this.lifetime.signal).then(
       () => {
         this.session.flushLogs();
@@ -120,6 +150,17 @@ export class InteractiveModSession implements ICommandLoader {
   setPresentation(presentation: ModCommandPresentation): void {
     this.presentation = { ...presentation };
   }
+
+  setRenderInput(input: ModRenderInput): void {
+    if (!this.closing) this.session.setRenderInput(input);
+  }
+
+  readonly subscribeBand = (listener: () => void): (() => void) => {
+    this.bandListeners.add(listener);
+    return () => this.bandListeners.delete(listener);
+  };
+
+  readonly getBand = (): ModBand | undefined => this.band;
 
   subscribe(listener: (text: string) => void): () => void {
     this.listener = listener;
@@ -183,6 +224,8 @@ export class InteractiveModSession implements ICommandLoader {
       } finally {
         this.listener = undefined;
         this.logs.length = 0;
+        this.band = undefined;
+        for (const listener of this.bandListeners) listener();
         if (sessions.get(this.config) === this) sessions.delete(this.config);
       }
     })();

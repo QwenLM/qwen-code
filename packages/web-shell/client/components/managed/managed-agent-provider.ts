@@ -49,6 +49,27 @@ export type ManagedInputBlock = components['schemas']['InputBlock'];
 export type ManagedSessionSkills =
   components['schemas']['WebShellSessionSkills'];
 export type ManagedSessionMcp = components['schemas']['PublicMcpCatalog'];
+export type ManagedWorkspaceFileLocator =
+  | { sessionId: string; workspaceId?: never; cwdRelative?: never }
+  | { sessionId?: never; workspaceId: string; cwdRelative: string };
+
+export type ManagedWorkspaceFileQueryRequest = ManagedWorkspaceFileLocator &
+  Omit<
+    components['schemas']['WebShellWorkspaceFileQueryRequest'],
+    'sessionId' | 'workspaceId' | 'cwdRelative'
+  >;
+
+export type ManagedWorkspaceFileReadRequest = ManagedWorkspaceFileLocator &
+  Omit<
+    components['schemas']['WebShellWorkspaceFileReadRequest'],
+    'sessionId' | 'workspaceId' | 'cwdRelative'
+  >;
+
+export type ManagedWorkspaceFileUploadRequest = ManagedWorkspaceFileLocator & {
+  path: string;
+  expectedScopeRevision: string;
+  uploadId: string;
+};
 
 export function isManagedApprovalMode(
   value: unknown,
@@ -150,9 +171,15 @@ export type ManagedLifecycleOperation =
 export type ManagedExportPage = components['schemas']['WebShellExportPage'];
 export type ManagedExportItem = components['schemas']['WebShellItem'];
 
+export type ManagedSessionWorktree =
+  components['schemas']['WebShellSessionWorktree'];
+export type ManagedSessionWorktreeOptions =
+  components['schemas']['WebShellSessionWorktreeOptions'];
+
 export interface ManagedAgentSessionSummary {
   sessionId: string;
   agentId?: string;
+  worktree?: ManagedSessionWorktree | null;
   approvalMode?: ManagedApprovalMode;
   initialApprovalMode?: ManagedApprovalMode;
   approvalRevision?: number;
@@ -193,7 +220,6 @@ export interface ManagedAgentSessionSummary {
     artifacts?: boolean;
     /** The caller may submit later Turns to this Workspace-bound Session. */
     workspaceTurns?: boolean;
-    cwdChange?: boolean;
     modelChange?: boolean;
     contextCompression?: boolean;
     approvalModeChange?: boolean;
@@ -232,7 +258,7 @@ export interface ManagedAgentSessionEvent {
   turnId: string;
   data?: unknown;
   /**
-   * Projected from a durable snapshot item rather than a raw event. The
+   * Projected from a materialized Item rather than a raw event. The
    * server can retract its items (reconciliation), after which these
    * projections must not survive a resync.
    */
@@ -243,6 +269,7 @@ export interface ManagedAgentSessionTranscript {
   events: ManagedAgentSessionEvent[];
   olderCursor?: string;
   lastEventId: number;
+  history?: 'items';
 }
 
 export interface ManagedAgentTurnAdmission {
@@ -259,7 +286,6 @@ export interface ManagedAgentCommandOptions extends ManagedAgentRequestOptions {
   idempotencyKey: string;
 }
 
-export type ManagedCwdOperation = components['schemas']['WebShellCwdOperation'];
 export type ManagedContextCompressionOperation =
   components['schemas']['WebShellContextCompressionOperation'];
 export type ManagedTask = components['schemas']['WebShellTask'];
@@ -351,6 +377,7 @@ export interface ManagedAgentProvider {
     sessionId: string,
     options: ManagedAgentRequestOptions & { cursor?: string },
   ): Promise<ManagedExportPage>;
+  readonly exportConsistency?: 'live';
   readonly storageKey: string;
   readonly canCancel: boolean;
   /** Present when the provider can filter the complete Session history by title. */
@@ -502,18 +529,6 @@ export interface ManagedAgentProvider {
       ): Promise<ManagedTaskCancelOperation>;
     };
   };
-  readonly cwdChange?: {
-    submit(
-      sessionId: string,
-      request: { cwdRelative: string; expectedContextRevision: number },
-      options: ManagedAgentCommandOptions,
-    ): Promise<ManagedCwdOperation>;
-    query(
-      sessionId: string,
-      operationId: string,
-      options: ManagedAgentRequestOptions,
-    ): Promise<ManagedCwdOperation>;
-  };
   readonly contextCompression?: {
     submit(
       sessionId: string,
@@ -555,13 +570,22 @@ export interface ManagedAgentProvider {
   };
   readonly workspaceFiles?: {
     query(
-      request: components['schemas']['WebShellWorkspaceFileQueryRequest'],
+      request: ManagedWorkspaceFileQueryRequest,
       options: ManagedAgentRequestOptions,
     ): Promise<components['schemas']['WebShellWorkspaceFilePage']>;
     read(
-      request: components['schemas']['WebShellWorkspaceFileReadRequest'],
+      request: ManagedWorkspaceFileReadRequest,
       options: ManagedAgentRequestOptions,
     ): Promise<components['schemas']['WebShellWorkspaceFileSnapshot']>;
+    upload?(
+      request: ManagedWorkspaceFileUploadRequest,
+      data: Blob,
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellWorkspaceFileUploadResult']>;
+    queryUpload?(
+      uploadId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellWorkspaceFileUploadStatus']>;
   };
   readonly workspaceBinding?: {
     readonly agentId: string;
@@ -613,6 +637,7 @@ export interface ManagedAgentProvider {
         planMode?: boolean;
         skills?: ManagedSessionSkill[];
         extensionPins?: ManagedExtensionPin[];
+        worktree?: { baseRef?: string };
       },
       options: ManagedAgentCommandOptions,
     ): Promise<{ sessionId: string }>;
@@ -628,9 +653,30 @@ export interface ManagedAgentProvider {
         planMode?: boolean;
         skills?: ManagedSessionSkill[];
         extensionPins?: ManagedExtensionPin[];
+        worktree?: { baseRef?: string };
       },
       options: ManagedAgentCommandOptions,
     ): Promise<{ sessionId: string }>;
+  };
+  readonly sessionWorktrees?: {
+    options(
+      request: { workspaceId: string; cwdRelative: string; baseRef?: string },
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedSessionWorktreeOptions>;
+    list(
+      workspaceId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<{ data: ManagedSessionWorktree[] }>;
+    inspect(
+      workspaceId: string,
+      worktreeId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellSessionWorktreeInspection']>;
+    cleanup(
+      workspaceId: string,
+      worktreeId: string,
+      options: ManagedAgentCommandOptions,
+    ): Promise<ManagedSessionWorktree>;
   };
   listSessions(
     options: ManagedAgentRequestOptions & {

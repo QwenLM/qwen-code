@@ -10,6 +10,11 @@ import type {
 import type { components } from './generated/managed-agent-api';
 import type { ManagedMcpManagementSnapshot } from './managed-mcp-management-types';
 import type {
+  ManagedWorkspaceFileQueryRequest,
+  ManagedWorkspaceFileReadRequest,
+  ManagedWorkspaceFileUploadRequest,
+} from './managed-agent-provider';
+import type {
   ManagedArtifact,
   ManagedArtifactPage,
   ManagedArtifactResponse,
@@ -233,17 +238,43 @@ export class JavaManagedAgentClient {
   }
 
   queryWorkspaceFiles(
-    request: Schemas['WebShellWorkspaceFileQueryRequest'],
+    request: ManagedWorkspaceFileQueryRequest,
     signal?: AbortSignal,
   ): Promise<Schemas['WebShellWorkspaceFilePage']> {
     return this.post('/workspaces/files/query', request, signal);
   }
 
   readWorkspaceFile(
-    request: Schemas['WebShellWorkspaceFileReadRequest'],
+    request: ManagedWorkspaceFileReadRequest,
     signal?: AbortSignal,
   ): Promise<Schemas['WebShellWorkspaceFileSnapshot']> {
     return this.post('/workspaces/files/read', request, signal);
+  }
+
+  async uploadWorkspaceFile(
+    request: ManagedWorkspaceFileUploadRequest,
+    data: Blob,
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellWorkspaceFileUploadResult']> {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(request)) {
+      if (value !== undefined) query.set(key, value);
+    }
+    const response = await this.fetchRequest(
+      `/workspaces/files/upload?${query}`,
+      data,
+      signal,
+      false,
+      'application/octet-stream',
+    );
+    return (await response.json()) as Schemas['WebShellWorkspaceFileUploadResult'];
+  }
+
+  queryWorkspaceFileUpload(
+    uploadId: string,
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellWorkspaceFileUploadStatus']> {
+    return this.post('/workspaces/files/uploads/query', { uploadId }, signal);
   }
 
   workspaceDirectories(
@@ -311,11 +342,51 @@ export class JavaManagedAgentClient {
     return this.post('/transcript/query', request, signal);
   }
 
+  getRecentTranscriptItems(
+    request: Schemas['WebShellExportRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellExportPage']> {
+    return this.post('/transcript/items/query', request, signal);
+  }
+
   createSession(
     request: Schemas['WebShellCreateRequest'],
     signal?: AbortSignal,
   ): Promise<JavaAgentCommandAdmission> {
     return this.post('/sessions/create', request, signal);
+  }
+
+  worktreeOptions(
+    request: Schemas['WebShellSessionWorktreeOptionsRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellSessionWorktreeOptions']> {
+    return this.post('/workspaces/worktrees/options', request, signal);
+  }
+
+  listSessionWorktrees(
+    workspaceId: string,
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellSessionWorktreePage']> {
+    return this.post('/workspaces/worktrees/query', { workspaceId }, signal);
+  }
+
+  inspectSessionWorktree(
+    workspaceId: string,
+    worktreeId: string,
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellSessionWorktreeInspection']> {
+    return this.post(
+      '/workspaces/worktrees/inspect',
+      { workspaceId, worktreeId },
+      signal,
+    );
+  }
+
+  cleanupSessionWorktree(
+    request: Schemas['WebShellSessionWorktreeCleanupRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellSessionWorktree']> {
+    return this.post('/workspaces/worktrees/cleanup', request, signal);
   }
 
   submitTurn(
@@ -389,13 +460,6 @@ export class JavaManagedAgentClient {
     signal?: AbortSignal,
   ): Promise<Schemas['WebShellOperation']> {
     return this.post('/operations/query', request, signal);
-  }
-
-  changeCwd(
-    request: Schemas['WebShellChangeCwdRequest'],
-    signal?: AbortSignal,
-  ): Promise<Schemas['WebShellCwdOperation']> {
-    return this.post('/sessions/cwd/change', request, signal);
   }
 
   compressContext(
@@ -960,10 +1024,29 @@ export class JavaManagedAgentClient {
     signal: AbortSignal | undefined,
     stream: boolean,
   ): Promise<Response> {
+    return this.fetchRequest(
+      path,
+      JSON.stringify(body),
+      signal,
+      stream,
+      'application/json',
+    );
+  }
+
+  private async fetchRequest(
+    path: string,
+    body: BodyInit,
+    signal: AbortSignal | undefined,
+    stream: boolean,
+    contentType: string,
+  ): Promise<Response> {
     const supplied = await this.options.getHeaders?.();
     const headers = new Headers(supplied);
-    if (!headers.has('content-type')) {
-      headers.set('content-type', 'application/json');
+    if (
+      contentType === 'application/octet-stream' ||
+      !headers.has('content-type')
+    ) {
+      headers.set('content-type', contentType);
     }
     headers.set('accept', stream ? 'text/event-stream' : 'application/json');
     const response = await this.fetchImpl(
@@ -972,7 +1055,7 @@ export class JavaManagedAgentClient {
         method: 'POST',
         headers,
         credentials: this.credentials,
-        body: JSON.stringify(body),
+        body,
         signal,
       },
     );

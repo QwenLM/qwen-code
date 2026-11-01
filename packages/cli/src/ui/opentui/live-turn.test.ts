@@ -52,6 +52,7 @@ import { rewindBoundaryHistory } from './live-session-model.js';
 import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import type { Content } from '@google/genai';
 import { injectCapturedInput } from './early-input.js';
+import { ShellExecutionService } from '@qwen-code/qwen-code-core/services/shellExecutionService.js';
 import {
   foldBatch,
   imagePathsToParts,
@@ -208,6 +209,180 @@ describe('useOpenTuiLiveTurn submit paths', () => {
   function park(turn: number, call: WaitingCallInfo) {
     (live.turns[turn - 1].options as LivePromptOptions).onWaitingCall?.(call);
   }
+
+  it('controls only the current unique executing shell and promotes without cancelling its turn', async () => {
+    const write = vi
+      .spyOn(ShellExecutionService, 'writeToPty')
+      .mockImplementation(() => {});
+    const resize = vi
+      .spyOn(ShellExecutionService, 'resizePty')
+      .mockImplementation(() => {});
+    const scroll = vi
+      .spyOn(ShellExecutionService, 'scrollPty')
+      .mockImplementation(() => {});
+    const hook = renderHook(() => useOpenTuiLiveTurn({ config: {} as Config }));
+    try {
+      await act(async () => {
+        hook.result.current.scheduleTool('run_shell_command', {});
+      });
+      const options = live.turns[0].options as LivePromptOptions;
+      expect(hook.result.current.foregroundShell).toBeNull();
+      expect(hook.result.current.promoteShellToBackground()).toBe(false);
+      const promotion = new AbortController();
+      act(() =>
+        options.onExecutingShells?.([
+          { callId: 'shell', pid: 1234, promoteAbortController: promotion },
+        ]),
+      );
+      const owner = hook.result.current.foregroundShell!;
+      expect(owner).toMatchObject({ callId: 'shell', pid: 1234 });
+      expect(hook.result.current.writeShellInput(owner, 'a\x1b[D\r')).toBe(
+        true,
+      );
+      expect(hook.result.current.resizeShell(owner, 64, 12)).toBe(true);
+      expect(hook.result.current.scrollShell(owner, -1)).toBe(true);
+      expect(write).toHaveBeenCalledExactlyOnceWith(1234, 'a\x1b[D\r');
+      expect(resize).toHaveBeenCalledExactlyOnceWith(1234, 64, 12);
+      expect(scroll).toHaveBeenCalledExactlyOnceWith(1234, -1);
+      expect(
+        hook.result.current.writeShellInput({ ...owner, pid: 1235 }, 'x'),
+      ).toBe(false);
+      expect(
+        hook.result.current.writeShellInput({ ...owner, callId: 'other' }, 'x'),
+      ).toBe(false);
+      expect(
+        hook.result.current.writeShellInput(
+          { ...owner, turn: owner.turn - 1 },
+          'x',
+        ),
+      ).toBe(false);
+      act(() => {
+        expect(hook.result.current.promoteShellToBackground()).toBe(true);
+      });
+      expect(promotion.signal.reason).toEqual({ kind: 'background' });
+      expect(live.signals[0].aborted).toBe(false);
+      expect(hook.result.current.foregroundShell).toBeNull();
+      expect(hook.result.current.writeShellInput(owner, 'late')).toBe(false);
+      expect(hook.result.current.promoteShellToBackground()).toBe(false);
+      expect(write).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => live.waiters.shift()?.());
+      hook.unmount();
+      write.mockRestore();
+      resize.mockRestore();
+      scroll.mockRestore();
+    }
+  });
+
+  it('does not select an absent PID or an ambiguous PTY/controller', async () => {
+    const hook = renderHook(() => useOpenTuiLiveTurn({ config: {} as Config }));
+    try {
+      await act(async () => {
+        hook.result.current.scheduleTool('run_shell_command', {});
+      });
+      const options = live.turns[0].options as LivePromptOptions;
+      const a = new AbortController();
+      const b = new AbortController();
+      act(() =>
+        options.onExecutingShells?.([
+          { callId: 'no-pid', promoteAbortController: a },
+        ]),
+      );
+      expect(hook.result.current.foregroundShell).toBeNull();
+      act(() =>
+        options.onExecutingShells?.([
+          { callId: 'a', pid: 1001, promoteAbortController: a },
+          { callId: 'b', pid: 1002, promoteAbortController: b },
+        ]),
+      );
+      expect(hook.result.current.foregroundShell).toBeNull();
+      expect(hook.result.current.promoteShellToBackground()).toBe(false);
+      expect(a.signal.aborted).toBe(false);
+      expect(b.signal.aborted).toBe(false);
+      act(() => options.onExecutingShells?.([{ callId: 'a', pid: 1001 }]));
+      expect(hook.result.current.foregroundShell).toMatchObject({
+        callId: 'a',
+        pid: 1001,
+      });
+      expect(hook.result.current.promoteShellToBackground()).toBe(false);
+    } finally {
+      await act(async () => live.waiters.shift()?.());
+      hook.unmount();
+    }
+  });
+
+  it.each(['interrupt', 'reset', 'complete', 'unmount'] as const)(
+    'invalidates shell actions on %s',
+    async (ending) => {
+      const write = vi
+        .spyOn(ShellExecutionService, 'writeToPty')
+        .mockImplementation(() => {});
+      const hook = renderHook(() =>
+        useOpenTuiLiveTurn({ config: {} as Config }),
+      );
+      try {
+        await act(async () => {
+          hook.result.current.scheduleTool('run_shell_command', {});
+        });
+        const options = live.turns[0].options as LivePromptOptions;
+        const promotion = new AbortController();
+        act(() =>
+          options.onExecutingShells?.([
+            { callId: 'shell', pid: 1234, promoteAbortController: promotion },
+          ]),
+        );
+        const owner = hook.result.current.foregroundShell!;
+        const actions = hook.result.current;
+        if (ending === 'interrupt') act(() => actions.interrupt());
+        else if (ending === 'reset') act(() => actions.resetTranscript([]));
+        else if (ending === 'complete')
+          await act(async () => live.waiters.shift()?.());
+        else hook.unmount();
+        expect(actions.writeShellInput(owner, 'late')).toBe(false);
+        expect(actions.resizeShell(owner, 64, 12)).toBe(false);
+        expect(actions.scrollShell(owner, 1)).toBe(false);
+        expect(actions.promoteShellToBackground()).toBe(false);
+        expect(write).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => live.waiters.shift()?.());
+        if (ending !== 'unmount') hook.unmount();
+        write.mockRestore();
+      }
+    },
+  );
+
+  it('rejects stale callbacks and a stale owner even when the next turn reuses callId and PID', async () => {
+    const hook = renderHook(() => useOpenTuiLiveTurn({ config: {} as Config }));
+    try {
+      await act(async () => {
+        hook.result.current.scheduleTool('run_shell_command', {});
+      });
+      const old = live.turns[0].options as LivePromptOptions;
+      act(() => old.onExecutingShells?.([{ callId: 'same', pid: 1234 }]));
+      const oldOwner = hook.result.current.foregroundShell!;
+      act(() => hook.result.current.resetTranscript([]));
+      live.holds.add(2);
+      await act(async () => {
+        hook.result.current.scheduleTool('run_shell_command', {});
+      });
+      const current = live.turns[1].options as LivePromptOptions;
+      act(() => current.onExecutingShells?.([{ callId: 'same', pid: 1234 }]));
+      const next = hook.result.current.foregroundShell!;
+      expect(next.turn).not.toBe(oldOwner.turn);
+      act(() => old.onExecutingShells?.([]));
+      expect(hook.result.current.foregroundShell).toEqual(next);
+      expect(hook.result.current.writeShellInput(oldOwner, 'stale')).toBe(
+        false,
+      );
+      act(() => old.onExecutingShells?.([{ callId: 'old', pid: 9999 }]));
+      expect(hook.result.current.foregroundShell).toEqual(next);
+    } finally {
+      await act(async () => {
+        for (const release of live.waiters.splice(0)) release();
+      });
+      hook.unmount();
+    }
+  });
 
   it('keeps the current seq while the real interrupt aborts its signal', async () => {
     const hook = renderHook(() => useOpenTuiLiveTurn({ config: {} as Config }));
@@ -606,6 +781,9 @@ describe('useOpenTuiLiveTurn submit paths', () => {
       expect(stripOrphanedUserEntriesFromHistory).toHaveBeenCalledTimes(
         restored ? 1 : 0,
       );
+      if (restored) {
+        expect(stripOrphanedUserEntriesFromHistory).toHaveBeenCalledWith(true);
+      }
       expect(removeLastUserMessage).toHaveBeenCalledTimes(restored ? 1 : 0);
     },
   );
@@ -1016,6 +1194,7 @@ describe('useOpenTuiLiveTurn submit paths', () => {
       });
     });
     const options = live.turns[0].options as LivePromptOptions;
+    expect(options.workflowModeEligible).toBe(true);
     let held: OpenTuiSteeringSubmission[] = [];
     act(() => {
       result.current.submit('read @delayed.txt', [path]);

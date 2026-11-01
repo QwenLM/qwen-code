@@ -10729,6 +10729,83 @@ it.each([true, false])(
   },
 );
 
+it.each([
+  { enabled: true, isBackground: false },
+  { enabled: false, isBackground: false },
+  { enabled: true, isBackground: 'FaLsE' },
+  { enabled: false, isBackground: 'FaLsE' },
+])(
+  'matches its advertised explicit foreground Shell contract (background enabled: $enabled, input: $isBackground)',
+  async ({ enabled, isBackground }) => {
+    const rig = backgroundTurnRig({
+      executionStatus: 'not_started',
+      responseParts: [],
+      capture: null,
+    });
+    turn = rig.turn;
+    enablement.childRun = enabled;
+    const declarations = await turn.declarations(new AbortController().signal);
+    const shell = declarations.find(
+      (tool) => tool.name === 'run_shell_command',
+    );
+    const args = { command: 'echo hi', is_background: isBackground };
+    const call = { ...calls[0], name: 'run_shell_command', args };
+    const results = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args } }],
+      'model',
+      new AbortController().signal,
+    );
+    if (enabled) {
+      expect(shell?.parametersJsonSchema).toHaveProperty(
+        'properties.is_background',
+      );
+      expect(broker.prepareV3).toHaveBeenCalledOnce();
+      expect(broker.executeV3).toHaveBeenCalledOnce();
+      expect(JSON.parse(broker.executeV3.mock.calls[0]![1])).toMatchObject({
+        toolName: 'run_shell_command',
+        input: { command: 'echo hi', is_background: false },
+      });
+      expect(
+        JSON.parse(broker.executeV3.mock.calls[0]![1]).input.is_background,
+      ).toBe(false);
+    } else {
+      expect(shell?.parametersJsonSchema).not.toHaveProperty(
+        'properties.is_background',
+      );
+      expect(results[0]?.functionResponse?.response?.['error']).toContain(
+        'foreground command',
+      );
+      expect(broker.prepareV3).not.toHaveBeenCalled();
+      expect(broker.executeV3).not.toHaveBeenCalled();
+    }
+    expect(rig.orchestrator.calls).toEqual([]);
+  },
+);
+
+it('reports a malformed background flag without hiding admitted capabilities', async () => {
+  const rig = backgroundTurnRig({
+    executionStatus: 'not_started',
+    responseParts: [],
+    capture: null,
+  });
+  turn = rig.turn;
+  const args = { command: 'echo hi', is_background: 'yes' };
+  const call = { ...calls[0], name: 'run_shell_command', args };
+  const results = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args } }],
+    'model',
+    new AbortController().signal,
+  );
+  const error = results[0]?.functionResponse?.response?.['error'];
+  expect(error).toContain('is_background');
+  expect(error).not.toContain('unavailable');
+  expect(broker.prepareV3).not.toHaveBeenCalled();
+  expect(broker.executeV3).not.toHaveBeenCalled();
+  expect(rig.orchestrator.calls).toEqual([]);
+});
+
 it.each([true, false])(
   'preserves extension Shell pins with background admission enabled (%s)',
   async (enabled) => {

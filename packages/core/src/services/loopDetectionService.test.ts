@@ -1940,6 +1940,17 @@ describe('LoopDetectionService', () => {
       expect(alternatingFired).toBe(false);
     });
 
+    it('leaves the pattern to a host that checks tool calls itself', () => {
+      service.reset('');
+      const hostChecked = (event: ServerLlmStreamEvent) =>
+        service.addAndCheckHeuristicLoops(event, { toolCallPatterns: false });
+      for (let i = 0; i < ALTERNATING_PATTERN_CYCLES + 2; i++) {
+        expect(hostChecked(eventA)).toBe(false);
+        expect(hostChecked(eventB)).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
     it('should reset alternating window after a different third pattern', () => {
       service.reset('');
       const eventC = toolCall('tool_c', { param: 'c' });

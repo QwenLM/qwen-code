@@ -44,6 +44,7 @@ interface CreateServeFeaturesDeps {
   persistSettingAvailable: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
   sessionGenerationAvailable: () => boolean;
+  sessionBtwStreamAvailable: () => boolean;
   currentSessionSchedulingAvailable: boolean;
   workspaceGenerationAvailable: () => boolean;
   reloadAvailable: boolean;
@@ -89,6 +90,7 @@ export function createServeFeatures(
     persistSettingAvailable,
     sessionArtifactsPersistenceAvailable,
     sessionGenerationAvailable,
+    sessionBtwStreamAvailable,
     currentSessionSchedulingAvailable,
     workspaceGenerationAvailable,
     reloadAvailable,
@@ -154,6 +156,7 @@ export function createServeFeatures(
         sessionShellCommandEnabled,
         sessionArtifactsPersistenceAvailable,
         sessionGenerationAvailable: sessionGenerationAvailable(),
+        sessionBtwStreamAvailable: sessionBtwStreamAvailable(),
         currentSessionSchedulingAvailable,
         workspaceGenerationAvailable: workspaceGenerationAvailable(),
         rateLimit: opts.rateLimit === true,

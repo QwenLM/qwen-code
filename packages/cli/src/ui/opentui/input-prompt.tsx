@@ -124,6 +124,11 @@ import { useAtCompletion } from '../hooks/useAtCompletion.js';
 import { categoryLabel } from '../components/SuggestionsDisplay.js';
 import { t } from '../../i18n/index.js';
 import { InputHistory } from './input-history.js';
+import {
+  usePromptVoiceInput,
+  type PromptVoiceInputOptions,
+} from '../hooks/use-prompt-voice-input.js';
+import { OpenTuiVoiceIndicator } from './OpenTuiVoiceIndicator.js';
 import { Command, matchesCommand, toOriginalKey } from './key-map.js';
 import { loadInteractiveCommands } from './slash-dispatch.js';
 import {
@@ -248,6 +253,7 @@ export interface InputPromptProps {
   ) => boolean | Promise<boolean>;
   onNotice?: (text: string) => void;
   preferredEditor?: string;
+  voice?: Omit<PromptVoiceInputOptions, 'config' | 'buffer' | 'onSubmit'>;
   vim?: {
     buffer: RefObject<VimBuffer | null>;
     handleInput: (key: Key) => boolean;
@@ -261,6 +267,8 @@ export interface InputPromptProps {
   /** Esc-while-streaming hook (aborts the live turn in the parent). */
   onInterrupt?: (onSettled?: OpenTuiCancelSettled) => void;
   onCancelCommand?: () => boolean;
+  onShellKey?: (key: KeyEvent) => boolean;
+  onShellPaste?: (text: string) => boolean;
   onRetry?: () => void;
   onRewind?: () => void;
   approvalMode?: ApprovalMode;
@@ -1322,8 +1330,14 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   //    into a `[Pasted Content N chars]` placeholder (ink useBracketedPaste
   //    parity). Global keyInput paste listeners run BEFORE the focused
   //    editor's handler; preventDefault stops the raw insertion ───────────
+  const onShellPaste = props.onShellPaste;
   useLayoutEffect(() => {
     const onPaste = (event: PasteEvent): void => {
+      if (onShellPaste?.(decodePasteBytes(event.bytes))) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       if (!focus) return;
       const el = editorRef.current;
       if (!el) return;
@@ -1367,6 +1381,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     insertText,
     collapsePastedText,
     shellModeActive,
+    onShellPaste,
   ]);
 
   const editorRequestRef = useRef<Draft | null>(null);
@@ -1434,10 +1449,25 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     }
   }, [props.preferredEditor, renderer, onNotice, replaceText]);
 
+  const voiceInput = usePromptVoiceInput({
+    ...props.voice,
+    config,
+    buffer,
+    onSubmit: (text) => {
+      invalidateImportedInput();
+      void submitDraft(text);
+    },
+  });
+
   // ── keyboard: global handlers run BEFORE the focused editor, so
   //    preventDefault here keeps the editor from double-handling a key ─────
   useKeyboard((key: KeyEvent) => {
     if (!focus || key.eventType === 'release') return;
+    if (props.onShellKey?.(key)) {
+      key.preventDefault();
+      key.stopPropagation();
+      return;
+    }
     const el = editorRef.current;
 
     // Any non-Esc key disarms the double-Esc clear window.
@@ -1448,6 +1478,25 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     }
 
     if (!el) return;
+    if (voiceInput.status !== 'idle') {
+      if (voiceInput.handleKeypress(toOriginalKey(key))) {
+        key.preventDefault();
+      } else if (matchesCommand(Command.SUBMIT, key)) {
+        key.preventDefault();
+        void submitDraft(bufferRef.current.text);
+      } else if (matchesCommand(Command.NEWLINE, key)) {
+        key.preventDefault();
+        bufferRef.current.newline();
+        setTextVersion((v) => v + 1);
+      } else if (handleEditorKey(el, bufferRef.current, key, true)) {
+        setTextVersion((v) => v + 1);
+      } else if (isPrintableKeyInput(key)) {
+        insertText(key.sequence);
+        setTextVersion((v) => v + 1);
+        key.preventDefault();
+      }
+      return;
+    }
     projectTextBuffer(el, bufferRef.current, renderer.widthMethod);
     // The visible category tabs own the bare arrows while they are up, exactly
     // as in ink — modifiers pinned false so Alt+arrow word movement and any
@@ -1481,6 +1530,18 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         restoredProvenanceRef.current = null;
       key.preventDefault();
       setTextVersion((v) => v + 1);
+      return;
+    }
+    if (
+      !shellModeActive &&
+      !searchActive &&
+      suggestions.length === 0 &&
+      selectedAttachmentRef.current < 0 &&
+      bufferRef.current.text.length === 0 &&
+      voiceInput.handleKeypress(toOriginalKey(key))
+    ) {
+      invalidateImportedInput();
+      key.preventDefault();
       return;
     }
     if (matchesCommand(Command.RETRY_LAST, key)) {
@@ -2076,9 +2137,17 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     }
   }, []);
 
+  const voiceStatusLabel =
+    voiceInput.status === 'recording'
+      ? t('Voice: recording')
+      : voiceInput.status === 'transcribing'
+        ? t('Voice: transcribing')
+        : voiceInput.status === 'refining'
+          ? t('Voice: refining')
+          : undefined;
   const columns = Math.max(width, 1);
   const renderedLabel = truncateToWidth(
-    sanitizeTerminalLine(topRightLabel ?? ''),
+    sanitizeTerminalLine(voiceStatusLabel ?? topRightLabel ?? ''),
     columns - 5,
   );
   const labelWidth = renderedLabel
@@ -2156,6 +2225,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
           ))}
         </box>
       )}
+      <OpenTuiVoiceIndicator
+        status={voiceInput.status}
+        interimText={voiceInput.interimText}
+        audioLevel={voiceInput.audioLevel}
+      />
       <text fg={borderColor}>{topBorderLine}</text>
       <box
         flexDirection="row"

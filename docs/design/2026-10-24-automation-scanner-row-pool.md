@@ -42,9 +42,10 @@ lease_until < ?`) with fence-checked ledger writes, so working different
    `managedAutomationScheduler`. The tick holds the scheduler's thread while
    joining, so scanning on its own scheduler deadlocks at pool size 1 and
    parks one thread per pending join otherwise.
-5. Finish in-flight work at shutdown; never interrupt it. The pool's
-   `destroy()` returns immediately (`awaitTerminationSeconds(0)`), so the pool
-   adds no shutdown wait of its own. A tick caught mid-join is still bounded by
+5. The row pool never interrupts tasks at shutdown, but it does not wait for
+   their completion or guarantee it before JVM exit. Its `destroy()` returns
+   immediately (`awaitTerminationSeconds(0)`), so it adds no shutdown wait of
+   its own. A tick caught mid-join is still bounded by
    the scheduler that invokes it (`managedAutomationScheduler`, itself a
    `SmartLifecycle`): the lifecycle processor caps that bean's stop at
    `spring.lifecycle.timeout-per-shutdown-phase` (30 s here). That is an upper
@@ -81,6 +82,16 @@ follow-up if probe durations keep saturating
   funnel, so a Session's executions stay one at a time. Accepted semantics,
   pinned by `twoDefinitionsSharingOneSessionBothFireWhenDueTogether`
   (#15442 verify lane, finding 1).
+- Decision on the shared-Session queue (#15667): the pool does not group rows
+  by Session. The second fire therefore queues behind the first probe inside
+  its own 30 s relay budget and can lose that answer; the occurrence is
+  re-driven with backoff, the Harness still finishes the run, and the re-drive
+  either replays the claimed run or reads the settled receipt back, so nothing
+  runs twice within a revision. In a Harness pool a lost answer can also take
+  that Harness out of selection until its next successful refresh (#15666).
+  Intended, not serialized here: the funnel is shared across nodes and with
+  public relays, so a per-node ordering would not remove the queue. Guidance:
+  give a gated definition whose probe is slow its own Session.
 - One fire can still out-live the 60 s lease while a cold Session loads (up to
   120 s before the relay starts). The fence denies the stale holder's writes,
   the occurrence stays `firing`, and a later tick re-drives it idempotently on
@@ -90,10 +101,12 @@ follow-up if probe durations keep saturating
   queries, so one tick submits at most 2 × `SCAN_LIMIT` (200) tasks; a row
   both queries return is submitted once.
 - At context close the pool also runs its **queued** rows, not only the
-  in-flight one, on its non-daemon threads: `destroy()` still returns
-  immediately, but process exit waits for queued work. Every queued row
-  claims and fires under the same fence, and a lost answer is re-driven by
-  a later tick (#15442 verify lane, finding 3).
+  in-flight one, on its non-daemon threads: `destroy()` returns immediately
+  and the JVM does not wait for that backlog once the shutdown hook
+  returns, so a queued row may neither run nor be waited for. Every row
+  that does run claims and fires under the same fence, and a lost answer is
+  re-driven by a later tick (#15442 verify lane, finding 3; corrected after
+  the #15527 review).
 
 ## Validation
 
@@ -104,7 +117,7 @@ follow-up if probe durations keep saturating
   `aBacklogDeeperThanThePoolStillCompletesWithinTheTick`,
   `aTickJoinsEveryRowBeforeItReportsOneFailure`,
   `theScannerWorksRowsOnItsOwnBoundedPool`,
-  `theScannerRowPoolFinishesInFlightWorkInsteadOfInterruptingIt`,
+  `theScannerRowPoolNeverInterruptsRowTasksAndClosesWithoutWaiting`,
   `theScannerRowPoolStillBootsWithAnUnvalidatedSizeWhileAutomationIsOff`,
   `twoDefinitionsSharingOneSessionBothFireWhenDueTogether`,
   `aRowBothQueriesReturnIsSubmittedOnce`,
@@ -115,6 +128,12 @@ follow-up if probe durations keep saturating
   runs on a real one-thread pool with the second row's claim in flight when
   the first one throws: a direct executor cannot pin the join, because its
   tasks finish during submission (#15442 verify lane, finding 2).
+- `commonClaimFailuresProduceOneBoundedSummary` pins the common claim outage:
+  one WARN with four additional observed task exceptions out of five submitted
+  rows, the first three tenant/schedule identities, no throwable payload, and
+  the original first exception rethrown. The count covers observed row-task
+  exceptions, not fire/decide errors handled inside a row; `submitted` remains
+  the submitted-row total even if an interrupt stops joining early.
 - MySQL (`AutomationScannerConcurrencyMySqlIT`, `mysql-integration` profile):
   racing claims reach exactly one fence winner under InnoDB row locks, a stale
   owner cannot move the ledger after a takeover, and two scanners settle one

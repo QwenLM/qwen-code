@@ -28,13 +28,14 @@ import {
   assertPositiveInteger,
   autofixPrPaths,
   checkAttemptKey,
-  repoRoot,
+  resolveWatchRoot,
   requireState,
   rerunFloors,
   withWatchLock,
   writeState,
   type AutofixPrPaths,
 } from './state.js';
+import { assertNoFixInFlight } from './fix.js';
 
 export interface RerunOutcome {
   rerun: boolean;
@@ -53,7 +54,7 @@ export function runRerun(
   task?: string,
 ): RerunOutcome {
   assertPositiveInteger(runId, 'run id');
-  const paths = autofixPrPaths(repoRoot(), prNumber);
+  const paths = autofixPrPaths(resolveWatchRoot(prNumber), prNumber);
   return withWatchLock(paths, prNumber, () =>
     rerunLocked(paths, prNumber, runId, task),
   );
@@ -67,6 +68,7 @@ function rerunLocked(
 ): RerunOutcome {
   const state = requireState(paths.statePath, prNumber);
   assertWatching(state, task);
+  assertNoFixInFlight(paths, prNumber);
   setGhHost(state.host);
   ensureAuthenticated();
   const { pr } = fetchPrData(state);

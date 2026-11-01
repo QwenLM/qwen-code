@@ -510,7 +510,66 @@ Integration regressions proved that model request preparation failures preserve 
 
 The machine-readable reports, manifests and retained failed diagnostics are under `.qwen/investigations/g3-step3-implementation/`; the current consolidated report is `packaged-verification.md`. These five packaged gates do not prove the whole matrix above. Since [replaceable-Harness D11](2026-10-02-hosted-replaceable-harness.md#d11--residual-gates-step-3-in-ci-the-model-round-arm-and-q2s-binding-half), they are CI steps of the `hosted-failover-e2e` job, which runs apart from the Hosted MySQL verify (see D11), next to a model-round arm that packages the main observations of B1 for a no-tool Session and of B2, though not their attempt and stream identities, the live SSE view or the admission count.
 
-#14481's second step adds five packaged fault arms to the same job. Three crash the replacement Harness after a durable A5 barrier: once the Allow decision is recorded (A5's decision row), once the approved execution reaches `PREPARED` while the Runtime Broker's `:start` is held (A5a's partial prepare), and once the approved result commits while its post-tool model round is held (A5's result-commit barrier). All three start a third generation, which must finish with the original Action, prepare key, digest, Runtime identity, one settled execution, one file effect and one terminal; the result-commit arm additionally requires the reissue to reuse the saved request and retract the published prefix. Two more drop the control plane's reply after commit: a lost decision response must retry to one `ACTION_RESPONSE` operation (A4's decision half), and a lost Turn admission must retry to one Turn row (C4). A lost load reply, a failed cleanup followed by another crash (C3), a committed terminal that was not delivered and a payable checkpoint without its terminal write (C1/C2) still have no packaged arm; they remain focused or integration evidence. Malformed or foreign refs and snapshot overflow also stay focused. Full-owner restart, real-provider acceptance and a real mixed-version cluster remain separate. Q2's binding half has the D11 frozen control-plane arm for a woken former Spring's stale claim and a store test of the bind guards; two live control planes remain a later phase.
+#14481's packaged gates add fourteen fault arms to the same job. Seven landed with
+the second step. Five layer one fault on the Allow path: three crash the
+replacement Harness after a
+durable A5 barrier — once the Allow decision is recorded (A5's decision row),
+once the approved execution reaches `PREPARED` while the Runtime Broker's
+`:start` is held (A5a's partial prepare), and once the approved result commits
+while its post-tool model round is held (A5's result-commit barrier) — and two
+drop the control plane's reply after commit: a lost decision response must
+retry to one `ACTION_RESPONSE` operation (A4's decision half), and a lost Turn
+admission must retry to one Turn row (C4). All five leave the original Action,
+prepare key, digest and Runtime identity in place, start a third generation,
+and require exactly one settled execution, one file effect and one terminal;
+the result-commit arm additionally reuses the saved request and retracts the
+published prefix. Five more cover the next barriers: a committed
+`turn.settled` whose reply is lost must be projected once after replacement
+with zero inference or tool calls (no second store commit is required), and
+the surviving public text must still be the recovered answer (C1); and a
+refused terminal write must leave the payable checkpoint to be compensated
+exactly once by the replacement, with the recovered answer still visible
+(C2). A refused cleanup release followed by another crash (C3) is packaged
+too: once the Turn is terminal and its generation is dead, the control plane
+re-drives the owed cleanup through a cleanup-only load until the replacement
+confirms it ([cleanup debt retry](2026-10-28-hosted-cleanup-debt-retry.md)).
+A lost takeover-load reply (A4's load half) is packaged as well: the replacement
+loses the reply to its first drive load once (a test-gated hook), the control
+plane redrives the same load into the now-active driver, and the original Turn
+must still project exactly one terminal with the recovered answer — the redrive
+restates the active attachment rather than wedging the Turn. An earlier observed
+stuck-RUNNING variant did not reproduce on the current tree, so the arm gates the
+handoff as a regression rather than marking an open gap. A crash between the
+main stream's durable Finished marker and the assistant commit (B3a) is
+packaged too: a test-gated hook holds the replacement inside that window once
+its post-tool round has recorded Finished, the runner crashes it there, and the
+next generation must reissue the saved request deep-equal and project one
+terminal with the recovered answer rather than compensate an already-committed
+output. A crash in the mixed-sibling approval gap (A3's native half) is
+packaged as well: a two-call batch is approved one sibling at a time, a
+test-gated hook holds the replacement on the first approval it asks after the
+earlier sibling is decided, the runner crashes it there, and the next
+generation must re-hang the original pending Action with its original deadline,
+require that sibling's own Allow rather than inherit the earlier one, leave the
+decided sibling un-re-asked, and settle both calls once each in their original
+order ([A3 mixed-sibling approval](2026-10-31-hosted-a3-mixed-sibling-approval.md)).
+A crash after several earlier tool rounds (B3) is packaged too: a multi-round
+fixture runs two earlier tools, the replacement is crashed while a later post-tool
+request is held, and the next generation must resume the saved logical round and
+restore the turn cost snapshot and per-model token ledger rather than restart them,
+with each earlier execution occurring once and the later request reissued deep-equal
+([B3 round and cost budget](2026-10-31-hosted-b3-round-cost-budget.md)). "Cost budget"
+here is the TurnBudget snapshot plus the token ledger, not a cumulative spend gate.
+Malformed or foreign refs, snapshot overflow, the rewritten-input and
+Hook-no-rerun half of A3 (a commandStep follow-up, since a native continuation
+refuses Hook/MCP sessions), Hook/MCP/child
+uncertainty (A6), the attempt and stream identities plus the live SSE view
+(B2), and the mixed-version reader/bundle
+closure (R2) stay focused or integration evidence. Full-owner restart, real-provider
+acceptance and a real mixed-version cluster remain separate. Q2's binding
+half has the D11 frozen control-plane arm for a woken former Spring's stale
+claim and a store test of the bind guards; two live control planes remain a
+later phase.
 
 ## 10. Implementation surface
 

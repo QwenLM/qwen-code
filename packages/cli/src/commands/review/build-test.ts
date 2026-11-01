@@ -219,6 +219,19 @@ export interface BuildTestReport {
    */
   testScope?: TestScope;
   /**
+   * The dirs whose suite ran only the tests related to the diff (`vitest
+   * related`), not the whole suite — read off the test commands, sorted.
+   * Absent when every suite ran whole: a script that is not a plain `vitest
+   * run`, or a diff the import graph cannot see through (`relatedTests`).
+   */
+  relatedTests?: string[];
+  /**
+   * Why every suite ran whole where a related run could have stood in — the
+   * diff changes what no import graph sees through (`wholeSuiteReason`).
+   * Absent when a suite ran related, or when none could have.
+   */
+  wholeSuiteReason?: string;
+  /**
    * True when every build and test command exited 0. An install that exits non-zero
    * but leaves a usable tree (a failed `prepare` hook) does NOT set this false — the
    * build below is the authoritative signal, and the `note` explains the install.
@@ -835,6 +848,22 @@ function planShaFrom(planPath: string): string | undefined {
   }
 }
 
+/** The old paths of the plan's renames (`DiffFile.renameFrom`). */
+function renamedFromIn(planPath: string): string[] {
+  try {
+    const parsed = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      files?: Array<{ renameFrom?: unknown }>;
+    };
+    const files = Array.isArray(parsed?.files) ? parsed.files : [];
+    return files
+      .map((f) => f?.renameFrom)
+      .filter((p): p is string => typeof p === 'string' && p.length > 0);
+  } catch {
+    // As `planShaFrom`: changedFilesFrom owns the error for a bad plan.
+    return [];
+  }
+}
+
 /** The changed files, from whichever plan report produced them. */
 function changedFilesFrom(planPath: string): string[] {
   let parsed: unknown;
@@ -1027,9 +1056,9 @@ function previousReport(out: string | undefined): BuildTestReport {
     throw new Error(
       `build-test: --resume refuses the report at ${out}: test command ` +
         `${JSON.stringify(alien.command)} is not one build-test itself runs ` +
-        `(npm test [--workspace="<dir>"]), so the report is not a build-test ` +
-        `run this command can continue. Run build-test without --resume ` +
-        `first.`,
+        `(npm test [--workspace="<dir>"], or its vitest related run), so the ` +
+        `report is not a build-test run this command can continue. Run ` +
+        `build-test without --resume first.`,
     );
   }
   return parsed as BuildTestReport;
@@ -1199,6 +1228,7 @@ function runBuildTestUnguarded(args: BuildTestArgs): BuildTestReport {
   const runArgs = {
     root,
     changedFiles,
+    renamedFrom: renamedFromIn(args.plan),
     timeout: args.timeout,
     install: args.install,
     buildOnly: args.buildOnly,

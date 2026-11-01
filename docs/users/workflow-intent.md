@@ -2,6 +2,9 @@
 
 [English](workflow-intent.md) | [简体中文](workflow-intent.zh-CN.md)
 
+For a saved preference across ordinary submissions, see
+[session Workflow mode](workflow-mode.md).
+
 With `tools.workflowsEnabled` enabled, include `ultracode` or the existing
 `workflow` keyword in a human submission to suggest using the Workflow tool
 for that turn. For example: `ultracode: audit these three modules`.

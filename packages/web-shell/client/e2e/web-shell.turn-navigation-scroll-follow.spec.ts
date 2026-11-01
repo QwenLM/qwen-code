@@ -82,7 +82,7 @@ test('global turn navigation follows transcript scrolling @smoke', async ({
   page,
   baseURL,
 }) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.setViewportSize({ width: 1600, height: 900 });
   const live = Array.from({ length: TURNS * 2 }, (_, index) =>
     recordEvent(
       index,
@@ -178,7 +178,7 @@ test('global turn navigation follows transcript scrolling @smoke', async ({
   await expect(rail).toBeHidden();
   await scrollTranscriptTo(page, 0.5);
   await expect.poll(() => ariaOrdinal(page)).toBeNull();
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.setViewportSize({ width: 1600, height: 900 });
   await expect(rail).toBeVisible();
   await expect.poll(() => ariaOrdinal(page)).not.toBeNull();
   const ratio = await markerOffsetRatio(page);

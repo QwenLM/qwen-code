@@ -21,6 +21,12 @@ import {
   resolveModUnsupportedEvents,
 } from '@qwen-code/qwen-code-core/mods/options.js';
 import { ModRuntime } from '@qwen-code/qwen-code-core/mods/runtime.js';
+import {
+  ENGINE_NODE,
+  type ModRenderElement,
+  type ModRenderInput,
+  type ModRenderSite,
+} from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import type { ModToolCall } from '@qwen-code/qwen-code-core/mods/tool-events.js';
 import {
   MOD_END_TIMEOUT_MS,
@@ -36,6 +42,7 @@ import type {
 } from '@qwen-code/qwen-code-core/mods/types.js';
 import { runOutsideAgentContext } from '@qwen-code/qwen-code-core/agents/runtime/agent-context.js';
 import type { ChatRecordingService } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import { stableJson } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import {
   LlmEventType,
@@ -70,10 +77,22 @@ import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOu
 
 const logger = createDebugLogger('MODS');
 
+// A resize redraws the band once it has settled; renders otherwise run at
+// Claude Code's rate for an expanded band, and at its steady rate for a second
+// after one ran longer than that.
+const RENDER_SETTLE_MS = 150;
+const RENDER_LIVE_MS = 34;
+const RENDER_STEADY_MS = 100;
+const RENDER_SLOW_MS = 1_000;
+
 export interface ModTerminalHost {
   surface: 'terminal';
   log(entry: ModLog, plugin: string, sessionId: string): void;
   presentation(): ModCommandPresentation;
+  /** The render sites the terminal draws, read once at load. */
+  sites?(): readonly ModRenderSite[];
+  /** Draws the tree the band's hooks settled on, drawn by `owner`. */
+  draw?(tree: ModRenderElement, owner: string): void;
 }
 
 type ModOutput =
@@ -169,6 +188,26 @@ export class ModSession implements ICommandLoader {
         this.turn.model = response.model;
     });
   private toolGeneration = new AbortController();
+  // The render sites the terminal offered at load.
+  private sites: readonly ModRenderSite[] = [];
+  // The band's renders: the host's latest input, keyed as Claude Code keys
+  // it, and the one render that may wait in the queue or run.
+  private readonly band: {
+    input?: ModRenderInput;
+    key?: string;
+    size?: string;
+    settle?: ReturnType<typeof setTimeout>;
+    wait?: ReturnType<typeof setTimeout>;
+    state: 'idle' | 'waiting' | 'running';
+    again: boolean;
+    startedAt: number;
+    steadyUntil: number;
+  } = {
+    state: 'idle',
+    again: false,
+    startedAt: -Infinity,
+    steadyUntil: 0,
+  };
   private unregisterCleanup: () => void;
 
   constructor(
@@ -239,6 +278,7 @@ export class ModSession implements ICommandLoader {
   }
 
   private async load(signal: AbortSignal): Promise<void> {
+    const sites = (this.sites = this.terminal?.sites?.() ?? []);
     try {
       const candidates = [];
       for (const extension of this.config
@@ -360,6 +400,9 @@ export class ModSession implements ICommandLoader {
           this.config.getCliVersion() || 'unknown',
           () => this.facts(),
           (turnId) => this.abortTurn(turnId),
+          sites.length
+            ? { sites, invalidate: () => this.requestRender() }
+            : undefined,
         );
         this.mods.push(
           ...ordered.map(({ extension }) => ({
@@ -367,6 +410,8 @@ export class ModSession implements ICommandLoader {
             name: extension.name,
           })),
         );
+        // The first render runs after session.start.
+        this.requestRender();
       }
     } catch (error) {
       await this.runtime?.dispose();
@@ -485,6 +530,8 @@ export class ModSession implements ICommandLoader {
       // The adopted session may end before any hook or API response reads it.
       this.capture();
       this.toolGeneration = new AbortController();
+      // The band's facts may differ in the adopted session.
+      this.requestRender();
     });
     this.toolQueue = task.catch(() => {});
     await task;
@@ -492,6 +539,106 @@ export class ModSession implements ICommandLoader {
 
   get hasToolHooks(): boolean {
     return this.runtime?.hasToolHooks === true;
+  }
+
+  /**
+   * Reports the band's input. A change of its key renders, after a change of
+   * width or of `maxRows` has settled; a change of height alone does not.
+   */
+  setRenderInput(input: ModRenderInput): void {
+    const band = this.band;
+    const key = [
+      input.viewport?.columns,
+      input.viewport?.isFullscreen,
+      stableJson(input.props),
+    ].join('\0');
+    band.input = input;
+    if (key === band.key) return;
+    const size = `${input.viewport?.columns}\0${input.props.maxRows}`;
+    const resized = band.size !== undefined && size !== band.size;
+    band.key = key;
+    band.size = size;
+    if (resized) {
+      clearTimeout(band.settle);
+      band.settle = setTimeout(() => {
+        band.settle = undefined;
+        this.requestRender();
+      }, RENDER_SETTLE_MS);
+    } else this.requestRender();
+  }
+
+  // Renders fold: one waits in the queue and reads the latest input when it
+  // runs. One that is running is never cancelled, since a cancel the worker
+  // cannot settle ends every Mod; a newer request runs after it.
+  private requestRender(): void {
+    const band = this.band;
+    if (
+      this.closing ||
+      !band.input ||
+      !this.sites.includes(band.input.component) ||
+      band.settle ||
+      band.wait ||
+      !this.runtime?.renderHooks.length ||
+      band.state === 'waiting'
+    )
+      return;
+    if (band.state === 'running') {
+      band.again = true;
+      return;
+    }
+    const now = Date.now();
+    const gap =
+      (now < band.steadyUntil ? RENDER_STEADY_MS : RENDER_LIVE_MS) -
+      (now - band.startedAt);
+    if (gap > 0) {
+      band.wait = setTimeout(() => {
+        band.wait = undefined;
+        this.requestRender();
+      }, gap);
+      return;
+    }
+    band.state = 'waiting';
+    // A render that fails, even in drawing its fallback, leaves the queue to
+    // the hooks behind it.
+    this.toolQueue = this.toolQueue
+      .then(() => this.render())
+      .catch((error) => logger.debug(`Mod ui.render: ${String(error)}`));
+  }
+
+  private async render(): Promise<void> {
+    const band = this.band;
+    const runtime = this.runtime!;
+    const owner =
+      runtime.renderHooks.length === 1 ? runtime.renderHooks[0] : 'hooks';
+    band.state = 'running';
+    band.startedAt = Date.now();
+    try {
+      // A switch in progress renders once it is done.
+      if (this.closing || this.sessionId !== this.config.getSessionId()) return;
+      if (!this.allowed() || !this.active()) {
+        this.terminal?.draw?.(ENGINE_NODE, owner);
+        return;
+      }
+      const { tree, notes } = await runtime.render(
+        band.input!,
+        this.lifetime.signal,
+      );
+      for (const note of notes) logger.debug(note);
+      if (!this.closing) this.terminal?.draw?.(tree, owner);
+    } catch (error) {
+      // The worker has failed or closed; the band draws nothing.
+      logger.debug(`Mod ui.render: ${String(error)}`);
+      if (!this.closing) this.terminal?.draw?.(ENGINE_NODE, owner);
+    } finally {
+      if (Date.now() - band.startedAt > RENDER_LIVE_MS)
+        band.steadyUntil = Date.now() + RENDER_SLOW_MS;
+      band.state = 'idle';
+      if (band.again) {
+        band.again = false;
+        this.requestRender();
+      }
+      this.flushLogs();
+    }
   }
 
   toolCall(onRepeat: () => void): ModToolCall | undefined {
@@ -850,6 +997,8 @@ export class ModSession implements ICommandLoader {
     this.closing ??= (async () => {
       this.unregisterCleanup();
       uiTelemetryService.off('update', this.observe);
+      clearTimeout(this.band.settle);
+      clearTimeout(this.band.wait);
       // A turn the close cuts short ends as aborted. Its end and every end
       // already queued run in order before session.end, within one budget.
       if (this.turn) void this.completeTurn(this.turn, 'aborted');

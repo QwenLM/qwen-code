@@ -19,6 +19,7 @@ import type {
 import type { EditorHandle } from '../../hooks/useComposerCore';
 import { getComposerDraftStorageKey } from '../../hooks/useComposerCore';
 import { getSlashCommandCompletionResult } from '../../completions/slashCompletion';
+import { createInputAnnotationsFromComposerTags } from '../../utils/composerTag';
 import type { ComponentProps } from 'react';
 import {
   ToolDetailsContext,
@@ -314,43 +315,182 @@ describe('ManagedSessionsPage', () => {
     });
   }
 
-  it('opens MCP management for the exact current Session and closes it on a Session switch', async () => {
-    const query = vi.fn().mockImplementation(async (id: string) => ({
-      sessionId: id,
-      revision: 0,
-      supported: true,
-      availableServers: [],
+  it.each([false, true])(
+    'refreshes a preparing empty worktree session until ready (home: %s) and keeps attachments unavailable during preparation',
+    async (home) => {
+      vi.useFakeTimers();
+      const worktree = {
+        id: 'worktree-a',
+        sessionId: 's1',
+        workspaceId: 'ws-a',
+        state: 'preparing' as const,
+        branch: 'worktree-managed-a',
+        baseCommit: 'a'.repeat(40),
+        cwdRelative: '.qwen-managed-session-worktrees/a',
+        operationId: 'op-a',
+        revision: 1,
+      };
+      let current = summary('s1', {
+        phase: 'created',
+        activeTurnId: undefined,
+        worktree,
+        workspace: {
+          workspaceId: 'ws-a',
+          cwdRelative: worktree.cwdRelative,
+          state: 'changing',
+        },
+        capabilities: {
+          canSend: false,
+          canCancel: false,
+          inputAttachments: true,
+          workspaceTurns: true,
+        },
+      });
+      mocks.client.getSession.mockImplementation(async () => current);
+      mocks.client.getTranscript.mockResolvedValue({
+        events: [],
+        lastEventId: 0,
+      });
+      await render('s1', 'en', provider, home ? null : undefined);
+      expect(container.textContent).toContain('Preparing worktree');
+      if (home) {
+        expect(container.textContent).not.toContain(worktree.branch);
+        expect(container.textContent).not.toContain('Base commit');
+      }
+      expect(mocks.editorProps!.attachmentsEnabled).toBe(false);
+      expect(mocks.editorProps!.fileReferenceActions).toBeUndefined();
+      current = {
+        ...current,
+        worktree: { ...worktree, state: 'ready', revision: 2 },
+        workspace: { ...current.workspace!, state: 'ready' },
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          inputAttachments: true,
+          workspaceTurns: true,
+        },
+      };
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+        await flush();
+      });
+      if (home) {
+        expect(container.querySelector('[data-managed-worktree]')).toBeNull();
+        expect(container.textContent).not.toContain(worktree.branch);
+      } else {
+        expect(container.textContent).toContain('Worktree ready');
+        expect(container.textContent).toContain(worktree.branch);
+      }
+      expect(mocks.editorProps!.attachmentsEnabled).toBe(true);
+      expect(mocks.client.getTranscript).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(['blocked', 'failed'] as const)(
+    'keeps %s worktree attention visible in Home without branch details',
+    async (state) => {
+      mocks.client.getSession.mockResolvedValue(
+        summary('s1', {
+          capabilities: { canSend: false, canCancel: false },
+          worktree: {
+            id: 'worktree-a',
+            sessionId: 's1',
+            workspaceId: 'ws-a',
+            state,
+            branch: 'worktree-managed-a',
+            baseCommit: 'a'.repeat(40),
+            cwdRelative: '.qwen-managed-worktrees/a',
+            operationId: 'operation-a',
+            revision: 1,
+            errorCode: 'worktree_identity_conflict',
+          },
+        }),
+      );
+      await render('s1', 'en', provider, null);
+      const status = container.querySelector(
+        `[data-managed-worktree="${state}"]`,
+      )!;
+      expect(status.textContent).toContain(
+        state === 'blocked'
+          ? 'Worktree needs attention'
+          : 'Worktree preparation failed',
+      );
+      expect(status.textContent).toContain('worktree_identity_conflict');
+      expect(status.textContent).not.toContain('worktree-managed-a');
+      expect(status.textContent).not.toContain('Base commit');
+      expect(mocks.editorProps!.disabled).toBe(true);
+    },
+  );
+
+  it('leaves MCP management to Plugins and refreshes the selected composer catalog on return', async () => {
+    const query = vi.fn();
+    const list = vi.fn(async (id: string) => ({
+      object: 'agent.mcp_catalog' as const,
+      session_id: id,
       servers: [],
     }));
     provider = {
       ...provider,
+      renameSession: vi.fn(),
       mcpManagement: { query, submit: vi.fn(), operation: vi.fn() },
+      mcp: { list },
     };
-    mocks.client.getSession.mockImplementation(async (id: string) =>
-      summary(id, {
-        workspace: { workspaceId: `workspace-${id}`, cwdRelative: '.' },
-      }),
-    );
-    await render('s1');
-    await act(async () =>
-      [...container.querySelectorAll<HTMLButtonElement>('button')]
-        .find((button) => button.textContent === 'Manage MCP')!
-        .click(),
-    );
-    expect(document.querySelector('[data-managed-mcp-manager]')).not.toBeNull();
-    expect(query).toHaveBeenCalledWith(
-      's1',
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
-    );
-    await render('s2');
-    expect(document.querySelector('[data-managed-mcp-manager]')).toBeNull();
-    await act(async () =>
-      [...container.querySelectorAll<HTMLButtonElement>('button')]
-        .find((button) => button.textContent === 'Manage MCP')!
-        .click(),
-    );
-    expect(query).toHaveBeenLastCalledWith('s2', expect.anything());
-    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    const current = summary('s1', {
+      workspace: { workspaceId: 'project', cwdRelative: '.' },
+      capabilities: {
+        canSend: true,
+        canCancel: false,
+        canRename: true,
+        workspaceTurns: true,
+      },
+    });
+    mocks.client.getSession.mockResolvedValue(current);
+    mocks.client.listSessions.mockResolvedValue({ sessions: [current] });
+    mocks.restoreEditorDraft.mockReturnValue('Keep this MCP draft');
+    const slot = document.createElement('aside');
+    document.body.appendChild(slot);
+    const hasManageMcp = () =>
+      [...document.querySelectorAll('button, [role="menuitem"]')].some(
+        (item) => item.textContent === 'Manage MCP',
+      );
+    try {
+      await render('s1', 'en', provider, slot);
+      expect(hasManageMcp()).toBe(false);
+      await act(async () => {
+        slot
+          .querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!
+          .dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+          );
+      });
+      expect(document.querySelector('[role="menu"]')).not.toBeNull();
+      expect(hasManageMcp()).toBe(false);
+      expect(
+        [...document.querySelectorAll('[role="menuitem"]')].some(
+          (item) => item.textContent === 'Rename',
+        ),
+      ).toBe(true);
+      const before = mocks.editorProps!.fileReferenceActions!;
+      await before.loadMcpStatus!();
+      await render('s1', 'en', provider, slot, false);
+      await expect(before.loadMcpStatus!()).rejects.toThrow(
+        'MCP Session changed',
+      );
+      await render('s1', 'en', provider, slot);
+      const after = mocks.editorProps!.fileReferenceActions!;
+      expect(after.scopeKey).not.toBe(before.scopeKey);
+      await after.loadMcpStatus!();
+      expect(list.mock.calls.map(([id]) => id)).toEqual(['s1', 's1']);
+      expect(container.querySelector('textarea')?.value).toBe(
+        'Keep this MCP draft',
+      );
+      await render('s1');
+      expect(hasManageMcp()).toBe(false);
+      expect(query).not.toHaveBeenCalled();
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    } finally {
+      slot.remove();
+    }
   });
 
   it.each([false, true])(
@@ -606,6 +746,154 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.client.getTranscript).toHaveBeenCalledOnce();
     expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
   });
+
+  it('renames a background Session from its sidebar menu without selecting it or accepting an old poll', async () => {
+    vi.useFakeTimers();
+    const selected = summary('s1', {
+      capabilities: { canSend: true, canCancel: false, canRename: true },
+    });
+    const other = summary('s2', {
+      title: 'Background session',
+      phase: 'agent_running',
+      capabilities: { canSend: false, canCancel: true, canRename: true },
+    });
+    const renamed = { ...other, title: 'Renamed background session' };
+    const renameSession = vi
+      .fn()
+      .mockResolvedValue({ displayName: renamed.title });
+    provider = { ...provider, renameSession };
+    mocks.restoreEditorDraft.mockReturnValue('Keep this draft');
+    mocks.client.listSessions.mockResolvedValue({
+      sessions: [selected, other],
+    });
+    let oldPoll!: (value: ManagedAgentSessionSummary) => void;
+    let oldSignal: AbortSignal | undefined;
+    mocks.client.getSession.mockImplementation(
+      (id: string, options: { signal: AbortSignal }) => {
+        if (id === other.sessionId) {
+          oldSignal = options.signal;
+          return new Promise((resolve) => {
+            oldPoll = resolve;
+          });
+        }
+        return Promise.resolve(selected);
+      },
+    );
+    const slot = document.createElement('aside');
+    document.body.appendChild(slot);
+    try {
+      await render('s1', 'en', provider, slot);
+      expect(
+        [...container.querySelectorAll('button')].some(
+          (button) => button.textContent === 'Rename',
+        ),
+      ).toBe(false);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+        await flush();
+      });
+      expect(oldSignal?.aborted).toBe(false);
+      await act(async () => {
+        slot
+          .querySelector<HTMLButtonElement>(
+            '[data-managed-session-id="s2"] button[aria-haspopup="menu"]',
+          )!
+          .dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+          );
+      });
+      const rename = [
+        ...document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+      ].find((item) => item.textContent === 'Rename');
+      expect(rename).toBeDefined();
+      await act(async () => rename!.click());
+      const input = document.querySelector<HTMLInputElement>(
+        'input[aria-label="Rename"]',
+      )!;
+      expect(input.value).toBe(other.title);
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(input, renamed.title);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      mocks.client.listSessions.mockResolvedValue({
+        sessions: [selected, renamed],
+      });
+      await act(async () => {
+        input.form!.dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+        await flush();
+      });
+      expect(renameSession).toHaveBeenCalledWith(
+        's2',
+        renamed.title,
+        expect.anything(),
+      );
+      expect(oldSignal?.aborted).toBe(true);
+      await act(async () => {
+        oldPoll({ ...other, updatedAt: 100 });
+        await flush();
+      });
+      expect(
+        slot.querySelector('[data-managed-session-id="s2"]')?.textContent,
+      ).toContain(renamed.title);
+      expect(container.textContent).toContain(selected.title);
+      expect(container.textContent).not.toContain(renamed.title);
+      expect(container.querySelector('textarea')?.value).toBe(
+        'Keep this draft',
+      );
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      expect(onSelect).not.toHaveBeenCalled();
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    } finally {
+      slot.remove();
+    }
+  });
+
+  it.each(['permission', 'provider', 'interactivity'] as const)(
+    'hides sidebar Rename without %s',
+    async (missing) => {
+      const session = summary('s1', {
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          canRename: missing !== 'permission',
+        },
+      });
+      provider = {
+        ...provider,
+        ...(missing === 'provider' ? {} : { renameSession: vi.fn() }),
+        exportSnapshot: vi.fn(),
+      };
+      mocks.client.getSession.mockResolvedValue(session);
+      mocks.client.listSessions.mockResolvedValue({ sessions: [session] });
+      const slot = document.createElement('aside');
+      document.body.appendChild(slot);
+      try {
+        await render('s1', 'en', provider, slot, missing !== 'interactivity');
+        const trigger = slot.querySelector<HTMLButtonElement>(
+          'button[aria-haspopup="menu"]',
+        );
+        expect(trigger).not.toBeNull();
+        await act(async () => {
+          trigger!.dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+          );
+        });
+        expect(document.querySelector('[role="menu"]')).not.toBeNull();
+        expect(
+          [...document.querySelectorAll('[role="menuitem"]')].some(
+            (item) => item.textContent === 'Rename',
+          ),
+        ).toBe(false);
+      } finally {
+        slot.remove();
+      }
+    },
+  );
 
   it('searches the confirmed session title while the catalog still has its previous title', async () => {
     mocks.client.getSession.mockResolvedValue(
@@ -919,9 +1207,70 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.editorProps?.skills).toEqual(skills);
     expect(mocks.editorProps?.fileReferenceActions).toBeDefined();
     expect(query).toHaveBeenCalledWith(
-      { workspaceId: 'ws', cwdRelative: '.', directory: '.', query: '' },
+      { sessionId: 's1', directory: '.', query: '' },
       expect.objectContaining({ clientId: expect.any(String) }),
     );
+  });
+
+  it('keeps prepared upload path context in the durable Turn input without a text attachment', async () => {
+    provider = {
+      ...provider,
+      workspaceFiles: {
+        query: vi.fn(async () => ({
+          scopeRevision: 'registered',
+          directory: '.',
+          entries: [],
+          truncated: false,
+          maxUploadBytes: 8 * 1024 * 1024,
+        })),
+        read: vi.fn(),
+        upload: vi.fn(async (request, data) => ({
+          scopeRevision: 'registered',
+          uploadId: request.uploadId,
+          path: request.path,
+          sizeBytes: data.size,
+          sha256: 'a'.repeat(64),
+        })),
+      },
+    };
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          inputAttachments: true,
+          workspaceTurns: true,
+        },
+        workspace: { workspaceId: 'ws', cwdRelative: '.' },
+      }),
+    );
+    await render('s1');
+    const target = mocks.editorProps!.fileUploadTarget!;
+    const result = await target.client!.uploadWorkspaceFile({
+      path: '报告.bin',
+      data: new Blob(['binary']),
+    });
+    const tag = target.createReference(result.path);
+    const text = tag.serialized!;
+    await act(async () => {
+      mocks.editorProps!.onSubmit(text, undefined, undefined, vi.fn(), {
+        inputAnnotations: createInputAnnotationsFromComposerTags(text, [tag]),
+      });
+      await flush();
+    });
+    expect(mocks.client.submitPrompt).toHaveBeenCalledOnce();
+    expect(mocks.client.submitPrompt.mock.calls[0][1]).toMatchObject({
+      text,
+      input: [
+        {
+          type: 'input_text',
+          text: expect.stringContaining(
+            'Uploaded Workspace files (paths relative to the working directory):',
+          ),
+        },
+      ],
+    });
+    expect(provider.workspaceFiles!.read).not.toHaveBeenCalled();
   });
 
   it.each(['default', 'auto-edit', 'yolo'] as const)(
@@ -1114,13 +1463,11 @@ describe('ManagedSessionsPage', () => {
         canCancel: false,
         workspaceTurns: true,
         modelChange: true,
-        cwdChange: true,
         approvalModeChange: true,
         contextCompression: true,
       },
     });
     modelApi(() => session);
-    provider.cwdChange = { submit: vi.fn(), query: vi.fn() };
     provider.approvalChange = {
       queryOptions: vi.fn(async () => ({
         supported: true,
@@ -1163,8 +1510,8 @@ describe('ManagedSessionsPage', () => {
     expect(
       [...container.querySelectorAll('button')].find(
         (button) => button.textContent === 'Change directory',
-      )?.disabled,
-    ).toBe(true);
+      ),
+    ).toBeUndefined();
     session = { ...session, compactionRevision: 9, modelContext: undefined };
     await act(async () => {
       finish({
@@ -1867,7 +2214,7 @@ describe('ManagedSessionsPage', () => {
       await act(async () =>
         slot
           .querySelector<HTMLButtonElement>(
-            '[aria-label="New task: Project B"]',
+            '[aria-label="New session: Project B"]',
           )!
           .click(),
       );
@@ -2644,94 +2991,33 @@ describe('ManagedSessionsPage', () => {
     expect(provider.tasks!.cancel!.submit).not.toHaveBeenCalled();
   });
 
-  it('changes cwd without optimistic directory updates or losing the editable draft', async () => {
-    let committed = false;
-    const bound = () =>
+  it('keeps the Workspace directory read-only even when an older backend advertises cwd changes', async () => {
+    const capabilities = {
+      canSend: true,
+      canCancel: false,
+      cwdChange: true,
+      workspaceTurns: true,
+    };
+    mocks.client.getSession.mockResolvedValue(
       summary('s1', {
         workspace: {
           workspaceId: 'ws',
-          cwdRelative: committed ? 'B' : 'A',
-          contextRevision: committed ? 2 : 1,
+          cwdRelative: 'services/api',
+          contextRevision: 1,
           state: 'ready',
         },
-        capabilities: {
-          canSend: true,
-          canCancel: false,
-          cwdChange: true,
-          workspaceTurns: true,
-        },
-      });
-    mocks.client.getSession.mockImplementation(async () => bound());
-    let finish!: (value: unknown) => void;
-    const submit = vi.fn().mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          finish = resolve;
-        }),
+        capabilities,
+      }),
     );
-    provider = { ...provider, cwdChange: { submit, query: vi.fn() } };
+    mocks.restoreEditorDraft.mockReturnValue('Keep this draft');
     await render('s1');
-    const button = Array.from(container.querySelectorAll('button')).find(
-      (item) => item.textContent === 'Change directory',
-    );
-    expect(button).toBeDefined();
-    await act(async () => {
-      button!.click();
-    });
-    const input = document.querySelector<HTMLInputElement>(
-      'input[aria-label="Directory relative to Workspace root"]',
-    )!;
-    expect(input.value).toBe('A');
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(
-        HTMLInputElement.prototype,
-        'value',
-      )!.set!.call(input, 'B');
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-    });
-    await act(async () => {
-      input
-        .closest('form')!
-        .dispatchEvent(
-          new Event('submit', { bubbles: true, cancelable: true }),
-        );
-    });
-    expect(submit).toHaveBeenCalledWith(
-      's1',
-      { cwdRelative: 'B', expectedContextRevision: 1 },
-      expect.anything(),
-    );
-    const composer = container.querySelector('textarea')!;
-    expect(composer.disabled).toBe(false);
-    const send = Array.from(container.querySelectorAll('button')).find(
-      (item) => item.textContent === 'Send',
-    )!;
-    expect(send.disabled).toBe(true);
-    expect(container.textContent).toContain('A');
-    committed = true;
-    await act(async () => {
-      finish({
-        sessionId: 's1',
-        operationId: 'op',
-        type: 'cwd_change',
-        status: 'completed',
-        expectedContextRevision: 1,
-        targetCwdRelative: 'B',
-        resultContextRevision: 2,
-        replayed: false,
-      });
-      await flush();
-    });
-    expect(mocks.client.getTranscript).toHaveBeenCalledOnce();
-    expect(container.textContent).toContain('B');
-  });
-
-  it('hides the cwd entry from old providers and capability-less sessions', async () => {
-    mocks.client.getSession.mockResolvedValue(
-      summary('s1', { workspace: { workspaceId: 'ws', cwdRelative: '.' } }),
-    );
-    await render('s1');
+    expect(container.textContent).toContain('services/api');
     expect(container.textContent).not.toContain('Change directory');
+    expect(
+      document.querySelector('[data-testid="managed-cwd-control"]'),
+    ).toBeNull();
+    expect(container.querySelector('textarea')?.value).toBe('Keep this draft');
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
   });
 
   it('keeps the shown approval while a reload has not returned the Session yet', async () => {
@@ -3456,7 +3742,7 @@ describe('ManagedSessionsPage', () => {
     expect(container.textContent).not.toContain('Preparing environment');
   });
 
-  it('compacts the bound Workspace row into one line in the home layout', async () => {
+  it('omits the bound Workspace metadata row in the home layout', async () => {
     mocks.client.getSession.mockResolvedValue(
       summary('bound', {
         workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
@@ -3466,18 +3752,9 @@ describe('ManagedSessionsPage', () => {
     document.body.appendChild(target);
     try {
       await render('bound', 'en', provider, target);
-      const binding = container.querySelector(
-        '[data-managed-workspace-binding]',
-      );
-      expect(binding?.querySelector('summary')?.getAttribute('title')).toBe(
-        'ws-a',
-      );
-      expect(binding?.textContent).toContain('ws-a');
-      expect(binding?.textContent).toContain('services/api');
-      // The compact row repeats neither label: a regression that restores the
-      // standalone lines inside the details row is what this pins.
-      expect(binding?.textContent).not.toContain('Bound Workspace');
-      expect(binding?.textContent).not.toContain('Relative directory');
+      expect(
+        container.querySelector('[data-managed-workspace-binding]'),
+      ).toBeNull();
     } finally {
       target.remove();
     }
@@ -3495,8 +3772,6 @@ describe('ManagedSessionsPage', () => {
     expect(binding?.textContent).toContain('Relative directory');
     expect(binding?.textContent).toContain('ws-a');
     expect(binding?.textContent).toContain('services/api');
-    // The compact summary belongs to the home layout only: rendering it here
-    // would repeat the row above the two labeled lines, inside a plain div.
     expect(binding?.querySelector('summary')).toBeNull();
   });
 

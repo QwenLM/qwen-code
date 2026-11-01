@@ -12,6 +12,7 @@ import type { WebShellRightPanelItem } from '../../customization';
 import {
   useConnection,
   useWorkspace,
+  type DaemonContextMemoryDetail,
   type DaemonSessionOwnerSnapshot,
   type DaemonSessionActions,
   type DaemonScheduledTask,
@@ -132,6 +133,7 @@ import type {
 import { SessionWorkflowInspector } from '../workflow/SessionWorkflowInspector';
 import type { SessionWorkflowProjection } from '../workflow/session-workflow-model';
 import { TerminalPanel } from '../terminal/TerminalPanel';
+import { DaemonConnectionBanner } from '../DaemonConnectionBanner';
 import { WebPreviewPanel } from '../preview/WebPreviewPanel';
 import { SavedWebPreview } from '../preview/SavedWebPreview';
 import type { WebPreviewState } from '../preview/web-preview';
@@ -458,6 +460,11 @@ interface ArtifactPanelProps {
     workspaceCwd?: string,
     workspaceId?: string,
   ) => void;
+  /** Open a context-panel memory file in a read-only preview. */
+  onOpenMemoryFile?: (
+    file: DaemonContextMemoryDetail,
+    workspaceCwd: string,
+  ) => void;
   latestReviewAvailable?: boolean;
   onOpenLatestReview?: () => void;
   /** Open an interactive terminal tab in this panel (shown as an empty-state action). */
@@ -669,6 +676,7 @@ export function ArtifactPanel({
   onSelectTurnCallsPrompt,
   onCloseTab,
   onOpenFilePreview,
+  onOpenMemoryFile,
   latestReviewAvailable = false,
   onOpenLatestReview,
   onOpenTerminal,
@@ -1091,6 +1099,7 @@ export function ArtifactPanel({
           </button>
         </div>
       </div>
+      {(fullscreen || variant === 'drawer') && <DaemonConnectionBanner />}
       <div
         className={`${styles.body} ${
           activeTab?.kind === 'side_task' || activeTab?.kind === 'files'
@@ -1704,6 +1713,7 @@ export function ArtifactPanel({
             controls={contextUsageControls?.[activeTab.sessionId]}
             sessionActions={activeTab.sessionActions}
             sessionId={activeTab.sessionId}
+            onOpenMemoryFile={onOpenMemoryFile}
           />
         ) : activeTab.kind === 'trajectory' ? (
           <TrajectoryPanel

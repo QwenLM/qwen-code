@@ -68,9 +68,9 @@ export function restoreUserPromptSubmitContextReceipt(
 
 /**
  * Drops a trailing part that is entirely a tagged UserPromptSubmit context
- * block. Injection always appends after the user's own part(s), so a sole
- * matching part is treated as user-authored and kept. Returns the same
- * array reference when nothing is stripped.
+ * block. Ordinary injection appends after the user's own part(s). Without
+ * provenance, a sole matching part is kept as user-authored text. Returns the
+ * same array reference when nothing is stripped.
  */
 export function stripTrailingUserPromptSubmitContextPart<T>(
   parts: readonly T[],
@@ -95,10 +95,14 @@ export function stripTrailingUserPromptSubmitContextPart<T>(
  * `isUserPromptSubmitContextPartText`, which recognizes any tagged block, this
  * recognizes one exact payload and does not trim.
  *
- * A match requires injector-owned evidence, not shape: the trailing part must
- * carry the module-private receipt in a user entry with at least one part of
- * the user's own ahead of it. Tagged text that merely appears — authored by
- * the user or the model, in any entry shape — never carries the receipt, so it
+ * A match requires injector-owned evidence, not shape: a matching part that
+ * carries the module-private receipt in a user entry matches when it sits after
+ * index zero (so later appended parts, including a memory catalog snapshot, do
+ * not invalidate the evidence) or when it is the entry's sole part (reactive
+ * compaction can rescue the block that way). Tagged text that merely appears —
+ * authored by the user or the model, in any entry shape — never carries the
+ * receipt, so it does not suppress a fresh delivery; when provenance cannot be
+ * established, injection proceeds as before.
  * does not suppress a fresh delivery; when provenance cannot be established,
  * injection proceeds as before.
  */
@@ -111,14 +115,14 @@ export function hasUserPromptSubmitContext(
     return false;
   }
   const parts = candidate.parts;
-  if (parts.length < 2) {
+  if (parts.length === 0) {
     return false;
   }
-  const last = parts[parts.length - 1] as
-    | (UserPromptSubmitContextPart & { text?: unknown })
-    | null;
-  return (
-    last?.text === wrapUserPromptSubmitContext(context) &&
-    last[userPromptSubmitContextReceipt] === true
+  const wrapped = wrapUserPromptSubmitContext(context);
+  return parts.some(
+    (part: UserPromptSubmitContextPart | null, index: number) =>
+      (index > 0 || parts.length === 1) &&
+      part?.text === wrapped &&
+      part[userPromptSubmitContextReceipt] === true,
   );
 }

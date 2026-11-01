@@ -46,13 +46,17 @@ import type {
 } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import {
+  backgroundFixOf,
   canonicalWorktreePath,
+  settleBackgroundFix,
   confirmedWatch,
   forgetConfirmedWatch,
   grantUnattendedFixes,
   recordConfirmedWatch,
+  recordWatchTask,
   revokeUnattendedFixes,
   unattendedFixGranted,
+  type BackgroundFix,
   type ConfirmedWatch,
 } from './autofix-pr-grants.js';
 
@@ -65,6 +69,7 @@ export const AUTOFIX_PR_COMMANDS = [
   'reply',
   'rerun',
   'schedule',
+  'fix-end',
   'status',
   'cleanup',
   'unattended',
@@ -79,6 +84,7 @@ export interface AutofixPrParams {
   repo?: string;
   host?: string;
   take_over?: boolean;
+  in_place?: boolean;
   task?: string;
   run_id?: string;
   lines?: number;
@@ -89,13 +95,14 @@ export interface AutofixPrParams {
   no_reply?: boolean;
   instructions?: boolean;
   again?: boolean;
+  attempt?: string;
 }
 
 type OptionName = Exclude<keyof AutofixPrParams, 'command' | 'pr'>;
 
 /** The options each command takes; any other is a refusal. */
 const OPTIONS: Readonly<Record<AutofixPrCommand, readonly OptionName[]>> = {
-  prepare: ['repo', 'host', 'take_over'],
+  prepare: ['repo', 'host', 'take_over', 'in_place'],
   snapshot: ['repo', 'host', 'task'],
   'ci-log': ['run_id', 'lines', 'task'],
   push: ['task'],
@@ -103,6 +110,7 @@ const OPTIONS: Readonly<Record<AutofixPrCommand, readonly OptionName[]>> = {
   reply: ['plan', 'no_post', 'task'],
   rerun: ['run_id', 'task'],
   schedule: ['every', 'no_reply', 'instructions', 'again'],
+  'fix-end': ['attempt', 'task'],
   status: [],
   cleanup: ['take_over'],
   unattended: [],
@@ -114,10 +122,12 @@ const REQUIRED: Partial<Record<AutofixPrCommand, readonly OptionName[]>> = {
   'ci-log': ['run_id'],
   reply: ['plan'],
   rerun: ['run_id'],
+  'fix-end': ['attempt'],
 };
 
 const BOOLEAN_OPTIONS = new Set<OptionName>([
   'take_over',
+  'in_place',
   'no_post',
   'discard',
   'no_reply',
@@ -135,6 +145,8 @@ const STRING_SHAPES: Readonly<Partial<Record<OptionName, RegExp>>> = {
   task: /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/,
   // A safe integer: the helper reads it as a number.
   run_id: /^\d{1,15}$/,
+  // The id the session opened a background fix's attempt with.
+  attempt: /^[0-9a-f]{12}$/,
 };
 
 /** Every helper finishes well within this; `push` gives hooks nine minutes. */
@@ -244,7 +256,9 @@ export function autofixPrArgs(params: AutofixPrParams): string[] {
   value('lines', params.lines);
   value('every', params.every);
   value('task', params.task);
+  value('attempt', params.attempt);
   flag('take-over', params.take_over);
+  flag('in-place', params.in_place);
   flag('no-post', params.no_post);
   flag('discard', params.discard);
   flag('no-reply', params.no_reply);
@@ -262,6 +276,7 @@ const WATCH_COMMANDS = new Set<AutofixPrCommand>([
   'reply',
   'rerun',
   'schedule',
+  'fix-end',
   'cleanup',
 ]);
 
@@ -519,6 +534,7 @@ interface WatchStatusLike {
   worktreePath?: unknown;
   worktreeExists?: unknown;
   gitTrusted?: unknown;
+  inPlace?: unknown;
 }
 
 /** Whether `status` lists `watch` as the one `prepared` recorded. */
@@ -723,6 +739,11 @@ export async function checkUnattendedWatch(
   if (watch.ended !== null) {
     return { refused: `the watch of PR #${pr} was ended` };
   }
+  if (watch.inPlace === true) {
+    return {
+      refused: `PR #${pr} is an in-place watch: its fixes run in the user's own checkout, always attended`,
+    };
+  }
   if (
     watch.worktreeExists !== true ||
     typeof watch.worktreePath !== 'string' ||
@@ -739,6 +760,25 @@ interface PreparedLike {
   preparedAt?: unknown;
   authorCanPush?: unknown;
   tookOver?: unknown;
+  inPlace?: unknown;
+}
+
+/** How long `cleanup` waits for a stopped fix agent to end. */
+const FIX_STOP_WAIT_MS = 15_000;
+
+/** A helper's refusal in one line: its last line on stderr, or why it did
+ * not finish. */
+function helperRefusal(command: string, run: AutofixPrRun): string {
+  // The CLI prints a helper's error with its stack: the reason is the line
+  // that names the error — the last such, as what `gh` or git printed
+  // before the helper threw comes first.
+  const lines = run.stderr.split('\n').map((line) => line.trim());
+  const named = lines
+    .filter((line) => /^(?:[A-Z]\w*)?Error: /.test(line))
+    .pop()
+    ?.replace(/^(?:[A-Z]\w*)?Error: /, '');
+  const said = named ?? lines.filter(Boolean).pop();
+  return `autofix-pr ${command} refused: ${said || run.failure || `exit ${run.exitCode}`}`;
 }
 
 function lastJsonLine(out: string): unknown {
@@ -979,6 +1019,9 @@ class AutofixPrInvocation extends BaseToolInvocation<
       return `An ask rule for \`qwen ${this.getDescription()}\` as a shell command asks for it here too.`;
     }
     if (this.params.command === 'prepare') {
+      if (this.params.in_place) {
+        return `Starts an in-place watch of PR #${pr}: the fix agent works in your own checkout of the PR branch, in the foreground; the round pushes what the branch holds — your commits included — and replies on the PR.`;
+      }
       return this.params.take_over
         ? `Takes the watch of PR #${pr} over from any other session that holds it: from now on its rounds push to the PR branch and reply on the PR without asking.`
         : `Starts or resumes this session's watch of PR #${pr}: from now on its rounds push to the PR branch and reply on the PR without asking.`;
@@ -998,7 +1041,8 @@ class AutofixPrInvocation extends BaseToolInvocation<
   /**
    * `status` as the helper printed it, each watch with `preparedHere`:
    * whether this session prepared it through the tool, from this clone, so
-   * a round's helpers run on it without asking.
+   * a round's helpers run on it without asking — and `unattended`: whether
+   * its fixes run without asking too, and so in the background.
    */
   private annotateStatus(out: string): string {
     const parsed = lastJsonLine(out) as { watches?: unknown } | undefined;
@@ -1009,8 +1053,12 @@ class AutofixPrInvocation extends BaseToolInvocation<
         typeof watch['pr'] === 'number'
           ? preparedWatch(this.config, watch['pr'])
           : undefined;
-      watch['preparedHere'] =
-        prepared !== undefined && listsPrepared(prepared, watch);
+      const here = prepared !== undefined && listsPrepared(prepared, watch);
+      watch['preparedHere'] = here;
+      // Its fix agent runs without asking, so in the background.
+      watch['unattended'] =
+        here &&
+        unattendedFixGranted(this.config.getSessionId(), prepared.worktree);
     }
     return JSON.stringify(parsed);
   }
@@ -1044,6 +1092,28 @@ class AutofixPrInvocation extends BaseToolInvocation<
       };
     }
     const sessionId = this.config.getSessionId();
+    if (this.params.pr !== undefined && this.params.command !== 'status') {
+      await settleBackgroundFix({ pr: this.params.pr });
+    }
+    // By the PR: the session's directory may be a linked worktree of the
+    // clone, whose helpers keep the watch beside its main one.
+    const fix =
+      this.params.pr === undefined || this.params.command === 'status'
+        ? undefined
+        : backgroundFixOf(sessionId, this.params.pr);
+    if (this.params.command === 'fix-end') return this.claim(fix, signal);
+    if (fix && this.params.command === 'cleanup') {
+      const refused = await this.stopFix(fix, signal);
+      if (refused) return refused;
+    } else if (fix && !fix.ended) {
+      // Its agent works in the worktree: whatever the marker says.
+      const message = `A fix agent of PR #${this.params.pr} is working in its worktree (attempt ${fix.attempt}); its round goes on from its completion notification. Nothing but status runs meanwhile.`;
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message, type: ToolErrorType.EXECUTION_DENIED },
+      };
+    }
     const misplaced = this.misplacedPlan();
     if (misplaced) {
       return {
@@ -1080,6 +1150,7 @@ class AutofixPrInvocation extends BaseToolInvocation<
       };
     }
     if (this.params.command === 'prepare') this.recordPrepared(sessionId, out);
+    if (this.params.command === 'schedule') this.recordTask(sessionId, out);
     if (this.params.command === 'status' && !run.truncated) {
       const annotated = this.annotateStatus(out);
       return { llmContent: annotated, returnDisplay: annotated };
@@ -1091,18 +1162,154 @@ class AutofixPrInvocation extends BaseToolInvocation<
   }
 
   /**
-   * For a watch this session prepared, the plan must sit beside its
-   * worktree, as the skill writes it; null when it does.
+   * The round claims its background fix's attempt: the agent has ended, and
+   * this session holds the attempt. The report adds how the agent ended and
+   * what it said, from memory, to what `fix-end` printed.
+   */
+  private async claim(
+    fix: BackgroundFix | undefined,
+    signal: AbortSignal,
+  ): Promise<ToolResult> {
+    const pr = this.params.pr!;
+    const refuse = (message: string): ToolResult => ({
+      llmContent: message,
+      returnDisplay: message,
+      error: { message, type: ToolErrorType.EXECUTION_DENIED },
+    });
+    if (!fix || fix.attempt !== this.params.attempt) {
+      return refuse(
+        `Attempt ${this.params.attempt} of PR #${pr} is not this session's to claim: it was dropped, or a round discarded it.`,
+      );
+    }
+    if (!fix.ended) {
+      return refuse(
+        `The fix agent of PR #${pr} is still working; its round goes on from its completion notification.`,
+      );
+    }
+    // A stopped agent ends when its grace runs out; what its tools were
+    // doing gets a little longer to settle before the round acts.
+    await fix.waitSettled(FIX_STOP_WAIT_MS);
+    const ended = fix.ended;
+    // Under the task this session scheduled, whatever the turn copied.
+    const run = await runAutofixPrHelper(
+      this.config,
+      autofixPrArgs({ ...this.params, task: fix.task.task }),
+      signal,
+    );
+    // A refusal leaves the attempt to claim again (a helper busy with the
+    // lock), until its deadline.
+    if (run.failure || run.exitCode !== 0) {
+      return refuse(helperRefusal('fix-end', run));
+    }
+    const printed = lastJsonLine(run.stdout);
+    // Its round's snapshot is gone: no claim will ever take it, so it goes
+    // stale now, for the next round to discard and redo.
+    if (
+      printed !== null &&
+      typeof printed === 'object' &&
+      (printed as { lostSnapshot?: unknown }).lostSnapshot === true
+    ) {
+      fix.drop();
+      return refuse(
+        `Attempt ${fix.attempt} of PR #${pr} has lost its round's snapshot: a later round discards and redoes the fix.`,
+      );
+    }
+    fix.claim();
+    // The watch's options as this session's `schedule` printed them: the
+    // turn goes on with these, whatever the follow-up it read said.
+    const { task, reply, instructions } = fix.task;
+    const out = JSON.stringify({
+      ...(printed !== null && typeof printed === 'object' ? printed : {}),
+      agent: ended,
+      watch: { task, reply, instructions },
+    });
+    return { llmContent: out, returnDisplay: out };
+  }
+
+  /**
+   * `cleanup` of a PR whose fix runs in the background here: its agent is
+   * stopped, with no notification, and its attempt ended before anything is
+   * removed — once its body settled, or at most `FIX_STOP_WAIT_MS` after the
+   * stop, as a stopped agent's grace runs out.
+   */
+  private async stopFix(
+    fix: BackgroundFix,
+    signal: AbortSignal,
+  ): Promise<ToolResult | null> {
+    const refuse = (message: string): ToolResult => ({
+      llmContent: message,
+      returnDisplay: message,
+      error: { message, type: ToolErrorType.EXECUTION_FAILED },
+    });
+    if (!fix.ended) {
+      if (fix.agentId === null) {
+        // Stopped as it launches, with no round to go on: as below, with no
+        // notification.
+        await fix.abandon({ notify: false });
+        return refuse(
+          `The fix agent of PR #${this.params.pr} was starting; it stops as it launches: run cleanup again.`,
+        );
+      }
+      this.config
+        .getBackgroundTaskRegistry()
+        .cancel(fix.agentId, { notify: false });
+    }
+    // Ended need not be settled: a stopped agent's grace may have run out.
+    await fix.waitSettled(FIX_STOP_WAIT_MS);
+    fix.end({ status: 'cancelled', report: '' });
+    // The marker goes before the watch: `cleanup` refuses a fresh one. A
+    // refusal keeps the attempt, refreshed, for the next stop.
+    const run = await runAutofixPrHelper(
+      this.config,
+      [
+        'fix-end',
+        String(this.params.pr),
+        `--attempt=${fix.attempt}`,
+        '--abandon',
+      ],
+      signal,
+    );
+    if (run.failure || run.exitCode !== 0) {
+      return refuse(helperRefusal('fix-end', run));
+    }
+    fix.claim();
+    return null;
+  }
+
+  /** The watch's task as `schedule` printed it: a background fix's round
+   * goes on with these options, whatever the state file says later. */
+  private recordTask(sessionId: string, out: string): void {
+    const printed = lastJsonLine(out) as
+      | { task?: unknown; reply?: unknown; instructions?: unknown }
+      | undefined;
+    if (
+      typeof printed?.task === 'string' &&
+      typeof printed.reply === 'boolean' &&
+      typeof printed.instructions === 'string'
+    ) {
+      recordWatchTask(sessionId, this.params.pr!, {
+        task: printed.task,
+        reply: printed.reply,
+        instructions: printed.instructions,
+      });
+    }
+  }
+
+  /**
+   * For a watch this session prepared, the plan must sit in the watch's
+   * `.qwen/tmp`, as the skill writes it; null when it does. A worktree
+   * watch's tmp is the worktree's parent; an in-place watch's worktree IS
+   * the user's checkout, so its tmp is inside it.
    */
   private misplacedPlan(): string | null {
     if (this.params.plan === undefined) return null;
     const pr = this.params.pr!;
     const watch = preparedWatch(this.config, pr);
     if (!watch) return null;
-    const expected = path.join(
-      path.dirname(watch.worktree),
-      `autofix-pr-${pr}-plan.json`,
-    );
+    const planDir = watch.inPlace
+      ? path.join(watch.worktree, '.qwen', 'tmp')
+      : path.dirname(watch.worktree);
+    const expected = path.join(planDir, `autofix-pr-${pr}-plan.json`);
     const given = path.join(
       canonicalWorktreePath(path.dirname(this.params.plan)),
       path.basename(this.params.plan),
@@ -1145,6 +1352,7 @@ class AutofixPrInvocation extends BaseToolInvocation<
       targetDir: this.config.getTargetDir(),
       preparedAt,
       worktree: canonicalWorktreePath(reported.worktreePath),
+      inPlace: reported.inPlace === true,
       authorCanPush: reported.authorCanPush === true,
     });
   }
@@ -1182,6 +1390,28 @@ class AutofixPrInvocation extends BaseToolInvocation<
         if (!this.config.isTrustedFolder()) return false;
         const again = await checkUnattendedWatch(this.config, pr, s);
         return !('refused' in again) && again.watch.worktree === worktree;
+      },
+      open: async (attempt, s) => {
+        const run = await runAutofixPrHelper(
+          this.config,
+          ['fix-start', String(pr), `--attempt=${attempt}`],
+          s,
+        );
+        const printed =
+          run.failure || run.exitCode !== 0
+            ? undefined
+            : (lastJsonLine(run.stdout) as { task?: unknown } | undefined);
+        if (typeof printed?.task !== 'string') {
+          throw new Error(helperRefusal('fix-start', run));
+        }
+        return { task: printed.task };
+      },
+      close: async (attempt) => {
+        await runAutofixPrHelper(
+          this.config,
+          ['fix-end', String(pr), `--attempt=${attempt}`, '--abandon'],
+          new AbortController().signal,
+        );
       },
     });
     const message = `The fix agent of PR #${pr} runs its commands without asking in ${worktree}, while this session runs the watch.`;
@@ -1229,6 +1459,11 @@ export class AutofixPrTool extends BaseDeclarativeTool<
             type: 'boolean',
             description: '--take-over (prepare, cleanup).',
           },
+          in_place: {
+            type: 'boolean',
+            description:
+              "--in-place (prepare): fix in the user's own checkout of the PR head branch — attended, one round per start, nothing ever discarded.",
+          },
           task: {
             type: 'string',
             description:
@@ -1269,6 +1504,11 @@ export class AutofixPrTool extends BaseDeclarativeTool<
           again: {
             type: 'boolean',
             description: 'schedule --again.',
+          },
+          attempt: {
+            type: 'string',
+            description:
+              "The background fix's attempt, from its completion notification (fix-end): --attempt.",
           },
         },
         required: ['command'],

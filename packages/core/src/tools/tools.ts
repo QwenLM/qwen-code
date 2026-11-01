@@ -612,6 +612,9 @@ export interface ToolResult {
    */
   persistedOutputFiles?: string[];
 
+  /** Producer-owned reason and recovery handle, preserved as one unit. */
+  recoveryText?: string;
+
   /**
    * Internal runtime marker: the producer already sized `llmContent` against
    * its own declared character budget, whether or not anything was cut. Records
