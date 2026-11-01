@@ -709,16 +709,19 @@ class HostedSessionRelayFaultGatesIT {
                             lead);
                     // The floor only advances through projected message
                     // coverage; the lead's settled Turn must be covered
-                    // before the advance can move past its events.
-                    if (current.snapshotThroughSequence() < 1) {
-                        return;
-                    }
+                    // before the advance can move past its events. An
+                    // assertion, not an early return: Awaitility treats a
+                    // lambda that returns without failing as satisfied.
+                    assertThat(current.snapshotThroughSequence())
+                            .as("message projection covers the lead's Turn")
+                            .isGreaterThanOrEqualTo(1L);
                     ReplayWindow moved = store.advanceReplayFloor(tenant,
                             lead, Long.MAX_VALUE);
                     assertThat(moved.floorSequence()).isGreaterThan(0L);
                     advanced.set(moved);
                 });
         ReplayWindow window = advanced.get();
+        assertThat(window).as("the replay floor advanced").isNotNull();
         assertThat(window.floorSequence())
                 .isLessThanOrEqualTo(window.snapshotThroughSequence());
 
