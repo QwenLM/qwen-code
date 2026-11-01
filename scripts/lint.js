@@ -106,8 +106,28 @@ export function getCachedArchiveInstaller({
       if ! cp "${cacheArchive}" "${localArchive}" 2>/dev/null \
         || ! verify_sha256 "${localArchive}" "${expectedSha256}"; then
         rm -f "${localArchive}"
-        curl -fsSL --retry 2 --retry-connrefused --connect-timeout 10 --max-time 90 \
-          -o "${localArchive}" "${downloadUrl}"
+        download_attempt=1
+        download_max_attempts=5
+        # curl --retry discards partial output before retrying, so keep our own
+        # loop and let each request resume at the bytes already received.
+        while :; do
+          if curl -fsSL --connect-timeout 10 --max-time 90 --continue-at - \
+            -o "${localArchive}" "${downloadUrl}"; then
+            break
+          else
+            curl_status=$?
+          fi
+          if [ "$curl_status" -eq 33 ] || [ "$curl_status" -eq 36 ]; then
+            rm -f "${localArchive}"
+          fi
+          if [ "$download_attempt" -ge "$download_max_attempts" ]; then
+            exit "$curl_status"
+          fi
+          delay=$((download_attempt * 5))
+          echo "Linter download failed (curl exit $curl_status); retrying in ${'${delay}'}s..." >&2
+          sleep "$delay"
+          download_attempt=$((download_attempt + 1))
+        done
         verify_sha256 "${localArchive}" "${expectedSha256}"
         ${archiveCheck}
         cache_tmp=''

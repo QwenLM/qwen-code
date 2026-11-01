@@ -256,6 +256,62 @@ describe('linter directories', () => {
     },
     15_000,
   );
+
+  it.skipIf(process.platform === 'win32')(
+    'resumes a truncated archive download instead of restarting it',
+    async () => {
+      const { getCachedArchiveInstaller } = await import('../lint.js');
+      const root = mkdtempSync(path.join(tmpdir(), 'linter-resume-'));
+
+      try {
+        const binDir = path.join(root, 'bin');
+        const cacheArchive = path.join(root, 'cache', 'tool.tar');
+        const localArchive = path.join(root, 'job', 'tool.tar');
+        const executable = path.join(root, 'job', 'tool');
+        const fixture = path.join(root, 'official.tar');
+        const curlLog = path.join(root, 'curl.log');
+        mkdirSync(binDir, { recursive: true });
+        mkdirSync(path.dirname(localArchive), { recursive: true });
+        writeFileSync(fixture, 'official archive');
+        writeFileSync(
+          path.join(binDir, 'curl'),
+          '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CURL_LOG"\nresume=0\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = "--continue-at" ]; then resume=1; shift 2; continue; fi\n  if [ "$1" = "-o" ]; then out="$2"; shift 2; continue; fi\n  shift\ndone\nif [ "$resume" = "0" ]; then\n  printf "offic" > "$out"\n  exit 28\nfi\nprintf "ial archive" >> "$out"\n',
+        );
+        writeFileSync(path.join(binDir, 'sleep'), '#!/bin/sh\nexit 0\n');
+        chmodSync(path.join(binDir, 'curl'), 0o755);
+        chmodSync(path.join(binDir, 'sleep'), 0o755);
+
+        const installer = getCachedArchiveInstaller({
+          cacheArchive,
+          localArchive,
+          expectedSha256: createHash('sha256')
+            .update(readFileSync(fixture))
+            .digest('hex'),
+          downloadUrl: 'https://example.invalid/tool.tar',
+          archiveCheck: 'true',
+          extract: `cp "${localArchive}" "${executable}" && chmod +x "${executable}"`,
+          executable,
+        });
+
+        execSync(installer, {
+          env: {
+            ...process.env,
+            PATH: `${binDir}:${process.env.PATH}`,
+            CURL_LOG: curlLog,
+          },
+        });
+
+        expect(readFileSync(executable, 'utf8')).toBe('official archive');
+        const attempts = readFileSync(curlLog, 'utf8').trim().split('\n');
+        expect(attempts).toHaveLength(2);
+        expect(attempts[0]).not.toContain('--continue-at');
+        expect(attempts[1]).toContain('--continue-at -');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    15_000,
+  );
 });
 
 // #12647 (2026-09-24, runner ecs-qwen-hk4-19): `git ls-files` died with
