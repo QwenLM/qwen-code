@@ -516,9 +516,9 @@ public class WorkspaceExecutionStore
         external(context, binding, repository, session.getSession().getScope(),
                 session.getSession().getHarnessSessionId(), false, true,
                 (connection, owner, current) -> {
-            JdbcExternalWorkspaceOwnership.releaseStopped(connection, owner, current, binding, session);
-            return null;
-        });
+                    JdbcExternalWorkspaceOwnership.releaseStopped(connection, owner, current, binding, session);
+                    return null;
+                });
     }
 
     private <T> T external(ContextBinding context, RuntimeBindingRecord binding, RuntimeBindingRepository repository,
