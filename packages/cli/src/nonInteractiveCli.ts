@@ -185,6 +185,7 @@ function suppressedOutputBody(structuredCaptured: boolean): string {
 }
 
 import { normalizePartList } from './utils/normalize-part-list.js';
+import { markPromptParts } from './services/prompt-processors/prompt-parts.js';
 import {
   extractPartsFromUserMessage,
   buildSystemMessage,
@@ -1276,7 +1277,7 @@ export async function runNonInteractive(
           switch (slashCommandResult.type) {
             case 'submit_prompt':
               // A slash command can replace the prompt entirely; fall back to @-command processing otherwise.
-              initialPartList = slashCommandResult.content;
+              initialPartList = markPromptParts(slashCommandResult.content);
               // Re-validate provider identity rather than trust the producer:
               // any slash command can set `modelOverride`, so the consumer
               // enforces that it names a model on the active provider before
@@ -1399,12 +1400,18 @@ export async function runNonInteractive(
         }
 
         if (!slashHandled) {
+          const sendType = options.sendMessageType ?? SendMessageType.UserQuery;
           const { processedQuery, shouldProceed } = await handleAtCommand({
             query: input,
             config,
             onDebugMessage: () => {},
             messageId: Date.now(),
             signal: abortController.signal,
+            // Notification batches and scheduled text ride this path too but
+            // are not marked; a `/loop` tick is text the harness wrote.
+            markPrompt:
+              sendType === SendMessageType.UserQuery ||
+              sendType === SendMessageType.Retry,
           });
 
           if (!shouldProceed || !processedQuery) {

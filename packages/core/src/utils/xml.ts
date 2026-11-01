@@ -104,8 +104,9 @@ function normalizeSystemReminderCandidateTag(tag: string): string {
   return normalized.toLowerCase();
 }
 
-function getSystemReminderTagKind(
+function getEnvelopeTagKind(
   tag: string,
+  tagName: string,
 ): 'closing' | 'other' | undefined {
   // NOTE: no fast-path pre-check (e.g. tag.toLowerCase().includes()) here.
   // Zero-width obfuscated variants would bypass a literal substring check,
@@ -132,11 +133,10 @@ function getSystemReminderTagKind(
   }
   while (i < len && isXmlWhitespace(normalized[i])) i++;
 
-  const TAG_NAME = 'system-reminder';
-  if (normalized.slice(i, i + TAG_NAME.length) !== TAG_NAME) {
+  if (normalized.slice(i, i + tagName.length) !== tagName) {
     return undefined;
   }
-  i += TAG_NAME.length;
+  i += tagName.length;
 
   // Optional attribute span: original `(?:\s+[^>]*)?`. The candidate tag was
   // produced by /<[^<>]*>/, so `normalized` (minus the final '>') contains no
@@ -156,10 +156,10 @@ function getSystemReminderTagKind(
   return closing ? 'closing' : 'other';
 }
 
-function escapeSystemReminderTag(tag: string): string {
-  const tagKind = getSystemReminderTagKind(tag);
+function escapeEnvelopeTag(tag: string, tagName: string): string {
+  const tagKind = getEnvelopeTagKind(tag, tagName);
   if (tagKind === 'closing') {
-    return '<\\/system-reminder>';
+    return `<\\/${tagName}>`;
   }
   if (tagKind === 'other') {
     return escapeXml(tag);
@@ -174,5 +174,18 @@ function escapeSystemReminderTag(tag: string): string {
  * characters inside the tag, from ending or spoofing the reminder envelope.
  */
 export function escapeSystemReminderTags(text: string): string {
-  return text.replace(XML_TAG_CANDIDATE_RE, escapeSystemReminderTag);
+  return text.replace(XML_TAG_CANDIDATE_RE, (tag) =>
+    escapeEnvelopeTag(tag, 'system-reminder'),
+  );
+}
+
+/**
+ * Escape `<user_message>` tag variants in text quoted inside a
+ * `<user_message>` envelope, the same way escapeSystemReminderTags guards
+ * reminders: a quote cannot close its envelope early or forge a sibling.
+ */
+export function escapeUserMessageTags(text: string): string {
+  return text.replace(XML_TAG_CANDIDATE_RE, (tag) =>
+    escapeEnvelopeTag(tag, 'user_message'),
+  );
 }

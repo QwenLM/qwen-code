@@ -19,9 +19,54 @@ export interface ContextLengthExceededInfo {
    * behavior.
    */
   limitKind?: 'input' | 'total';
+  /**
+   * The rejected prompt's own size, read only from wording that states it
+   * apart from the output budget. `actualTokens` keeps the figure the
+   * reactive path has always read, which for "you requested N tokens" counts
+   * the requested output too.
+   */
+  promptTokens?: number;
+  /**
+   * A "you requested N tokens" total with no breakdown: the prompt plus the
+   * output budget the request asked for. A caller that knows that budget can
+   * subtract it.
+   */
+  requestedTokens?: number;
 }
 
 const MAX_COLLECT_DEPTH = 4;
+
+/**
+ * Wordings that state the prompt's own size, each matched within a single
+ * fragment so a number from a sibling field is never paired with it.
+ */
+const PROMPT_TOKEN_PATTERNS = [
+  // Anthropic, Fireworks: "prompt is too long: 210000 tokens > 200000 maximum"
+  /\bprompt is too long:\s*(\d[\d,]*)/i,
+  // OpenAI: "your messages resulted in 135000 tokens"
+  /\bresulted in\s+(\d[\d,]*)\s+tokens?\b/i,
+  // vLLM, Mistral: "your prompt contains 25000 input tokens". The digits must
+  // follow directly: vLLM's "contains at least N" is a tokenization cut-off.
+  /\bprompt contains\s+(\d[\d,]*)\s+(?:input\s+)?tokens?\b/i,
+  // vLLM: "your request has 10000 input tokens"
+  /\brequest has\s+(\d[\d,]*)\s+input tokens?\b/i,
+  // Gemini: "The input token count (1196265) exceeds ..."
+  /\binput token count\s*\(\s*(\d[\d,]*)\s*\)/i,
+  // llama.cpp: "request (279935 tokens) exceeds the available context size"
+  /\brequest\s*\(\s*(\d[\d,]*)\s*tokens?\s*\)\s*exceeds\b/i,
+  // SGLang: "36000 tokens from the input messages"
+  /\b(\d[\d,]*)\s+tokens?\s+from the input messages\b/i,
+];
+
+/**
+ * OpenAI and the servers that copy its wording: "you requested 131329 tokens
+ * (123137 in the messages, 8192 in the completion)". The total includes the
+ * output budget; the parenthesis, when present, says how much of it.
+ */
+const REQUESTED_TOKENS_PATTERN =
+  /\byou requested\s+(?:about\s+)?(\d[\d,]*)\s+tokens?\b(?!\s+(?:in|for)\s+the\s+(?:completion|output))(?:\s*\(([^)]*)\))?/i;
+const OUTPUT_SHARE_PATTERN =
+  /(\d[\d,]*)\s+(?:in|for)\s+the\s+(?:completion|output)\b/i;
 
 const TIMEOUT_PATTERNS = [
   /\bcontext deadline exceeded\b/i,
@@ -126,6 +171,27 @@ function parseTokenCounts(text: string): {
     };
   }
 
+  return {};
+}
+
+function parsePromptTokens(
+  fragments: string[],
+): Pick<ContextLengthExceededInfo, 'promptTokens' | 'requestedTokens'> {
+  for (const pattern of PROMPT_TOKEN_PATTERNS) {
+    for (const fragment of fragments) {
+      const match = pattern.exec(fragment);
+      if (match) return { promptTokens: parseInteger(match[1]!) };
+    }
+  }
+  for (const fragment of fragments) {
+    const match = REQUESTED_TOKENS_PATTERN.exec(fragment);
+    if (!match) continue;
+    const total = parseInteger(match[1]!);
+    const output = match[2] ? OUTPUT_SHARE_PATTERN.exec(match[2]) : null;
+    if (!output) return { requestedTokens: total };
+    const prompt = total - parseInteger(output[1]!);
+    return prompt > 0 ? { promptTokens: prompt } : {};
+  }
   return {};
 }
 
@@ -263,7 +329,9 @@ export function getContextLengthExceededInfo(
       CONTEXT_LENGTH_PATTERNS.some((pattern) => pattern.test(fragment)) &&
       !TIMEOUT_PATTERNS.some((pattern) => pattern.test(fragment)),
   );
-  const counts = isExceeded ? parseTokenCounts(message) : {};
+  const counts = isExceeded
+    ? { ...parseTokenCounts(message), ...parsePromptTokens(fragments) }
+    : {};
 
   return {
     isExceeded,

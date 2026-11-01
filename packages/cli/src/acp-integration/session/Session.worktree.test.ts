@@ -367,11 +367,13 @@ describe('Session.pendingWorktreeNotice', () => {
     await session.prompt(makePromptRequest('/testcommand'));
     await session.prompt(makePromptRequest('ordinary prompt'));
 
-    expect(capturedMessages[0]).toEqual([{ text: 'Prompt from command' }]);
+    expect(capturedMessages[0]).toEqual([
+      core.markTypedPrompt({ text: 'Prompt from command' }),
+    ]);
     expect(capturedMessages[1]).toEqual(
       expect.arrayContaining([
         { text: expect.stringContaining(notice) as string },
-        { text: 'ordinary prompt' },
+        core.markTypedPrompt({ text: 'ordinary prompt' }),
       ]),
     );
     expect(session.pendingRecoveredAgentsNotice).toBeNull();

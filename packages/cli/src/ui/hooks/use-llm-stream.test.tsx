@@ -50,8 +50,11 @@ import {
   ToolConfirmationOutcome,
   getRuntimeContentGenerator,
   getToolCallFingerprint,
+  isTypedPrompt,
+  markTypedPrompt,
   runWithRuntimeContentGenerator,
 } from '@qwen-code/qwen-code-core';
+import { markInjectedFilePart } from '../../services/prompt-processors/injected-file-parts.js';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import { FinishReason } from '@google/genai';
 import type { CommandContext } from '../commands/types.js';
@@ -1845,7 +1848,7 @@ describe('useLlmStream', () => {
       });
       expect(mockRunVisionBridge).not.toHaveBeenCalled();
       expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual([
-        { text: 'describe' },
+        markTypedPrompt({ text: 'describe' }),
         imagePart,
       ]);
       expect(mockSendMessageStream.mock.calls[0]?.[3]).toMatchObject({
@@ -7831,7 +7834,7 @@ describe('useLlmStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
     });
 
-    const expectedMidTurnMessage = { text: queuedPrompt };
+    const expectedMidTurnMessage = markTypedPrompt({ text: queuedPrompt });
     expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
       [expectedMidTurnMessage],
       queuedPrompt,
@@ -7921,7 +7924,9 @@ describe('useLlmStream', () => {
         new AbortController().signal,
       );
     });
-    expect(steerInput?.parts).toEqual([{ text: steeredPrompt }]);
+    expect(steerInput?.parts).toEqual([
+      markTypedPrompt({ text: steeredPrompt }),
+    ]);
     expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
     expect(mockAddItem).not.toHaveBeenCalledWith(
       { type: MessageType.USER, text: steeredPrompt, sentToModel: false },
@@ -7929,7 +7934,7 @@ describe('useLlmStream', () => {
     );
     steerInput?.accept();
     expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
-      [{ text: steeredPrompt }],
+      [markTypedPrompt({ text: steeredPrompt })],
       steeredPrompt,
     );
     expect(mockAddItem).toHaveBeenCalledWith(
@@ -8180,9 +8185,9 @@ describe('useLlmStream', () => {
     );
 
     expect(steerInput?.parts).toEqual([
-      { text: 'plain before final goal' },
+      markTypedPrompt({ text: 'plain before final goal' }),
       { text: '\n\n' },
-      { text: 'plain after final goal' },
+      markTypedPrompt({ text: 'plain after final goal' }),
     ]);
   });
 
@@ -9379,7 +9384,7 @@ describe('useLlmStream', () => {
       expect.any(Number),
     );
     expect(mockSendMessageStream).toHaveBeenCalledWith(
-      [...toolCallResponseParts, { text: queuedPrompt }],
+      [...toolCallResponseParts, markTypedPrompt({ text: queuedPrompt })],
       expect.any(AbortSignal),
       'prompt-id-midturn',
       expect.objectContaining({ type: SendMessageType.ToolResult }),
@@ -15988,6 +15993,53 @@ describe('useLlmStream', () => {
 
         expect(mockScheduleToolCalls).not.toHaveBeenCalled();
       });
+    });
+
+    it.each([
+      [SendMessageType.UserQuery, true],
+      [SendMessageType.Cron, false],
+    ])(
+      'marks a %s @-prompt as the request for compaction: %s (#9455)',
+      async (type, marked) => {
+        handleAtCommandSpy.mockResolvedValue({
+          processedQuery: [{ text: 'resolved' }],
+          shouldProceed: true,
+        });
+        const { result } = renderTestHook();
+
+        await act(async () => {
+          await result.current.submitQuery('look at @notes.md', type);
+        });
+
+        expect(handleAtCommandSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ markPrompt: marked }),
+        );
+      },
+    );
+
+    it("marks an expanded prompt's text for compaction but not injected file content (#9455)", async () => {
+      const fileBody = markInjectedFilePart({ text: 'const x = 1;' });
+      mockHandleSlashCommand.mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Explain this file:\n' }, fileBody],
+      });
+
+      const { result, mockSendMessageStream: localMockSendMessageStream } =
+        renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('/explain');
+      });
+
+      await waitFor(() =>
+        expect(localMockSendMessageStream).toHaveBeenCalled(),
+      );
+      const sent = localMockSendMessageStream.mock.calls[0]![0] as Part[];
+      expect(sent.map((part) => part.text)).toEqual([
+        'Explain this file:\n',
+        'const x = 1;',
+      ]);
+      expect(sent.map(isTypedPrompt)).toEqual([true, false]);
     });
 
     it('should correctly handle a submit_prompt action with empty content', async () => {

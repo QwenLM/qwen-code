@@ -28,6 +28,17 @@ export const AUTO_MEMORY_SNAPSHOT_METADATA =
 
 export const SYSTEM_REMINDER_OPEN = '<system-reminder>';
 export const SYSTEM_REMINDER_CLOSE = '</system-reminder>';
+
+/**
+ * The first sentence of the IDE context the client splices into a reminder
+ * block in front of the prompt's own text: the full form, and the form that
+ * lists changes since the last one. Compaction strips a leading reminder block
+ * from a quote only when it opens with one of these, so a reminder block the
+ * user typed stays in their quote.
+ */
+export const IDE_CONTEXT_OPENER = "Here is the user's current editor context.";
+export const IDE_CONTEXT_CHANGES_OPENER =
+  "Here is a summary of changes in the user's current editor context.";
 const MAX_DEFERRED_TOOL_DESC_LEN = 160;
 const COMPRESSED_PREFIX_LENGTH = Symbol('compressedPrefixLength');
 

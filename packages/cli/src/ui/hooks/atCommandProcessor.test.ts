@@ -15,6 +15,8 @@ import {
   FileDiscoveryService,
   StandardFileSystemService,
   COMMON_IGNORE_PATTERNS,
+  isTypedPrompt,
+  markTypedPrompt,
   Storage,
   // DEFAULT_FILE_EXCLUDES,
 } from '@qwen-code/qwen-code-core';
@@ -201,7 +203,7 @@ describe('handleAtCommand', () => {
     });
 
     expect(result.processedQuery).toEqual([
-      { text: `@${filePath}` },
+      markTypedPrompt({ text: `@${filePath}` }),
       { text: '\n--- Content from referenced files ---' },
       { text: `\nContent from ${filePath}:\n` },
       { text: fileContent },
@@ -213,6 +215,63 @@ describe('handleAtCommand', () => {
     expect(result.toolDisplays).toHaveLength(1);
     expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
     expect(result.toolDisplays![0].description).toBe('@file.txt');
+  });
+
+  describe('marks the typed prompt for compaction (#9455)', () => {
+    const typedFlags = async (query: string, markPrompt?: boolean) => {
+      const result = await handleAtCommand({
+        query,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 900,
+        signal: abortController.signal,
+        markPrompt,
+      });
+      return (result.processedQuery as Array<{ text?: string }>).map(
+        isTypedPrompt,
+      );
+    };
+
+    it('marks a query with no @path', async () => {
+      expect(await typedFlags('regular user query')).toEqual([true]);
+    });
+
+    it('marks a lone @', async () => {
+      expect(await typedFlags('  @  ')).toEqual([true]);
+    });
+
+    it('marks a query whose @paths are all invalid', async () => {
+      expect(await typedFlags('see @nonexistent/file.txt please')).toEqual([
+        true,
+      ]);
+    });
+
+    it('marks only the prompt when a file is attached', async () => {
+      const filePath = await createTestFile(
+        path.join(testRootDir, 'marked.txt'),
+        'attached body',
+      );
+
+      expect(await typedFlags(`explain @${filePath}`)).toEqual([
+        true,
+        false,
+        false,
+        false,
+        false,
+      ]);
+    });
+
+    it('marks nothing for input that is not a request', async () => {
+      const filePath = await createTestFile(
+        path.join(testRootDir, 'notice.txt'),
+        'attached body',
+      );
+
+      expect(await typedFlags('background task finished', false)).toEqual([
+        false,
+      ]);
+      expect(await typedFlags(`see @${filePath}`, false)).not.toContain(true);
+    });
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -418,7 +477,7 @@ describe('handleAtCommand', () => {
       });
 
       expect(siblingResult.processedQuery).toEqual([
-        { text: `@${siblingFilePath}` },
+        markTypedPrompt({ text: `@${siblingFilePath}` }),
       ]);
       expect(JSON.stringify(siblingResult.processedQuery)).not.toContain(
         siblingFileContent,
@@ -666,7 +725,7 @@ describe('handleAtCommand', () => {
 
     expect(result.shouldProceed).toBe(true);
     expect(result.processedQuery).toEqual([
-      { text: 'Use @mcp:demo now' },
+      markTypedPrompt({ text: 'Use @mcp:demo now' }),
       {
         text: expect.stringContaining('--- MCP Server: demo ---'),
       },
@@ -723,7 +782,7 @@ describe('handleAtCommand', () => {
       });
 
       expect(result.processedQuery).toEqual([
-        { text: `@${filePath}` },
+        markTypedPrompt({ text: `@${filePath}` }),
         { text: '\n--- Content from referenced files ---' },
         { text: `\nContent from ${filePath}:\n` },
         { text: fileContent },
@@ -932,7 +991,9 @@ describe('handleAtCommand', () => {
           signal: abortController.signal,
         });
 
-        expect(result.processedQuery).toEqual([{ text: `@${aliasPath}` }]);
+        expect(result.processedQuery).toEqual([
+          markTypedPrompt({ text: `@${aliasPath}` }),
+        ]);
       },
     );
 
@@ -2287,7 +2348,7 @@ describe('handleAtCommand', () => {
       // Legacy behavior: the URL is left as text, nothing is fetched.
       expect(omniMocks.downloadMediaUrl).not.toHaveBeenCalled();
       expect(result.shouldProceed).toBe(true);
-      expect(result.processedQuery).toEqual([{ text: query }]);
+      expect(result.processedQuery).toEqual([markTypedPrompt({ text: query })]);
     });
 
     it('does not hit the no-content early return for a URL-only prompt', async () => {

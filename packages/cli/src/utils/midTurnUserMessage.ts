@@ -5,6 +5,10 @@
  */
 
 import type { Part, PartListUnion } from '@google/genai';
+import {
+  isTypedPrompt,
+  markTypedPrompt,
+} from '@qwen-code/qwen-code-core/utils/attached-content.js';
 import { normalizePartList } from './normalize-part-list.js';
 
 export const MID_TURN_USER_MESSAGE_PREFIX =
@@ -24,8 +28,14 @@ export function prefixMidTurnUserMessageParts(
   prefix = MID_TURN_USER_MESSAGE_PREFIX,
 ): Part[] {
   const partArray = normalizePartList(parts);
+  // Text built from displayText stands for the message, so compaction must
+  // read it as typed, unless a part of the message already carries the mark.
+  const builtText: Part = { text: `${prefix}${displayText}` };
+  const leadPart = partArray.some(isTypedPrompt)
+    ? builtText
+    : markTypedPrompt(builtText);
   if (partArray.length === 0) {
-    return [{ text: `${prefix}${displayText}` }];
+    return [leadPart];
   }
 
   const [firstPart, ...rest] = partArray;
@@ -39,5 +49,5 @@ export function prefixMidTurnUserMessageParts(
     ];
   }
 
-  return [{ text: `${prefix}${displayText}` }, ...partArray];
+  return [leadPart, ...partArray];
 }

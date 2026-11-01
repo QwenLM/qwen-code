@@ -5,6 +5,10 @@
  */
 
 import type { Part } from '@google/genai';
+import {
+  HOSTED_ATTACHMENT_HEADER_PREFIX,
+  markTypedPrompt,
+} from '@qwen-code/qwen-code-core/utils/attached-content.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 
@@ -145,7 +149,7 @@ export function parseHostedInput(value: unknown): {
       )
         throw new Error('Invalid Hosted text attachment.');
       attachments.push({
-        text: `Attached file ${JSON.stringify(name)} (${mime}):\n<attachment>\n${resource['text']}\n</attachment>`,
+        text: `${HOSTED_ATTACHMENT_HEADER_PREFIX}${JSON.stringify(name)} (${mime}):\n<attachment>\n${resource['text']}\n</attachment>`,
       });
       continue;
     }
@@ -160,7 +164,8 @@ export function parseHostedInput(value: unknown): {
   return {
     text,
     attachments,
-    parts: [...(text ? [{ text }] : []), ...attachments],
+    // The text is the request, for compaction; the attachments are not.
+    parts: [...(text ? [markTypedPrompt({ text })] : []), ...attachments],
   };
 }
 

@@ -24,6 +24,8 @@ import type { CLIUserMessage } from './nonInteractive/types.js';
 import {
   executeToolCall,
   isTelemetrySdkInitialized,
+  isTypedPrompt,
+  markTypedPrompt,
   ToolErrorType,
   shutdownTelemetry,
   LlmEventType,
@@ -7381,7 +7383,7 @@ describe('runNonInteractive', () => {
 
       // Ensure the prompt sent to the model is from the command, not the raw input
       expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
-        [{ text: 'Prompt from command' }],
+        [markTypedPrompt({ text: 'Prompt from command' })],
         expect.any(AbortSignal),
         'prompt-id-slash',
         {
@@ -7479,7 +7481,7 @@ describe('runNonInteractive', () => {
         mockLlmClient.admitUserPrompt.mock.invocationCallOrder[0],
       ).toBeLessThan(deploy.action.mock.invocationCallOrder[0]!);
       expect(mockLlmClient.sendMessageStream).toHaveBeenCalledExactlyOnceWith(
-        [{ text: 'deploy expanded' }],
+        [markTypedPrompt({ text: 'deploy expanded' })],
         expect.any(AbortSignal),
         'prompt-id-admit',
         {
@@ -7505,7 +7507,7 @@ describe('runNonInteractive', () => {
 
       expect(deploy.action).not.toHaveBeenCalled();
       expect(mockLlmClient.sendMessageStream).toHaveBeenCalledExactlyOnceWith(
-        [{ text: '/deploy prod' }],
+        [markTypedPrompt({ text: '/deploy prod' })],
         expect.any(AbortSignal),
         'prompt-id-refused',
         expect.objectContaining({
@@ -7715,6 +7717,71 @@ describe('runNonInteractive', () => {
     expect(processStderrSpy).toHaveBeenCalledWith(
       'Unknown command result type: unhandled\n',
     );
+  });
+
+  describe('marking the request for compaction (#9455)', () => {
+    const answer = () =>
+      mockLlmClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'ok' },
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+          },
+        ]),
+      );
+
+    it("marks a command's expanded prompt", async () => {
+      setupMetricsMock();
+      mockGetCommands.mockReturnValue([
+        {
+          name: 'expand',
+          description: 'expands to a prompt',
+          kind: CommandKind.FILE,
+          action: vi.fn().mockResolvedValue({
+            type: 'submit_prompt',
+            content: [{ text: 'Prompt from command' }],
+          }),
+        },
+      ]);
+      answer();
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/expand',
+        'prompt-id-expand',
+      );
+
+      const sent = mockLlmClient.sendMessageStream.mock.calls[0]![0] as Part[];
+      expect(sent.filter(isTypedPrompt).map((part) => part.text)).toEqual([
+        'Prompt from command',
+      ]);
+    });
+
+    it.each([
+      [SendMessageType.UserQuery, true],
+      [SendMessageType.Cron, false],
+      [SendMessageType.Notification, false],
+    ])('marks %s input as the request: %s', async (type, marked) => {
+      setupMetricsMock();
+      answer();
+      const { handleAtCommand } = await import(
+        './ui/hooks/atCommandProcessor.js'
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'background task finished',
+        'prompt-id-mark',
+        { sendMessageType: type },
+      );
+
+      expect(handleAtCommand).toHaveBeenCalledWith(
+        expect.objectContaining({ markPrompt: marked }),
+      );
+    });
   });
 
   it('should pass arguments to the slash command action', async () => {

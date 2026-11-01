@@ -13,6 +13,7 @@ import sharp from 'sharp';
 import type { Part, PartListUnion } from '@google/genai';
 import { readManyFiles } from './readManyFiles.js';
 import type { ReadManyFilesOptions } from './readManyFiles.js';
+import { opensAttachedContent } from '../utils/attached-content.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import type { Config } from '../config/config.js';
@@ -204,6 +205,15 @@ describe('readManyFiles', () => {
       expect(content).toContain('file1.txt');
       expect(content).toContain('Content of file1.txt');
       expect(content).toContain('--- End of content ---');
+    });
+
+    it('opens its content with a header compaction recognizes as attached', async () => {
+      await createTestFile('file1.txt');
+
+      const { result } = await read(['file1.txt']);
+
+      const [first] = result.contentParts as Part[];
+      expect(opensAttachedContent(first!.text ?? '')).toBe(true);
     });
 
     it('uses display paths for canonical reads', async () => {

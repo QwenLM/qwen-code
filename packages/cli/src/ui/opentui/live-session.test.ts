@@ -60,6 +60,8 @@ import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js
 import { goalToolResultProvenance } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { HandleAtCommandResult } from '../hooks/atCommandProcessor.js';
+import { markTypedPrompt } from '@qwen-code/qwen-code-core/utils/attached-content.js';
+import { markPromptParts } from '../../services/prompt-processors/prompt-parts.js';
 import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
 
 function steering(...texts: string[]): OpenTuiSteeringSubmission[] {
@@ -2087,7 +2089,7 @@ describe('livePromptEvents', () => {
       })(),
     ).rejects.toThrow('failed after delivery');
     expect(recordMidTurnUserMessage).toHaveBeenCalledExactlyOnceWith(
-      [{ text: 'send exactly once' }],
+      [markTypedPrompt({ text: 'send exactly once' })],
       'send exactly once',
     );
     expect(events.filter((event) => event.type === 'user')).toEqual([
@@ -2125,7 +2127,7 @@ describe('livePromptEvents', () => {
           return;
         }
         const carrier = (args[3] as SendMessageOptions).steerInput;
-        expect(carrier?.parts).toEqual(entry.content);
+        expect(carrier?.parts).toEqual(markPromptParts(entry.content));
         try {
           if (event.type !== 'zero-event exit') yield event;
         } finally {
@@ -2150,7 +2152,7 @@ describe('livePromptEvents', () => {
       expect(sendMessageStream).toHaveBeenCalledTimes(2);
       expect(sendMessageStream.mock.calls[1][0]).toEqual([
         toolResponse,
-        ...entry.content,
+        ...markPromptParts(entry.content),
       ]);
       expect(restoreSteering).toHaveBeenCalledOnce();
       expect(restoreSteering.mock.calls[0][0][0]).toBe(entry);
@@ -2180,7 +2182,7 @@ describe('livePromptEvents', () => {
           return;
         }
         const carrier = (args[3] as SendMessageOptions).steerInput;
-        expect(carrier?.parts).toEqual(entry.content);
+        expect(carrier?.parts).toEqual(markPromptParts(entry.content));
         carrier?.accept();
         carrier?.accept();
         carrier?.restore();
@@ -2215,10 +2217,10 @@ describe('livePromptEvents', () => {
       expect(sendMessageStream).toHaveBeenCalledTimes(2);
       expect(sendMessageStream.mock.calls[1][0]).toEqual([
         toolResponse,
-        ...entry.content,
+        ...markPromptParts(entry.content),
       ]);
       expect(recordMidTurnUserMessage).toHaveBeenCalledExactlyOnceWith(
-        entry.content,
+        markPromptParts(entry.content),
         entry.text,
       );
       expect(events.filter((event) => event.type === 'user')).toEqual([
@@ -2253,7 +2255,7 @@ describe('livePromptEvents', () => {
           response: { ok: true },
         },
       },
-      { text: 'steer me' },
+      markTypedPrompt({ text: 'steer me' }),
     ]);
   });
 
@@ -2348,7 +2350,7 @@ describe('livePromptEvents', () => {
       );
       expect(sendMessageStream.mock.calls[1][0]).toEqual([
         toolResponse,
-        ...(mixed ? valid.content : []),
+        ...(mixed ? markPromptParts(valid.content) : []),
       ]);
       expect(restoreSteering.mock.calls).toEqual(mixed ? [[[valid]]] : []);
       const canonical = expectMentionCanonicalSource(events);
@@ -2466,9 +2468,9 @@ describe('livePromptEvents', () => {
     const [secondPrompt] = sendMessageStream.mock.calls[1] as unknown[];
     expect(secondPrompt).toEqual([
       toolResponse,
-      { text: 'first' },
+      markTypedPrompt({ text: 'first' }),
       { text: '\n\n' },
-      { text: 'second' },
+      markTypedPrompt({ text: 'second' }),
     ]);
     expect(atMocks.calls).toEqual([]);
   });
@@ -2526,8 +2528,8 @@ describe('livePromptEvents', () => {
     // Per message, in ink accept() order — each with its own parts, not the
     // joined hop (a resumed session replays the same shape).
     expect(recordMidTurnUserMessage.mock.calls).toEqual([
-      [[{ text: 'first' }], 'first'],
-      [[{ text: 'second' }], 'second'],
+      [[markTypedPrompt({ text: 'first' })], 'first'],
+      [[markTypedPrompt({ text: 'second' })], 'second'],
     ]);
   });
 

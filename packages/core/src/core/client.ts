@@ -184,6 +184,8 @@ import {
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
+  IDE_CONTEXT_CHANGES_OPENER,
+  IDE_CONTEXT_OPENER,
   wrapSystemReminder,
   type AgentAvailabilityEntry,
 } from './environmentContext.js';
@@ -207,6 +209,7 @@ import { promptIdContext } from '../utils/promptIdContext.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
+import { markTypedPrompt } from '../utils/attached-content.js';
 import { ApiRetryEvent } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
 import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
@@ -3122,7 +3125,7 @@ export class LlmClient {
       }
 
       const contextParts = [
-        "Here is the user's current editor context. Use it when relevant, including to answer questions about the active file, open files, cursor, or selected text.",
+        `${IDE_CONTEXT_OPENER} Use it when relevant, including to answer questions about the active file, open files, cursor, or selected text.`,
         contextLines.join('\n'),
       ];
 
@@ -3252,7 +3255,7 @@ export class LlmClient {
       }
 
       const contextParts = [
-        "Here is a summary of changes in the user's current editor context. Use it with the previous editor context when relevant, including to answer questions about the active file, open files, cursor, or selected text.",
+        `${IDE_CONTEXT_CHANGES_OPENER} Use it with the previous editor context when relevant, including to answer questions about the active file, open files, cursor, or selected text.`,
         changeLines.join('\n'),
       ];
 
@@ -3797,6 +3800,21 @@ export class LlmClient {
       SendMessageType.UserQuery,
   ): AsyncGenerator<ServerLlmStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
+    // A prompt the user typed arrives here as a plain string when nothing in
+    // it needed expanding, and so does its retry; mark it so compaction tells
+    // it apart from what rides the turn after it (hook context, reminders).
+    // Expanded prompts are marked where they are built. A scheduled prompt is
+    // left to compaction's positional reading: a `/loop` tick sends text the
+    // harness wrote under the same type.
+    if (
+      typeof request === 'string' &&
+      (messageType === SendMessageType.UserQuery ||
+        messageType === SendMessageType.Retry) &&
+      !options?.isConcurrentSideQuery &&
+      isTopLevelSession()
+    ) {
+      request = [markTypedPrompt({ text: request })];
+    }
     const humanInput =
       messageType === SendMessageType.UserQuery &&
       !options?.isConcurrentSideQuery &&
