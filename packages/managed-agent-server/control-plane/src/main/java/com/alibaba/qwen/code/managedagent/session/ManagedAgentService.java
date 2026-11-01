@@ -326,7 +326,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         return new WebShellSessionModels(store.modelOptions(),
                 store.findModelSelections(principal.tenantId(),
                         List.of(sessionId)).getOrDefault(sessionId,
-                        new WebShellModelSelection(null, 0)), supported);
+                            new WebShellModelSelection(null, 0)), supported);
     }
 
     public WebShellModelChangeResult changeWebShellSessionModel(String tenantId, String actorId,
@@ -365,7 +365,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         boolean supported = Boolean.TRUE.equals(summary.capabilities().approvalModeChange());
         var selected = store.findApprovalSelections(principal.tenantId(),
                 List.of(sessionId)).getOrDefault(sessionId,
-                new WebShellApprovalSelection(summary.approvalMode(), summary.approvalRevision() == null ? 0 : summary.approvalRevision(), summary.planMode()));
+                    new WebShellApprovalSelection(summary.approvalMode(), summary.approvalRevision() == null ? 0 : summary.approvalRevision(), summary.planMode()));
         return new WebShellSessionApproval(selected.mode(), selected.revision(),
                 supported ? harness.supportsAutoApproval() || "auto".equals(selected.mode())
                         ? List.of("default", "auto", "auto-edit", "yolo") : List.of("default", "auto-edit", "yolo")
