@@ -2,6 +2,11 @@ name: 'Windows Self-Hosted Runner Validation'
 
 on:
   workflow_dispatch:
+    inputs:
+      preview_launch_diagnostic:
+        description: 'Run focused Windows preview launcher and installer tests'
+        type: boolean
+        default: false
 
 permissions:
   contents: 'read'
@@ -9,6 +14,7 @@ permissions:
 jobs:
   validate:
     name: 'Validate runner'
+    if: '${{ !inputs.preview_launch_diagnostic }}'
     runs-on: ['self-hosted', 'Windows', 'X64', 'ecs-win']
     timeout-minutes: 60
     steps:
@@ -124,3 +130,48 @@ jobs:
           # operation the suites perform, and no test notices.
           git config --global core.autocrlf false
           npm run test:ci
+
+  preview-launch-diagnostic:
+    name: 'Preview launcher and installer preservation'
+    if: '${{ inputs.preview_launch_diagnostic }}'
+    runs-on: 'windows-2022'
+    timeout-minutes: 15
+    steps:
+      - name: 'Disable Git CRLF conversion'
+        shell: 'powershell'
+        run: 'git config --global core.autocrlf false'
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'
+      - name: 'Configure Windows test environment'
+        uses: './.github/actions/configure-windows-runner'
+      - name: 'Verify checkout includes expected head commit'
+        uses: './.github/actions/verify-checkout-head'
+        with:
+          expected_sha: '${{ github.sha }}'
+      - name: 'Set up Node.js 22.x'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'
+        with:
+          node-version: '22.x'
+          package-manager-cache: false
+      - name: 'Record exact diagnostic candidate'
+        shell: 'bash'
+        run: |-
+          set -euo pipefail
+          actual_head="$(git rev-parse HEAD)"
+          test "$actual_head" = "$GITHUB_SHA"
+          printf 'QWEN_DIAG_HEAD=%s\n' "$actual_head" > "$RUNNER_TEMP/preview-launch-diagnostic.log"
+      - name: 'Install dependencies without workspace builds'
+        shell: 'bash'
+        run: 'corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only'
+      - name: 'Run the preview installer preservation file'
+        shell: 'bash'
+        run: |-
+          set -euo pipefail
+          node node_modules/vitest/vitest.mjs run scripts/tests/opentui-preview-install.test.js --config scripts/tests/vitest.config.ts --retry=0 --bail=1 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false 2>&1 | tee -a "$RUNNER_TEMP/preview-launch-diagnostic.log"
+      - name: 'Save launcher diagnostic output'
+        if: '${{ always() }}'
+        uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
+        with:
+          name: 'preview-launch-diagnostic-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}'
+          path: '${{ runner.temp }}/preview-launch-diagnostic.log'
+          if-no-files-found: 'warn'
