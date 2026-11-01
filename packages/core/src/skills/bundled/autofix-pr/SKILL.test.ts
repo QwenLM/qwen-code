@@ -332,6 +332,43 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain('whose `## Never` it is told to follow too');
   });
 
+  it('draws the line at ready to merge: no approval, no review state, no merge, no auto-merge', () => {
+    const { body } = loadSkill();
+    expect(body).toContain(
+      'The watch gets the PR ready to merge and keeps it there',
+    );
+    expect(body).toContain(
+      'It never approves a PR, changes its review state, merges or closes it, or turns on auto-merge',
+    );
+    expect(body).toContain(
+      "It combines with the repository's auto-merge, which merges once those requirements are met.",
+    );
+    // The start confirmation says it too, not the opening paragraph alone.
+    const confirm =
+      /\n5\. \*\*Confirm\*\*([\s\S]*?)\n6\. /.exec(body)?.[1] ?? '';
+    expect(confirm).toContain('it gets the PR ready to merge, and no further');
+    expect(confirm).toContain("merging stays the user's");
+  });
+
+  it('reports a round that pushed nothing but left something for a person', () => {
+    const { body } = loadSkill();
+    expect(body).toContain(
+      'With nothing pushed, post one anyway when `needsHuman` is not empty',
+    );
+    // What keeps the report from repeating is the helper's, not the round's.
+    expect(body).toContain(
+      'a summary that answers no comments goes out once per head, and a later round posts one again only when it leaves something new for a person',
+    );
+    // A report that never reached the PR is not spent: the round runs again.
+    expect(body).toContain(
+      'One that never reached the PR is still owed, so a failed `reply` is run again with the same plan.',
+    );
+    expect(body).toContain(
+      'Omit it (`null`) only when nothing was pushed, no review or issue comment was answered, and `needsHuman` is empty.',
+    );
+    expect(body).toContain('and the summary reports them on the PR');
+  });
+
   it("lists every item step 3 sets aside under the brief's own items, which the after-fix turn answers from", () => {
     const { body } = loadSkill();
     const ciLogs = /3\. \*\*CI logs\.\*\*([^\n]*)/.exec(body)?.[1] ?? '';
@@ -341,8 +378,16 @@ describe('bundled autofix-pr skill', () => {
         /out of the brief's events, list (?:it|them) under `## The round's own items`/g,
       ),
     ).toHaveLength(2);
-    expect(ciLogs).toContain(
-      "never goes into the brief's events — only under `## The round's own items`",
+    // A workflow that could not start, and a check its fix pushes left red.
+    expect(
+      ciLogs.match(
+        /never goes into the brief's events — only under `## The round's own items`/g,
+      ),
+    ).toHaveLength(2);
+    // A spent check gets no log and no fix: a person's, recorded as handled.
+    expect(ciLogs).toContain('with a `runId` and no `exhausted`, run');
+    expect(ciLogs).toMatch(
+      /`exhausted: true`[^]*?it is not fixed again\. It is `needs_human`[^]*?its `key` goes into `handledChecks`/,
     );
     expect(ciLogs).not.toMatch(/out of the brief[ ,.]|into the brief[;.]/);
     expect(body).toContain(
