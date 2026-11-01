@@ -23306,6 +23306,7 @@ export function App({
                       <PluginManagerPage
                         onClose={returnToChat}
                         onUseSkill={handleUseSkill}
+                        showBackButton={!navigationRailVisible}
                         initialFocusRef={pluginTabRef}
                         initialTab={pluginInitialTab}
                         skillsWorkspaceCwd={skillsSourceCwd}
