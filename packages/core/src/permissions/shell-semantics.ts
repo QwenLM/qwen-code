@@ -85,9 +85,7 @@ export interface ShellOperation {
  * How one character of a word was written. The shell expands `$` and
  * backticks unless the character is `literal` (single quotes or a backslash
  * escape), and reads `<` and `>` as syntax only when the character is
- * unquoted (`none`). The inside of a `${…}` or `$((…))` expansion counts as
- * `double`: its `$` still expands, but its spaces, `<`, `>` and `#` belong
- * to the expansion, not to the command.
+ * unquoted (`none`).
  */
 type CharQuoting = 'none' | 'double' | 'literal';
 
@@ -99,9 +97,7 @@ interface ShellWord {
 
 /**
  * Tokenize a shell command string, respecting single/double quotes and
- * backslash escapes, splitting on unquoted whitespace. A `#` that starts a
- * word begins a comment. A `${…}` or `$((…))` expansion stays in one word,
- * as in bash, and its `<`, `>` and `#` are not syntax.
+ * backslash escapes, splitting on unquoted whitespace.
  *
  * The input should be a single simple command (already split from compound
  * commands via `splitCompoundCommand`).
@@ -113,34 +109,20 @@ function tokenizeCommand(command: string): ShellWord[] {
   let inSingle = false;
   let inDouble = false;
   let escaped = false;
-  // Set once anything, even an empty `""`, has been written for this word.
-  let wordStarted = false;
-  // What closes each open expansion, innermost last: `}` for `${`, `))` for
-  // `$((`, and `)` for a parenthesis inside arithmetic.
-  const closers: string[] = [];
-  // A `#` inside `` `…` `` comments out the inner command only.
-  let inBackquote = false;
 
   const flush = (): void => {
     const word = toShellWord(text, quoting);
     if (word) words.push(word);
     text = '';
     quoting = [];
-    wordStarted = false;
   };
-  const append = (chars: string, how: CharQuoting): void => {
-    text += chars;
-    for (let k = 0; k < chars.length; k++) quoting.push(how);
-    wordStarted = true;
-  };
-  // The delimiters of an expansion are syntax unless it is nested in another.
-  const outside = (): CharQuoting => (closers.length > 0 ? 'double' : 'none');
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
 
     if (escaped) {
-      append(ch, 'literal');
+      text += ch;
+      quoting.push('literal');
       escaped = false;
       continue;
     }
@@ -150,50 +132,18 @@ function tokenizeCommand(command: string): ShellWord[] {
     }
     if (ch === "'" && !inDouble) {
       inSingle = !inSingle;
-      wordStarted = true;
       continue;
     }
     if (ch === '"' && !inSingle) {
       inDouble = !inDouble;
-      wordStarted = true;
       continue;
     }
-    if (!inSingle && !inDouble) {
-      const opener = command.startsWith('$((', i)
-        ? '$(('
-        : command.startsWith('${', i)
-          ? '${'
-          : undefined;
-      if (opener) {
-        append(opener, outside());
-        closers.push(opener === '${' ? '}' : '))');
-        i += opener.length - 1;
-        continue;
-      }
-      const closer = closers[closers.length - 1];
-      if (closer !== undefined) {
-        if (ch === closer[0]) {
-          closers.pop();
-          // `))` ends arithmetic. A lone `)` means the `$((` opened a
-          // substitution of a subshell, `$( (…) )`, which ends here too.
-          const end = closer === '))' && command[i + 1] === ')' ? '))' : ch;
-          append(end, outside());
-          i += end.length - 1;
-          continue;
-        }
-        if (ch === '(' && closer !== '}') closers.push(')');
-        append(ch, 'double');
-        continue;
-      }
-      if (ch === ' ' || ch === '\t') {
-        flush();
-        continue;
-      }
-      if (ch === '`') inBackquote = !inBackquote;
-      // Only a `#` that starts a word begins a comment: `""#x` is one word.
-      if (ch === '#' && !wordStarted && !inBackquote) break;
+    if (!inSingle && !inDouble && (ch === ' ' || ch === '\t')) {
+      flush();
+      continue;
     }
-    append(ch, inSingle ? 'literal' : inDouble ? 'double' : 'none');
+    text += ch;
+    quoting.push(inSingle ? 'literal' : inDouble ? 'double' : 'none');
   }
   flush();
   return words;
@@ -284,14 +234,6 @@ function isEnvAssignmentToken(token: string): boolean {
 }
 
 /**
- * `<(cmd)` and `>(cmd)` become a pipe such as `/dev/fd/63`, not a file on
- * disk.
- */
-function isProcessSubstitution(word: string): boolean {
-  return /^[<>]\(/.test(word);
-}
-
-/**
  * Return true if a token looks like a file/directory path argument, as
  * opposed to a flag, shell variable, number, or script expression.
  */
@@ -307,8 +249,6 @@ function looksLikePath(s: string): boolean {
   if (s.includes('{') || s.includes('}')) return false;
   // URLs are handled separately by the web-fetch handlers
   if (s.includes('://')) return false;
-  // A process substitution is a pipe, not a file
-  if (isProcessSubstitution(s)) return false;
   return true;
 }
 
@@ -359,8 +299,6 @@ function splitWordRedirects(
   for (let k = 0; k < text.length; k++) {
     const ch = text[k];
     if ((ch !== '<' && ch !== '>') || quoting[k] !== 'none') continue;
-    // `<(cmd)` and `>(cmd)` are process substitutions, not redirections.
-    if (text[k + 1] === '(') continue;
     // The second character of `>>`, `<>`, `<<` continues the operator; a
     // quoted `>` before it is plain text and starts nothing.
     if (
@@ -423,55 +361,13 @@ function redirectTargetOps(
   return [{ virtualTool: tool, filePath: resolvePath(target, cwd) }];
 }
 
-/** Reserved words that can come before `[[` in command position. */
-const TEST_COMMAND_PREFIXES: ReadonlySet<string> = new Set([
-  '!',
-  'if',
-  'elif',
-  'while',
-  'until',
-  'then',
-  'do',
-  'else',
-  'time',
-]);
-
-/**
- * Whether `words[i]` opens a `[[ … ]]` test. `[[` is a test only as the
- * command word and only when a `]]` closes it; elsewhere it is an argument.
- */
-function opensTest(words: readonly ShellWord[], i: number): boolean {
-  const { text, quoting } = words[i]!;
-  return (
-    text === '[[' &&
-    quoting.every((how) => how === 'none') &&
-    words.slice(0, i).every((word) => TEST_COMMAND_PREFIXES.has(word.text)) &&
-    words.slice(i + 1).some(closesTest)
-  );
-}
-
-/**
- * Whether `word` closes a `[[ … ]]` test: an unquoted `]]`, alone or with a
- * redirection glued after it (`]]>out`), since bash ends a word at `<` / `>`.
- */
-function closesTest({ text, quoting }: ShellWord): boolean {
-  const bare = (k: number) => quoting[k] === 'none';
-  return (
-    text.startsWith(']]') &&
-    bare(0) &&
-    bare(1) &&
-    (text.length === 2 || ((text[2] === '<' || text[2] === '>') && bare(2)))
-  );
-}
-
 /**
  * Extract I/O redirections from a command's words.
  *
  * Handles every bash redirection form, with or without a space before the
  * target and with any fd number: `>`, `>>`, `>|`, `<`, `<>`, `&>`, `&>>`,
  * `>&file`, heredocs and here-strings. fd duplication and closing (`2>&1`,
- * `>&-`) touch no file. Quoted `<` / `>` are plain text, and so are the
- * comparison operators inside `[[ … ]]`.
+ * `>&-`) touch no file. Quoted `<` / `>` are plain text.
  */
 function extractRedirects(
   words: readonly ShellWord[],
@@ -479,20 +375,8 @@ function extractRedirects(
 ): RedirectResult {
   const ops: ShellOperation[] = [];
   const rest: string[] = [];
-  let inTest = false;
-
   for (let i = 0; i < words.length; i++) {
     const word = words[i]!;
-    if (!inTest && opensTest(words, i)) inTest = true;
-    if (inTest) {
-      if (closesTest(word)) inTest = false;
-      // `]]>out` ends the test and redirects; split it below.
-      if (inTest || word.text === ']]') {
-        rest.push(word.text);
-        continue;
-      }
-    }
-
     const split = splitWordRedirects(word);
     if (!split) {
       rest.push(word.text);
@@ -2068,9 +1952,31 @@ const PREFIX_COMMAND_FLAGS_WITH_VALUE = new Map<string, ReadonlySet<string>>([
       '--command-timeout',
       '-U',
       '--other-user',
+      '-R',
+      '--chroot',
+      '--host',
     ]),
   ],
   ['timeout', new Set(['-s', '--signal', '-k', '--kill-after'])],
+  ['nice', new Set(['-n', '--adjustment'])],
+  [
+    'ionice',
+    new Set([
+      '-c',
+      '--class',
+      '-n',
+      '--classdata',
+      '-p',
+      '--pid',
+      '-P',
+      '--pgid',
+      '-u',
+      '--uid',
+    ]),
+  ],
+  ['stdbuf', new Set(['-i', '--input', '-o', '--output', '-e', '--error'])],
+  ['doas', new Set(['-u', '-C', '-a'])],
+  ['time', new Set(['-o', '--output', '-f', '--format'])],
   [
     'env',
     new Set([
@@ -2106,13 +2012,16 @@ function readPrefixOptions(
   tokens: readonly string[],
   start: number,
   withValue: ReadonlySet<string>,
+  gluedValue: ReadonlySet<string> = new Set(),
 ): { options: PrefixOption[]; end: number; ended: boolean } {
   const options: PrefixOption[] = [];
   let i = start;
   while (i < tokens.length) {
     const word = tokens[i]!;
-    if (word === '--') return { options, end: i + 1, ended: true };
-    if (!word.startsWith('-') || word === '-') break;
+    if (word === '--' || word === '-') {
+      return { options, end: i + 1, ended: true };
+    }
+    if (!word.startsWith('-')) break;
     i++;
     if (word.startsWith('--')) {
       const eq = word.indexOf('=');
@@ -2128,6 +2037,11 @@ function readPrefixOptions(
     }
     for (let k = 1; k < word.length; k++) {
       const name = `-${word[k]}`;
+      // An optional value is only ever glued: `sudo -hhost`, not `-h host`.
+      if (gluedValue.has(name)) {
+        options.push({ name, value: word.slice(k + 1) || undefined });
+        break;
+      }
       if (!withValue.has(name)) {
         options.push({ name });
         continue;
@@ -2174,6 +2088,27 @@ const PREFIX_COMMANDS = new Set([
   'stdbuf',
 ]);
 
+/** Shells whose `-c` takes the script as one argument. */
+const SCRIPT_SHELLS: ReadonlySet<string> = new Set(['sh', 'bash', 'zsh']);
+
+/**
+ * The script of a wrapped shell such as `bash -c SCRIPT`, given as words,
+ * or undefined when the words do not start one. The script word is exactly
+ * what bash receives; quoting the words back into one string would lose the
+ * quotes inside it, since `stripShellWrapper` only peels the outer pair.
+ */
+function wrappedShellScript(words: readonly string[]): string | undefined {
+  const shell = words[0]?.split('/').pop()?.toLowerCase();
+  if (shell === undefined || !SCRIPT_SHELLS.has(shell)) return undefined;
+  for (let i = 1; i < words.length; i++) {
+    const word = words[i]!;
+    if (/^-[a-z]*c[a-z]*$/i.test(word)) return words[i + 1];
+    if (!word.startsWith('-') && word !== '+o') return undefined;
+    if (word === '-o' || word === '+o') i++;
+  }
+  return undefined;
+}
+
 /** Quote a word so that tokenizing it again yields the same text. */
 function quoteShellWord(text: string): string {
   return /^[A-Za-z0-9_./=:,+@%^-]+$/.test(text)
@@ -2205,9 +2140,6 @@ export function extractShellOperations(
   cwd: string,
 ): ShellOperation[] {
   if (!simpleCommand.trim()) return [];
-  // `(( … ))` is arithmetic: its `<` and `>` compare numbers. Without the
-  // closing `))`, as in `((cat .env); true)`, bash reads nested subshells.
-  if (/^\s*\(\([\s\S]*\)\)\s*$/.test(simpleCommand)) return [];
 
   const words = tokenizeCommand(simpleCommand);
   if (words.length === 0) return [];
@@ -2235,7 +2167,12 @@ export function extractShellOperations(
     const options: PrefixOption[] = [];
     let startIdx = 1;
     for (;;) {
-      const read = readPrefixOptions(commandTokens, startIdx, flagsWithVal);
+      const read = readPrefixOptions(
+        commandTokens,
+        startIdx,
+        flagsWithVal,
+        cmdName === 'sudo' ? new Set(['-h']) : undefined,
+      );
       options.push(...read.options);
       let next = read.end;
       while (
@@ -2251,8 +2188,12 @@ export function extractShellOperations(
 
     // Re-quote the inner command so its words survive tokenizing again,
     // and walk it so a wrapped shell (`sudo bash -c '…'`) is unwrapped.
+    // A word holding a command substitution stays as it is, so a redirect in
+    // the substitution still counts until substitutions are analysed.
     const quotedRest = (from: number) =>
-      commandTokens.slice(from).map(quoteShellWord);
+      commandTokens
+        .slice(from)
+        .map((word) => (/\$\(|`/.test(word) ? word : quoteShellWord(word)));
     let innerCommand: string[] | undefined;
     let innerCwd = cwd;
     let innerCwdUnknown = false;
@@ -2292,7 +2233,12 @@ export function extractShellOperations(
     ) {
       startIdx++;
     }
-    if (!innerCommand && startIdx < commandTokens.length) {
+    const script = innerCommand
+      ? undefined
+      : wrappedShellScript(commandTokens.slice(startIdx));
+    if (script !== undefined) {
+      ops.push(...walkCompoundCommand(script, innerCwd, 1, innerCwdUnknown));
+    } else if (!innerCommand && startIdx < commandTokens.length) {
       innerCommand = quotedRest(startIdx);
     }
     if (innerCommand) {

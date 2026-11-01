@@ -706,7 +706,13 @@ describe('redirect grammar', () => {
       'echo x > a">"b',
       [write(`${CWD}/a>b`)],
     ],
-    ['no write inside a comment', 'echo hi # > foo', []],
+    // Comments, tests, arithmetic and expansions are not modelled: masking
+    // them would also hide the substitutions they can hold.
+    [
+      'a redirect after a `#` still counts',
+      'echo hi # > foo',
+      [write(`${CWD}/foo`)],
+    ],
     [
       'a `#` inside a word is not a comment',
       'echo ""#x >f',
@@ -722,40 +728,12 @@ describe('redirect grammar', () => {
       'echo ${x:-a #b} > f',
       [write(`${CWD}/f`)],
     ],
-    ['a comment after backquotes', 'echo `echo a` # > f', []],
-    ['a comment after `${…}`', 'echo ${x} # > f', []],
-    ['no write for a `>` inside `${…}`', 'echo ${x:- > b }', []],
     [
       '`[[` as an argument hides no redirect',
       'echo [[ > f',
       [write(`${CWD}/f`)],
     ],
     ['`[[` without `]]` hides no redirect', '[[ x >f', [write(`${CWD}/f`)]],
-    ['no write for `[[ a > b ]]`', '[[ a > b ]]', []],
-    [
-      '`]]` glued to a redirect ends the test',
-      '[[ a > b ]]>out',
-      [write(`${CWD}/out`)],
-    ],
-    ['no write for `(( a > b ))`', '(( a > b ))', []],
-    [
-      'arithmetic keeps its `>`',
-      'echo $(( 1 > 0 )) > out.txt',
-      [write(`${CWD}/out.txt`)],
-    ],
-    ['no write for a comparison in `$((…))`', 'echo $((a>b))', []],
-    ['no write for a spaced comparison in `$((…))`', 'echo $(( a > b ))', []],
-    ['arithmetic ends at its `))`', 'echo $((a>b))>f', [write(`${CWD}/f`)]],
-    [
-      'arithmetic nests parentheses',
-      'echo $(( (a) > b )) > f',
-      [write(`${CWD}/f`)],
-    ],
-    [
-      '`$((` without `))` is a substitution, not arithmetic',
-      'echo $((true) ) > f',
-      [write(`${CWD}/f`)],
-    ],
   ])('%s', (_title, command, expected) => {
     expect(ops(command)).toEqual(expected);
   });
@@ -768,7 +746,6 @@ describe('prefix commands and substitutions', () => {
       'echo $(printf X > p.txt)',
       [write(`${CWD}/p.txt`)],
     ],
-    ['a process substitution is not a file', 'cat <(true)', []],
     [
       'prefix commands keep quoted words intact',
       'sudo cat "my notes.txt"',
@@ -785,24 +762,35 @@ describe('prefix commands and substitutions', () => {
       [read('/repo/.env')],
     ],
     [
-      '`[[ … ]]` after `if` compares',
-      'if [[ a > b ]]; then echo hi > f; fi',
-      [write('/repo/f')],
-    ],
-    [
-      '`[[ … ]]` after `if` ends at a glued `]]>`',
-      'if [[ a > b ]]>out; then :; fi',
-      [write('/repo/out')],
-    ],
-    [
-      '`[[ … ]]` after `if` ends at a spaced `]] >`',
-      'if [[ a > b ]] >out; then :; fi',
-      [write('/repo/out')],
-    ],
-    [
       'nested subshells are not arithmetic',
       '((cat .env); printf X >p.txt)',
       [read('/repo/.env'), write('/repo/p.txt')],
+    ],
+    // What the tokenizer does not model must not hide what it contains.
+    [
+      'a redirect in a substitution inside `[[ … ]]` counts',
+      '[[ -n $(printf X > p.txt) ]]',
+      [write('/repo/p.txt')],
+    ],
+    [
+      'a quoted `if` is a command name, so its redirect counts',
+      `'if' [[ 1 > p.txt ]]`,
+      [write('/repo/p.txt')],
+    ],
+    [
+      'a redirect in a substitution inside `${…}` counts',
+      'echo ${x:-$(printf X > p.txt )}',
+      [write('/repo/p.txt')],
+    ],
+    [
+      'a redirect in a substitution inside `(( … ))` counts',
+      '(( $(printf X > p.txt) ))',
+      [write('/repo/p.txt')],
+    ],
+    [
+      'a `#` inside `(( … ))` does not hide the redirect after it',
+      '(( 1 # c )) > p.txt',
+      [write('/repo/p.txt')],
     ],
   ])('%s', (_title, command, expected) => {
     expect(across(command)).toEqual(expected);
@@ -810,6 +798,12 @@ describe('prefix commands and substitutions', () => {
 
   it('unwraps a shell behind a prefix command', () => {
     expect(across(`sudo bash -c 'printf X > p.txt'`)).toEqual([
+      write('/repo/p.txt'),
+    ]);
+  });
+
+  it('keeps the quotes inside a wrapped shell script', () => {
+    expect(across(`sudo bash -c "printf '%s' '{}' > p.txt"`)).toEqual([
       write('/repo/p.txt'),
     ]);
   });
@@ -824,6 +818,14 @@ describe('prefix command options', () => {
       [read('/repo/.env')],
     ],
     ['`--` ends the options', 'sudo -- cat .env', [read('/repo/.env')]],
+    ['a bare `-` ends the options', 'sudo - cat .env', [read('/repo/.env')]],
+    ['`env -` ends the options', 'env - cat .env', [read('/repo/.env')]],
+    [
+      '`sudo -h` takes only a glued value',
+      'sudo -hhost cat .env',
+      [read('/repo/.env')],
+    ],
+    ['`nice -n` takes a value', 'nice -n 5 cat .env', [read('/repo/.env')]],
     ['`env -u` takes a value', 'env -u FOO cat .env', [read('/repo/.env')]],
     ['`env -S` runs its string', `env -S 'cat .env'`, [read('/repo/.env')]],
     ['`env -S` glued', `env -S'cat .env'`, [read('/repo/.env')]],

@@ -3469,6 +3469,18 @@ describe('PermissionManager — shell redirection forms (#10196)', () => {
     'echo ${x:-a #b} > p.txt',
     'printf X > a>p.txt',
     'echo a> b> p.txt',
+    // The tokenizer does not model tests, arithmetic, expansions or
+    // comments, so a redirection inside them, or in a substitution they
+    // hold, still counts as on main.
+    '[[ -n $(printf X > p.txt) ]]',
+    `'if' [[ 1 > p.txt ]]`,
+    'echo ${x:-$(printf X > p.txt )}',
+    'echo $(( 1 + $(printf X > p.txt) ))',
+    '(( $(printf X > p.txt) ))',
+    '(( 1 # c )) > p.txt',
+    // A wrapped shell's script is read as bash receives it.
+    `sudo bash -c "printf '%s' '{}' > p.txt"`,
+    'sudo - sh -c "printf X > p.txt"',
   ])('denies %s under Edit(p.txt)', async (command) => {
     const pm = repoPm({ permissionsDeny: ['Edit(p.txt)'] });
     expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
@@ -3484,6 +3496,9 @@ describe('PermissionManager — shell redirection forms (#10196)', () => {
     `env -S 'cat .env'`,
     'env -u FOO cat .env',
     'sudo -Eu root cat .env',
+    // A bare `-` ends the prefix options like `--`.
+    'sudo - cat .env',
+    'env - cat .env',
   ])('denies %s under Read(.env)', async (command) => {
     const pm = repoPm({ permissionsDeny: ['Read(.env)'] });
     expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
@@ -3504,13 +3519,23 @@ describe('PermissionManager — shell redirection forms (#10196)', () => {
     'ls -la 2>&1',
     'npm test 2>&1 | tail -20',
     'echo hi > /dev/null',
-    'echo hi # > p.txt',
     "echo '>' p.txt",
-    'echo $((a>b))',
-    'echo $(( a > b ))',
   ])('does not see a write in %s', async (command) => {
     const pm = repoPm({ permissionsDeny: ['Write'] });
     expect(await pm.evaluate(sh(command, '/repo'))).toBe('allow');
+  });
+
+  // Comments, arithmetic and process substitutions are not modelled, so a
+  // spaced `>` in them still reads as a write, as on main. Masking them
+  // without looking inside the substitutions they hold would hide real
+  // writes.
+  it.each([
+    'echo hi # > p.txt',
+    'echo $(( a > b ))',
+    'npm test 2> >(tee err.log)',
+  ])('still sees the write main sees in %s', async (command) => {
+    const pm = repoPm({ permissionsDeny: ['Write'] });
+    expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
   });
 });
 
