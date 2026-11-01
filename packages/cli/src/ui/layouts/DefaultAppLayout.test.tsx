@@ -95,6 +95,7 @@ const baseUIState: Partial<UIState> = {
   staticExtraHeight: 0,
   constrainHeight: true,
   streamingState: StreamingState.Responding,
+  useTerminalBuffer: false,
   historyManager: {
     addItem: vi.fn(),
     history: [],
@@ -159,6 +160,7 @@ describe('DefaultAppLayout', () => {
 
     renderLayout({
       ...baseUIState,
+      useTerminalBuffer: true,
       terminalHeight: 24,
       btwItem: {
         type: 'btw',
@@ -168,6 +170,30 @@ describe('DefaultAppLayout', () => {
 
     expect(btwMessagePropsSpy).toHaveBeenCalledWith(
       expect.objectContaining({ maxAnswerRows: 12 }),
+    );
+  });
+
+  it('renders the whole /btw answer outside VP mode', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
+    btwMessagePropsSpy.mockClear();
+
+    renderLayout({
+      ...baseUIState,
+      useTerminalBuffer: false,
+      terminalHeight: 24,
+      btwItem: {
+        type: 'btw',
+        btw: { question: 'side', answer: 'long answer', isPending: false },
+      },
+    });
+
+    // A row budget would mount the panel's ScrollableList, which arms SGR
+    // mouse tracking (bypassVpGate) on the non-VP main screen.
+    expect(btwMessagePropsSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ maxAnswerRows: undefined }),
     );
   });
 

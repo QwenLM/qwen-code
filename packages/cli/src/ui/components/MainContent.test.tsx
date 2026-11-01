@@ -926,9 +926,24 @@ describe('<MainContent />', () => {
       expect(lastFrame()).toMatch(/VP_ITEM:1[\s\S]*VP_ITEM:2/);
     });
 
-    it('hands keyboard and wheel scrolling to the /btw answer panel while it is open', () => {
+    it('hands keyboard and wheel scrolling to the /btw answer panel once its viewport exists', () => {
       scrollableListPropsSpy.mockClear();
       renderMainContent(createUIState({ useTerminalBuffer: true }));
+
+      expect(scrollableListPropsSpy.mock.calls.at(-1)?.[0].hasFocus).toBe(true);
+
+      // A pending answer has no scroller yet, so the transcript keeps the keys
+      // instead of leaving the pending window with no scroll owner at all.
+      scrollableListPropsSpy.mockClear();
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          btwItem: {
+            type: 'btw',
+            btw: { question: 'side', answer: '', isPending: true },
+          },
+        }),
+      );
 
       expect(scrollableListPropsSpy.mock.calls.at(-1)?.[0].hasFocus).toBe(true);
 

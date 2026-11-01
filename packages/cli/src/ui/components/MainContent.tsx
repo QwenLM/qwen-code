@@ -537,9 +537,15 @@ export const MainContent = ({
     // While the /btw answer panel is open it owns keyboard and wheel
     // scrolling: it renders its own viewport in the bottom controls region, so
     // leaving this list subscribed too would scroll both surfaces on every
-    // keypress and wheel tick.
+    // keypress and wheel tick. A pending answer has no viewport yet — the
+    // panel only mounts its scroller once the answer arrives — so during that
+    // window the transcript keeps the keys instead of nothing owning them.
+    const btwPanelOwnsViewport =
+      uiState.btwItem !== null && !uiState.btwItem.btw.isPending;
     const viewportInteractive =
-      !uiState.dialogsVisible && contextMenuOpen === null && !uiState.btwItem;
+      !uiState.dialogsVisible &&
+      contextMenuOpen === null &&
+      !btwPanelOwnsViewport;
 
     return (
       <OverflowProvider>

@@ -62,7 +62,13 @@ export const DefaultAppLayout: React.FC = () => {
     uiState.staticExtraHeight,
   );
   const dialogHeight = uiState.constrainHeight ? dialogMaxHeight : undefined;
-  const btwAnswerMaxRows = getBtwAnswerMaxRows(uiState.terminalHeight);
+  // The /btw answer viewport only exists in VP mode. Its ScrollableList arms
+  // SGR mouse tracking (bypassVpGate), which must not happen on the non-VP
+  // main screen where the terminal keeps native scrollback — so the row budget
+  // stays undefined there and the panel renders the whole answer.
+  const btwAnswerMaxRows = uiState.useTerminalBuffer
+    ? getBtwAnswerMaxRows(uiState.terminalHeight)
+    : undefined;
   const shouldShowStickyTodos =
     uiState.stickyTodos !== null &&
     !uiState.dialogsVisible &&
