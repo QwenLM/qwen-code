@@ -294,6 +294,92 @@ describe('failures ledger', () => {
   });
 });
 
+// Rounds folded whole workspace suites into their own counts: "7737 scripted
+// assertions" held a few dozen checks the round wrote. Suite results have a
+// field of their own, and the triple counts what the round wrote.
+describe('gates', () => {
+  const GATES_ERROR = /gates must be an array of \{ suite, pass, fail \}/;
+  const withGates = (gates, counts = { pass: 4, fail: 0, total: 4 }) =>
+    check({ assertions: JSON.stringify({ ...counts, gates }) });
+
+  it("accepts suite counts beside the round's own", () => {
+    const result = withGates([
+      { suite: 'cli acp-session', pass: 1290, fail: 2, skipped: 1 },
+      { suite: 'core client', pass: 535, fail: 0 },
+    ]);
+    expect(result.errors).toEqual([]);
+    expect(result.warnings).toEqual([]);
+    expect(result.counts).toEqual({ pass: 4, fail: 0, total: 4 });
+    // An empty list is a round that ran no suites: valid, and below the
+    // size threshold it has nothing to warn about.
+    const empty = withGates([]);
+    expect(empty.errors).toEqual([]);
+    expect(empty.warnings).toEqual([]);
+  });
+
+  it('refuses a malformed list without echoing the suite name', () => {
+    for (const gates of [
+      { cli: { pass: 1, fail: 0 } },
+      [null],
+      [{ pass: 1, fail: 0 }],
+      [{ suite: '  ', pass: 1, fail: 0 }],
+      [{ suite: 'x', pass: -1, fail: 0 }],
+      [{ suite: 'x', pass: 1, fail: 0.5 }],
+      [{ suite: 'x', pass: 1, fail: 0, skipped: '2' }],
+      [{ suite: 'x', pass: 1, fail: 0, skipped: false }],
+      [{ suite: 'x', pass: 1, fail: 0, skipped: null }],
+      [{ suite: 'x', pass: '1', fail: 0 }],
+    ]) {
+      const result = withGates(gates);
+      expect(result.errors.join('\n')).toMatch(GATES_ERROR);
+    }
+    // The publisher forwards error lines to its log; a suite name is
+    // agent-chosen text.
+    const named = withGates([
+      { suite: '@everyone <!-- x -->', pass: -1, fail: 0 },
+    ]);
+    expect(named.errors.join('\n')).not.toContain('@everyone');
+  });
+
+  it('refuses counts beyond the safe integer range', () => {
+    // Raw literals: JSON.stringify would turn 1e309 into null and hide the
+    // overflow that the publisher's jq clamps to a finite double.
+    const raw = (pass) =>
+      check({
+        assertions: `{"pass":4,"fail":0,"total":4,"gates":[{"suite":"x","pass":${pass},"fail":0}]}`,
+      });
+    for (const pass of ['1e309', '1e308', '9007199254740992']) {
+      expect(raw(pass).errors.join('\n')).toMatch(GATES_ERROR);
+    }
+    expect(raw('9007199254740991').errors).toEqual([]);
+  });
+
+  it('warns when a suite-sized total comes with no gates', () => {
+    const big = check({
+      assertions: JSON.stringify({ pass: 1001, fail: 0, total: 1001 }),
+    });
+    expect(big.errors).toEqual([]);
+    expect(big.warnings.join('\n')).toMatch(
+      /counts 1001 assertions and records no gates/,
+    );
+    const edge = check({
+      assertions: JSON.stringify({ pass: 1000, fail: 0, total: 1000 }),
+    });
+    expect(edge.warnings.join('\n')).not.toMatch(/records no gates/);
+    const split = withGates([{ suite: 'cli', pass: 1292, fail: 0 }], {
+      pass: 1001,
+      fail: 0,
+      total: 1001,
+    });
+    expect(split.warnings.join('\n')).not.toMatch(/records no gates/);
+    // An empty list records no suites, so it must not silence the warning
+    // either: folding suites in and writing [] is the same smell.
+    const empty = withGates([], { pass: 1001, fail: 0, total: 1001 });
+    expect(empty.errors).toEqual([]);
+    expect(empty.warnings.join('\n')).toMatch(/records no gates/);
+  });
+});
+
 // "Every production commit since the previous round was mutated on its own"
 // shipped while two commits had no row. A coverage claim is universally
 // quantified over an enumerable set, so it is checked against that set.
