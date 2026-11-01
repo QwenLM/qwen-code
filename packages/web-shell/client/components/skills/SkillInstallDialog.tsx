@@ -28,7 +28,7 @@ import { Spinner } from '../ui/spinner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 
 type InstallSource = 'github' | 'folder' | 'zip';
-const MAX_SKILL_ZIP_BYTES = 6 * 1024 * 1024;
+const MAX_SKILL_ZIP_BYTES = 7_864_071;
 
 function installErrorMessage(
   error: unknown,
@@ -42,34 +42,49 @@ function installErrorMessage(
     body && typeof body === 'object'
       ? (body as { code?: unknown }).code
       : undefined;
+  const detail = extractErrorDetail(error);
+  const withDetail = (guidance: string) =>
+    detail && detail !== guidance ? `${detail}\n\n${guidance}` : guidance;
+
   if (code === 'invalid_skill_source')
-    return t('skills.install.error.invalidSource');
+    return withDetail(t('skills.install.error.invalidSource'));
   if (code === 'invalid_skill_scope')
-    return t('skills.install.error.invalidScope');
+    return withDetail(t('skills.install.error.invalidScope'));
   if (code === 'invalid_skill_name')
-    return t('skills.install.error.invalidName');
+    return withDetail(t('skills.install.error.invalidName'));
   if (code === 'skill_manifest_missing')
-    return t('skills.install.error.manifestMissing');
-  if (
-    code === 'invalid_skill_package' ||
-    code === 'invalid_skill_manifest' ||
-    code === 'skill_name_mismatch' ||
-    code === 'unsafe_skill_path'
-  ) {
-    return t('skills.install.error.invalidPackage');
+    return withDetail(t('skills.install.error.manifestMissing'));
+  if (code === 'invalid_skill_manifest') {
+    return withDetail(
+      t(
+        detail ===
+          'Failed to parse skill file: Invalid format: missing YAML frontmatter'
+          ? 'skills.install.error.frontmatter'
+          : 'skills.install.error.invalidManifest',
+      ),
+    );
   }
+  if (code === 'skill_name_mismatch')
+    return withDetail(t('skills.install.error.nameMismatch'));
+  if (code === 'unsafe_skill_path')
+    return withDetail(t('skills.install.error.unsafePath'));
+  if (code === 'invalid_skill_package')
+    return withDetail(t('skills.install.error.invalidPackage'));
   if (code === 'skill_package_too_large')
-    return t('skills.install.error.zipTooLarge');
+    return withDetail(t('skills.install.error.packageTooLarge'));
+  if (code === 'skill_too_many_files')
+    return withDetail(t('skills.install.error.tooManyFiles'));
   if (code === 'invalid_skill_folder')
-    return t('skills.install.error.invalidFolder');
+    return withDetail(t('skills.install.error.invalidFolder'));
   if (code === 'github_api_failed' || code === 'github_skill_download_failed')
-    return t('skills.install.error.githubFailed');
-  if (code === 'skill_not_found') return t('skills.install.error.notFound');
+    return withDetail(t('skills.install.error.githubFailed'));
+  if (code === 'skill_not_found')
+    return withDetail(t('skills.install.error.notFound'));
   if (code === 'token_required')
-    return t('skills.install.error.authentication');
+    return withDetail(t('skills.install.error.authentication'));
   if (code === 'untrusted_workspace')
-    return t('skills.install.error.untrusted');
-  return extractErrorDetail(error) || t('skills.install.failed');
+    return withDetail(t('skills.install.error.untrusted'));
+  return detail || t('skills.install.failed');
 }
 
 interface SkillInstallDialogProps {
@@ -156,7 +171,7 @@ export function SkillInstallDialog({
       }}
     >
       <DialogContent
-        className="sm:max-w-lg"
+        className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg"
         showCloseButton={false}
         onPointerDownOutside={(event) => event.preventDefault()}
       >
@@ -170,7 +185,9 @@ export function SkillInstallDialog({
           {error ? (
             <Alert variant="destructive">
               <AlertCircleIcon />
-              <AlertDescription>{error}</AlertDescription>
+              <AlertDescription className="min-w-0 whitespace-pre-wrap break-words">
+                {error}
+              </AlertDescription>
             </Alert>
           ) : null}
           <label className="grid gap-2 text-sm font-medium">

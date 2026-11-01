@@ -50,6 +50,11 @@ const report = {
   promptSubmissions: 0,
   continuationsAfterFailure: 0,
   postFailureLoads: [] as boolean[],
+  postFailureCancellationLoads: 0,
+  // Record non-resuming recovery modes separately from their wire origins.
+  // A targeted cancellation proves the replacement; a cleanup load only proves
+  // that no resume ran, so the two are counted apart.
+  postFailureLoadOrigins: [] as string[],
   lateCancelReplays: 0,
   originalCancelBody: '',
 };
@@ -156,8 +161,46 @@ const proxy = createServer(async (req, res) => {
           `/session/${config.sessionId}/managed-runtime/continue`
       )
         report.continuationsAfterFailure++;
-      if (injected && target.pathname.endsWith('/load'))
-        report.postFailureLoads.push(fields.cancellationTakeover === true);
+      let postFailureLoadIndex: number | undefined;
+      let postFailureCancellationLoad = false;
+      if (injected && target.pathname.endsWith('/load')) {
+        const cancellationOnly =
+          fields.cancellationTakeover === true &&
+          fields.passiveManagedRuntimeRecovery === true &&
+          typeof fields.cancellationPromptId === 'string' &&
+          fields.cancellationPromptId === report.promptId &&
+          fields.recoveryCleanupPromptId === undefined;
+        // Cleanup does not carry the client prompt id, and both cleanup
+        // branches return before any resume, so a targeted cleanup load is
+        // non-resuming whatever prompt it names.
+        const cleanupOnly =
+          typeof fields.recoveryCleanupPromptId === 'string' &&
+          fields.cancellationTakeover !== true &&
+          fields.passiveManagedRuntimeRecovery !== true &&
+          fields.cancellationPromptId === undefined;
+        const nonDriving =
+          fields.driveRuntimeRecovery !== true &&
+          fields.mcpManagementOnly !== true &&
+          fields.lifecycleAuthority === undefined;
+        postFailureLoadIndex = report.postFailureLoads.length;
+        report.postFailureLoads.push(
+          nonDriving && (cancellationOnly || cleanupOnly),
+        );
+        postFailureCancellationLoad = nonDriving && cancellationOnly;
+        report.postFailureLoadOrigins.push(
+          [
+            `takeover=${fields.cancellationTakeover === true}`,
+            `passive=${fields.passiveManagedRuntimeRecovery === true}`,
+            `drive=${fields.driveRuntimeRecovery === true}`,
+            `mcpOnly=${fields.mcpManagementOnly === true}`,
+            `promptId=${typeof fields.cancellationPromptId === 'string'}`,
+            `promptMatches=${fields.cancellationPromptId === report.promptId}`,
+            `cleanup=${typeof fields.recoveryCleanupPromptId === 'string'}`,
+            `cleanupMatches=${fields.recoveryCleanupPromptId === report.promptId}`,
+            `lifecycle=${fields.lifecycleAuthority !== undefined}`,
+          ].join(' '),
+        );
+      }
       const headers = Object.fromEntries(
         Object.entries(req.headers)
           .filter(
@@ -181,6 +224,12 @@ const proxy = createServer(async (req, res) => {
         headers,
         ...(body.length ? { body } : {}),
       });
+      if (postFailureLoadIndex !== undefined) {
+        report.postFailureLoadOrigins[postFailureLoadIndex] +=
+          ` status=${upstream.status}`;
+        if (postFailureCancellationLoad && upstream.ok)
+          report.postFailureCancellationLoads++;
+      }
       if (target.pathname.endsWith('/events') && upstream.body) {
         res.writeHead(upstream.status, relayedHeaders(upstream.headers));
         const reader = upstream.body.getReader();
@@ -250,6 +299,7 @@ const proxy = createServer(async (req, res) => {
         req.method === 'POST' &&
         [
           '/internal/runtime-broker/v1/runtimes:warm',
+          '/internal/runtime-broker/v1/runtimes:capabilities',
           '/internal/runtime-broker/v1/tool-sessions:active-holds',
         ].includes(url.pathname);
       assert.equal(fields.harnessSessionId, config.sessionId);
@@ -638,7 +688,12 @@ async function runExistingCase() {
 }
 
 async function runRecoverySettlement() {
-  async function api(route: string, body?: object, expected = 200) {
+  async function api(
+    route: string,
+    body?: object,
+    expected = 200,
+    allowProjectionPending = false,
+  ) {
     if (proxyFailure) throw proxyFailure;
     const response = await fetch(config.storeUrl + route, {
       method: body ? 'POST' : 'GET',
@@ -652,6 +707,13 @@ async function runRecoverySettlement() {
       signal: AbortSignal.timeout(10_000),
     });
     const text = await response.text();
+    if (
+      allowProjectionPending &&
+      response.status === 503 &&
+      JSON.parse(text)?.error?.code === 'message_projection_pending'
+    ) {
+      return null;
+    }
     assert.equal(response.status, expected, `${route}: ${text}`);
     return text ? JSON.parse(text) : {};
   }
@@ -678,10 +740,17 @@ async function runRecoverySettlement() {
   assert.equal(report.modelCalls, 1);
   assert.equal(report.promptSubmissions, 1);
   assert.equal(report.continuationsAfterFailure, 0);
-  assert(report.postFailureLoads.length > 0);
+  assert(
+    report.postFailureLoads.length > 0,
+    `no post-failure loads were recorded at all: ${JSON.stringify(report.postFailureLoadOrigins)}`,
+  );
+  assert(
+    report.postFailureCancellationLoads > 0,
+    'replacement must use a targeted cancellation takeover load',
+  );
   assert(
     report.postFailureLoads.every(Boolean),
-    'replacement must use cancellation-only loads',
+    `replacement must use targeted cancellation or cleanup-only loads: ${report.postFailureLoadOrigins.join(' | ')}`,
   );
   await unlink(`${proof}.read-gate`);
   await waitUntil(async () => {
@@ -739,9 +808,9 @@ async function runRecoverySettlement() {
     report.promptId,
   );
   await waitUntil(async () =>
-    JSON.stringify(await api(`${route}/items?limit=100`)).includes(
-      'FOLLOW_UP_OK',
-    ),
+    JSON.stringify(
+      await api(`${route}/items?limit=100`, undefined, 200, true),
+    ).includes('FOLLOW_UP_OK'),
   );
   assert.equal(
     report.operations.filter((operation) => operation === 'start').length,

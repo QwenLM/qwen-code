@@ -17,6 +17,7 @@ import { useAgentViewState } from '../contexts/AgentViewContext.js';
 import { StreamingState } from '../types.js';
 
 const dialogManagerMockState = vi.hoisted(() => ({ lineCount: 1 }));
+const btwMessagePropsSpy = vi.hoisted(() => vi.fn());
 
 vi.mock('../components/MainContent.js', () => ({
   MainContent: () => <Text>MainContent</Text>,
@@ -48,7 +49,10 @@ vi.mock('../components/ExitWarning.js', () => ({
 }));
 
 vi.mock('../components/messages/BtwMessage.js', () => ({
-  BtwMessage: () => <Text>BtwMessage</Text>,
+  BtwMessage: (props: unknown) => {
+    btwMessagePropsSpy(props);
+    return <Text>BtwMessage</Text>;
+  },
 }));
 
 vi.mock('../components/StickyTodoList.js', () => ({
@@ -91,6 +95,7 @@ const baseUIState: Partial<UIState> = {
   staticExtraHeight: 0,
   constrainHeight: true,
   streamingState: StreamingState.Responding,
+  useTerminalBuffer: false,
   historyManager: {
     addItem: vi.fn(),
     history: [],
@@ -143,6 +148,52 @@ describe('DefaultAppLayout', () => {
     );
     expect(output.indexOf('StickyTodoList')).toBeLessThan(
       output.indexOf('Composer'),
+    );
+  });
+
+  it('budgets the /btw answer viewport from the terminal height', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
+    btwMessagePropsSpy.mockClear();
+
+    renderLayout({
+      ...baseUIState,
+      useTerminalBuffer: true,
+      terminalHeight: 24,
+      btwItem: {
+        type: 'btw',
+        btw: { question: 'side', answer: 'long answer', isPending: false },
+      },
+    });
+
+    expect(btwMessagePropsSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ maxAnswerRows: 12 }),
+    );
+  });
+
+  it('renders the whole /btw answer outside VP mode', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
+    btwMessagePropsSpy.mockClear();
+
+    renderLayout({
+      ...baseUIState,
+      useTerminalBuffer: false,
+      terminalHeight: 24,
+      btwItem: {
+        type: 'btw',
+        btw: { question: 'side', answer: 'long answer', isPending: false },
+      },
+    });
+
+    // A row budget would mount the panel's ScrollableList, which arms SGR
+    // mouse tracking (bypassVpGate) on the non-VP main screen.
+    expect(btwMessagePropsSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ maxAnswerRows: undefined }),
     );
   });
 

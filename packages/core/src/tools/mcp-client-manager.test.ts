@@ -2712,6 +2712,7 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
           skillsDir: '/bundle/generated-ui/skills',
         },
       });
+      config.setMcpAppHostSupported(true);
       (
         config as unknown as { initializeBundledGeneratedUi(): void }
       ).initializeBundledGeneratedUi();

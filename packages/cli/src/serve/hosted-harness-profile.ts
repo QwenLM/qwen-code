@@ -90,6 +90,10 @@ export function validateHostedHarnessProfile(
     );
   }
   if (opts.hostedCsiSessionStoreUrl !== undefined) {
+    if (process.env['QWEN_HOSTED_HARNESS_INSTANCE_ID'] !== undefined)
+      throw new Error(
+        'The shared Harness pool cannot host private CSI owners.',
+      );
     if (
       !opts.managedRuntimeBrokerUrl ||
       !opts.managedRuntimeBrokerToken?.trim()

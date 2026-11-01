@@ -495,7 +495,10 @@ describe('installation scripts', () => {
     expect(prepared.command).toBe(
       'set "PROCESSOR_ARCHITECTURE=AMD64" && set "PROCESSOR_ARCHITEW6432=" && set "PSModulePath=C:\\PowerShell\\7\\Modules" && call "C:\\tools\\install-qwen-standalone.bat"',
     );
-    expect(prepared.env).toEqual({ Path: 'C:\\fake-bin' });
+    expect(prepared.env).toEqual({
+      Path: 'C:\\fake-bin',
+      QWEN_NO_MODIFY_PATH: '1',
+    });
   });
 
   it('creates PowerShell validation scripts with a ps1 extension', () => {
@@ -763,15 +766,16 @@ describe('standalone release packaging', () => {
     expect(allowedBlock).not.toBeNull();
     expect(npmOnlyBlock).not.toBeNull();
     for (const entry of entries) {
-      if (entry.includes('*')) {
+      const topLevelEntry = entry.split('/')[0];
+      if (topLevelEntry.includes('*')) {
         // Glob entries (today: '*.sb') are covered by
         // DIST_ALLOWED_ENTRY_PATTERNS rather than a literal name.
         expect(packageScript).toContain('DIST_ALLOWED_ENTRY_PATTERNS');
         continue;
       }
       const known =
-        allowedBlock[1].includes(`'${entry}'`) ||
-        npmOnlyBlock[1].includes(`'${entry}'`);
+        allowedBlock[1].includes(`'${topLevelEntry}'`) ||
+        npmOnlyBlock[1].includes(`'${topLevelEntry}'`);
       expect(known, `npm files entry '${entry}' unknown to packager`).toBe(
         true,
       );
@@ -946,6 +950,40 @@ describe('standalone release packaging', () => {
     }
   });
 
+  it('keeps retrying a transient download until a later attempt succeeds', async () => {
+    const { downloadWithRetry } = await import(standaloneReleaseScriptUrl);
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
+    const destination = path.join(tmpDir, 'node-v22.0.0-linux-x64.tar.xz');
+    const sleepImpl = vi.fn(async () => {});
+    const fetchImpl = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('fetch failed'))
+      .mockRejectedValueOnce(new Error('fetch failed'))
+      .mockRejectedValueOnce(new Error('fetch failed'))
+      .mockRejectedValueOnce(new Error('fetch failed'))
+      .mockResolvedValueOnce(new Response('runtime-bytes'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      await downloadWithRetry(
+        'https://nodejs.org/dist/v22.0.0/node-v22.0.0-linux-x64.tar.xz',
+        destination,
+        { fetchImpl, sleepImpl },
+      );
+
+      // A fourth transient failure must still leave one attempt, and a
+      // success on the final attempt must still write the destination.
+      expect(fetchImpl).toHaveBeenCalledTimes(5);
+      expect(sleepImpl.mock.calls.map(([ms]) => ms)).toEqual([
+        5_000, 10_000, 20_000, 40_000,
+      ]);
+      expect(readFileSync(destination, 'utf8')).toBe('runtime-bytes');
+    } finally {
+      warnSpy.mockRestore();
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('re-downloads a runtime archive that fails verification', async () => {
     const { downloadWithRetry } = await import(standaloneReleaseScriptUrl);
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
@@ -991,8 +1029,10 @@ describe('standalone release packaging', () => {
           { fetchImpl, sleepImpl },
         ),
       ).rejects.toThrow(/Failed to download/);
-      expect(fetchImpl).toHaveBeenCalledTimes(3);
-      expect(sleepImpl.mock.calls.map(([ms]) => ms)).toEqual([5_000, 10_000]);
+      expect(fetchImpl).toHaveBeenCalledTimes(5);
+      expect(sleepImpl.mock.calls.map(([ms]) => ms)).toEqual([
+        5_000, 10_000, 20_000, 40_000,
+      ]);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -1077,7 +1117,7 @@ describe('standalone release packaging', () => {
         ).rejects.toThrow(
           `ERROR: ${label} SHASUMS256.txt does not list ${missingArchives.join(', ')}`,
         );
-        expect(fetchImpl).toHaveBeenCalledTimes(3);
+        expect(fetchImpl).toHaveBeenCalledTimes(5);
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
       }
@@ -1174,7 +1214,7 @@ describe('standalone release packaging', () => {
     expect(normalised).toMatch(
       /downloadRuntimeChecksums\(\{[^;]*expectedArchives: RELEASE_TARGETS\.map/,
     );
-    expect(normalised).toContain('const MAX_DOWNLOAD_ATTEMPTS = 3;');
+    expect(normalised).toContain('const MAX_DOWNLOAD_ATTEMPTS = 5;');
     expect(normalised).toContain('const INITIAL_DOWNLOAD_BACKOFF_MS = 5_000;');
     expect(normalised).toContain('const DOWNLOAD_TIMEOUT_MS = 120_000;');
     expect(normalised).toContain('AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS)');
@@ -2951,13 +2991,30 @@ describe('standalone release packaging', () => {
 
     try {
       const archiveRoot = path.join(tmpDir, 'pkg');
-      mkdirSync(path.join(archiveRoot, 'qwen-code', 'bin'), {
-        recursive: true,
-      });
+      const packageRoot = path.join(archiveRoot, 'qwen-code');
+      for (const directory of ['bin', 'bun/bin', 'node/bin', 'lib']) {
+        mkdirSync(path.join(packageRoot, directory), { recursive: true });
+      }
       writeFileSync(
-        path.join(archiveRoot, 'qwen-code', 'bin', 'qwen'),
-        '#!/usr/bin/env sh\n',
+        path.join(packageRoot, 'manifest.json'),
+        JSON.stringify({
+          name: '@qwen-code/qwen-code',
+          version: '0.0.1',
+          runtime: 'bun',
+          target: `${process.platform}-${process.arch}`,
+        }),
       );
+      writeFileSync(
+        path.join(packageRoot, 'lib/package.json'),
+        '{"type":"module"}',
+      );
+      for (const file of ['lib/cli.js', 'lib/cli-entry.js']) {
+        writeFileSync(path.join(packageRoot, file), 'export {};\n');
+      }
+      for (const file of ['bin/qwen', 'bun/bin/bun', 'node/bin/node']) {
+        writeFileSync(path.join(packageRoot, file), '#!/usr/bin/env sh\n');
+        chmodSync(path.join(packageRoot, file), 0o755);
+      }
       const archive = path.join(
         tmpDir,
         'qwen-code-linux-x64-opentui-preview.tar.gz',
@@ -4894,6 +4951,13 @@ describe('Windows installer end-to-end', () => {
         const home = path.join(tmpDir, 'home');
         runWindowsInstaller(archive, installRoot, home);
 
+        const persistentPaths = runWindowsCommand(
+          `powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('Path', 'User'); [Environment]::GetEnvironmentVariable('Path', 'Machine')"`,
+        ).toString();
+        expect(persistentPaths.toLowerCase()).not.toContain(
+          installRoot.toLowerCase(),
+        );
+
         expect(existsSync(path.join(installRoot, 'bin', 'qwen.cmd'))).toBe(
           true,
         );
@@ -6007,7 +6071,8 @@ const WINDOWS_COMMAND_ENV_OVERRIDES = [
 ];
 
 function prepareWindowsCommand(command, env = {}, baseEnv = process.env) {
-  const commandEnv = { ...baseEnv, ...env };
+  // USERPROFILE does not isolate the account's persistent registry PATH.
+  const commandEnv = { ...baseEnv, QWEN_NO_MODIFY_PATH: '1', ...env };
   const commandPrefix = [];
 
   for (const key of WINDOWS_COMMAND_ENV_OVERRIDES) {

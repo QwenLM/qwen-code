@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { FolderClosedIcon, FolderOpenIcon, SquarePenIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { Button } from '../ui/button';
@@ -8,6 +8,7 @@ import {
 } from '../sidebar/workspaceExpansion';
 import sectionStyles from '../sidebar/WorkspaceSection.module.css';
 import sidebarStyles from '../sidebar/WebShellSidebar.module.css';
+import { ManagedSessionNavigationRow } from './ManagedSessionNavigationRow';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
@@ -31,6 +32,7 @@ export function ManagedWorkspaceNavigation({
   onSelectWorkspace,
   onSelectSession,
   onWorkspacesChange,
+  renderSessionActions,
 }: {
   provider: ManagedAgentProvider;
   clientId: string;
@@ -43,6 +45,7 @@ export function ManagedWorkspaceNavigation({
   onSelectWorkspace?: (workspaceId: string) => void;
   onSelectSession: (sessionId: string, workspaceId?: string) => void;
   onWorkspacesChange?: (workspaces: ManagedAgentWorkspace[]) => void;
+  renderSessionActions?: (session: ManagedAgentSessionSummary) => ReactNode;
 }) {
   const { t } = useI18n();
   const binding = provider.workspaceBinding!;
@@ -176,6 +179,7 @@ export function ManagedWorkspaceNavigation({
             canCreate={supported && group.workspace?.canCreateSession === true}
             onSelectWorkspace={onSelectWorkspace}
             onSelectSession={onSelectSession}
+            renderSessionActions={renderSessionActions}
           />
         );
       })}
@@ -207,6 +211,7 @@ function ManagedWorkspaceGroup({
   canCreate,
   onSelectWorkspace,
   onSelectSession,
+  renderSessionActions,
 }: {
   storageKey: string;
   workspaceId?: string;
@@ -218,6 +223,7 @@ function ManagedWorkspaceGroup({
   canCreate: boolean;
   onSelectWorkspace?: (workspaceId: string) => void;
   onSelectSession: (sessionId: string, workspaceId?: string) => void;
+  renderSessionActions?: (session: ManagedAgentSessionSummary) => ReactNode;
 }) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(() =>
@@ -236,7 +242,7 @@ function ManagedWorkspaceGroup({
       className={sectionStyles.section}
       data-managed-workspace={workspaceId ?? ''}
     >
-      <div className={sectionStyles.headerRow}>
+      <div className={`${sectionStyles.headerRow} group/managed-workspace`}>
         <button
           type="button"
           className={sectionStyles.header}
@@ -251,40 +257,35 @@ function ManagedWorkspaceGroup({
           <span className={sectionStyles.name} title={workspaceId}>
             {label}
           </span>
-          <span className={sectionStyles.badge}>
-            {t('managed.managedMode')}
-          </span>
         </button>
         {workspaceId && onSelectWorkspace && (
-          <button
-            type="button"
-            className={sidebarStyles.workspaceHeaderAction}
-            disabled={!canCreate}
-            aria-label={`${t('sidebar.newTask')}: ${label}`}
-            title={t('sidebar.newTask')}
-            onClick={() => onSelectWorkspace(workspaceId)}
+          <div
+            className={`${sidebarStyles.workspaceHeaderActions} invisible group-hover/managed-workspace:visible group-focus-within/managed-workspace:visible [@media(hover:none)]:visible`}
           >
-            <SquarePenIcon size={16} strokeWidth={1.2} aria-hidden="true" />
-          </button>
+            <button
+              type="button"
+              className={sidebarStyles.workspaceHeaderAction}
+              disabled={!canCreate}
+              aria-label={`${t('sidebar.newTask')}: ${label}`}
+              title={t('sidebar.newTask')}
+              onClick={() => onSelectWorkspace(workspaceId)}
+            >
+              <SquarePenIcon size={16} strokeWidth={1.2} aria-hidden="true" />
+            </button>
+          </div>
         )}
       </div>
       {open && (
         <div className={sectionStyles.sessions}>
           {sessions.map((session) => (
-            <button
-              type="button"
+            <ManagedSessionNavigationRow
               key={session.sessionId}
-              className={`${sidebarStyles.sessionRow} w-full text-left ${active && sessionId === session.sessionId ? sidebarStyles.currentSession : ''}`}
-              aria-current={
-                active && sessionId === session.sessionId ? 'page' : undefined
-              }
-              title={t(`managed.phase.${session.phase}`)}
-              onClick={() => onSelectSession(session.sessionId, workspaceId)}
-            >
-              <span className={sectionStyles.sessionName}>
-                {session.title || session.sessionId}
-              </span>
-            </button>
+              session={session}
+              active={active && sessionId === session.sessionId}
+              workspaceLabel={label}
+              onSelect={() => onSelectSession(session.sessionId, workspaceId)}
+              actions={renderSessionActions?.(session)}
+            />
           ))}
           {!sessions.length && (
             <p className={sectionStyles.empty}>{t('sidebar.noSessions')}</p>

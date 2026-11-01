@@ -1248,11 +1248,15 @@ export function sendBridgeError(
         });
         return;
       }
-      if (kind === 'directory_not_found') {
+      if (
+        kind === 'directory_not_found' ||
+        (kind === 'containment_violation' &&
+          ctx?.route === 'POST /session/:id/cd')
+      ) {
         const d = data as { path?: string };
         res.status(400).json({
           error: errorMessage(err),
-          code: 'directory_not_found',
+          code: kind,
           path: d.path,
         });
         return;

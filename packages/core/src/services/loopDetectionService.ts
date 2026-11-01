@@ -291,6 +291,11 @@ export function shouldRemindTurnToolCallCap(
 export interface LoopCheckOptions {
   /** False to keep the check from queueing reminders. Defaults to true. */
   queueReminders?: boolean;
+  /**
+   * False to leave tool-call patterns to a host that checks its own; a tool
+   * call still ends the content and thought streams. Defaults to true.
+   */
+  toolCallPatterns?: boolean;
 }
 
 // Producer shapes of the oversized-result stubs (see tools/truncation.ts).
@@ -909,14 +914,17 @@ export class LoopDetectionService {
    */
   addAndCheckHeuristicLoops(
     event: ServerLlmStreamEvent,
-    { queueReminders = true }: LoopCheckOptions = {},
+    { queueReminders = true, toolCallPatterns = true }: LoopCheckOptions = {},
   ): boolean {
     return this.withReminderQueueing(queueReminders, () =>
-      this.runHeuristicLoops(event),
+      this.runHeuristicLoops(event, toolCallPatterns),
     );
   }
 
-  private runHeuristicLoops(event: ServerLlmStreamEvent): boolean {
+  private runHeuristicLoops(
+    event: ServerLlmStreamEvent,
+    toolCallPatterns: boolean,
+  ): boolean {
     if (this.loopDetected || this.disabledForSession) {
       return this.loopDetected;
     }
@@ -930,6 +938,7 @@ export class LoopDetectionService {
         // reasoning stream. Once a tool call lands, the model has made
         // observable progress — any prior thoughts should not carry over.
         this.thoughtHistory = [];
+        if (!toolCallPatterns) break;
 
         const toolCall = getLoopDetectionToolCall(event.value);
         this.trackToolCall(toolCall);

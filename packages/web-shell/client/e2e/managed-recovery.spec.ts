@@ -50,7 +50,6 @@ async function installRecovery(page: Page, running = false) {
   };
   if (running) {
     summary.activeTurn!.status = 'running';
-    summary.capabilities!.durableOperations = true;
     summary.recovery = undefined;
   }
   const operation = {
@@ -95,11 +94,22 @@ async function installRecovery(page: Page, running = false) {
     sessionId: 'source',
     eventId: `event-${event.sequence}`,
     createdAt: event.sequence,
+    terminal: ['turn.completed', 'turn.failed', 'turn.cancelled'].includes(
+      event.type,
+    ),
   }));
   page.on('pageerror', (error) => errors.push(error.message));
   await page.route('**/api/agent/web-shell/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
     const body = route.request().postDataJSON();
+    if (path.endsWith('/user-messages/query'))
+      return route.fulfill({ json: { paused: false, messages: [] } });
+    if (path.endsWith('/workspace-extensions/query'))
+      return route.fulfill({ json: { supported: false, extensions: [] } });
+    if (path.endsWith('/workspaces/worktrees/options'))
+      return route.fulfill({
+        json: { supported: true, currentBranch: 'main', branches: ['main'] },
+      });
     if (path.endsWith('/runtime-nodes/query'))
       return route.fulfill({ json: { supported: false, data: [] } });
     if (path.endsWith('/sessions/query'))
@@ -138,7 +148,13 @@ async function installRecovery(page: Page, running = false) {
       });
     if (path.endsWith('/transcript/query'))
       return route.fulfill({
-        json: { events, lastSequence: 6, hasMore: false },
+        json: {
+          items: [],
+          events,
+          coveredSequence: 6,
+          lastSequence: 6,
+          hasMore: false,
+        },
       });
     if (path.endsWith('/events/stream'))
       return route.fulfill({ contentType: 'text/event-stream', body: '' });
@@ -199,7 +215,7 @@ async function installRecovery(page: Page, running = false) {
     });
   });
   await page.goto('/e2e/fixtures/managed-usability.html');
-  await page.getByRole('button', { name: /Recover original task/ }).click();
+  await page.getByRole('button', { name: /^Recover original task\b/ }).click();
   if (!running)
     await expect(
       page.getByRole('region', { name: 'Session recovery' }),
@@ -243,7 +259,7 @@ test('refresh tracks the original cancel operation until cancellation is confirm
   expect(scenario.writes).toHaveLength(1);
   const reads = scenario.operationReads.length;
   await page.reload();
-  await page.getByRole('button', { name: /Recover original task/ }).click();
+  await page.getByRole('button', { name: /^Recover original task\b/ }).click();
   await expect
     .poll(() => scenario.operationReads.length)
     .toBeGreaterThan(reads);
@@ -286,6 +302,9 @@ test('new Session handoff is editable, preselected and never automatically sent 
   page,
 }) => {
   const scenario = await installRecovery(page);
+  await expect(
+    page.getByText('Confirmed inspection complete', { exact: true }),
+  ).toBeVisible();
   await page
     .getByRole('button', { name: 'Continue in a new Session', exact: true })
     .click();

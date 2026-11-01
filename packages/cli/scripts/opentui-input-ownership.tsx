@@ -23,6 +23,7 @@ const b = join(scratch, 'b.png');
 let saveImage = async (): Promise<string | null> => a;
 let accepted = false;
 const submissions: Array<Parameters<InputPromptProps['onSubmit']>> = [];
+const notices: string[] = [];
 let setup: Awaited<ReturnType<typeof testRender>> | undefined;
 const nodes = (node: Renderable): Renderable[] => [
   node,
@@ -64,6 +65,7 @@ try {
     setup = await testRender(
       <OpenTuiInputPrompt
         userMessages={[]}
+        onNotice={(message) => notices.push(message)}
         onSubmit={(...args) => {
           submissions.push(args);
           return accepted;
@@ -92,9 +94,16 @@ try {
   );
   assert(editor, 'The native textarea must be mounted');
   await input(() => ui.mockInput.pasteBracketedText(JSON.stringify(a)));
-  await act(async () =>
-    ui.waitForFrame((frame) => /📎 clipboard-/.test(frame)),
-  );
+  // A single act around the wait defers the async attachment update we need.
+  const attachmentDeadline = Date.now() + 5_000;
+  while (
+    !/📎 clipboard-/.test(ui.captureCharFrame()) &&
+    Date.now() < attachmentDeadline
+  ) {
+    await new Promise((done) => setTimeout(done, 10));
+    await idle();
+  }
+  assert.match(ui.captureCharFrame(), /📎 clipboard-/);
   await key('RETURN');
   assert.equal(
     submissions.length,

@@ -124,6 +124,8 @@ import {
   superviseInProcess,
 } from './utils/processUtils.js';
 import { getInstallationInfo } from './utils/installationInfo.js';
+import { isInteractiveInvocation } from './utils/interactive-mode.js';
+import { selectNpmBunHandoff } from './utils/npm-runtime.js';
 import { createLocalWorkflowAncestorTrustProvider } from './config/trustedFolders.js';
 
 const debugLogger = createDebugLogger('STARTUP');
@@ -686,6 +688,21 @@ export async function main() {
       return shouldRelaunch ? UPDATE_COMPLETE_EXIT_CODE : 0;
     };
     const sandboxConfig = await loadSandboxConfig(settings.merged, argv);
+    const npmBunHandoff = selectNpmBunHandoff({
+      interactive:
+        isInteractiveInvocation(argv) && Boolean(process.stdout.isTTY),
+      screenReader:
+        argv.screenReader ??
+        settings.merged.ui?.accessibility?.screenReader ??
+        false,
+      protocolMode: Boolean(
+        isAcpMode ||
+          argv.inputFormat === InputFormat.STREAM_JSON ||
+          (argv.inputFile ?? settings.merged.dualOutput?.inputFile) ||
+          argv.jsonFd !== undefined,
+      ),
+      sandbox: Boolean(sandboxConfig),
+    });
     const customSandboxImage =
       argv.sandboxImage ??
       process.env['QWEN_SANDBOX_IMAGE'] ??
@@ -853,6 +870,7 @@ export async function main() {
       );
       process.exit(0);
     } else if (
+      !npmBunHandoff &&
       memoryArgs.length === 0 &&
       !hasLoadedEnvironmentValues() &&
       !isAcpMode &&
@@ -870,8 +888,13 @@ export async function main() {
       // Interactive and streaming modes keep a supervisor for in-session
       // restarts. A one-shot prompt can replace this already-loaded process.
       await relaunchAppInChildProcess(memoryArgs, [], {
+        interpreter: npmBunHandoff?.interpreter,
         afterSpawn: clearCorruptionEnvVars,
-        childEnv: { ...privateAcpChildEnv, ...getRelaunchEnvProvenance() },
+        childEnv: {
+          ...privateAcpChildEnv,
+          ...getRelaunchEnvProvenance(),
+          ...npmBunHandoff?.childEnv,
+        },
         environmentChangedSinceBoot: hasLoadedEnvironmentValues(),
         onUpdateRelaunch,
         replaceProcess:
@@ -1088,6 +1111,15 @@ export async function main() {
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
+
+    // The interactive UI segments text through Intl.Segmenter; on an ICU-less
+    // Node the first segmentation segfaults the process (#11747). Probe here,
+    // where interactivity is known, so headless and ACP runs (which never
+    // segment) are untouched by the gate.
+    if (config.isInteractive() && !config.getExperimentalZedIntegration()) {
+      const { assertFullIcuAvailable } = await import('./startup/icu-check.js');
+      assertFullIcuAvailable();
+    }
 
     const nonInteractiveHousekeeping =
       !config.isInteractive() || config.getExperimentalZedIntegration()

@@ -914,10 +914,12 @@ export class BunPtyProcess extends EventEmitter {
     // while the leader is unreaped, so its session and tty still name it.
     const tree = collectPtyProcessTree(this.pid);
     const signalTree = (sig: NodeJS.Signals, owned: PtyProcessTree): void => {
-      try {
-        process.kill(-this.pid, sig);
-      } catch {
-        // Process group already gone.
+      if (!this.exited) {
+        try {
+          process.kill(-this.pid, sig);
+        } catch {
+          // Process group already gone.
+        }
       }
       for (const pid of owned.pids) {
         // A reaped leader's pid may already belong to another process.
