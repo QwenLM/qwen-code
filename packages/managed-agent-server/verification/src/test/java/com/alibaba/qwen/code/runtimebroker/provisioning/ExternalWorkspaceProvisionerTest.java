@@ -524,18 +524,27 @@ class ExternalWorkspaceProvisionerTest {
             assertEquals("runtime_broker_resource_conflict", refused.getCode());
             assertFalse(refused.isRetryable());
         }
-        failure(subject.stopDrained(draining(original.request(), original.seed(), original.handle(), original.lease(), false)));
+        var noDrain = failure(subject.stopDrained(draining(original.request(), original.seed(), original.handle(), original.lease(), false)));
+        assertEquals(409, noDrain.getStatusCode());
+        assertEquals("workspace_close_identity_unverified", noDrain.getCode());
+        assertFalse(noDrain.isRetryable());
         assertEquals(observations, client.observes.size());
         assertEquals(1, client.provisions.size());
         subject.close();
         subject = provisioner(registration(PROVIDER, 2, MOUNT));
         var saved = draining(original.request(), original.seed(), original.handle(), original.lease(), true);
         assertFalse(subject.supportsDrainedStop(saved));
-        failure(subject.stopDrained(saved));
+        var wrongRevision = failure(subject.stopDrained(saved));
+        assertEquals(409, wrongRevision.getStatusCode());
+        assertEquals("runtime_broker_resource_conflict", wrongRevision.getCode());
+        assertFalse(wrongRevision.isRetryable());
         subject.close();
         subject = provisioner(registration("other-provider", 1, MOUNT));
         assertFalse(subject.supportsDrainedStop(saved));
-        failure(subject.stopDrained(saved));
+        var wrongProvider = failure(subject.stopDrained(saved));
+        assertEquals(409, wrongProvider.getStatusCode());
+        assertEquals("runtime_broker_resource_conflict", wrongProvider.getCode());
+        assertFalse(wrongProvider.isRetryable());
         assertEquals(observations, client.observes.size());
         assertEquals(1, client.provisions.size());
     }

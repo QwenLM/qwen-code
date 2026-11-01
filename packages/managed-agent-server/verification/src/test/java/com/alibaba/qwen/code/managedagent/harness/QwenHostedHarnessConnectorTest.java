@@ -919,10 +919,16 @@ class QwenHostedHarnessConnectorTest {
         var connector = new QwenHostedHarnessConnector(properties, mock(AgentStateStore.class), mock(WorkspaceExecutionStore.class));
         ReflectionTestUtils.setField(connector, "client", client);
         String profile = "hosted-workspace-external-files/1";
+        // Empty features list: no negotiation possible.
         assertThat(connector.supportsLifecycle(profile)).isFalse();
+        // Wrong version (/2): exact match required, not a prefix or version-range.
         when(capabilities.getFeatures()).thenReturn(List.of("hosted-workspace-external-files/2"));
         assertThat(connector.supportsLifecycle(profile)).isFalse();
         assertThat(connector.supportsSavedLifecycle(profile)).isFalse();
+        // Prefix-similar but different profile: must not match.
+        when(capabilities.getFeatures()).thenReturn(List.of("hosted-workspace-external-files/10"));
+        assertThat(connector.supportsLifecycle(profile)).isFalse();
+        // Exact match: negotiation succeeds.
         when(capabilities.getFeatures()).thenReturn(List.of(profile));
         assertThat(connector.supportsLifecycle(profile)).isTrue();
         properties.getHarness().setWorkspaceFilesEnabled(false);

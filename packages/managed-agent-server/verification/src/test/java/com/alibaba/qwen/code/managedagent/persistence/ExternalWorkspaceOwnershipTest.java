@@ -275,10 +275,18 @@ class ExternalWorkspaceOwnershipTest {
         assertThat(ownership.isHeld(context, session, binding, bindings)).isTrue();
         var competitor = sessions.findOrCreate(new RuntimeSessionRecord(new RuntimeSession("harness", "competitor", "bootstrap",
                 binding.getRequest().getScope()), binding.getBindingId(), binding.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
-        assertThatThrownBy(() -> ownership.claim(context, competitor, binding, bindings)).isInstanceOf(RuntimeBrokerException.class);
+        assertThatThrownBy(() -> ownership.claim(context, competitor, binding, bindings))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("workspace_busy");
+                    assertThat(error.isRetryable()).isTrue();
+                });
         jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE runtime_session_id = ?",
                 owner.get("storage_key"), competitor.getRuntimeSessionId());
-        assertThatThrownBy(() -> ownership.assertHeld(context, session, binding, bindings)).isInstanceOf(RuntimeBrokerException.class);
+        assertThatThrownBy(() -> ownership.assertHeld(context, session, binding, bindings))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("workspace_busy");
+                    assertThat(error.isRetryable()).isTrue();
+                });
         assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(owner);
     }
 
@@ -292,11 +300,19 @@ class ExternalWorkspaceOwnershipTest {
         session = bindings.beginSessionRelease(sessions, executions, session);
         var claim = binding;
         var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
-        assertThatThrownBy(() -> ownership.releaseStopped(context, session, claim, bindings)).isInstanceOf(RuntimeBrokerException.class);
+        assertThatThrownBy(() -> ownership.releaseStopped(context, session, claim, bindings))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("runtime_close_claim_pending");
+                    assertThat(error.isRetryable()).isTrue();
+                });
         var receipt = new RuntimeDrainReceipt(binding.getBindingId(), binding.getGeneration(),
                 binding.getProvisionSeed().getProvisionRequestId(), binding.getResourceHandle(), Instant.now());
         var unpersisted = binding.withDrainReceipt(receipt);
-        assertThatThrownBy(() -> ownership.releaseStopped(context, session, unpersisted, bindings)).isInstanceOf(RuntimeBrokerException.class);
+        assertThatThrownBy(() -> ownership.releaseStopped(context, session, unpersisted, bindings))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("runtime_close_claim_pending");
+                    assertThat(error.isRetryable()).isTrue();
+                });
         assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(owner);
         binding = bindings.compareAndSet(binding, unpersisted);
         jdbc.update("DELETE FROM ma_workspace_access");
@@ -411,10 +427,18 @@ class ExternalWorkspaceOwnershipTest {
         ownership.claim(context, session, binding, bindings);
         jdbc.update("DELETE FROM ma_workspace_access");
         assertThat(ownership.isHeld(context, session, binding, bindings)).isTrue();
-        assertThatThrownBy(() -> ownership.assertHeld(context, session, binding, bindings)).isInstanceOf(RuntimeBrokerException.class);
+        assertThatThrownBy(() -> ownership.assertHeld(context, session, binding, bindings))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("workspace_close_identity_unverified");
+                    assertThat(error.isRetryable()).isFalse();
+                });
         ownership.release(context, session, binding, bindings);
         assertThat(ownership.isHeld(context, session, binding, bindings)).isFalse();
-        assertThatThrownBy(() -> ownership.claim(context, session, binding, bindings)).isInstanceOf(RuntimeBrokerException.class);
+        assertThatThrownBy(() -> ownership.claim(context, session, binding, bindings))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("workspace_close_identity_unverified");
+                    assertThat(error.isRetryable()).isFalse();
+                });
         binding = bindings.claimOperation(binding.getBindingId(), "drainer", Duration.ofMinutes(1));
         binding = bindings.compareAndSet(binding, binding.withDrainRequested(true, Instant.now())
                 .withState(RuntimeBindingRecord.State.DRAINING, binding.getLease(), Instant.now()));
@@ -426,7 +450,11 @@ class ExternalWorkspaceOwnershipTest {
         var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
         bindings.releaseOperation(binding.getBindingId(), binding.getOperationOwner(), binding.getOperationGeneration());
         binding = bindings.claimOperation(binding.getBindingId(), "second", Duration.ofMinutes(1));
-        assertThatThrownBy(() -> ownership.releaseStopped(context, session, stale, bindings)).isInstanceOf(RuntimeBrokerException.class);
+        assertThatThrownBy(() -> ownership.releaseStopped(context, session, stale, bindings))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("runtime_close_claim_pending");
+                    assertThat(error.isRetryable()).isTrue();
+                });
         assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(owner);
         var releasing = bindings.beginSessionRelease(sessions, executions, session);
         assertThat(bindings.completeStoppedSessionRelease(sessions, executions, releasing, binding).getState())
