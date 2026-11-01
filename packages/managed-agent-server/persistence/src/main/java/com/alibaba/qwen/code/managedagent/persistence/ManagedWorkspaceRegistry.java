@@ -543,5 +543,4 @@ public class ManagedWorkspaceRegistry
             String storageId, String configRef, String policyRef,
             String storageKind, WorkspaceAccess access, String role) {
     }
-
 }
