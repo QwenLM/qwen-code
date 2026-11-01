@@ -2746,6 +2746,23 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(result.output).toBe('ASCII\n你\ufffd');
     });
 
+    it('keeps UTF-8 stderr cut off by the capture limit as UTF-8 on a legacy code page', async () => {
+      useSystemEncoding('gbk');
+      // The first chunk ends inside 你, and the limit cuts stderr inside 好.
+      const bytes = Buffer.from('ASCII\n你好世界');
+      const { result } = await simulateExecution(
+        'git log',
+        () => {
+          emitOut(bytes.subarray(0, 8), 'stderr');
+          emitOut(bytes.subarray(8), 'stderr');
+          finish(1);
+        },
+        {},
+        { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
+      );
+      expect(result.output).toMatch(/^ASCII\n你\ufffd\n\n\[Output exceeded/);
+    });
+
     it('decodes UTF-8 output that a kill from outside the service cut inside a character with the code page', async () => {
       useSystemEncoding('gbk');
       // The output ends inside 好. Node reports both streams ended before
