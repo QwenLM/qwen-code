@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -107,6 +108,10 @@ import static org.awaitility.Awaitility.await;
  * handed-over one is never answered "not sent". FG9e cuts the sender's
  * and a recipient's public or WebShell stream mid-relay and resumes
  * each from its cursor: no gap, no duplicate, the ledger frame for frame.
+ * The same letter's `cursor-expired-resync` case advances the replay
+ * floor through projected coverage: a cursor below it gets one
+ * `agent.session.resync_required` frame on both surfaces, the JSON route
+ * answers `409 cursor_expired`, and the floor itself remains readable.
  * FG9b refuses one journal write of the pass at the store (a test-only
  * trigger): the sender's outbound, the lead's receipt, the copy-back.
  * The Session that met it latches its writes, so only a cold Harness
@@ -118,6 +123,7 @@ import static org.awaitility.Awaitility.await;
 class HostedSessionRelayFaultGatesIT {
     private static final String TOKEN = "fg9-fixture";
     private static final String DIGEST = "sha256:" + "b".repeat(64);
+    private static final String RESYNC = "agent.session.resync_required";
     /** The store client's bounded uncertain-error retry of one commit:
      * `ManagedSessionStoreHttpClient.appendTransaction`'s commit loop
      * (`packages/core/src/managed-runtime/http-managed-session-store.ts`),
@@ -237,7 +243,8 @@ class HostedSessionRelayFaultGatesIT {
     @Timeout(600)
     void fg9eRelayStreamsStayContinuousAcrossAbortAndResumeOnMySql()
             throws Exception {
-        runLetter("fg9e", List.of("public-resume", "webshell-resume"));
+        runLetter("fg9e", List.of("public-resume", "webshell-resume",
+                "cursor-expired-resync"));
     }
 
     @Test
@@ -287,6 +294,7 @@ class HostedSessionRelayFaultGatesIT {
                     case "cancel-during-handover" -> cancelDuringHandover();
                     case "public-resume" -> streamResume("public");
                     case "webshell-resume" -> streamResume("webshell");
+                    case "cursor-expired-resync" -> cursorExpiredResync();
                     case "outbound-commit-refused" -> outboundCommitRefused();
                     case "receipt-commit-refused" -> receiptCommitRefused();
                     case "answered-commit-refused" -> answeredCommitRefused();
@@ -678,6 +686,82 @@ class HostedSessionRelayFaultGatesIT {
         assertThat(senderView.stream().filter(frame -> frame.toString()
                 .contains("ALICE_REPORT done")))
                 .as("alice's answer after the relay, once").hasSize(1);
+    }
+
+    // -------------------------------------------- case: FG9e-resync
+
+    /**
+     * A cursor below the Session stream's replay floor is not replayed
+     * partially. Both surfaces answer with one `resync_required` frame
+     * naming the floor and the snapshot through which the client must
+     * reload, and the frame has no event id for a reconnect to anchor on;
+     * the plain JSON route answers the same window as `409
+     * cursor_expired`, while the floor itself stays a readable cursor.
+     */
+    private void cursorExpiredResync() throws Exception {
+        String lead = newTeam("expiredresync", "bob");
+        awaitLeadSettled(lead);
+        ManagedAgentStore store = spring.getBean(ManagedAgentStore.class);
+        AtomicReference<ReplayWindow> advanced = new AtomicReference<>();
+        waiting().atMost(Duration.ofSeconds(120))
+                .pollInterval(Duration.ofMillis(250)).untilAsserted(() -> {
+                    ReplayWindow current = store.findReplayWindow(tenant,
+                            lead);
+                    // The floor only advances through projected message
+                    // coverage; the lead's settled Turn must be covered
+                    // before the advance can move past its events.
+                    if (current.snapshotThroughSequence() < 1) {
+                        return;
+                    }
+                    ReplayWindow moved = store.advanceReplayFloor(tenant,
+                            lead, Long.MAX_VALUE);
+                    assertThat(moved.floorSequence()).isGreaterThan(0L);
+                    advanced.set(moved);
+                });
+        ReplayWindow window = advanced.get();
+        assertThat(window.floorSequence())
+                .isLessThanOrEqualTo(window.snapshotThroughSequence());
+
+        JsonNode expired = request("GET", eventsPath(lead) + "?after=0",
+                null, null, 409);
+        JsonNode error = expired.path("error");
+        assertThat(error.path("code").asText()).isEqualTo("cursor_expired");
+        assertThat(error.path("replay_floor_sequence").asLong())
+                .isEqualTo(window.floorSequence());
+        assertThat(error.path("snapshot_through_sequence").asLong())
+                .isGreaterThanOrEqualTo(window.floorSequence());
+        assertThat(request("GET", eventsPath(lead) + "?after="
+                + window.floorSequence(), null, null, 200)
+                .path("error").isMissingNode())
+                .as("the floor is a readable cursor").isTrue();
+
+        for (String surface : List.of("public", "webshell")) {
+            Observer stale = new Observer(surface, lead, 0);
+            JsonNode frame = stale.awaitResync();
+            assertThat(stale.frames).as("%s: no partial replay", surface)
+                    .isEmpty();
+            assertThat(frame.has("sequence"))
+                    .as("%s: the resync frame has no reconnect anchor",
+                            surface).isFalse();
+            assertThat(frame.path("type").asText()).isEqualTo(RESYNC);
+            assertThat(frame.path("action").asText())
+                    .isEqualTo("reload_snapshot");
+            if ("public".equals(surface)) {
+                assertThat(frame.path("session_id").asText())
+                        .isEqualTo(lead);
+                assertThat(frame.path("replay_floor_sequence").asLong())
+                        .isEqualTo(window.floorSequence());
+                assertThat(frame.path("snapshot_through_sequence").asLong())
+                        .isGreaterThanOrEqualTo(window.floorSequence());
+            } else {
+                assertThat(frame.path("sessionId").asText()).isEqualTo(lead);
+                assertThat(frame.path("replayFloorSequence").asLong())
+                        .isEqualTo(window.floorSequence());
+                assertThat(frame.path("snapshotThroughSequence").asLong())
+                        .isGreaterThanOrEqualTo(window.floorSequence());
+            }
+            stale.abort();
+        }
     }
 
     // --------------------------------------------------- case: FG9b-1
@@ -1472,10 +1556,12 @@ class HostedSessionRelayFaultGatesIT {
     /**
      * One client of a Session's public or WebShell event stream. It owns
      * its HttpClient, so {@link #abort} cuts the connection mid-stream the
-     * way a lost client does; {@link #frames} is everything it read.
+     * way a lost client does; {@link #frames} is the replayed events it
+     * read and {@link #resyncs} the resync frames, normally none or one.
      */
     private final class Observer {
         private final List<JsonNode> frames = new CopyOnWriteArrayList<>();
+        private final List<JsonNode> resyncs = new CopyOnWriteArrayList<>();
         private final AtomicReference<Throwable> failure =
                 new AtomicReference<>();
         private final HttpClient client = HttpClient.newBuilder()
@@ -1535,14 +1621,27 @@ class HostedSessionRelayFaultGatesIT {
                                 .append(line.substring(5).stripLeading());
                     } else if (line.isEmpty() && data.length() > 0) {
                         JsonNode frame = json.readTree(data.toString());
-                        if (!frame.path("sequence").asText().equals(id)
-                                || !frame.path("type").asText()
-                                        .equals(event)) {
-                            throw new IllegalStateException("SSE id/event "
-                                    + id + "/" + event + " do not name "
-                                    + frame);
+                        if (RESYNC.equals(event)) {
+                            // The resync frame carries no id on purpose:
+                            // a reconnect must not move past the events the
+                            // client still lacks, it reloads the Snapshot.
+                            if (id != null || !frame.path("type").asText()
+                                    .equals(event)) {
+                                throw new IllegalStateException("SSE id/event "
+                                        + id + "/" + event + " do not name "
+                                        + frame);
+                            }
+                            resyncs.add(frame);
+                        } else {
+                            if (!frame.path("sequence").asText().equals(id)
+                                    || !frame.path("type").asText()
+                                            .equals(event)) {
+                                throw new IllegalStateException("SSE id/event "
+                                        + id + "/" + event + " do not name "
+                                        + frame);
+                            }
+                            frames.add(frame);
                         }
-                        frames.add(frame);
                         id = null;
                         event = null;
                         data.setLength(0);
@@ -1559,6 +1658,23 @@ class HostedSessionRelayFaultGatesIT {
             return frames.isEmpty() ? 0
                     : frames.get(frames.size() - 1).path("sequence")
                             .asLong();
+        }
+
+        /** The one resync frame an expired cursor earns, once it arrived
+         * and the server closed the stream. */
+        JsonNode awaitResync() {
+            waiting().atMost(Duration.ofSeconds(30))
+                    .pollInterval(Duration.ofMillis(100)).untilAsserted(() -> {
+                        assertThat(failure.get()).isNull();
+                        assertThat(resyncs).as("%s resync frame", surface)
+                                .isNotEmpty();
+                        assertThat(reader.isAlive())
+                                .as("%s resync stream closed", surface)
+                                .isFalse();
+                    });
+            assertThat(resyncs).as("%s resync frames", surface)
+                    .hasSize(1);
+            return resyncs.getFirst();
         }
 
         /** Every event the ledger holds now has reached this client. */
@@ -1962,6 +2078,11 @@ class HostedSessionRelayFaultGatesIT {
             // 30 s window; a short heartbeat is that write.
             arguments.add(
                     "--qwen.managed-agent.events.heartbeat-interval=2s");
+            // `cursor-expired-resync` advances the floor itself and then
+            // asserts that exact value; a scheduled advance would move it
+            // underneath the assertions.
+            arguments.add(
+                    "--qwen.managed-agent.events.replay-floor-enabled=false");
         }
         for (int i = 0; i < caseCount; i++) {
             arguments.add("--qwen.managed-agent.runtime-broker.workspace-mounts["
