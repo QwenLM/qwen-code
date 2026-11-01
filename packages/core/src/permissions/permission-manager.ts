@@ -49,6 +49,11 @@ const debugLogger = createDebugLogger('PERMISSIONS');
 // because the hosted permission path builds a new manager per tool call.
 const reportedMalformedRules = new Set<string>();
 
+/** Clears the once-per-process dedupe so a test can report the same rule twice. */
+export function resetReportedMalformedRulesForTesting(): void {
+  reportedMalformedRules.clear();
+}
+
 /**
  * How a tool participates in the registry for this session.
  *
@@ -324,7 +329,7 @@ export class PermissionManager {
     // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where a dropped rule would otherwise be invisible
     console.warn(
       `${origin}: ignoring malformed ${type} rule (no closing parenthesis at the end): ${JSON.stringify(raw)}. ` +
-        `The rule has no effect; end it with ")" to apply it.`,
+        `The rule has no effect; write it as "Tool(specifier)" so it ends at the closing ")" of the specifier.`,
     );
   }
 

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,7 +27,10 @@ import {
   buildHumanReadableRuleLabel,
   TOOL_NAME_ALIASES,
 } from './rule-parser.js';
-import { PermissionManager } from './permission-manager.js';
+import {
+  PermissionManager,
+  resetReportedMalformedRulesForTesting,
+} from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
 import type { PermissionCheckContext, PermissionRule } from './types.js';
 import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
@@ -92,6 +95,12 @@ vi.mock('../utils/shell-utils.js', async (importOriginal) => {
 // a shell type an earlier test left behind.
 beforeEach(() => {
   shellTypeMock.value = 'bash';
+});
+
+afterEach(() => {
+  // The report dedupe is process-wide; clear it so one test's rule does not
+  // swallow the warning another test asserts.
+  resetReportedMalformedRulesForTesting();
 });
 
 // ─── Shared helpers ──────────────────────────────────────────────────────────
@@ -2771,12 +2780,12 @@ describe('PermissionManager', () => {
     it('tells the operator when a malformed deny rule is dropped', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
-        pm.addSessionDenyRule('Bash(rm -rf /home)*');
+        pm.addSessionDenyRule('Bash(rm -rf /)*');
         // A deny rule that protects nothing is the dangerous direction: the
         // operator's model says "blocked" while the runtime has no rule.
         expect(warn).toHaveBeenCalledTimes(1);
         expect(warn.mock.calls[0]![0]).toContain('deny rule');
-        expect(warn.mock.calls[0]![0]).toContain('Bash(rm -rf /home)*');
+        expect(warn.mock.calls[0]![0]).toContain('Bash(rm -rf /)*');
       } finally {
         warn.mockRestore();
       }
