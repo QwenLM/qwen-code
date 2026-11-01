@@ -32,6 +32,7 @@ This change moves only the default location of the global directory. `QWEN_HOME`
 - Code that derived the home directory as the parent of the global directory now uses the home directory directly, so `~/.env` remains the home-level `.env`.
 - Auto mode's self-modification guard protects the resolved global directory, so `~/.config/qwen/settings.json` and its `hooks/` and `skills/` keep the protection that `~/.qwen/...` gets from the path patterns. This also covers a `QWEN_HOME` written as `~/...`. On Linux it protects the XDG directory and its marker even while `~/.qwen` is in use, because writing the marker there makes the XDG directory the global directory on the next start.
 - The opt-in diagnostics (startup and CPU profiles, heap snapshots) write under the global directory, so they no longer create `~/.qwen` on an XDG install.
+- An XDG install does not read `settings.json` or `oauth_creds.json` from `~/.qwen`. When `~/.qwen` has one that the XDG directory lacks, for example because an older release recreated `~/.qwen` and the user signed in there, the CLI prints a startup warning that names the files and the two ways out: run `/auth` in this install, or delete the marker to use `~/.qwen` again. The warning stops once the XDG directory has its own copy or the file is gone from `~/.qwen`.
 
 ## Alternatives considered
 
@@ -39,6 +40,7 @@ This change moves only the default location of the global directory. `QWEN_HOME`
 - Prefer the XDG directory whenever it exists. An unrelated `~/.config/qwen` would then silently take over an existing `~/.qwen`.
 - Use files Qwen Code already writes on first run (`installation_id`, `output-language.md`) as the markers. Both are conditional: `installation_id` is skipped when usage statistics are off and `output-language.md` in bare mode, so such a first run leaves no marker. Both are also written under `QWEN_HOME`, so a redirected run would claim the directory it was pointed at.
 - Split configuration, data and state across `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME`. That touches every runtime path and is left for a follow-up; `QWEN_RUNTIME_DIR` already separates runtime output.
+- Read `oauth_creds.json` from `~/.qwen` when the XDG directory has none, without copying it. Both installs would then refresh one Qwen OAuth token, each with its own lock file, and the first refresh here would write a second copy; the token manager has that lock because concurrent refreshes from separate sessions caused authentication failures (#443). Clearing the credentials here, as re-authentication does, would also leave the copy in `~/.qwen` to be read again. A sign-in through `/auth` is stored in `settings.json`, which such a fallback would not cover.
 - Use XDG on macOS as well. Nobody asked for it, so macOS keeps `~/.qwen`.
 
 ## Compatibility and migration

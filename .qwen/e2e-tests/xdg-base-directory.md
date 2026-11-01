@@ -35,6 +35,10 @@ Create `~/.qwen` and `~/.config/qwen/settings.json` containing `{}`, then run th
 
 In the new-install group's home, `mkdir ~/.qwen` and run the command again. Expect `~/.config/qwen` to stay in use.
 
+### A sign-in left in a recreated ~/.qwen
+
+In a fresh home, run the command once, then `mkdir ~/.qwen` and write `{}` to `~/.qwen/settings.json` and `~/.qwen/oauth_creds.json`, as an older release signing in there would. Run the command again. Expect `~/.config/qwen` to stay in use, a warning that names both files, `/auth` and `~/.config/qwen/.qwen-global-dir`, and both files in `~/.qwen` unchanged, with no copy in `~/.config/qwen`. Write `{}` to `~/.config/qwen/settings.json` and run it again: expect the warning to name only `oauth_creds.json`.
+
 ### Other entry points on a new install
 
 Each in its own fresh home: run `qwen mcp list`, and start `qwen serve --port 0` and stop it once it prints its listening line. Expect `~/.config/qwen/.qwen-global-dir` after each. `qwen --version` and `qwen --help` still create nothing under `HOME`.
@@ -83,7 +87,7 @@ That is why neither file can serve as the marker: each is skipped by one of thos
 All runs used a throwaway `HOME` with `QWEN_HOME` and `XDG_CONFIG_HOME` unset.
 
 - `cd packages/core && npx vitest run src/config/storage.test.ts src/permissions/autoMode.test.ts src/skills/bundled/stuck/SKILL.test.ts` and the other suites that read the global directory.
-- `cd packages/cli && npx vitest run src/cli.test.ts src/llm.test.tsx src/config/storage-paths-lite.test.ts src/config/shared-env-keys.test.ts src/config/environment.test.ts src/config/settings.test.ts src/config/path-freshness.test.ts src/serve/fast-path.test.ts src/serve/run-qwen-serve.test.ts` and the profiler suites.
+- `cd packages/cli && npx vitest run src/cli.test.ts src/llm.test.tsx src/config/storage-paths-lite.test.ts src/config/shared-env-keys.test.ts src/config/environment.test.ts src/config/settings.test.ts src/config/path-freshness.test.ts src/serve/fast-path.test.ts src/serve/run-qwen-serve.test.ts src/utils/userStartupWarnings.test.ts` and the profiler suites.
 - `cd packages/vscode-ide-companion && npx vitest run src/utils/paths.test.ts src/ide-server.test.ts`.
 - `cd packages/channels/base && npx vitest run src/paths.test.ts`.
 - `cd packages/sdk-typescript && npx vitest run test/unit/peer/registry.test.ts`.
