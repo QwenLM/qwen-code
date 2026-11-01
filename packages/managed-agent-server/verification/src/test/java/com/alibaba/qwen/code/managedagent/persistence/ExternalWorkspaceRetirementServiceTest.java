@@ -9,7 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeClient;
+import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -55,7 +55,7 @@ class ExternalWorkspaceRetirementServiceTest {
                     + " workspace_config_ref, workspace_policy_ref, tool_profile, creator_actor_key)"
                     + " VALUES ('tenant', ?, 'qwen-code', ?, 1, 1, 'workspace', 1, 'workspace', '.', ?, 1, ?, ?, ?, ?)",
                     id, id, WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
-                    WorkspaceExecutionProfile.POLICY_REF, "hosted-workspace-external-files/1", ManagedWorkspaceRegistry.actorKey("tenant", "owner"));
+                    WorkspaceExecutionProfile.POLICY_REF, "hosted-workspace-external-files/1", com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "owner"));
         }
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
         placement = new RuntimeProvisionRequest(new RuntimeScope("tenant", "workspace", "1", "/var/lib/managed-workspace",
