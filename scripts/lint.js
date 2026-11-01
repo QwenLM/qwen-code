@@ -109,10 +109,15 @@ export function getCachedArchiveInstaller({
         download_attempt=1
         download_max_attempts=5
         # curl --retry discards partial output before retrying, so keep our own
-        # loop and let each request resume at the bytes already received.
+        # loop and let each retry resume at the bytes already received. The
+        # first request must not resume: the stale copy was just removed, so a
+        # resumed request would append the tail to an empty file.
         while :; do
-          if curl -fsSL --connect-timeout 10 --max-time 90 --continue-at - \
-            -o "${localArchive}" "${downloadUrl}"; then
+          set -- -fsSL --connect-timeout 10 --max-time 90
+          if [ "$download_attempt" -gt 1 ]; then
+            set -- "$@" --continue-at -
+          fi
+          if curl "$@" -o "${localArchive}" "${downloadUrl}"; then
             break
           else
             curl_status=$?
