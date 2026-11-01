@@ -90,7 +90,7 @@ describe('bundled Generated UI candidate', () => {
   it('forces Node mode when the CLI runs as the Electron binary', () => {
     const assets = join(fixture, 'generated-ui');
     populate(assets);
-    const originalElectron = process.versions.electron;
+    const originalElectron = process.versions['electron'];
     Object.defineProperty(process.versions, 'electron', {
       value: '43.8.3',
       configurable: true,

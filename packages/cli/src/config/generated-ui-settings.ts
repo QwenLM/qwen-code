@@ -79,7 +79,7 @@ export function prepareBundledGeneratedUi(
       // companion, the ACP launch scrubs ELECTRON_RUN_AS_NODE from the
       // inherited environment (#16063): without it this child starts the
       // VS Code GUI, which opens the entry file in an editor.
-      ...(process.versions.electron
+      ...(process.versions['electron']
         ? { env: { ELECTRON_RUN_AS_NODE: '1' } }
         : {}),
     },
