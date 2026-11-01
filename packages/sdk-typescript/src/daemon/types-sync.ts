@@ -10,11 +10,13 @@ import type {
   BridgePendingUserQuestion,
   BridgePendingUserQuestionInteraction,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import type {
   DaemonPendingInteractionOption,
   DaemonPendingPermissionInteraction,
   DaemonPendingUserQuestion,
   DaemonPendingUserQuestionInteraction,
+  DaemonWorkspaceSkillsStatus,
 } from './types.js';
 
 type Assert<T extends true> = T;
@@ -23,6 +25,10 @@ type MutuallyAssignable<A, B> = A extends B
     ? true
     : false
   : false;
+type Equal<X, Y> =
+  (<T>() => T extends X ? 1 : 2) extends <T>() => T extends Y ? 1 : 2
+    ? true
+    : false;
 
 type PendingInteractionOptionStaysInSync = Assert<
   MutuallyAssignable<
@@ -53,3 +59,27 @@ export const pendingInteractionWireTypesInSync: [
   PendingUserQuestionStaysInSync,
   PendingUserQuestionInteractionStaysInSync,
 ] = [true, true, true, true];
+
+type SkillsSnapshotKeysInSync = Assert<
+  Equal<
+    keyof NonNullable<ServeWorkspaceSkillsStatus['snapshot']>,
+    keyof NonNullable<DaemonWorkspaceSkillsStatus['snapshot']>
+  >
+>;
+type SkillsSnapshotOptionalityInSync = Assert<
+  Equal<
+    undefined extends ServeWorkspaceSkillsStatus['snapshot'] ? true : false,
+    undefined extends DaemonWorkspaceSkillsStatus['snapshot'] ? true : false
+  >
+>;
+
+export const skillsSnapshotWireTypesInSync: [
+  Assert<
+    MutuallyAssignable<
+      NonNullable<ServeWorkspaceSkillsStatus['snapshot']>,
+      NonNullable<DaemonWorkspaceSkillsStatus['snapshot']>
+    >
+  >,
+  SkillsSnapshotKeysInSync,
+  SkillsSnapshotOptionalityInSync,
+] = [true, true, true];

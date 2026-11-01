@@ -518,10 +518,10 @@ describe('NativeLspService Integration Tests', () => {
       await expect(service.discoverAndPrepare()).resolves.not.toThrow();
     });
 
-    it('should return empty results when no server is ready', async () => {
-      // Before starting any servers, operations should return empty
-      const results = await lspService.workspaceSymbols('test');
-      expect(results).toEqual([]);
+    it('should reject workspace symbols when no server is ready', async () => {
+      await expect(lspService.workspaceSymbols('test')).rejects.toThrow(
+        'No LSP servers are configured or running',
+      );
     });
 
     it('should reject diagnostics when no server is ready', async () => {
@@ -531,7 +531,7 @@ describe('NativeLspService Integration Tests', () => {
       );
     });
 
-    it('should return empty code actions when no server is ready', async () => {
+    it('should reject code actions when no server is ready', async () => {
       const uri = 'file:///test/workspace/src/app.ts';
       const context = {
         diagnostics: [],
@@ -539,12 +539,9 @@ describe('NativeLspService Integration Tests', () => {
         triggerKind: 'invoked' as const,
       };
 
-      const results = await lspService.codeActions(
-        uri,
-        range(0, 0, 0, 10),
-        context,
-      );
-      expect(results).toEqual([]);
+      await expect(
+        lspService.codeActions(uri, range(0, 0, 0, 10), context),
+      ).rejects.toThrow('No LSP servers are configured or running');
     });
   });
 

@@ -4,8 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isWrappedSystemReminderPart } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import {
+  runAgentLoop,
+  type AgentLoopResult,
+  type AgentLoopRound,
+  type AgentLoopSettledCall,
+  type AgentLoopToolExecutor,
+} from '@qwen-code/qwen-code-core/core/agent-loop.js';
+import type { SendMessageOptions } from '@qwen-code/qwen-code-core/core/client.js';
+import type { CompletedToolCall } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 
 import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import type {
@@ -55,7 +65,6 @@ import {
   ToolConfirmationOutcome,
   createDuplicateProviderToolCallResponse,
   findPlanModeEntryBatchBoundaryIndex,
-  isSystemReminderContent,
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
   getCachedToolCallFingerprint,
@@ -96,7 +105,7 @@ import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAda
 import type { ControlService } from './nonInteractive/control/ControlService.js';
 
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
-import { ModSession } from './services/mod-session.js';
+import { ModSession, type ModTurn } from './services/mod-session.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
 import {
   AlreadyReportedError,
@@ -120,6 +129,14 @@ export class TurnInterruptedError extends Error {
   constructor() {
     super('Operation cancelled.');
     this.name = 'TurnInterruptedError';
+  }
+}
+
+/** `$.turn.abort` ends the turn as an interrupt does, in every mode. */
+class ModTurnAbortedError extends TurnInterruptedError {
+  constructor() {
+    super();
+    this.message = 'A Mod ended the turn.';
   }
 }
 
@@ -556,12 +573,21 @@ export async function runNonInteractive(
     const modSession =
       options.modSession ?? ModSession.create(config, settings, adapter);
     const ownsModSession = options.modSession === undefined;
+    // The prompt's turn, from its admission to its answer or its exit.
+    let modTurn: ModTurn | undefined;
     const unsubscribeRecordingFailure = ownsAdapter
       ? subscribeToHeadlessChatRecordingFailures(config, adapter)
       : undefined;
     let chatRecordingSettlement: Promise<void> | undefined;
     const settleBeforeTerminalOutput = (): Promise<void> => {
       chatRecordingSettlement ??= (async () => {
+        // An exit that did not reach the answer ended the turn on its way. A
+        // tripped run budget aborts the same controller, but is an error.
+        await modTurn?.complete(
+          abortController.signal.aborted && !budgetEnforcer.getExceeded()
+            ? 'aborted'
+            : 'error',
+        );
         if (ownsModSession) await modSession?.close();
         modSession?.flushLogs();
         await settleChatRecording(config, { finalize: ownsAdapter });
@@ -877,11 +903,13 @@ export async function runNonInteractive(
         // (vs. a useless literal "unreachable").
         throw new Error(exceeded.message);
       }
+      const reason: unknown = abortController.signal.reason;
       if (
-        options.recoverableCancellation === true &&
-        abortController.signal.reason instanceof TurnInterruptedError
+        reason instanceof TurnInterruptedError &&
+        (options.recoverableCancellation === true ||
+          reason instanceof ModTurnAbortedError)
       ) {
-        throw abortController.signal.reason;
+        throw reason;
       }
       await handleCancellationError(config);
       throw new Error('Operation cancelled.');
@@ -1203,8 +1231,8 @@ export async function runNonInteractive(
         const reminderParts = buildInitialSystemReminders(config);
         if (reminderParts.length > 0 && initialPartList) {
           const continuationParts = normalizePartList(initialPartList);
-          const hasSystemReminderPart = continuationParts.some((part) =>
-            isSystemReminderContent({ role: 'user', parts: [part] }),
+          const hasSystemReminderPart = continuationParts.some(
+            isWrappedSystemReminderPart,
           );
           if (!hasSystemReminderPart) {
             initialPartList = insertAfterFunctionResponses(
@@ -1700,6 +1728,7 @@ export async function runNonInteractive(
       // no-op), so unconditional invocation is safe even when the drain
       // path already finalized monitors before reaching here.
       const emitStructuredSuccess = async (): Promise<0> => {
+        await modTurn?.complete();
         const owner = captureActiveInteractionOwner();
         if (
           owner &&
@@ -1808,10 +1837,17 @@ export async function runNonInteractive(
         }
         if (event.type !== LlmEventType.Retry) return;
         if (!event.retryInfo) {
+          const diagnostics = event.retryDiagnostics;
+          const diagnosticText = diagnostics
+            ? ` [kind=${diagnostics.kind}, reason=${diagnostics.reason}` +
+              `${diagnostics.transportCode ? `, transportCode=${diagnostics.transportCode}` : ''}` +
+              `${diagnostics.statusCode !== undefined ? `, statusCode=${diagnostics.statusCode}` : ''}` +
+              ']'
+            : '';
           process.stderr.write(
             `Retrying provider attempt (${discardedToolCallCount} buffered tool call(s) discarded${
               preserveText ? '; preserving delivered text' : ''
-            }).\n`,
+            })${diagnosticText}.\n`,
           );
           return;
         }
@@ -2495,6 +2531,291 @@ export async function runNonInteractive(
         };
       };
 
+      // `experimental.unifiedAgentLoop`: model rounds and tool batches run on
+      // the shared agent loop. Each `sharedAgentLoop` branch below replaces
+      // the current code next to it, which stays unchanged while the setting
+      // exists.
+      const sharedAgentLoop = config.isUnifiedAgentLoopEnabled?.() === true;
+      type SharedLoopScope = {
+        maxRounds?: number;
+        runtimeView?: RuntimeContentGeneratorView;
+        setModelOverride: (override: string | undefined) => boolean;
+        nextRound?: (round: number, parts: Part[]) => AgentLoopRound;
+        endsOnTerminateTurn: () => boolean;
+        onRoundStart: (round: number) => void;
+        onAbort?: () => void;
+        // Hears each model event once the adapter has it.
+        onEvent?: (event: ServerLlmStreamEvent) => void;
+        tracksPreview: boolean;
+      };
+      const runOnSharedLoop = (
+        first: AgentLoopRound,
+        scope: SharedLoopScope,
+      ): Promise<AgentLoopResult> => {
+        const inputFormat =
+          typeof config.getInputFormat === 'function'
+            ? config.getInputFormat()
+            : InputFormat.TEXT;
+        const toolCallUpdateCallback =
+          inputFormat === InputFormat.STREAM_JSON && options.controlService
+            ? options.controlService.permission.getToolCallUpdateCallback()
+            : undefined;
+        const onToolResultFullTurnModel = (model: string) =>
+          !inlineModelOverrideActive && scope.setModelOverride(model);
+        let structuredOutputActive = false;
+        let planModeSiblings = new Set<ToolCallRequestInfo>();
+        let roundStartedAt = 0;
+        let attemptPreviewLength = 0;
+        // Mods with tool hooks wrap each call, so those calls run one at a
+        // time, as they do today. Scheduled one by one, they also skip a
+        // plan-mode entry's siblings here rather than in the scheduler.
+        const modExecutor: AgentLoopToolExecutor = {
+          run: async (requests, signal, hooks) => {
+            const settled: AgentLoopSettledCall[] = [];
+            const planModeEntry = findPlanModeEntryBatchBoundaryIndex(
+              requests.map((request) => request.name),
+            );
+            for (const [index, request] of requests.entries()) {
+              if (planModeEntry !== undefined && index !== planModeEntry) {
+                const error = new Error(PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE);
+                settled.push({
+                  status: 'error',
+                  request,
+                  response: {
+                    callId: request.callId,
+                    responseParts: [
+                      {
+                        functionResponse: {
+                          id: request.callId,
+                          name: request.name,
+                          response: { error: error.message },
+                        },
+                      },
+                    ],
+                    resultDisplay: error.message,
+                    error,
+                    errorType: ToolErrorType.EXECUTION_DENIED,
+                    executionStatus: 'not_started',
+                  },
+                });
+                continue;
+              }
+              if (!hooks.beforeLaunch(request, settled)) continue;
+              let call: CompletedToolCall | undefined;
+              const response = await executeToolCall(config, request, signal, {
+                recordToolResult: false,
+                modToolCall: modSession?.toolCall(() =>
+                  budgetEnforcer.tickToolCall(),
+                ),
+                onToolResultFullTurnModel,
+                outputUpdateHandler: hooks.output,
+                onAllToolCallsComplete: async (calls) => {
+                  call = calls[0];
+                },
+                runtimeView: scope.runtimeView,
+                ...(toolCallUpdateCallback && {
+                  onToolCallsUpdate: toolCallUpdateCallback,
+                }),
+              });
+              settled.push({
+                status: call?.status ?? (response.error ? 'error' : 'success'),
+                request: call?.request ?? request,
+                response,
+              });
+            }
+            return settled;
+          },
+        };
+        return runAgentLoop({
+          client: llmClient,
+          config,
+          signal: abortController.signal,
+          ...(activeGoalTurn && {
+            toolSignal: AbortSignal.any([
+              abortController.signal,
+              activeGoalTurn.controller.signal,
+            ]),
+          }),
+          first,
+          maxRounds: scope.maxRounds,
+          duplicates: {
+            handled: handledToolCallFingerprints,
+            responded: duplicateProviderToolCallResponseIds,
+          },
+          scheduler: {
+            onToolResultFullTurnModel,
+            ...(toolCallUpdateCallback && {
+              onToolCallsUpdate: toolCallUpdateCallback,
+            }),
+          },
+          ...(modSession?.hasToolHooks && { executor: modExecutor }),
+          runtimeView: scope.runtimeView,
+          host: {
+            onRoundStart: (round) => {
+              roundStartedAt = Date.now();
+              attemptPreviewLength = plainTextPreview.length;
+              scope.onRoundStart(round);
+              adapter.startAssistantMessage();
+            },
+            onModelEvent: async (event, discardedCalls) => {
+              captureActiveInteractionOwner();
+              if (abortController.signal.aborted) {
+                adapter.finalizeAssistantMessage();
+                scope.onAbort?.();
+                await routeAbort();
+              }
+              discardAbandonedAttempt(
+                event,
+                [...discardedCalls],
+                scope.tracksPreview
+                  ? () => {
+                      plainTextPreview = plainTextPreview.slice(
+                        0,
+                        attemptPreviewLength,
+                      );
+                    }
+                  : undefined,
+              );
+              adapter.processEvent(event);
+              scope.onEvent?.(event);
+              if (
+                event.type === LlmEventType.HookSystemMessage &&
+                outputFormat === OutputFormat.TEXT
+              ) {
+                process.stderr.write(`${sanitizeTerminalText(event.value)}\n`);
+              }
+              if (
+                scope.tracksPreview &&
+                event.type === LlmEventType.Content &&
+                plainTextPreview.length < PLAIN_TEXT_PREVIEW_LIMIT
+              ) {
+                const remaining =
+                  PLAIN_TEXT_PREVIEW_LIMIT - plainTextPreview.length;
+                plainTextPreview += String(event.value).slice(0, remaining);
+              }
+              if (event.type === LlmEventType.LoopDetected) {
+                if (!loopDetected) {
+                  loopDetectedMessage = emitLoopDetectedMessage(
+                    config,
+                    event.value,
+                  );
+                }
+                loopDetected = true;
+              }
+              if (event.type === LlmEventType.Error) {
+                const errorText = parseAndFormatApiError(
+                  event.value.error,
+                  config.getContentGeneratorConfig()?.authType,
+                );
+                if (outputFormat === OutputFormat.TEXT) {
+                  process.stderr.write(`${errorText}\n`);
+                }
+                throw new AlreadyReportedError(errorText);
+              }
+            },
+            onRoundEnd: () => {
+              captureActiveInteractionOwner();
+              adapter.finalizeAssistantMessage();
+              totalApiDurationMs += Date.now() - roundStartedAt;
+            },
+            nextRound: scope.nextRound,
+            selectCalls: (executable, batch) => {
+              structuredOutputActive =
+                Boolean(config.getJsonSchema()) &&
+                batch.some((r) => r.name === ToolNames.STRUCTURED_OUTPUT);
+              const selected = structuredOutputActive
+                ? executable.filter(
+                    (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
+                  )
+                : executable;
+              const planModeEntry = findPlanModeEntryBatchBoundaryIndex(
+                selected.map((r) => r.name),
+              );
+              planModeSiblings = new Set(
+                planModeEntry === undefined
+                  ? []
+                  : selected.filter((_, index) => index !== planModeEntry),
+              );
+              return selected;
+            },
+            beforeToolLaunch: (request, settled) => {
+              if (abortController.signal.aborted) return false;
+              // A plan-mode sibling skip is not counted, as today.
+              if (planModeSiblings.has(request)) return true;
+              // The first valid structured_output ends the session. The tool is
+              // not concurrency-safe, so an earlier one has settled by now.
+              if (
+                structuredOutputActive &&
+                settled.some(
+                  (call) =>
+                    call.request.name === ToolNames.STRUCTURED_OUTPUT &&
+                    !call.response.error,
+                )
+              ) {
+                return false;
+              }
+              // Tick before the launch so --max-tool-calls=N stops at
+              // exactly N; structured_output is exempt under --json-schema.
+              if (
+                request.name !== ToolNames.STRUCTURED_OUTPUT ||
+                config.getJsonSchema?.() === undefined
+              ) {
+                budgetEnforcer.tickToolCall();
+              }
+              return !abortController.signal.aborted;
+            },
+            outputHandler: (request) => {
+              const executionRequest = getHeadlessExecutionRequest(
+                request,
+                config,
+              );
+              return executionRequest.name === ToolNames.AGENT
+                ? createAgentToolProgressHandler(
+                    config,
+                    request.callId,
+                    adapter,
+                  ).handler
+                : createToolProgressHandler(executionRequest, adapter).handler;
+            },
+            onToolResult: ({ request, executionRequest, response, origin }) => {
+              if (origin !== 'executed') {
+                adapter.emitToolResult(request, response);
+                return false;
+              }
+              const siblingSkip = planModeSiblings.has(request);
+              if (response.error && !siblingSkip) {
+                handleToolError(
+                  executionRequest.name,
+                  response.error,
+                  config,
+                  response.errorType || 'TOOL_EXECUTION_ERROR',
+                  shellResultText(response.resultDisplay),
+                  { approvalRequired: response.approvalRequired === true },
+                );
+              }
+              adapter.emitToolResult(
+                siblingSkip ? request : executionRequest,
+                response,
+              );
+              if ('modelOverride' in response) {
+                scope.setModelOverride(response.modelOverride);
+              }
+              if (
+                request.name === ToolNames.STRUCTURED_OUTPUT &&
+                !response.error
+              ) {
+                structuredSubmission = request.args;
+                return true;
+              }
+              return false;
+            },
+            skippedOutput: () =>
+              suppressedOutputBody(structuredSubmission !== undefined),
+            endsOnTerminateTurn: scope.endsOnTerminateTurn,
+          },
+        });
+      };
+
       let currentPromptId = prompt_id;
       while (true) {
         // Drain pending teammate messages into the conversation.
@@ -2561,223 +2882,357 @@ export async function runNonInteractive(
           sendType !== SendMessageType.ToolResult,
         );
 
-        const toolCallRequests: ToolCallRequestInfo[] = [];
-        const attemptPreviewLength = plainTextPreview.length;
-        const apiStartTime = Date.now();
-        const responseStream = llmClient.sendMessageStream(
-          currentMessages[0]?.parts || [],
-          abortController.signal,
-          currentPromptId,
-          {
-            type: sendType,
-            modelOverride,
-            ...(isFirstTurn &&
-              sendType === SendMessageType.UserQuery &&
-              !goalTurn &&
-              !options.continueInterrupted &&
-              !isSlashCommand(input) &&
-              options.humanInput &&
-              !isSlashCommand(options.humanInput.text) && {
-                humanInput: options.humanInput,
-              }),
-            ...(isFirstTurn &&
-              sendType === SendMessageType.UserQuery &&
-              !options.continueInterrupted &&
-              submittedPrompt.trim().length > 0 && { submittedPrompt }),
-            ...(isFirstTurn && promptAdmission && { promptAdmission }),
-            ...(isFirstTurn &&
-              options.notificationDisplayText && {
-                notificationDisplayText: options.notificationDisplayText,
-              }),
-            ...(goalTurn
-              ? {
-                  goalPermit: goalTurn.permit,
-                  goalTurnKey: goalTurn.turnKey,
-                  goalSignal: goalTurn.controller.signal,
-                  goalOrigin: goalTurn.origin,
-                  getInterruptedGoalPauseReason: (interruption) => {
-                    const exceeded = budgetEnforcer.getExceeded();
-                    if (exceeded) {
-                      return goalPauseReasonForRunBudget(exceeded.kind);
-                    }
-                    if (abortController.signal.aborted) {
-                      return GOAL_PAUSE_REASON_USER_INTERRUPT;
-                    }
-                    if (interruption?.cause === 'stop-hook-cap') {
-                      return goalPauseReasonForHeadlessFailure(
-                        'a Stop hook blocked this session too many times in a row',
-                      );
-                    }
-                    // A turn that died with an error did not end cleanly, so
-                    // it must not read as the run simply finishing first --
-                    // but it stays in the headless register, which never
-                    // tells the reader to run a slash command.
-                    return interruption?.failure
-                      ? goalPauseReasonForHeadlessFailure(interruption.failure)
-                      : GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED;
+        const roundOptions: SendMessageOptions = {
+          type: sendType,
+          modelOverride,
+          workflowModeEligible:
+            isFirstTurn &&
+            sendType === SendMessageType.UserQuery &&
+            !goalTurn &&
+            !options.continueInterrupted &&
+            !isSlashCommand(input),
+          // The prompt, or the interrupted turn it continues, is a turn the
+          // Mods hear once UserPromptSubmit admits it.
+          ...(modSession &&
+            isFirstTurn &&
+            (sendType === SendMessageType.UserQuery ||
+              options.continueInterrupted) && {
+              onPromptAdmitted: () => {
+                modTurn = modSession.startTurn(
+                  options.continueInterrupted
+                    ? ''
+                    : (options.humanInput?.text ?? input),
+                  abortController.signal,
+                  () => {
+                    if (abortController.signal.aborted) return false;
+                    abortController.abort(new ModTurnAbortedError());
+                    return true;
                   },
+                  currentPromptId,
+                );
+              },
+            }),
+          ...(isFirstTurn &&
+            sendType === SendMessageType.UserQuery &&
+            !goalTurn &&
+            !options.continueInterrupted &&
+            !isSlashCommand(input) &&
+            options.humanInput &&
+            !isSlashCommand(options.humanInput.text) && {
+              humanInput: options.humanInput,
+            }),
+          ...(isFirstTurn &&
+            sendType === SendMessageType.UserQuery &&
+            !options.continueInterrupted &&
+            submittedPrompt.trim().length > 0 && { submittedPrompt }),
+          ...(isFirstTurn && promptAdmission && { promptAdmission }),
+          ...(isFirstTurn &&
+            options.notificationDisplayText && {
+              notificationDisplayText: options.notificationDisplayText,
+            }),
+          ...(goalTurn
+            ? {
+                goalPermit: goalTurn.permit,
+                goalTurnKey: goalTurn.turnKey,
+                goalSignal: goalTurn.controller.signal,
+                goalOrigin: goalTurn.origin,
+                getInterruptedGoalPauseReason: (interruption) => {
+                  const exceeded = budgetEnforcer.getExceeded();
+                  if (exceeded) {
+                    return goalPauseReasonForRunBudget(exceeded.kind);
+                  }
+                  if (abortController.signal.aborted) {
+                    return GOAL_PAUSE_REASON_USER_INTERRUPT;
+                  }
+                  if (interruption?.cause === 'stop-hook-cap') {
+                    return goalPauseReasonForHeadlessFailure(
+                      'a Stop hook blocked this session too many times in a row',
+                    );
+                  }
+                  // A turn that died with an error did not end cleanly, so
+                  // it must not read as the run simply finishing first --
+                  // but it stays in the headless register, which never
+                  // tells the reader to run a slash command.
+                  return interruption?.failure
+                    ? goalPauseReasonForHeadlessFailure(interruption.failure)
+                    : GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED;
+                },
+              }
+            : {}),
+        };
+        let shouldFinalizeTurn: boolean;
+        if (sharedAgentLoop) {
+          const result = await runOnSharedLoop(
+            {
+              parts: currentMessages[0]?.parts || [],
+              promptId: currentPromptId,
+              options: roundOptions,
+            },
+            {
+              maxRounds: 1,
+              runtimeView: fullTurnRuntimeView,
+              setModelOverride: (override) => {
+                if (inlineModelOverrideActive) return false;
+                if (fullTurnModelOverrideActive && modelOverride !== override) {
+                  return false;
                 }
-              : {}),
-          },
-        );
-        isFirstTurn = false;
-        isFirstGoalSegment = false;
-
-        // Start assistant message for this turn
-        adapter.startAssistantMessage();
-
-        for await (const event of responseStream) {
-          captureActiveInteractionOwner();
-          if (abortController.signal.aborted) {
-            // Pair the startAssistantMessage() above so stream-json mode
-            // doesn't leave an unterminated message_start when a budget /
-            // SIGINT abort lands mid-stream. Symmetric with the drain-item
-            // loop fix below.
-            adapter.finalizeAssistantMessage();
-            await routeAbort();
-          }
-          discardAbandonedAttempt(event, toolCallRequests, () => {
-            plainTextPreview = plainTextPreview.slice(0, attemptPreviewLength);
-          });
-          // Process fallback metadata only after the abandoned attempt has
-          // been reset, so batch adapters do not roll the system event back.
-          adapter.processEvent(event);
-          if (
-            event.type === LlmEventType.HookSystemMessage &&
-            outputFormat === OutputFormat.TEXT
-          ) {
-            process.stderr.write(`${sanitizeTerminalText(event.value)}\n`);
-          }
-          if (event.type === LlmEventType.ToolCallRequest) {
-            toolCallRequests.push(event.value);
-          }
-          if (
-            event.type === LlmEventType.Content &&
-            plainTextPreview.length < PLAIN_TEXT_PREVIEW_LIMIT
-          ) {
-            const remaining =
-              PLAIN_TEXT_PREVIEW_LIMIT - plainTextPreview.length;
-            plainTextPreview += String(event.value).slice(0, remaining);
-          }
-          if (event.type === LlmEventType.LoopDetected) {
-            if (!loopDetected) {
+                if (
+                  modelOverride?.endsWith('\0') &&
+                  modelOverride !== override
+                ) {
+                  return false;
+                }
+                modelOverride = override;
+                return true;
+              },
+              endsOnTerminateTurn: () => activeGoalTurn !== undefined,
+              onRoundStart: () => {
+                isFirstTurn = false;
+                isFirstGoalSegment = false;
+              },
+              onEvent: (event) => modTurn?.saw(event),
+              tracksPreview: true,
+            },
+          );
+          switch (result.reason) {
+            case 'surface_ended':
+              // Awaited, so the run's finally closes the Mods after it.
+              return await emitStructuredSuccess();
+            case 'duplicate_provider_call':
               loopDetectedMessage = emitLoopDetectedMessage(
                 config,
-                event.value,
+                PROVIDER_DUPLICATE_ID_LOOP_STOP,
               );
-            }
-            loopDetected = true;
-          }
-          if (event.type === LlmEventType.Error) {
-            const errorText = parseAndFormatApiError(
-              event.value.error,
-              config.getContentGeneratorConfig()?.authType,
-            );
-            if (outputFormat === OutputFormat.TEXT) {
-              process.stderr.write(`${errorText}\n`);
-            }
-            // The adapter has already captured the formatted error in JSON
-            // modes, while text mode wrote it above. Mark the throw so the
-            // terminal error result is emitted without formatting it again.
-            throw new AlreadyReportedError(errorText);
-          }
-        }
-        captureActiveInteractionOwner();
-
-        // Finalize assistant message
-        adapter.finalizeAssistantMessage();
-        totalApiDurationMs += Date.now() - apiStartTime;
-
-        if (loopDetected) {
-          return emitLoopDetectedResult();
-        }
-
-        let shouldFinalizeTurn = toolCallRequests.length === 0;
-        if (toolCallRequests.length > 0) {
-          // Dispatch the per-turn tool-call batch through the shared
-          // helper (see processToolCallBatch above). The helper handles
-          // the `--json-schema` pre-scan, executes each request, writes
-          // the first valid `structured_output` call's args into the
-          // session-scoped `structuredSubmission`, and synthesises
-          // tool_result events for every suppressed sibling. The
-          // `modelOverride` setter is the only call-site-specific
-          // binding — the main turn updates the session-scoped
-          // `modelOverride` so the next turn's sendMessageStream sees
-          // it; the drain turn updates a per-item `itemModelOverride`
-          // scoped to that drain item.
-          const {
-            responseParts: toolResponseParts,
-            repeatedDuplicateProviderToolCall,
-            terminateTurn,
-          } = await processToolCallBatch(
-            toolCallRequests,
-            (override) => {
-              if (inlineModelOverrideActive) return false;
-              if (fullTurnModelOverrideActive && modelOverride !== override) {
-                return false;
+              return await emitLoopDetectedResult();
+            case 'loop_detected':
+              return await emitLoopDetectedResult();
+            case 'cancelled':
+              // Awaited, so a recoverable interrupt reaches the catch below and
+              // ends with its result, as on the current loop.
+              return await routeAbort();
+            case 'max_session_turns':
+              // The client counts turns across the whole session (#15325).
+              await failClosedActiveGoalTurn(
+                'Headless Goal stopped after the session turn limit',
+              );
+              await settleBeforeTerminalOutput();
+              return handleMaxTurnsExceededError(config);
+            case 'next_round':
+              currentMessages = [{ role: 'user', parts: result.parts ?? [] }];
+              hasUnsentToolResponse = true;
+              shouldFinalizeTurn = false;
+              break;
+            case 'tool_ended_turn': {
+              shouldFinalizeTurn = true;
+              if (!activeGoalTurn) break;
+              await modTurn?.complete();
+              llmClient.addHistory({ role: 'user', parts: result.parts ?? [] });
+              await config.getChatRecordingService?.()?.flush();
+              await finishGoalTurn(activeGoalTurn);
+              activeGoalTurn = undefined;
+              selectActiveInteraction(currentPromptId);
+              endActiveInteraction('ok');
+              const nextGoalTurn = queuedGoalTurns.shift();
+              if (nextGoalTurn) {
+                activeGoalTurn = nextGoalTurn;
+                markGoalTurnDelivered(nextGoalTurn);
+                isFirstGoalSegment = true;
+                currentMessages = [
+                  {
+                    role: 'user',
+                    parts: buildGoalContinuationParts(
+                      nextGoalTurn,
+                      config.getToolRegistry?.(),
+                    ),
+                  },
+                ];
+                hasUnsentToolResponse = false;
+                continue;
               }
-              if (modelOverride?.endsWith('\0') && modelOverride !== override) {
-                return false;
-              }
-              modelOverride = override;
-              return true;
-            },
-            fullTurnRuntimeView,
+              break;
+            }
+            default:
+              shouldFinalizeTurn = true;
+          }
+        } else {
+          const toolCallRequests: ToolCallRequestInfo[] = [];
+          const attemptPreviewLength = plainTextPreview.length;
+          const apiStartTime = Date.now();
+          const responseStream = llmClient.sendMessageStream(
+            currentMessages[0]?.parts || [],
+            abortController.signal,
+            currentPromptId,
+            roundOptions,
           );
+          isFirstTurn = false;
+          isFirstGoalSegment = false;
 
-          if (structuredSubmission !== undefined) {
-            // Single-shot terminal contract; aborts in-flight background
-            // agents, holds back briefly for their terminal
-            // task_notification events to land, then emits the
-            // structured success envelope. Same helper as the drain-turn
-            // post-loop branch — see emitStructuredSuccess above.
-            return emitStructuredSuccess();
-          }
-          if (
-            repeatedDuplicateProviderToolCall &&
-            toolResponseParts.length === 0
-          ) {
-            loopDetectedMessage = emitLoopDetectedMessage(
-              config,
-              PROVIDER_DUPLICATE_ID_LOOP_STOP,
-            );
-            return emitLoopDetectedResult();
-          }
-          if (terminateTurn && activeGoalTurn) {
-            llmClient.addHistory({
-              role: 'user',
-              parts: toolResponseParts,
-            });
-            await config.getChatRecordingService?.()?.flush();
-            await finishGoalTurn(activeGoalTurn);
-            activeGoalTurn = undefined;
-            selectActiveInteraction(currentPromptId);
-            endActiveInteraction('ok');
-            const nextGoalTurn = queuedGoalTurns.shift();
-            if (nextGoalTurn) {
-              activeGoalTurn = nextGoalTurn;
-              markGoalTurnDelivered(nextGoalTurn);
-              isFirstGoalSegment = true;
-              currentMessages = [
-                {
-                  role: 'user',
-                  parts: buildGoalContinuationParts(
-                    nextGoalTurn,
-                    config.getToolRegistry?.(),
-                  ),
-                },
-              ];
-              hasUnsentToolResponse = false;
-              continue;
+          // Start assistant message for this turn
+          adapter.startAssistantMessage();
+
+          for await (const event of responseStream) {
+            captureActiveInteractionOwner();
+            if (abortController.signal.aborted) {
+              // Pair the startAssistantMessage() above so stream-json mode
+              // doesn't leave an unterminated message_start when a budget /
+              // SIGINT abort lands mid-stream. Symmetric with the drain-item
+              // loop fix below.
+              adapter.finalizeAssistantMessage();
+              await routeAbort();
             }
-            shouldFinalizeTurn = true;
+            discardAbandonedAttempt(event, toolCallRequests, () => {
+              plainTextPreview = plainTextPreview.slice(
+                0,
+                attemptPreviewLength,
+              );
+            });
+            // Process fallback metadata only after the abandoned attempt has
+            // been reset, so batch adapters do not roll the system event back.
+            adapter.processEvent(event);
+            modTurn?.saw(event);
+            if (
+              event.type === LlmEventType.HookSystemMessage &&
+              outputFormat === OutputFormat.TEXT
+            ) {
+              process.stderr.write(`${sanitizeTerminalText(event.value)}\n`);
+            }
+            if (event.type === LlmEventType.ToolCallRequest) {
+              toolCallRequests.push(event.value);
+            }
+            if (
+              event.type === LlmEventType.Content &&
+              plainTextPreview.length < PLAIN_TEXT_PREVIEW_LIMIT
+            ) {
+              const remaining =
+                PLAIN_TEXT_PREVIEW_LIMIT - plainTextPreview.length;
+              plainTextPreview += String(event.value).slice(0, remaining);
+            }
+            if (event.type === LlmEventType.LoopDetected) {
+              if (!loopDetected) {
+                loopDetectedMessage = emitLoopDetectedMessage(
+                  config,
+                  event.value,
+                );
+              }
+              loopDetected = true;
+            }
+            if (event.type === LlmEventType.Error) {
+              const errorText = parseAndFormatApiError(
+                event.value.error,
+                config.getContentGeneratorConfig()?.authType,
+              );
+              if (outputFormat === OutputFormat.TEXT) {
+                process.stderr.write(`${errorText}\n`);
+              }
+              // The adapter has already captured the formatted error in JSON
+              // modes, while text mode wrote it above. Mark the throw so the
+              // terminal error result is emitted without formatting it again.
+              throw new AlreadyReportedError(errorText);
+            }
           }
-          if (!shouldFinalizeTurn) {
-            currentMessages = [{ role: 'user', parts: toolResponseParts }];
-            hasUnsentToolResponse = true;
+          captureActiveInteractionOwner();
+
+          // Finalize assistant message
+          adapter.finalizeAssistantMessage();
+          totalApiDurationMs += Date.now() - apiStartTime;
+
+          if (loopDetected) {
+            return await emitLoopDetectedResult();
+          }
+
+          shouldFinalizeTurn = toolCallRequests.length === 0;
+          if (toolCallRequests.length > 0) {
+            // Dispatch the per-turn tool-call batch through the shared
+            // helper (see processToolCallBatch above). The helper handles
+            // the `--json-schema` pre-scan, executes each request, writes
+            // the first valid `structured_output` call's args into the
+            // session-scoped `structuredSubmission`, and synthesises
+            // tool_result events for every suppressed sibling. The
+            // `modelOverride` setter is the only call-site-specific
+            // binding — the main turn updates the session-scoped
+            // `modelOverride` so the next turn's sendMessageStream sees
+            // it; the drain turn updates a per-item `itemModelOverride`
+            // scoped to that drain item.
+            const {
+              responseParts: toolResponseParts,
+              repeatedDuplicateProviderToolCall,
+              terminateTurn,
+            } = await processToolCallBatch(
+              toolCallRequests,
+              (override) => {
+                if (inlineModelOverrideActive) return false;
+                if (fullTurnModelOverrideActive && modelOverride !== override) {
+                  return false;
+                }
+                if (
+                  modelOverride?.endsWith('\0') &&
+                  modelOverride !== override
+                ) {
+                  return false;
+                }
+                modelOverride = override;
+                return true;
+              },
+              fullTurnRuntimeView,
+            );
+
+            if (structuredSubmission !== undefined) {
+              // Single-shot terminal contract; aborts in-flight background
+              // agents, holds back briefly for their terminal
+              // task_notification events to land, then emits the
+              // structured success envelope. Same helper as the drain-turn
+              // post-loop branch — see emitStructuredSuccess above.
+              // Awaited, so the run's finally closes the Mods after it.
+              return await emitStructuredSuccess();
+            }
+            if (
+              repeatedDuplicateProviderToolCall &&
+              toolResponseParts.length === 0
+            ) {
+              loopDetectedMessage = emitLoopDetectedMessage(
+                config,
+                PROVIDER_DUPLICATE_ID_LOOP_STOP,
+              );
+              return await emitLoopDetectedResult();
+            }
+            if (terminateTurn && activeGoalTurn) {
+              await modTurn?.complete();
+              llmClient.addHistory({
+                role: 'user',
+                parts: toolResponseParts,
+              });
+              await config.getChatRecordingService?.()?.flush();
+              await finishGoalTurn(activeGoalTurn);
+              activeGoalTurn = undefined;
+              selectActiveInteraction(currentPromptId);
+              endActiveInteraction('ok');
+              const nextGoalTurn = queuedGoalTurns.shift();
+              if (nextGoalTurn) {
+                activeGoalTurn = nextGoalTurn;
+                markGoalTurnDelivered(nextGoalTurn);
+                isFirstGoalSegment = true;
+                currentMessages = [
+                  {
+                    role: 'user',
+                    parts: buildGoalContinuationParts(
+                      nextGoalTurn,
+                      config.getToolRegistry?.(),
+                    ),
+                  },
+                ];
+                hasUnsentToolResponse = false;
+                continue;
+              }
+              shouldFinalizeTurn = true;
+            }
+            if (!shouldFinalizeTurn) {
+              currentMessages = [{ role: 'user', parts: toolResponseParts }];
+              hasUnsentToolResponse = true;
+            }
           }
         }
         if (shouldFinalizeTurn) {
+          await modTurn?.complete();
           if (activeGoalTurn) {
             const completedGoalTurn = activeGoalTurn;
             await config.getChatRecordingService?.()?.flush();
@@ -2929,6 +3384,65 @@ export async function runNonInteractive(
             let itemIsFirstTurn = true;
             let itemModelOverride: string | undefined;
             const itemPromptId = `${prompt_id}/automatic/${turnCount}`;
+
+            if (sharedAgentLoop) {
+              const result = await runOnSharedLoop(
+                {
+                  parts: itemMessages[0]?.parts || [],
+                  promptId: itemPromptId,
+                  options: {
+                    type: item.sendMessageType,
+                    modelOverride: itemModelOverride,
+                    notificationDisplayText: item.displayText,
+                    todoWorkChainId: item.todoWorkChainId,
+                  },
+                },
+                {
+                  setModelOverride: (override) => {
+                    if (
+                      itemModelOverride?.endsWith('\0') &&
+                      itemModelOverride !== override
+                    ) {
+                      return false;
+                    }
+                    itemModelOverride = override;
+                    return true;
+                  },
+                  nextRound: (_round, parts) => ({
+                    parts,
+                    promptId: itemPromptId,
+                    options: {
+                      type: SendMessageType.ToolResult,
+                      modelOverride: itemModelOverride,
+                    },
+                  }),
+                  endsOnTerminateTurn: () => false,
+                  onRoundStart: (round) =>
+                    selectActiveInteraction(itemPromptId, round === 0),
+                  onAbort: () => {
+                    flushQueuedNotificationsToSdk(localQueue);
+                    finalizeOneShotMonitors();
+                  },
+                  tracksPreview: false,
+                },
+              );
+              if (result.reason === 'duplicate_provider_call') {
+                loopDetectedMessage = emitLoopDetectedMessage(
+                  config,
+                  PROVIDER_DUPLICATE_ID_LOOP_STOP,
+                );
+                loopDetected = true;
+              } else if (result.reason === 'cancelled') {
+                await routeAbort();
+              } else if (result.reason === 'max_session_turns') {
+                await failClosedActiveGoalTurn(
+                  'Headless Goal stopped after the session turn limit',
+                );
+                await settleBeforeTerminalOutput();
+                await handleMaxTurnsExceededError(config);
+              }
+              return;
+            }
 
             while (true) {
               const itemToolCallRequests: ToolCallRequestInfo[] = [];
@@ -3231,7 +3745,7 @@ export async function runNonInteractive(
             // through the model, but later monitor output is SDK-only.
             captureMonitorTurnsInLocalQueue = false;
             await drainLocalQueue();
-            if (loopDetected) return emitLoopDetectedResult();
+            if (loopDetected) return await emitLoopDetectedResult();
             // A drain-turn structured_output captured the terminal
             // contract — bail out of the holdback loop early and let the
             // post-loop code emit the success result.
@@ -3271,7 +3785,8 @@ export async function runNonInteractive(
           // metrics snapshot after the holdback so any task notifications
           // that landed during shutdown contribute to the totals.
           if (structuredSubmission !== undefined) {
-            return emitStructuredSuccess();
+            // Awaited, so the run's finally closes the Mods after it.
+            return await emitStructuredSuccess();
           }
 
           // --json-schema contract: the model MUST terminate via the
@@ -3375,8 +3890,9 @@ export async function runNonInteractive(
       // generic `handleError` exit code 1 from a raw "AbortError".
       const recoverableCancellation =
         !budgetExceeded &&
-        options.recoverableCancellation === true &&
-        abortController.signal.reason instanceof TurnInterruptedError;
+        abortController.signal.reason instanceof TurnInterruptedError &&
+        (options.recoverableCancellation === true ||
+          abortController.signal.reason instanceof ModTurnAbortedError);
 
       // For JSON and STREAM_JSON modes, compute usage from metrics
       const message = budgetExceeded

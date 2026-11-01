@@ -7,6 +7,7 @@ import { expect, it } from 'vitest';
 import {
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
+  HOSTED_WORKSPACE_FILE_PROFILE_V3,
   HOSTED_WORKSPACE_READ_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HOSTED_WORKSPACE_TEAM_LEAD_PROFILE,
@@ -35,6 +36,7 @@ it('pre-approves glob only on the search profiles and the read profile', () => {
   for (const profile of [
     HOSTED_WORKSPACE_FILE_PROFILE_V2,
     HOSTED_WORKSPACE_SHELL_PROFILE,
+    HOSTED_WORKSPACE_FILE_PROFILE_V3,
     HOSTED_WORKSPACE_READ_PROFILE,
   ])
     expect(isHostedWorkspaceGlobProfile(profile)).toBe(true);

@@ -2,6 +2,8 @@
 
 [English](2026-10-22-mysql-ci-optimization.md) | [简体中文](2026-10-22-mysql-ci-optimization.zh-CN.md)
 
+当前数据库集成 CI 仅运行 MySQL 8.4。下文双引擎描述和测量保留原优化时的记录；保留的 MySQL 任务仍为每个 fork 使用独立实例。参见[当前数据库验证范围](managed-runtime-broker-jdbc.zh-CN.md#数据库验证范围)。
+
 ## 问题与证据
 
 main 夜间[运行 39664846210](https://github.com/QwenLM/qwen-code/actions/runs/39664846210) 执行 52 个类、1,060 个集成用例用了 33 分 41 秒。各类报告耗时累计为 33 分 39 秒，说明实际基本串行。这个时间不包含单元测试、Maven 缓存操作和 runner 的 Java 锁等待。

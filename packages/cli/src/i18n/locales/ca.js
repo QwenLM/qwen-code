@@ -1918,6 +1918,8 @@ export default {
   'System prompt': 'Missatge del sistema',
   'Built-in tools': 'Eines integrades',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Fitxers d’instruccions',
+  'Auto memory': 'Memòria automàtica',
   'Memory files': 'Fitxers de memòria',
   Skills: 'Habilitats',
   Messages: 'Missatges',
@@ -2170,6 +2172,8 @@ export default {
   'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
     'Història reduïda: {{n}} missatges ocults. Utilitzeu /history expand-now per mostrar.',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    'Les actualitzacions a una versió concreta requereixen una instal·lació independent. Instal·leu manualment la versió {{version}} amb el vostre mètode d’instal·lació.',
   'Check for Qwen Code updates and install if available':
     'Comprova les actualitzacions de Qwen Code i instal·la si estan disponibles',
   'Qwen Code update available! {{current}} → {{latest}}':
@@ -2463,6 +2467,7 @@ export default {
   'toolDisplayName.CronCreate': 'Crea tasca programada',
   'toolDisplayName.CronList': 'Llista tasques programades',
   'toolDisplayName.CronDelete': 'Suprimeix tasca programada',
+  'toolDisplayName.AutofixPr': 'Autocorrecció de PR',
   'toolDisplayName.LoopWakeup': 'Desperta el bucle',
   'toolDisplayName.CreateSubSession': 'Crea subsessió',
   'toolDisplayName.ListAgents': "Llista d'agents",

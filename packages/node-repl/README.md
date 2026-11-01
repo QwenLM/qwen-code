@@ -62,11 +62,11 @@ Call `cua.rewriteDocumentation()` after context compaction. `cua.desktop` provid
 
 Install Node.js **22 or later**, including npm, and the MCP client you want to
 use. Run the server on the computer whose desktop you want to control.
-The commands below target **0.26.0** and require that version's npm packages
-and native GitHub Release (`cua-driver-rs-v0.26.0`) to be published.
+The commands below target **0.27.0** and require that version's npm packages
+and native GitHub Release (`cua-driver-rs-v0.27.0`) to be published.
 
 `npx` downloads the server on first launch. It automatically installs
-`@qwen-code/cua-sdk@0.26.0` and `@qwen-code/browser-use@0.26.0`; the SDK's
+`@qwen-code/cua-sdk@0.27.0` and `@qwen-code/browser-use@0.27.0`; the SDK's
 installation downloads the matching native payload and verifies its SHA-256
 checksum. Allow npm installation scripts and network access to npm and GitHub
 Releases. No separate SDK install, manual SDK import, skill installation,
@@ -82,7 +82,7 @@ the same version. For direct native MCP tools instead of JavaScript, see the
 On macOS/Linux:
 
 ```bash
-qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.26.0
+qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.27.0
 ```
 
 This writes the server entry to `~/.qwen/settings.json`. Use `--scope project`
@@ -94,7 +94,7 @@ settings entry is:
   "mcpServers": {
     "node-repl": {
       "command": "npx",
-      "args": ["-y", "@qwen-code/node-repl-mcp@0.26.0"],
+      "args": ["-y", "@qwen-code/node-repl-mcp@0.27.0"],
     },
   },
 }
@@ -105,7 +105,7 @@ settings entry is:
 On macOS/Linux:
 
 ```bash
-claude mcp add --scope user --transport stdio node-repl -- npx -y @qwen-code/node-repl-mcp@0.26.0
+claude mcp add --scope user --transport stdio node-repl -- npx -y @qwen-code/node-repl-mcp@0.27.0
 ```
 
 User scope is stored in `~/.claude.json`. Use `--scope project` to write the
@@ -118,7 +118,7 @@ JSON shape as above. See the
 On macOS/Linux:
 
 ```bash
-codex mcp add node-repl -- npx -y @qwen-code/node-repl-mcp@0.26.0
+codex mcp add node-repl -- npx -y @qwen-code/node-repl-mcp@0.27.0
 ```
 
 Alternatively, add the following to `~/.codex/config.toml`. The longer startup
@@ -128,7 +128,7 @@ existing table if you registered the server with the CLI.
 ```toml
 [mcp_servers.node-repl]
 command = "npx"
-args = ["-y", "@qwen-code/node-repl-mcp@0.26.0"]
+args = ["-y", "@qwen-code/node-repl-mcp@0.27.0"]
 startup_timeout_sec = 120
 ```
 
@@ -143,17 +143,17 @@ your chosen client:
 
 ```powershell
 # Qwen Code
-qwen mcp add --scope user node-repl cmd.exe /d /c npx -y @qwen-code/node-repl-mcp@0.26.0
+qwen mcp add --scope user node-repl cmd.exe /d /c npx -y @qwen-code/node-repl-mcp@0.27.0
 
 # Claude Code
-claude mcp add --scope user --transport stdio node-repl -- cmd.exe /d /c npx -y @qwen-code/node-repl-mcp@0.26.0
+claude mcp add --scope user --transport stdio node-repl -- cmd.exe /d /c npx -y @qwen-code/node-repl-mcp@0.27.0
 
 # Codex
-codex mcp add node-repl -- cmd.exe /d /c npx -y @qwen-code/node-repl-mcp@0.26.0
+codex mcp add node-repl -- cmd.exe /d /c npx -y @qwen-code/node-repl-mcp@0.27.0
 ```
 
 For manual JSON/TOML configuration on Windows, set `command` to `"cmd.exe"`
-and `args` to `["/d", "/c", "npx", "-y", "@qwen-code/node-repl-mcp@0.26.0"]`.
+and `args` to `["/d", "/c", "npx", "-y", "@qwen-code/node-repl-mcp@0.27.0"]`.
 
 ### Permissions and connection check
 
@@ -169,6 +169,17 @@ await cua.getState();
 It displays the current platform's instructions and application inventory.
 Continue with `var app = await cua.getApp('Application name')` using an
 application from that observation. The global `cua` is already loaded.
+
+The native agent cursor is enabled by default. macOS also shows a live local
+PiP for the session's two most recently observed, authorized windows. It
+refreshes while JavaScript is idle. Drag a card or its Move preview handle to move the borderless window.
+Hover to reveal its floating controls, or close it to stop that preview; a later authorized observation can recreate it. `js_reset` clears the owning cursor and preview. Start the
+ordinary MCP server with `--no-overlay` or `--no-pip` to disable either surface.
+For desktop relay, set `"experimental_pip": false` in the local Mac's
+`~/.cua-driver/config.json`, preserving other keys, then restart the relay.
+Relay install arguments are not forwarded to its child server.
+Disable PiP and restart its host before sharing the desktop if its mirrored
+windows should not be visible; closing the current panel is only temporary.
 
 On macOS, grant Accessibility and Screen Recording to the responsible host
 shown by macOS (the client, terminal, or Node process, depending on how you
@@ -215,7 +226,7 @@ add the following allowlist to the existing server entry in `config.toml`:
 ```toml
 [mcp_servers.node-repl]
 command = "npx"
-args = ["-y", "@qwen-code/node-repl-mcp@0.26.0"]
+args = ["-y", "@qwen-code/node-repl-mcp@0.27.0"]
 startup_timeout_sec = 120
 env_vars = ["DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "AT_SPI_BUS_ADDRESS", "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY", "GTK_MODULES", "QT_ACCESSIBILITY", "QT_LINUX_ACCESSIBILITY_ALWAYS_ON"]
 ```
@@ -240,7 +251,7 @@ somewhere else, typically a headless dev box, so the Computer Use runtime can
 drive the desktop you are sitting at. On macOS:
 
 ```bash
-npx -y @qwen-code/node-repl-mcp@0.26.0 desktop-relay install
+npx -y @qwen-code/node-repl-mcp@0.27.0 desktop-relay install
 ```
 
 This installs the server and `@qwen-code/cua-sdk` under `~/.qwen/desktop-relay`

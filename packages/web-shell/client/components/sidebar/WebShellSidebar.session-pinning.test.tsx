@@ -4,6 +4,7 @@ import * as React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
+import type { SessionCatalogSnapshot } from '../../session-catalog/session-catalog-store';
 import {
   clickSidebarElement as click,
   flushSidebar,
@@ -80,7 +81,9 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
     };
   });
 const refreshSessionCatalogQueries = vi.hoisted(() => vi.fn());
-const useSessionCatalogQueries = vi.hoisted(() => vi.fn(() => []));
+const useSessionCatalogQueries = vi.hoisted(() =>
+  vi.fn((): SessionCatalogSnapshot[] => []),
+);
 const loadSession = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
@@ -315,6 +318,73 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar session pinning (issue #9465)', () => {
+  it('does not restore cleared activity unread when the legacy catalog catches up', async () => {
+    const running = makeSession('background', {
+      displayName: 'Background result',
+      hasActivePrompt: true,
+      updatedAt: new Date().toISOString(),
+    });
+    const completed = { ...running, hasActivePrompt: false };
+    const catalog = (session: DaemonSessionSummary) => {
+      useSessionCatalogQueries.mockReturnValue([
+        { loading: false, stale: false, page: { sessions: [session] } },
+      ]);
+    };
+    active.sessions = [running];
+    active.data = active.sessions;
+    catalog(running);
+    renderSidebar();
+    await flushSidebar();
+    await act(async () => {
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="View activity"]',
+        )!,
+      );
+    });
+    await flushSidebar();
+    catalog(completed);
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).not.toBeNull();
+    await act(async () => {
+      container
+        .querySelector('button[aria-label="Activity options"]')!
+        .dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        );
+    });
+    const markRead = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ].find((item) => item.textContent === 'Mark all as read');
+    expect(markRead).toBeDefined();
+    await act(async () => click(markRead!));
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    active.sessions = [completed];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    await act(async () => {
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Close activity view"]',
+        )!,
+      );
+    });
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    expect(workspaceActions.updateSessionOrganization).not.toHaveBeenCalled();
+  });
+
   it('orders the pinned section by pin time, not last activity', async () => {
     // The daemon returns the pinned page sorted by activity (updatedAt
     // descending): "recent" was active most recently but was pinned AFTER
@@ -1836,5 +1906,181 @@ describe('WebShellSidebar PR badge rows', () => {
     expect(
       metaSlotFor('With PR').style.getPropertyValue('--session-actions-width'),
     ).toBe('0px');
+  });
+});
+
+describe('WebShellSidebar session tree', () => {
+  const flatCapabilities = { qwenCodeVersion: '1.2.3', features: [] };
+
+  function primeDerived() {
+    connection.capabilities = flatCapabilities;
+    workspace.capabilities = flatCapabilities;
+    active.sessions = [
+      makeSession('parent', { displayName: 'Parent session' }),
+      makeSession('child', {
+        displayName: 'Derived session',
+        parentSessionId: 'parent',
+      }),
+    ];
+    active.data = active.sessions;
+  }
+
+  function toggleOf(sessionTitle: string): HTMLElement | null {
+    const row = [
+      ...container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ].find((candidate) => candidate.textContent?.includes(sessionTitle));
+    return (
+      row?.querySelector<HTMLElement>('[class*="sessionTreeToggle"]') ?? null
+    );
+  }
+
+  it('collapses a derived session under its parent in the main list', async () => {
+    primeDerived();
+    renderSidebar();
+    await flushSidebar();
+
+    expect(container.textContent).toContain('Parent session');
+    expect(container.textContent).not.toContain('Derived session');
+    const toggle = toggleOf('Parent session');
+    expect(toggle).not.toBeNull();
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle?.getAttribute('aria-label')).toBe('1 sub-session');
+  });
+
+  it('expands the derived session and persists the toggle', async () => {
+    primeDerived();
+    renderSidebar();
+    await flushSidebar();
+
+    act(() => click(toggleOf('Parent session')!));
+    await flushSidebar();
+
+    expect(container.textContent).toContain('Derived session');
+    const childRow = [
+      ...container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ].find((candidate) => candidate.textContent?.includes('Derived session'));
+    expect(childRow?.getAttribute('data-session-tree-depth')).toBe('1');
+    expect(
+      window.localStorage.getItem(
+        'qwen.web-shell.sidebar.session-tree-expanded:primary:/tmp/project',
+      ),
+    ).toContain('parent');
+  });
+
+  it('nests a derived session inside its group section', async () => {
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'design-group',
+          name: 'Design',
+          color: 'blue',
+          order: 0,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+    active.sessions = [
+      makeSession('group-parent', {
+        displayName: 'Group parent',
+        groupId: 'design-group',
+      }),
+      makeSession('group-child', {
+        displayName: 'Group child',
+        groupId: 'design-group',
+        parentSessionId: 'group-parent',
+      }),
+    ];
+    active.data = active.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    const group = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(group).not.toBeNull();
+    expect(group?.textContent).toContain('Group parent');
+    expect(group?.textContent).not.toContain('Group child');
+    expect(
+      group
+        ?.querySelector('[class*="sessionTreeToggle"]')
+        ?.getAttribute('aria-expanded'),
+    ).toBe('false');
+
+    act(() =>
+      click(group!.querySelector<HTMLElement>('[class*="sessionTreeToggle"]')!),
+    );
+    await flushSidebar();
+
+    expect(
+      container.querySelector('section[aria-label="Design"]')?.textContent,
+    ).toContain('Group child');
+  });
+
+  it('keeps an unarchived child reachable after its parent is archived', async () => {
+    // Archiving only the parent removes it from the active page; the child is
+    // still active and must stay reachable from the sidebar.
+    active.sessions = [
+      makeSession('orphaned-child', {
+        displayName: 'Archived parent child',
+        parentSessionId: 'archived-parent',
+      }),
+    ];
+    active.data = active.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    expect(container.textContent).toContain('Archived parent child');
+    const row = [
+      ...container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ].find((candidate) =>
+      candidate.textContent?.includes('Archived parent child'),
+    );
+    expect(row?.getAttribute('data-session-tree-depth')).toBe('0');
+  });
+
+  it('does not open the session when Enter is pressed on the chevron', async () => {
+    primeDerived();
+    renderSidebar();
+    await flushSidebar();
+
+    const toggle = toggleOf('Parent session')!;
+    act(() => {
+      toggle.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    await flushSidebar();
+
+    expect(loadSession).not.toHaveBeenCalled();
+  });
+
+  it('keeps the child flat when its parent is pinned into the Pinned section', async () => {
+    connection.capabilities = flatCapabilities;
+    workspace.capabilities = flatCapabilities;
+    const pinnedParent = makeSession('pinned-parent', {
+      displayName: 'Pinned parent',
+      isPinned: true,
+    });
+    // The daemon's all-sessions page keeps a pinned row in place (isPinned),
+    // while the project list lifts it into the Pinned section.
+    active.sessions = [
+      pinnedParent,
+      makeSession('child', {
+        displayName: 'Derived session',
+        parentSessionId: 'pinned-parent',
+      }),
+    ];
+    active.data = active.sessions;
+    pinned.sessions = [pinnedParent];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    expect(container.textContent).toContain('Derived session');
   });
 });

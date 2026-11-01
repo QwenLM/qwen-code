@@ -353,11 +353,12 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
     },
   );
 
-  it('reports filesWritten from successful mutating tool results only', async () => {
+  it('reports successful reads and writes separately from attempted calls', async () => {
     const { parent } = await makeParent();
     const restore = stubExecute(
       async (emitter) => {
         tool(emitter, 'read-1', 'read', '/repo/README.md');
+        tool(emitter, 'read-2', 'read', '/repo/missing.md', false);
         tool(emitter, 'write-1', 'write', PROJECT_MD);
         tool(emitter, 'edit-1', 'edit', '/repo/outside.md', false);
       },
@@ -368,9 +369,11 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
 
     expect(result.filesTouched).toEqual([
       '/repo/README.md',
+      '/repo/missing.md',
       PROJECT_MD,
       '/repo/outside.md',
     ]);
+    expect(result.filesRead).toEqual(['/repo/README.md']);
     expect(result.filesWritten).toEqual([PROJECT_MD]);
   });
 

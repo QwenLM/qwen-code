@@ -224,6 +224,105 @@ describe('AddMenu', () => {
     ...overrides,
   });
 
+  it('requests a change without optimistically changing the confirmed value', async () => {
+    const onWorkflowModeChange = vi.fn();
+    renderWith(
+      baseProps({
+        workflow: {
+          workflowModeStatus: 'ready',
+          workflowMode: { requested: false, available: true, effective: false },
+          onWorkflowModeChange,
+        },
+      }),
+    );
+    await openMenu();
+    await act(async () => menuItem('composer-add-menu-workflow')!.click());
+    await settle();
+    expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(true);
+    await openMenu();
+    expect(
+      menuItem('composer-add-menu-workflow')!.getAttribute('aria-checked'),
+    ).toBe('false');
+  });
+
+  it.each([false, true])(
+    'toggles Workflow from the menu (simple: %s)',
+    async (simpleMode) => {
+      const onWorkflowModeChange = vi.fn();
+      renderWith(
+        baseProps({
+          simpleMode,
+          workflow: {
+            workflowModeStatus: 'ready',
+            workflowMode: {
+              requested: true,
+              available: false,
+              effective: false,
+              reason: 'workflow_unavailable',
+            },
+            onWorkflowModeChange,
+          },
+        }),
+      );
+      await openMenu();
+      const row = menuItem('composer-add-menu-workflow')!;
+      expect(row.getAttribute('role')).toBe('menuitemcheckbox');
+      expect(row.getAttribute('aria-checked')).toBe('true');
+      expect(row.textContent).toContain('The Workflow tool is unavailable');
+      await act(async () => row.click());
+      await settle();
+      expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(false);
+      expect(menuItem('composer-add-menu-workflow')).toBeNull();
+    },
+  );
+
+  it.each(['unbound', 'syncing', 'unknown', 'ready'] as const)(
+    'keeps %s Workflow state visible and disabled',
+    async (workflowModeStatus) => {
+      const onWorkflowModeChange = vi.fn();
+      renderWith(
+        baseProps({
+          workflow: {
+            workflowModeStatus,
+            workflowMode: {
+              requested: false,
+              available: false,
+              effective: false,
+            },
+            onWorkflowModeChange,
+          },
+        }),
+      );
+      await openMenu();
+      const row = menuItem('composer-add-menu-workflow')!;
+      expect(row.getAttribute('data-disabled')).toBe('');
+      await act(async () => row.click());
+      expect(onWorkflowModeChange).not.toHaveBeenCalled();
+    },
+  );
+
+  it('omits unsupported Workflow and keeps pending writes disabled', async () => {
+    const props = baseProps({
+      workflow: { workflowModeStatus: 'unsupported' },
+    });
+    renderWith(props);
+    await openMenu();
+    expect(menuItem('composer-add-menu-workflow')).toBeNull();
+    rerenderWith({
+      ...props,
+      workflow: {
+        workflowModeStatus: 'ready',
+        workflowModePending: true,
+        workflowMode: { requested: true, available: true, effective: true },
+        onWorkflowModeChange: vi.fn(),
+      },
+    });
+    const row = menuItem('composer-add-menu-workflow')!;
+    expect(row.getAttribute('aria-busy')).toBe('true');
+    expect(row.getAttribute('data-disabled')).toBe('');
+    expect(row.textContent).toContain('Updating Workflow mode');
+  });
+
   it('omits the Plan entry unless the host supplies one', async () => {
     renderWith(baseProps());
     await openMenu();
@@ -931,6 +1030,33 @@ describe('mobile AddMenu', () => {
     });
     await settle();
   }
+  it.each(['en', 'zh-CN'] as const)(
+    'explains unavailable simple actions in %s and discovers them on the next open',
+    async (language) => {
+      let actions: ReturnType<AddMenuProps['getWorkspaceActions']> = undefined;
+      renderWith(
+        mobileProps({
+          simpleMode: true,
+          addFileAvailable: false,
+          getWorkspaceActions: () => actions,
+        }),
+        language,
+      );
+      await openMenu();
+      expect(menuItem('composer-add-menu-empty')?.textContent).toBe(
+        getTranslator(language)('composerAdd.emptyState'),
+      );
+      const close = portalRoot!.querySelector<HTMLButtonElement>(
+        `[aria-label="${getTranslator(language)('common.close')}"]`,
+      )!;
+      await act(async () => close.click());
+      await settle();
+      actions = { listDirectory: vi.fn().mockResolvedValue([]) };
+      await openMenu();
+      expect(menuItem('composer-add-menu-empty')).toBeNull();
+      expect(menuItem('composer-add-menu-reference-file')).not.toBeNull();
+    },
+  );
   it('uses the scoped bottom drawer and supports reference search and back', async () => {
     const props = mobileProps({
       getWorkspaceActions: () => ({
