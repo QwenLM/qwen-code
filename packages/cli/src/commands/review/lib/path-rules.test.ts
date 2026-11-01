@@ -368,6 +368,17 @@ describe('pathRulesFor — the shell/CI-lane rule', () => {
     expect(out).not.toContain('src/pay.ts');
   });
 
+  it('names the Mac lane and its command chain in the worked example', () => {
+    // The worked example is the only place an agent learns which lane to cite,
+    // so renaming the job or the group runner has to fail here instead of
+    // quietly sending reviewers at a lane that no longer runs the script.
+    const out = pathRulesFor(['scripts/tests/qwen-pr-review-workflow.test.js']);
+    expect(out).toContain(
+      '`test_macos_shards` runs on `merge_group`/`schedule`/`workflow_dispatch`',
+    );
+    expect(out).toContain('`node scripts/run-macos-ci-group.js scripts`');
+  });
+
   it('stacks with the workflow rule on a diff that changes embedded shell', () => {
     // The security checklist owns what the workflow does with its token; this
     // one owns whether its `run:` block works on the hosts it runs on. A

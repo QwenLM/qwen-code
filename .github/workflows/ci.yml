@@ -25,10 +25,11 @@ on:
       - 'omni-experiment'
   merge_group:
   # Scheduled macOS and Windows tests provide a non-Linux signal even when
-  # the merge queue is not enabled and their pull-request triggers are off
-  # (see test_macos_shards and test_windows). These lanes also admit
-  # `merge_group` and `workflow_dispatch`; treat a red nightly as a blocker,
-  # not as noise.
+  # the merge queue is not enabled and these jobs are excluded from
+  # `pull_request` runs (see test_macos_shards and test_windows). The
+  # `pull_request` trigger itself still fires: those runs appear on the pull
+  # request as skipped, not absent. These lanes also admit `merge_group` and
+  # `workflow_dispatch`; treat a red nightly as a blocker, not as noise.
   schedule:
     - cron: '17 19 * * *'
   workflow_dispatch:
