@@ -413,6 +413,15 @@ describe('Shell Command Processor - Encoding Functions', () => {
       const bytes = Buffer.from([0x8e, 0xe9, 0xa8, 0xa1, 0xaa, 0xa0]);
       expect(new TextDecoder(label!).decode(bytes)).toBe('Ощибка');
     });
+
+    it('should map code page 54936 to the WHATWG gb18030 label and decode GB18030 bytes correctly', () => {
+      const label = windowsCodePageToEncoding(54936);
+      expect(label).toBe('gb18030');
+      // 管理员 (two bytes a character, as in GBK) and ¥, which GB18030
+      // encodes in four bytes.
+      const bytes = Buffer.from('b9dcc0edd4b181308436', 'hex');
+      expect(new TextDecoder(label!).decode(bytes)).toBe('管理员¥');
+    });
   });
 
   describe('Cross-platform behavior', () => {

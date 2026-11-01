@@ -3421,6 +3421,30 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(result.output).not.toContain('post-promote-stderr');
     });
 
+    it('post-promotion: leaves no service listener on the child or its streams', async () => {
+      // A listener left behind keeps the execution scope, and the output
+      // captured before the promote, reachable while the child runs on.
+      const { result } = await simulateExecution(
+        'tail -f /tmp/never.log',
+        (_cp, ac) => {
+          emitOut('pre-promote\n');
+          ac.abort(bg('bg_test123'));
+        },
+      );
+
+      expect(result.promoted).toBe(true);
+      for (const stream of [
+        mockChildProcess.stdout!,
+        mockChildProcess.stderr!,
+      ]) {
+        expect(stream.listenerCount('data')).toBe(0);
+        expect(stream.listenerCount('end')).toBe(0);
+      }
+      for (const event of ['exit', 'close', 'error']) {
+        expect(mockChildProcess.listenerCount(event)).toBe(0);
+      }
+    });
+
     it('post-exit race: background-promote refuses if child is already terminal (exitCode/signalCode non-null)', async () => {
       // The child may exit (exitCode set) before Node delivers 'exit'; a
       // promote then would detach our exit listener and hand the caller an

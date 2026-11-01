@@ -18,6 +18,7 @@ import {
   getCachedEncodingForBuffer,
   getCachedSystemEncoding,
 } from '../utils/systemEncoding.js';
+import { isUtf8CompatibleEncoding } from '../utils/encoding.js';
 import { isBinary } from '../utils/textUtils.js';
 import { getShellConfiguration, type ShellType } from '../utils/shell-utils.js';
 import {
@@ -351,14 +352,14 @@ function decodePreviewTail(buffer: Buffer): string {
 /**
  * Whether the system encoding is a code page other than UTF-8. An unknown
  * encoding (code page 437, a C locale) or plain ASCII (macOS with no locale
- * set) says nothing about bytes outside ASCII, so it does not count.
+ * set) says nothing about bytes outside ASCII, so it does not count. The
+ * decoder check catches the other labels of UTF-8, such as unicode-1-1-utf-8.
  */
 function hasLegacyCodePage(): boolean {
   const encoding = getCachedSystemEncoding();
   return (
     !!encoding &&
-    encoding !== 'ascii' &&
-    encoding !== 'us-ascii' &&
+    !isUtf8CompatibleEncoding(encoding) &&
     new TextDecoder(encoding).encoding !== 'utf-8'
   );
 }
@@ -1545,17 +1546,21 @@ export class ShellExecutionService {
         // The drain reports a stdout still held (raw capture and streaming),
         // and the buffered re-decode treats a stream still open when a
         // cancel kills the shell as cut off.
-        child.stdout?.on('end', () => {
+        const stdoutEndHandler = () => {
           stdoutEnded = true;
-        });
-        child.stderr?.on('end', () => {
+        };
+        const stderrEndHandler = () => {
           stderrEnded = true;
-        });
+        };
+        child.stdout?.on('end', stdoutEndHandler);
+        child.stderr?.on('end', stderrEndHandler);
         child.on('error', errorHandler);
 
         const detachServiceListeners = () => {
           child.stdout?.off('data', stdoutHandler);
           child.stderr?.off('data', stderrHandler);
+          child.stdout?.off('end', stdoutEndHandler);
+          child.stderr?.off('end', stderrEndHandler);
           child.off('error', errorHandler);
           child.off('exit', exitHandler);
           child.off('close', closeHandler);
