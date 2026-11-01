@@ -31,9 +31,13 @@
 
 将所有 `VerificationFixtures.configure(new ManagedAgentStore(...))` 调用迁到该工厂。只读/private 夹具使用的裸 standalone 构造继续有效。少量 definitions/lifecycle 配置语句移到工厂构造前；若 lifecycle 夹具通过 result-store provider 回引，则按原 provider 图在 Session store 构造后登记 result store。不通过反射修改 final 字段，不重建已构造 store 来模拟 setter。
 
+Spring `@Bean` 工厂是另一条构造路径：以前 Spring 会对工厂返回的对象继续执行已移除的 setter，但不会对该对象重新执行带注解的构造器。因此，close、retention 和 action 测试工厂必须通过方法参数接收全部协作者，直接调用完整构造器，保留必需参数、可空的可选参数和延迟 record-store 参数。各工厂原有的 properties、clock 和 publisher 选择保持不变。standalone 测试工厂只用于手工装配的夹具，不能代替 Spring 装配。
+
 ## 验证
 
 新增禁用循环引用的真实 Spring context 测试。覆盖必需依赖全部存在、分别缺少各必需依赖、可选依赖缺席、实际 record-store/Session-store 回环、延迟 target 解析及事务代理身份。断言 store 没有注入字段或修改依赖的方法，八个依赖字段全部 final。必需 bean 检查必须验证 Spring 解析行为，不能只检查构造器注解。
+
+在 Spring context 中逐一加载三个实际测试工厂配置，验证注入协作者的身份、record store 的延迟初始化，以及其回引的是完成装配后的事务代理。运行已有 close、retention 和 action 场景作为行为回归覆盖，并包含原 CI 中被后台清理未捕获异常影响的 retention guard 用例。
 
 复用应用 context 准入与 skills 测试、definition/approval 测试及装配迁移影响的 lifecycle 夹具。包括一个有代表性的现有完整应用 context，以便最小 context 之外也覆盖真实组件装配。SQL/repository 算法不变，对比构造器和已删除 setter 之外的方法体。在模块共享的 10 分钟本地验证预算内，以 JDK 21 和匹配源码的 SDK 运行定向 Java 测试与 Checkstyle；完整 Java/SpotBugs 及平台/集成验收交给 CI。该内部装配重构不需要全局 CLI 基线或 TypeScript 构建。
 
