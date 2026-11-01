@@ -193,8 +193,7 @@ public final class ExternalWorkspaceRetirementService {
         require("workspace".equals(scope.getIsolationClass()) && request.tenantId().equals(scope.getTenantId())
                 && request.workspaceId().equals(scope.getWorkspaceId())
                 && Long.toString(request.workspaceGeneration()).equals(scope.getWorkspaceGeneration())
-                && request.runtimeGeneration() == binding.getGeneration() && binding.getLease() == null
-                && binding.getAttestationGeneration() == 0 && !binding.isDrainRequested()
+                && request.runtimeGeneration() == binding.getGeneration() && !binding.isDrainRequested()
                 && (binding.getState() == RuntimeBindingRecord.State.PROVISIONING
                         || binding.getState() == RuntimeBindingRecord.State.RECOVERY_BLOCKED
                         || binding.getState() == RuntimeBindingRecord.State.READY));
@@ -244,13 +243,25 @@ public final class ExternalWorkspaceRetirementService {
         empty("SELECT h.session_id FROM ma_session_head h LEFT JOIN ma_session s ON s.tenant_id = h.tenant_id"
                 + " AND s.session_id = h.session_id AND s.workspace_id = h.workspace_id WHERE h.tenant_id = ?"
                 + " AND h.workspace_id = ? AND s.session_id IS NULL LIMIT 1 FOR UPDATE", request.tenantId(), request.workspaceId());
-        for (String table : List.of("ma_runtime_session", "ma_tool_execution")) {
-            empty("SELECT r.binding_id FROM " + table + " r JOIN ma_runtime_binding b ON b.binding_id = r.binding_id"
-                    + " WHERE b.tenant_id = ? AND b.workspace_id = ? LIMIT 1 FOR UPDATE", request.tenantId(), request.workspaceId());
-        }
+        empty("SELECT r.binding_id FROM ma_runtime_session r JOIN ma_runtime_binding b ON b.binding_id = r.binding_id"
+                + " WHERE b.tenant_id = ? AND b.workspace_id = ? AND r.session_state NOT IN ('RELEASED', 'FAILED')"
+                + " LIMIT 1 FOR UPDATE", request.tenantId(), request.workspaceId());
+        empty("SELECT r.binding_id FROM ma_tool_execution r JOIN ma_runtime_binding b ON b.binding_id = r.binding_id"
+                + " WHERE b.tenant_id = ? AND b.workspace_id = ? AND r.execution_state NOT IN ('SETTLED', 'ABANDONED')"
+                + " LIMIT 1 FOR UPDATE", request.tenantId(), request.workspaceId());
         var registered = storage.find(request.tenantId(), request.workspaceId()).orElseThrow(ExternalWorkspaceRetirementService::blocked);
-        empty("SELECT storage_key FROM ma_storage_owner WHERE storage_key = ? AND (holder_key IS NOT NULL OR binding_id IS NOT NULL"
-                + " OR runtime_generation IS NOT NULL OR runtime_session_id IS NOT NULL) LIMIT 1 FOR UPDATE", registered.ownerKey());
+        var owners = WorkspaceOperations.rows(jdbc, "SELECT holder_key, binding_id, runtime_generation, runtime_session_id,"
+                + " maintenance_id, maintenance_generation FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE", registered.ownerKey());
+        require(owners.size() == 1);
+        var owner = owners.getFirst();
+        boolean emptyOwner = owner.get("holder_key") == null && owner.get("binding_id") == null
+                && owner.get("runtime_generation") == null && owner.get("runtime_session_id") == null;
+        boolean exactOwner = owner.get("holder_key") != null
+                && request.bindingId().equals(owner.get("binding_id"))
+                && owner.get("runtime_generation") instanceof Number generation
+                && generation.longValue() == request.runtimeGeneration();
+        require(owner.get("maintenance_id") == null && owner.get("maintenance_generation") == null
+                && (emptyOwner || exactOwner));
     }
 
     private void requireNoOtherBinding(Request request, String allowed) {

@@ -2297,7 +2297,7 @@ public final class JdbcRuntimeBindingRepository
         return released;
     }
 
-    /** 仅清理从未取得 lease 或 Runtime Session 的 external 首次启动。 */
+    /** 平台已证明实例终止后结清 external binding；历史记录可保留，活动执行不可退役。 */
     public RuntimeBindingRecord retireUnacquiredExternal(Connection connection,
             RuntimeBindingRecord expected) throws SQLException {
         RuntimeBindingRecord current = lockActiveForRetirement(
@@ -2308,8 +2308,6 @@ public final class JdbcRuntimeBindingRepository
                 || !"workspace".equals(
                         current.getRequest().getScope().getIsolationClass())
                 || current.getVersion() != expected.getVersion()
-                || current.getLease() != null
-                || current.getAttestationGeneration() != 0
                 || current.isDrainRequested()
                 || current.hasLiveOperationAt(now)
                 || current.getState()
@@ -2319,14 +2317,16 @@ public final class JdbcRuntimeBindingRepository
                         && current.getState()
                                 != RuntimeBindingRecord.State.READY) {
             throw new IllegalStateException(
-                    "Original unacquired external binding is unavailable");
+                    "Original terminated external binding is unavailable");
         }
-        for (String table : List.of(
-                "ma_runtime_session", "ma_tool_execution")) {
+        for (String table : List.of("ma_runtime_session", "ma_tool_execution")) {
+            String nonterminal = "ma_runtime_session".equals(table)
+                    ? " AND session_state NOT IN ('RELEASED', 'FAILED')"
+                    : " AND execution_state NOT IN ('SETTLED', 'ABANDONED')";
             try (var statement = connection.prepareStatement(
                     "SELECT binding_id FROM " + table
                             + " WHERE binding_id = ?"
-                            + " AND runtime_generation = ?"
+                            + " AND runtime_generation = ?" + nonterminal
                             + " LIMIT 1 FOR UPDATE")) {
                 JdbcRepositorySupport.setIdentity(
                         statement, 1, current.getBindingId());
@@ -2334,9 +2334,66 @@ public final class JdbcRuntimeBindingRepository
                 try (var rows = statement.executeQuery()) {
                     if (rows.next()) {
                         throw new IllegalStateException(
-                                "Original runtime was already acquired");
+                                "Original runtime has nonterminal execution");
                     }
                 }
+            }
+        }
+        String storageOwnerKey;
+        try (var statement = connection.prepareStatement(
+                "SELECT physical_key FROM ma_storage WHERE alias_key = ?")) {
+            statement.setString(1, storageAliasKey(
+                    current.getRequest().getScope().getTenantId(),
+                    current.getRequest().getStorageId()));
+            try (var rows = statement.executeQuery()) {
+                if (!rows.next()) {
+                    throw new IllegalStateException(
+                            "Workspace storage registration is unavailable");
+                }
+                storageOwnerKey = rows.getString(1);
+            }
+        }
+        try (var statement = connection.prepareStatement(
+                "SELECT holder_key, binding_id, runtime_generation, runtime_session_id,"
+                        + " maintenance_id, maintenance_generation"
+                        + " FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE")) {
+            statement.setString(1, storageOwnerKey);
+            try (var rows = statement.executeQuery()) {
+                if (!rows.next()) {
+                    throw new IllegalStateException(
+                            "Workspace owner is unavailable");
+                }
+                boolean emptyOwner = rows.getObject("holder_key") == null
+                        && rows.getObject("binding_id") == null
+                        && rows.getObject("runtime_generation") == null
+                        && rows.getObject("runtime_session_id") == null;
+                boolean exactOwner = rows.getObject("holder_key") != null
+                        && current.getBindingId().equals(rows.getString("binding_id"))
+                        && rows.getObject("runtime_generation") != null
+                        && current.getGeneration() == rows.getLong("runtime_generation");
+                if (rows.getObject("maintenance_id") != null
+                        || rows.getObject("maintenance_generation") != null
+                        || !emptyOwner && !exactOwner) {
+                    throw new IllegalStateException(
+                            "Workspace owner does not match terminated binding");
+                }
+            }
+        }
+        try (var statement = connection.prepareStatement(
+                "UPDATE ma_storage_owner SET holder_key = NULL,"
+                        + " binding_id = NULL, runtime_generation = NULL,"
+                        + " runtime_session_id = NULL"
+                        + " WHERE storage_key = ? AND ((binding_id = ?"
+                        + " AND runtime_generation = ?) OR (holder_key IS NULL"
+                        + " AND binding_id IS NULL AND runtime_generation IS NULL"
+                        + " AND runtime_session_id IS NULL))")) {
+            statement.setString(1, storageOwnerKey);
+            JdbcRepositorySupport.setIdentity(
+                    statement, 2, current.getBindingId());
+            statement.setLong(3, current.getGeneration());
+            if (statement.executeUpdate() != 1) {
+                throw new IllegalStateException(
+                        "Terminated workspace owner changed");
             }
         }
         RuntimeBindingRecord released =
