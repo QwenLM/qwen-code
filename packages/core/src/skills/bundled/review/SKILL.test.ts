@@ -1106,6 +1106,9 @@ describe('bundled review skill', () => {
     expect(body).toContain('never post on it silently');
     expect(body).toContain('prose never parses to a local target');
     expect(body).toContain('resolve to the bare number (or ask for it)');
+    expect(body).toContain(
+      'requested posting on a PR target whose bare number was promoted from prose',
+    );
     // Review R1-2: the restart cost belongs to a SURVIVING interrupted
     // attempt only; after a completed round the refusal costs nothing,
     // and worktree-gone is its own shape (report survived, tree vanished).

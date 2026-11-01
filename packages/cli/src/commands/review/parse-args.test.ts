@@ -704,6 +704,12 @@ describe('parseReviewArgs', () => {
     // The setting-driven arm withholds the same way — no flag typed at all.
     const bySetting = parseReviewArgs('review the last 3', { comment: true });
     expect(bySetting.comment.effective).toBe(false);
+    const settingWarning = bySetting.warnings.find((w) =>
+      w.includes('Bare number 3 was promoted to the PR target'),
+    );
+    expect(settingWarning).toContain('`review.comment` setting');
+    expect(settingWarning).toContain('posting authority is withheld');
+    expect(settingWarning).not.toContain('--comment');
     // Review R2-2: the warning is decided AFTER the URL preference, from the
     // token that actually became the target — a demoted number never draws
     // it, and a courtesy particle after an unposted re-review costs nothing.

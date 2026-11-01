@@ -872,6 +872,7 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     expect(count.ok).toBe(false);
     expect(count.cls).toBe('unbound');
     expect(count.why).toContain('promoted from prose');
+    expect(count.why).toContain('re-invoke with the number first');
     // The sentence-final count is the same hazard, and the setting-driven
     // arm needs no flag at all — both refuse.
     expect(authFor('review the last 3 --comment', { pr: 3 }).ok).toBe(false);

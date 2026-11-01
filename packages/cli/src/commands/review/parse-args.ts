@@ -1029,7 +1029,9 @@ export function parseReviewArgs(
     // posting authority (review R2-2): a demoted number never draws it, and
     // a re-review nobody asked to post costs no confirmation turn.
     warnings.push(
-      `Bare number ${target.number} was promoted to the PR target from prose, so \`--comment\` posting authority is withheld — a count is indistinguishable from a PR id; confirm the intended PR and re-invoke with its number typed first to post.`,
+      commentRequestedByFlag
+        ? `Bare number ${target.number} was promoted to the PR target from prose, so \`--comment\` posting authority is withheld — a count is indistinguishable from a PR id; confirm the intended PR and re-invoke with its number typed first to post.`
+        : `Bare number ${target.number} was promoted to the PR target from prose, so the \`review.comment\` setting's posting authority is withheld — a count is indistinguishable from a PR id; confirm the intended PR and re-invoke with its number typed first to post.`,
     );
   }
 
