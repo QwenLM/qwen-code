@@ -97,10 +97,10 @@ silent:
 - `assertions.json` may carry `gates: [{ suite, pass, fail, skipped? }]`, one
   entry per existing test suite the round ran as a targeted gate. Those counts
   stay out of `pass`/`fail`/`total`, which count only the checks the round
-  wrote, and the publisher prints their totals on a line of their own. A
-  malformed list is an error. Over 1000 assertions with no `gates` is a
-  warning: the four such rounds among 18 recent CI artifacts had each counted
-  whole workspace suites.
+  wrote, each suite run counting as one, and the publisher prints their
+  totals on a line of their own. A malformed list is an error. Over 1000
+  assertions with no gate results is a warning: the four such rounds among
+  18 recent CI artifacts had each counted whole workspace suites.
 
 Each prepared artifact directory keeps `context.json` with the round's full
 coordinates — `repo`, `pr`, `baseRefOid` and `headRefOid` — so a local round

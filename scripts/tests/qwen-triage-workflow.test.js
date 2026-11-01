@@ -4482,6 +4482,7 @@ describe('qwen-triage verify hardening round 2', () => {
           'for a in "$@"; do case "$a" in body=@*) cp "${a#body=@}" "$BODY_OUT";; esac; done',
           'case "$all" in',
           '  *"api user"*|*" user "*) echo qwen-code-ci-bot ;;',
+          '  */pulls/7999*) [ "$STUB_PR_STATE" = fail ] && exit 1; echo "${STUB_PR_STATE:-open}" ;;',
           '  *"-X PATCH"*) echo "PATCH $all" >> "$CALLS" ;;',
           '  *comments*--method*GET*) cat "$LISTING" ;;',
           '  *issues/*/comments*) echo "POST $all" >> "$CALLS" ;;',
@@ -4664,6 +4665,34 @@ describe('qwen-triage verify hardening round 2', () => {
       const quotedOnly = run([quoting]);
       expect(quotedOnly).toContain('POST');
       expect(quotedOnly).not.toContain('PATCH');
+
+      // A round can queue for hours. Once the PR has closed, a notice with
+      // no status of its own to finalize is not posted; the summary says
+      // why. Its own live status is still finalized, a report is still
+      // posted, and a failed state lookup posts.
+      const summary = join(dir, 'summary.md');
+      const closed = { STUB_PR_STATE: 'closed', GITHUB_STEP_SUMMARY: summary };
+      for (const env of [
+        { DOWNLOAD_OUTCOME: 'failure' },
+        { VERIFY_RESULT: 'cancelled' },
+        { VERDICT: 'infra-error', PREPARE_FAILURE_PHASE: 'install' },
+      ]) {
+        writeFileSync(summary, '');
+        expect(run([], { ...closed, ...env })).toBe('');
+        expect(readFileSync(summary, 'utf8')).toContain(
+          'PR #7999 closed before this round published; notice not posted',
+        );
+        expect(run([ownReport], { ...closed, ...env })).toBe('');
+        const finalized = run([status(555, 1)], { ...closed, ...env });
+        expect(finalized).toContain('/issues/comments/555');
+        expect(finalized).not.toContain('POST');
+        expect(run([], { STUB_PR_STATE: 'fail', ...env })).toContain('POST');
+        expect(run([], { STUB_PR_STATE: 'open', ...env })).toContain('POST');
+      }
+      expect(run([], closed)).toContain('POST');
+      expect(
+        run([], { ...closed, VERDICT: 'fail', PREPARE_FAILURE_PHASE: 'build' }),
+      ).toContain('POST');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -6737,6 +6766,26 @@ describe('qwen-triage verify publish fidelity', () => {
         accepts: false,
         renders: false,
       },
+      // Blank is JSON whitespace only. jq's \S counts U+0085 as space and
+      // JS's trim() strips U+FEFF, so either test alone split the two.
+      {
+        name: 'whitespace-suite',
+        text: withGates('[{"suite":" \\t\\n\\r","pass":1,"fail":0}]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'nel-suite',
+        text: withGates('[{"suite":"\\u0085","pass":1,"fail":0}]'),
+        accepts: true,
+        renders: true,
+      },
+      {
+        name: 'bom-suite',
+        text: withGates('[{"suite":"\\ufeff","pass":1,"fail":0}]'),
+        accepts: true,
+        renders: true,
+      },
       {
         name: 'string-count',
         text: withGates('[{"suite":"x","pass":"1","fail":0}]'),
@@ -6828,14 +6877,20 @@ describe('qwen-triage verify publish fidelity', () => {
     // The compensation for the change's main risk: the requirement that
     // routes a PR-caused gate red back into the count the verdict reads.
     expect(flat).toContain(
-      'A gate red the PR causes still reaches the verdict as an assertion',
+      'gate red the PR causes, green at base and red at head, fails with its attribution',
     );
+    // A round that ran only suites still needs a positive total.
+    expect(flat).toContain('So is each suite run');
+    expect(flat).toContain('still records a positive total');
     // The size warning is inert unless the round is told to act on it,
     // in both the local clear-list and the CI-path sentence.
     expect(flat).toContain(
       'act on a gates-size warning by recording the suites it ran under `gates`',
     );
     expect(flat).toContain('a gates-size warning reaches nobody but you');
+    // ...and told what to do when there is no suite to move.
+    const noSuite = 'say in the report what the count holds';
+    expect(flat.split(noSuite)).toHaveLength(3);
   });
 
   // The checker runs only for a completed run with a report, valid counts
