@@ -2402,13 +2402,154 @@ function tokensContainGitAmend(segment: string, depth: number): boolean {
     return commandContainsGitAmendAtDepth(tokens.slice(1).join(' '), depth + 1);
   }
 
-  return isGitAmendInvocation(tokens);
+  if (isGitAmendInvocation(tokens)) return true;
+
+  // Wrappers that embed their command as a token subsequence rather than as a
+  // prefix: `xargs git commit --amend`, `find . -exec git commit --amend …`,
+  // and a leading redirection (`> log git commit --amend`), where the program
+  // is not at index 0. Try every offset so those are seen without teaching this
+  // function each wrapper. Quoted mentions stay inert because they arrive as a
+  // single token, and `-m --amend` stays inert because the invocation check
+  // consumes flag values.
+  for (let offset = 1; offset < tokens.length; offset++) {
+    if (isGitAmendInvocation(tokens.slice(offset))) return true;
+  }
+  return false;
+}
+
+/**
+ * Bodies of `$(…)` and backtick substitutions, which are code rather than data.
+ *
+ * Quoted and escaped occurrences are skipped so `echo '$(date)'` does not read
+ * as a substitution; nesting inside `$( … $( … ) … )` is preserved by counting
+ * depth, and the body is returned verbatim so the caller can analyse it.
+ */
+function extractCommandSubstitutionBodies(command: string): string[] {
+  const bodies: string[] = [];
+  let index = 0;
+  let quote: "'" | '"' | null = null;
+  while (index < command.length) {
+    const char = command[index]!;
+    if (char === '\\' && quote !== "'") {
+      index += 2;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = null;
+      index++;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      index++;
+      continue;
+    }
+    if (char === '$' && command[index + 1] === '(') {
+      let depth = 1;
+      let cursor = index + 2;
+      let inner: "'" | '"' | null = null;
+      while (cursor < command.length && depth > 0) {
+        const c = command[cursor]!;
+        if (c === '\\' && inner !== "'") {
+          cursor += 2;
+          continue;
+        }
+        if (inner) {
+          if (c === inner) inner = null;
+        } else if (c === "'" || c === '"') {
+          inner = c;
+        } else if (c === '(') {
+          depth++;
+        } else if (c === ')') {
+          depth--;
+          if (depth === 0) break;
+        }
+        cursor++;
+      }
+      bodies.push(command.slice(index + 2, cursor));
+      index = cursor + 1;
+      continue;
+    }
+    if (char === '`') {
+      const close = command.indexOf('`', index + 1);
+      if (close === -1) break;
+      bodies.push(command.slice(index + 1, close));
+      index = close + 1;
+      continue;
+    }
+    index++;
+  }
+  return bodies;
+}
+
+const SHELLS_READING_STDIN = new Set([
+  'bash',
+  'sh',
+  'zsh',
+  'dash',
+  'ksh',
+  'ash',
+]);
+
+/**
+ * Heredoc bodies whose consumer runs them as code.
+ *
+ * `cat > notes.txt <<'EOF'` carries inert data, but `bash <<'EOF'` carries the
+ * program itself — stripping every body unconditionally hides the second case.
+ * The consumer is the first word of the line that opened the heredoc.
+ */
+function extractShellFedHeredocBodies(command: string): string[] {
+  const lines = command.split('\n');
+  const bodies: string[] = [];
+  let active: { delimiter: string; shellFed: boolean } | null = null;
+  let collected: string[] = [];
+
+  for (const line of lines) {
+    if (active) {
+      if (line.trim() === active.delimiter) {
+        if (active.shellFed) bodies.push(collected.join('\n'));
+        active = null;
+        collected = [];
+        continue;
+      }
+      collected.push(line);
+      continue;
+    }
+
+    const delimiters = getHeredocDelimiters(line);
+    if (delimiters.length === 0) continue;
+
+    const opener = line.slice(0, line.indexOf('<<'));
+    const consumer = amendExecutableBasename(
+      opener.trim().split(/\s+/)[0] ?? '',
+    );
+    active = {
+      delimiter: delimiters[0]!,
+      shellFed: SHELLS_READING_STDIN.has(consumer),
+    };
+    collected = [];
+  }
+
+  return bodies;
 }
 
 function commandContainsGitAmendAtDepth(
   command: string,
   depth: number,
 ): boolean {
+  // A heredoc handed to a shell is the program, not data.
+  if (depth < AMEND_UNWRAP_DEPTH_LIMIT) {
+    for (const body of extractShellFedHeredocBodies(command)) {
+      if (commandContainsGitAmendAtDepth(body, depth + 1)) return true;
+    }
+  }
+  // A substitution body is code the shell runs, so analyse it as its own
+  // command before deciding the surrounding segment is amend-free.
+  if (depth < AMEND_UNWRAP_DEPTH_LIMIT) {
+    for (const body of extractCommandSubstitutionBodies(command)) {
+      if (commandContainsGitAmendAtDepth(body, depth + 1)) return true;
+    }
+  }
   for (const { command: segment } of splitCompoundCommandSegments(
     stripHeredocBodies(command),
   )) {

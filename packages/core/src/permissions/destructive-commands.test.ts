@@ -198,6 +198,16 @@ describe('isDestructiveCommand — git commit --amend', () => {
     "time -f '%e' git commit --amend --no-edit",
     'time --format=%e git commit --amend --no-edit',
     'time -o /tmp/time.out git commit --amend --no-edit',
+    // The removed substring guard denied all of these; each executes a real
+    // amend, so the token-based recogniser must keep denying them (#13570).
+    'echo $(git commit --amend --no-edit)',
+    'x=$(git commit --amend --no-edit)',
+    'echo `git commit --amend --no-edit`',
+    "bash <<'EOF'\ngit commit --amend --no-edit\nEOF",
+    'sh -s <<EOF\ngit commit --amend --no-edit\nEOF',
+    'xargs -I{} git commit --amend --no-edit',
+    'find . -exec git commit --amend --no-edit \\;',
+    '> amend.log git commit --amend --no-edit',
   ])('blocks amend through an execution wrapper: %s', (command) => {
     expectBlocked(command, 'amend the commit', 'amend');
   });
