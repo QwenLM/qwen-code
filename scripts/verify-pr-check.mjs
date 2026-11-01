@@ -7,13 +7,13 @@
  */
 
 /**
- * Applies the publisher's consistency rules to a local `/verify-pr` round.
+ * Applies the publisher's consistency rules to a `/verify-pr` round.
  *
- * In CI the publish job refuses an artifact whose verdict contradicts its own
- * assertion counts, so a `merge-ready` report carrying `fail: 7` degrades to
- * "no usable structured verdict". A local round has no publisher: the skill
- * asks the maintainer to "keep the counts honest yourself", which is the one
- * step of that path a machine should own.
+ * The CI publish job runs this file from its trusted checkout and does not
+ * trust a verdict it refuses, so a `merge-ready` report carrying `fail: 7`
+ * degrades to "no usable structured verdict". A local round has no publisher,
+ * so the skill runs it before posting: the one step of that path a machine
+ * should own.
  *
  * Usage:
  *   node scripts/verify-pr-check.mjs <artifact-dir>
@@ -35,8 +35,26 @@ export const VERDICTS = ['merge-ready', 'findings', 'blocked', 'inconclusive'];
  */
 export const ATTRIBUTIONS = ['pr', 'harness', 'environment'];
 
+/**
+ * Above this many assertions, a round has almost certainly folded an existing
+ * test suite into its own counts. The four such rounds among 18 recent CI
+ * artifacts (3918 to 7737) each counted whole workspace suites; one counted
+ * them again for every mutant run, so 7737 held a few dozen checks of its own.
+ */
+const SUITE_SIZED_TOTAL = 1000;
+
 const KEBAB_PNG = /^[a-z0-9]+(?:-[a-z0-9]+)*\.png$/;
 const OID = /^[0-9a-f]{7,40}$/;
+// GFM renders an ATX heading indented up to three spaces as a heading too
+// (four spaces become a code block), so the indent is part of the shape,
+// not a way around it.
+const HEADING = /^ {0,3}#{1,6}\s/;
+// A heading is a short title; past this it is a paragraph wearing a heading's
+// font size. GitHub renders an H1 at 2em, so a long heading line is a wall of
+// giant text however well-formed the Markdown is.
+const HEADING_TITLE_MAX = 120;
+const FOOTER =
+  /^_— .+ via Qwen Code \/verify-pr \(v[^;]+; skill [0-9a-f]{12}\)_$/;
 
 const HELP = `Usage: node scripts/verify-pr-check.mjs <artifact-dir>
 
@@ -46,6 +64,8 @@ Checks a local round against the rules the CI publisher enforces:
   - verdict.txt is exactly one of merge-ready | findings | blocked | inconclusive
   - assertions.json holds non-negative integers, a positive total, and
     total == pass + fail
+  - assertions.json gates, when present, lists { suite, pass, fail } entries
+    (skipped optional) with non-negative integer counts up to 2^53-1
   - a merge-ready verdict carries no failed assertion
   - a findings/blocked verdict whose failures ledger attributes no failure to
     the PR is a contradiction: expected reds are passes
@@ -53,8 +73,12 @@ Checks a local round against the rules the CI publisher enforces:
     and lists at least one commit (an empty set makes the claim vacuous)
 
 and warns (without failing) when the report does not lead with its verdict and
-head OID, when evidence/ carries no kebab-case PNG capture, or when a round with
-failures carries no failures ledger at all.
+head OID, when the verdict line is a heading (GitHub renders the whole
+paragraph as one giant H1), when evidence/ carries no kebab-case PNG capture,
+when a round with failures carries no failures ledger at all, when over
+${SUITE_SIZED_TOTAL} assertions come with no gates (an existing test suite
+counted as the round's own), or when comment.md — the exact body a local round
+posts, optional — repeats the heading shape or lacks the attribution footer.
 
 Exit codes: 0 no errors, 1 errors found, 2 usage.
 `;
@@ -133,6 +157,29 @@ export function checkMutationCoverage(text) {
     );
   }
   return { errors };
+}
+
+// GitHub renders CRLF and LF identically, so a Windows-authored artifact
+// must not fail the line-anchored checks on a stray \r.
+function normalizeNewlines(text) {
+  return text.replace(/\r\n?/g, '\n');
+}
+
+/**
+ * The verdict line is a plain paragraph. Three rounds of PR #15984 opened
+ * with `# PR … — **Verdict: …** — <the whole verdict paragraph>` on one line,
+ * which GitHub renders as a single giant H1 — structurally valid Markdown,
+ * visually a wall of bold text. A heading carrying the verdict, or any
+ * over-long heading in the lead, is that defect's shape.
+ */
+function leadShapeWarnings(text, verdict, label) {
+  const first = text.split('\n').find((line) => line.trim() !== '');
+  if (!first || !HEADING.test(first)) return [];
+  const holdsVerdict = verdict !== null && first.includes(verdict);
+  if (!holdsVerdict && first.length <= HEADING_TITLE_MAX) return [];
+  return [
+    `${label} opens with a heading${holdsVerdict ? ' carrying the verdict' : ` of ${first.length} characters`}: GitHub renders the whole line as one giant H1 — the verdict line is a plain paragraph (no leading #), and a heading is a short title on its own line`,
+  ];
 }
 
 /**
@@ -234,6 +281,44 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
             attributions = ledger.map((entry) => entry.attribution);
           }
         }
+        // Gate counts are the repo's existing tests, kept apart so that
+        // pass/fail/total measure what this round wrote. The messages carry
+        // no suite name: the publisher forwards error lines to its log.
+        const gates = parsed.gates;
+        // The safe-integer ceiling keeps parity with the publisher's jq:
+        // a JSON literal like 1e309 parses to Infinity here, while jq
+        // clamps it to a finite double that would otherwise pass.
+        const isCount = (value) =>
+          Number.isInteger(value) &&
+          value >= 0 &&
+          value <= Number.MAX_SAFE_INTEGER;
+        if (
+          gates !== undefined &&
+          (!Array.isArray(gates) ||
+            gates.some(
+              (gate) =>
+                !gate ||
+                typeof gate.suite !== 'string' ||
+                gate.suite.trim() === '' ||
+                !isCount(gate.pass) ||
+                !isCount(gate.fail) ||
+                (gate.skipped !== undefined && !isCount(gate.skipped)),
+            ))
+        ) {
+          errors.push(
+            'assertions.json gates must be an array of { suite, pass, fail } entries with non-negative integer counts (skipped optional)',
+          );
+        }
+        // An empty list records no suites, so it must not silence the
+        // size warning either.
+        if (
+          counts.total > SUITE_SIZED_TOTAL &&
+          (gates === undefined || (Array.isArray(gates) && gates.length === 0))
+        ) {
+          warnings.push(
+            `assertions.json counts ${counts.total} assertions and records no gates: an existing test suite's results belong in gates, not in pass, fail and total`,
+          );
+        }
       }
     }
   }
@@ -268,7 +353,8 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
   errors.push(...checkMutationCoverage(files.mutations).errors);
 
   if (files.report && files.report.trim() !== '') {
-    const lead = files.report
+    const report = normalizeNewlines(files.report);
+    const lead = report
       .split('\n')
       .filter((line) => line.trim() !== '')
       .slice(0, 10);
@@ -287,6 +373,23 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
     } else if (cited.length === 0) {
       warnings.push(
         'report.md does not name a 40-character head OID in its first 10 non-empty lines',
+      );
+    }
+    warnings.push(...leadShapeWarnings(report, verdict, 'report.md'));
+  }
+
+  // comment.md is the exact body a local round posts: report content plus
+  // the attribution footer. report.md deliberately carries no footer (both
+  // publish paths append it at comment time), so this is the only artifact
+  // where the footer's presence is checkable. The workflow assembles its own
+  // body and never writes this file, so its absence is not a defect.
+  if (files.comment && files.comment.trim() !== '') {
+    const comment = normalizeNewlines(files.comment);
+    warnings.push(...leadShapeWarnings(comment, verdict, 'comment.md'));
+    const lines = comment.split('\n').filter((line) => line.trim() !== '');
+    if (!FOOTER.test(lines[lines.length - 1] ?? '')) {
+      warnings.push(
+        'comment.md does not end with the attribution footer `_— <model> via Qwen Code /verify-pr (v<version>; skill <12-hex>)_`: append the resolved footer before posting — omit it only when the model cannot be resolved',
       );
     }
   }
@@ -329,6 +432,7 @@ function main(argv) {
     verdict: readIfExists(join(dir, 'verdict.txt')),
     assertions: readIfExists(join(dir, 'assertions.json')),
     mutations: readIfExists(join(dir, 'mutations.json')),
+    comment: readIfExists(join(dir, 'comment.md')),
   };
   const evidenceDir = join(dir, 'evidence');
   const evidence = existsSync(evidenceDir)

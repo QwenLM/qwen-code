@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Box } from 'ink';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { LoadedSettings } from '../../config/settings.js';
-import { setLanguageAsync } from '../../i18n/index.js';
+import { setLanguageAsync, t } from '../../i18n/index.js';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { UIStateContext } from '../contexts/UIStateContext.js';
 import type { UIState } from '../contexts/UIStateContext.js';
@@ -84,12 +84,14 @@ describe('AuthDialog navigation hint', () => {
   });
 
   it.each([
-    { width: 36, height: 14 },
-    { width: 36, height: 6 },
-    { width: 100, height: 14 },
+    { language: 'en', width: 36, height: 14 },
+    { language: 'en', width: 36, height: 6 },
+    { language: 'en', width: 100, height: 14 },
+    { language: 'de', width: 36, height: 6 },
   ])(
-    'keeps the complete submenu hint within $width columns and $height rows',
-    async ({ width, height }) => {
+    'keeps the complete $language submenu hint within $width columns and $height rows',
+    async ({ language, width, height }) => {
+      await setLanguageAsync(language);
       const { lastFrame, unmount } = renderMenu(width, height);
       try {
         await vi.waitFor(() => expect(lastFrame()).toContain('QwenCloud'));
@@ -99,8 +101,34 @@ describe('AuthDialog navigation hint', () => {
 
         const frame = lastFrame() ?? '';
         expect(frame.replace(/[│\s]/g, '')).toContain(
-          'Entertoselect,↑↓tonavigate,Esctogoback',
+          t('Enter to select, ↑↓ to navigate, Esc to go back').replace(
+            /\s/g,
+            '',
+          ),
         );
+        expect(frame.split('\n').length).toBeLessThanOrEqual(height);
+      } finally {
+        unmount();
+      }
+    },
+  );
+
+  it.each([
+    { language: 'en', height: 5, hintStart: 'Entertoselect' },
+    { language: 'de', height: 5, hintStart: 'EnterzumAuswählen' },
+  ])(
+    'keeps a hint and option when the $language hint cannot wrap in $height rows',
+    async ({ language, height, hintStart }) => {
+      await setLanguageAsync(language);
+      const { lastFrame, unmount } = renderMenu(36, height);
+      try {
+        await vi.waitFor(() => expect(lastFrame()).toContain('QwenCloud'));
+        expect(menu.select).toBeTypeOf('function');
+        menu.select?.('THIRD_PARTY_PROVIDERS');
+        await vi.waitFor(() => expect(lastFrame()).toContain('DeepSeek'));
+
+        const frame = lastFrame() ?? '';
+        expect(frame.replace(/[│\s]/g, '')).toContain(hintStart);
         expect(frame.split('\n').length).toBeLessThanOrEqual(height);
       } finally {
         unmount();

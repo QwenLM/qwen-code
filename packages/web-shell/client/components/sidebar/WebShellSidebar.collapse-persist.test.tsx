@@ -3100,9 +3100,8 @@ describe('Recent sessions shared rows', () => {
     ]);
     expect(recent.textContent).not.toContain('Independent chat');
     expect(
-      container.querySelector('[data-testid="standalone-active-group"]')
-        ?.textContent,
-    ).not.toContain('Independent chat');
+      container.querySelector('[data-testid="standalone-active-group"]'),
+    ).toBeNull();
     expect(active.archiveSession).not.toHaveBeenCalled();
   });
 

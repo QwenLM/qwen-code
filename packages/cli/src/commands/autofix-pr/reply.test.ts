@@ -884,6 +884,265 @@ describe('runReply', () => {
     });
   });
 
+  it('reports a blocked round even on a head an earlier round already summarized', () => {
+    writeState(paths.statePath, { ...state(), summarizedSha: HEAD });
+    const plan: ReplyPlan = {
+      summary: { body: 'Needs a human: Test fails outside the PR.' },
+      needsHuman: ['Test: whether the runner image is ours to fix'],
+    };
+    expect(reply(plan)).toMatchObject({ summarySkipped: false });
+    expect(posts().map((p) => p.path)).toEqual(['repos/o/r/issues/7/comments']);
+    // What was reported is keyed apart from what was recorded for `status`.
+    expect(state().reportedNeedsHuman).toEqual({
+      sha: HEAD,
+      texts: ['Test: whether the runner image is ours to fix'],
+    });
+    // The same items never post it twice.
+    expect(reply(plan)).toMatchObject({ summarySkipped: true });
+    expect(posts()).toHaveLength(1);
+    // Nothing new for a person on a head already summarized: quiet.
+    expect(reply({ summary: { body: 'Still blocked.' } })).toMatchObject({
+      summarySkipped: true,
+    });
+    // A new item on that same head is reported.
+    expect(
+      reply({
+        summary: { body: 'Needs a human: the API change.' },
+        needsHuman: ['PRRC_101: whether to keep the API'],
+      }),
+    ).toMatchObject({ summarySkipped: false });
+    expect(posts()).toHaveLength(2);
+    expect(state().reportedNeedsHuman).toEqual({
+      sha: HEAD,
+      texts: [
+        'Test: whether the runner image is ours to fix',
+        'PRRC_101: whether to keep the API',
+      ],
+    });
+  });
+
+  it('with --no-post records a blocked summary and posts nothing', () => {
+    // Summarized already: only the blocked items can make this summary due,
+    // so the test cannot pass on the once-per-head path alone.
+    writeState(paths.statePath, { ...state(), summarizedSha: HEAD });
+    const plan: ReplyPlan = {
+      summary: { body: 'Needs a human: Test.' },
+      needsHuman: ['Test: the runner image'],
+    };
+    expect(reply(plan, false).posted).toEqual([]);
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+    expect(state().summarizedSha).toBe(HEAD);
+    expect(state().reportedNeedsHuman).toEqual({
+      sha: HEAD,
+      texts: ['Test: the runner image'],
+    });
+    expect(reply(plan)).toMatchObject({ summarySkipped: true });
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+  });
+
+  it('still owes the PR its blocked summary when the POST never reached it', () => {
+    writeState(paths.statePath, { ...state(), summarizedSha: HEAD });
+    const plan: ReplyPlan = {
+      summary: { body: 'Needs a human: Test fails outside the PR.' },
+      needsHuman: ['Test: whether the runner image is ours to fix'],
+      handledChecks: [`Test@${HEAD}@#5`],
+    };
+    mocks.ghWithInput.mockImplementationOnce(() => {
+      throw new Error('connection refused');
+    });
+    expect(() => reply(plan)).toThrow(/connection refused/);
+    // The items are on disk for `status`, but no summary reported them.
+    expect(state().needsHuman!.map(({ text }) => text)).toEqual([
+      'Test: whether the runner image is ours to fix',
+    ]);
+    expect(state().reportedNeedsHuman).toBeUndefined();
+    expect(state().summarizedSha).toBe(HEAD);
+    expect(state().handledChecks ?? []).toEqual([]);
+
+    // So the retry still owes the report, and posts it before recording the
+    // failure handled — the gate must not go quiet on an unreported blocker.
+    const retry = reply(plan);
+    expect(retry).toMatchObject({
+      summarySkipped: false,
+      adopted: 0,
+      handledChecks: 1,
+    });
+    expect(posts().map((p) => p.path)).toEqual([
+      'repos/o/r/issues/7/comments',
+      'repos/o/r/issues/7/comments',
+    ]);
+    expect(state().reportedNeedsHuman).toEqual({
+      sha: HEAD,
+      texts: ['Test: whether the runner image is ours to fix'],
+    });
+    // A third run has nothing left to report.
+    expect(reply(plan)).toMatchObject({ summarySkipped: true });
+    expect(posts()).toHaveLength(2);
+  });
+
+  it('still posts the blocked summary when a thread reply failed before it', () => {
+    writeState(paths.statePath, { ...state(), summarizedSha: HEAD });
+    const plan: ReplyPlan = {
+      replies: [
+        {
+          replyTo: 101,
+          body: 'Needs a human decision: the API.',
+          handled: ['PRRC_101'],
+        },
+      ],
+      summary: { body: 'Needs a human: the API.' },
+      needsHuman: ['PRRC_101: whether to keep the API'],
+    };
+    // The thread reply fails first: no summary intent was even announced.
+    mocks.ghWithInput.mockImplementationOnce(() => {
+      throw new Error('HTTP 502');
+    });
+    expect(() => reply(plan)).toThrow(/HTTP 502/);
+    expect(state().reportedNeedsHuman).toBeUndefined();
+    // The thread reply was announced; no summary intent exists yet.
+    expect(state().pendingPosts!.map(({ where }) => where)).toEqual([101]);
+
+    const retry = reply(plan);
+    expect(retry).toMatchObject({ summarySkipped: false, adopted: 0 });
+    expect(posts().map((p) => p.path)).toEqual([
+      'repos/o/r/pulls/7/comments/101/replies',
+      'repos/o/r/pulls/7/comments/101/replies',
+      'repos/o/r/issues/7/comments',
+    ]);
+    expect(state().reportedNeedsHuman).toEqual({
+      sha: HEAD,
+      texts: ['PRRC_101: whether to keep the API'],
+    });
+  });
+
+  it('adopts a blocked summary whose answer was lost, and does not post it twice', () => {
+    writeState(paths.statePath, { ...state(), summarizedSha: HEAD });
+    const plan: ReplyPlan = {
+      summary: { body: 'Needs a human: Test.' },
+      needsHuman: ['Test: the runner image'],
+    };
+    // The POST reaches GitHub; its answer does not.
+    mocks.ghWithInput.mockImplementationOnce(() => {
+      throw new Error('connection reset');
+    });
+    expect(() => reply(plan)).toThrow(/connection reset/);
+    expect(state().pendingPosts).toHaveLength(1);
+    expect(state().pendingPosts![0].needsHuman).toEqual([
+      'Test: the runner image',
+    ]);
+    expect(state().reportedNeedsHuman).toBeUndefined();
+
+    const landed = {
+      ...comment('IC_50', 'me', 'OWNER'),
+      body: `Needs a human: Test.\n\n${REPLY_MARKER}`,
+    };
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({
+        comments: {
+          pageInfo: { hasPreviousPage: false },
+          nodes: [landed],
+        },
+      }),
+      viewer: 'me',
+    }));
+    const retry = reply(plan);
+    expect(retry).toMatchObject({ adopted: 1, summarySkipped: true });
+    expect(state().reportedNeedsHuman).toEqual({
+      sha: HEAD,
+      texts: ['Test: the runner image'],
+    });
+    // Only the attempt that failed ever called GitHub.
+    expect(mocks.ghWithInput).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps earlier reported items when it adopts a later summary', () => {
+    writeState(paths.statePath, { ...state(), summarizedSha: HEAD });
+    const a: ReplyPlan = {
+      summary: { body: 'Needs a human: A.' },
+      needsHuman: ['A: the runner image'],
+    };
+    expect(reply(a)).toMatchObject({ summarySkipped: false });
+    expect(state().reportedNeedsHuman).toEqual({
+      sha: HEAD,
+      texts: ['A: the runner image'],
+    });
+
+    // A later round reports B; the POST lands, its answer does not.
+    const b: ReplyPlan = {
+      summary: { body: 'Needs a human: B.' },
+      needsHuman: ['B: the API change'],
+    };
+    mocks.ghWithInput.mockImplementationOnce(() => {
+      throw new Error('connection reset');
+    });
+    expect(() => reply(b)).toThrow(/connection reset/);
+    expect(state().reportedNeedsHuman).toEqual({
+      sha: HEAD,
+      texts: ['A: the runner image'],
+    });
+
+    const landed = {
+      ...comment('IC_60', 'me', 'OWNER'),
+      body: `Needs a human: B.\n\n${REPLY_MARKER}`,
+    };
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({
+        comments: { pageInfo: { hasPreviousPage: false }, nodes: [landed] },
+      }),
+      viewer: 'me',
+    }));
+    expect(reply(b)).toMatchObject({ adopted: 1, summarySkipped: true });
+    // Adopting B adds B; it does not replace A.
+    expect(state().reportedNeedsHuman).toEqual({
+      sha: HEAD,
+      texts: ['A: the runner image', 'B: the API change'],
+    });
+
+    // So replaying A reports nothing again.
+    const calls = mocks.ghWithInput.mock.calls.length;
+    expect(reply(a)).toMatchObject({ summarySkipped: true });
+    expect(mocks.ghWithInput.mock.calls.length).toBe(calls);
+  });
+
+  it('keeps reported items when it adopts a summary that reported none', () => {
+    writeState(paths.statePath, { ...state(), summarizedSha: HEAD });
+    const a: ReplyPlan = {
+      summary: { body: 'Needs a human: A.' },
+      needsHuman: ['A: the runner image'],
+    };
+    reply(a);
+
+    // A round that only answers a comment reports no blocked items.
+    const answered: ReplyPlan = {
+      summary: { body: 'Answered the review.', handled: ['IC_1'] },
+    };
+    mocks.ghWithInput.mockImplementationOnce(() => {
+      throw new Error('connection reset');
+    });
+    expect(() => reply(answered)).toThrow(/connection reset/);
+    expect(state().pendingPosts![0].needsHuman).toBeUndefined();
+
+    const landed = {
+      ...comment('IC_61', 'me', 'OWNER'),
+      body: `Answered the review.\n\n${REPLY_MARKER}`,
+    };
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({
+        comments: { pageInfo: { hasPreviousPage: false }, nodes: [landed] },
+      }),
+      viewer: 'me',
+    }));
+    expect(reply(answered)).toMatchObject({ adopted: 1, summarySkipped: true });
+    // An empty report erases nothing.
+    expect(state().reportedNeedsHuman).toEqual({
+      sha: HEAD,
+      texts: ['A: the runner image'],
+    });
+    const calls = mocks.ghWithInput.mock.calls.length;
+    expect(reply(a)).toMatchObject({ summarySkipped: true });
+    expect(mocks.ghWithInput.mock.calls.length).toBe(calls);
+  });
+
   it('posts again when the reply an earlier run announced never reached the PR', () => {
     mocks.ghWithInput.mockImplementationOnce(() => {
       throw new Error('connection refused');

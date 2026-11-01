@@ -1488,7 +1488,7 @@ describe('buildSpringRecipeLines', () => {
     expect(joined).toContain(`source "${envPath}"`);
     expect(joined).toContain('export SPRING_DATASOURCE_URL=');
     expect(joined).toContain(
-      'cd packages/managed-agent-server && mvn spring-boot:run',
+      'mvn -f packages/managed-agent-server/pom.xml -pl server -am -DskipTests install && mvn -f packages/managed-agent-server/server/pom.xml spring-boot:run',
     );
     expect(joined).toContain('packages/sdk-java/qwencode/pom.xml');
     expect(joined).not.toContain('runtime-broker/pom.xml');
@@ -1505,7 +1505,7 @@ describe('buildSpringRecipeLines', () => {
       .map((line) => line.trim())
       .filter((line) => line !== '' && !line.startsWith('#'));
     expect(actionable).toContain(
-      'Set-Location packages\\managed-agent-server; mvn spring-boot:run',
+      'mvn -f packages/managed-agent-server/pom.xml -pl server -am -DskipTests install; mvn -f packages/managed-agent-server/server/pom.xml spring-boot:run',
     );
     const dotPointers = actionable.filter((line) => line.includes(ps1Path));
     expect(dotPointers).toHaveLength(1);

@@ -11,6 +11,9 @@ Run Qwen Code as a local HTTP daemon so multiple clients (IDE plugins, web UIs, 
 ## What it gives you
 
 - **Built-in Web Shell UI** — `qwen serve` serves the browser-based Web Shell at its root (`http://127.0.0.1:4170/`) out of the box; run `qwen serve --open` to launch it in your browser automatically. It is served on the same origin as the API, so no second port or reverse proxy is needed. Pass `--no-web` for an API-only daemon.
+
+  The sidebar hides **No-workspace sessions** once its list has loaded with no sessions, just like **Pinned**. Use the main **New session** button and choose **No workspace** in the composer to start a conversation when the group is hidden.
+
 - **Up to one primary ACP child plus one on-demand child per trusted secondary, many clients** — production attempts to preheat the primary bridge and retries on first use after failure; trusted secondary runtimes start their own child on demand, while untrusted secondaries never start one. Under the default `sessionScope: 'single'`, clients targeting the same workspace share one ACP session and collaborate on the same conversation, file diffs, and permission prompts.
 - **Reconnect-safe streaming** — SSE with `Last-Event-ID` reconnect lets a client drop and pick up exactly where it left off (within the ring's replay window).
 - **Paged persisted transcripts** — `GET /session/:id/transcript` returns the complete active on-disk transcript as replay pages without attaching a client or changing the live SSE replay window.

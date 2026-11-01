@@ -495,7 +495,10 @@ describe('installation scripts', () => {
     expect(prepared.command).toBe(
       'set "PROCESSOR_ARCHITECTURE=AMD64" && set "PROCESSOR_ARCHITEW6432=" && set "PSModulePath=C:\\PowerShell\\7\\Modules" && call "C:\\tools\\install-qwen-standalone.bat"',
     );
-    expect(prepared.env).toEqual({ Path: 'C:\\fake-bin' });
+    expect(prepared.env).toEqual({
+      Path: 'C:\\fake-bin',
+      QWEN_NO_MODIFY_PATH: '1',
+    });
   });
 
   it('creates PowerShell validation scripts with a ps1 extension', () => {
@@ -4948,6 +4951,13 @@ describe('Windows installer end-to-end', () => {
         const home = path.join(tmpDir, 'home');
         runWindowsInstaller(archive, installRoot, home);
 
+        const persistentPaths = runWindowsCommand(
+          `powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('Path', 'User'); [Environment]::GetEnvironmentVariable('Path', 'Machine')"`,
+        ).toString();
+        expect(persistentPaths.toLowerCase()).not.toContain(
+          installRoot.toLowerCase(),
+        );
+
         expect(existsSync(path.join(installRoot, 'bin', 'qwen.cmd'))).toBe(
           true,
         );
@@ -6061,7 +6071,8 @@ const WINDOWS_COMMAND_ENV_OVERRIDES = [
 ];
 
 function prepareWindowsCommand(command, env = {}, baseEnv = process.env) {
-  const commandEnv = { ...baseEnv, ...env };
+  // USERPROFILE does not isolate the account's persistent registry PATH.
+  const commandEnv = { ...baseEnv, QWEN_NO_MODIFY_PATH: '1', ...env };
   const commandPrefix = [];
 
   for (const key of WINDOWS_COMMAND_ENV_OVERRIDES) {

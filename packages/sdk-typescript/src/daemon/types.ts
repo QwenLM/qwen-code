@@ -2030,6 +2030,32 @@ export interface DaemonWorkspaceSessionLiveState {
   sessions: DaemonSessionLiveState[];
 }
 
+export interface DaemonSessionLiveStateBatchRequest {
+  /** 1–20 registered workspace ids or absolute cwd paths. */
+  workspaces: string[];
+}
+
+export interface DaemonSessionLiveStateBatchSnapshot
+  extends DaemonWorkspaceSessionLiveState {
+  /** Original selector from the request. */
+  workspace: string;
+  workspaceId: string;
+  cwd: string;
+}
+
+export interface DaemonSessionLiveStateBatchError {
+  workspace: string;
+  workspaceId?: string;
+  cwd?: string;
+  error: { code: string; message: string; status: number };
+}
+
+export interface DaemonSessionLiveStateBatchResult {
+  workspaces: Array<
+    DaemonSessionLiveStateBatchSnapshot | DaemonSessionLiveStateBatchError
+  >;
+}
+
 export interface DaemonWorkspaceSessionInfo {
   active: number;
   archived: number;
@@ -3215,6 +3241,8 @@ export interface DaemonContextCategoryBreakdown {
   systemPrompt: number;
   builtinTools: number;
   mcpTools: number;
+  /** Instructions are separate when present; older producers combine them with memory. */
+  instructionFiles?: number;
   memoryFiles: number;
   skills: number;
   /** Startup prelude outside the skill listing. Absent from older daemons. */
@@ -3242,6 +3270,13 @@ export interface DaemonContextToolDetail {
 export interface DaemonContextMemoryDetail {
   path: string;
   tokens: number;
+  /**
+   * Absolute on-disk path when the row maps to a file the context preview
+   * can open: inside the session workspace, or a global memory file. Absent
+   * for synthetic aggregates and instruction files outside that readable
+   * scope (parent-directory or extension files). Absent from older daemons.
+   */
+  absolutePath?: string;
 }
 
 export interface DaemonContextSkillDetail {
@@ -3258,6 +3293,7 @@ export interface DaemonSessionContextUsage {
   breakdown: DaemonContextCategoryBreakdown;
   builtinTools: DaemonContextToolDetail[];
   mcpTools: DaemonContextToolDetail[];
+  instructionFiles?: DaemonContextMemoryDetail[];
   memoryFiles: DaemonContextMemoryDetail[];
   skills: DaemonContextSkillDetail[];
   isEstimated?: boolean;
@@ -3268,6 +3304,14 @@ export interface DaemonSessionContextUsageStatus {
   v: 1;
   sessionId: string;
   workspaceCwd: string;
+  /**
+   * Stable workspace root the session was admitted under. Unlike
+   * `workspaceCwd` (the live target dir, which moves when a session enters a
+   * worktree or `cd`s into a subdirectory), this stays at the registered
+   * workspace root, so a client can resolve the owning workspace for file
+   * reads. Absent from older daemons.
+   */
+  workspaceRoot?: string;
   usage: DaemonSessionContextUsage;
   formattedText: string;
 }
