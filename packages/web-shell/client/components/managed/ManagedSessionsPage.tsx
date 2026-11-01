@@ -796,6 +796,9 @@ function ManagedSessionsContent({
     return () => abort.abort();
   }, [pendingKey]);
 
+  // Failure and discard notices describe the conversation they came from; they
+  // must not follow the user into another session. Switching also retries the
+  // session list, so a list error is re-derived rather than carried over.
   useEffect(() => {
     setError(undefined);
     setDiscarded(false);
@@ -1634,7 +1637,7 @@ function ManagedSessionsContent({
             (message): message is string =>
               Boolean(message) &&
               (interactive || message !== error) &&
-              // summary.failure 已在会话信息区渲染（下方失败区块），告警通道不再重复。
+              // summary.failure 已在 composer 上方的失败区块渲染，告警通道不再重复。
               message !== failureMessage,
           ),
         ),
