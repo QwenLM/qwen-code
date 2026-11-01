@@ -123,7 +123,7 @@ Spring 会从许多地方解析 `qwen.managed-agent.runtime-broker.state-directo
 - **健康端点：** 遵循 Spring Boot 关于 management 端口的规则（`ManagementPortType`）。未设置或与服务端端口相同时，它与服务端共用监听；为负数时关闭 HTTP 端点；其他值则在 `management.server.address` 上打开独立监听（未设置时绑定所有接口），位于 `management.server.base-path` 之下，并沿用服务端的 TLS，除非 `management.server.ssl` 替换它。两种情况下都应用 `management.endpoints.web.base-path` 和 `health` 的路径映射；路径映射为空白时 Spring Boot 会忽略它，仍使用名称 `health`。
 - **Harness：** `qwen.managed-agent.harness.base-url`，即控制面访问它所用的 URL。
 
-端口为 0（启动时选取）或负数时没有可等待的 URL，因此两个阶段都会拒绝执行，直到 `--server-url` 指定一个。`--server-url` 仍可指定控制面的地址，例如位于代理之后，此时健康端点为 `<url>/actuator/health`；`verify` 不访问 Harness，这时只为 `--tenant` 解析配置。无法解析配置时（即上文的两种情况），两个阶段与以前一样使用 `server.env` 中给出的 URL，并打印一行说明用了哪些：猜错的代价是等满一次 `--timeout`，而拒绝执行会挡住猜对时本可以完成的升级。
+端口为 0（启动时选取）或负数时没有可等待的 URL，因此两个阶段都会拒绝执行，直到 `--server-url` 指定一个。URL 无法表示该监听时（例如保留了 zone 的 IPv6 链路本地地址），或者 `--server-url` 不是 URL 时，两个阶段同样拒绝执行，而不是在根本发不出去的探测上等满 `--timeout`。`--server-url` 仍可指定控制面的地址，例如位于代理之后，此时健康端点为 `<url>/actuator/health`；`verify` 不访问 Harness，这时只为 `--tenant` 解析配置。无法解析配置时（即上文的两种情况），两个阶段与以前一样使用 `server.env` 中给出的 URL，并打印一行说明用了哪些：猜错的代价是等满一次 `--timeout`，而拒绝执行会挡住猜对时本可以完成的升级。
 
 ### 备份是否仍然有效
 

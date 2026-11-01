@@ -1965,7 +1965,9 @@ test('start and verify reach the listeners the server resolves', async (t) => {
     'PASS http://127.0.0.1:9091/manage/actuator/health is UP',
   );
   assert.equal(rows.session, 'PASS read Session s1 and 0 item(s)');
-  assert.deepEqual(urls().slice(1), [
+  // The health row comes first, and each read needs the one before it.
+  assert.deepEqual(urls(), [
+    'http://127.0.0.1:9091/manage/actuator/health',
     'http://127.0.0.1:9090/v1/agents/sessions?limit=1',
     'http://127.0.0.1:9090/v1/agents/sessions/s1',
     'http://127.0.0.1:9090/v1/agents/sessions/s1/items?limit=20',
@@ -2045,6 +2047,19 @@ test('start and verify use server.env when the configuration does not resolve', 
     rowsOf(host.output).health,
     'PASS http://127.0.0.1:18081/actuator/health is UP',
   );
+
+  // An address from server.env that no URL can carry is refused as well.
+  await host.stop();
+  await writeFile(
+    path.join(host.etc, 'server.env'),
+    'QWEN_MANAGED_AGENT_SERVER_ADDRESS=fe80::1%eth0\n',
+    { flag: 'a' },
+  );
+  assert.equal(await host.upgrade('start'), 1);
+  assert.match(
+    host.output.join('\n'),
+    /start refused: The server's configuration puts the control plane at "http:\/\/\[fe80::1%eth0\]:18080", which is not a URL: a URL cannot carry an IPv6 zone\./,
+  );
 });
 
 test('start refuses listeners it cannot reach before it starts anything', async (t) => {
@@ -2069,6 +2084,41 @@ test('start refuses listeners it cannot reach before it starts anything', async 
   assert.match(
     host.output.join('\n'),
     /start refused: The control plane reaches qwen-hosted-harness at "", which is not a URL; correct qwen\.managed-agent\.harness\.base-url\./,
+  );
+  // A link-local listener keeps its zone, which no URL can carry.
+  const zoned = 'http://[fe80:0:0:0:0:0:0:1%1]';
+  host.resolved = {
+    serverUrl: `${zoned}:8080`,
+    healthUrl: `${zoned}:8080/actuator/health`,
+  };
+  assert.equal(await host.upgrade('start'), 1);
+  assert.match(
+    host.output.join('\n'),
+    /start refused: The server's configuration puts the control plane at "http:\/\/\[fe80:0:0:0:0:0:0:1%1\]:8080", which is not a URL: a URL cannot carry an IPv6 zone\. Bind it where a URL can name it, or pass --server-url <a URL that serves \/actuator\/health>\./,
+  );
+  host.resolved = { healthUrl: `${zoned}:9091/actuator/health` };
+  assert.equal(await host.upgrade('start'), 1);
+  assert.match(
+    host.output.join('\n'),
+    /puts the health endpoint at "http:\/\/\[fe80:0:0:0:0:0:0:1%1\]:9091\/actuator\/health", which is not a URL: a URL/,
+  );
+  host.resolved = {
+    serverUrl: 'http://127.0.0.1:70000',
+    healthUrl: 'http://127.0.0.1:70000/actuator/health',
+  };
+  assert.equal(await host.upgrade('start'), 1);
+  assert.match(
+    host.output.join('\n'),
+    /puts the control plane at "http:\/\/127\.0\.0\.1:70000", which is not a URL\. Bind it/,
+  );
+  host.resolved = {};
+  assert.equal(
+    await host.upgrade('start', '--server-url', 'http://[fe80::1%eth0]:8080'),
+    1,
+  );
+  assert.match(
+    host.output.join('\n'),
+    /start refused: --server-url "http:\/\/\[fe80::1%eth0\]:8080" is not a URL\./,
   );
   assert.equal(host.units[HARNESS].ActiveState, 'inactive');
   assert.equal(host.units[SERVER].ActiveState, 'inactive');

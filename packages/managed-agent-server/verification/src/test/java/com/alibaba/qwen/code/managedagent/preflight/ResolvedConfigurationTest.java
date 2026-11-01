@@ -199,12 +199,15 @@ class ResolvedConfigurationTest {
                 resolve(Map.of(), "--server.port=9092").get("serverUrl"));
 
         // A wildcard serves the loopback interface of its family, and the
-        // relaxed SERVER_ADDRESS outranks the packaged default too.
+        // relaxed SERVER_ADDRESS outranks the packaged default too. A
+        // link-local address keeps its zone, which the upgrade command
+        // refuses, since no URL carries one.
         Map<String, String> addresses = Map.of(
                 "0.0.0.0", "http://127.0.0.1:8080",
                 "::", "http://[::1]:8080",
                 "0:0:0:0:0:0:0:1", "http://[::1]:8080",
                 "10.1.2.3", "http://10.1.2.3:8080",
+                "fe80::1%1", "http://[fe80:0:0:0:0:0:0:1%1]:8080",
                 "", "http://127.0.0.1:8080");
         addresses.forEach((address, url) -> assertEquals(url,
                 resolve(Map.of("QWEN_MANAGED_AGENT_SERVER_ADDRESS", address))

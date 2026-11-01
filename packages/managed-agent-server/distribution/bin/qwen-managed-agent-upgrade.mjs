@@ -2461,7 +2461,8 @@ async function resolveConfiguration(system, deployment) {
  * Where start and verify reach the control plane, its health endpoint and the
  * Harness: the listeners the server's configuration resolves to, with the
  * control plane at --server-url when that is given. When the configuration
- * does not resolve, the URLs server.env names, and a line that says so.
+ * does not resolve, the URLs server.env names, and a line that says so. A
+ * listener without a fixed port or a URL is refused before anything runs.
  * verify, which does not reach the Harness, leaves the configuration alone
  * when --server-url names the control plane.
  */
@@ -2503,6 +2504,20 @@ async function listeners(
     throw new Refusal(
       `The server's configuration gives ${urls.server ? 'the health endpoint' : 'the control plane'} no fixed port: 0 picks one at start, and a negative one opens none. Pass --server-url <a URL that serves /actuator/health>.`,
     );
+  }
+  // fetch would fail on each probe until the timeout, so say why up front. A
+  // link-local listener keeps its IPv6 zone, which no URL can carry.
+  for (const [name, url] of [
+    ['the control plane', urls.server],
+    ['the health endpoint', urls.health],
+  ]) {
+    if (!URL.canParse(url)) {
+      throw new Refusal(
+        options.serverUrl
+          ? `--server-url ${JSON.stringify(options.serverUrl)} is not a URL.`
+          : `The server's configuration puts ${name} at ${JSON.stringify(url)}, which is not a URL${url.includes('%') ? ': a URL cannot carry an IPv6 zone' : ''}. Bind it where a URL can name it, or pass --server-url <a URL that serves /actuator/health>.`,
+      );
+    }
   }
   return urls;
 }
