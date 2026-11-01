@@ -451,9 +451,9 @@ public class WorkspaceExecutionStore
         external(context, binding, repository, session.getSession().getScope(),
                 session.getSession().getHarnessSessionId(), true,
                 (connection, owner, current) -> {
-            JdbcExternalWorkspaceOwnership.claim(connection, owner, current, session);
-            return null;
-        });
+                JdbcExternalWorkspaceOwnership.claim(connection, owner, current, session);
+                return null;
+            });
     }
 
     public boolean isHeld(ContextBinding context, RuntimeSessionRecord session, RuntimeBindingRecord binding,
@@ -477,11 +477,11 @@ public class WorkspaceExecutionStore
         external(context, binding, repository, session.getSession().getScope(),
                 session.getSession().getHarnessSessionId(), true,
                 (connection, owner, current) -> {
-            if (!JdbcExternalWorkspaceOwnership.held(connection, owner, current, session, true)) {
-                throw busy();
-            }
-            return null;
-        });
+                if (!JdbcExternalWorkspaceOwnership.held(connection, owner, current, session, true)) {
+                    throw busy();
+                }
+                return null;
+            });
     }
 
     public void release(ContextBinding context, RuntimeSessionRecord session, RuntimeBindingRecord binding,
@@ -493,9 +493,9 @@ public class WorkspaceExecutionStore
         external(context, binding, repository, session.getSession().getScope(),
                 session.getSession().getHarnessSessionId(), false,
                 (connection, owner, current) -> {
-            JdbcExternalWorkspaceOwnership.releaseMember(connection, owner, current, session);
-            return null;
-        });
+                JdbcExternalWorkspaceOwnership.releaseMember(connection, owner, current, session);
+                return null;
+            });
     }
 
     public void assertOriginalExternal(ContextBinding context, RuntimeSessionRecord session, RuntimeBindingRecord binding,
@@ -503,12 +503,12 @@ public class WorkspaceExecutionStore
         external(context, binding, repository, session.getSession().getScope(),
                 session.getSession().getHarnessSessionId(), false,
                 (connection, owner, current) -> {
-            JdbcExternalWorkspaceOwnership.held(connection, owner, current, session, false);
-            if (!JdbcExternalWorkspaceOwnership.hasHolder(connection, owner, current)) {
-                throw unavailable();
-            }
-            return null;
-        });
+                JdbcExternalWorkspaceOwnership.held(connection, owner, current, session, false);
+                if (!JdbcExternalWorkspaceOwnership.hasHolder(connection, owner, current)) {
+                    throw unavailable();
+                }
+                return null;
+            });
     }
 
     public void releaseStopped(ContextBinding context, RuntimeSessionRecord session, RuntimeBindingRecord binding,
@@ -516,9 +516,9 @@ public class WorkspaceExecutionStore
         external(context, binding, repository, session.getSession().getScope(),
                 session.getSession().getHarnessSessionId(), false,
                 (connection, owner, current) -> {
-            JdbcExternalWorkspaceOwnership.releaseStopped(connection, owner, current, binding, session);
-            return null;
-        });
+                JdbcExternalWorkspaceOwnership.releaseStopped(connection, owner, current, binding, session);
+                return null;
+            });
     }
 
     private <T> T external(ContextBinding context, RuntimeBindingRecord binding, RuntimeBindingRepository repository,
@@ -846,9 +846,9 @@ public class WorkspaceExecutionStore
                 saved.getRequest().getScope(),
                 saved.getRequest().getIsolationKey(), false,
                 (connection, owner, current) -> {
-            JdbcExternalWorkspaceOwnership.requireDrainMembers(connection, owner, current);
-            return noActiveExecutions(current);
-        });
+                JdbcExternalWorkspaceOwnership.requireDrainMembers(connection, owner, current);
+                return noActiveExecutions(current);
+            });
     }
 
     private boolean noActiveExecutions(RuntimeBindingRecord binding) {

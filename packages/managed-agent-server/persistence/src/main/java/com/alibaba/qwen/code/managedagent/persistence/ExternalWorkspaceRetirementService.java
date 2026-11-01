@@ -89,7 +89,9 @@ public final class ExternalWorkspaceRetirementService {
 
     public Receipt retire(Request request, TerminationVerifier verifier) {
         Receipt prior = inspect(request);
-        if (prior != null) { return prior; }
+        if (prior != null) {
+            return prior;
+        }
         RuntimeBindingRecord original = original(request);
         Identity identity = identity(request, original);
         TerminationProof proof = Objects.requireNonNull(verifier, "Trusted termination verifier").verify(identity);
@@ -98,7 +100,9 @@ public final class ExternalWorkspaceRetirementService {
             lock(request);
             var operations = operations(request);
             var saved = operations.find(KIND, request.retirementId(), true);
-            if (saved != null) { return receipt(request, saved); }
+            if (saved != null) {
+                return receipt(request, saved);
+            }
             requireWorkspace(request, "ACTIVE");
             RuntimeBindingRecord current = jdbc.execute((ConnectionCallback<RuntimeBindingRecord>) connection ->
                     bindings.lockActiveForRetirement(connection, original));
@@ -134,7 +138,9 @@ public final class ExternalWorkspaceRetirementService {
             require(saved != null);
             Receipt receipt = receipt(request, saved);
             require(receipt.proofDigest().equals(proofDigest));
-            if (receipt.resumed()) { return receipt; }
+            if (receipt.resumed()) {
+                return receipt;
+            }
             requireWorkspace(request, "DRAINING");
             RuntimeBindingRecord original = bindings.findById(request.bindingId());
             require(original != null && original.getState() == RuntimeBindingRecord.State.RELEASED
@@ -280,14 +286,24 @@ public final class ExternalWorkspaceRetirementService {
                 proof.sandboxId(), proof.state(), proof.observedAt().toString(), proof.auditId(), proof.evidenceSha256());
     }
     private String encode(Object value) {
-        try { return json.writeValueAsString(value); }
-        catch (java.io.IOException error) { throw new IllegalStateException("Retirement evidence cannot be encoded", error); }
+        try {
+            return json.writeValueAsString(value);
+        } catch (java.io.IOException error) {
+            throw new IllegalStateException("Retirement evidence cannot be encoded", error);
+        }
     }
     private <T> T decode(String value, Class<T> type) {
-        try { return json.readValue(value, type); }
-        catch (java.io.IOException | IllegalArgumentException error) { throw blocked(); }
+        try {
+            return json.readValue(value, type);
+        } catch (java.io.IOException | IllegalArgumentException error) {
+            throw blocked();
+        }
     }
-    private static void require(boolean value) { if (!value) { throw blocked(); } }
+    private static void require(boolean value) {
+        if (!value) {
+            throw blocked();
+        }
+    }
     private static RuntimeBrokerException blocked() {
         return new RuntimeBrokerException(409, "external_workspace_retirement_blocked",
                 "Original Workspace termination or complete idle evidence is unavailable", false);

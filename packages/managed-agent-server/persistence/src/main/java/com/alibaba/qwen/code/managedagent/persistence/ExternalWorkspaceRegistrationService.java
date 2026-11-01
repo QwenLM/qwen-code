@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration;
-
 import org.springframework.stereotype.Component;
 
 /** 仅供可信宿主使用的注册入口，不暴露未经授权的用户自助授权接口。 */

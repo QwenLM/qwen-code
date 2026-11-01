@@ -9,8 +9,8 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner;
+import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -68,7 +68,10 @@ class ExternalWorkspaceRetirementServiceTest {
                 .withState(RuntimeBindingRecord.State.RECOVERY_BLOCKED, null, Instant.now()));
         original = bindings.releaseOperation(original.getBindingId(), "initial", original.getOperationGeneration());
         var embedded = mock(EmbeddedRuntimeBroker.class);
-        doAnswer(invocation -> { provider.validateTerminalOriginal(invocation.getArgument(0)); return null; })
+        doAnswer(invocation -> {
+            provider.validateTerminalOriginal(invocation.getArgument(0));
+            return null;
+        })
                 .when(embedded).validateExternalTerminalOriginal(any());
         service = new ExternalWorkspaceRetirementService(jdbc, manager, bindings, registration,
                 new ManagedWorkspaceRegistry(jdbc), embedded, new ObjectMapper().findAndRegisterModules());
@@ -77,7 +80,11 @@ class ExternalWorkspaceRetirementServiceTest {
     }
 
     @AfterEach
-    void close() { if (provider != null) { provider.close(); } }
+    void close() {
+        if (provider != null) {
+            provider.close();
+        }
+    }
 
     private ExternalWorkspaceRetirementService.TerminationProof terminated(ExternalWorkspaceRetirementService.Identity identity) {
         return new ExternalWorkspaceRetirementService.TerminationProof(identity, "sandbox-original", "Terminated",

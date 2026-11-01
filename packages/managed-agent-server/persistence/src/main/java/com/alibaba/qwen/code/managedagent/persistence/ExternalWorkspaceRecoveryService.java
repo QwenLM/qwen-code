@@ -13,6 +13,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import javax.sql.DataSource;
+
 import java.net.URI;
 import java.sql.SQLException;
 import java.time.Instant;
