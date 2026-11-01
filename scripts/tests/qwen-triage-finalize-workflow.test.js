@@ -56,7 +56,9 @@ describe('qwen-triage-finalize workflow', () => {
     // run would drop its read-modify-write, so queue instead of cancel.
     // Non-PR firings get a unique group so they never occupy a PR's group
     // before the job-level event gate skips them.
-    expect(workflow.concurrency.group).toBe(
+    // The group is a folded YAML scalar: line wrapping belongs to the
+    // formatter, so compare the expression with whitespace flattened.
+    expect(workflow.concurrency.group.replace(/\s+/g, ' ')).toBe(
       "qwen-triage-finalize-${{ github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_sha || github.run_id }}",
     );
     expect(workflowText).toContain('cancel-in-progress: false');
