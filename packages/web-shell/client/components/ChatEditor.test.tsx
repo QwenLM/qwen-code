@@ -6873,35 +6873,43 @@ describe('ChatEditor Workflow mode', () => {
     workflowMode: { requested: true, available: true, effective: true },
   };
 
-  it('keeps Workflow independent of reasoning and a running response', () => {
+  it('moves Workflow into the menu and keeps it usable during a running response', async () => {
     const onWorkflowModeChange = vi.fn();
     const container = renderChatEditor({
       ...ready,
       isRunning: true,
       disabled: true,
-      visibleToolbarActions: ['plan', 'workflowMode', 'model'],
+      visibleToolbarActions: ['addMenu', 'plan', 'workflowMode', 'model'],
       onTogglePlan: vi.fn(),
       onWorkflowModeChange,
     });
-    const control = container.querySelector<HTMLButtonElement>(
-      '[aria-label="Workflow mode"]',
+    expect(
+      container.querySelector('[data-web-shell-workflow-mode-control]'),
+    ).toBeNull();
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-add-menu-trigger"]',
     )!;
-    expect(control.disabled).toBe(false);
-    act(() => control.click());
+    expect(trigger.disabled).toBe(false);
+    await act(async () =>
+      trigger.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      ),
+    );
+    const portal = mounted.find(
+      (entry) => entry.container === container,
+    )!.portalRoot;
+    const control = portal.querySelector<HTMLElement>(
+      '[data-testid="composer-add-menu-workflow"]',
+    )!;
+    expect(control.getAttribute('aria-checked')).toBe('true');
+    expect(control.getAttribute('data-disabled')).toBeNull();
+    expect(
+      portal.querySelector('[data-testid="composer-add-menu-file"]'),
+    ).toBeNull();
+    await act(async () => control.click());
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
     expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(false);
     expect(composerCoreState.submitText).not.toHaveBeenCalled();
-    const plan = container.querySelector('[data-web-shell-plan-control]')!;
-    const workflow = container.querySelector(
-      '[data-web-shell-workflow-mode-control]',
-    )!;
-    const model = container.querySelector('[data-web-shell-model-button]')!;
-    expect(
-      plan.compareDocumentPosition(workflow) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-    expect(
-      workflow.compareDocumentPosition(model) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
   });
 
   it('honors explicit toolbar allowlists without fabricating support', () => {

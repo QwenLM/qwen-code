@@ -695,6 +695,7 @@ function getArtifactPanelTabStops(
   );
 }
 const DEFAULT_COMPOSER_TOOLBAR_ACTIONS = [
+  'addMenu',
   'approvalMode',
   'workflowMode',
   'contextUsage',

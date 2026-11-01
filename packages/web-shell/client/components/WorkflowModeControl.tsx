@@ -17,15 +17,16 @@ export interface WorkflowModeControlProps {
   onWorkflowModeChange?: (requested: boolean) => void;
 }
 
-export function WorkflowModeControl({
-  workflowMode,
-  workflowModeStatus: status,
-  workflowModePending: pending = false,
-  onWorkflowModeChange,
-}: WorkflowModeControlProps) {
-  const { language } = useI18n();
+export function getWorkflowModeControlState(
+  {
+    workflowMode,
+    workflowModeStatus: status,
+    workflowModePending: pending = false,
+    onWorkflowModeChange,
+  }: WorkflowModeControlProps,
+  language: Parameters<typeof getWorkflowModeMessages>[0],
+) {
   const messages = getWorkflowModeMessages(language);
-  const descriptionId = useId();
   if (!status || status === 'unsupported') return null;
   const mode = status === 'unbound' ? undefined : workflowMode;
 
@@ -64,6 +65,17 @@ export function WorkflowModeControl({
   const description = [state, reason, mode ? messages.nextTurn : undefined]
     .filter(Boolean)
     .join(' ');
+
+  return { mode, disabled, description, messages, status, pending };
+}
+
+export function WorkflowModeControl(props: WorkflowModeControlProps) {
+  const { language } = useI18n();
+  const descriptionId = useId();
+  const control = getWorkflowModeControlState(props, language);
+  if (!control) return null;
+  const { mode, disabled, description, messages, status, pending } = control;
+  const { onWorkflowModeChange } = props;
 
   return (
     <Popover>
