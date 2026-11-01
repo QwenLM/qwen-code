@@ -134,6 +134,7 @@ const CODE_BLOCK_PREFIX_PADDING = 1;
 const LIST_ITEM_PREFIX_PADDING = 1;
 const LIST_ITEM_TEXT_FLEX_GROW = 1;
 const BLOCKQUOTE_PREFIX_PADDING = 1;
+const BLOCKQUOTE_PREFIX = '│ ';
 const MATH_BLOCK_PREFIX_PADDING = 1;
 
 const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
@@ -624,6 +625,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           quoteText={blockquoteMatch[1]}
           textColor={textColor}
           enableInlineMath={renderVisualBlocks}
+          availableWidth={paragraphWidth}
         />,
       );
     } else if (headerMatch) {
@@ -1056,26 +1058,49 @@ interface RenderBlockquoteProps {
   quoteText: string;
   textColor?: string;
   enableInlineMath?: boolean;
+  /**
+   * Width the whole quote may use, the `│ ` marker included. Pass it only where
+   * `contentWidth` is exactly the width the quote may use; without it the text
+   * box is measured implicitly by yoga and can consume the right margin.
+   */
+  availableWidth?: number;
 }
 
 const RenderBlockquoteInternal: React.FC<RenderBlockquoteProps> = ({
   quoteText,
   textColor = theme.text.primary,
   enableInlineMath = true,
-}) => (
-  <Box paddingLeft={BLOCKQUOTE_PREFIX_PADDING} flexDirection="row">
-    <Text color={theme.text.secondary}>│ </Text>
-    <Box flexGrow={LIST_ITEM_TEXT_FLEX_GROW}>
-      <Text wrap="wrap" color={textColor} italic>
-        <RenderInline
-          text={quoteText}
-          textColor={textColor}
-          enableInlineMath={enableInlineMath}
-        />
-      </Text>
+  availableWidth,
+}) => {
+  const textWidth =
+    availableWidth === undefined
+      ? undefined
+      : Math.max(
+          0,
+          availableWidth -
+            BLOCKQUOTE_PREFIX_PADDING -
+            stringWidth(BLOCKQUOTE_PREFIX),
+        );
+  const textContainerProps =
+    textWidth === undefined
+      ? { flexGrow: LIST_ITEM_TEXT_FLEX_GROW }
+      : { width: textWidth };
+
+  return (
+    <Box paddingLeft={BLOCKQUOTE_PREFIX_PADDING} flexDirection="row">
+      <Text color={theme.text.secondary}>{BLOCKQUOTE_PREFIX}</Text>
+      <Box {...textContainerProps}>
+        <Text wrap="wrap" color={textColor} italic>
+          <RenderInline
+            text={quoteText}
+            textColor={textColor}
+            enableInlineMath={enableInlineMath}
+          />
+        </Text>
+      </Box>
     </Box>
-  </Box>
-);
+  );
+};
 
 const RenderBlockquote = React.memo(RenderBlockquoteInternal);
 
