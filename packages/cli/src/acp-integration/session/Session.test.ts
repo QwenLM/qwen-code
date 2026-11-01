@@ -1637,6 +1637,36 @@ describe('Session', () => {
       },
     );
 
+    it('lands a report that arrives after the pre-close flush', async () => {
+      // The flush runs before the writer terminals, and the recorder stops
+      // accepting writes when they start. A teammate report that lands in that
+      // window used to be queued for a drain that never comes while still being
+      // marked persisted, so it vanished silently.
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      session.beginClose();
+      vi.mocked(mockChatRecordingService.recordNotification).mockClear();
+
+      session.flushPendingPeerNotifications();
+      const landedBefore = vi.mocked(
+        mockChatRecordingService.recordNotification,
+      ).mock.calls.length;
+      manager.leaderCallback?.('late report', 'late report', ['security']);
+
+      expect(
+        vi.mocked(mockChatRecordingService.recordNotification).mock.calls,
+      ).toHaveLength(landedBefore + 1);
+      session.dispose();
+    });
+
     it('coalesces a teardown burst into one automatic leader turn', async () => {
       // `cleanup()` publishes one exit per surviving teammate (up to ten). Each
       // queued peer item drains as its own automatic leader turn, so carrying

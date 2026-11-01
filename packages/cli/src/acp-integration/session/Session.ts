@@ -2761,6 +2761,12 @@ export class Session implements SessionContext {
   // on a session whose registries are already unregistered.
   private disposed = false;
   private closing = false;
+  /**
+   * Set once the pre-close flush has landed the queue. Nothing may be enqueued
+   * after that point: the recorder stops accepting writes when the writer
+   * terminals start, so a late arrival is neither drained nor durable.
+   */
+  private peerNotificationsSealed = false;
   private closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
   private historyMutationActive = false;
   private pendingDeletedApiPromptIds: Set<string> | undefined;
@@ -5252,6 +5258,7 @@ export class Session implements SessionContext {
    * which is the last point where the write is both accepted and then flushed.
    */
   flushPendingPeerNotifications(): void {
+    this.peerNotificationsSealed = true;
     this.#landUndrainedPeerNotifications();
   }
 
@@ -13067,6 +13074,13 @@ export class Session implements SessionContext {
   }
 
   #enqueueBackgroundNotification(item: QueuedBackgroundNotification): void {
+    // The pre-close flush already ran, so this queue will never be drained
+    // again. Land the copy while the recorder still accepts writes rather than
+    // parking it in a queue whose contents become unpersistable moments later.
+    if (this.peerNotificationsSealed) {
+      this.#landUndrainedPeerNotifications([item]);
+      return;
+    }
     while (this.notificationQueue.length >= MAX_BACKGROUND_NOTIFICATION_QUEUE) {
       // While the todo-stop guard defers unrelated automatic turns, a queued
       // notification that continues the current work chain is the one thing
