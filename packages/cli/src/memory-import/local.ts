@@ -24,6 +24,14 @@ export async function createLocalMemoryImportService(): Promise<MemoryImportServ
       interactive: false,
     } as unknown as CliArgs,
     process.cwd(),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    false,
+    // This Config exists for one memory-import run and never uses LSP.
+    { lspDisabled: true },
   );
   if (!config.isTrustedFolder() || !config.isManagedMemoryAvailable())
     throw new Error(

@@ -10,6 +10,7 @@ interface MockAuthSettings {
 }
 const mocks = vi.hoisted(() => ({
   refreshAuth: vi.fn(async () => undefined),
+  loadCliConfig: vi.fn(),
   settings: {
     merged: { security: { auth: { selectedType: 'gemini' } } },
   } as { merged: MockAuthSettings },
@@ -20,15 +21,7 @@ vi.mock('../config/settings.js', () => ({
   loadSettings: () => mocks.settings,
 }));
 vi.mock('../config/config.js', () => ({
-  loadCliConfig: async () => ({
-    isTrustedFolder: () => true,
-    isManagedMemoryAvailable: () => true,
-    getProjectRoot: () => '/project',
-    getModelsConfig: () => ({
-      getCurrentAuthType: () => mocks.currentAuthType,
-    }),
-    refreshAuth: mocks.refreshAuth,
-  }),
+  loadCliConfig: mocks.loadCliConfig,
 }));
 vi.mock('../utils/modelConfigUtils.js', () => ({
   getAuthTypeFromEnv: () => mocks.envAuthType,
@@ -49,6 +42,23 @@ beforeEach(() => {
   };
   mocks.currentAuthType = undefined;
   mocks.envAuthType = undefined;
+  mocks.loadCliConfig.mockImplementation(async () => ({
+    isTrustedFolder: () => true,
+    isManagedMemoryAvailable: () => true,
+    getProjectRoot: () => '/project',
+    getModelsConfig: () => ({
+      getCurrentAuthType: () => mocks.currentAuthType,
+    }),
+    refreshAuth: mocks.refreshAuth,
+  }));
+});
+
+it('refuses LSP for the import Config, which never uses it', async () => {
+  const { createLocalMemoryImportService } = await import('./local.js');
+  await createLocalMemoryImportService();
+  expect(mocks.loadCliConfig.mock.calls[0]?.[9]).toEqual({
+    lspDisabled: true,
+  });
 });
 
 it('authenticates with cached credentials only, never an interactive flow', async () => {

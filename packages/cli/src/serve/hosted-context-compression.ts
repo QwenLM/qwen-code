@@ -359,7 +359,10 @@ export class HostedContextCompression {
       undefined,
       undefined,
       true,
-      { toolInvocationGuard: () => ({ allowed: false }) },
+      {
+        toolInvocationGuard: () => ({ allowed: false }),
+        lspDisabled: true,
+      },
     );
     try {
       await applyHostedModelPin(
