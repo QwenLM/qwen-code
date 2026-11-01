@@ -435,7 +435,7 @@ mint 快速逼出 relay 侧超时加重试；另有 FG9e 的流心跳（见下�
 - **relay 闩锁**沿用 H4e-b3：`SchedulerHold` 在单线程的
   `messageRelayScheduler` 上停放一个任务，于是在用例放行之前不会跑任何
   scan —— 也就没有认领、没有 handover；FG9d 的 `cancel-after-mint` /
-  `cancel-reply-lost` 与两个 FG9e 用例都在 alice 发送前拿到它；
+  `cancel-reply-lost` 与两个 FG9e 续传用例都在 alice 发送前拿到它；
 - **第二个 proxy 实例**只为 `cancel-reply-lost` 里客户端自己的 cancel
   POST 挡在公开 API 前（其余一律直连 Spring），处置同为提交后丢答；
 - **观察者**是 FG8e 观察者的 in-JVM 移植：每条流一个 HttpClient

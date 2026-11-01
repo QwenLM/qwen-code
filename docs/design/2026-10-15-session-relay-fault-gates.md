@@ -521,8 +521,8 @@ and FG9e's stream heartbeat (below).
 - the **relay hold** is the H4e-b3 one: `SchedulerHold` parks a task on
   the one-thread `messageRelayScheduler`, so no scan — and with it no
   claim or handover — runs until the case releases it; FG9d's
-  `cancel-after-mint` / `cancel-reply-lost` and both FG9e cases take it
-  before alice sends;
+  `cancel-after-mint` / `cancel-reply-lost` and both FG9e resume cases
+  take it before alice sends;
 - a **second proxy instance** fronts the public API for the client's own
   cancel POST in `cancel-reply-lost` only (everything else talks to
   Spring directly), with the same drop-after-commit disposition;
