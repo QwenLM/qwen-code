@@ -115,6 +115,7 @@ describe('getUserStartupWarnings', () => {
       await write(path.join(xdgDir(), 'settings.json'));
       const [notice] = await notices();
       expect(notice).toContain(' has oauth_creds.json from another');
+      expect(notice).toContain(' does not read it. ');
 
       await write(path.join(xdgDir(), 'oauth_creds.json'));
       expect(await notices()).toEqual([]);

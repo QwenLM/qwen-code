@@ -99,8 +99,8 @@ const legacyGlobalDirCheck: WarningCheck = {
     const legacy = tildeifyPath(legacyDir);
     return (
       `${legacy} has ${files.join(' and ')} from another Qwen Code install, ` +
-      `but this install uses ${tildeifyPath(xdgDir)} and does not read them. ` +
-      `Run /auth to sign in here, or delete ` +
+      `but this install uses ${tildeifyPath(xdgDir)} and does not read ` +
+      `${files.length === 1 ? 'it' : 'them'}. Run /auth to sign in here, or delete ` +
       `${tildeifyPath(path.join(xdgDir, GLOBAL_DIR_MARKER))} to use ${legacy} instead.`
     );
   },
