@@ -22,7 +22,6 @@ type QwenSubscriptionStatusProps = { onCancel?: () => void } & (
       onOpenPlans: () => void;
       onCheckAgain: () => void;
       onSwitchProvider: () => void;
-      onSignOut: () => void;
     }
   | {
       status: 'error';
@@ -55,7 +54,7 @@ export function QwenSubscriptionStatus(
             {
               key: 'check',
               value: 'check',
-              title: t('Check again'),
+              title: t('Retry Connection'),
               description: '',
               disabled: props.checking,
             },
@@ -66,37 +65,30 @@ export function QwenSubscriptionStatus(
     );
   }
 
-  const actions = [
-    ...(props.canCheckAgain
-      ? [
-          {
-            key: 'check',
-            value: props.onCheckAgain,
-            title: t('Check again'),
-            description: '',
-            disabled: props.checking,
-          },
-        ]
-      : []),
-    {
-      key: 'plans',
-      value: props.onOpenPlans,
-      title: t('Open plans again'),
-      description: t('Opens the Qwen Code plans page in your browser'),
-    },
-    {
-      key: 'provider',
-      value: props.onSwitchProvider,
-      title: t('Use Alibaba ModelStudio instead'),
-      description: t('Coding Plan, Token Plan, or Standard API Key'),
-    },
-    {
-      key: 'signout',
-      value: props.onSignOut,
-      title: t('Sign out'),
-      description: t('Disconnect this device from your Qwen account'),
-    },
-  ];
+  const actions = props.canCheckAgain
+    ? [
+        {
+          key: 'check',
+          value: props.onCheckAgain,
+          title: t('Retry Connection'),
+          description: '',
+          disabled: props.checking,
+        },
+      ]
+    : [
+        {
+          key: 'plans',
+          value: props.onOpenPlans,
+          title: t('View Plans'),
+          description: t('Opens the Qwen Code plans page in your browser'),
+        },
+        {
+          key: 'provider',
+          value: props.onSwitchProvider,
+          title: t('Switch Provider'),
+          description: t('Choose another model provider'),
+        },
+      ];
   return (
     <Box flexDirection="column">
       <Text color={theme.status.success}>

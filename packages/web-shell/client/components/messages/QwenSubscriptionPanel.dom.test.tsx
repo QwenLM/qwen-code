@@ -56,12 +56,13 @@ afterEach(() => {
 });
 async function render(
   activation?: {
-    onActivate: (signal: AbortSignal) => Promise<void>;
+    onActivate: (signal: AbortSignal) => Promise<string | void>;
     onActivated: () => void;
   },
   activeTransport = transport,
   presentation: {
     dialog?: boolean;
+    desktopSuccess?: boolean;
     onAuthError?: (message: string) => void;
     onModelsUnavailable?: () => void;
   } = {},
@@ -120,9 +121,9 @@ it('starts authorization directly after the native picker selection and opens th
   ).toHaveLength(1);
   expect(container.textContent).toContain(user.email);
   expect(container.textContent).toContain('Free account');
-  expect(container.textContent).not.toContain('Check again');
+  expect(container.textContent).not.toContain('Retry Connection');
   expect(open.mock.calls.map(([url]) => url)).toEqual([authorizationUrl]);
-  await click('Open plans again');
+  await click('View Plans');
   expect(open.mock.calls.map(([url]) => url)).toEqual([
     authorizationUrl,
     'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
@@ -144,12 +145,8 @@ it.each(['free', 'go'])(
       [...container.querySelectorAll('button')].map(
         (button) => button.textContent,
       ),
-    ).toEqual([
-      'Open plans again',
-      'Use Alibaba ModelStudio instead',
-      'Sign out',
-    ]);
-    await click('Open plans again');
+    ).toEqual(['View Plans', 'Switch Provider']);
+    await click('View Plans');
     expect(open).toHaveBeenCalledTimes(2);
     expect(open).toHaveBeenLastCalledWith(
       'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
@@ -174,7 +171,7 @@ it('keeps authorization navigation when a failed first membership query is retri
   expect(container.textContent).toContain(
     "Couldn't check your subscription status",
   );
-  await click('Check again');
+  await click('Retry Connection');
   expect(container.textContent).toContain('Free account');
   await tick(5000);
   expect(transport.getSubscriptionUserInfo).toHaveBeenCalledTimes(2);
@@ -199,19 +196,19 @@ it('cancels a late start response after the panel was closed and never opens its
   expect(open).not.toHaveBeenCalled();
 });
 
-it('stops purchase polling at 120 seconds and retries once on Check again', async () => {
+it('stops purchase polling at 120 seconds and retries once on Retry Connection', async () => {
   await render();
   await tick(120000);
   expect(container.textContent).toContain("Your subscription isn't active yet");
   const calls = transport.getSubscriptionUserInfo.mock.calls.length;
   await tick(10000);
   expect(transport.getSubscriptionUserInfo).toHaveBeenCalledTimes(calls);
-  await click('Check again');
+  await click('Retry Connection');
   expect(transport.getSubscriptionUserInfo).toHaveBeenCalledTimes(calls + 1);
   expect(container.textContent).toContain('No active Plus or Pro');
 });
 
-it('keeps purchase actions after a query failure and discovers paid membership on retry', async () => {
+it('retries membership after a query failure and discovers a paid plan', async () => {
   transport.getSubscriptionUserInfo
     .mockRejectedValueOnce(new Error('offline'))
     .mockResolvedValue({ ...user, member_type: 'pro' });
@@ -220,14 +217,14 @@ it('keeps purchase actions after a query failure and discovers paid membership o
   expect(container.textContent).toContain(
     "Couldn't check your subscription status",
   );
-  await click('Check again');
+  await click('Retry Connection');
   expect(container.textContent).toContain('Qwen Pro is active');
   expect(container.textContent).not.toContain('mock-model');
   expect(container.textContent).toContain('Sign out');
   expect(transport.startSubscriptionLogin).toHaveBeenCalledTimes(1);
 });
 
-it('signs out during a manual check and cancels the request before revoke', async () => {
+it('aborts a manual check on unmount without signing out', async () => {
   transport.getSubscriptionUserInfo.mockRejectedValueOnce(new Error('offline'));
   await render();
   await tick(5000);
@@ -242,11 +239,15 @@ it('signs out during a manual check and cancels the request before revoke', asyn
       );
     },
   );
-  await click('Check again');
-  await click('Sign out');
+  await click('Retry Connection');
+  expect(container.querySelectorAll('button')).toHaveLength(1);
+  act(() => {
+    root!.unmount();
+    root = undefined;
+  });
   expect(signal?.aborted).toBe(true);
-  expect(transport.signOutSubscription).toHaveBeenCalledTimes(1);
-  expect(close).toHaveBeenCalledOnce();
+  expect(transport.signOutSubscription).not.toHaveBeenCalled();
+  expect(close).not.toHaveBeenCalled();
   expect(container.textContent).not.toContain('Qwen Account with Subscription');
 });
 
@@ -263,7 +264,7 @@ it('does not retry login automatically after denial and hides backend details', 
   await tick(10000);
   expect(transport.startSubscriptionLogin).toHaveBeenCalledTimes(1);
   transport.startSubscriptionLogin.mockResolvedValue(ready);
-  await click('Sign in again');
+  await click('Retry Connection');
   expect(transport.startSubscriptionLogin).toHaveBeenCalledTimes(2);
   expect(container.textContent).toContain('Free account');
 });
@@ -295,6 +296,10 @@ it('recognizes refresh expiry in the daemon HTTP error body during membership po
 });
 
 it('ignores an old sign-out failure after switching daemon transports', async () => {
+  transport.startSubscriptionLogin.mockResolvedValue({
+    ...ready,
+    userInfo: { ...user, member_type: 'pro' },
+  });
   let rejectSignOut!: (error: Error) => void;
   transport.signOutSubscription.mockReturnValue(
     new Promise((_resolve, reject) => {
@@ -377,7 +382,7 @@ it('does not carry an old daemon cooldown into a new transport', async () => {
       />,
     );
   });
-  await click('Check again');
+  await click('Retry Connection');
   expect(nextTransport.getSubscriptionUserInfo).toHaveBeenCalledTimes(1);
   expect(container.textContent).toContain('Qwen Plus is active');
 });
@@ -398,7 +403,7 @@ it('retries a failed first identity query without creating a second authorizatio
     "Couldn't check your subscription status",
   );
   expect(open).not.toHaveBeenCalled();
-  await click('Check again');
+  await click('Retry Connection');
   expect(transport.getSubscriptionUserInfo).toHaveBeenCalledTimes(1);
   expect(transport.startSubscriptionLogin).toHaveBeenCalledTimes(1);
   expect(container.textContent).toContain('Qwen Plus is active');
@@ -414,7 +419,7 @@ it('keeps exchange invalid_grant distinct from session expiry', async () => {
   await render();
   expect(container.textContent).toContain('Could not complete authorization');
   expect(container.textContent).not.toContain('session has expired');
-  expect(container.textContent).toContain('Sign in again');
+  expect(container.textContent).toContain('Retry Connection');
 });
 
 it('respects Retry-After before retrying a failed first query and starts waiting after Free is confirmed', async () => {
@@ -427,13 +432,13 @@ it('respects Retry-After before retrying a failed first query and starts waiting
     retryAfterMs: 60_000,
   });
   await render();
-  await click('Check again');
+  await click('Retry Connection');
   expect(transport.getSubscriptionUserInfo).not.toHaveBeenCalled();
   await tick(60_000);
-  await click('Check again');
+  await click('Retry Connection');
   expect(transport.getSubscriptionUserInfo).toHaveBeenCalledTimes(1);
   expect(container.textContent).toContain('Free account');
-  expect(container.textContent).not.toContain('Check again');
+  expect(container.textContent).not.toContain('Retry Connection');
   await tick(120_000);
   expect(container.textContent).toContain("Your subscription isn't active yet");
   expect(transport.startSubscriptionLogin).toHaveBeenCalledTimes(1);
@@ -539,6 +544,10 @@ it('leaves the paid ready state after activation discovers expired refresh crede
 it.each(['revoke', 'cleanup'] as const)(
   'keeps %s errors visible without offering an authorization retry',
   async (errorStage) => {
+    transport.startSubscriptionLogin.mockResolvedValue({
+      ...ready,
+      userInfo: { ...user, member_type: 'pro' },
+    });
     transport.signOutSubscription.mockRejectedValue({
       body: { code: 'credentials_error', errorStage },
     });
@@ -549,8 +558,7 @@ it.each(['revoke', 'cleanup'] as const)(
         ? 'signed out locally'
         : 'remove local Qwen credentials',
     );
-    expect(container.textContent).not.toContain('Sign in again');
-    expect(container.textContent).not.toContain('Check again');
+    expect(container.textContent).not.toContain('Retry Connection');
   },
 );
 
@@ -646,7 +654,7 @@ it.each([
     const onActivate = vi.fn();
     await render({ onActivate, onActivated: vi.fn() });
     expect(onActivate).not.toHaveBeenCalled();
-    expect(container.textContent).toContain('Open plans again');
+    expect(container.textContent).toContain('View Plans');
     expect(container.textContent).toContain(`${plan} account`);
   },
 );
@@ -695,7 +703,7 @@ it('reports authorization failure to the sidebar but retains membership query er
   });
   await render(undefined, transport, { onAuthError });
   expect(onAuthError).not.toHaveBeenCalled();
-  expect(container.textContent).toContain('Check again');
+  expect(container.textContent).toContain('Retry Connection');
 });
 
 it('automatically activates when purchase polling discovers paid membership', async () => {
@@ -727,7 +735,7 @@ it('automatically activates after a failed membership query is retried successfu
   const onActivated = vi.fn();
   await render({ onActivate, onActivated });
   expect(onActivate).not.toHaveBeenCalled();
-  await click('Check again');
+  await click('Retry Connection');
   expect(onActivate).toHaveBeenCalledOnce();
   expect(onActivated).toHaveBeenCalledOnce();
   expect(transport.startSubscriptionLogin).toHaveBeenCalledOnce();
@@ -747,6 +755,118 @@ it('does not activate again when host callbacks change identity', async () => {
   });
   expect(onActivate).toHaveBeenCalledOnce();
   expect(onActivated).toHaveBeenCalledOnce();
+});
+
+it.each(['Start Using', 'close', 'Escape'])(
+  'finishes desktop success once through %s after activation completes',
+  async (action) => {
+    transport.startSubscriptionLogin.mockResolvedValue({
+      ...ready,
+      userInfo: { ...user, member_type: 'pro' },
+    });
+    let finish!: (model: string) => void;
+    const onActivate = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const onActivated = vi.fn();
+    await render({ onActivate, onActivated }, transport, {
+      dialog: true,
+      desktopSuccess: true,
+    });
+    expect(document.querySelector('[data-subscription-success]')).toBeNull();
+    expect(onActivated).not.toHaveBeenCalled();
+    await act(async () => finish('actual-model'));
+    await tick(0);
+    const success = document.querySelector('[data-subscription-success]')!;
+    expect(success).not.toBeNull();
+    expect(success.textContent).toContain(user.email);
+    expect(success.textContent).toContain('Qwen Pro');
+    expect(success.textContent).toContain('actual-model');
+    expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+    expect(onActivated).not.toHaveBeenCalled();
+    const dismiss = () => {
+      if (action === 'Escape')
+        document.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        );
+      else
+        [...success.querySelectorAll('button')]
+          .find(
+            (button) =>
+              button.textContent === action ||
+              button.getAttribute('aria-label') === action,
+          )!
+          .click();
+    };
+    await act(async () => {
+      dismiss();
+      dismiss();
+    });
+    expect(onActivated).toHaveBeenCalledOnce();
+    expect(onActivated).toHaveBeenCalledWith();
+    expect(onActivate).toHaveBeenCalledOnce();
+    expect(transport.signOutSubscription).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+  },
+);
+
+it('discards a completed desktop success when its transport changes', async () => {
+  transport.startSubscriptionLogin.mockResolvedValue({
+    ...ready,
+    userInfo: { ...user, member_type: 'pro' },
+  });
+  const onActivated = vi.fn();
+  await render(
+    { onActivate: vi.fn().mockResolvedValue('actual-model'), onActivated },
+    transport,
+    { dialog: true, desktopSuccess: true },
+  );
+  expect(document.querySelector('[data-subscription-success]')).not.toBeNull();
+  const nextTransport = {
+    ...transport,
+    startSubscriptionLogin: vi.fn().mockResolvedValue({
+      id: 'new-flow',
+      status: 'waiting',
+      authorizationUrl,
+    }),
+  };
+  await render({ onActivate: vi.fn(), onActivated }, nextTransport, {
+    dialog: true,
+    desktopSuccess: true,
+  });
+  expect(document.querySelector('[data-subscription-success]')).toBeNull();
+  expect(onActivated).not.toHaveBeenCalled();
+  expect(transport.cancelSubscriptionLogin).toHaveBeenCalledWith('flow-one');
+});
+
+it('restarts desktop authorization with Retry Connection before Previous and no Next', async () => {
+  transport.startSubscriptionLogin.mockResolvedValue({
+    id: 'denied',
+    status: 'error',
+    errorCode: 'access_denied',
+    errorStage: 'exchange',
+  });
+  await render(undefined, transport, { dialog: true });
+  const dialog = document.querySelector('[role="dialog"]')!;
+  const buttons = [...dialog.querySelectorAll('button')];
+  const retry = buttons.find(
+    (button) => button.textContent === 'Retry Connection',
+  )!;
+  const previous = buttons.find((button) => button.textContent === 'previous')!;
+  expect(buttons.indexOf(retry)).toBeLessThan(buttons.indexOf(previous));
+  expect(buttons.some((button) => button.textContent === 'next')).toBe(false);
+  transport.startSubscriptionLogin.mockResolvedValue({
+    id: 'retry-auth',
+    status: 'waiting',
+    authorizationUrl,
+  });
+  await act(async () => retry.click());
+  expect(transport.startSubscriptionLogin).toHaveBeenCalledTimes(2);
+  expect(open).toHaveBeenCalledWith(authorizationUrl);
+  expect(transport.getSubscriptionUserInfo).not.toHaveBeenCalled();
 });
 
 it('waits for the new transport to confirm membership and ignores the old activation', async () => {

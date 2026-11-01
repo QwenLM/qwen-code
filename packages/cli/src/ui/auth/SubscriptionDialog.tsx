@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useRef } from 'react';
 import { Box, Text } from 'ink';
 import { t } from '../../i18n/index.js';
 import { QwenSubscriptionProgress } from '../components/QwenSubscriptionProgress.js';
@@ -17,13 +16,13 @@ import { RadioButtonSelect } from '../components/shared/RadioButtonSelect.js';
 export function SubscriptionDialog({
   onBack,
   onModelSelectionRequired,
-  onModelStudio,
+  onSwitchProvider,
   suppressBrowserLaunch,
   onConnect,
 }: {
   onBack: () => void;
   onModelSelectionRequired?: () => void;
-  onModelStudio: () => void;
+  onSwitchProvider: () => void;
   suppressBrowserLaunch?: boolean;
   onConnect?: (signal: AbortSignal) => Promise<void>;
 }) {
@@ -32,21 +31,11 @@ export function SubscriptionDialog({
     onActivate: onConnect,
   });
   const { state } = flow;
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
   const back = () => {
     flow.cancel();
     if (flow.modelSelectionRequired && onModelSelectionRequired)
       onModelSelectionRequired();
     else onBack();
-  };
-  const signOut = async () => {
-    if ((await flow.signOut()) && mounted.current) onBack();
   };
   useKeypress(
     (key) => {
@@ -121,9 +110,8 @@ export function SubscriptionDialog({
       onCheckAgain={flow.checkAgain}
       onSwitchProvider={() => {
         flow.cancel();
-        onModelStudio();
+        onSwitchProvider();
       }}
-      onSignOut={() => void signOut()}
       onCancel={back}
     />
   );

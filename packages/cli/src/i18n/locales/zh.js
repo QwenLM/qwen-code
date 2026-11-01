@@ -1763,16 +1763,13 @@ export default {
   'Your Qwen session has expired. Run /auth to sign in again.':
     '你的 Qwen 登录已过期，请运行 /auth 重新登录。',
   'Checking your subscription…': '正在检查你的订阅…',
-  'Check again': '再次检查',
-  'Open plans again': '重新打开套餐页',
+  'Retry Connection': '重试',
+  'View Plans': '查看套餐',
   'Opens the Qwen Code plans page in your browser':
     '在浏览器中打开 Qwen Code 套餐页',
-  'Use Alibaba ModelStudio instead': '改用阿里云百炼',
-  'Coding Plan, Token Plan, or Standard API Key':
-    'Coding Plan、Token Plan 或标准 API Key',
+  'Switch Provider': '切换供应商',
+  'Choose another model provider': '选择其他模型供应商',
   'Sign out': '退出登录',
-  'Disconnect this device from your Qwen account':
-    '断开此设备与你的 Qwen 账号的连接',
   'Enter to select, ↑↓ to navigate · Esc to close':
     '按 Enter 选择，↑↓ 切换 · 按 Esc 关闭',
   'Qwen OAuth Authentication': 'Qwen OAuth 认证',

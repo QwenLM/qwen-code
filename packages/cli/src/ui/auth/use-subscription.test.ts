@@ -272,17 +272,15 @@ it('shows timeout instead of navigating away when the device code expires', asyn
   unmount();
 });
 
-it('cancels in-flight membership work before signout', async () => {
+it('cancels membership polling without signing out', async () => {
   const { result, unmount } = renderHook(() =>
     useSubscription({ suppressBrowserLaunch: true }),
   );
   await flush();
   const signal: AbortSignal = mocks.getUserInfo.mock.calls[0][0];
-  await act(async () => {
-    expect(await result.current.signOut()).toBe(true);
-  });
+  act(() => result.current.cancel());
   expect(signal.aborted).toBe(true);
-  expect(mocks.signOut).toHaveBeenCalledTimes(1);
+  expect(mocks.signOut).not.toHaveBeenCalled();
   const calls = mocks.getUserInfo.mock.calls.length;
   await act(async () => {
     await vi.advanceTimersByTimeAsync(150_000);
@@ -291,7 +289,7 @@ it('cancels in-flight membership work before signout', async () => {
   unmount();
 });
 
-it('allows signout to cancel a pending manual membership query', async () => {
+it('cancels a pending manual membership query without signing out', async () => {
   mocks.getUserInfo
     .mockResolvedValueOnce(free)
     .mockRejectedValueOnce(queryFailure());
@@ -312,10 +310,8 @@ it('allows signout to cancel a pending manual membership query', async () => {
   );
   act(() => result.current.checkAgain());
   expect(result.current.checking).toBe(true);
-  await act(async () => {
-    expect(await result.current.signOut()).toBe(true);
-  });
-  expect(mocks.signOut).toHaveBeenCalledTimes(1);
+  await act(async () => result.current.cancel());
+  expect(mocks.signOut).not.toHaveBeenCalled();
   expect((mocks.getUserInfo.mock.calls.at(-1)![0] as AbortSignal).aborted).toBe(
     true,
   );
@@ -434,39 +430,6 @@ it('does not repeat a membership request before Retry-After, then recovers', asy
   expect(result.current.state).toEqual({ status: 'ready', plan: 'Plus' });
   unmount();
 });
-
-it.each(['revoke', 'cleanup'] as const)(
-  'explains %s failure without reopening login',
-  async (stage) => {
-    mocks.signOut.mockRejectedValue(
-      new SubscriptionOAuthError(
-        'network_error',
-        undefined,
-        'synthetic-secret',
-        undefined,
-        stage,
-      ),
-    );
-    const { result, unmount } = renderHook(() => useSubscription());
-    await flush();
-    await act(async () => {
-      expect(await result.current.signOut()).toBe(false);
-    });
-    expect(result.current.state).toMatchObject({
-      status: 'error',
-      message: expect.stringContaining(
-        stage === 'revoke'
-          ? 'signed out locally'
-          : 'remove local Qwen credentials',
-      ),
-    });
-    expect(mocks.signIn).not.toHaveBeenCalled();
-    expect(JSON.stringify(result.current.state)).not.toContain(
-      'synthetic-secret',
-    );
-    unmount();
-  },
-);
 
 it('activates a paid account, hides private errors, and permits retry', async () => {
   mocks.getUserInfo.mockResolvedValue({ ...free, member_type: 'pro' });

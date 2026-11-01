@@ -1254,6 +1254,7 @@ export function AuthMessage({
     return (
       <QwenSubscriptionFlow
         dialog={dialog}
+        desktopSuccess={dialog && isDesktopShell()}
         transport={workspaceActions}
         onActivate={async (signal) => {
           const owner = sessionOwnerGuard.capture();
@@ -1282,18 +1283,14 @@ export function AuthMessage({
           return result.modelId;
         }}
         onActivated={(message) => {
-          onMessage(message);
+          if (message) onMessage(message);
           onClose();
         }}
         onModelsUnavailable={onClose}
         onClose={() => setSubscriptionReal(false)}
         onOtherProviders={() => {
           setSubscriptionReal(false);
-          const group = groups.find((item) => item.id === 'alibaba');
-          if (group) {
-            setGroupId(group.id);
-            setView('providers');
-          }
+          setView('groups');
         }}
         onOpenExternal={(url) => {
           if (isDesktopShell()) {

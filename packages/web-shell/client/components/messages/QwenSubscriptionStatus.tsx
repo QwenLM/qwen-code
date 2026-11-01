@@ -23,7 +23,6 @@ export interface QwenSubscriptionStatusProps {
   onOpenPurchase: () => void;
   onRetry: () => void;
   onSwitchProvider: () => void;
-  onSignOut: () => void;
   onCancel: () => void;
 }
 
@@ -33,7 +32,6 @@ export function QwenSubscriptionStatus({
   onOpenPurchase,
   onRetry,
   onSwitchProvider,
-  onSignOut,
   onCancel,
 }: QwenSubscriptionStatusProps) {
   const { t, language } = useI18n();
@@ -47,37 +45,32 @@ export function QwenSubscriptionStatus({
     );
   }
   if (state.status === 'purchase-required') {
-    const actions = [
-      ...(state.canCheckAgain
-        ? [
-            {
-              key: 'check',
-              label: t('subscription.checkAgain'),
-              description: '',
-              onClick: onRetry,
-              disabled: state.checking,
-            },
-          ]
-        : []),
-      {
-        key: 'plans',
-        label: t('subscription.openPlans'),
-        description: t('subscription.openPlansDescription'),
-        onClick: onOpenPurchase,
-      },
-      {
-        key: 'provider',
-        label: t('subscription.switchProvider'),
-        description: t('subscription.switchProviderDescription'),
-        onClick: onSwitchProvider,
-      },
-      {
-        key: 'signout',
-        label: t('subscription.signOut'),
-        description: t('subscription.signOutDescription'),
-        onClick: onSignOut,
-      },
-    ];
+    const actions = state.canCheckAgain
+      ? [
+          {
+            key: 'check',
+            label: t('subscription.checkAgain'),
+            description: '',
+            onClick: onRetry,
+            disabled: state.checking,
+          },
+        ]
+      : [
+          {
+            key: 'plans',
+            label: t('subscription.openPlans'),
+            description: t('subscription.openPlansDescription'),
+            onClick: onOpenPurchase,
+            disabled: false,
+          },
+          {
+            key: 'provider',
+            label: t('subscription.switchProvider'),
+            description: t('subscription.switchProviderDescription'),
+            onClick: onSwitchProvider,
+            disabled: false,
+          },
+        ];
     return (
       <section
         aria-label={t('subscription.title')}
@@ -121,8 +114,10 @@ export function QwenSubscriptionStatus({
               key={action.key}
               type="button"
               aria-label={action.label}
-              data-selected={selectedAction === action.key}
-              className={`${authStyles.option} ${selectedAction === action.key ? authStyles.optionActive : ''} ${styles.desktopOption}`}
+              data-selected={
+                state.canCheckAgain || selectedAction === action.key
+              }
+              className={`${authStyles.option} ${state.canCheckAgain || selectedAction === action.key ? authStyles.optionActive : ''} ${styles.desktopOption}`}
               onFocus={() => setSelectedAction(action.key)}
               onMouseEnter={() => setSelectedAction(action.key)}
               onClick={action.onClick}
@@ -138,15 +133,6 @@ export function QwenSubscriptionStatus({
               </span>
             </button>
           ))}
-        </div>
-        <div className={authStyles.actions}>
-          <button
-            type="button"
-            className={authStyles.actionButton}
-            onClick={onCancel}
-          >
-            {t('subscription.cancel')}
-          </button>
         </div>
       </section>
     );
@@ -192,27 +178,27 @@ export function QwenSubscriptionStatus({
       {state.status === 'waiting' && (
         <p className={authStyles.muted}>{t('subscription.pending')}</p>
       )}
-      {state.status === 'query-error' && (
-        <button
-          type="button"
-          className={`${authStyles.actionButton} self-start`}
-          onClick={onRetry}
-          disabled={state.checking}
-        >
-          {t('subscription.checkAgain')}
-        </button>
-      )}
       <div className={authStyles.actions}>
-        <button
-          type="button"
-          className={authStyles.actionButton}
-          onClick={onCancel}
-        >
-          {t('common.previous')}
-        </button>
-        <button type="button" className={authStyles.actionButton} disabled>
-          {t('common.next')}
-        </button>
+        {(state.status === 'query-error' ||
+          (state.status === 'error' && state.retry === 'authorization')) && (
+          <button
+            type="button"
+            className={`${authStyles.actionButton} self-start`}
+            onClick={onRetry}
+            disabled={state.status === 'query-error' && state.checking}
+          >
+            {t('subscription.checkAgain')}
+          </button>
+        )}
+        {state.status !== 'query-error' && (
+          <button
+            type="button"
+            className={authStyles.actionButton}
+            onClick={onCancel}
+          >
+            {t('common.previous')}
+          </button>
+        )}
       </div>
     </section>
   );

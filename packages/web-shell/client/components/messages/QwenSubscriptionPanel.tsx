@@ -24,6 +24,7 @@ import {
 import { QwenSubscriptionSidebarStatus } from './QwenSubscriptionSidebarStatus';
 import styles from './AuthMessage.module.css';
 import sidebarStyles from './QwenSubscriptionSidebarStatus.module.css';
+import { QwenSubscriptionSuccessDialog } from './QwenSubscriptionSuccessDialog';
 import {
   useSubscription,
   type SubscriptionTransport,
@@ -31,10 +32,12 @@ import {
 
 function QwenSubscriptionView({
   dialog = false,
+  hideReadyStatus = false,
   children,
   ...props
 }: QwenSubscriptionStatusProps & {
   dialog?: boolean;
+  hideReadyStatus?: boolean;
   children?: ReactNode;
 }) {
   const { t } = useI18n();
@@ -63,7 +66,9 @@ function QwenSubscriptionView({
           </span>
         </nav>
       )}
-      <Status {...props} />
+      {!(hideReadyStatus && props.state.status === 'ready') && (
+        <Status {...props} />
+      )}
       {children}
     </div>
   );
@@ -83,12 +88,13 @@ function QwenSubscriptionView({
 
 type FlowProps = {
   dialog?: boolean;
+  desktopSuccess?: boolean;
   transport: SubscriptionTransport;
   onOpenExternal: (url: string) => void | Promise<void>;
   onClose: () => void;
   onOtherProviders: () => void;
   onActivate?: (signal: AbortSignal) => Promise<string | void>;
-  onActivated?: (message: string) => void;
+  onActivated?: (message?: string) => void;
   onModelsUnavailable?: () => void;
   onAuthError?: (message: string) => void;
 };
@@ -109,6 +115,13 @@ export function QwenSubscriptionFlow(props: FlowProps) {
   const [connecting, setConnecting] = useState(false);
   const [connectionError, setConnectionError] = useState<string>();
   const [connectionRetryAt, setConnectionRetryAt] = useState(0);
+  const [completed, setCompleted] = useState<{
+    email: string;
+    plan: string;
+    model: string;
+    owner: AbortSignal;
+  }>();
+  const completionDelivered = useRef(false);
   useEffect(() => {
     if (!connectionRetryAt) return;
     const timer = setTimeout(
@@ -123,6 +136,8 @@ export function QwenSubscriptionFlow(props: FlowProps) {
     setConnecting(false);
     setConnectionError(undefined);
     setConnectionRetryAt(0);
+    setCompleted(undefined);
+    completionDelivered.current = false;
     return () => {
       mounted.current = false;
       activation.current?.abort();
@@ -149,14 +164,17 @@ export function QwenSubscriptionFlow(props: FlowProps) {
     try {
       const signal = AbortSignal.any([owner, controller.signal]);
       const model = await onActivate(signal);
-      if (!owner.aborted && !controller.signal.aborted && mounted.current)
-        callbacks.current.onActivated?.(
-          t('subscription.connected', {
-            email: account.email,
-            plan: account.plan,
-            model: model ?? '',
-          }),
-        );
+      if (!owner.aborted && !controller.signal.aborted && mounted.current) {
+        const result = {
+          email: account.email,
+          plan: account.plan,
+          model: model ?? '',
+        };
+        if (callbacks.current.desktopSuccess) {
+          setCompleted({ ...result, owner });
+        } else
+          callbacks.current.onActivated?.(t('subscription.connected', result));
+      }
     } catch (error) {
       if (!owner.aborted && !controller.signal.aborted && mounted.current) {
         const body = (
@@ -246,9 +264,24 @@ export function QwenSubscriptionFlow(props: FlowProps) {
   const signOut = async () => {
     if ((await flow.signOut()) && mounted.current) props.onClose();
   };
+  if (
+    props.desktopSuccess &&
+    completed &&
+    completed.owner === flow.readySignal &&
+    !completed.owner.aborted
+  ) {
+    const { owner, ...account } = completed;
+    const finish = () => {
+      if (owner.aborted || completionDelivered.current) return;
+      completionDelivered.current = true;
+      callbacks.current.onActivated?.();
+    };
+    return <QwenSubscriptionSuccessDialog {...account} onClose={finish} />;
+  }
   return (
     <QwenSubscriptionView
       dialog={props.dialog}
+      hideReadyStatus={props.desktopSuccess}
       state={flow.state}
       onOpenAuthorization={flow.openAuthorization}
       onOpenPurchase={flow.openPlans}
@@ -257,15 +290,14 @@ export function QwenSubscriptionFlow(props: FlowProps) {
         activation.current?.abort();
         props.onOtherProviders();
       }}
-      onSignOut={() => {
-        void signOut();
-      }}
       onCancel={close}
     >
       {flow.state.status === 'ready' && (
         <>
           {connectionError && <p role="alert">{connectionError}</p>}
-          {connecting && <p role="status">{t('subscription.connecting')}</p>}
+          {(connecting || (props.desktopSuccess && !connectionError)) && (
+            <p role="status">{t('subscription.connecting')}</p>
+          )}
           {connectionError && props.onActivate && (
             <Button
               disabled={

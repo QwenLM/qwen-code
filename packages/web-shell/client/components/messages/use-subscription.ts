@@ -44,7 +44,7 @@ const COPY = {
       'Authentication timed out. Please try again or select a different authentication method.',
     queryFailed: "Couldn't check your subscription status. Please try again.",
     purchaseTimeout:
-      "Your subscription isn't active yet. If you've completed payment, please wait a moment and check again.",
+      "Your subscription isn't active yet. If you've completed payment, please wait a moment and retry.",
     notActive:
       "No active Plus or Pro subscription was found for this account. If you've already subscribed, make sure you used the same Qwen account.",
   },
@@ -62,7 +62,7 @@ const COPY = {
     expired: '你的 Qwen 登录已过期，请重新登录。',
     timeout: '身份验证超时，请重试或选择其他身份验证方式。',
     queryFailed: '无法查询你的订阅状态，请重试。',
-    purchaseTimeout: '你的订阅尚未生效。如果已完成付款，请稍等片刻后再次检查。',
+    purchaseTimeout: '你的订阅尚未生效。如果已完成付款，请稍等片刻后重试。',
     notActive:
       '此账号未找到有效的 Plus 或 Pro 订阅。如果已经订阅，请确认使用的是同一个 Qwen 账号。',
   },

@@ -30,7 +30,6 @@ const flow = vi.hoisted(() => ({
   canCheckAgain: false,
   openPlans: vi.fn(),
   checkAgain: vi.fn(),
-  signOut: vi.fn(),
   cancel: vi.fn(),
 }));
 vi.mock('./use-subscription.js', () => ({ useSubscription: () => flow }));
@@ -42,14 +41,13 @@ beforeEach(() => {
   flow.modelSelectionRequired = false;
   flow.connecting = false;
   flow.canCheckAgain = false;
-  flow.signOut.mockResolvedValue(true);
 });
 afterEach(() => vi.restoreAllMocks());
 
 it('shows the real authorization link and cancels without signing out', async () => {
   const onBack = vi.fn();
   const ui = renderWithProviders(
-    <SubscriptionDialog onBack={onBack} onModelStudio={vi.fn()} />,
+    <SubscriptionDialog onBack={onBack} onSwitchProvider={vi.fn()} />,
   );
   try {
     expect(ui.lastFrame()).toContain('client=qwen-code');
@@ -58,36 +56,40 @@ it('shows the real authorization link and cancels without signing out', async ()
     ui.stdin.write('\u001b');
     await vi.waitFor(() => expect(onBack).toHaveBeenCalledTimes(1));
     expect(flow.cancel).toHaveBeenCalledTimes(1);
-    expect(flow.signOut).not.toHaveBeenCalled();
   } finally {
     ui.unmount();
   }
 });
 
-it('keeps Check again hidden during purchase polling and signs out through the session', async () => {
+it('opens plans and switches provider during purchase polling without signing out', async () => {
   flow.state = { status: 'purchase-required', plan: 'Free' };
   const onBack = vi.fn();
+  const onSwitchProvider = vi.fn();
   const ui = renderWithProviders(
-    <SubscriptionDialog onBack={onBack} onModelStudio={vi.fn()} />,
+    <SubscriptionDialog onBack={onBack} onSwitchProvider={onSwitchProvider} />,
   );
   try {
     expect(ui.lastFrame()).toContain('tester@example.com');
-    expect(ui.lastFrame()).not.toContain('Check again');
-    await settle(100);
-    ui.stdin.write('\u001b[B');
-    await settle(100);
-    ui.stdin.write('\u001b[B');
-    await vi.waitFor(() => expect(ui.lastFrame()).toContain('› Sign out'));
+    expect(ui.lastFrame()).not.toContain('Retry Connection');
+    expect(ui.lastFrame()).not.toContain('Sign out');
     await settle(100);
     ui.stdin.write('\u001b[13u');
-    await vi.waitFor(() => expect(flow.signOut).toHaveBeenCalledTimes(1));
-    await vi.waitFor(() => expect(onBack).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(flow.openPlans).toHaveBeenCalledOnce());
+    ui.stdin.write('\u001b[B');
+    await vi.waitFor(() =>
+      expect(ui.lastFrame()).toContain('› Switch Provider'),
+    );
+    await settle(100);
+    ui.stdin.write('\u001b[13u');
+    await vi.waitFor(() => expect(onSwitchProvider).toHaveBeenCalledOnce());
+    expect(flow.cancel).toHaveBeenCalledOnce();
+    expect(onBack).not.toHaveBeenCalled();
   } finally {
     ui.unmount();
   }
 });
 
-it('shows Check again after purchase timeout and disables it while checking', () => {
+it('shows Retry Connection after purchase timeout and disables it while checking', () => {
   flow.state = {
     status: 'purchase-required',
     plan: 'Free',
@@ -96,11 +98,14 @@ it('shows Check again after purchase timeout and disables it while checking', ()
   flow.canCheckAgain = true;
   flow.checking = true;
   const ui = renderWithProviders(
-    <SubscriptionDialog onBack={vi.fn()} onModelStudio={vi.fn()} />,
+    <SubscriptionDialog onBack={vi.fn()} onSwitchProvider={vi.fn()} />,
   );
   try {
-    expect(ui.lastFrame()).toContain('Check again');
+    expect(ui.lastFrame()).toContain('Retry Connection');
     expect(ui.lastFrame()).toContain('Checking your subscription…');
+    expect(ui.lastFrame()).not.toContain('View Plans');
+    expect(ui.lastFrame()).not.toContain('Switch Provider');
+    expect(ui.lastFrame()).not.toContain('Sign out');
   } finally {
     ui.unmount();
   }
@@ -109,7 +114,7 @@ it('shows Check again after purchase timeout and disables it while checking', ()
 it('waits for automatic activation without a Connect or Sign out menu', () => {
   flow.state = { status: 'ready', plan: 'Plus' };
   const ui = renderWithProviders(
-    <SubscriptionDialog onBack={vi.fn()} onModelStudio={vi.fn()} />,
+    <SubscriptionDialog onBack={vi.fn()} onSwitchProvider={vi.fn()} />,
   );
   try {
     expect(ui.lastFrame()).toContain('Loading models from provider…');
@@ -131,7 +136,7 @@ it('only points to /model and returns to the input without signing out', async (
     <SubscriptionDialog
       onBack={onBack}
       onModelSelectionRequired={onModelSelectionRequired}
-      onModelStudio={vi.fn()}
+      onSwitchProvider={vi.fn()}
     />,
   );
   try {
@@ -143,29 +148,27 @@ it('only points to /model and returns to the input without signing out', async (
       expect(onModelSelectionRequired).toHaveBeenCalledOnce(),
     );
     expect(onBack).not.toHaveBeenCalled();
-    expect(flow.signOut).not.toHaveBeenCalled();
     expect(flow.connect).not.toHaveBeenCalled();
   } finally {
     ui.unmount();
   }
 });
 
-it('keeps the error visible when sign-out fails', async () => {
+it('retries inactive membership without opening plans or leaving the dialog', async () => {
   flow.state = { status: 'purchase-required', plan: 'Free' };
-  flow.signOut.mockResolvedValue(false);
+  flow.canCheckAgain = true;
   const onBack = vi.fn();
   const ui = renderWithProviders(
-    <SubscriptionDialog onBack={onBack} onModelStudio={vi.fn()} />,
+    <SubscriptionDialog onBack={onBack} onSwitchProvider={vi.fn()} />,
   );
   try {
     await settle(100);
-    ui.stdin.write('\u001b[B');
-    await settle(100);
-    ui.stdin.write('\u001b[B');
-    await vi.waitFor(() => expect(ui.lastFrame()).toContain('› Sign out'));
-    await settle(100);
+    expect(ui.lastFrame()).toContain('Retry Connection');
+    expect(ui.lastFrame()).not.toContain('View Plans');
+    expect(ui.lastFrame()).not.toContain('Switch Provider');
     ui.stdin.write('\u001b[13u');
-    await vi.waitFor(() => expect(flow.signOut).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(flow.checkAgain).toHaveBeenCalledOnce());
+    expect(flow.openPlans).not.toHaveBeenCalled();
     expect(onBack).not.toHaveBeenCalled();
   } finally {
     ui.unmount();
@@ -179,10 +182,10 @@ it('keeps a first membership query error visible and retries only the query', as
   };
   const onBack = vi.fn();
   const ui = renderWithProviders(
-    <SubscriptionDialog onBack={onBack} onModelStudio={vi.fn()} />,
+    <SubscriptionDialog onBack={onBack} onSwitchProvider={vi.fn()} />,
   );
   try {
-    expect(ui.lastFrame()).toContain('Check again');
+    expect(ui.lastFrame()).toContain('Retry Connection');
     expect(ui.lastFrame()).not.toContain('Press any key');
     await settle(100);
     ui.stdin.write('\u001b[13u');
@@ -198,7 +201,7 @@ it('retries activation after failure without leaving the dialog', async () => {
   flow.connectionError =
     'Could not connect Qwen Subscription. Please try again.';
   const ui = renderWithProviders(
-    <SubscriptionDialog onBack={vi.fn()} onModelStudio={vi.fn()} />,
+    <SubscriptionDialog onBack={vi.fn()} onSwitchProvider={vi.fn()} />,
   );
   try {
     expect(ui.lastFrame()).toContain('Retry');
@@ -206,7 +209,6 @@ it('retries activation after failure without leaving the dialog', async () => {
     await settle(100);
     ui.stdin.write('\u001b[13u');
     await vi.waitFor(() => expect(flow.connect).toHaveBeenCalledOnce());
-    expect(flow.signOut).not.toHaveBeenCalled();
   } finally {
     ui.unmount();
   }
@@ -217,7 +219,7 @@ it('cancels while automatic activation is pending', async () => {
   flow.connecting = true;
   const onBack = vi.fn();
   const ui = renderWithProviders(
-    <SubscriptionDialog onBack={onBack} onModelStudio={vi.fn()} />,
+    <SubscriptionDialog onBack={onBack} onSwitchProvider={vi.fn()} />,
   );
   try {
     expect(ui.lastFrame()).toContain('Loading models from provider…');

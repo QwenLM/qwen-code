@@ -2544,10 +2544,9 @@ export default {
   'Authentication timed out. Please try again or select a different authentication method.':
     '驗證逾時，請重試或選擇其他驗證方式。',
   'Authorization or access was denied.': '授權或存取遭拒。',
-  'Check again': '再次檢查',
+  'Retry Connection': '重試',
   'Checking your subscription…': '正在檢查你的訂閱…',
-  'Coding Plan, Token Plan, or Standard API Key':
-    'Coding Plan、Token Plan 或標準 API 金鑰',
+  'Choose another model provider': '選擇其他模型服務供應商',
   'Could not complete authorization. Please try signing in again.':
     '無法完成授權，請重新登入。',
   'Could not read or save Qwen credentials. Check local file permissions and disk space.':
@@ -2558,14 +2557,12 @@ export default {
     '無法清除本機 Qwen 憑證，請檢查檔案權限。',
   'Could not request an authorization link. Please try signing in again.':
     '無法申請授權連結，請重新登入。',
-  'Disconnect this device from your Qwen account':
-    '中斷此裝置與你的 Qwen 帳號的連線',
   'Enter to select, ↑↓ to navigate · Esc to close':
     '按 Enter 選取，↑↓ 切換 · Esc 關閉',
   "If the browser didn't open, visit:": '如果瀏覽器未開啟，請前往：',
   'Loading models from provider…': '正在從服務供應商載入模型…',
   'Model: {{model}}': '模型：{{model}}',
-  'Open plans again': '重新開啟方案頁面',
+  'View Plans': '檢視方案',
   'Opening chat.qwen.ai in your browser… Sign in there to connect Qwen Code.':
     '正在瀏覽器中開啟 chat.qwen.ai… 請登入以連接 Qwen Code。',
   'Opens the Qwen Code plans page in your browser':
@@ -2586,7 +2583,7 @@ export default {
   'Too many requests. Please try again later.': '請求過多，請稍後重試。',
   'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai':
     '在 chat.qwen.ai 訂閱 Plus／Pro 方案以使用 Qwen Code + Agent',
-  'Use Alibaba ModelStudio instead': '改用 Alibaba ModelStudio',
+  'Switch Provider': '切換供應商',
   'Waiting for sign-in…': '正在等待登入…',
   'Waiting for your subscription to become active…': '正在等待你的訂閱生效…',
   'You are signed out locally, but the remote session could not be revoked.':

@@ -26,7 +26,6 @@ function render(
     onRetry: vi.fn(),
     onCancel: vi.fn(),
     onSwitchProvider: vi.fn(),
-    onSignOut: vi.fn(),
   };
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -71,7 +70,7 @@ describe('QwenSubscriptionSidebarStatus', () => {
     expect(callbacks.onCancel).toHaveBeenCalledOnce();
   });
 
-  it.each(['Free', 'Lite'] as const)(
+  it.each(['Free', 'Go'] as const)(
     'allows %s users to open plans while waiting for their purchase',
     (plan) => {
       const callbacks = render({
@@ -95,19 +94,16 @@ describe('QwenSubscriptionSidebarStatus', () => {
         [...(options?.querySelectorAll('button') ?? [])].map(
           (button) => button.textContent,
         ),
-      ).toEqual([
-        'Open plans again',
-        'Use Alibaba ModelStudio instead',
-        'Sign out',
-      ]);
+      ).toEqual(['View Plans', 'Switch Provider']);
+      expect(container.querySelectorAll('button')).toHaveLength(2);
+      expect(container.textContent).not.toContain('Sign out');
+      expect(container.textContent).not.toContain('Cancel');
       expect(options?.querySelectorAll('p')).toHaveLength(0);
-      click('Open plans again');
-      expect(container.textContent).not.toContain('Check again');
+      click('View Plans');
+      expect(container.textContent).not.toContain('Retry Connection');
       expect(callbacks.onRetry).not.toHaveBeenCalled();
-      click('Use Alibaba ModelStudio instead');
+      click('Switch Provider');
       expect(callbacks.onSwitchProvider).toHaveBeenCalledOnce();
-      click('Sign out');
-      expect(callbacks.onSignOut).toHaveBeenCalledOnce();
       expect(callbacks.onOpenPurchase).toHaveBeenCalledOnce();
       expect(callbacks.onCancel).not.toHaveBeenCalled();
     },
@@ -127,7 +123,7 @@ describe('QwenSubscriptionSidebarStatus', () => {
     },
   );
 
-  it('shows a supplied error as text and allows retry or cancellation', () => {
+  it('shows a supplied query error as text and only allows retry', () => {
     const callbacks = render({
       status: 'query-error',
       message: 'Unable to check membership. <script>ignored</script>',
@@ -139,14 +135,14 @@ describe('QwenSubscriptionSidebarStatus', () => {
     expect(container.querySelector('script')).toBeNull();
     expect(container.textContent).not.toContain('Qwen Subscription');
     expect(container.querySelector('[data-slot="alert"]')).toBeNull();
-    click('Check again');
+    click('Retry Connection');
     expect(callbacks.onRetry).toHaveBeenCalledOnce();
-    click('Cancel');
-    expect(callbacks.onCancel).toHaveBeenCalledOnce();
+    expect(container.querySelectorAll('button')).toHaveLength(1);
+    expect(callbacks.onCancel).not.toHaveBeenCalled();
   });
 
   it.each(['query failure', 'purchase timeout'])(
-    'keeps the plans action alongside manual checking after %s',
+    'offers only a retry after %s',
     (message) => {
       const callbacks = render({
         status: 'purchase-required',
@@ -155,30 +151,59 @@ describe('QwenSubscriptionSidebarStatus', () => {
         message,
         canCheckAgain: true,
       });
-      expect(container.textContent).toContain('Open plans again');
-      click('Check again');
+      expect(container.querySelectorAll('button')).toHaveLength(1);
+      expect(container.textContent).not.toContain('View Plans');
+      expect(container.textContent).not.toContain('Switch Provider');
+      click('Retry Connection');
       expect(callbacks.onOpenPurchase).not.toHaveBeenCalled();
       expect(callbacks.onRetry).toHaveBeenCalledOnce();
     },
   );
 
-  it('disables Check again during a membership query', () => {
+  it.each(['purchase-required', 'query-error'] as const)(
+    'disables Retry Connection during a %s query',
+    (status) => {
+      const callbacks = render(
+        status === 'query-error'
+          ? { status, message: 'Unable to check membership.', checking: true }
+          : {
+              status,
+              plan: 'Free',
+              email: 'starter@example.com',
+              checking: true,
+              canCheckAgain: true,
+            },
+      );
+      expect(container.textContent).toContain('Checking your subscription…');
+      const button = [...container.querySelectorAll('button')].find(
+        (item) =>
+          item.getAttribute('aria-label') === 'Retry Connection' ||
+          item.textContent === 'Retry Connection',
+      );
+      expect(button?.disabled).toBe(true);
+      expect(container.querySelectorAll('button')).toHaveLength(1);
+      act(() => button?.click());
+      expect(callbacks.onRetry).not.toHaveBeenCalled();
+      expect(container.textContent).not.toContain('Press any key');
+      expect(container.textContent).not.toContain('Esc to');
+    },
+  );
+
+  it('offers an authorization retry and cancellation after denied consent', () => {
     const callbacks = render({
-      status: 'purchase-required',
-      plan: 'Free',
-      email: 'starter@example.com',
-      checking: true,
-      canCheckAgain: true,
+      status: 'error',
+      retry: 'authorization',
+      message: 'Authorization or access was denied.',
     });
-    expect(container.textContent).toContain('Checking your subscription…');
-    const button = [...container.querySelectorAll('button')].find(
-      (item) => item.getAttribute('aria-label') === 'Check again',
-    );
-    expect(button?.disabled).toBe(true);
-    act(() => button?.click());
-    expect(callbacks.onRetry).not.toHaveBeenCalled();
-    expect(container.textContent).not.toContain('Press any key');
-    expect(container.textContent).not.toContain('Esc to');
+    expect(
+      [...container.querySelectorAll('button')].map(
+        (button) => button.textContent,
+      ),
+    ).toEqual(['Retry Connection', 'Cancel']);
+    click('Retry Connection');
+    expect(callbacks.onRetry).toHaveBeenCalledOnce();
+    click('Cancel');
+    expect(callbacks.onCancel).toHaveBeenCalledOnce();
   });
 
   it('shows only purchase action buttons in a Chinese host', () => {
@@ -207,12 +232,8 @@ describe('QwenSubscriptionSidebarStatus', () => {
       [...container.querySelectorAll('button')].map(
         (button) => button.textContent,
       ),
-    ).toEqual([
-      'Open plans again',
-      'Use Alibaba ModelStudio instead',
-      'Sign out',
-    ]);
-    click('Open plans again');
+    ).toEqual(['View Plans', 'Switch Provider']);
+    click('View Plans');
     expect(callbacks.onOpenPurchase).toHaveBeenCalledOnce();
     expect(callbacks.onCancel).not.toHaveBeenCalled();
   });

@@ -103,7 +103,6 @@ const subscription = vi.hoisted(() => ({
   canCheckAgain: false,
   openPlans: vi.fn(),
   checkAgain: vi.fn(),
-  signOut: vi.fn(),
   cancel: vi.fn(),
 }));
 vi.mock('../auth/use-subscription.js', async (importOriginal) => ({
@@ -1636,7 +1635,6 @@ describe('real subscription entry', () => {
     subscription.connecting = false;
     subscription.connectionError = undefined;
     subscription.modelSelectionRequired = false;
-    subscription.signOut.mockResolvedValue(true);
   });
   afterEach(() => vi.unstubAllEnvs());
 
@@ -1651,7 +1649,6 @@ describe('real subscription entry', () => {
     expect(config.refreshAuth).not.toHaveBeenCalled();
     await pressEsc();
     expect(screen.getByText('Connect a Provider')).toBeTruthy();
-    expect(subscription.signOut).not.toHaveBeenCalled();
   });
 
   it('animates the waiting indicator and stops it when the panel closes', async () => {
@@ -1681,28 +1678,34 @@ describe('real subscription entry', () => {
     }
   });
 
-  it('uses real purchase actions and waits for sign-out before returning', async () => {
+  it('opens plans and switches to the complete provider menu without signing out', async () => {
     subscription.state = { status: 'purchase-required', plan: 'Free' };
     renderDialog();
     await press('return');
     expect(document.body.textContent).toContain('real@example.com');
-    expect(screen.queryByText('Check again')).toBeNull();
+    expect(screen.queryByText('Retry Connection')).toBeNull();
+    expect(screen.queryByText('Sign out')).toBeNull();
     await press('return');
     expect(subscription.openPlans).toHaveBeenCalledTimes(1);
     await press('down');
-    await press('down');
     await press('return');
-    expect(subscription.signOut).toHaveBeenCalledTimes(1);
+    expect(subscription.cancel).toHaveBeenCalledOnce();
     expect(screen.getByText('Connect a Provider')).toBeTruthy();
+    expect(screen.getByText('QwenCloud')).toBeTruthy();
+    expect(screen.getByText('Alibaba ModelStudio')).toBeTruthy();
+    expect(screen.getByText('Third-party Providers')).toBeTruthy();
+    expect(screen.getByText('Custom Provider')).toBeTruthy();
   });
 
-  it('replaces plans with Check again after the automatic wait', async () => {
+  it('replaces plans with Retry Connection after the automatic wait', async () => {
     subscription.state = { status: 'purchase-required', plan: 'Free' };
     subscription.canCheckAgain = true;
     renderDialog();
     await press('return');
-    expect(screen.queryByText('Open plans again')).not.toBeNull();
-    expect(screen.getByText('Check again')).toBeTruthy();
+    expect(screen.queryByText('View Plans')).toBeNull();
+    expect(screen.queryByText('Switch Provider')).toBeNull();
+    expect(screen.queryByText('Sign out')).toBeNull();
+    expect(screen.getByText('Retry Connection')).toBeTruthy();
     await press('return');
     expect(subscription.checkAgain).toHaveBeenCalledTimes(1);
   });
@@ -1735,7 +1738,6 @@ describe('real subscription entry', () => {
     expect(screen.queryByText('Retry')).toBeNull();
     await pressEsc();
     expect(onClose).toHaveBeenCalledOnce();
-    expect(subscription.signOut).not.toHaveBeenCalled();
     expect(subscription.connect).not.toHaveBeenCalled();
   });
 
@@ -1765,7 +1767,6 @@ describe('real subscription entry', () => {
     await press('x');
     expect(screen.getByText('Connect a Provider')).toBeTruthy();
     expect(subscription.cancel).toHaveBeenCalledTimes(1);
-    expect(subscription.signOut).not.toHaveBeenCalled();
   });
 
   it('keeps a first membership query failure open and retries the query', async () => {
@@ -1782,7 +1783,7 @@ describe('real subscription entry', () => {
       ),
     ).toBeNull();
     await press('x');
-    expect(screen.getByText('Check again')).toBeTruthy();
+    expect(screen.getByText('Retry Connection')).toBeTruthy();
     await press('return');
     expect(subscription.checkAgain).toHaveBeenCalledTimes(1);
     expect(subscription.cancel).not.toHaveBeenCalled();

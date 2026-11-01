@@ -602,7 +602,7 @@ describe('host model management', () => {
 });
 
 describe('subscription development entry', () => {
-  it('localizes the subscription entry using the desktop language', async () => {
+  it('uses the configured subscription entry in a Chinese desktop host', async () => {
     actions.getAuthProviders.mockResolvedValue({
       v: 1,
       workspaceCwd: '/workspace',
@@ -633,11 +633,11 @@ describe('subscription development entry', () => {
     const dialog = document.querySelector('[role="dialog"]');
     expect(dialog?.getAttribute('aria-label')).toBe('连接供应商');
     expect(
-      dialog?.querySelector('button[aria-label="Qwen"]')?.textContent,
-    ).toContain('Qwen 新');
+      dialog?.querySelector(
+        'button[aria-label="Qwen Account with Subscription"]',
+      )?.textContent,
+    ).toContain('Qwen Account with Subscription 新');
     expect(dialog?.textContent).toContain('在 chat.qwen.ai 订阅 Plus/Pro');
-    expect(dialog?.textContent).not.toContain('Qwen Account with Subscription');
-    expect(dialog?.textContent).not.toContain('Unlock Qwen Code');
     expect(dialog?.textContent).toContain('自定义供应商');
     expect(dialog?.textContent).toContain('手动连接本地服务、代理或其他供应商');
   });
@@ -678,7 +678,8 @@ describe('subscription development entry', () => {
     actions.cancelSubscriptionLogin.mockResolvedValue(undefined);
     await openAuth(true);
     const entry = [...document.querySelectorAll('button')].find(
-      (item) => item.getAttribute('aria-label') === 'Qwen',
+      (item) =>
+        item.getAttribute('aria-label') === 'Qwen Account with Subscription',
     );
     expect(entry).toBeDefined();
     expect(entry!.classList.contains(styles.optionActive)).toBe(true);
@@ -697,17 +698,19 @@ describe('subscription development entry', () => {
     const next = [...authorization!.querySelectorAll('button')].find(
       (item) => item.textContent === 'next',
     );
-    expect(next?.disabled).toBe(true);
+    expect(next).toBeUndefined();
     const back = [...authorization!.querySelectorAll('button')].find(
       (item) => item.textContent === 'previous',
     );
     await act(async () => back!.click());
     expect(
-      document.querySelector('[role="dialog"] button[aria-label="Qwen"]'),
+      document.querySelector(
+        '[role="dialog"] button[aria-label="Qwen Account with Subscription"]',
+      ),
     ).not.toBeNull();
     expect(
       document
-        .querySelector('button[aria-label="Qwen"]')
+        .querySelector('button[aria-label="Qwen Account with Subscription"]')
         ?.classList.contains(styles.optionActive),
     ).toBe(true);
     expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
@@ -731,7 +734,7 @@ describe('subscription development entry', () => {
     await act(async () => find('previous').click());
     expect(
       document
-        .querySelector('button[aria-label="Qwen"]')
+        .querySelector('button[aria-label="Qwen Account with Subscription"]')
         ?.classList.contains(styles.optionActive),
     ).toBe(false);
     expect(
@@ -763,7 +766,8 @@ describe('subscription development entry', () => {
       if (desktop) Object.assign(window, { __TAURI__: { core: { invoke } } });
       await openAuth();
       const button = [...container!.querySelectorAll('button')].find(
-        (item) => item.getAttribute('aria-label') === 'Qwen',
+        (item) =>
+          item.getAttribute('aria-label') === 'Qwen Account with Subscription',
       )!;
       await act(async () => {
         button.click();
@@ -811,7 +815,8 @@ describe('subscription development entry', () => {
     });
     const completion = await openAuth();
     const entry = [...container!.querySelectorAll('button')].find(
-      (item) => item.getAttribute('aria-label') === 'Qwen',
+      (item) =>
+        item.getAttribute('aria-label') === 'Qwen Account with Subscription',
     )!;
     await act(async () => entry.click());
     expect(
@@ -944,7 +949,8 @@ describe('subscription development entry', () => {
       });
       const completion = await openAuth(true);
       const entry = [...document.querySelectorAll('button')].find(
-        (item) => item.getAttribute('aria-label') === 'Qwen',
+        (item) =>
+          item.getAttribute('aria-label') === 'Qwen Account with Subscription',
       )!;
       await act(async () => entry.click());
       expect(completion.onClose).toHaveBeenCalledOnce();
@@ -1013,7 +1019,8 @@ describe('subscription development entry', () => {
     actions.cancelSubscriptionLogin.mockResolvedValue(undefined);
     await openAuth();
     const button = [...container!.querySelectorAll('button')].find(
-      (item) => item.getAttribute('aria-label') === 'Qwen',
+      (item) =>
+        item.getAttribute('aria-label') === 'Qwen Account with Subscription',
     )!;
     await act(async () => {
       button.click();
@@ -1032,8 +1039,137 @@ describe('subscription development entry', () => {
   it('keeps the subscription entry hidden when capability is disabled or unavailable', async () => {
     actions.getSubscriptionConfig.mockRejectedValue(new Error('offline'));
     await openAuth();
-    expect(container!.querySelector('button[aria-label="Qwen"]')).toBeNull();
+    expect(
+      container!.querySelector(
+        'button[aria-label="Qwen Account with Subscription"]',
+      ),
+    ).toBeNull();
     expect(container!.textContent).not.toContain('Local Mock');
     expect(actions.startSubscriptionLogin).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['en', 'plus', true],
+    ['zh-CN', 'pro', false],
+  ] as const)(
+    'shows desktop success after session synchronization (%s, %s)',
+    async (language, plan, existingSession) => {
+      (window as Window & { __TAURI__?: unknown }).__TAURI__ = {
+        core: { invoke: vi.fn() },
+      };
+      try {
+        sessionState.sessionId = existingSession
+          ? 'current-session'
+          : undefined;
+        actions.getSubscriptionConfig.mockResolvedValue({
+          enabled: true,
+          plansUrl: 'https://plans.example',
+        });
+        actions.startSubscriptionLogin.mockResolvedValue({
+          id: 'paid',
+          status: 'ready',
+          userInfo: {
+            sub: 'user',
+            name: 'User',
+            email: 'long-account@example.test',
+            member_type: plan,
+          },
+        });
+        let finish!: () => void;
+        const synchronize = existingSession
+          ? sessionActions.setModel
+          : sessionActions.refreshModels;
+        synchronize.mockReturnValue(
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+        );
+        const completion = await openAuth(true, language);
+        await act(async () =>
+          document
+            .querySelector<HTMLButtonElement>(
+              'button[aria-label="Qwen Account with Subscription"]',
+            )!
+            .click(),
+        );
+        expect(synchronize).toHaveBeenCalledOnce();
+        expect(
+          document.querySelector('[data-subscription-success]'),
+        ).toBeNull();
+        expect(completion.onClose).not.toHaveBeenCalled();
+        await act(async () => finish());
+        const success = document.querySelector('[data-subscription-success]')!;
+        expect(success.textContent).toContain(
+          language === 'en' ? 'Signed in successfully' : '登录成功',
+        );
+        expect(success.textContent).toContain('long-account@example.test');
+        expect(success.textContent).toContain(
+          plan === 'plus' ? 'Qwen Plus' : 'Qwen Pro',
+        );
+        expect(success.textContent).toContain('qwen3.8-max');
+        expect(completion.onMessage).not.toHaveBeenCalled();
+        expect(completion.onClose).not.toHaveBeenCalled();
+        await act(async () =>
+          [...success.querySelectorAll('button')]
+            .find(
+              (button) =>
+                button.textContent ===
+                (language === 'en' ? 'Start Using' : '开始使用'),
+            )!
+            .click(),
+        );
+        expect(completion.onClose).toHaveBeenCalledOnce();
+        expect(completion.onMessage).not.toHaveBeenCalled();
+        expect(actions.activateSubscription).toHaveBeenCalledOnce();
+        expect(actions.signOutSubscription).not.toHaveBeenCalled();
+      } finally {
+        delete (window as Window & { __TAURI__?: unknown }).__TAURI__;
+      }
+    },
+  );
+
+  it('returns purchase switching to all provider groups without signing out', async () => {
+    actions.getSubscriptionConfig.mockResolvedValue({
+      enabled: true,
+      plansUrl: 'https://plans.example',
+    });
+    actions.startSubscriptionLogin.mockResolvedValue({
+      id: 'free',
+      status: 'ready',
+      userInfo: {
+        sub: 'user',
+        name: 'User',
+        email: 'free@example.test',
+        member_type: 'free',
+      },
+    });
+    actions.cancelSubscriptionLogin.mockResolvedValue(undefined);
+    vi.spyOn(window, 'open').mockReturnValue(null);
+    await openAuth(true);
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Qwen Account with Subscription"]',
+        )!
+        .click(),
+    );
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Switch Provider"]',
+        )!
+        .click(),
+    );
+    expect(
+      document.querySelector(
+        'button[aria-label="Qwen Account with Subscription"]',
+      ),
+    ).not.toBeNull();
+    expect(document.querySelector('[role="dialog"]')!.textContent).toContain(
+      'Custom',
+    );
+    expect(actions.cancelSubscriptionLogin).toHaveBeenCalledWith('free');
+    expect(actions.signOutSubscription).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
   });
 });

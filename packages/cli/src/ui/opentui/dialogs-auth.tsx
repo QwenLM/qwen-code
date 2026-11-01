@@ -1292,14 +1292,14 @@ function SubscriptionWaitingIndicator() {
 function SubscriptionView({
   onBack,
   onModelSelectionRequired,
-  onModelStudio,
+  onSwitchProvider,
   suppressBrowserLaunch,
   availableTerminalHeight,
   onConnect,
 }: {
   onBack: () => void;
   onModelSelectionRequired: () => void;
-  onModelStudio: () => void;
+  onSwitchProvider: () => void;
   onConnect?: (signal: AbortSignal) => Promise<void>;
   suppressBrowserLaunch?: boolean;
   availableTerminalHeight?: number;
@@ -1309,20 +1309,10 @@ function SubscriptionView({
     onActivate: onConnect,
   });
   const { state } = flow;
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
   const back = () => {
     flow.cancel();
     if (flow.modelSelectionRequired) onModelSelectionRequired();
     else onBack();
-  };
-  const signOut = async () => {
-    if ((await flow.signOut()) && mounted.current) onBack();
   };
   const renderer = useRenderer();
   useLayoutEffect(() => {
@@ -1349,57 +1339,36 @@ function SubscriptionView({
           },
         ]
       : []),
-    ...(state.status === 'query-error'
+    ...(state.status === 'query-error' ||
+    (state.status === 'purchase-required' && flow.canCheckAgain)
       ? [
           {
             key: 'check',
             value: 'check',
-            label: t('Check again'),
+            label: t('Retry Connection'),
             disabled: flow.checking,
             run: flow.checkAgain,
           },
         ]
       : []),
-    ...(state.status === 'purchase-required'
+    ...(state.status === 'purchase-required' && !flow.canCheckAgain
       ? [
-          ...(flow.canCheckAgain
-            ? [
-                {
-                  key: 'check',
-                  value: 'check',
-                  label: t('Check again'),
-                  disabled: flow.checking,
-                  run: flow.checkAgain,
-                },
-              ]
-            : []),
           {
             key: 'plans',
             value: 'plans',
-            label: t('Open plans again'),
+            label: t('View Plans'),
             description: t('Opens the Qwen Code plans page in your browser'),
             run: flow.openPlans,
           },
           {
             key: 'provider',
             value: 'provider',
-            label: t('Use Alibaba ModelStudio instead'),
-            description: t('Coding Plan, Token Plan, or Standard API Key'),
+            label: t('Switch Provider'),
+            description: t('Choose another model provider'),
             run: () => {
               flow.cancel();
-              onModelStudio();
+              onSwitchProvider();
             },
-          },
-        ]
-      : []),
-    ...(state.status === 'purchase-required'
-      ? [
-          {
-            key: 'signout',
-            value: 'signout',
-            label: t('Sign out'),
-            description: t('Disconnect this device from your Qwen account'),
-            run: () => void signOut(),
           },
         ]
       : []),
@@ -2020,7 +1989,11 @@ function AuthDialogFlow({
           );
           onClose();
         }}
-        onModelStudio={() => setViewLevel('alibaba-select')}
+        onSwitchProvider={() => {
+          clearErrors();
+          setViewStack([]);
+          setViewLevel('main');
+        }}
       />
     );
   }

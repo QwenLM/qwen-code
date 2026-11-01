@@ -11,7 +11,6 @@ export function QwenSubscriptionSidebarStatus({
   onOpenPurchase,
   onRetry,
   onSwitchProvider,
-  onSignOut,
   onCancel,
 }: QwenSubscriptionStatusProps) {
   const { t } = useI18n();
@@ -24,33 +23,29 @@ export function QwenSubscriptionSidebarStatus({
     );
   }
   if (state.status === 'purchase-required') {
-    const actions = [
-      ...(state.canCheckAgain
-        ? [
-            {
-              key: 'check',
-              label: 'Check again',
-              onClick: onRetry,
-              disabled: state.checking,
-            },
-          ]
-        : []),
-      {
-        key: 'plans',
-        label: 'Open plans again',
-        onClick: onOpenPurchase,
-      },
-      {
-        key: 'provider',
-        label: 'Use Alibaba ModelStudio instead',
-        onClick: onSwitchProvider,
-      },
-      {
-        key: 'signout',
-        label: 'Sign out',
-        onClick: onSignOut,
-      },
-    ];
+    const actions = state.canCheckAgain
+      ? [
+          {
+            key: 'check',
+            label: english('subscription.checkAgain'),
+            onClick: onRetry,
+            disabled: state.checking,
+          },
+        ]
+      : [
+          {
+            key: 'plans',
+            label: english('subscription.openPlans'),
+            onClick: onOpenPurchase,
+            disabled: false,
+          },
+          {
+            key: 'provider',
+            label: english('subscription.switchProvider'),
+            onClick: onSwitchProvider,
+            disabled: false,
+          },
+        ];
     return (
       <section
         aria-label={english('subscription.title')}
@@ -135,21 +130,19 @@ export function QwenSubscriptionSidebarStatus({
             onClick={onRetry}
             disabled={state.status === 'query-error' && state.checking}
           >
-            {t(
-              state.status === 'query-error'
-                ? 'subscription.checkAgain'
-                : 'subscription.signInAgain',
-            )}
+            {t('subscription.checkAgain')}
           </Button>
         )}
-        <Button
-          type="button"
-          variant="outline"
-          className={styles.action}
-          onClick={onCancel}
-        >
-          {t('subscription.cancel')}
-        </Button>
+        {state.status !== 'query-error' && (
+          <Button
+            type="button"
+            variant="outline"
+            className={styles.action}
+            onClick={onCancel}
+          >
+            {t('subscription.cancel')}
+          </Button>
+        )}
       </div>
     </section>
   );

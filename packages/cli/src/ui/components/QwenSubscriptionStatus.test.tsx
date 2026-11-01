@@ -9,6 +9,7 @@ import { Text } from 'ink';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { QwenSubscriptionStatus } from './QwenSubscriptionStatus.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
+import { setLanguageAsync } from '../../i18n/index.js';
 
 vi.mock('../hooks/useKeypress.js', () => ({ useKeypress: vi.fn() }));
 vi.mock('./shared/DescriptiveRadioButtonSelect.js', () => ({
@@ -27,7 +28,6 @@ const callbacks = () => ({
   onOpenPlans: vi.fn(),
   onCheckAgain: vi.fn(),
   onSwitchProvider: vi.fn(),
-  onSignOut: vi.fn(),
 });
 
 describe('QwenSubscriptionStatus', () => {
@@ -59,25 +59,20 @@ describe('QwenSubscriptionStatus', () => {
         .mocked(DescriptiveRadioButtonSelect)
         .mock.calls.at(-1)![0];
       expect(menu.items.map((item) => item.title)).toEqual([
-        'Open plans again',
-        'Use Alibaba ModelStudio instead',
-        'Sign out',
+        'View Plans',
+        'Switch Provider',
       ]);
       for (const action of Object.values(actions))
         expect(action).not.toHaveBeenCalled();
       for (const item of menu.items) menu.onSelect(item.value);
       expect(actions.onCheckAgain).not.toHaveBeenCalled();
-      for (const action of [
-        actions.onOpenPlans,
-        actions.onSwitchProvider,
-        actions.onSignOut,
-      ])
+      for (const action of [actions.onOpenPlans, actions.onSwitchProvider])
         expect(action).toHaveBeenCalledOnce();
       ui.unmount();
     },
   );
 
-  it('disables Check again and uses the confirmed checking copy', () => {
+  it('disables Retry Connection and uses the confirmed checking copy', () => {
     const ui = render(
       <QwenSubscriptionStatus
         status="purchase-required"
@@ -92,11 +87,12 @@ describe('QwenSubscriptionStatus', () => {
     const items = vi.mocked(DescriptiveRadioButtonSelect).mock.calls.at(-1)![0]
       .items;
     expect(items.find((item) => item.key === 'check')?.disabled).toBe(true);
-    expect(items.find((item) => item.key === 'plans')).toBeDefined();
+    expect(items.map((item) => item.title)).toEqual(['Retry Connection']);
     ui.unmount();
   });
 
-  it('keeps the purchase actions when the caller supplies a query error', () => {
+  it('offers only retry when the caller supplies a query error', () => {
+    const actions = callbacks();
     const message =
       "Couldn't check your subscription status. Please try again.";
     const ui = render(
@@ -106,16 +102,24 @@ describe('QwenSubscriptionStatus', () => {
         plan="Free"
         message={message}
         canCheckAgain
-        {...callbacks()}
+        {...actions}
       />,
     );
     expect(ui.lastFrame()?.replace(/\s+/g, ' ')).toContain(message);
-    expect(ui.lastFrame()).toContain('Check again');
-    expect(ui.lastFrame()).toContain('Open plans again');
+    expect(ui.lastFrame()).toContain('Retry Connection');
+    expect(ui.lastFrame()).not.toContain('View Plans');
+    expect(ui.lastFrame()).not.toContain('Switch Provider');
+    expect(ui.lastFrame()).not.toContain('Sign out');
+    const menu = vi.mocked(DescriptiveRadioButtonSelect).mock.calls.at(-1)![0];
+    expect(menu.items).toHaveLength(1);
+    menu.onSelect(menu.items[0]!.value);
+    expect(actions.onCheckAgain).toHaveBeenCalledOnce();
+    expect(actions.onOpenPlans).not.toHaveBeenCalled();
+    expect(actions.onSwitchProvider).not.toHaveBeenCalled();
     ui.unmount();
   });
 
-  it('keeps the supplied membership error and Check again action', () => {
+  it('keeps the supplied membership error and Retry Connection action', () => {
     const onRetry = vi.fn();
     const ui = render(
       <QwenSubscriptionStatus
@@ -126,9 +130,52 @@ describe('QwenSubscriptionStatus', () => {
     );
     expect(ui.lastFrame()).toContain('Subscription service unavailable');
     const menu = vi.mocked(DescriptiveRadioButtonSelect).mock.calls.at(-1)![0];
-    expect(menu.items[0]?.title).toBe('Check again');
+    expect(menu.items[0]?.title).toBe('Retry Connection');
     menu.onSelect('check');
     expect(onRetry).toHaveBeenCalledOnce();
     ui.unmount();
   });
+
+  it.each([
+    ['zh', '查看套餐', '切换供应商', '重试'],
+    ['zh-TW', '檢視方案', '切換供應商', '重試'],
+  ])(
+    'localizes purchase and retry actions in %s',
+    async (language, plans, provider, retry) => {
+      await setLanguageAsync(language);
+      const actions = callbacks();
+      const ui = render(
+        <QwenSubscriptionStatus
+          status="purchase-required"
+          email="starter@example.com"
+          plan="Free"
+          {...actions}
+        />,
+      );
+      try {
+        const menu = vi
+          .mocked(DescriptiveRadioButtonSelect)
+          .mock.calls.at(-1)![0];
+        expect(menu.items.map((item) => item.title)).toEqual([plans, provider]);
+        ui.rerender(
+          <QwenSubscriptionStatus
+            status="purchase-required"
+            email="starter@example.com"
+            plan="Free"
+            canCheckAgain
+            {...actions}
+          />,
+        );
+        await vi.waitFor(() => {
+          const retryMenu = vi
+            .mocked(DescriptiveRadioButtonSelect)
+            .mock.calls.at(-1)![0];
+          expect(retryMenu.items.map((item) => item.title)).toEqual([retry]);
+        });
+      } finally {
+        ui.unmount();
+        await setLanguageAsync('en');
+      }
+    },
+  );
 });

@@ -1848,16 +1848,13 @@ export default {
   'Your Qwen session has expired. Run /auth to sign in again.':
     'Your Qwen session has expired. Run /auth to sign in again.',
   'Checking your subscription…': 'Checking your subscription…',
-  'Check again': 'Check again',
-  'Open plans again': 'Open plans again',
+  'Retry Connection': 'Retry Connection',
+  'View Plans': 'View Plans',
   'Opens the Qwen Code plans page in your browser':
     'Opens the Qwen Code plans page in your browser',
-  'Use Alibaba ModelStudio instead': 'Use Alibaba ModelStudio instead',
-  'Coding Plan, Token Plan, or Standard API Key':
-    'Coding Plan, Token Plan, or Standard API Key',
+  'Switch Provider': 'Switch Provider',
+  'Choose another model provider': 'Choose another model provider',
   'Sign out': 'Sign out',
-  'Disconnect this device from your Qwen account':
-    'Disconnect this device from your Qwen account',
   'Enter to select, ↑↓ to navigate · Esc to close':
     'Enter to select, ↑↓ to navigate · Esc to close',
   'Qwen OAuth Authentication': 'Qwen OAuth Authentication',

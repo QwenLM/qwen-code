@@ -12,13 +12,14 @@ afterEach(() => {
   container?.remove();
 });
 
-it('keeps plans and account switching available after a no-membership recheck', () => {
+it('offers only membership retry after a no-membership recheck', () => {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   const openPlans = vi.fn();
   const retry = vi.fn();
-  const signOut = vi.fn();
+  const switchProvider = vi.fn();
+  const cancel = vi.fn();
   act(() =>
     root?.render(
       <I18nProvider language="en">
@@ -34,9 +35,8 @@ it('keeps plans and account switching available after a no-membership recheck', 
           onOpenAuthorization={vi.fn()}
           onOpenPurchase={openPlans}
           onRetry={retry}
-          onSwitchProvider={vi.fn()}
-          onSignOut={signOut}
-          onCancel={vi.fn()}
+          onSwitchProvider={switchProvider}
+          onCancel={cancel}
         />
       </I18nProvider>,
     ),
@@ -46,11 +46,14 @@ it('keeps plans and account switching available after a no-membership recheck', 
       (item) =>
         item.getAttribute('aria-label') === label || item.textContent === label,
     );
-  expect(button('Check again')).toBeDefined();
-  expect(button('Sign out')).toBeDefined();
-  expect(button('Open plans again')).toBeDefined();
-  act(() => button('Open plans again')?.click());
-  expect(openPlans).toHaveBeenCalledOnce();
-  expect(retry).not.toHaveBeenCalled();
-  expect(signOut).not.toHaveBeenCalled();
+  expect(container.querySelectorAll('button')).toHaveLength(1);
+  expect(button('Retry Connection')).toBeDefined();
+  expect(button('Sign out')).toBeUndefined();
+  expect(button('View Plans')).toBeUndefined();
+  expect(button('Switch Provider')).toBeUndefined();
+  act(() => button('Retry Connection')?.click());
+  expect(retry).toHaveBeenCalledOnce();
+  expect(openPlans).not.toHaveBeenCalled();
+  expect(switchProvider).not.toHaveBeenCalled();
+  expect(cancel).not.toHaveBeenCalled();
 });

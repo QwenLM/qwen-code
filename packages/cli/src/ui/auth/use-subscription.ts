@@ -170,9 +170,7 @@ export function useSubscription({
   const activationOwner = useRef<AbortSignal | null>(null);
   const session = useRef<QwenSubscriptionSession | null>(null);
   const lifetime = useRef<AbortController | null>(null);
-  const mounted = useRef(false);
   const busy = useRef(false);
-  const signingOut = useRef(false);
   const plansUrl = useRef('');
   const retryAt = useRef(0);
   const startPurchase = useRef<() => Promise<void>>(async () => {});
@@ -187,7 +185,6 @@ export function useSubscription({
     const controller = new AbortController();
     const { signal } = controller;
     lifetime.current = controller;
-    mounted.current = true;
     activationOwner.current = null;
     confirmedPaidOwner.current = null;
     busy.current = false;
@@ -272,7 +269,6 @@ export function useSubscription({
       if (!signal.aborted) setState(authenticationError(error));
     });
     return () => {
-      mounted.current = false;
       controller.abort();
     };
   }, [suppressBrowserLaunch]);
@@ -344,7 +340,6 @@ export function useSubscription({
       signal.aborted ||
       activationOwner.current === signal ||
       Date.now() < retryAt.current ||
-      signingOut.current ||
       stateRef.current.status !== 'ready' ||
       confirmedPaidOwner.current !== signal
     )
@@ -412,25 +407,6 @@ export function useSubscription({
     void connect();
   }, [state, canActivate, connect]);
 
-  const signOut = async (): Promise<boolean> => {
-    if (signingOut.current || !session.current) return false;
-    signingOut.current = true;
-    busy.current = true;
-    lifetime.current?.abort();
-    setChecking(true);
-    try {
-      await session.current.signOut();
-      return true;
-    } catch (error) {
-      if (mounted.current) setState(authenticationError(error));
-      return false;
-    } finally {
-      signingOut.current = false;
-      busy.current = false;
-      if (mounted.current) setChecking(false);
-    }
-  };
-
   return {
     state,
     email,
@@ -452,7 +428,6 @@ export function useSubscription({
       }
     },
     checkAgain,
-    signOut,
     cancel: () => lifetime.current?.abort(),
   };
 }

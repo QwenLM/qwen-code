@@ -28,7 +28,6 @@ function render(
     onRetry: vi.fn(),
     onCancel: vi.fn(),
     onSwitchProvider: vi.fn(),
-    onSignOut: vi.fn(),
   };
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -72,14 +71,13 @@ describe('QwenSubscriptionStatus', () => {
     const next = [...container.querySelectorAll('button')].find(
       (button) => button.textContent === 'next',
     );
-    expect(next?.disabled).toBe(true);
-    act(() => next?.click());
+    expect(next).toBeUndefined();
     expect(callbacks.onCancel).not.toHaveBeenCalled();
     click('previous');
     expect(callbacks.onCancel).toHaveBeenCalledOnce();
   });
 
-  it.each(['Free', 'Lite'] as const)(
+  it.each(['Free', 'Go'] as const)(
     'allows %s users to open plans while waiting for their purchase',
     (plan) => {
       const callbacks = render({
@@ -101,23 +99,17 @@ describe('QwenSubscriptionStatus', () => {
         [...(options?.querySelectorAll('button') ?? [])].map((button) =>
           button.getAttribute('aria-label'),
         ),
-      ).toEqual([
-        'Open plans again',
-        'Use Alibaba ModelStudio instead',
-        'Sign out',
-      ]);
-      expect(options?.querySelectorAll(`.${styles.option}`)).toHaveLength(3);
-      expect(options?.textContent).not.toContain('Cancel');
-      click('Open plans again');
-      expect(container.textContent).not.toContain('Check again');
+      ).toEqual(['View Plans', 'Switch Provider']);
+      expect(container.querySelectorAll('button')).toHaveLength(2);
+      expect(container.textContent).not.toContain('Cancel');
+      expect(container.textContent).not.toContain('Sign out');
+      click('View Plans');
+      expect(container.textContent).not.toContain('Retry Connection');
       expect(callbacks.onRetry).not.toHaveBeenCalled();
-      click('Use Alibaba ModelStudio instead');
+      click('Switch Provider');
       expect(callbacks.onSwitchProvider).toHaveBeenCalledOnce();
-      click('Sign out');
-      expect(callbacks.onSignOut).toHaveBeenCalledOnce();
       expect(callbacks.onOpenPurchase).toHaveBeenCalledOnce();
-      click('Cancel');
-      expect(callbacks.onCancel).toHaveBeenCalledOnce();
+      expect(callbacks.onCancel).not.toHaveBeenCalled();
     },
   );
 
@@ -135,7 +127,7 @@ describe('QwenSubscriptionStatus', () => {
     },
   );
 
-  it('shows a supplied error as text and allows retry or cancellation', () => {
+  it('shows a supplied query error as text and only allows retry', () => {
     const callbacks = render({
       status: 'query-error',
       message: 'Unable to check membership. <script>ignored</script>',
@@ -147,14 +139,14 @@ describe('QwenSubscriptionStatus', () => {
     expect(container.querySelector('script')).toBeNull();
     expect(container.textContent).not.toContain('Qwen Subscription');
     expect(container.querySelector('[data-slot="alert"]')).toBeNull();
-    click('Check again');
+    click('Retry Connection');
     expect(callbacks.onRetry).toHaveBeenCalledOnce();
-    click('previous');
-    expect(callbacks.onCancel).toHaveBeenCalledOnce();
+    expect(container.querySelectorAll('button')).toHaveLength(1);
+    expect(callbacks.onCancel).not.toHaveBeenCalled();
   });
 
   it.each(['query failure', 'purchase timeout'])(
-    'keeps the plans action alongside manual checking after %s',
+    'offers only a retry after %s',
     (message) => {
       const callbacks = render({
         status: 'purchase-required',
@@ -163,31 +155,43 @@ describe('QwenSubscriptionStatus', () => {
         message,
         canCheckAgain: true,
       });
-      expect(container.textContent).toContain('Open plans again');
-      click('Check again');
+      expect(container.querySelectorAll('button')).toHaveLength(1);
+      expect(container.textContent).not.toContain('View Plans');
+      expect(container.textContent).not.toContain('Switch Provider');
+      click('Retry Connection');
       expect(callbacks.onOpenPurchase).not.toHaveBeenCalled();
       expect(callbacks.onRetry).toHaveBeenCalledOnce();
     },
   );
 
-  it('disables Check again during a membership query', () => {
-    const callbacks = render({
-      status: 'purchase-required',
-      plan: 'Free',
-      email: 'starter@example.com',
-      checking: true,
-      canCheckAgain: true,
-    });
-    expect(container.textContent).toContain('Checking your subscription…');
-    const button = [...container.querySelectorAll('button')].find(
-      (item) => item.getAttribute('aria-label') === 'Check again',
-    );
-    expect(button?.disabled).toBe(true);
-    act(() => button?.click());
-    expect(callbacks.onRetry).not.toHaveBeenCalled();
-    expect(container.textContent).not.toContain('Press any key');
-    expect(container.textContent).not.toContain('Esc to');
-  });
+  it.each(['purchase-required', 'query-error'] as const)(
+    'disables Retry Connection during a %s query',
+    (status) => {
+      const callbacks = render(
+        status === 'query-error'
+          ? { status, message: 'Unable to check membership.', checking: true }
+          : {
+              status,
+              plan: 'Free',
+              email: 'starter@example.com',
+              checking: true,
+              canCheckAgain: true,
+            },
+      );
+      expect(container.textContent).toContain('Checking your subscription…');
+      const button = [...container.querySelectorAll('button')].find(
+        (item) =>
+          item.getAttribute('aria-label') === 'Retry Connection' ||
+          item.textContent === 'Retry Connection',
+      );
+      expect(button?.disabled).toBe(true);
+      expect(container.querySelectorAll('button')).toHaveLength(1);
+      act(() => button?.click());
+      expect(callbacks.onRetry).not.toHaveBeenCalled();
+      expect(container.textContent).not.toContain('Press any key');
+      expect(container.textContent).not.toContain('Esc to');
+    },
+  );
 
   it('follows the host locale for the complete purchase guidance and updates when it changes', () => {
     const state = {
@@ -201,15 +205,14 @@ describe('QwenSubscriptionStatus', () => {
     expect(container.textContent).toContain('Free 账号');
     expect(container.textContent).toContain('正在等待你的订阅生效…');
     expect(container.textContent).toContain('在浏览器中打开 Qwen Code 套餐页');
-    expect(container.textContent).toContain(
-      'Coding Plan、Token Plan 或标准 API Key',
-    );
-    expect(container.textContent).toContain('断开此设备与你的 Qwen 账号的连接');
+    expect(container.textContent).toContain('选择其他模型供应商');
+    expect(container.textContent).not.toContain('退出登录');
     expect(container.textContent).not.toContain("You're signed in");
-    click('重新打开套餐页');
+    click('查看套餐');
     expect(callbacks.onOpenPurchase).toHaveBeenCalledOnce();
-    click('取消');
-    expect(callbacks.onCancel).toHaveBeenCalledOnce();
+    click('切换供应商');
+    expect(callbacks.onSwitchProvider).toHaveBeenCalledOnce();
+    expect(callbacks.onCancel).not.toHaveBeenCalled();
     act(() =>
       root?.render(
         <I18nProvider language="en">
@@ -222,12 +225,12 @@ describe('QwenSubscriptionStatus', () => {
       "You're signed in with a Free account",
     );
     expect(container.textContent).not.toContain('正在等待');
-    click('Open plans again');
+    click('View Plans');
     expect(callbacks.onOpenPurchase).toHaveBeenCalledTimes(2);
   });
 
   it.each(['en', 'zh-CN'] as const)(
-    'does not offer a sign-in retry after authorization failure (%s)',
+    'offers retry before previous without Next after authorization failure (%s)',
     (language) => {
       const message =
         language === 'en'
@@ -241,16 +244,41 @@ describe('QwenSubscriptionStatus', () => {
         message,
       );
       expect(container.querySelectorAll('button')).toHaveLength(2);
+      expect(
+        [...container.querySelectorAll('button')].map(
+          (button) => button.textContent,
+        ),
+      ).toEqual(
+        language === 'en'
+          ? ['Retry Connection', 'previous']
+          : ['重试', '上一步'],
+      );
       const next = [...container.querySelectorAll('button')].find(
         (button) =>
           button.textContent === (language === 'en' ? 'next' : '下一步'),
       );
-      expect(next?.disabled).toBe(true);
+      expect(next).toBeUndefined();
+      click(language === 'en' ? 'Retry Connection' : '重试');
+      expect(callbacks.onRetry).toHaveBeenCalledOnce();
       click(language === 'en' ? 'previous' : '上一步');
       expect(callbacks.onCancel).toHaveBeenCalledOnce();
-      expect(callbacks.onRetry).not.toHaveBeenCalled();
     },
   );
+
+  it('keeps nonretryable credential errors without an authorization retry', () => {
+    const callbacks = render({
+      status: 'error',
+      message: 'Could not save credentials.',
+    });
+    expect(
+      [...container.querySelectorAll('button')].map(
+        (button) => button.textContent,
+      ),
+    ).toEqual(['previous']);
+    click('previous');
+    expect(callbacks.onCancel).toHaveBeenCalledOnce();
+    expect(callbacks.onRetry).not.toHaveBeenCalled();
+  });
 
   it('moves the highlighted action with keyboard focus without activating it', () => {
     const callbacks = render({

@@ -42,7 +42,7 @@ const renderDialogManager = (
 ): ReturnType<typeof renderWithProviders> =>
   renderWithProviders(
     <UIStateContext.Provider value={uiState}>
-      <UIActionsContext.Provider value={{} as UIActions}>
+      <UIActionsContext.Provider value={{ auth: {} } as UIActions}>
         <DialogManager addItem={vi.fn()} terminalWidth={100} />
       </UIActionsContext.Provider>
     </UIStateContext.Provider>,
@@ -50,6 +50,31 @@ const renderDialogManager = (
   );
 
 describe('DialogManager', () => {
+  it.each([14, 24, 40])(
+    'keeps the full provider menu at %i rows',
+    (terminalHeight) => {
+      const uiState = createUIState({
+        terminalHeight,
+        staticExtraHeight: 3,
+        auth: { isAuthDialogOpen: true } as UIState['auth'],
+      });
+      const { lastFrame, unmount } = renderDialogManager(uiState, {
+        getAuthType: () => undefined,
+        getContentGeneratorConfig: () => ({ model: 'test-model' }),
+      });
+      try {
+        const fullFrame = lastFrame();
+        expect(fullFrame).toContain('Connect a Provider');
+        expect(fullFrame).toContain('Custom Provider');
+        expect(fullFrame).toContain('Terms of Services and Privacy Notice:');
+        expect(fullFrame).toMatch(
+          /Token Plan or Standard API Key[^\n]*\n│\s*│\n/,
+        );
+      } finally {
+        unmount();
+      }
+    },
+  );
   // The picker's list comes from the hook, which re-reads the style
   // directories on every open; wiring it to the built-ins instead would hide
   // every custom style and mount the rows during the disk read.
