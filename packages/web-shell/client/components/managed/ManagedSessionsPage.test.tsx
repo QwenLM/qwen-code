@@ -4826,9 +4826,43 @@ describe('ManagedSessionsPage', () => {
         [...container.querySelectorAll('[role="alert"]')].map(
           (element) => element.textContent,
         ),
-      ).toEqual(['History unavailable']);
+      ).toEqual(['Managed sessions could not be loaded.']);
+      expect(container.textContent).not.toContain('History unavailable');
+      expect(container.querySelector('nav [role="alert"]')).not.toBeNull();
     },
   );
+
+  it('keeps an HTTP list failure retryable and does not present it as an empty list', async () => {
+    mocks.client.listSessions
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(
+          500,
+          'internal',
+          'Managed Agent request failed (500)',
+          'request-list-500',
+        ),
+      )
+      .mockResolvedValueOnce({ sessions: [] });
+
+    await render(undefined);
+
+    const alert = container.querySelector<HTMLElement>('nav [role="alert"]');
+    expect(alert?.textContent).toContain(
+      'Managed sessions could not be loaded.',
+    );
+    expect(alert?.textContent).toContain(
+      'HTTP 500 · internal · Request ID: request-list-500',
+    );
+    expect(container.textContent).not.toContain('No managed tasks yet.');
+
+    await click('Retry loading sessions');
+
+    expect(mocks.client.listSessions).toHaveBeenCalledTimes(2);
+    expect(container.textContent).not.toContain(
+      'Managed sessions could not be loaded.',
+    );
+    expect(container.textContent).toContain('No managed tasks yet.');
+  });
 
   it.each(['History unavailable', 'Not found'])(
     'keeps distinct detail errors alongside an inactive navigation alert: %s',
@@ -4844,7 +4878,11 @@ describe('ManagedSessionsPage', () => {
         [...container.querySelectorAll('[role="alert"]')]
           .map((element) => element.textContent)
           .sort(),
-      ).toEqual([...new Set(['History unavailable', detailError])].sort());
+      ).toEqual(
+        [
+          ...new Set(['Managed sessions could not be loaded.', detailError]),
+        ].sort(),
+      );
     },
   );
 
