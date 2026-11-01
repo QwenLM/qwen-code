@@ -106,7 +106,8 @@ Options:
   --skip-database          check, backup: the database is backed up another way
   --runtime-state <dir>    check, backup: the Runtime state directory, or none,
                            instead of the one the server's configuration resolves to
-  --server-url <url>       start, verify: control-plane URL (default from server.env)
+  --server-url <url>       start, verify: control-plane URL (default: the listener
+                           the server's configuration resolves to)
   --timeout <seconds>      stop, start, verify: how long to wait
   --actor <id>             verify: read Sessions as this actor, through the server's
                            trusted actor header
@@ -480,6 +481,8 @@ export function configurationFiles(value) {
   return { files, unread };
 }
 
+// The control plane as server.env alone places it, for a configuration the
+// server jar cannot resolve.
 export function serverBaseUrl(environment) {
   let host =
     environment.get('QWEN_MANAGED_AGENT_SERVER_ADDRESS') || '127.0.0.1';
@@ -2455,6 +2458,47 @@ async function resolveConfiguration(system, deployment) {
 }
 
 /**
+ * Where start and verify reach the control plane, its health endpoint and the
+ * Harness: the listeners the server's configuration resolves to, with the
+ * control plane at --server-url when that is given. When the configuration
+ * does not resolve, the URLs server.env names, and a line that says so.
+ */
+async function listeners(system, deployment, options) {
+  const resolved = await resolvedConfiguration(system, deployment);
+  let urls;
+  if (resolved.error) {
+    const environment = deployment.serverEnvironment;
+    const server = serverBaseUrl(environment);
+    urls = {
+      server,
+      health: `${server}/actuator/health`,
+      harness:
+        environment.get('QWEN_MANAGED_AGENT_HARNESS_BASE_URL') ??
+        'http://127.0.0.1:4170',
+    };
+    system.out(
+      `Cannot resolve the server's listeners: ${resolved.error}; using the URLs server.env names${options.serverUrl ? '' : ', or pass --server-url'}.`,
+    );
+  } else {
+    urls = {
+      server: resolved.serverUrl,
+      health: resolved.healthUrl,
+      harness: resolved.harnessBaseUrl,
+    };
+  }
+  if (options.serverUrl) {
+    urls.server = options.serverUrl;
+    urls.health = `${options.serverUrl}/actuator/health`;
+  }
+  if (!urls.server || !urls.health) {
+    throw new Refusal(
+      `The server's configuration gives ${urls.server ? 'the health endpoint' : 'the control plane'} no fixed port: 0 picks one at start, and a negative one opens none. Pass --server-url <a URL that serves /actuator/health>.`,
+    );
+  }
+  return urls;
+}
+
+/**
  * Whether a unit start started has exited since `started`, how it showed
  * right after the start: it failed, waits to be run again, which the shipped
  * units' Restart=on-failure does instead of failing, or was run again. The
@@ -2487,9 +2531,9 @@ async function waitFor(system, deadline, probe) {
 // waits for the whole budget.
 const PROBE_TIMEOUT_MS = 5000;
 
-async function health(system, baseUrl, budgetMs, capMs = PROBE_TIMEOUT_MS) {
+async function health(system, url, budgetMs, capMs = PROBE_TIMEOUT_MS) {
   try {
-    const response = await system.fetch(`${baseUrl}/actuator/health`, {
+    const response = await system.fetch(url, {
       signal: AbortSignal.timeout(Math.min(budgetMs, capMs)),
     });
     const body = await response.json();
@@ -2520,6 +2564,15 @@ async function phaseStart(system, deployment, options) {
       `Runtime workers of ${server.name} still run (PID ${workers.join(', ')}); run stop first.`,
     );
   }
+  const urls = await listeners(system, deployment, options);
+  let harnessUrl;
+  try {
+    harnessUrl = new URL(urls.harness);
+  } catch {
+    throw new Refusal(
+      `The control plane reaches ${harness.name} at ${JSON.stringify(urls.harness)}, which is not a URL; correct qwen.managed-agent.harness.base-url.`,
+    );
+  }
 
   // An earlier start that the preflight stopped left the Harness running,
   // and systemctl start would leave it as it was: restart it, so it reads
@@ -2534,10 +2587,6 @@ async function phaseStart(system, deployment, options) {
     runChecked(system, 'systemctl', ['restart', harness.name]);
   }
   const harnessStarted = await showUnit(system, harness.name);
-  const harnessUrl = new URL(
-    deployment.serverEnvironment.get('QWEN_MANAGED_AGENT_HARNESS_BASE_URL') ??
-      'http://127.0.0.1:4170',
-  );
   const harnessPort =
     Number(harnessUrl.port) || (harnessUrl.protocol === 'https:' ? 443 : 80);
   const harnessHost = harnessUrl.hostname.replace(/^\[|\]$/g, '');
@@ -2576,8 +2625,6 @@ async function phaseStart(system, deployment, options) {
   system.out(`Starting ${server.name}`);
   runChecked(system, 'systemctl', ['start', server.name]);
   const serverStarted = await showUnit(system, server.name);
-  const baseUrl =
-    options.serverUrl ?? serverBaseUrl(deployment.serverEnvironment);
   const healthy = await waitFor(
     system,
     system.now() + options.timeout * 1000,
@@ -2587,24 +2634,24 @@ async function phaseStart(system, deployment, options) {
       ) {
         return false;
       }
-      return (await health(system, baseUrl, budget)) ? true : undefined;
+      return (await health(system, urls.health, budget)) ? true : undefined;
     },
   );
   if (healthy === false) {
     // Ends the restarts systemd would go on with, so start can run again.
     runChecked(system, 'systemctl', ['stop', server.name]);
     throw new Refusal(
-      `${server.name} exited before it reported UP at ${baseUrl}/actuator/health, and is stopped now; see journalctl -u ${server.name}, then run start again.`,
+      `${server.name} exited before it reported UP at ${urls.health}, and is stopped now; see journalctl -u ${server.name}, then run start again.`,
     );
   }
   if (!healthy) {
     // Left running: the journal may show a start that is merely slow.
     throw new Refusal(
-      `${server.name} did not report UP at ${baseUrl}/actuator/health within ${options.timeout}s and keeps running; see journalctl -u ${server.name}, then run verify, or run stop to start it again.`,
+      `${server.name} did not report UP at ${urls.health} within ${options.timeout}s and keeps running; see journalctl -u ${server.name}, then run verify, or run stop to start it again.`,
     );
   }
   system.out(
-    `${server.name} is UP at ${baseUrl}. Run verify before reopening ingress.`,
+    `${server.name} is UP at ${urls.health}. Run verify before reopening ingress.`,
   );
   return 0;
 }
@@ -2780,6 +2827,7 @@ async function phaseVerify(system, deployment, options) {
       `${down.map((unit) => unit.name).join(' and ')} not running; run start first.`,
     );
   }
+  const urls = await listeners(system, deployment, options);
   const rows = [];
   system.out(
     `Running ${SERVER_LAUNCHER} --check --online as ${server.user || 'root'}`,
@@ -2794,20 +2842,16 @@ async function phaseVerify(system, deployment, options) {
           'read its FAIL rows above',
         ),
   );
-  const baseUrl =
-    options.serverUrl ?? serverBaseUrl(deployment.serverEnvironment);
   const budget = options.timeout * 1000;
   // start has waited for UP already, so one probe that may take the whole
   // budget tells a slow answer from a wrong one.
   rows.push(
-    (await health(system, baseUrl, budget, budget))
-      ? row('health', 'PASS', `${baseUrl}/actuator/health is UP`)
-      : row('health', 'FAIL', `${baseUrl}/actuator/health is not UP`),
+    (await health(system, urls.health, budget, budget))
+      ? row('health', 'PASS', `${urls.health} is UP`)
+      : row('health', 'FAIL', `${urls.health} is not UP`),
   );
   const ingress = 'read a Session through the ingress';
-  const resolved = options.tenant
-    ? await resolvedConfiguration(system, deployment)
-    : undefined;
+  const resolved = await resolvedConfiguration(system, deployment);
   if (!options.tenant) {
     rows.push(
       row(
@@ -2848,7 +2892,7 @@ async function phaseVerify(system, deployment, options) {
     );
   } else {
     const client = {
-      baseUrl,
+      baseUrl: urls.server,
       tenant: options.tenant,
       actor: options.actor && {
         header: resolved.trustedActorHeader,
