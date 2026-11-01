@@ -120,10 +120,10 @@ Spring 会从许多地方解析 `qwen.managed-agent.runtime-broker.state-directo
 `start` 等待 Harness 的端口和控制面的健康端点，`verify` 探测该端点并读取 API。这些地址都可能设置在 `server.env` 看不到的地方：`config/application.yml` 中的 `server.port`、relaxed 形式的 `SERVER_ADDRESS`、命令行参数，或者把 actuator 移到独立监听上的 `management.server.port`。只从 `server.env` 推算时，`start` 会在一个无人监听的端口上等满 `--timeout`。因此两个阶段都从同一份 `ResolvedConfiguration` 输出中取得 URL：
 
 - **控制面：** `server.address` 绑定的地址、`server.port` 绑定的端口；启用 `server.ssl` 时用 `https`。通配地址经其地址族的回环接口访问，其他地址按绑定的地址访问。
-- **健康端点：** 遵循 Spring Boot 关于 management 端口的规则（`ManagementPortType`）。未设置或与服务端端口相同时，它与服务端共用监听；为负数时关闭 HTTP 端点；其他值则在 `management.server.address` 上打开独立监听（未设置时绑定所有接口），位于 `management.server.base-path` 之下，并沿用服务端的 TLS，除非 `management.server.ssl` 替换它。两种情况下都应用 `management.endpoints.web.base-path` 和 `health` 的路径映射。
+- **健康端点：** 遵循 Spring Boot 关于 management 端口的规则（`ManagementPortType`）。未设置或与服务端端口相同时，它与服务端共用监听；为负数时关闭 HTTP 端点；其他值则在 `management.server.address` 上打开独立监听（未设置时绑定所有接口），位于 `management.server.base-path` 之下，并沿用服务端的 TLS，除非 `management.server.ssl` 替换它。两种情况下都应用 `management.endpoints.web.base-path` 和 `health` 的路径映射；路径映射为空白时 Spring Boot 会忽略它，仍使用名称 `health`。
 - **Harness：** `qwen.managed-agent.harness.base-url`，即控制面访问它所用的 URL。
 
-端口为 0（启动时选取）或负数时没有可等待的 URL，因此两个阶段都会拒绝执行，直到 `--server-url` 指定一个。`--server-url` 仍可指定控制面的地址，例如位于代理之后，此时健康端点为 `<url>/actuator/health`。无法解析配置时（即上文的两种情况），两个阶段与以前一样使用 `server.env` 中给出的 URL，并打印一行说明：猜错的代价是等满一次 `--timeout`，而拒绝执行会挡住猜对时本可以完成的升级。
+端口为 0（启动时选取）或负数时没有可等待的 URL，因此两个阶段都会拒绝执行，直到 `--server-url` 指定一个。`--server-url` 仍可指定控制面的地址，例如位于代理之后，此时健康端点为 `<url>/actuator/health`；`verify` 不访问 Harness，这时只为 `--tenant` 解析配置。无法解析配置时（即上文的两种情况），两个阶段与以前一样使用 `server.env` 中给出的 URL，并打印一行说明用了哪些：猜错的代价是等满一次 `--timeout`，而拒绝执行会挡住猜对时本可以完成的升级。
 
 ### 备份是否仍然有效
 

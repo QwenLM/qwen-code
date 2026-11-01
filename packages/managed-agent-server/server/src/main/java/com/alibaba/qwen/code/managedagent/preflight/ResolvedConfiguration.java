@@ -163,15 +163,17 @@ public final class ResolvedConfiguration {
      * it shares the server's listener; negative, it turns the HTTP endpoints
      * off; otherwise it opens a listener of its own, which binds
      * management.server.address and keeps the server's TLS unless
-     * management.server.ssl replaces it. Empty when nothing answers at a
-     * fixed URL.
+     * management.server.ssl replaces it. A blank path mapping keeps the
+     * endpoint's name, as MappingWebEndpointPathMapper ignores it. Empty when
+     * nothing answers at a fixed URL.
      */
     private static String healthUrl(Binder binder, int serverPort,
             boolean serverSsl, String serverUrl) {
         String endpoint = path(binder.bind("management.endpoints.web.base-path",
                 String.class).orElse("/actuator"))
-                + path(binder.bind("management.endpoints.web.path-mapping.health",
-                        String.class).orElse("health"));
+                + path(StringUtils.defaultIfBlank(binder.bind(
+                        "management.endpoints.web.path-mapping.health",
+                        String.class).orElse(null), "health"));
         Integer port = binder.bind("management.server.port", Integer.class)
                 .orElse(null);
         if (port == null || port != 0 && port == serverPort) {

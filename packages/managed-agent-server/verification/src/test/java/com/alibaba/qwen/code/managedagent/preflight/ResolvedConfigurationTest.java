@@ -257,6 +257,14 @@ class ResolvedConfigurationTest {
                 .get("healthUrl"));
         assertEquals("http://127.0.0.1:8080/health", resolve(Map.of(),
                 "--management.endpoints.web.base-path=/").get("healthUrl"));
+        // A blank mapping, such as an unset ${HEALTH_PATH:}, keeps the name.
+        for (String mapping : new String[] {"", "   "}) {
+            assertEquals("http://127.0.0.1:8080/actuator/health",
+                    resolve(Map.of(),
+                            "--management.endpoints.web.path-mapping.health="
+                                    + mapping).get("healthUrl"),
+                    "'" + mapping + "'");
+        }
 
         // The server's TLS carries over unless management.server.ssl
         // replaces it.

@@ -2462,29 +2462,38 @@ async function resolveConfiguration(system, deployment) {
  * Harness: the listeners the server's configuration resolves to, with the
  * control plane at --server-url when that is given. When the configuration
  * does not resolve, the URLs server.env names, and a line that says so.
+ * verify, which does not reach the Harness, leaves the configuration alone
+ * when --server-url names the control plane.
  */
-async function listeners(system, deployment, options) {
-  const resolved = await resolvedConfiguration(system, deployment);
-  let urls;
-  if (resolved.error) {
-    const environment = deployment.serverEnvironment;
-    const server = serverBaseUrl(environment);
-    urls = {
-      server,
-      health: `${server}/actuator/health`,
-      harness:
-        environment.get('QWEN_MANAGED_AGENT_HARNESS_BASE_URL') ??
-        'http://127.0.0.1:4170',
-    };
-    system.out(
-      `Cannot resolve the server's listeners: ${resolved.error}; using the URLs server.env names${options.serverUrl ? '' : ', or pass --server-url'}.`,
-    );
-  } else {
-    urls = {
-      server: resolved.serverUrl,
-      health: resolved.healthUrl,
-      harness: resolved.harnessBaseUrl,
-    };
+async function listeners(
+  system,
+  deployment,
+  options,
+  { reachesHarness = true } = {},
+) {
+  let urls = {};
+  if (reachesHarness || !options.serverUrl) {
+    const resolved = await resolvedConfiguration(system, deployment);
+    if (resolved.error) {
+      const environment = deployment.serverEnvironment;
+      const server = serverBaseUrl(environment);
+      urls = {
+        server,
+        health: `${server}/actuator/health`,
+        harness:
+          environment.get('QWEN_MANAGED_AGENT_HARNESS_BASE_URL') ??
+          'http://127.0.0.1:4170',
+      };
+      system.out(
+        `Cannot resolve the server's listeners: ${resolved.error}; ${options.serverUrl ? 'using the Harness URL server.env names' : 'using the URLs server.env names, or pass --server-url'}.`,
+      );
+    } else {
+      urls = {
+        server: resolved.serverUrl,
+        health: resolved.healthUrl,
+        harness: resolved.harnessBaseUrl,
+      };
+    }
   }
   if (options.serverUrl) {
     urls.server = options.serverUrl;
@@ -2651,7 +2660,7 @@ async function phaseStart(system, deployment, options) {
     );
   }
   system.out(
-    `${server.name} is UP at ${urls.health}. Run verify before reopening ingress.`,
+    `${server.name} is UP at ${urls.health}; its API is at ${urls.server}. Run verify before reopening ingress.`,
   );
   return 0;
 }
@@ -2827,7 +2836,9 @@ async function phaseVerify(system, deployment, options) {
       `${down.map((unit) => unit.name).join(' and ')} not running; run start first.`,
     );
   }
-  const urls = await listeners(system, deployment, options);
+  const urls = await listeners(system, deployment, options, {
+    reachesHarness: false,
+  });
   const rows = [];
   system.out(
     `Running ${SERVER_LAUNCHER} --check --online as ${server.user || 'root'}`,
@@ -2851,7 +2862,9 @@ async function phaseVerify(system, deployment, options) {
       : row('health', 'FAIL', `${urls.health} is not UP`),
   );
   const ingress = 'read a Session through the ingress';
-  const resolved = await resolvedConfiguration(system, deployment);
+  const resolved = options.tenant
+    ? await resolvedConfiguration(system, deployment)
+    : undefined;
   if (!options.tenant) {
     rows.push(
       row(

@@ -1950,7 +1950,7 @@ test('start and verify reach the listeners the server resolves', async (t) => {
   assert.deepEqual(urls(), ['http://127.0.0.1:9091/manage/actuator/health']);
   assert.ok(
     host.output.includes(
-      `${SERVER} is UP at http://127.0.0.1:9091/manage/actuator/health. Run verify before reopening ingress.`,
+      `${SERVER} is UP at http://127.0.0.1:9091/manage/actuator/health; its API is at http://127.0.0.1:9090. Run verify before reopening ingress.`,
     ),
   );
 
@@ -2020,17 +2020,27 @@ test('start and verify use server.env when the configuration does not resolve', 
     [...new Set(host.requests.map(({ url }) => url))],
     ['http://127.0.0.1:18080/actuator/health'],
   );
-  host.requests = [];
+  // --server-url leaves nothing to fall back to but the Harness.
+  await host.stop();
+  host.connections = [];
+  assert.equal(
+    await host.upgrade('start', '--server-url', 'http://127.0.0.1:18081'),
+    0,
+  );
+  assert.ok(
+    host.output.includes(
+      "Cannot resolve the server's listeners: cannot resolve the server configuration: refused; using the Harness URL server.env names.",
+    ),
+  );
+  assert.deepEqual([...new Set(host.connections)], ['127.0.0.1:4172']);
+  // verify reaches no Harness, so it has nothing to resolve.
+  host.services = [];
   assert.equal(
     await host.upgrade('verify', '--server-url', 'http://127.0.0.1:18081'),
     0,
   );
-  // --server-url leaves nothing to fall back to but the Harness.
-  assert.ok(
-    host.output.includes(
-      "Cannot resolve the server's listeners: cannot resolve the server configuration: refused; using the URLs server.env names.",
-    ),
-  );
+  assert.ok(!host.output.some((line) => line.startsWith('Cannot resolve')));
+  assert.ok(!host.services.some(({ args }) => args.includes(RESOLVER)));
   assert.equal(
     rowsOf(host.output).health,
     'PASS http://127.0.0.1:18081/actuator/health is UP',
