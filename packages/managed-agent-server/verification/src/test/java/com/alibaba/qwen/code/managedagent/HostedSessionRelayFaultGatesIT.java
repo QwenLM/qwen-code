@@ -2082,8 +2082,9 @@ class HostedSessionRelayFaultGatesIT {
             arguments.add(
                     "--qwen.managed-agent.events.heartbeat-interval=2s");
             // `cursor-expired-resync` advances the floor itself and then
-            // asserts that exact value; a scheduled advance would move it
-            // underneath the assertions.
+            // asserts that exact value. The flag is false by default; pin
+            // it so a future default flip cannot move the floor underneath
+            // the assertions.
             arguments.add(
                     "--qwen.managed-agent.events.replay-floor-enabled=false");
         }
