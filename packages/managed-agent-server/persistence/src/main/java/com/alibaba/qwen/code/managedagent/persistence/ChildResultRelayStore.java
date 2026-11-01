@@ -125,10 +125,21 @@ public class ChildResultRelayStore
      * and the claim — retirement authorization always reads it here. */
     public String deliveryState(String tenantId, String parentSessionId,
             String childRunId) {
+        return deliveryState(tenantId, parentSessionId, childRunId, false);
+    }
+
+    /** The classification's read locks the record row: a consumption
+     * commit that lands between this read and the mirror write would
+     * otherwise leave the stale snapshot behind a row the correction
+     * could not see yet. The parent's consuming revision updates that
+     * same record row first, so the two commits serialize. */
+    private String deliveryState(String tenantId, String parentSessionId,
+            String childRunId, boolean forUpdate) {
         List<String> rows = jdbc.query(
                 "SELECT delivery_state FROM ma_session_record"
                         + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
-                        + " AND domain = 'child_run' AND record_id = ?",
+                        + " AND domain = 'child_run' AND record_id = ?"
+                        + (forUpdate ? " FOR UPDATE" : ""),
                 (result, row) -> result.getString("delivery_state"),
                 com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, parentSessionId), tenantId, parentSessionId, childRunId);
         return rows.isEmpty() ? null : rows.getFirst();
@@ -822,8 +833,25 @@ public class ChildResultRelayStore
         });
     }
 
+    /**
+     * The parent's consumption revision corrects the classification's
+     * snapshot: classify may commit between acceptance and the wake Turn's
+     * read, and a row left `pending` there would keep claiming a consumed
+     * result never reached the parent. The parent's commit owns the fact,
+     * so it amends the mirror in its own transaction; a row not written
+     * yet is left to its classification, which reads the record's state.
+     */
+    public void markConsumed(String tenantId, String parentSessionId,
+            String childRunId, long now) {
+        jdbc.update("UPDATE ma_delivery SET consumption_state = 'consumed',"
+                        + " gmt_modified = ? WHERE delivery_kind = 'CHILD_RESULT'"
+                        + " AND tenant_id = ? AND source_scope_key = ?"
+                        + " AND delivery_id = ?",
+                now, tenantId, scope(tenantId, parentSessionId), childRunId);
+    }
+
     private void recordDelivery(RelayRow row, String child, String transport, long now) {
-        String delivery = deliveryState(row.tenantId(), row.parentSessionId(), row.childRunId());
+        String delivery = deliveryState(row.tenantId(), row.parentSessionId(), row.childRunId(), true);
         String reception = Set.of("accepted", "consumed").contains(delivery == null ? "" : delivery) ? "accepted" : "pending";
         String consumption = "consumed".equals(delivery) ? "consumed" : "pending";
         String sourceScope = scope(row.tenantId(), row.parentSessionId());
