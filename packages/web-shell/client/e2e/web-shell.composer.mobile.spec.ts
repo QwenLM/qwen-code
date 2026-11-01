@@ -331,7 +331,10 @@ test('switching to simple mode exits Shell before sending the retained draft @sm
     'data-web-shell-composer-variant',
     'default',
   );
-  await composer.getByRole('button', { name: 'Shell mode', exact: true }).tap();
+  await composer.getByTestId('composer-add-menu-trigger').tap();
+  const drawer = page.locator('[data-web-shell-mobile-add-menu]');
+  await drawer.getByRole('button', { name: 'Shell mode', exact: true }).tap();
+  await expect(drawer).toBeHidden();
   await expect(textarea).toHaveAttribute(
     'placeholder',
     'Enter terminal command',

@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.managedagent.extensions;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedConfigInstall;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionPolicyStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
@@ -28,14 +28,14 @@ import java.util.function.Supplier;
 
 @Service
 public class ManagedExtensionManagementService {
-    private final AgentStateStore store;
+    private final SessionPolicyStore store;
     private final ManagedAgentService sessions;
     private final ManagedExtensionRecordStore records;
     private final ManagedExtensionPackageService packages;
     private final ObjectMapper json;
     private final HarnessConnector harness;
 
-    public ManagedExtensionManagementService(AgentStateStore store, ManagedAgentService sessions,
+    public ManagedExtensionManagementService(SessionPolicyStore store, ManagedAgentService sessions,
             ManagedExtensionRecordStore records, ManagedExtensionPackageService packages,
             @Qualifier("managedAgentObjectMapper") ObjectMapper json, HarnessConnector harness) {
         this.store = store;
