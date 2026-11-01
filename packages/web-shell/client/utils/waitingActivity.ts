@@ -52,6 +52,8 @@ export interface WaitingTokenUsageFallback {
   inputTokens?: number;
   outputTokens?: number;
   cachedTokens?: number;
+  /** The connection-level usage object keeps the daemon's wire field name. */
+  cachedReadTokens?: number;
 }
 
 function isTimestamp(value: unknown): value is number {
@@ -151,7 +153,10 @@ export function buildWaitingTokenUsage(
   if (input === 0 && output === 0) {
     input = Math.max(0, fallback.inputTokens ?? 0);
     output = Math.max(0, fallback.outputTokens ?? 0);
-    cached = Math.max(0, fallback.cachedTokens ?? 0);
+    cached = Math.max(
+      0,
+      fallback.cachedTokens ?? fallback.cachedReadTokens ?? 0,
+    );
   }
   return {
     input,

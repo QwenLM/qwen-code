@@ -100,5 +100,12 @@ describe('waiting activity calendar', () => {
       cachedTokens: 1,
     });
     expect(fallback).toEqual({ input: 7, output: 3, cached: 1 });
+
+    const connectionFallback = buildWaitingTokenUsage([{ role: 'user' }], {
+      inputTokens: 100,
+      outputTokens: 20,
+      cachedReadTokens: 50,
+    });
+    expect(connectionFallback).toEqual({ input: 100, output: 20, cached: 50 });
   });
 });
