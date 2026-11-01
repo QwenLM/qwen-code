@@ -2,7 +2,9 @@
 
 [English](2026-10-29-managed-agent-maven-modules.md) | [简体中文](2026-10-29-managed-agent-maven-modules.zh-CN.md)
 
-状态：已在工作树实现，最终验收待 CI。调研基线为 `523be857db`。本设计取代
+状态：已通过 [PR #15871](https://github.com/QwenLM/qwen-code/pull/15871)
+合入 `f3af3dd857`。下方合并后证据区分已完成检查与剩余验收。调研基线为
+`523be857db`。本设计取代
 [源码布局](2026-10-15-managed-agent-server-layout.zh-CN.md)及
 [Java 包设计](2026-10-19-managed-agent-package-boundaries.zh-CN.md)中的单模块边界。
 
@@ -80,6 +82,8 @@ binding 仓储实现它，内存仓储不实现。Broker 使用能力接口而�
 重试所需输入、状态、原因和 cause。SDK payload digest 与 permission rules 算法通过
 小接口委托复用，不复制实现。Workspace 范围和授权 wrapper 留在控制面，物理供应及
 通信进入适配器，实例创建和监听器归 server 装配。
+流空闲超时保留独立的传输异常子类型和原有空闲时长，以便重试诊断区分流静默与其他
+传输故障。
 
 CSI 维护保留持久化顺序：锁定并保存原操作尝试，执行限定的 Kubernetes 操作，然后
 通过栅栏校验保存回执或未知结果。保留 UID/resourceVersion、请求字节及回执摘要。
@@ -205,3 +209,47 @@ SDK 包装保留显式接口实现，将重复的运行时异常转换集中到�
 保留现有行为测试用例。源码比对确认 JavaBean 方法签名及 SDK 委托调用点保持不变。
 这些新增 Java 回归尚未在本地运行：共享预算已用尽，较早的 Java 通过记录不能证明
 本次增量通过。最终编译、质量检查及回归仍待 CI。
+
+## 合并后验证
+
+以下是 2026-10-30 对 CI 源码 `8f93271371` 的观测快照。其 Managed Agent 与 Java
+SDK 子树和合并提交 `f3af3dd857` 完全一致，其他 monorepo 文件存在差异。上文的
+本地结果继续作为历史证据保留。
+
+| 范围              | 观测证据                                                     | 限制                                                              |
+| ----------------- | ------------------------------------------------------------ | ----------------------------------------------------------------- |
+| Java 21 fast 验证 | 5,987 项测试，零失败/错误，17 项跳过；分页测试 11 项全部通过 | 不能替代完整专项 profile                                          |
+| 完整 SDK 矩阵     | Linux Java 11/17/21 与 Windows Java 21 通过                  | Linux Java 21 的 Broker 选择运行 1,259 项测试，16 项跳过          |
+| macOS Java 21     | 1,259 项测试，1 项失败，13 项跳过                            | caller-cancellation 探针取消前未确认响应已开始，CI 未记录实际时序 |
+| 真实集成          | Real daemon 及 RocketMQ Broker/多节点门禁通过                | 此快照中 MySQL、Hosted failover 及 Hosted 故障任务仍在运行或排队  |
+
+对应运行是 [fast gate](https://github.com/QwenLM/qwen-code/actions/runs/41048531547)
+及 [full gate](https://github.com/QwenLM/qwen-code/actions/runs/41071842780)。
+取消探针修正会等待首个响应字节 flush，确认 future 取消成功，在完整 handler 范围观测
+I/O 失败并关闭自建 executor。原有 300 毫秒 deadline、10 秒 caller timeout 及 2 秒
+对端闭连断言保持不变。生产取消实现未改；必须有新一次 macOS 运行才能认定修后探针
+已经验证。
+
+现有独立 Maven 宿主夹具接入完整 MySQL lane。它仅将父 POM 及生产 reactor 安装进
+任务独立 Maven 仓库，以普通 server 依赖解析同一版本，并分别执行未启用及显式启用
+宿主测试，拒绝空测试选择。该检查覆盖不会自动创建 Managed 资源，以及显式启用后
+装配成功；新增 CI 执行仍待完成。
+
+参考分发 CI 校验实际归档校验和并以 MySQL 启动打包服务，运维入口继续由打包集成
+测试覆盖。普通宿主、可执行包/归档及真实集成分别作为独立证据。这些运行不构成真实
+云 OSS 验收。本轮不发布或部署产物，也不重置共享本地 Java 预算。
+
+### Hosted 故障验证后续修正
+
+`2d878d48e2` 的完整运行执行了 165 项 Hosted 集成用例，出现 4 项失败、20 项错误和
+4 项跳过。其中 19 项错误来自测试仍对 SDK 包装本身反射，而非访问其委托对象；池化
+夹具还直接查询了已被包装隐藏的具体 Bean。事件读取器回放使用了旧源码目录深度。
+两个流空闲用例暴露了 SDK 空闲异常子类型及超时时长在契约边界丢失的问题。恢复收敛
+驱动则在已有有界 Items 轮询中，把文档约定可重试的
+`503 message_projection_pending` 当成了终止错误。
+
+后续修正仅在测试故障注入时解包已知边界，向上查找仓库中的 TypeScript 读取器标记，
+保留中立空闲异常子类型，并仅在 Items 轮询中继续等待精确匹配的投影未就绪响应。
+既有期限、终态检查、单次执行断言及报告完整性门禁不变。新增 Java 回归和完整
+Hosted/admission profile 仍待 CI；共享预算耗尽后不恢复本地 Java 检查。独立的
+RocketMQ 磁盘保护失败继续作为环境阻塞，本次改动没有修复该资源问题。

@@ -1,8 +1,10 @@
 package com.alibaba.qwen.code.managedagent.harness;
 
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
+import com.alibaba.qwen.code.managedagent.HostedGateTestSupport;
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerApplication;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.HarnessPlacementStore;
@@ -86,7 +88,10 @@ class HostedHarnessPoolMySqlIT {
         var settings = spring.getBean(ManagedAgentProperties.class);
         settings.getSessionStore().setBaseUrl("http://127.0.0.1:" + spring.getWebServer().getPort());
         var placements = spring.getBean(HarnessPlacementStore.class);
-        pool = spring.getBean(HarnessPoolConnector.class);
+        // The wired bean is the SdkHarnessBoundary decorator, so asking Spring
+        // for the concrete pool type finds nothing; resolve the owner instead.
+        pool = (HarnessPoolConnector) HostedGateTestSupport.connectorOwning(
+                spring.getBean(HarnessConnector.class));
         pool.refresh();
         assertThat(pool.supportsFencedTitles()).isTrue();
         String tenantA = "pool-a-" + UUID.randomUUID();
