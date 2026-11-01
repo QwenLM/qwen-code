@@ -927,7 +927,7 @@ describe('Hosted real-process gates', () => {
       // at 198 minutes). The pool fixture provisionally adds 180 s (its
       // 120 s method ceiling plus 60 s for process/context cleanup), moving
       // the fork to 11444; the FG9e cursor-expired-resync case adds 60 s
-      // (21.3 s measured), moving the fork to 11504 and the step to 202
+      // (21–23 s measured), moving the fork to 11504 and the step to 202
       // minutes until CI measures it: the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.

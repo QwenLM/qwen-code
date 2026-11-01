@@ -1169,7 +1169,7 @@ jobs:
     # fork plus wrap, 16 s left). The pool fixture provisionally reserves
     # 180 s (its 120 s method ceiling plus 60 s for process/context cleanup),
     # pending CI measurement: fork 11444 s and Verify 201 minutes; the FG9e
-    # cursor-expired-resync case adds 60 s (21.3 s measured), so the fork
+    # cursor-expired-resync case adds 60 s (21–23 s measured), so the fork
     # moves to 11504 s and Verify to 202 minutes, wrapping fork + 600 s plus
     # margin (12104 s of fork plus wrap, 16 s left);
     # the Broker fault gates use 20,
