@@ -76,6 +76,9 @@ test('shows the activity heatmap, moves the intro into Tetris and closes when th
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
   const daemon = await installScenario(page, scenario, testInfo);
+  await page.addInitScript(() => {
+    window.localStorage.setItem('qwen-code-web-shell-waiting-games', '1');
+  });
   await gotoSession(page, scenario, daemon);
 
   const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
@@ -101,11 +104,14 @@ test('shows the activity heatmap, moves the intro into Tetris and closes when th
   await expect(game).toBeVisible();
   await expect(game).toContainText('Q&A activity');
   await expect(game).toContainText('Activity');
-  await expect(game.locator('[data-level]')).toHaveCount(44);
+  await expect(game.locator('[data-level]')).toHaveCount(44 * 7);
   await expect(trigger).toHaveAttribute('aria-expanded', 'true');
 
-  await game.locator('[data-level]').first().hover();
-  await expect(game.locator('[role="tooltip"]')).toBeVisible();
+  await game.locator('[data-level]:not([data-empty="true"])').first().hover();
+  const tooltip = game.locator('[role="tooltip"]');
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip).toContainText('Q&A');
+  await expect(tooltip).toContainText('Click to locate');
   await page.screenshot({
     path: testInfo.outputPath('waiting-minigame-heatmap-tooltip.png'),
   });
@@ -161,11 +167,35 @@ test('shows the activity heatmap, moves the intro into Tetris and closes when th
   await expect(trigger).toHaveCount(0);
 });
 
+test('keeps the game entry off without the games config', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+  await startWaitingCard(page, daemon, 'Activity only');
+  const game = page.locator('[data-component="waiting-minigame"]');
+
+  await expect(game).toContainText('Q&A activity');
+  await expect(
+    game.locator('[data-component="waiting-minigame-start"]'),
+  ).toHaveCount(0);
+  await page.waitForTimeout(6_000);
+  await expect(
+    game.locator('[data-component="waiting-minigame-start"]'),
+  ).toHaveCount(0);
+  await game.getByRole('tab', { name: 'Usage' }).click();
+  await expect(game).toContainText('Token usage');
+});
+
 test('keeps the intro blocks still and starts Snake with an apple', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
   const daemon = await installScenario(page, scenario, testInfo);
+  await page.addInitScript(() => {
+    window.localStorage.setItem('qwen-code-web-shell-waiting-games', '1');
+  });
   await gotoSession(page, scenario, daemon);
   await startWaitingCard(page, daemon, 'Snake while waiting');
   const game = page.locator('[data-component="waiting-minigame"]');
@@ -199,6 +229,7 @@ test('renders the waiting card in dark theme and Chinese', async ({
   await page.addInitScript(() => {
     window.localStorage.setItem('qwen-code-web-shell-theme', 'dark');
     window.localStorage.setItem('qwen-code-web-shell-language', 'zh-CN');
+    window.localStorage.setItem('qwen-code-web-shell-waiting-games', '1');
   });
   const scenario = createWebShellDaemonScenario();
   const daemon = await installScenario(page, scenario, testInfo);

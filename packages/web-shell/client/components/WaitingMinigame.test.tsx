@@ -3,6 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../i18n';
+import { buildWaitingActivity } from '../utils/waitingActivity';
 import {
   WaitingMinigame,
   WaitingMinigameButton,
@@ -18,11 +19,21 @@ interface Rendered {
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
-const activity = Array.from({ length: 44 }, (_, index) => ({
-  count: index % 4,
-  startAt: 1_000 + index * 60_000,
-  endAt: 61_000 + index * 60_000,
-}));
+const DAY_MS = 24 * 60 * 60 * 1000;
+const NOW = new Date(2026, 10, 4, 12, 0, 0).getTime();
+const activity = buildWaitingActivity(
+  [
+    { id: 'user-old', role: 'user', timestamp: NOW - 3 * DAY_MS },
+    {
+      id: 'assistant-old',
+      role: 'assistant',
+      timestamp: NOW - 3 * DAY_MS + 60_000,
+    },
+    { id: 'user-today', role: 'user', timestamp: NOW - 1_000 },
+    { id: 'assistant-today', role: 'assistant', timestamp: NOW - 500 },
+  ],
+  { now: NOW },
+);
 const tokens = {
   input: 5_000,
   output: 3_000,
@@ -64,6 +75,7 @@ function render(props: Partial<WaitingMinigameProps> = {}): Rendered {
             activity={next.activity ?? activity}
             tokenUsage={next.tokenUsage ?? tokens}
             onSelectActivity={next.onSelectActivity}
+            gamesEnabled={next.gamesEnabled ?? true}
             entryDelayMs={next.entryDelayMs ?? 0}
           />
         </I18nProvider>,
@@ -145,11 +157,29 @@ describe('WaitingMinigame', () => {
     expect(container.textContent).toContain('Q&A activity');
     expect(container.textContent).toContain('Activity');
     expect(container.textContent).toContain('Usage');
-    expect(container.querySelectorAll('[data-level]')).toHaveLength(44);
+    expect(container.querySelectorAll('[data-level]')).toHaveLength(44 * 7);
     expect(
       container.querySelector('[aria-label="Start a random game"]'),
     ).not.toBeNull();
     expect(container.textContent).not.toContain('Score 0');
+  });
+
+  it('keeps the game entry hidden when games are disabled', () => {
+    const { container } = render({ gamesEnabled: false });
+    expect(container.textContent).toContain('Q&A activity');
+    expect(container.textContent).toContain('Activity');
+    expect(container.textContent).toContain('Usage');
+    expect(
+      container.querySelector('[data-component="waiting-minigame-start"]'),
+    ).toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(6_000);
+    });
+    expect(
+      container.querySelector('[data-component="waiting-minigame-start"]'),
+    ).toBeNull();
+    clickButton(container, 'Usage');
+    expect(container.textContent).toContain('Total tokens');
   });
 
   it('reveals the Qwen entry after the five second delay', () => {
@@ -181,10 +211,9 @@ describe('WaitingMinigame', () => {
     };
     expect(position()).toBe('1:1');
     rerender({
-      activity: activity.map((_, index) => ({
-        count: index === 5 ? 0 : 1,
-        startAt: 1_000,
-        endAt: 2_000,
+      activity: activity.map((day, index) => ({
+        ...day,
+        count: day.future || index === 100 ? 0 : 1,
       })),
     });
     expect(position()).toBe('1:1');
@@ -229,31 +258,39 @@ describe('WaitingMinigame', () => {
     expect(container.textContent).toContain('Arrows / WASD turn');
   });
 
-  it('shows bucket details on hover and locates the clicked bucket', () => {
+  it('shows day details on hover and locates the clicked day', () => {
     const onSelectActivity = vi.fn();
-    const buckets = Array.from({ length: 44 }, (_, index) => ({
-      count: index === 3 ? 2 : 0,
-      startAt: 1_000,
-      endAt: 61_000,
-      ...(index === 3 ? { messageId: 'user-3' } : {}),
-    }));
+    const days = buildWaitingActivity(
+      [
+        {
+          id: 'assistant-hover',
+          role: 'assistant',
+          timestamp: NOW - 1_000,
+        },
+        { id: 'user-hover', role: 'user', timestamp: NOW - 500 },
+      ],
+      { now: NOW },
+    );
     const { container } = render({
-      activity: buckets,
+      activity: days,
       onSelectActivity,
     });
-    const columns = container.querySelectorAll<HTMLElement>('[data-level]');
-    const bucket = columns[3]!;
+    const active = container.querySelector<HTMLElement>(
+      '[data-level]:not([data-empty="true"])',
+    )!;
     act(() => {
-      bucket.dispatchEvent(
+      active.dispatchEvent(
         new MouseEvent('mouseover', { bubbles: true, relatedTarget: null }),
       );
     });
     expect(container.textContent).toContain('2 Q&A');
     expect(container.textContent).toContain('Click to locate');
-    act(() => bucket.click());
-    expect(onSelectActivity).toHaveBeenCalledWith('user-3');
+    act(() => active.click());
+    expect(onSelectActivity).toHaveBeenCalledWith('user-hover');
 
-    const empty = columns[4]!;
+    const empty = container.querySelector<HTMLElement>(
+      'button[data-level][data-empty="true"]',
+    )!;
     act(() => empty.click());
     expect(onSelectActivity).toHaveBeenCalledTimes(1);
   });

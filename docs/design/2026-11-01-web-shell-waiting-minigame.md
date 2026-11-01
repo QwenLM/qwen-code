@@ -29,8 +29,9 @@ line.
     click-to-locate;
   - an `Activity` / `Usage` switch, where `Usage` shows task token consumption
     instead of a credits balance;
-  - a Qwen mark on a random cold cell that appears after five seconds and
-    starts a random game.
+  - an optional, configuration-gated game entry on a random cold day.
+- Keep the activity and usage views available without configuration; the game
+  entry stays hidden unless it is explicitly enabled.
 - Keep keyboard input and the composer usable; never hijack typing.
 - Keep the feature local to the browser: no backend, daemon, transcript,
   telemetry, or model changes.
@@ -46,15 +47,18 @@ line.
 `WaitingMinigameButton` renders at the end of the `StreamingStatus` row while a
 prompt is active. Clicking it mounts `WaitingMinigame` above the row:
 
-1. The card opens on `Activity`: 44 time buckets across the task's own Q&A
-   timeline, each bucket a column of seven cells colored by message density.
-   Hovering a column shows its time range and Q&A count. Clicking a bucket with
-   activity scrolls the transcript to the first Q&A in that bucket and
-   highlights the message.
-2. After five seconds, a white square with the blue Qwen mark appears on a
-   randomly chosen cold cell (a bucket with the fewest messages). Clicking it
-   starts either horizontal Tetris or Snake at random; there is no picker or
-   switch control.
+1. The card opens on `Activity`: a fixed 44-week calendar (44 columns × 7
+   rows). Columns are Monday-to-Sunday weeks and every cell is one local day.
+   The calendar ends with the current week; days after today are empty
+   placeholders. Cell color shows that day's Q&A count, month labels sit below
+   the grid, hovering a cell shows its date and count, and clicking a populated
+   day scrolls the transcript to the first Q&A of that day and highlights the
+   message.
+2. When the game entry is enabled, a white square with the blue Qwen mark
+   appears after five seconds on a randomly chosen cold day. Clicking it starts
+   either horizontal Tetris or Snake at random; there is no picker or switch
+   control. Without the configuration, the Qwen mark and all game controls stay
+   absent and the card remains an activity/usage readout.
 3. The `Usage` tab shows total tokens, input, output, cached, and context
    used/limit for the task. It replaces the credits view from the reference
    design.
@@ -80,16 +84,23 @@ timers.
 - **Inline trigger instead of a banner.** A full-width strip competed with the
   conversation. A single icon at the end of the status line costs no extra row;
   the card only appears on demand.
-- **Activity first.** The expanded card starts with the task's own timeline
-  rather than the game. It gives the card a useful reading state and makes the
-  Qwen mark an intentional game entry.
+- **Activity first.** The expanded card starts with the task's own daily
+  calendar rather than the game. It gives the card a useful reading state and
+  makes the Qwen mark an intentional, optional game entry.
+- **Activity primary, game opt-in.** The card's product purpose is to surface
+  the task's Q&A activity by time; the game is a waiting-time extra. Keeping
+  the game behind configuration avoids shipping an unexpected interactive
+  surface to every user.
 - **Hover details and jump-to-message.** Each bucket exposes its time range and
   Q&A count, and a bucket that contains messages becomes a navigation target.
   The anchor prefers the first user question so the transcript lands at the
   start of the exchange.
 - **Delayed entry on a cold cell.** Hiding the Qwen mark for five seconds keeps
   the heatmap useful during the first moments of a turn. Placing it on the
-  coldest bucket keeps the busiest columns unobstructed.
+  coldest day keeps the busiest dates unobstructed.
+- **Fixed daily cells.** Every cell is one calendar day instead of a bucket
+  stretched from the task span. Time semantics stay stable, a short task simply
+  lights up today's cell, and the month axis matches the reference calendar.
 - **Random game instead of a picker.** A single click starts one of the two
   games; removing the picker and switch keeps the waiting card compact.
 - **Different intros for the two games.** Tetris uses the intro blocks as its
@@ -100,6 +111,10 @@ timers.
 - **Flow layout instead of an overlay.** Adding a normal footer child avoids
   DOM measurement, clipping, and z-index coupling with the editor. The
   trade-off is a transient transcript resize when opening the card.
+- **Stable card frame.** The header, tab row, body and footer are reserved in
+  every view, and the body keeps the calendar height. Switching between
+  activity, usage, intro and game does not resize the card or move the
+  composer.
 - **Main composer only.** The App composer is the single-session surface.
   Split and side-task panes are separate `ChatPane` instances and do not
   render the card.
@@ -118,11 +133,24 @@ timers.
 - Approval and question overlays render above the composer. The card stays
   inside the composer footer below them.
 
+## Configuration
+
+The activity and usage views are always available. The game entry is off by
+default and can be enabled with any of:
+
+- `?waitingGames=1` on the Web Shell URL; `?waitingGames=0` forces it off even
+  when a stored or host flag enables it.
+- `localStorage['qwen-code-web-shell-waiting-games'] = '1'`.
+- A host-injected `window.__QWEN_CODE_WAITING_GAMES__ = true`.
+
+The local harness exposes the same switch as `Games: off/on`. Game screenshots
+in this document were captured with the entry enabled.
+
 ## Screenshots
 
-Captured from the Chromium Web Shell harness with the mock daemon
-(`client/e2e/waiting-minigame.spec.ts`); the usage screenshot uses the local
-harness sample data.
+The activity, usage and dark-theme screenshots use the local harness sample
+data with the game entry off. The intro and game frames use the Chromium E2E
+(`client/e2e/waiting-minigame.spec.ts`) with the game entry enabled.
 
 | Activity heatmap with hover details                                | QWEN CODE intro                                       |
 | ------------------------------------------------------------------ | ----------------------------------------------------- |
@@ -142,21 +170,24 @@ harness sample data.
 
 ## Validation plan
 
-- Activity/token tests: empty timeline, bucket counts, single-message window,
+- Activity/token tests: fixed calendar, day grouping, future placeholders,
   message anchors, usage sums and fallback.
 - Tetris tests: spawn, gravity, movement bounds, rotation kicks, locking,
   column clears, score, speed floor, game over, pause, render grid, and the
   prefilled start cluster.
 - Snake tests: spawn, movement, turn queue and reversals, food and score, wall
   and body collision, pause/restart, render grid, and the slower opening speed.
-- Component tests: closed by default, activity first, hover details, bucket
-  click, five-second Qwen entry, intro timings, Tetris flight and landing,
-  static Snake intro, pause/resume, Escape, tab-hidden pause, trigger state.
+- Component tests: closed by default, activity first, day hover details, day
+  click, hidden game entry by default, configured game entry after five
+  seconds, intro timings, Tetris flight and landing, static Snake intro,
+  pause/resume, Escape, tab-hidden pause, trigger state.
+- Configuration tests: default off, storage flag, URL flag and override,
+  host-injected global.
 - App regression suite (`client/App.test.tsx`) for the composer and streaming
   status.
-- Chromium E2E: trigger → heatmap → hover details → five-second entry →
-  QWEN CODE intro → Tetris flight/landing → pause; Snake intro without
-  movement; dark theme and Chinese copy.
+- Chromium E2E: trigger → heatmap → hover details → game-off default →
+  configured game entry → QWEN CODE intro → Tetris flight/landing → pause;
+  Snake intro without movement; dark theme and Chinese copy.
 - Local harness: `client/e2e/waiting-minigame-harness.html` with synthetic
   activity/token data, selectable entry delay, and theme/language switches.
 
@@ -164,10 +195,12 @@ harness sample data.
 
 - The trigger appears only while a prompt is active; the card closes with the
   turn.
-- The card opens on the 44-bucket activity heatmap, shows bucket details on
-  hover, and locates a clicked bucket in the transcript.
-- The Qwen mark appears after five seconds on a cold cell and starts a random
-  game; both games run in the same 44×7 board.
+- The card opens on a fixed 44-week daily calendar, shows day details on
+  hover, and locates a clicked day in the transcript.
+- The Qwen mark appears after five seconds on a cold day when the game entry
+  is configured; both games run in the same 44×7 board.
+- The game entry and game controls are hidden by default and only appear with
+  the configuration enabled.
 - The Tetris intro blocks form the right-side start cluster; the Snake intro
   does not move its blocks.
 - The game/card does not break composer input and never steals editor keys.

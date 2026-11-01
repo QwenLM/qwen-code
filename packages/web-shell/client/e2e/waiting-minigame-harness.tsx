@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import '../styles/globals.css';
 import '../styles/standalone.css';
@@ -7,20 +7,28 @@ import {
   WaitingMinigame,
   WaitingMinigameButton,
 } from '../components/WaitingMinigame';
-import type { WaitingActivityBucket } from '../utils/waitingActivity';
+import {
+  buildWaitingActivity,
+  type WaitingActivityDay,
+  type WaitingActivityMessage,
+} from '../utils/waitingActivity';
 
-function makeActivity(seed: number): WaitingActivityBucket[] {
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function makeActivity(seed: number): WaitingActivityDay[] {
   const now = Date.now();
-  return Array.from({ length: 44 }, (_, index) => {
-    const startAt = now - 44 * 60_000 + index * 60_000;
-    const count = (index + seed) % 5 === 0 ? 1 + ((index + seed) % 3) : 0;
-    return {
-      count,
-      startAt,
-      endAt: startAt + 60_000,
-      ...(count > 0 ? { messageId: `harness-message-${index}` } : {}),
-    };
-  });
+  const messages: WaitingActivityMessage[] = [];
+  for (let daysAgo = 0; daysAgo < 300; daysAgo++) {
+    if ((daysAgo + seed) % 5 !== 0) continue;
+    const timestamp = now - daysAgo * DAY_MS;
+    messages.push({ id: `harness-user-${daysAgo}`, role: 'user', timestamp });
+    messages.push({
+      id: `harness-assistant-${daysAgo}`,
+      role: 'assistant',
+      timestamp: timestamp + 60_000,
+    });
+  }
+  return buildWaitingActivity(messages, { now });
 }
 
 const TOKENS = {
@@ -38,10 +46,39 @@ function Harness() {
   const [seed, setSeed] = useState(1);
   const [withTokens, setWithTokens] = useState(true);
   const [entryDelayMs, setEntryDelayMs] = useState(0);
+  const [gamesEnabled, setGamesEnabled] = useState(false);
   const [located, setLocated] = useState('');
+  const [nextGame, setNextGame] = useState<'random' | 'tetris' | 'snake'>(
+    'random',
+  );
   const activity = useMemo(() => makeActivity(seed), [seed]);
   const tokenUsage = withTokens ? TOKENS : { input: 0, output: 0, cached: 0 };
   const toggleTheme = () => setDark((value) => !value);
+
+  // 只在点击 Qwen 入口时替换第一次随机数，保证开局堆和后续逻辑仍是随机的
+  useEffect(() => {
+    if (nextGame === 'random') return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (
+        !(target instanceof Element) ||
+        !target.closest('[data-component="waiting-minigame-start"]')
+      ) {
+        return;
+      }
+      const original = Math.random;
+      let used = false;
+      Math.random = () => {
+        if (used) return original();
+        used = true;
+        Math.random = original;
+        return nextGame === 'tetris' ? 0 : 0.999_999;
+      };
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    return () =>
+      document.removeEventListener('pointerdown', onPointerDown, true);
+  }, [nextGame]);
 
   return (
     <I18nProvider language={language}>
@@ -95,6 +132,23 @@ function Harness() {
           </button>
           <button
             type="button"
+            onClick={() => setGamesEnabled((value) => !value)}
+          >
+            Games: {gamesEnabled ? 'on' : 'off'}
+          </button>
+          <span>Next game:</span>
+          {(['random', 'tetris', 'snake'] as const).map((kind) => (
+            <button
+              key={kind}
+              type="button"
+              aria-pressed={nextGame === kind}
+              onClick={() => setNextGame(kind)}
+            >
+              {kind}
+            </button>
+          ))}
+          <button
+            type="button"
             onClick={() => {
               setOpen(false);
               window.setTimeout(() => setOpen(true), 30);
@@ -131,6 +185,7 @@ function Harness() {
               activity={activity}
               tokenUsage={tokenUsage}
               entryDelayMs={entryDelayMs}
+              gamesEnabled={gamesEnabled}
               onSelectActivity={setLocated}
             />
           )}

@@ -213,6 +213,7 @@ import {
   WaitingMinigame,
   WaitingMinigameButton,
 } from './components/WaitingMinigame';
+import { readWaitingGamesEnabled } from './utils/waitingGamesConfig';
 import {
   ToastHost,
   TOAST_REQUEST_EVENT,
@@ -9000,6 +9001,7 @@ export function App({
   const waitingMinigameVisible =
     !suppressFailedPromptRetryStreaming &&
     (streamingState !== 'idle' || sessionHasActivePrompt);
+  const waitingGamesEnabled = useMemo(() => readWaitingGamesEnabled(), []);
   const [waitingMinigameOpen, setWaitingMinigameOpen] = useState(false);
   useEffect(() => {
     if (!waitingMinigameVisible) setWaitingMinigameOpen(false);
@@ -24531,6 +24533,7 @@ export function App({
                             activity={waitingMinigameActivity}
                             tokenUsage={waitingMinigameTokens}
                             onSelectActivity={locateWaitingActivity}
+                            gamesEnabled={waitingGamesEnabled}
                           />
                         )}
                         {streamingState !== 'idle' ||
