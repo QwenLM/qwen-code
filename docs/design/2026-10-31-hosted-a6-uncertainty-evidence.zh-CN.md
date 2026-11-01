@@ -119,6 +119,8 @@ A6 要求三个观察：缺失或未知的 producer 证据必须阻塞；不重�
 - `packages/cli/src/serve/hosted-runtime-recovery.ts`（G3 写入点守卫与 A6 错误子类型）
 - `packages/cli/src/serve/hosted-harness-session.ts`（有边界的 cancel 出口）
 - `packages/cli/src/serve/hosted-child-wait-recovery.test.ts`（G3 fill 级用例）
+- `packages/cli/src/serve/hosted-background-launch-recovery.test.ts`（journal-only
+  workflow/账本拒绝）
 - `packages/cli/src/serve/hosted-harness-session.test.ts`（G3 路由级用例）
 - `packages/cli/src/serve/hosted-approval-continuation.test.ts`（G1/G2 矩阵）
 - 本设计文档（双语）；定向证据落地时同步更新父文档 §9.1 状态注记。
@@ -178,3 +180,15 @@ KILLED，每次还原 sha256 一致。
 门禁：8 个定向套件 1587/1587（harness 文件的 686 个用例在默认全文件运行
 无断言失败但达到 10 分钟执行上限后，分成 175 + 511 两个显式组完成）；
 typecheck RC=0；ESLint 与 Prettier 绿。
+
+## R4 验证跟进（1 条建议——已修复）
+
+- **journal-only workflow 拒绝**：验证者唯一存活的变异 M12 把
+  `settleJournalOnlyInterruptedTurn` 的家族判断缩为
+  `call.name === 'agent'`。现有 `parkYoloWithOwedCall` 夹具现在增加 workflow
+  兄弟用例：没有 child 账本时，接管必须保持
+  `{kind: 'declined', reason: 'model_start'}` 且输入仍未结算。这是纯测试补钉，
+  生产代码不变。
+- M12 现在恰好只使该用例变红（`1 failed | 11 passed`，实际收到
+  `{kind: 'inapplicable'}`），还原后套件 12/12。累计定向证据为 9 个套件、
+  1599 个用例（此前 1587 + 本 journal-only 套件 12）。

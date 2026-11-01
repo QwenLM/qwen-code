@@ -143,6 +143,8 @@ guarded and tested, while the first clause has three concrete evidence gaps:
   A6 error subtype)
 - `packages/cli/src/serve/hosted-harness-session.ts` (the bounded cancel escape)
 - `packages/cli/src/serve/hosted-child-wait-recovery.test.ts` (G3 fill-level cases)
+- `packages/cli/src/serve/hosted-background-launch-recovery.test.ts` (the
+  journal-only workflow/ledger refusal)
 - `packages/cli/src/serve/hosted-harness-session.test.ts` (G3 route-level cases)
 - `packages/cli/src/serve/hosted-approval-continuation.test.ts` (G1/G2 matrix)
 - this design doc (both languages); the parent §9.1 status note is updated when
@@ -240,3 +242,16 @@ Gates: 8 focused suites, 1587/1587 (the harness file's 686 tests completed in
 two explicit groups, 175 + 511, after the default full-file run reached the
 10-minute runner limit without a test failure); typecheck RC=0; ESLint and
 Prettier green.
+
+## R4 verification follow-up (1 Suggestion — fixed)
+
+- **Journal-only workflow refusal**: the verifier's sole surviving mutation,
+  M12, narrowed `settleJournalOnlyInterruptedTurn`'s family test to
+  `call.name === 'agent'`. The existing `parkYoloWithOwedCall` fixture now has
+  a workflow sibling: with no child ledger, the takeover must keep
+  `{kind: 'declined', reason: 'model_start'}` and leave the input unsettled.
+  This is test-only; production code is unchanged.
+- M12 now reds exactly that case (`1 failed | 11 passed`, received
+  `{kind: 'inapplicable'}`), and the restored suite is 12/12. The cumulative
+  focused evidence is 9 suites, 1599 tests (the previous 1587 plus this 12-test
+  journal-only suite).
