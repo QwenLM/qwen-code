@@ -190,7 +190,7 @@ export interface ProviderModelProvidersPatch {
  */
 export type ProviderInstallState = Record<
   string,
-  Record<string, string | undefined>
+  Record<string, string | string[] | undefined>
 >;
 
 export interface ProviderInstallPlan {

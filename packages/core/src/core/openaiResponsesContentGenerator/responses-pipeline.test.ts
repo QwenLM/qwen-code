@@ -1213,6 +1213,36 @@ describe('ResponsesPipeline', () => {
       );
     });
 
+    it.each([
+      [undefined, 'qwen-code-cli'],
+      ['CLI', 'qwen-code-cli'],
+      ['desktop', 'qwen-code-desktop'],
+    ])('attributes channel %s on the Token Plan wire', async (channel, t1) => {
+      await executeDone(
+        pipe(
+          {
+            baseUrl: 'https://token-plan.maas.qianwenaiapi.com/compatible-mode',
+            customHeaders: { 'X-DashScope-Source-Config': 'user' },
+          },
+          { ...makeCliConfig(), getChannel: () => channel } as Config,
+        ),
+      );
+
+      expect(sentHeaders().get('x-dashscope-source-config')).toBe(
+        JSON.stringify({
+          channel: 'qianwenai-inner-agents',
+          source: 'model',
+          tags: { t1 },
+        }),
+      );
+    });
+
+    it('sends no source attribution to other endpoints', async () => {
+      await executeDone();
+
+      expect(sentHeaders().get('x-dashscope-source-config')).toBeNull();
+    });
+
     it('expands ${session_id} per request when the consent gate is on', async () => {
       await executeDone(
         pipe(

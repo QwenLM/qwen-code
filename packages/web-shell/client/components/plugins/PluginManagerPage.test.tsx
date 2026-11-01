@@ -39,11 +39,32 @@ const { workspaceState } = vi.hoisted(() => ({
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => workspaceState,
+  useOptionalWorkspace: () => undefined,
 }));
 
-vi.mock('../extensions/ExtensionsManagerPage', () => ({
-  ExtensionsManagerPage: () => <div>Extensions</div>,
-}));
+vi.mock('../extensions/ExtensionsManagerPage', async () => {
+  const { ManagedExtensionsManagerPage } = await import(
+    '../managed/ManagedExtensionsManagerPage'
+  );
+  return {
+    ExtensionsManagerPage: (props: {
+      managed?: {
+        provider: ManagedAgentProvider;
+        workspaceId?: string;
+        sessionId?: string;
+      };
+      onClose: () => void;
+    }) =>
+      props.managed ? (
+        <ManagedExtensionsManagerPage
+          {...props.managed}
+          onClose={props.onClose}
+        />
+      ) : (
+        <div data-testid="daemon-extensions-page">Extensions</div>
+      ),
+  };
+});
 vi.mock('../agents/AgentsManagerPage', () => ({
   AgentsManagerPage: () => <div>Agents</div>,
 }));
@@ -53,11 +74,32 @@ vi.mock('../skills/SkillsManagerPage', async () => {
     SkillsManagerPage: (props: {
       workspaceCwd?: string;
       workspaceControl?: ReactNode;
-      embedded?: { onDetailChange(open: boolean): void };
+      embedded?: {
+        onDetailChange(open: boolean): void;
+        onBack?: () => void;
+      };
     }) => {
       const [detail, setDetail] = React.useState(false);
       return detail ? (
         <div>
+          {props.embedded?.onBack ? (
+            <button
+              type="button"
+              aria-label="back"
+              onClick={props.embedded.onBack}
+            >
+              back
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => {
+              setDetail(false);
+              props.embedded?.onDetailChange(false);
+            }}
+          >
+            back to skills
+          </button>
           <span data-testid="workspace-cwd">{props.workspaceCwd}</span>
           {props.workspaceControl}
         </div>
@@ -96,6 +138,75 @@ vi.mock('../mcp/McpManagerPage', () => ({
 const { PluginManagerPage } = await import('./PluginManagerPage');
 const { I18nProvider } = await import('../../i18n');
 
+it('keeps Managed Extensions separate from the daemon before Session selection', async () => {
+  const provider = { storageKey: 'managed' } as ManagedAgentProvider;
+  await act(async () =>
+    root.render(
+      <I18nProvider language="en">
+        <PluginManagerPage
+          onClose={vi.fn()}
+          onUseSkill={vi.fn()}
+          managedExtensions={{ provider }}
+        />
+      </I18nProvider>,
+    ),
+  );
+  expect(
+    container.querySelector('[data-testid="daemon-extensions-page"]'),
+  ).toBeNull();
+  expect(container.textContent).toContain(
+    'Select a workspace and session to manage extensions.',
+  );
+});
+
+it('queries the selected Managed Extension Workspace and Session and follows selection changes', async () => {
+  const list = vi.fn(async () => ({ supported: true, extensions: [] }));
+  const query = vi.fn(async (sessionId: string) => ({
+    sessionId,
+    supported: true,
+    revision: 0,
+    extensions: [],
+    requestedExtensions: [],
+  }));
+  const provider = {
+    storageKey: 'managed',
+    extensions: { list, query, apply: vi.fn() },
+  } as unknown as ManagedAgentProvider;
+  const render = async (sessionId: string) => {
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <PluginManagerPage
+            onClose={vi.fn()}
+            onUseSkill={vi.fn()}
+            managedExtensions={{
+              provider,
+              sessionId,
+              workspaceId: `workspace-${sessionId}`,
+            }}
+          />
+        </I18nProvider>,
+      );
+    });
+  };
+  await render('session-a');
+  expect(list).toHaveBeenCalledExactlyOnceWith(
+    'workspace-session-a',
+    expect.anything(),
+  );
+  expect(query).toHaveBeenCalledExactlyOnceWith('session-a', expect.anything());
+  expect(
+    container.querySelector('[data-testid="daemon-extensions-page"]'),
+  ).toBeNull();
+  await render('session-b');
+  expect(list).toHaveBeenLastCalledWith(
+    'workspace-session-b',
+    expect.objectContaining({ signal: expect.any(AbortSignal) }),
+  );
+  expect(query).toHaveBeenLastCalledWith('session-b', expect.anything());
+  expect(provider.extensions!.apply).not.toHaveBeenCalled();
+});
+
 it('keeps the Managed MCP entry separate from the daemon when no Session is selected', async () => {
   const provider = { storageKey: 'managed' } as ManagedAgentProvider;
   await act(async () =>
@@ -114,6 +225,56 @@ it('keeps the Managed MCP entry separate from the daemon when no Session is sele
   expect(container.querySelector('[data-managed-mcp-manager]')).not.toBeNull();
   expect(container.textContent).toContain('Select a Managed Session');
   expect(container.querySelector('[aria-label="Workspace"]')).toBeNull();
+});
+
+it('queries the selected Managed Session through the MCP tab and follows Session changes', async () => {
+  const query = vi.fn(async (sessionId: string) => ({
+    sessionId,
+    revision: 0,
+    supported: true,
+    availableServers: [],
+    servers: [],
+  }));
+  const provider = {
+    storageKey: 'managed',
+    mcpManagement: { query, submit: vi.fn(), operation: vi.fn() },
+  } as unknown as ManagedAgentProvider;
+  const render = async (sessionId: string) => {
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <PluginManagerPage
+            onClose={vi.fn()}
+            onUseSkill={vi.fn()}
+            initialTab="mcp"
+            managedMcp={{
+              provider,
+              sessionId,
+              workspaceId: `workspace-${sessionId}`,
+            }}
+          />
+        </I18nProvider>,
+      );
+    });
+  };
+  await render('session-a');
+  expect(query).toHaveBeenCalledExactlyOnceWith(
+    'session-a',
+    expect.objectContaining({ signal: expect.any(AbortSignal) }),
+  );
+  expect(container.querySelector('[data-testid="mcp-page"]')).toBeNull();
+  expect(
+    container.querySelector('[data-managed-mcp-manager]')?.textContent,
+  ).toContain('session-a');
+  await render('session-b');
+  expect(query).toHaveBeenLastCalledWith('session-b', expect.anything());
+  expect(
+    container.querySelector('[data-managed-mcp-manager]')?.textContent,
+  ).toContain('session-b');
+  expect(
+    container.querySelector('[data-managed-mcp-manager]')?.textContent,
+  ).not.toContain('session-a');
+  expect(provider.mcpManagement!.submit).not.toHaveBeenCalled();
 });
 
 let container: HTMLDivElement;
@@ -238,6 +399,125 @@ describe('PluginManagerPage Skills workspace selector', () => {
     expect(
       container.querySelector('[data-testid="workspace-cwd"]')?.textContent,
     ).toBe('/work/a');
+  });
+});
+
+describe('PluginManagerPage back control', () => {
+  const backButton = () =>
+    container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Back to conversation"]',
+    );
+
+  it('renders a back control wired to onClose', async () => {
+    const onClose = vi.fn();
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <PluginManagerPage
+            onClose={onClose}
+            onUseSkill={vi.fn()}
+            showBackButton
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(backButton()).not.toBeNull();
+    await act(async () => backButton()!.click());
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the back control after switching tabs', async () => {
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <PluginManagerPage
+            onClose={vi.fn()}
+            onUseSkill={vi.fn()}
+            showBackButton
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const mcpTab = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'MCP',
+    );
+    await act(async () => {
+      mcpTab?.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+      mcpTab?.click();
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        container.querySelector('[data-testid="mcp-page"]'),
+      ).not.toBeNull();
+    });
+    expect(backButton()).not.toBeNull();
+  });
+
+  it('omits the back control by default', async () => {
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <PluginManagerPage onClose={vi.fn()} onUseSkill={vi.fn()} />
+        </I18nProvider>,
+      );
+    });
+
+    expect(backButton()).toBeNull();
+  });
+
+  it('keeps a back control in a detail view', async () => {
+    const onClose = vi.fn();
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <PluginManagerPage
+            onClose={onClose}
+            onUseSkill={vi.fn()}
+            showBackButton
+            initialTab="skills"
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const openSkill = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'open skill',
+    );
+    await act(async () => openSkill!.click());
+
+    expect(backButton()).toBeNull();
+    const detailBack = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="back"]',
+    );
+    expect(detailBack).not.toBeNull();
+    await act(async () => detailBack!.click());
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a single back control in managed mode', async () => {
+    const provider = { storageKey: 'managed' } as ManagedAgentProvider;
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <PluginManagerPage
+            onClose={vi.fn()}
+            onUseSkill={vi.fn()}
+            showBackButton
+            managedExtensions={{ provider }}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(
+      container.querySelectorAll('button[aria-label="back"]'),
+    ).toHaveLength(1);
+    expect(backButton()).not.toBeNull();
   });
 });
 

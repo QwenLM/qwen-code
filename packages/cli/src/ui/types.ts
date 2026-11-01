@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { RestoreToolResponseBinding } from './utils/restore-tool-response.js';
 import type {
   CompactionThresholds,
   CompressionStatus,
@@ -210,7 +211,10 @@ export interface HistoryItemBase {
 export type HistoryItemUser = HistoryItemBase & {
   type: 'user';
   text: string;
+  recallText?: string;
   promptId?: string;
+  /** Source-record link for conversation rewind, never for file restore. */
+  rewindId?: string;
   /**
    * Whether this UI history item represents a user turn that reached the model.
    *
@@ -242,11 +246,15 @@ export type HistoryItemLlmThought = HistoryItemBase & {
   type: 'gemini_thought';
   text: string;
   durationMs?: number;
+  isStreaming?: boolean;
+  thoughtGroupId?: number;
 };
 
 export type HistoryItemLlmThoughtContent = HistoryItemBase & {
   type: 'gemini_thought_content';
   text: string;
+  isStreaming?: boolean;
+  thoughtGroupId?: number;
 };
 
 export type HistoryItemInfo = HistoryItemBase & {
@@ -523,6 +531,8 @@ export interface ContextCategoryBreakdown {
   systemPrompt: number;
   builtinTools: number;
   mcpTools: number;
+  /** Instructions are separate when present; older producers combine them with memory. */
+  instructionFiles?: number;
   memoryFiles: number;
   /** Skill tool definition + the `<available_skills>` listing as sent + loaded bodies. */
   skills: number;
@@ -565,6 +575,13 @@ export interface ContextToolDetail {
 export interface ContextMemoryDetail {
   path: string;
   tokens: number;
+  /**
+   * Absolute on-disk path when the row maps to a file the context preview
+   * can open: inside the session workspace, or a global memory file. Absent
+   * for synthetic aggregates and for instruction files outside that readable
+   * scope (parent-directory or extension files), which stay non-interactive.
+   */
+  absolutePath?: string;
 }
 
 export interface ContextSkillDetail {
@@ -585,6 +602,7 @@ export type HistoryItemContextUsage = HistoryItemBase & {
   breakdown: ContextCategoryBreakdown;
   builtinTools: ContextToolDetail[];
   mcpTools: ContextToolDetail[];
+  instructionFiles?: ContextMemoryDetail[];
   memoryFiles: ContextMemoryDetail[];
   skills: ContextSkillDetail[];
   /** True when totalTokens is absent or derived from a local estimate rather than provider usage. */
@@ -996,6 +1014,7 @@ export type SlashCommandProcessorResult =
       type: 'schedule_tool';
       toolName: string;
       toolArgs: Record<string, unknown>;
+      restoreResponseBinding?: RestoreToolResponseBinding;
     }
   | {
       type: 'handled'; // Indicates the command was processed and no further action is needed.
@@ -1011,6 +1030,8 @@ export interface ShellConfirmationRequest {
 }
 
 export interface ConfirmationRequest {
+  signal?: AbortSignal;
+  isCurrent?: () => boolean;
   prompt: ReactNode;
   onConfirm: (confirm: boolean) => void;
 }

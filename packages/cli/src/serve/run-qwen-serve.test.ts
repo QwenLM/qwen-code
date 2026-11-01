@@ -41,6 +41,7 @@ import {
   runQwenServe,
   type RunHandle,
   type RunQwenServeDeps,
+  maxSessionsFromSettings,
   subSessionConcurrencyCapsFromSettings,
   validatePolicyConfig,
   verifyWorkerTlsTrust,
@@ -75,7 +76,10 @@ import type {
   BridgeDaemonStatusSnapshot,
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
-import type { ServeWorkspaceSkillStatus } from '@qwen-code/acp-bridge/status';
+import type {
+  ServeWorkspaceSkillsStatus,
+  ServeWorkspaceSkillStatus,
+} from '@qwen-code/acp-bridge/status';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
 import type { IdleAcpReclaimer } from './idle-acp-reclamation.js';
@@ -90,6 +94,7 @@ import * as trustedFoldersRuntime from '../config/trustedFolders.js';
 import * as trustPolicyRuntime from '../config/daemon-trust-policy.js';
 import * as trustPolicyMonitorRuntime from '../config/daemon-trust-policy-monitor.js';
 import * as workspaceServiceRuntime from './workspace-service/index.js';
+import type { QueryWorkspaceStatusFn } from './workspace-service/types.js';
 import {
   ChannelWorkerStartupError,
   type ChannelWorkerSnapshot,
@@ -121,6 +126,7 @@ import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
 import { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
 import * as scheduledTaskKeepalive from './scheduled-task-keepalive.js';
+import { createDaemonUpdateRestarter } from './daemon-update-restart.js';
 
 const originalTestRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
 const isolatedTestRuntimeDir = fs.realpathSync(
@@ -1277,6 +1283,15 @@ vi.mock('@qwen-code/acp-bridge/spawnChannel', async (importOriginal) => {
   };
 });
 
+vi.mock('./daemon-update-restart.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./daemon-update-restart.js')>();
+  return {
+    ...actual,
+    createDaemonUpdateRestarter: vi.fn(actual.createDaemonUpdateRestarter),
+  };
+});
+
 vi.mock('./channel-worker-manager.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('./channel-worker-manager.js')>();
@@ -1404,6 +1419,260 @@ describe('workspace skill settings persistence', () => {
       ],
     });
   });
+
+  it.each(['single', 'batch'] as const)(
+    'retries catalog identity for a %s enable inside the cold-read throttle window',
+    async (mode) => {
+      writeSkillSettings(['rust:chat'], ['chat']);
+      const idle = {
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: false,
+        skills: [],
+      };
+      const query = vi
+        .fn()
+        .mockResolvedValueOnce(idle)
+        .mockResolvedValue({
+          ...idle,
+          initialized: true,
+          skills: [skillStatus('rust:chat', 'project')],
+        });
+      const original = workspaceServiceRuntime.createDaemonWorkspaceService;
+      vi.spyOn(
+        workspaceServiceRuntime,
+        'createDaemonWorkspaceService',
+      ).mockImplementation((deps) =>
+        original({
+          ...deps,
+          queryWorkspaceStatus: query,
+          workspaceSkillsStatusProvider: vi.fn().mockResolvedValue(idle),
+        }),
+      );
+      const deps = await captureSkillPersistence([]);
+      vi.spyOn(Date, 'now').mockReturnValue(10_000);
+      const service = deps.workspaceRegistry!.primary.workspaceService;
+      const context = { route: 'TEST', workspaceCwd: workspace };
+      expect(
+        (await service.getWorkspaceSkillsStatus(context)).initialized,
+      ).toBe(false);
+      expect(
+        (await service.getWorkspaceSkillsStatus(context)).initialized,
+      ).toBe(false);
+      expect(query).toHaveBeenCalledOnce();
+
+      if (mode === 'single') {
+        await expect(
+          deps.persistDisabledSkills!(workspace, 'rust:chat', true),
+        ).resolves.toMatchObject({ changed: true, disabled: [] });
+      } else {
+        await expect(
+          deps.persistDisabledSkillsBatch!(workspace, ['rust:chat'], true),
+        ).resolves.toMatchObject({
+          outcomes: [{ skillName: 'rust:chat', changed: true }],
+        });
+      }
+      expect(query).toHaveBeenCalledTimes(2);
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(workspace, '.qwen', 'settings.json'),
+            'utf8',
+          ),
+        ).skills,
+      ).toEqual({ enabled: ['rust:chat'] });
+    },
+  );
+
+  it.each(['single', 'batch'] as const)(
+    'does not read the catalog for a %s disable',
+    async (mode) => {
+      writeSkillSettings([]);
+      const query = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: true,
+        skills: [skillStatus('rust:chat', 'project')],
+      });
+      const original = workspaceServiceRuntime.createDaemonWorkspaceService;
+      vi.spyOn(
+        workspaceServiceRuntime,
+        'createDaemonWorkspaceService',
+      ).mockImplementation((deps) =>
+        original({ ...deps, queryWorkspaceStatus: query }),
+      );
+      const { persistDisabledSkills, persistDisabledSkillsBatch } =
+        await captureSkillPersistence([]);
+
+      await (mode === 'single'
+        ? persistDisabledSkills!(workspace, 'rust:chat', false)
+        : persistDisabledSkillsBatch!(workspace, ['rust:chat'], false));
+
+      expect(query).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not hold the settings write lock across a cold catalog read', async () => {
+    writeSkillSettings([]);
+    const never = new Promise<never>(() => undefined);
+    const original = workspaceServiceRuntime.createDaemonWorkspaceService;
+    vi.spyOn(
+      workspaceServiceRuntime,
+      'createDaemonWorkspaceService',
+    ).mockImplementation((deps) =>
+      original({
+        ...deps,
+        queryWorkspaceStatus: vi.fn(() => never),
+        workspaceSkillsStatusProvider: undefined,
+      }),
+    );
+    const { persistDisabledSkills, persistDisabledTools } =
+      await captureSkillPersistence([]);
+
+    void persistDisabledSkills!(workspace, 'rust:chat', true).catch(
+      () => undefined,
+    );
+    const outcome = await Promise.race([
+      persistDisabledTools!(workspace, 'Bash', false).then(() => 'written'),
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve('blocked'), 1_000),
+      ),
+    ]);
+
+    expect(outcome).toBe('written');
+  });
+
+  it.each(['single', 'batch'] as const)(
+    'keeps a later disable behind a %s enable awaiting the catalog',
+    async (mode) => {
+      writeSkillSettings([]);
+      let resolveCatalog: (status: ServeWorkspaceSkillsStatus) => void = () =>
+        undefined;
+      const catalog = new Promise<ServeWorkspaceSkillsStatus>((resolve) => {
+        resolveCatalog = resolve;
+      });
+      const queryMock = vi.fn(() => catalog);
+      const query = queryMock as unknown as QueryWorkspaceStatusFn;
+      const original = workspaceServiceRuntime.createDaemonWorkspaceService;
+      vi.spyOn(
+        workspaceServiceRuntime,
+        'createDaemonWorkspaceService',
+      ).mockImplementation((deps) =>
+        original({
+          ...deps,
+          queryWorkspaceStatus: query,
+          workspaceSkillsStatusProvider: undefined,
+        }),
+      );
+      const { persistDisabledSkills, persistDisabledSkillsBatch } =
+        await captureSkillPersistence([]);
+
+      const enable =
+        mode === 'single'
+          ? persistDisabledSkills!(workspace, 'rust:chat', true)
+          : persistDisabledSkillsBatch!(workspace, ['rust:chat'], true);
+      await vi.waitFor(() => expect(queryMock).toHaveBeenCalled());
+      const disable =
+        mode === 'single'
+          ? persistDisabledSkills!(workspace, 'rust:chat', false)
+          : persistDisabledSkillsBatch!(workspace, ['rust:chat'], false);
+      resolveCatalog({
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: true,
+        skills: [skillStatus('rust:chat', 'project')],
+      });
+
+      await expect(enable).resolves.toMatchObject(
+        mode === 'single'
+          ? { changed: true }
+          : {
+              outcomes: [{ skillName: 'rust:chat', changed: true }],
+            },
+      );
+      await expect(disable).resolves.toMatchObject(
+        mode === 'single'
+          ? { changed: true }
+          : {
+              outcomes: [{ skillName: 'rust:chat', changed: true }],
+            },
+      );
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(workspace, '.qwen', 'settings.json'),
+            'utf8',
+          ),
+        ).skills,
+      ).toEqual({ disabled: ['rust:chat'] });
+    },
+  );
+
+  it.each(['single', 'batch'] as const)(
+    'resolves a %s enable from the retained catalog when fresh sources fail',
+    async (mode) => {
+      writeSkillSettings(['rust:chat'], ['chat']);
+      const idle = {
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: false,
+        skills: [],
+      };
+      const warm = {
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: true,
+        skills: [skillStatus('rust:chat', 'project')],
+      };
+      const query = vi.fn().mockResolvedValueOnce(warm).mockResolvedValue(idle);
+      const original = workspaceServiceRuntime.createDaemonWorkspaceService;
+      vi.spyOn(
+        workspaceServiceRuntime,
+        'createDaemonWorkspaceService',
+      ).mockImplementation((deps) =>
+        original({
+          ...deps,
+          queryWorkspaceStatus: query,
+          workspaceSkillsStatusProvider: vi
+            .fn()
+            .mockRejectedValue(new Error('enumeration failed')),
+          isChannelLive: () => false,
+        }),
+      );
+      const {
+        persistDisabledSkills,
+        persistDisabledSkillsBatch,
+        workspaceRegistry,
+      } = await captureSkillPersistence([]);
+      const service = workspaceRegistry!.primary.workspaceService;
+      await service.getWorkspaceSkillsStatus({
+        route: 'TEST',
+        workspaceCwd: workspace,
+      });
+
+      const result =
+        mode === 'single'
+          ? await persistDisabledSkills!(workspace, 'rust:chat', true)
+          : await persistDisabledSkillsBatch!(workspace, ['rust:chat'], true);
+
+      expect(result).toMatchObject(
+        mode === 'single'
+          ? { changed: true, disabled: [] }
+          : {
+              outcomes: [{ skillName: 'rust:chat', changed: true }],
+            },
+      );
+      expect(result).not.toHaveProperty('block');
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(workspace, '.qwen', 'settings.json'),
+            'utf8',
+          ),
+        ).skills,
+      ).toEqual({ enabled: ['rust:chat'] });
+    },
+  );
 
   it('preserves the legacy bare-name block for extensions and uncatalogued skills', async () => {
     writeSkillSettings([], ['pdf', 'legacy']);
@@ -2092,6 +2361,34 @@ describe('subSessionConcurrencyCapsFromSettings', () => {
     const onWarning = vi.fn();
     subSessionConcurrencyCapsFromSettings({}, onWarning);
     expect(onWarning).not.toHaveBeenCalled();
+  });
+});
+
+describe('maxSessionsFromSettings', () => {
+  it('honors non-negative integers and Infinity', () => {
+    expect(maxSessionsFromSettings({ maxSessions: 0 })).toBe(0);
+    expect(maxSessionsFromSettings({ maxSessions: 64 })).toBe(64);
+    expect(
+      maxSessionsFromSettings({ maxSessions: Number.POSITIVE_INFINITY }),
+    ).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it('omits an absent key so the built-in default applies', () => {
+    const onWarning = vi.fn();
+    expect(maxSessionsFromSettings({}, onWarning)).toBeUndefined();
+    expect(maxSessionsFromSettings(undefined, onWarning)).toBeUndefined();
+    expect(onWarning).not.toHaveBeenCalled();
+  });
+
+  it('rejects values the bridge would refuse and warns', () => {
+    const onWarning = vi.fn();
+    for (const value of [-1, 2.5, Number.NaN, '32', true, null]) {
+      expect(maxSessionsFromSettings({ maxSessions: value }, onWarning)) //
+        .toBeUndefined();
+    }
+    expect(onWarning).toHaveBeenCalledTimes(6);
+    expect(onWarning.mock.calls[0][0]).toContain('serve.maxSessions');
+    expect(onWarning.mock.calls[0][0]).toContain('-1');
   });
 });
 
@@ -4774,6 +5071,61 @@ describe('runQwenServe daemon logger wiring', () => {
   }, 10_000);
 });
 
+describe('serve.maxSessions boot resolution', () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  async function bootAndAdvertise(
+    optionMaxSessions: number | undefined,
+    settingsMaxSessions: unknown,
+  ): Promise<number | null> {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ms-')));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        ...(optionMaxSessions !== undefined
+          ? { maxSessions: optionMaxSessions }
+          : {}),
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        preheatBridge: false,
+        bootSettings: { serve: { maxSessions: settingsMaxSessions } },
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      const res = await fetch(`${handle.url}/capabilities`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        limits: { maxSessionsPerWorkspace: number | null };
+      };
+      return body.limits.maxSessionsPerWorkspace;
+    } finally {
+      await handle.close();
+    }
+  }
+
+  it('applies serve.maxSessions when the flag is omitted', async () => {
+    await expect(bootAndAdvertise(undefined, 7)).resolves.toBe(7);
+  });
+
+  it('lets the flag win over serve.maxSessions', async () => {
+    await expect(bootAndAdvertise(5, 7)).resolves.toBe(5);
+  });
+
+  it('keeps the built-in default for an invalid setting', async () => {
+    await expect(bootAndAdvertise(undefined, -1)).resolves.toBe(32);
+  });
+});
+
 describe('runQwenServe telemetry validation', () => {
   let tmpDir: string;
   const originalSensitiveSpanAttributeMaxLengthEnv =
@@ -4964,6 +5316,57 @@ describe('runQwenServe telemetry validation', () => {
         reason: 'daemon_shutdown',
       });
     }
+  });
+
+  it('derives the multi-workspace total cap from serve.maxSessions', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ms-total-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => makeRuntimeBridge());
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        maxRegisteredWorkspaces: 2,
+        serveWebShell: false,
+      },
+      {
+        preheatBridge: false,
+        bootSettings: { serve: { maxSessions: 3 } },
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      const res = await fetch(`${handle.url}/capabilities`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        limits: {
+          maxSessionsPerWorkspace: number | null;
+          maxTotalSessions: number | null;
+        };
+      };
+      expect(body.limits.maxSessionsPerWorkspace).toBe(3);
+      // maxRegisteredWorkspaces: 2 keeps the capacity at or below the 25
+      // threshold, so the total is derived from the resolved per-workspace
+      // cap instead of the flat 800.
+      expect(body.limits.maxTotalSessions).toBe(6);
+    } finally {
+      await handle.close();
+    }
+    expect(createBridge).toHaveBeenCalledTimes(2);
   });
 
   it('drains every lifecycle runtime before close yields', async () => {
@@ -6560,6 +6963,8 @@ describe('runQwenServe deployment profiles', () => {
           token: 'hosted-secret',
           serveWebShell: false,
           hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          managedRuntimeBrokerUrl: 'https://broker.internal',
+          managedRuntimeBrokerToken: 'file-fed-broker-secret',
         },
         {
           bridge: makeRuntimeBridge(),
@@ -6567,12 +6972,122 @@ describe('runQwenServe deployment profiles', () => {
         },
       );
       expect(createApp.mock.calls[0]?.[0].channelSelection).toBeUndefined();
+      expect(createApp.mock.calls[0]?.[0].managedRuntimeBrokerUrl).toBe(
+        'https://broker.internal',
+      );
+      expect(createApp.mock.calls[0]?.[0].managedRuntimeBrokerToken).toBe(
+        'file-fed-broker-secret',
+      );
       expect(createApp.mock.calls[0]?.[2]?.manageScheduledTaskSessions).toBe(
         false,
       );
     } finally {
       await handle?.close();
       createApp.mockRestore();
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { hosted: false, deferred: false },
+    { hosted: true, deferred: false },
+    { hosted: false, deferred: true },
+    { hosted: true, deferred: true },
+  ])(
+    'scopes local session recovery to ordinary profiles (Hosted: $hosted, deferred: $deferred)',
+    async ({ hosted, deferred }) => {
+      const workspace = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-local-state-')),
+      );
+      const chats = vi.spyOn(
+        qwenCore.SessionService.prototype,
+        'getWorktreeSessionPath',
+      );
+      let handle: RunHandle | undefined;
+      let restoreBridge: (() => void) | undefined;
+      try {
+        const options = {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          serveWebShell: false,
+          ...(hosted
+            ? {
+                profile: 'hosted-harness' as const,
+                token: 'hosted-secret',
+                hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+                managedRuntimeBrokerUrl: 'https://broker.internal',
+                managedRuntimeBrokerToken: 'broker-secret',
+              }
+            : {}),
+        } satisfies Parameters<typeof runQwenServe>[0];
+        const deps = {
+          trustedWorkspace: true,
+          daemonLogBaseDir: path.join(workspace, 'debug'),
+        };
+        if (deferred) {
+          const started = await startDeferredDaemon(workspace, {
+            serveOptions: options,
+            deps,
+          });
+          handle = started.handle;
+          restoreBridge = () => started.createBridge.mockRestore();
+          await fetch(`${handle.url}/health`);
+          await handle.runtimeReady;
+        } else {
+          handle = await runQwenServe(options, {
+            ...deps,
+            bridge: makeRuntimeBridge(),
+          });
+        }
+        if (hosted) expect(chats).not.toHaveBeenCalled();
+        else expect(chats).toHaveBeenCalled();
+      } finally {
+        await handle?.close();
+        restoreBridge?.();
+        chats.mockRestore();
+        fs.rmSync(workspace, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('hands the update restarter the Broker pair the Hosted Harness resolved', async () => {
+    const workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-restart-')),
+    );
+    vi.mocked(createDaemonUpdateRestarter).mockClear();
+    let handle: RunHandle | undefined;
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          profile: 'hosted-harness',
+          token: 'hosted-secret',
+          serveWebShell: false,
+          hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          managedRuntimeBrokerUrl: 'https://broker.internal',
+          managedRuntimeBrokerToken: 'broker-secret',
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          daemonLogBaseDir: path.join(workspace, 'debug'),
+          updateRestartArgv: ['serve', '--profile', 'hosted-harness'],
+        },
+      );
+      // `qwen serve` has already removed the pair from its environment, so
+      // the replacement gets it only through these options.
+      expect(createDaemonUpdateRestarter).toHaveBeenCalledWith(
+        expect.objectContaining({
+          managedRuntimeBrokerUrl: 'https://broker.internal',
+          managedRuntimeBrokerToken: 'broker-secret',
+        }),
+      );
+    } finally {
+      await handle?.close();
       fs.rmSync(workspace, { recursive: true, force: true });
     }
   });
@@ -8402,6 +8917,146 @@ describe('runQwenServe runtime startup failures', () => {
     vi.restoreAllMocks();
     if (tmpDir) {
       fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('binds workflow mode writes to the trusted owner of each runtime generation', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-workflow-mode-owners-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    const added = path.join(tmpDir, 'added');
+    for (const cwd of [primary, secondary, added]) fs.mkdirSync(cwd);
+    vi.spyOn(
+      trustPolicyRuntime,
+      'readDaemonTrustPolicySnapshot',
+    ).mockResolvedValue({
+      revision: 'trusted-workflow-mode-owners',
+      folderTrustEnabled: false,
+      ideTrust: undefined,
+      trustedFolders: {},
+    });
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => ({
+        ...makeRuntimeBridge(),
+        getSessionSummary: vi
+          .fn()
+          .mockImplementation((sessionId: string) => ({ sessionId })),
+      }));
+    let registry: WorkspaceRegistry | undefined;
+    const createApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      registry = args[2]?.workspaceRegistry;
+      return createApp(...args);
+    });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        token: 'workflow-mode-token',
+        serveWebShell: false,
+      },
+      { preheatBridge: false, daemonLogBaseDir: path.join(tmpDir, 'debug') },
+    );
+    try {
+      const response = await fetch(`${handle.url}/workspaces`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer workflow-mode-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ cwd: added, persist: false }),
+      });
+      expect(response.status).toBe(201);
+      expect(createBridge).toHaveBeenCalledTimes(3);
+      const options = createBridge.mock.calls.map(([options]) => options);
+      for (const [index, option] of options.entries()) {
+        expect(option.isWorkflowModeWriteAllowed).toBeTypeOf('function');
+        expect(option.isWorkflowModeWriteAllowed!('missing-session')).toBe(
+          false,
+        );
+        option.sessionLifecycle!({
+          type: 'registered',
+          sessionId: `owned-session-${index}`,
+          workspaceCwd: option.boundWorkspace!,
+          reason: 'spawn',
+        });
+      }
+      for (const [index, option] of options.entries()) {
+        expect(
+          option.isWorkflowModeWriteAllowed!(`owned-session-${index}`),
+        ).toBe(true);
+        expect(
+          option.isWorkflowModeWriteAllowed!(
+            `owned-session-${(index + 1) % options.length}`,
+          ),
+        ).toBe(false);
+      }
+      const dynamic = options[2]!;
+      const entry = registry!.getManagedEntryByWorkspaceCwd(
+        dynamic.boundWorkspace!,
+      )!;
+      expect(registry!.beginReplacement(entry, 'revoked')).toBe(true);
+      expect(dynamic.isWorkflowModeWriteAllowed!('owned-session-2')).toBe(
+        false,
+      );
+      expect(options[0]!.isWorkflowModeWriteAllowed!('owned-session-0')).toBe(
+        true,
+      );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('denies workflow mode writes for an untrusted primary owner', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-workflow-mode-untrusted-')),
+    );
+    vi.spyOn(
+      trustPolicyRuntime,
+      'readDaemonTrustPolicySnapshot',
+    ).mockResolvedValue({
+      revision: 'untrusted-workflow-mode-owner',
+      folderTrustEnabled: true,
+      ideTrust: undefined,
+      trustedFolders: {},
+    });
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => ({
+        ...makeRuntimeBridge(),
+        getSessionSummary: vi
+          .fn()
+          .mockReturnValue({ sessionId: 'untrusted-session' }),
+      }));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      { preheatBridge: false, daemonLogBaseDir: path.join(tmpDir, 'debug') },
+    );
+    try {
+      const options = createBridge.mock.calls[0]![0];
+      expect(options.isWorkflowModeWriteAllowed).toBeTypeOf('function');
+      options.sessionLifecycle!({
+        type: 'registered',
+        sessionId: 'untrusted-session',
+        workspaceCwd: tmpDir,
+        reason: 'spawn',
+      });
+      expect(options.isWorkflowModeWriteAllowed!('untrusted-session')).toBe(
+        false,
+      );
+    } finally {
+      await handle.close();
     }
   });
 
@@ -14053,7 +14708,7 @@ vi.mock('./server/session-pr-refresh.js', () => {
   );
 });
 
-describe('session-pr-refresh degraded load on the serve fast path', () => {
+describe('session-pr-refresh isolation on the serve fast path', () => {
   let tmpDir: string;
 
   afterEach(() => {
@@ -14063,37 +14718,55 @@ describe('session-pr-refresh degraded load on the serve fast path', () => {
     }
   });
 
-  it('degrades to no PR-state sweep instead of leaking an unhandled rejection', async () => {
-    tmpDir = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-pr-refresh-degrade-')),
-    );
-    // The serve fast path installs no process-level unhandledRejection
-    // handler before the runtime builds, so record them here: without the
-    // import's .catch the rejection escapes and Node's default is to exit.
-    const rejections: unknown[] = [];
-    const recordRejection = (reason: unknown): void => {
-      rejections.push(reason);
-    };
-    process.on('unhandledRejection', recordRejection);
-    let handle: RunHandle | undefined;
-    try {
-      ({ handle } = await startDeferredDaemon(tmpDir));
-      const health = await fetch(`${handle.url}/health`);
-      expect(health.status).toBe(200);
-      // The first health schedules the runtime build; the refresh module
-      // import fires inside it and rejects on the next turns.
-      await expect(handle.runtimeReady).resolves.toBeUndefined();
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      expect(rejections).toEqual([]);
-      // The intended degradation is "no PR-state sweep" — the daemon keeps
-      // serving everything else.
-      const healthAfter = await fetch(`${handle.url}/health`);
-      expect(healthAfter.status).toBe(200);
-    } finally {
-      process.off('unhandledRejection', recordRejection);
-      await handle?.close();
-    }
-  });
+  it.each([false, true])(
+    'keeps serving when the refresh chunk is unavailable (Hosted: %s)',
+    async (hosted) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-pr-refresh-degrade-')),
+      );
+      // The serve fast path installs no process-level unhandledRejection
+      // handler before the runtime builds, so record them here: without the
+      // import's .catch the rejection escapes and Node's default is to exit.
+      const stderr = vi.spyOn(process.stderr, 'write');
+      const rejections: unknown[] = [];
+      const recordRejection = (reason: unknown): void => {
+        rejections.push(reason);
+      };
+      process.on('unhandledRejection', recordRejection);
+      let handle: RunHandle | undefined;
+      try {
+        ({ handle } = await startDeferredDaemon(tmpDir, {
+          serveOptions: hosted
+            ? {
+                profile: 'hosted-harness',
+                serveWebShell: false,
+                hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+              }
+            : {},
+        }));
+        const headers = { authorization: 'Bearer secret-token' };
+        const health = await fetch(`${handle.url}/health`, { headers });
+        expect(health.status).toBe(200);
+        // The first health schedules the runtime build; the refresh module
+        // import fires inside it and rejects on the next turns.
+        await expect(handle.runtimeReady).resolves.toBeUndefined();
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        expect(rejections).toEqual([]);
+        expect(
+          stderr.mock.calls.some(([chunk]) =>
+            String(chunk).includes('session-pr-refresh load failed:'),
+          ),
+        ).toBe(!hosted);
+        // The intended degradation is "no PR-state sweep" — the daemon keeps
+        // serving everything else.
+        const healthAfter = await fetch(`${handle.url}/health`, { headers });
+        expect(healthAfter.status).toBe(200);
+      } finally {
+        process.off('unhandledRejection', recordRejection);
+        await handle?.close();
+      }
+    },
+  );
 });
 
 describe('runQwenServe Web Shell signals on RunHandle', () => {
@@ -21004,6 +21677,9 @@ describe('runQwenServe channel worker supervisor', () => {
   });
 
   it('keeps serve running when worker pidfile metadata cannot be written', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-pidfile-')),
     );
@@ -21038,8 +21714,14 @@ describe('runQwenServe channel worker supervisor', () => {
       await handle.runtimeReady;
       expect(worker.start).toHaveBeenCalled();
       expect(pidfile.writeServeServiceInfo).toHaveBeenCalled();
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'failed to write channel worker pidfile metadata: disk full',
+        ),
+      );
     } finally {
       await handle.close();
+      stderr.mockRestore();
     }
   });
 
@@ -21758,6 +22440,63 @@ describe('runQwenServe channel worker supervisor', () => {
     } finally {
       await handle.close();
     }
+  });
+
+  it('keeps the Hosted Harness on its requested port', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-port-')),
+    );
+    const portsAttempted: number[] = [];
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+    } as unknown as express.Application);
+    const testServer = createServer();
+    testServer.listen = vi.fn((port: number) => {
+      portsAttempted.push(port);
+      const err = new Error('address in use') as NodeJS.ErrnoException;
+      err.code = 'EADDRINUSE';
+      setImmediate(() => testServer.emit('error', err));
+      return testServer;
+    }) as unknown as typeof testServer.listen;
+
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 4170,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            profile: 'hosted-harness',
+            token: 'hosted-secret',
+            serveWebShell: false,
+            hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          },
+          {
+            bridge: makeFakeBridge(),
+            httpServerFactory: () => testServer,
+            resolveOnListen: true,
+          },
+        ),
+      ).rejects.toMatchObject({ code: 'EADDRINUSE' });
+    } finally {
+      stderrSpy.mockRestore();
+    }
+    expect(portsAttempted).toEqual([4170]);
+    expect(
+      stderrWrites.some((w) =>
+        w.includes(
+          'port 4170 is in use; --profile hosted-harness does not move to another port',
+        ),
+      ),
+    ).toBe(true);
   });
 
   it('does not retry on non-EADDRINUSE listen errors', async () => {

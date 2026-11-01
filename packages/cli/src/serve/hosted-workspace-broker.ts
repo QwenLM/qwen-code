@@ -48,6 +48,11 @@ import type {
   ManagedMonitorControl,
   ManagedMonitorOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-monitor-protocol.js';
+import type { ManagedExtensionRuntimeControl } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-package.js';
+import {
+  MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
+  MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+} from './managed-extension-profile.js';
 import type { ManagedSessionLifecycleAuthority } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 
 export interface HostedWorkspaceBrokerOptions {
@@ -126,9 +131,11 @@ export class HostedWorkspaceBrokerExecutionUnresolved extends Error {
 }
 
 export class HostedWorkspaceBroker {
+  private extensionBinding?: { runtimeBindingId: string; generation: string };
   private readonly baseUrl: URL;
   private leaseAcquired = false;
   private capability?: string;
+  private capabilityResolution?: Promise<void>;
   private readonly identity: {
     harnessSessionId: string;
     runtimeSessionId: string;
@@ -211,6 +218,19 @@ export class HostedWorkspaceBroker {
     if (response['runtime'] !== undefined) this.readRuntime(response);
   }
 
+  async resolveCapabilities(): Promise<void> {
+    if (this.capability !== undefined) return;
+    await (this.capabilityResolution ??= this.harnessRequest(
+      '/runtimes:capabilities',
+      {},
+    )
+      .then((response) => this.readRuntime(response))
+      .catch((cause: unknown) => {
+        this.capabilityResolution = undefined;
+        throw cause;
+      }));
+  }
+
   async mcpDefinitions(
     originalOwner = false,
   ): Promise<readonly HostedPublishedMcpServer[]> {
@@ -281,6 +301,10 @@ export class HostedWorkspaceBroker {
       scope['tenantId'] !== this.key.tenantId ||
       scope['workspaceId'] !== this.key.workspaceId ||
       (scope['capabilityDigest'] !== WORKSPACE_CAPABILITY_DIGEST &&
+        scope['capabilityDigest'] !==
+          MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST &&
+        scope['capabilityDigest'] !==
+          MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST &&
         !(
           scope['capabilityDigest'] === RESIDENT_WORKSPACE_CAPABILITY_DIGEST &&
           scope['isolationClass'] === 'workspace'
@@ -732,6 +756,59 @@ export class HostedWorkspaceBroker {
     return result as unknown as ManagedHookOperationView;
   }
 
+  async extensionControl(
+    operation: ManagedExtensionRuntimeControl,
+  ): Promise<Record<string, unknown>> {
+    const envelope = await this.request(
+      `/harness-sessions/${encodeURIComponent(this.key.sessionId)}/extensions/control`,
+      {
+        operation,
+        ...(this.extensionBinding
+          ? {
+              expectedRuntimeBindingId: this.extensionBinding.runtimeBindingId,
+              expectedRuntimeGeneration: this.extensionBinding.generation,
+            }
+          : {}),
+      },
+      true,
+      8 * 1024 * 1024,
+    );
+    this.readRuntime(envelope);
+    this.extensionBinding = {
+      runtimeBindingId: this.runtime!.bindingId,
+      generation: this.runtime!.generation,
+    };
+    const result = object(envelope['result']);
+    if (result['operationId'] !== operation.operationId)
+      throw new Error('Runtime extension response identity is invalid.');
+    return result;
+  }
+
+  async extensionCommand(
+    operation: import('@qwen-code/qwen-code-core/managed-runtime/managed-extension-package.js').ManagedExtensionCommandControl,
+  ): Promise<Record<string, unknown>> {
+    const envelope = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    const result = object(envelope['result']);
+    if (
+      result['operationId'] !== operation.operationId ||
+      !['running', 'settled', 'outcome_unknown'].includes(
+        String(result['state']),
+      )
+    )
+      throw new Error('Runtime extension command response is invalid.');
+    return result;
+  }
+
+  expectExtensionRuntime(expected: {
+    runtimeBindingId: string;
+    generation: string;
+  }): void {
+    this.extensionBinding = expected;
+  }
+
   /**
    * #13896: one watch's maintenance through the client route. A watch
    * answers running, exited or unknown — never the Hook/MCP settlement
@@ -1036,6 +1113,7 @@ export class HostedWorkspaceBroker {
     path: string,
     body?: Record<string, unknown>,
     harnessScoped = false,
+    maximumResponseBytes = 2 * 1024 * 1024,
   ): Promise<Record<string, unknown>> {
     const url = new URL(`/internal/runtime-broker/v1${path}`, this.baseUrl);
     const fields = {
@@ -1077,7 +1155,7 @@ export class HostedWorkspaceBroker {
         const chunk = await reader.read();
         if (chunk.done) break;
         length += chunk.value.length;
-        if (length > 2 * 1024 * 1024) {
+        if (length > maximumResponseBytes) {
           await reader.cancel();
           throw new Error('Runtime Broker response exceeds its limit.');
         }

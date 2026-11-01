@@ -28,14 +28,62 @@ const ATTRS = (
   'fill-opacity stroke-opacity transform text-anchor dominant-baseline preserveAspectRatio'
 ).split(' ');
 const INPUT_TYPES = new Set(['text', 'number', 'range', 'checkbox', 'radio']);
+// Base styles for generated markup. Colors, fonts and radii come from the
+// host's standard MCP App style variables when present, so ordinary elements
+// match the host theme without generated CSS choosing colors.
+export const VIEW_BASE_STYLE = [
+  ':root{color-scheme:light dark;' +
+    '--gu-text:var(--color-text-primary,CanvasText);' +
+    '--gu-muted:var(--color-text-secondary,GrayText);' +
+    '--gu-surface:var(--color-background-secondary,color-mix(in srgb,CanvasText 6%,Canvas));' +
+    '--gu-border:var(--color-border-primary,color-mix(in srgb,CanvasText 18%,transparent));' +
+    '--gu-accent:var(--color-ring-primary,AccentColor);' +
+    '--gu-danger:var(--color-text-danger,#d92d20);' +
+    '--gu-radius:var(--border-radius-md,6px)}',
+  'html{background:transparent;color:var(--gu-text)}',
+  'body{margin:12px;display:flow-root;font:14px/1.5 var(--font-sans,system-ui,sans-serif);overflow-wrap:anywhere}',
+  '*{box-sizing:border-box}',
+  'h1,h2,h3,h4{margin:0 0 8px;line-height:1.3}h1{font-size:20px}h2{font-size:17px}h3,h4{font-size:15px}',
+  'p{margin:0 0 8px}',
+  'label{display:block;margin:10px 0 4px;color:var(--gu-muted);font-size:13px}',
+  'label:has(input[type=checkbox],input[type=radio]){display:flex;align-items:center;gap:6px;color:var(--gu-text);font-size:14px}',
+  'input,select,textarea,button{font:inherit;color:inherit;max-width:100%}',
+  'input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{padding:6px 8px;border:1px solid var(--gu-border);border-radius:var(--gu-radius);background:var(--gu-surface)}',
+  'input[type=range]{width:100%}',
+  'input[type=range],input[type=checkbox],input[type=radio]{accent-color:var(--gu-accent)}',
+  'button{padding:6px 12px;border:1px solid var(--gu-border);border-radius:var(--gu-radius);background:var(--gu-surface);cursor:pointer}',
+  'table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}',
+  'th,td{padding:6px 8px;border-bottom:1px solid var(--gu-border);text-align:left}',
+  'th{color:var(--gu-muted);font-size:13px;font-weight:600}',
+  '.num{text-align:right;font-variant-numeric:tabular-nums}',
+  'output{font-variant-numeric:tabular-nums;font-weight:600}',
+  '.muted{color:var(--gu-muted)}.danger{color:var(--gu-danger)}',
+  '.panel{padding:12px;border:1px solid var(--gu-border);border-radius:calc(var(--gu-radius) + 2px);background:var(--gu-surface)}',
+  '.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(min(180px,100%),1fr))}',
+  '.stat{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}',
+  'pre{white-space:pre-wrap}svg{max-width:100%;height:auto}',
+].join('');
+
 const FRAME_DOCUMENT =
   '<!doctype html><html><head><meta charset="utf-8">' +
   '<meta http-equiv="Content-Security-Policy" content="default-src &#39;none&#39;; ' +
   'script-src &#39;none&#39;; style-src &#39;unsafe-inline&#39;; ' +
   'form-action &#39;none&#39;; base-uri &#39;none&#39;; object-src &#39;none&#39;; frame-src &#39;none&#39;">' +
-  '<style>html{color-scheme:light dark}body{font:14px system-ui,sans-serif;margin:12px;overflow-wrap:anywhere}' +
-  '*{box-sizing:border-box}input,select,textarea,button{font:inherit;max-width:100%}' +
-  'svg{max-width:100%}pre{white-space:pre-wrap}</style></head><body></body></html>';
+  `<style>${VIEW_BASE_STYLE}</style></head><body></body></html>`;
+
+// The view grows with its content, so the card scrolls with the page instead
+// of nesting a scroll area; the bound only stops runaway layouts.
+export const MIN_VIEW_HEIGHT = 80;
+export const MAX_VIEW_HEIGHT = 3600;
+
+// Only standard style variables with plain values reach the view document.
+const STYLE_VARIABLE = /^--(color|font|border-radius)-[a-z0-9-]+$/;
+const STYLE_VALUE = /^[^;{}<>\\]*$/;
+
+export interface HostStyle {
+  theme?: 'light' | 'dark';
+  variables?: Record<string, string | undefined>;
+}
 
 type Control = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
 
@@ -50,6 +98,8 @@ export class ViewSurface {
   private cleanup?: () => void;
   private cancelMount?: () => void;
   private stopped = false;
+  private hostStyle: HostStyle = {};
+  private fittedWidth = 0;
 
   constructor(
     private readonly frame: HTMLIFrameElement,
@@ -81,14 +131,50 @@ export class ViewSurface {
     });
   }
 
+  /** Applies the host theme now and to any document mounted later. */
+  setHostStyle(style: HostStyle): void {
+    this.hostStyle = style;
+    if (this.content) this.applyHostStyle(this.content);
+  }
+
+  private applyHostStyle(doc: Document): void {
+    const root = doc.documentElement;
+    const { theme, variables = {} } = this.hostStyle;
+    root.style.colorScheme =
+      theme === 'light' || theme === 'dark' ? theme : 'light dark';
+    for (const name of Array.from(root.style)) {
+      if (name.startsWith('--')) root.style.removeProperty(name);
+    }
+    for (const [name, value] of Object.entries(variables)) {
+      if (
+        typeof value === 'string' &&
+        STYLE_VARIABLE.test(name) &&
+        value.length <= 200 &&
+        STYLE_VALUE.test(value)
+      ) {
+        root.style.setProperty(name, value);
+      }
+    }
+  }
+
   attach(doc: Document, html: string, css: string): void {
     this.cleanup?.();
     this.content = doc;
+    this.applyHostStyle(doc);
     const style = doc.createElement('style');
     style.textContent = css;
     doc.head.append(style);
     doc.body.replaceChildren(this.markup(html));
     this.validate(doc.body);
+    this.fit();
+    // Content reflows with width, never with the height fit() writes, so a
+    // resize that keeps the width is the frame's own and needs no refit.
+    const resize = () => {
+      if (this.frame.clientWidth !== this.fittedWidth) this.fit();
+    };
+    const refit = () => this.fit();
+    doc.defaultView?.addEventListener('resize', resize);
+    doc.body.addEventListener('toggle', refit, true);
     const listener = (event: Event) => {
       if (this.stopped) return;
       try {
@@ -117,6 +203,8 @@ export class ViewSurface {
       for (const type of ['input', 'change', 'click']) {
         doc.body.removeEventListener(type, listener);
       }
+      doc.defaultView?.removeEventListener('resize', resize);
+      doc.body.removeEventListener('toggle', refit, true);
     };
   }
 
@@ -257,6 +345,7 @@ export class ViewSurface {
       if (superseded) return { kind: 'superseded', inputs: current };
     }
     this.applyTo(body, patches);
+    this.fit();
     return { kind: 'applied', inputs: this.inputs() };
   }
 
@@ -298,6 +387,32 @@ export class ViewSurface {
       }
       this.validate(body);
     }
+  }
+
+  /** Sizes the frame to its content within the view height bounds. */
+  fit(): void {
+    const body = this.content?.body;
+    const view = this.content?.defaultView;
+    // A hidden or zero-width frame lays its text out one character per line;
+    // measuring then would flash a card thousands of pixels tall.
+    if (!body || !view || this.frame.hidden || this.frame.clientWidth === 0)
+      return;
+    // The root's scroll height never drops below the frame, so measure the
+    // body and its margins to let the frame shrink as well as grow. Measure at
+    // the minimum height so content sized by the viewport (100vh, height:100%)
+    // cannot grow the frame on every fit.
+    this.fittedWidth = this.frame.clientWidth;
+    this.frame.style.height = `${MIN_VIEW_HEIGHT}px`;
+    const style = view.getComputedStyle(body);
+    const content =
+      body.getBoundingClientRect().height +
+      (parseFloat(style.marginTop) || 0) +
+      (parseFloat(style.marginBottom) || 0);
+    const height = Math.min(
+      MAX_VIEW_HEIGHT,
+      Math.max(MIN_VIEW_HEIGHT, Math.ceil(content) + 2),
+    );
+    this.frame.style.height = `${height}px`;
   }
 
   stop(): void {

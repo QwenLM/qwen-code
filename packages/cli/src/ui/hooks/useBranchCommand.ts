@@ -5,6 +5,7 @@
  */
 
 import { useCallback } from 'react';
+import type { WorkflowModeSnapshot } from '@qwen-code/qwen-code-core/core/workflow-mode.js';
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import { randomUUID } from 'node:crypto';
 import {
@@ -134,6 +135,7 @@ export function useBranchCommand(
       // before the latch could name a session a concurrent swap's rollback
       // is about to change (#9844).
       let oldSessionId = config.getSessionId();
+      let oldWorkflowMode: WorkflowModeSnapshot | undefined;
       let coreSwapped = false;
       let uiSwapped = false;
       let toolsInvalidated = false;
@@ -171,6 +173,7 @@ export function useBranchCommand(
         // session the user is on, and forking/rolling back against that
         // stale id would land on a session the UI never shows (#9844).
         oldSessionId = config.getSessionId();
+        oldWorkflowMode = await config.captureWorkflowModeState?.();
 
         // 1. Flush outgoing recorder. A degraded source must not fork because
         //    the visible, unpersisted tail would be silently missing.
@@ -343,6 +346,8 @@ export function useBranchCommand(
           try {
             getInteractiveModSession(config)?.invalidateTools();
             config.startNewSession(oldSessionId, prevSessionData);
+            if (oldWorkflowMode)
+              config.restoreWorkflowModeState(oldWorkflowMode);
             // Re-hydrate chat history against the restored session. Best-
             // effort: if this throws too, sessionId + recorder are still
             // back on the parent, which is the load-bearing invariant.

@@ -5,6 +5,11 @@ import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import { SystemMessage } from './SystemMessage';
+import {
+  createContextUsageMessageData,
+  serializeContextUsageMessage,
+} from './ContextUsageMessage';
+import type { DaemonSessionContextUsageStatus } from '@qwen-code/web-shell/daemon-react-sdk';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -34,12 +39,18 @@ function render(node: ReactNode, language: 'en' | 'zh-CN' = 'en'): HTMLElement {
 
 describe('SystemMessage — prompt_cancelled marker', () => {
   it.each([
-    ['zh-CN', 10999, '你在 11 秒后取消了请求'],
-    ['zh-CN', 999, '你在 1 秒后取消了请求'],
-    ['zh-CN', 0, '你在 0 秒后取消了请求'],
-    ['zh-CN', 7069, '你在 8 秒后取消了请求'],
-    ['en', 10999, 'You cancelled this request after 11 seconds'],
-  ] as const)('renders elapsed seconds in %s', (language, elapsedMs, text) => {
+    ['zh-CN', 10999, '你在 11s 后取消了请求'],
+    ['zh-CN', 999, '你在 1s 后取消了请求'],
+    ['zh-CN', 0, '你在 0s 后取消了请求'],
+    ['zh-CN', 7069, '你在 8s 后取消了请求'],
+    ['zh-CN', 59999, '你在 1m 0s 后取消了请求'],
+    ['zh-CN', 60000, '你在 1m 0s 后取消了请求'],
+    ['zh-CN', 60001, '你在 1m 1s 后取消了请求'],
+    ['zh-CN', 397000, '你在 6m 37s 后取消了请求'],
+    ['en', 10999, 'You cancelled this request after 11s'],
+    ['en', 999, 'You cancelled this request after 1s'],
+    ['en', 397000, 'You cancelled this request after 6m 37s'],
+  ] as const)('renders elapsed duration in %s', (language, elapsedMs, text) => {
     const container = render(
       <SystemMessage
         content=""
@@ -1030,4 +1041,82 @@ describe('background continuation', () => {
       ).toBe(`Background task ${status}`);
     },
   );
+});
+
+describe('SystemMessage — context usage instruction files', () => {
+  function contextUsageStatus(): DaemonSessionContextUsageStatus {
+    return {
+      v: 1,
+      sessionId: 's-1',
+      workspaceCwd: '/repo/.qwen/worktrees/task',
+      workspaceRoot: '/repo',
+      formattedText: '',
+      usage: {
+        modelName: 'm',
+        totalTokens: 50,
+        contextWindowSize: 100,
+        breakdown: {
+          systemPrompt: 10,
+          builtinTools: 10,
+          mcpTools: 0,
+          instructionFiles: 5,
+          memoryFiles: 0,
+          skills: 0,
+          messages: 25,
+          freeSpace: 40,
+          autocompactBuffer: 10,
+        },
+        builtinTools: [],
+        mcpTools: [],
+        instructionFiles: [
+          {
+            path: 'AGENTS.md',
+            tokens: 5,
+            absolutePath: '/repo/.qwen/worktrees/task/AGENTS.md',
+          },
+        ],
+        memoryFiles: [],
+        skills: [],
+        showDetails: true,
+      },
+    };
+  }
+
+  it('opens an instruction file through the admission root, like the panel', () => {
+    const status = contextUsageStatus();
+    const onOpenMemoryFile = vi.fn();
+    const container = render(
+      <SystemMessage
+        content={serializeContextUsageMessage(status)}
+        variant="info"
+        data={createContextUsageMessageData(status)}
+        onOpenMemoryFile={onOpenMemoryFile}
+      />,
+    );
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[title="AGENTS.md"]',
+    );
+    expect(button).not.toBeNull();
+    act(() => button!.click());
+    expect(onOpenMemoryFile).toHaveBeenCalledTimes(1);
+    expect(onOpenMemoryFile).toHaveBeenCalledWith(
+      status.usage.instructionFiles![0],
+      '/repo',
+    );
+  });
+
+  it('renders instruction rows as plain text when no opener is supplied', () => {
+    const status = contextUsageStatus();
+    const container = render(
+      <SystemMessage
+        content={serializeContextUsageMessage(status)}
+        variant="info"
+        data={createContextUsageMessageData(status)}
+      />,
+    );
+    expect(container.querySelector('button[title="AGENTS.md"]')).toBeNull();
+    expect(container.querySelector('[title="AGENTS.md"]')?.tagName).toBe(
+      'SPAN',
+    );
+  });
 });
