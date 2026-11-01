@@ -22,7 +22,11 @@ function takeUtf8Prefix(value: string, maxBytes: number): string {
   return value.slice(0, end);
 }
 
-export async function readStdin(): Promise<string> {
+export interface ReadStdinOptions {
+  warnOnTimeout?: boolean;
+}
+
+export async function readStdin(options?: ReadStdinOptions): Promise<string> {
   const MAX_STDIN_SIZE = 8 * 1024 * 1024; // 8MB
   return new Promise((resolve, reject) => {
     let data = '';
@@ -35,6 +39,11 @@ export async function readStdin(): Promise<string> {
       // stop reading if input is not available yet, this is needed
       // in terminals where stdin is never TTY and nothing's piped
       // which causes the program to get stuck expecting data from stdin
+      if (options?.warnOnTimeout && totalSize === 0) {
+        writeStderrLine(
+          `Warning: no stdin input received within ${pipedInputShouldBeAvailableInMs}ms; proceeding without stdin.`,
+        );
+      }
       onEnd();
     }, pipedInputShouldBeAvailableInMs);
 
