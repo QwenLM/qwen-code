@@ -200,10 +200,12 @@ store 客户端在一次提交调用内部重驱的丢弃，根本到不了 rela
   在这些窗口上，单独中和其中任何一层都是等价变异，所以本片的变异一次去掉全部
   防线（见「变异检查」）。
 
-- `CHILD_RESULT` 台账行在 relay 分类时记录投递快照。分类可能早于父会话消费，
-  因此消费快照可以保持 `pending`，也可以读到 `consumed`。门禁要求恰好一行
-  `delivered`/`accepted`，同时独立要求当前 `child_run` 记录已提交 consumed revision，
-  以此证明唤醒 Turn 已读取通知。
+- `CHILD_RESULT` 台账行镜像记录的投递状态，两处写入可能竞态：分类可能落在受理
+  之后、父级消费 revision 之前，所以门禁两者都要等。父级的消费 revision 随后在
+  自己的提交里修正该行的 `consumption_state` —— 否则镜像会一直停在 `pending`，
+  而记录早已标记结果被消费。分类读取记录行时按主键加锁，因此消费提交无法插进
+  这次读与镜像写入之间，同 Session 的其他记录也不会被锁住。
+
 - lead 的唤醒 Turn 不投影到它的公开流（与 FG9e 对成员唤醒 Turn 的发现一致）；
   workflow 子 Session 的 Turn 会投影，从 `turn.accepted` 到 `turn.completed`。所以
   FG10f 切断的是子 Session 的流，而不是 lead 的流：lead 的台账在启动 Turn 之后就

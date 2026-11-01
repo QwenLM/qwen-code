@@ -276,8 +276,8 @@ class ToolPublicationLockOrderMySqlIT {
             String sessionId = createCsiOriginal(jdbc, manager, JSON, properties, registration);
             var bindings = new JdbcRuntimeBindingRepository(source,
                     new AesGcmSecretProtector("test", new byte[32]));
-            var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                    new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+            var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
+                    new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             var transaction = new TransactionTemplate(manager);
             var request = transaction.execute(status ->
                     requireCsiRequest(managed, registration, sessionId));
