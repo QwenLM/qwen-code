@@ -202,7 +202,11 @@ function canCompileSedPattern(sedInfo: SedEditInfo): boolean {
 }
 
 function hasPosixBracketExpression(pattern: string): boolean {
-  return /\[\[:[A-Za-z]+:\]\]/u.test(pattern);
+  // Any `[:`, `[.` or `[=` opens a POSIX character class, collating symbol or
+  // equivalence class. Matching only the self-contained `[[:alpha:]]` form let
+  // negated and mixed expressions such as `[^[:space:]]` or `[[:alpha:]abc]`
+  // through, and the simulation then disagreed with sed on them.
+  return /\[[:.=]/u.test(pattern);
 }
 
 /**

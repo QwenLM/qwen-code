@@ -237,6 +237,15 @@ describe('sedEditParser', () => {
     expect(
       parseSedEditCommand("sed -i 's/[[:digit:]]/X/g' file.txt"),
     ).toBeNull();
+    // Negated, mixed and equivalence-class forms do not contain the
+    // self-contained `[[:alpha:]]` shape the old guard matched.
+    expect(
+      parseSedEditCommand("sed -i 's/[^[:space:]]/X/g' file.txt"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/[[:alpha:]abc]/X/g' file.txt"),
+    ).toBeNull();
+    expect(parseSedEditCommand("sed -i 's/[[=a=]]/X/g' file.txt")).toBeNull();
   });
 
   it('rejects sed escapes that diverge in JavaScript regexes', () => {
@@ -278,6 +287,10 @@ describe('sedEditParser', () => {
     // BSD sed advances over characters for zero-width global matches; GNU sed
     // advances over bytes for this pattern.
     expect(applySed("sed -i 's/x*/-/g' f.txt", '😀\n')).toBe('-😀-\n');
+    // The same split covers backreferences: with `u`, `\(.\)\1` matches one
+    // astral character repeated, as GNU sed does in a UTF-8 locale; BSD sed
+    // compares bytes and leaves this file alone.
+    expect(applySed("sed -i 's/\\(.\\)\\1/X/g' f.txt", '😀😀x\n')).toBe('Xx\n');
     expect(applySed("sed -i 's/=.*$/=new/' f.txt", 'key=old\r\nk2=v\r\n')).toBe(
       'key=new\nk2=new\n',
     );
