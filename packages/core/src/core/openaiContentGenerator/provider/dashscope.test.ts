@@ -919,27 +919,31 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(wire(tier('high'))['enable_thinking']).toBe(true);
     });
 
-    describe.each(['qwen3.8-max', 'qwen3.8-max-preview'])(
-      '%s reasoning effort',
-      (model) => {
-        it.each(['low', 'medium', 'high', 'xhigh'] as const)(
-          'passes %s through as reasoning_effort',
-          (effort) => {
-            expectWire(wireM(model, tier(effort), tier(effort)), {
-              reasoning_effort: effort,
-              enable_thinking: undefined,
-              reasoning: undefined,
-            });
-          },
-        );
-      },
-    );
+    describe.each([
+      'qwen3.8-max',
+      'qwen3.8-max-preview',
+      'qwen-latest-series-invite-202610-m6',
+      'qwen4-plus',
+    ])('%s reasoning effort', (model) => {
+      it.each(['low', 'medium', 'high', 'xhigh'] as const)(
+        'passes %s through as reasoning_effort',
+        (effort) => {
+          expectWire(wireM(model, tier(effort), tier(effort)), {
+            reasoning_effort: effort,
+            enable_thinking: undefined,
+            reasoning: undefined,
+          });
+        },
+      );
+    });
 
     describe.each([
       'qwen3.8-max',
       'qwen3.8-max-preview',
       'qwen3.8-max-latest',
       'qwen3.8-max-2026-01-15',
+      'qwen-latest-series-invite-202610-m6',
+      'qwen4-plus',
     ])('%s reasoning effort ceiling', (model) => {
       it('warns once however many requests the same provider builds', () => {
         const generator = gen({ model, ...tier('max') });
