@@ -372,6 +372,16 @@ class ExternalWorkspaceMaterializationTest {
     @Test
     void malformedExternalRegistrationIsANonRetryableWorkspaceAdmissionRefusal() {
         properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setEnabled(true);
+        properties.getSessionStore().setEnabled(true);
+        properties.getRuntimeBroker().setEnabled(true);
+        properties.getRuntimeBroker().setTrustedLocalRebootRecovery(false);
+        properties.getRuntimeBroker().setExternalProviderUrl("http://provider.invalid");
+        properties.getRuntimeBroker().setProvisioner("external-workspace");
+        properties.getRuntimeBroker().setExternalProviderToken("provider-token-for-tests");
+        properties.getRuntimeBroker().setExternalProviderId("provider");
+        properties.getRuntimeBroker().setWorkspaceCwd("/worker/workspace");
+        properties.getRuntimeBroker().setWorkspaceId("workspace");
         var harness = mock(HarnessConnector.class);
         when(harness.supportsLifecycle("hosted-workspace-external-files/1")).thenReturn(true);
         var warmer = mock(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class);
@@ -403,6 +413,16 @@ class ExternalWorkspaceMaterializationTest {
     @Test
     void malformedExternalRegistrationOnlyDisablesItsWorkspaceInBatchDiscovery() {
         properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setEnabled(true);
+        properties.getSessionStore().setEnabled(true);
+        properties.getRuntimeBroker().setEnabled(true);
+        properties.getRuntimeBroker().setTrustedLocalRebootRecovery(false);
+        properties.getRuntimeBroker().setExternalProviderUrl("http://provider.invalid");
+        properties.getRuntimeBroker().setProvisioner("external-workspace");
+        properties.getRuntimeBroker().setExternalProviderToken("provider-token-for-tests");
+        properties.getRuntimeBroker().setExternalProviderId("provider");
+        properties.getRuntimeBroker().setWorkspaceCwd("/worker/workspace");
+        properties.getRuntimeBroker().setWorkspaceId("workspace");
         var harness = mock(HarnessConnector.class);
         when(harness.supportsLifecycle("hosted-workspace-external-files/1")).thenReturn(true);
         var warmer = mock(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class);
@@ -417,7 +437,8 @@ class ExternalWorkspaceMaterializationTest {
             store.materialize("tenant", "workspace", "Name", "owner", "key");
             register("tenant", "healthy");
             store.materialize("tenant", "healthy", "Healthy", "owner", "healthy-key");
-            jdbc.update("UPDATE ma_storage SET registration_json = 'not-json' WHERE storage_id = 'workspace'");
+            jdbc.update("UPDATE ma_storage SET registration_json = 'not-json' WHERE storage_id = ?",
+                    "workspace".getBytes(java.nio.charset.StandardCharsets.UTF_8));
 
             assertThat(registry.listReadable("tenant", "owner", null, 10))
                     .hasSize(2)
