@@ -70,6 +70,26 @@ describe('bundled Generated UI candidate', () => {
     });
   });
 
+  it('forces Node mode when the CLI runs as the Electron binary', () => {
+    const assets = join(fixture, 'generated-ui');
+    populate(assets);
+    const originalElectron = process.versions.electron;
+    Object.defineProperty(process.versions, 'electron', {
+      value: '43.8.3',
+      configurable: true,
+    });
+    try {
+      expect(prepareBundledGeneratedUi(true, true).server?.env).toEqual({
+        ELECTRON_RUN_AS_NODE: '1',
+      });
+    } finally {
+      Object.defineProperty(process.versions, 'electron', {
+        value: originalElectron,
+        configurable: true,
+      });
+    }
+  });
+
   it.each(files)(
     'withholds an incomplete installation missing %s',
     (missing) => {

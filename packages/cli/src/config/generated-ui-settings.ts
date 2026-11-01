@@ -65,6 +65,13 @@ export function prepareBundledGeneratedUi(
       args: [join(assetsDir, entry)],
       includeTools: ['generated_ui_show'],
       trust: false,
+      // When the CLI itself is the Electron binary launched by an IDE
+      // companion, the ACP launch scrubs ELECTRON_RUN_AS_NODE from the
+      // inherited environment (#16063): without it this child starts the
+      // VS Code GUI, which opens the entry file in an editor.
+      ...(process.versions.electron
+        ? { env: { ELECTRON_RUN_AS_NODE: '1' } }
+        : {}),
     },
   };
 }
