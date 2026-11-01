@@ -462,7 +462,16 @@ class ExternalWorkspaceMaterializationTest {
     @Test
     void ephemeralWorkspaceUsesTheSameRegistrationEligibilityAsExternal() {
         properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setEnabled(true);
+        properties.getSessionStore().setEnabled(true);
+        properties.getRuntimeBroker().setEnabled(true);
+        properties.getRuntimeBroker().setTrustedLocalRebootRecovery(false);
+        properties.getRuntimeBroker().setExternalProviderUrl("http://provider.invalid");
+        properties.getRuntimeBroker().setProvisioner("external-workspace");
+        properties.getRuntimeBroker().setExternalProviderToken("provider-token-for-tests");
         properties.getRuntimeBroker().setExternalProviderId("provider");
+        properties.getRuntimeBroker().setWorkspaceCwd("/worker/workspace");
+        properties.getRuntimeBroker().setWorkspaceId("workspace");
         var harness = mock(HarnessConnector.class);
         when(harness.supportsLifecycle("hosted-workspace-external-files/1")).thenReturn(true);
         var warmer = mock(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class);
