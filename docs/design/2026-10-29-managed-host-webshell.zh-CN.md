@@ -45,13 +45,9 @@ Session ID 隔离。短期 token 刷新应保持 provider 身份稳定。品牌�
 无需 import map 或单独 CSS import。普通 default 与 transcript 构建保持既有入口和 external
 规则。
 
-整页宿主使用同级的 `--mode app-host`，产物写入 `dist/app-host/`，通过
-`renderWebShellApp(container, props)` 挂载完整 Web Shell。两个宿主模式都走 scoped CSS
-注入与 `@keyframes`/`@property` 重命名。scoped 选择器的前两项
-（`[data-web-shell-root][data-web-shell-shadcn]` 和
-`[data-web-shell-portal-root][data-web-shell-shadcn]`）匹配元素自身，所以根元素上的
-状态类（如 `appChatEmpty`）在 scoped 产物中同样生效。两个宿主模式都不在
-`npm run build` 中，都是同一份配置下的按需构建产物，按完整目录提供。
+整页宿主入口（`--mode app-host`）已从本 PR 移除：它没有构建接线、没有测试覆盖、
+硬编码了特定宿主的侧栏/footer 配置。等有明确消费者后，可以在后续 PR 中补上
+打包和测试再重新引入。
 
 ## 验证与验收
 
