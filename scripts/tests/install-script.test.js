@@ -1437,9 +1437,7 @@ describe('standalone release packaging', () => {
       'call :PrintFinalInstructions "!INSTALL_BIN_DIR!" "!INSTALL_DIR!" "standalone"',
     );
     expect(script).toContain('call :MaybeUpdatePath "!EXTRA_BIN!"');
-    expect(maybeUpdatePath).toContain(
-      'set "QWEN_PATH_SCOPE=!PATH_SCOPE!"',
-    );
+    expect(maybeUpdatePath).toContain('set "QWEN_PATH_SCOPE=!PATH_SCOPE!"');
     expect(maybeUpdatePath).toContain(
       "$target = if ($scope -ieq 'machine') { 'Machine' } else { 'User' }",
     );
