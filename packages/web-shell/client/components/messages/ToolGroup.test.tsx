@@ -12,6 +12,7 @@ import {
 } from '../../adapters/toolClassification';
 import { transcriptBlocksToDaemonMessages } from '../../adapters/transcriptToMessages';
 import { getTranslator, I18nProvider } from '../../i18n';
+import { sanitizeControlChars } from './toolFormatting';
 import {
   WebShellCustomizationProvider,
   type MarkdownRenderContext,
@@ -3277,6 +3278,25 @@ describe('generic tool card details', () => {
     expect(container.textContent).toContain(tail);
   });
 
+  it('renders a payload under the inline cap whole without Show more', () => {
+    const tail = 'SHORT-TAIL';
+    const rawOutput = `${'a'.repeat(3900 - tail.length)}${tail}`;
+    expect(rawOutput).toHaveLength(3900);
+
+    const container = renderToolLine(
+      makeTool({ toolName: 'mcp__demo__short', rawOutput }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain(tail);
+    expect(container.textContent).not.toContain('Content truncated');
+    expect(
+      [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Show more',
+      ),
+    ).toBeUndefined();
+  });
+
   it('offers Show more when pretty-printing grows a payload past the cap', () => {
     const tail = 'TAIL-MARKER';
     const items = [
@@ -3673,6 +3693,30 @@ describe('generic tool card details', () => {
         (button) => button.textContent === 'Show more',
       ),
     ).toBeUndefined();
+  });
+
+  it('offers Show more when escaping grows the arguments past the cap', () => {
+    const tail = 'ARG-ESCAPED-TAIL';
+    // JSON.stringify escapes C0 bytes but leaves the bidi controls that
+    // sanitizeControlChars renders as `\u202e`, so this payload only crosses
+    // the inline cap once escaping is counted.
+    const args = { note: `${'\u202e'.repeat(500)}${'a'.repeat(3000)}${tail}` };
+    const raw = JSON.stringify(args, null, 2);
+    expect(raw.length).toBeLessThanOrEqual(4000);
+    expect(sanitizeControlChars(raw).length).toBeGreaterThan(4000);
+
+    const container = renderToolLine(
+      makeTool({ toolName: 'mcp__demo__bidiargs', args }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).not.toContain(tail);
+    const more = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Show more',
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).toContain(tail);
   });
 
   it('bounds generic arguments in document mode', () => {
