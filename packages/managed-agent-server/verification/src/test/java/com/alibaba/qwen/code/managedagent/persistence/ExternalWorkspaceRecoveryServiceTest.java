@@ -131,7 +131,7 @@ class ExternalWorkspaceRecoveryServiceTest {
         when(bindings.compareAndSet(claimed, fenced)).thenReturn(fenced);
         // 最后一次读取模拟工具在初始检查与关闭准入之间成功抢先进入。
         when(executions.hasActiveByBinding("binding", 1)).thenReturn(false, false, true);
-        var nativeBroker = new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService(
+        var nativeBroker = new com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService(
                 mock(com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver.class), provisioner,
                 mock(com.alibaba.qwen.code.runtimebroker.RuntimeTransport.class), bindings,
                 mock(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository.class), executions,
