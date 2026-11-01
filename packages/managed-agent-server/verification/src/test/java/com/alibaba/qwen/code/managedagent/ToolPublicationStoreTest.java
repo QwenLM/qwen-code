@@ -136,8 +136,8 @@ class ToolPublicationStoreTest {
         projectionProperties = new ManagedAgentProperties();
         projectionProperties.getArtifacts().setEnabled(true);
         publicWorkspaces = org.mockito.Mockito.mock(ManagedWorkspaceRegistry.class);
-        publicSessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, java.time.Clock.systemUTC(), events -> {},
-                publicWorkspaces, projectionProperties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        publicSessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, java.time.Clock.systemUTC(), events -> {},
+                publicWorkspaces, projectionProperties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         publicResults = new ManagedToolResultStore(jdbc, manager, publicSessions);
         sessions.setToolResults(publicResults);
     }

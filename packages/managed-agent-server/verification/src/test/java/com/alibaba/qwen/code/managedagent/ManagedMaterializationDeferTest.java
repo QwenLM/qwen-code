@@ -42,12 +42,12 @@ class ManagedMaterializationDeferTest {
                         + " session_id, stream_kind, stream_id, last_sequence, covered_sequence,"
                         + " gmt_modified) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 "tenant", "session", "SESSION", "", 9L, 9L, 1L);
-        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc,
+        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc,
                 new ObjectMapper(),
                 Clock.fixed(Instant.ofEpochMilli(123456789L),
                         ZoneOffset.UTC),
                 ignored -> {}, new ManagedWorkspaceRegistry(jdbc),
-                new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
 
         store.deferMaterializationTarget("tenant", "session");
 
@@ -92,12 +92,12 @@ class ManagedMaterializationDeferTest {
                     "tenant", session, "SESSION", "", 9L, 1L,
                     1000L * (i + 1));
         }
-        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc,
+        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc,
                 new ObjectMapper(),
                 Clock.fixed(Instant.ofEpochMilli(123456789L),
                         ZoneOffset.UTC),
                 ignored -> {}, new ManagedWorkspaceRegistry(jdbc),
-                new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
 
         assertThat(store.findMaterializationTargets(2))
                 .containsExactly(
