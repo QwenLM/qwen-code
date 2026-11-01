@@ -373,7 +373,7 @@ function testLinuxReleaseLegsHaveGlibcContracts() {
   );
   assert.match(
     workflow,
-    /^ {4}container: \$\{\{ matrix\.container \|\| null \}\}[ ]{2}# yamllint disable-line rule:quoted-strings$/m,
+    /^ {4}container: \$\{\{ matrix\.container \|\| null \}\}[ ]# yamllint disable-line rule:quoted-strings$/m,
     'the build job must only add a container when the matrix leg names one',
   );
   const legs = [];

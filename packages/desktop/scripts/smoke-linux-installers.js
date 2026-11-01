@@ -147,8 +147,7 @@ function smokeInstaller(installer, type, expectGlibc = '') {
 export function verifyRpmDependencies(
   installer,
   expectGlibc,
-  run = (command, args) =>
-    execFileSync(command, args, { encoding: 'utf8' }),
+  run = (command, args) => execFileSync(command, args, { encoding: 'utf8' }),
 ) {
   const architecturals = run('rpm', ['-qp', '--qf', '%{ARCH}\n', installer])
     .trim()
@@ -174,14 +173,8 @@ export function verifyRpmDependencies(
     .split('\n')
     .map((entry) => entry.trim())
     .filter(Boolean);
-  if (
-    files.some((file) =>
-      /(^|\/)libwebkit2gtk-4\.1\.so(?:\.|$)/.test(file),
-    )
-  ) {
-    throw new Error(
-      'The Desktop rpm must not carry its own WebKitGTK library',
-    );
+  if (files.some((file) => /(^|\/)libwebkit2gtk-4\.1\.so(?:\.|$)/.test(file))) {
+    throw new Error('The Desktop rpm must not carry its own WebKitGTK library');
   }
   const glibcVersions = requires.flatMap((entry) => {
     const direct = entry.match(/^glibc\s*>=\s*(\d+\.\d+(?:\.\d+)?)/)?.[1];
