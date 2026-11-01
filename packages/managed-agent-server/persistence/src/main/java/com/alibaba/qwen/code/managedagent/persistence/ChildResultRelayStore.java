@@ -125,23 +125,33 @@ public class ChildResultRelayStore
      * and the claim — retirement authorization always reads it here. */
     public String deliveryState(String tenantId, String parentSessionId,
             String childRunId) {
-        return deliveryState(tenantId, parentSessionId, childRunId, false);
-    }
-
-    /** The classification's read locks the record row: a consumption
-     * commit that lands between this read and the mirror write would
-     * otherwise leave the stale snapshot behind a row the correction
-     * could not see yet. The parent's consuming revision updates that
-     * same record row first, so the two commits serialize. */
-    private String deliveryState(String tenantId, String parentSessionId,
-            String childRunId, boolean forUpdate) {
         List<String> rows = jdbc.query(
                 "SELECT delivery_state FROM ma_session_record"
                         + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
-                        + " AND domain = 'child_run' AND record_id = ?"
-                        + (forUpdate ? " FOR UPDATE" : ""),
+                        + " AND domain = 'child_run' AND record_id = ?",
                 (result, row) -> result.getString("delivery_state"),
                 com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, parentSessionId), tenantId, parentSessionId, childRunId);
+        return rows.isEmpty() ? null : rows.getFirst();
+    }
+
+    /** The classification's read locks exactly the record row it mirrors:
+     * a consumption commit that lands between this read and the mirror
+     * write would otherwise leave the stale snapshot behind a row the
+     * correction could not see yet. The parent's consuming revision
+     * updates that same record row first, so the two commits serialize.
+     * The lookup names the record's primary key; matching only the
+     * session scope would make MySQL lock every row the scan touches. */
+    private String lockedDeliveryState(String tenantId,
+            String parentSessionId, String childRunId) {
+        List<String> rows = jdbc.query(
+                "SELECT delivery_state FROM ma_session_record"
+                        + " WHERE session_scope_key = ? AND record_key = ?"
+                        + " AND tenant_id = ? AND domain = 'child_run' AND record_id = ?"
+                        + " FOR UPDATE",
+                (result, row) -> result.getString("delivery_state"),
+                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, parentSessionId),
+                ManagedExtensionProjection.recordKey(parentSessionId, "child_run", childRunId),
+                tenantId, childRunId);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
@@ -851,7 +861,7 @@ public class ChildResultRelayStore
     }
 
     private void recordDelivery(RelayRow row, String child, String transport, long now) {
-        String delivery = deliveryState(row.tenantId(), row.parentSessionId(), row.childRunId(), true);
+        String delivery = lockedDeliveryState(row.tenantId(), row.parentSessionId(), row.childRunId());
         String reception = Set.of("accepted", "consumed").contains(delivery == null ? "" : delivery) ? "accepted" : "pending";
         String consumption = "consumed".equals(delivery) ? "consumed" : "pending";
         String sourceScope = scope(row.tenantId(), row.parentSessionId());

@@ -240,8 +240,9 @@ Mechanics notes recorded at landing:
   The consuming revision then corrects that row's `consumption_state` in
   its own commit — a mirror left `pending` would keep claiming the
   parent never read a result its record marks consumed. The
-  classification's read locks the record row, so a consumption commit
-  cannot slip between that read and the mirror write.
+  classification's read locks that record row by its primary key, so a
+  consumption commit cannot slip between that read and the mirror write
+  and no sibling record in the Session is locked.
 - The lead's wake Turn is not projected to its public stream (as FG9e
   found for member wake Turns); the workflow child Session's Turn is,
   from `turn.accepted` through `turn.completed`. FG10f therefore cuts the
