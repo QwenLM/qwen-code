@@ -312,6 +312,9 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // Moonshot / Kimi
   // -------------------
+  // Kimi K3's 256K variant shares the generation prefix but not its window,
+  // so it is named before the 1M row (Kimi Code reports 262,144 for it).
+  [/^(?:kimi-)?k3-256k$/, LIMITS['256k']],
   // Kimi K3 generation: 1M, including Kimi Code's bare `k3.1-pro` aliases.
   [KIMI_K3_GENERATION, LIMITS['1m']],
   [/^kimi-/, LIMITS['256k']], // Kimi fallback: 256K

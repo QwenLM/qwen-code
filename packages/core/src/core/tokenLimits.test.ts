@@ -397,6 +397,12 @@ describe('tokenLimit', () => {
       expect(tokenLimit('k3.1-pro-high-speed')).toBe(1000000);
       expect(tokenLimit('moonshot/k3.1-pro')).toBe(1000000);
     });
+
+    it('should keep the K3 256K variant out of the 1M rule', () => {
+      expect(tokenLimit('k3-256k')).toBe(262144);
+      expect(tokenLimit('kimi-k3-256k')).toBe(262144);
+      expect(tokenLimit('moonshot/k3-256k')).toBe(262144);
+    });
   });
 
   describe('Other models', () => {

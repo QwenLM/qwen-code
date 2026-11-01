@@ -260,6 +260,9 @@ const CATALOG_CONTEXT_CORRECTIONS: Readonly<Record<string, number>> = {
   // curated row or the presets declare, so compaction thresholds computed
   // from it fire too late and the request 400s at the vendor.
   'qwen3-coder-plus': 1_000_000,
+  // The K3 generation's 256K variant is catalogued beside the 1M tiers; it
+  // must keep its own window under both a missing and an over-stated entry.
+  'k3-256k': 262_144,
   'minimax-m2.5': 196_608,
   'minimax-m2.5-highspeed': 196_608,
   'glm-4.7': 202_752,
@@ -270,6 +273,8 @@ const CATALOG_CONTEXT_CORRECTIONS: Readonly<Record<string, number>> = {
  * models.dev lists each Kimi K3 sub-version under both its dotted and dashed
  * spellings (`kimi-k3.1-pro-highspeed`, `kimi-k3-1-pro-highspeed`) and keeps
  * adding tiers, so an id-by-id table would leave the next one over-stated.
+ * The shared pattern excludes `k3-256k`, which keeps the window corrected
+ * for it in the table above.
  */
 const CATALOG_CONTEXT_GENERATION_CORRECTIONS: ReadonlyArray<[RegExp, number]> =
   [[KIMI_K3_GENERATION, 1_000_000]];
