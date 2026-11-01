@@ -866,19 +866,59 @@ describe('getNpmCliPath', () => {
     expect(mockedExistsSync).not.toHaveBeenCalled();
   });
 
-  it('rejects a relative APPDATA so the probe cannot follow the caller cwd', () => {
-    stubInheritedPrefixes();
-    vi.stubEnv('APPDATA', '.');
-    mockedExistsSync.mockReturnValue(true);
+  it.each([
+    '.',
+    'C:',
+    'C:npmroot',
+    '\\npmroot',
+    '/npmroot',
+    '\\',
+    '/',
+    '\\\\server',
+  ])(
+    'rejects non-qualified APPDATA %s without probing a cwd-dependent path',
+    (appData) => {
+      stubInheritedPrefixes();
+      vi.stubEnv('APPDATA', appData);
+      mockedExistsSync.mockReturnValue(true);
 
-    const result = getNpmCliPath(nodePathWin32, 'win32');
+      const result = getNpmCliPath(nodePathWin32, 'win32');
 
-    expect(result).toBe(bundledWin32);
-    expect(mockedExistsSync).not.toHaveBeenCalled();
-    expect(debugSpy).toHaveBeenCalledWith(
-      expect.stringContaining(bundledWin32),
-    );
-  });
+      expect(result).toBe(bundledWin32);
+      expect(mockedExistsSync).not.toHaveBeenCalled();
+      expect(mockedRealPathSync).not.toHaveBeenCalled();
+      expect(debugSpy).toHaveBeenCalledWith(
+        expect.stringContaining(bundledWin32),
+      );
+    },
+  );
+
+  it.each([
+    'C:/Users/dev/AppData/Roaming',
+    '\\\\server\\profiles\\dev',
+    '//server/profiles/dev',
+  ])(
+    'preserves fully qualified APPDATA %s, including UNC roaming profiles',
+    (appData) => {
+      stubInheritedPrefixes();
+      vi.stubEnv('APPDATA', appData);
+      const userNpm = path.win32.join(
+        appData,
+        'npm',
+        'node_modules',
+        'npm',
+        'bin',
+        'npm-cli.js',
+      );
+      mockedExistsSync.mockImplementation(
+        (candidate) => String(candidate) === userNpm,
+      );
+
+      expect(getNpmCliPath(nodePathWin32, 'win32')).toBe(userNpm);
+      expect(mockedExistsSync).toHaveBeenCalledExactlyOnceWith(userNpm);
+      expect(mockedRealPathSync).not.toHaveBeenCalled();
+    },
+  );
 
   it('ignores npm_config_prefix and npm_config_global_prefix with a live APPDATA', () => {
     // A repository-controlled .env can set both. Honouring them would pick the

@@ -58,15 +58,19 @@ export function getNpmCliPath(
     //
     // APPDATA is the same class of input, so it is guarded twice rather than
     // trusted: it is a hardcoded project-.env rejection (shared-env-keys.ts
-    // PROJECT_ENV_HARDCODED_EXCLUSIONS), and only an absolute value can select a
-    // file here — a relative one would resolve against whatever cwd the caller
-    // happens to have, which differs between the probe and the spawn that
-    // follows it.
+    // PROJECT_ENV_HARDCODED_EXCLUSIONS), and only a fully qualified drive or
+    // UNC path can select a file here. UNC roots preserve roaming profiles;
+    // drive-relative roots would depend on the caller's current drive, which
+    // can differ between the probe and the spawn that follows it.
     //
     // A machine that never self-updated npm has no such file, so the probe falls
     // through to the bundled copy and behaviour is unchanged.
     const appData = process.env['APPDATA'];
-    if (appData && path.win32.isAbsolute(appData)) {
+    if (
+      appData &&
+      path.win32.isAbsolute(appData) &&
+      path.win32.parse(appData).root.length > 1
+    ) {
       const userNpmCliJs = path.win32.join(
         appData,
         'npm',
