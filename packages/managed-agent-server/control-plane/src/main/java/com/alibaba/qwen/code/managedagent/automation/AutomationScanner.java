@@ -44,7 +44,7 @@ import java.util.function.Supplier;
  * definition the node works (#15667). A
  * claim whose answer was lost is re-driven by later ticks with bounded
  * backoff and, past the bound, recorded unknown — never guessed; a scanner
- * that lost its lease cannot move the ledger. See
+ * whose lease another claim has taken cannot move the ledger. See
  * docs/design/2026-10-07-managed-automation-runtime.md, decisions 5–8.
  */
 @Service

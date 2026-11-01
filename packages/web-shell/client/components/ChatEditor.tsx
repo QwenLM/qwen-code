@@ -42,7 +42,6 @@ import type {
   DaemonWorkflowMode,
   DaemonWorkflowModeStatus,
 } from '@qwen-code/web-shell/daemon-react-sdk';
-import { WorkflowModeControl } from './WorkflowModeControl';
 import { useWebShellPortalRoot } from '../portalRoot';
 import {
   useWebShellCustomization,
@@ -3075,6 +3074,16 @@ export const ChatEditor = memo(
           skillsLoading={skillsLoading}
           skillsLoadError={skillsLoadError}
           skillsLoaded={skillsLoaded}
+          workflow={
+            showAddMenuAction && showToolbarAction('workflowMode')
+              ? {
+                  workflowMode,
+                  workflowModeStatus,
+                  workflowModePending,
+                  onWorkflowModeChange,
+                }
+              : undefined
+          }
           btw={
             !isSimple && btwEnabled && !core.shellMode
               ? {
@@ -3288,14 +3297,6 @@ export const ChatEditor = memo(
                 <TooltipContent side="top">{planTooltip}</TooltipContent>
               </Tooltip>
             </TooltipProvider>
-          )}
-          {showToolbarAction('workflowMode') && (
-            <WorkflowModeControl
-              workflowMode={workflowMode}
-              workflowModeStatus={workflowModeStatus}
-              workflowModePending={workflowModePending}
-              onWorkflowModeChange={onWorkflowModeChange}
-            />
           )}
           {showModelAction && (
             <div
