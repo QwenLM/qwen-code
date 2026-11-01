@@ -226,7 +226,7 @@ class WorkspaceSessionCloseTest {
                 com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry registry) {
             var properties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
-            return com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, java.time.Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+            return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, java.time.Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         }
     }
 

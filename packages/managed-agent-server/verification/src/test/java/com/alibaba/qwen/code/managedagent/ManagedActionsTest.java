@@ -119,7 +119,7 @@ class ManagedActionsTest {
                 com.alibaba.qwen.code.managedagent.contracts.event.CommittedEventPublisher publisher) {
             var properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
-            return com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, clock, publisher, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+            return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, clock, publisher, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         }
     }
 
