@@ -7340,10 +7340,12 @@ export class Config {
 
   /**
    * Return a higher-priority static DashScope knob that shadows the current
-   * global effort on qwen3.8-max, so interactive callers can report the
-   * effective outcome instead of confirming a tier that will not reach the
-   * wire. The provider resolves extra_body before samplingParams before the
-   * unified reasoning setting; same-layer explicit effort still wins budget.
+   * global effort on the tiered-effort Qwen families (qwen3.8-max, the
+   * invitation-only latest-series previews, and qwen4), so interactive
+   * callers can report the effective outcome instead of confirming a tier
+   * that will not reach the wire. The provider resolves extra_body before
+   * samplingParams before the unified reasoning setting; same-layer explicit
+   * effort still wins budget.
    */
   getReasoningEffortOverride(): ReasoningEffortOverride | undefined {
     const cfg = this.getContentGeneratorConfig();
