@@ -2257,6 +2257,167 @@ function getHeredocDelimiters(line: string): string[] {
   return delimiters;
 }
 
+const AMEND_PREFIX_COMMANDS = new Set([...PREFIX_COMMANDS, 'command']);
+
+const AMEND_PREFIX_FLAGS_WITH_VALUE = new Map<string, ReadonlySet<string>>([
+  ...PREFIX_COMMAND_FLAGS_WITH_VALUE,
+  ['doas', new Set(['-u', '-C'])],
+  ['env', new Set(['-u', '--unset', '-S', '--split-string', '-C', '--chdir'])],
+  [
+    'ionice',
+    new Set([
+      '-c',
+      '--class',
+      '-n',
+      '--classdata',
+      '-p',
+      '--pid',
+      '-P',
+      '--pgid',
+      '-u',
+      '--uid',
+    ]),
+  ],
+  ['nice', new Set(['-n', '--adjustment'])],
+  ['stdbuf', new Set(['-i', '-o', '-e', '--input', '--output', '--error'])],
+  ['time', new Set(['-f', '--format', '-o', '--output'])],
+]);
+
+const AMEND_LEADING_NOISE = new Set(
+  '! do done elif else esac fi for if in select then time until while'.split(' '),
+);
+
+const AMEND_GIT_GLOBAL_FLAGS_WITH_VALUE =
+  /^(?:-[cC]|--(?:config-env|exec-path|git-dir|list-cmds|namespace|super-prefix|work-tree))$/;
+
+const AMEND_COMMIT_FLAGS_WITH_VALUE =
+  /^(?:-[A-Za-z]*[cCFm]|--(?:author|cleanup|date|file|fixup|message|pathspec-from-file|reedit-message|reuse-message|squash|template|trailer))$/;
+
+const AMEND_UNWRAP_DEPTH_LIMIT = 8;
+
+function amendExecutableBasename(token: string): string {
+  return (token.split(/[\\/]/).pop() ?? token)
+    .toLowerCase()
+    .replace(/\.(?:exe|cmd|bat)$/i, '');
+}
+
+function skipAmendPrefixes(tokens: string[]): string[] {
+  let index = 0;
+
+  while (index < tokens.length) {
+    const token = tokens[index]!;
+    if (AMEND_LEADING_NOISE.has(token) || isEnvAssignmentToken(token)) {
+      index++;
+      continue;
+    }
+
+    const program = amendExecutableBasename(token);
+    if (!AMEND_PREFIX_COMMANDS.has(program)) break;
+
+    index++;
+    const flagsWithValue = AMEND_PREFIX_FLAGS_WITH_VALUE.get(program);
+    while (index < tokens.length && tokens[index]!.startsWith('-')) {
+      const flag = tokens[index]!;
+      index++;
+      if (
+        flagsWithValue?.has(flag) &&
+        index < tokens.length &&
+        !tokens[index]!.startsWith('-')
+      ) {
+        index++;
+      }
+    }
+    if (program === 'env') {
+      while (index < tokens.length && isEnvAssignmentToken(tokens[index]!)) {
+        index++;
+      }
+    }
+    if (
+      program === 'timeout' &&
+      index < tokens.length &&
+      /^\d/.test(tokens[index]!)
+    ) {
+      index++;
+    }
+  }
+
+  return tokens.slice(index);
+}
+
+function isGitAmendInvocation(tokens: string[]): boolean {
+  if (amendExecutableBasename(tokens[0] ?? '') !== 'git') return false;
+
+  let index = 1;
+  while (index < tokens.length) {
+    const token = tokens[index]!;
+    if (token === '--') {
+      index++;
+      break;
+    }
+    if (!token.startsWith('-')) break;
+    index +=
+      AMEND_GIT_GLOBAL_FLAGS_WITH_VALUE.test(token) && index + 1 < tokens.length
+        ? 2
+        : 1;
+  }
+
+  if (tokens[index] !== 'commit') return false;
+
+  for (index++; index < tokens.length; index++) {
+    const token = tokens[index]!;
+    if (token === '--') return false;
+    if (token === '--amend' || token.startsWith('--amend=')) return true;
+
+    const consumesNext =
+      AMEND_COMMIT_FLAGS_WITH_VALUE.test(token) && index + 1 < tokens.length;
+    if (consumesNext) index++;
+  }
+  return false;
+}
+
+function tokensContainGitAmend(segment: string, depth: number): boolean {
+  if (depth >= AMEND_UNWRAP_DEPTH_LIMIT) {
+    // Fail closed for pathological wrapper nesting in a permission guard.
+    return true;
+  }
+
+  const unwrapped = stripShellWrapper(segment);
+  if (unwrapped !== segment) {
+    return commandContainsGitAmendAtDepth(unwrapped, depth + 1);
+  }
+
+  const tokens = skipAmendPrefixes(tokenize(segment));
+  if (tokens.length === 0) return false;
+
+  if (amendExecutableBasename(tokens[0]!) === 'eval') {
+    return commandContainsGitAmendAtDepth(tokens.slice(1).join(' '), depth + 1);
+  }
+
+  return isGitAmendInvocation(tokens);
+}
+
+function commandContainsGitAmendAtDepth(
+  command: string,
+  depth: number,
+): boolean {
+  for (const { command: segment } of splitCompoundCommandSegments(
+    stripHeredocBodies(command),
+  )) {
+    if (tokensContainGitAmend(segment, depth)) return true;
+  }
+  return false;
+}
+
+/**
+ * Check whether a shell command actually invokes `git commit --amend`.
+ *
+ * Unlike the old raw-substring guard, this ignores quoted text, heredoc
+ * bodies, commit-message arguments, and commands whose program is not git.
+ */
+export function commandContainsGitAmend(command: string): boolean {
+  return commandContainsGitAmendAtDepth(command, 0);
+}
+
 function walkCompoundCommand(
   command: string,
   cwd: string,

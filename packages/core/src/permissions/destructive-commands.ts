@@ -20,6 +20,7 @@
 
 import type { Content, Part } from '@google/genai';
 import { execSync } from 'node:child_process';
+import { commandContainsGitAmend } from './shell-semantics.js';
 
 /**
  * Destructive git commands that discard local work.
@@ -31,13 +32,6 @@ const DESTRUCTIVE_GIT_PATTERNS: readonly RegExp[] = Object.freeze([
   /\bgit\s+clean\s+-[a-zA-Z]*f/,
   /\bgit\s+stash\s+drop\b/,
 ]);
-
-/**
- * `git commit --amend` is blocked unless the target commit was made by the
- * agent in this session. Session tracking is managed externally via
- * {@link registerSessionCommit} and {@link isAmendOfSessionCommit}.
- */
-const GIT_AMEND_PATTERN = /\bgit\s+commit\s+--amend\b/;
 
 /**
  * IaC destroy commands that tear down infrastructure.
@@ -216,7 +210,7 @@ export function isDestructiveCommand(
     }
   }
 
-  if (GIT_AMEND_PATTERN.test(expanded) && !isAmendOfSessionCommit(cwd)) {
+  if (commandContainsGitAmend(command) && !isAmendOfSessionCommit(cwd)) {
     return {
       blocked: true,
       reason:

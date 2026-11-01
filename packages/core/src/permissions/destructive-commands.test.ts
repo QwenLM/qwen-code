@@ -186,6 +186,29 @@ describe('isDestructiveCommand — git commit --amend', () => {
     expectBlocked('git commit --amend --no-edit', 'amend the commit', 'amend');
   });
 
+  it.each([
+    'git -c core.editor=true commit --amend',
+    '/usr/bin/git commit --amend --no-edit',
+    "bash -c 'git commit --amend --no-edit'",
+    'sudo env GIT_COMMITTER_DATE=now git commit --amend --no-edit',
+    'timeout 10 git commit --amend --no-edit',
+    'if true; then git commit --amend --no-edit; fi',
+  ])('blocks amend through an execution wrapper: %s', (command) => {
+    expectBlocked(command, 'amend the commit', 'amend');
+  });
+
+  it.each([
+    `node -e 'console.log("a report about git commit --amend behaviour")'`,
+    'echo "git commit --amend"',
+    `printf '%s\\n' 'git commit --amend'`,
+    'grep -n "git commit --amend" CHANGELOG.md',
+    'git commit -m --amend',
+    'git log --grep="git commit --amend"',
+    `cat > notes.txt <<'EOF'\ngit commit --amend\nEOF`,
+  ])('allows inert text that mentions amend: %s', (command) => {
+    expectAllowed([command], 'write a report');
+  });
+
   it('allows git commit (without --amend)', () => {
     expectAllowed(['git commit -m "fix"'], 'commit changes');
   });
