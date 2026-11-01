@@ -11,6 +11,82 @@ import type { AcpChannel } from './channel.js';
 import { BridgeTimeoutError } from './status.js';
 
 describe('channel startup', () => {
+  it('completes a slow cold startup and reuses its channel', async () => {
+    vi.useFakeTimers();
+    const handle = makeChannel({ initializeDelayMs: 30 });
+    let releaseFactory!: (channel: AcpChannel) => void;
+    const factory = new Promise<AcpChannel>((resolve) => {
+      releaseFactory = resolve;
+    });
+    const channelFactory = vi.fn(() => factory);
+    const bridge = makeBridge({ initializeTimeoutMs: 50, channelFactory });
+
+    try {
+      const preheat = bridge.preheat().catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(45);
+      releaseFactory(handle.channel);
+      await vi.advanceTimersByTimeAsync(30);
+      expect(await preheat).toBeUndefined();
+      expect(bridge.isChannelLive()).toBe(true);
+      await bridge.preheat();
+      expect(channelFactory).toHaveBeenCalledOnce();
+      expect(handle.agent.initializeCalls).toHaveLength(1);
+      expect(handle.killed).toBe(false);
+    } finally {
+      releaseFactory(handle.channel);
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    [75, 25],
+    [101, 1],
+  ])(
+    'clamps initialize to %i ms elapsed / %i ms remaining after a stalled factory',
+    async (elapsedMs, expectedBudgetMs) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      const handle = makeChannel({
+        initializeImpl: () => new Promise(() => {}),
+      });
+      let releaseFactory!: (channel: AcpChannel) => void;
+      const factory = new Promise<AcpChannel>((resolve) => {
+        releaseFactory = resolve;
+      });
+      const bridge = makeBridge({
+        initializeTimeoutMs: 50,
+        channelFactory: () => factory,
+      });
+
+      try {
+        const settled = vi.fn();
+        const preheat = bridge.preheat().catch((error: unknown) => error);
+        void preheat.then(settled);
+        vi.setSystemTime(elapsedMs);
+        releaseFactory(handle.channel);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(handle.agent.initializeCalls).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(expectedBudgetMs - 1);
+        expect(handle.killed).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(settled).toHaveBeenCalledOnce();
+        expect(handle.killed).toBe(true);
+        expect(await preheat).toMatchObject({
+          name: 'BridgeTimeoutError',
+          label: 'initialize',
+          timeoutMs: expectedBudgetMs,
+        });
+        expect(bridge.isChannelLive()).toBe(false);
+      } finally {
+        releaseFactory(handle.channel);
+        await vi.advanceTimersByTimeAsync(50);
+        await bridge.shutdown();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('gives initialize its own budget after a slow channel factory', async () => {
     vi.useFakeTimers();
     let finishInitialize!: () => void;

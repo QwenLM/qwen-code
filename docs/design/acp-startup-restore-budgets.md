@@ -1,0 +1,38 @@
+# ACP startup and restore budgets
+
+[English](acp-startup-restore-budgets.md) | [简体中文](acp-startup-restore-budgets.zh-CN.md)
+
+## Problem
+
+PR #14985 gives child creation and the ACP initialize handshake separate budgets. Each phase receives `initializeTimeoutMs` (`T`), with an absolute deadline for their pair of `2T`. Failure teardown can additionally await up to `T`; it must retain its graceful termination and forced-kill escalation.
+
+Session restoration currently starts its timeout after channel acquisition. A 9-second spawn, 9-second handshake, and 53-second restore therefore complete at 71 seconds, beyond the SDK's default 70-second request deadline. Both load and resume exhibit this with the actual bridge and deterministic ACP transport.
+
+## Scope and decision
+
+Keep the initialize setting, defaults, protocol limits, and client timeout formulas unchanged. Document the two startup phases and separate failure teardown accurately.
+
+For a fresh restore, use one absolute `sessionRestoreTimeoutMs` deadline from the beginning of owner preparation through the ACP load/resume request. Engine selection, channel acquisition, and remembered-language delivery consume this budget. Each preparation await is bounded, and the ACP request receives only the remaining budget. Expired preparation never dispatches a late load/resume request.
+
+This includes readiness in the advertised restore budget instead of publishing a new startup limit or changing SDK/Web Shell headroom. At defaults, restoration has 60 seconds, while SDK requests retain 10 seconds of headroom and the Web Shell watchdog retains 15 seconds. Slow restores can time out earlier than with the previous extra unadvertised startup allowance; operators can configure a larger restore timeout.
+
+## Ownership and cleanup
+
+The bridge remains scoped to its resolved workspace runtime, and execution-engine selection stays authoritative. No daemon route or runtime fallback changes.
+
+Channel acquisition is shared. A restore deadline stops that caller's wait without cancelling another caller's channel startup. Late readiness may warm the channel, but cannot issue the expired caller's ACP restore. The existing owner finalizer releases admission, closes event buffers, and settles coalesced waiters when preparation fails.
+
+Once ACP restoration starts, retain existing timeout fencing, late-result cleanup, and empty/shared-channel handling. Report preparation deadline failures as `SessionRestoreTimeoutError` and a timeout public result. Warm-session attachment and post-restore state application retain their existing behavior.
+
+## Validation and acceptance criteria
+
+- With `T=50 ms`, a 45 ms factory and 30 ms handshake succeed; warm preheat reuses that channel.
+- Clock jumps that leave 25 ms or exhaust the absolute startup deadline produce the clamped 25 ms or 1 ms handshake budgets. Removing the clamp or widening the deadline must fail these assertions; restoring the shared budget must fail the successful cold-start case.
+- Both cold load and resume settle at the advertised restore deadline, before the SDK/Web Shell headroom, while a restore that fits the remaining budget succeeds.
+- Preparation can time out while engine selection, channel acquisition, or remembered-language delivery is pending. A late preparation result issues no restore and does not retain an admission slot or damage a shared channel.
+- Existing restore abandonment, cleanup, coalescing, per-engine ownership, startup cancellation, and warm reuse remain covered by package tests.
+- Build, bundle, typecheck, formatting, lint, and independent verification must pass. The original slow Windows workspace is unavailable; deterministic transport tests establish timing behavior, with built CLI smoke reported separately.
+
+## Open questions
+
+None required. Client protocol changes and general post-restore processing deadlines are outside this fix.

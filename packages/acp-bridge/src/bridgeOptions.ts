@@ -309,13 +309,16 @@ export interface BridgeOptions {
   /**
    * How long to wait for the child's `initialize` reply before giving up.
    * The channel spawn that precedes the handshake gets its own budget of the
-   * same length, and one absolute deadline bounds startup at twice this value.
+   * same length, and one absolute deadline bounds the spawn+handshake pair at
+   * twice this value. Failed startup can additionally await up to one more
+   * such budget for channel teardown.
    */
   initializeTimeoutMs?: number;
   /**
-   * How long to wait for `session/load` and `session/resume`. Defaults to
-   * 60 seconds; an explicitly configured `initializeTimeoutMs` can raise it,
-   * but never lower it.
+   * How long to wait for channel readiness and `session/load` or
+   * `session/resume`, including engine selection and user-language delivery.
+   * Defaults to 60 seconds; an explicitly configured `initializeTimeoutMs`
+   * can raise it, but never lower it.
    */
   sessionRestoreTimeoutMs?: number;
   /**
