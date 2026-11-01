@@ -35,8 +35,9 @@ Two entry paths share the contract below.
 `/verify-pr <n>` proves the change and posts nothing. `--publish` adds the
 report comment and its image evidence; `--watch` installs a standing trigger.
 Before publishing a local round, run
-`node scripts/verify-pr-check.mjs <artifact dir>`; it applies the consistency
-rules the publisher enforces in CI.
+`node <trusted-clone>/scripts/verify-pr-check.mjs --context <host snapshot> <artifact dir>`
+from a checkout the PR cannot write; it applies the
+consistency rules the publisher enforces in CI.
 
 ## Environment contract (CI verify job)
 
@@ -209,46 +210,79 @@ isolates PR code, and a host-side proxy keeps the real model key out of the
 container. `scripts/verify-pr-model-proxy.mjs` is that proxy — the same relay
 rules as the CI lane's inline one (only `POST /chat/completions`, a per-run
 bearer token, a per-chunk idle watchdog), plus hop-by-hop request header
-stripping. The CI lane deliberately keeps its
-own inline copy: the proxy holds the real key, so it must never execute a
-script from the PR-head checkout.
+stripping. The CI lane deliberately keeps its own inline copy.
 
-1. **Start the proxy on the host** (after prepare has written `context.json`):
+Two checkouts are involved, and they are not interchangeable:
+
+- `<trusted-clone>` — a checkout of `main` (or another trusted revision) that
+  the PR cannot write. The proxy and the checker always run from here.
+- `<pr-clone>` — a **standalone** clone checked out at the PR head. The round
+  runs here, so its `.git` lives inside the tree; a linked worktree's gitfile
+  points at an absolute host path the container cannot see. Prepare runs here
+  on the host and refuses any other HEAD.
+
+Never start the key-holding proxy or the post-round checker from
+`<pr-clone>`: a PR can rewrite a script in its own tree, and those two steps
+run with the real key and the maintainer's `gh` access.
+
+1. **Prepare on the host, then copy the full snapshot out of the tree:**
 
    ```bash
-   REVIEW_OPENAI_BASE_URL=<upstream-url> REVIEW_OPENAI_API_KEY=<real-key> \
-     node scripts/verify-pr-model-proxy.mjs --listen 172.17.0.1
-   # => {"port":...,"baseUrl":"http://172.17.0.1:<port>","token":"...","nonce":"..."}
+   node <pr-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>
+   mkdir -p ~/.cache/qwen-verify/pr<n>
+   cp <pr-clone>/tmp/verify-context/pr<n>.json \
+     ~/.cache/qwen-verify/pr<n>/pr.json
+   ```
+
+   The artifact directory's `context.json` carries only the four coordinates;
+   the round reads the full gh snapshot (title, body, author, commits) from
+   `$QWEN_VERIFY_CONTEXT`. The host copy is also what pins the expected head
+   after the round, because PR code can rewrite anything inside `<pr-clone>`.
+
+2. **Start the proxy from the trusted checkout, in the background**, with the
+   key read rather than typed onto the command line (a literal assignment
+   lands in shell history):
+
+   ```bash
+   read -rsp 'REVIEW_OPENAI_API_KEY: ' REVIEW_OPENAI_API_KEY; echo
+   export REVIEW_OPENAI_API_KEY
+   REVIEW_OPENAI_BASE_URL=<upstream-url> \
+     node <trusted-clone>/scripts/verify-pr-model-proxy.mjs \
+       --listen <bridge-ip> > ~/.cache/qwen-verify/pr<n>/proxy.json 2>&1 &
+   echo $! > ~/.cache/qwen-verify/pr<n>/proxy.pid
    ```
 
    Bind the Docker bridge address, not `127.0.0.1` — a container cannot reach
    the host's loopback. The bearer check stays mandatory: the port is visible
-   to every container on the bridge. The real key is never printed.
+   to every container on the bridge. Keep the proxy running for the whole
+   round and stop it at the end — it holds the real key.
 
-2. **Start the boundary**, mounting nothing credential-shaped:
+3. **Start the boundary as a named, detached container** so every later step
+   can be issued without a TTY:
 
    ```bash
-   docker run --rm -it \
-     -v <pr-worktree>:/work \
-     -v <round-dir>/context.json:/verify-context/pr.json:ro \
+   docker run -d --rm --name qwen-verify-<n> \
+     --user "$(id -u):$(id -g)" -e HOME=/tmp/qwen-home \
+     -v <pr-clone>:/work \
+     -v ~/.cache/qwen-verify/pr<n>:/verify-context:ro \
      -e QWEN_VERIFY_CONTEXT=/verify-context/pr.json \
-     -e QWEN_VERIFY_CREDENTIAL_FREE=1 \
      -e QWEN_VERIFY_PROXY_TOKEN=<token> \
-     -w /work node:22-bookworm bash
+     -w /work node:22-bookworm sleep infinity
    ```
 
    No host `HOME`, no `gh` token, no `SANDBOX_MOUNTS`. The token travels as
    `QWEN_VERIFY_PROXY_TOKEN`, **not** `OPENAI_API_KEY`: `--require-isolation`
    refuses any non-empty `OPENAI_API_KEY` (it cannot tell a proxy token from
-   a real key), and this name is not a credential signal.
-   `QWEN_VERIFY_CREDENTIAL_FREE=1` remains the attestation — set it only
-   after confirming the mounts carry nothing.
+   a real key), and this name is not a credential signal. Running as the host
+   uid keeps files written into the mounted tree — including the round's
+   artifacts — owned by the maintainer, not root.
 
-3. **Point the provider at the proxy** in the container's fresh
+4. **Point the provider at the proxy** in the container's fresh
    `$HOME/.qwen/settings.json`; the runtime reads the credential from
    `envKey`, so no `OPENAI_API_KEY` is needed:
 
-   ```json
+   ```bash
+   docker exec -i qwen-verify-<n> bash -lc 'mkdir -p "$HOME/.qwen" && cat > "$HOME/.qwen/settings.json"' <<'JSON'
    {
      "security": { "auth": { "selectedType": "openai" } },
      "model": { "name": "<model-id>" },
@@ -257,18 +291,57 @@ script from the PR-head checkout.
          {
            "id": "<model-id>",
            "envKey": "QWEN_VERIFY_PROXY_TOKEN",
-           "baseUrl": "<baseUrl printed by the proxy>"
+           "baseUrl": "<baseUrl from proxy.json>"
          }
        ]
      }
    }
+   JSON
    ```
 
-4. **Inside, the round's first command** is still
-   `node scripts/verify-pr-prepare.mjs --require-isolation` (exit 4 = not a
-   boundary). Then install the CLI, build as the local install strategy
-   requires, and run the round. Coordinate resolution and publishing stay on
-   the host: they need `gh`, which the boundary excludes.
+5. **Attest inside, after a check — never on the `docker run` line.** The
+   gate only sees known credential names and home paths, and gitignored files
+   in the round tree are invisible to its clean-tree check, so review the
+   mount list and reject credential-shaped ignored files first:
+
+   ```bash
+   docker exec -i qwen-verify-<n> bash -lc '
+     set -e
+     test -z "$(git -C /work status --porcelain --ignored -- .env ".env.*")" ||
+       { echo "ignored credential file in the round tree"; exit 1; }
+     export QWEN_VERIFY_CREDENTIAL_FREE=1
+     node /work/scripts/verify-pr-prepare.mjs --require-isolation
+   '
+   ```
+
+   Exit 4 means this is not a boundary: stop and run nothing else.
+
+6. **Run the round inside**, installing the CLI into the fresh home because
+   the container is not root:
+
+   ```bash
+   docker exec -i qwen-verify-<n> bash -lc '
+     set -e
+     export PATH="$HOME/.local/bin:$PATH"
+     npm install -g --prefix "$HOME/.local" @qwen-code/qwen-code
+     # build the tree as the local install strategy requires, then:
+     qwen --auth-type openai --approval-mode yolo \
+       --prompt "/verify-pr <n> --repo <owner>/<repo>"
+   '
+   ```
+
+7. **After the round, check and clean up from the host.** The checker and its
+   expected head both come from outside the round tree:
+
+   ```bash
+   node <trusted-clone>/scripts/verify-pr-check.mjs \
+     --context ~/.cache/qwen-verify/pr<n>/pr.json <round-dir>
+   docker rm -f qwen-verify-<n>
+   kill "$(cat ~/.cache/qwen-verify/pr<n>/proxy.pid)"
+   ```
+
+   `<round-dir>` is `<pr-clone>/tmp/pr<n>-verify-<ts>`. Publishing still
+   needs `gh`, so it stays on the host.
 
 ## Watch mode (local only)
 
@@ -481,7 +554,9 @@ body — report content plus the resolved footer — into `comment.md` in the
 artifact directory and post that file: it is what the read-back below
 compares against, and it gives the checker a place to verify the footer
 actually landed. The local path has no publisher enforcing the fail/mismatch
-rule, so run `node scripts/verify-pr-check.mjs <artifact dir>` and clear its
+rule, so run
+`node <trusted-clone>/scripts/verify-pr-check.mjs --context <host snapshot> <artifact dir>`
+and clear its
 errors and its verdict-shape and footer warnings before publishing (a
 missing footer is legitimate only when the model could not be resolved),
 act on a gates-size warning by recording the suites it ran under `gates`

@@ -417,6 +417,11 @@ A published verification comment ends with the same attribution shape
   later preparation into a different artifact directory. Publishable round
   snapshots contain no PR title or body.
 
+## Related designs
+
+- The container boundary and its host-side model proxy:
+  [verify-pr-local-model-proxy.md](verify-pr-local-model-proxy.md).
+
 ## Open questions
 
 None at this scope.

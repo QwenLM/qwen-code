@@ -97,6 +97,11 @@
 - 所有脚本都不执行 PR 代码。
 - 对于自带轮次快照的报告，在不同产物目录中准备后续轮次不会改变检查所用的提交号。可发布的轮次快照不包含 PR 标题或正文。
 
+## 相关设计
+
+- 容器边界与它的宿主机模型代理：
+  [verify-pr-local-model-proxy.zh-CN.md](verify-pr-local-model-proxy.zh-CN.md)。
+
 ## 未决问题
 
 本范围内无。
