@@ -22713,6 +22713,10 @@ export function App({
                     managedAgentProvider ? setManagedNavigationSearch : undefined
                   }
                   currentSessionActive={!managedMode}
+                  onSessionArchived={(sessionId, workspaceCwd) => {
+                    closeUsageTabs([sessionId]);
+                    void handleCurrentSessionRemoved({ sessionId, workspaceCwd });
+                  }}
                   onNewStandaloneSession={() =>
                     createNewSession({ kind: 'global' })
                   }
@@ -23401,6 +23405,7 @@ export function App({
                       <PluginManagerPage
                         onClose={returnToChat}
                         onUseSkill={handleUseSkill}
+                        showBackButton={!navigationRailVisible}
                         initialFocusRef={pluginTabRef}
                         initialTab={pluginInitialTab}
                         skillsWorkspaceCwd={skillsSourceCwd}
