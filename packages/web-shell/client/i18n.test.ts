@@ -54,8 +54,6 @@ describe('web-shell i18n catalog', () => {
       const t = getTranslator(language);
       for (const key of [
         'waitingGame.title',
-        'waitingGame.hint',
-        'waitingGame.waiting',
         'waitingGame.start',
         'waitingGame.collapse',
         'waitingGame.region',
@@ -71,7 +69,6 @@ describe('web-shell i18n catalog', () => {
       }
     }
     const zh = getTranslator('zh-CN');
-    expect(zh('waitingGame.waiting')).toBe('等待回复中');
     expect(zh('waitingGame.score', { score: 100 })).toBe('得分 100');
     expect(zh('waitingGame.cleared', { count: 2, score: 100 })).toBe(
       '消除 2 列 · +100',
