@@ -43,7 +43,7 @@ class ManagedSessionOperationMigrationTest {
                         status ->
                                 store.insertSessionCommand(
                                                 "tenant",
-                                                (String) null,
+                                                "actor-a",
                                                 "CREATE_SESSION",
                                                 "create",
                                                 "digest-create",

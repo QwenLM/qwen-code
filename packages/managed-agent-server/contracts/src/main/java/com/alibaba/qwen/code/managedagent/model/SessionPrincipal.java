@@ -51,10 +51,13 @@ public record SessionPrincipal(String tenantId, String userId,
     }
 
     private static void checkComponent(String name, String value) {
-        if (value.indexOf(0) >= 0) {
-            throw new ManagedAgentException(400,
-                    "invalid_actor",
-                    "The " + name + " must not contain NUL.");
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            if (character <= 0x1f || (character >= 0x7f && character <= 0x9f)) {
+                throw new ManagedAgentException(400,
+                        "invalid_actor",
+                        "The " + name + " must not contain control characters.");
+            }
         }
         if (value.getBytes(StandardCharsets.UTF_8).length
                 > MAX_COMPONENT_BYTES) {

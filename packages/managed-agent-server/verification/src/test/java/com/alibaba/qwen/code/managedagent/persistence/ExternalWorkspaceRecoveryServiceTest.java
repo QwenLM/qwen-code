@@ -103,7 +103,12 @@ class ExternalWorkspaceRecoveryServiceTest {
         when(binding.getVersion()).thenReturn(8L);
         assertThrows(RuntimeBrokerException.class,
                 () -> service.recoverSnapshot("tenant", "owner", "workspace", snapshot));
-        verifyNoInteractions(broker);
+        // 版本漂移后 recoverSnapshot 在到达宿主前就被 blocked() 拒绝；
+        // 但 requireSnapshot 已经向 broker 取过一次只读 boot 回执，不能断言零交互。
+        verify(broker, never()).recoverExternalWorkspaceBinding(
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.anyLong());
     }
 
     @Test
@@ -117,18 +122,24 @@ class ExternalWorkspaceRecoveryServiceTest {
         when(claimed.getBindingId()).thenReturn("binding");
         when(claimed.getGeneration()).thenReturn(1L);
         when(claimed.getVersion()).thenReturn(8L);
-        when(claimed.getRequest()).thenReturn(binding.getRequest());
+        // 提前取出 binding 的 mock 返回值，避免在 stubbing claimed 时再次触发 binding
+        // 的 stubbed 调用，造成 UnfinishedStubbingException。
+        var claimedRequest = binding.getRequest();
+        var claimedLease = binding.getLease();
+        var claimedSeed = binding.getProvisionSeed();
+        var claimedHandle = binding.getResourceHandle();
+        when(claimed.getRequest()).thenReturn(claimedRequest);
         when(claimed.getState()).thenReturn(RuntimeBindingRecord.State.READY);
-        when(claimed.getLease()).thenReturn(binding.getLease());
-        when(claimed.getProvisionSeed()).thenReturn(binding.getProvisionSeed());
-        when(claimed.getResourceHandle()).thenReturn(binding.getResourceHandle());
+        when(claimed.getLease()).thenReturn(claimedLease);
+        when(claimed.getProvisionSeed()).thenReturn(claimedSeed);
+        when(claimed.getResourceHandle()).thenReturn(claimedHandle);
         when(claimed.getOperationGeneration()).thenReturn(1L);
         when(fenced.getBindingId()).thenReturn("binding");
         when(fenced.getGeneration()).thenReturn(1L);
         when(bindings.claimOperation(org.mockito.ArgumentMatchers.eq("binding"),
                 org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any())).thenReturn(claimed);
         when(claimed.withState(org.mockito.ArgumentMatchers.eq(RuntimeBindingRecord.State.RECOVERY_BLOCKED),
-                org.mockito.ArgumentMatchers.eq(binding.getLease()), org.mockito.ArgumentMatchers.any())).thenReturn(fenced);
+                org.mockito.ArgumentMatchers.eq(claimedLease), org.mockito.ArgumentMatchers.any())).thenReturn(fenced);
         when(bindings.compareAndSet(claimed, fenced)).thenReturn(fenced);
         // 最后一次读取模拟工具在初始检查与关闭准入之间成功抢先进入。
         when(executions.hasActiveByBinding("binding", 1)).thenReturn(false, false, true);
