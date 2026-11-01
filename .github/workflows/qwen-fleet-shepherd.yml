@@ -540,8 +540,12 @@ jobs:
             # R6-3).
             local cands cts cauthor cage cperm reads=0
             cands="$(jq -r --arg tc "${TAKEOVER_COMMAND}" --arg rc "${RETRY_COMMAND}" '
-              [ .[] | select(((.body // "") | gsub("^\\s+|\\s+$"; "")) == $tc
-                             or ((.body // "") | gsub("^\\s+|\\s+$"; "")) == $rc)
+              [ .[] | ((.body // "") | gsub("^\\s+|\\s+$"; "")) as $b
+                | ($b | ltrimstr($tc + " for ")) as $fn
+                | ($b | ltrimstr($tc + " from ")) as $sn
+                | select($b == $tc or $b == $rc
+                         or ($fn != $b and ($fn | test("^[0-9]{1,2}$")) and (($fn | tonumber) >= 1))
+                         or ($sn != $b and ($sn | test("^[0-9]{1,2}$"))))
                 | {ts: (.created_at // ""), login: (.user.login // "")} ]
               | group_by(.login) | map(max_by(.ts)) | sort_by(.ts) | reverse | .[] | "\(.ts)\t\(.login)"' "${ic}")"
             while IFS=$'\t' read -r cts cauthor; do

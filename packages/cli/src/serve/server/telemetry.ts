@@ -45,6 +45,12 @@ interface LegacySessionTelemetryRoute {
 export const legacySessionTelemetryRoutes = [
   {
     method: 'POST',
+    path: '/sessions/live-state',
+    attribution: 'handler_resolved',
+    route: 'POST /sessions/live-state',
+  },
+  {
+    method: 'POST',
     path: '/sessions/catalog',
     attribution: 'handler_resolved',
     route: 'POST /sessions/catalog',
@@ -429,6 +435,18 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/btw/stream',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/btw/stream',
+  },
+  {
+    method: 'DELETE',
+    path: '/session/:id/btw/stream/:requestId',
+    attribution: 'handler_resolved',
+    route: 'DELETE /session/:id/btw/stream/:requestId',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/mid-turn-message',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/mid-turn-message',
@@ -608,7 +626,8 @@ function matchLegacySessionTelemetryRoute(
       route: entry.route,
       attribution: entry.attribution,
       ...(rawSessionId ? { sessionId: decodePathSegment(rawSessionId) } : {}),
-      ...(requestId !== undefined &&
+      ...(entry.path.endsWith('/permission/:requestId') &&
+      requestId !== undefined &&
       requestId.length <= MAX_CLIENT_ID_LENGTH &&
       CLIENT_ID_RE.test(requestId)
         ? { permissionRequestId: requestId }

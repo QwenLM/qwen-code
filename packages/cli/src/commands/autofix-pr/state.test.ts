@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -12,6 +13,7 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   utimesSync,
@@ -27,13 +29,88 @@ import {
   isBranchName,
   keepHistory,
   readHistory,
+  readRegularFile,
   readState,
   stateDefect,
   writeState,
   assertOwnedBySession,
+  parseWorktreePaths,
+  vouchedScanRoots,
   withWatchLock,
   type AutofixPrState,
 } from './state.js';
+
+describe('vouchedScanRoots', () => {
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null' },
+    }).trim();
+  let dir: string;
+  let bare: string;
+  let wt: string;
+  let foreign: string;
+
+  beforeEach(() => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), 'autofix-vouch-')));
+    const src = join(dir, 'src');
+    git(dir, 'init', '-q', '-b', 'main', src);
+    git(
+      src,
+      '-c',
+      'user.email=a@b',
+      '-c',
+      'user.name=a',
+      'commit',
+      '-q',
+      '--allow-empty',
+      '-m',
+      'one',
+    );
+    bare = join(dir, 'bare.git');
+    git(dir, 'clone', '-q', '--bare', src, bare);
+    wt = join(dir, 'wt');
+    git(bare, 'worktree', 'add', '-q', '--detach', wt);
+    foreign = join(dir, 'foreign');
+    git(dir, 'init', '-q', '-b', 'main', foreign);
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('vouches genuine worktrees of a bare clone, not a foreign repository', () => {
+    // A bare clone's main entry has no `.git` child; the anchor must resolve
+    // to the bare dir itself, and a foreign repo at a stale path is not read.
+    const vouched = vouchedScanRoots([bare, wt, foreign]);
+    expect(vouched).toContain(bare);
+    expect(vouched).toContain(wt);
+    expect(vouched).not.toContain(foreign);
+  });
+
+  it('does not fail open to unvouched siblings when the anchor is unavailable', () => {
+    const missing = join(dir, 'does-not-exist');
+    const vouched = vouchedScanRoots([missing, foreign]);
+    expect(vouched).toEqual([missing]);
+  });
+});
+
+describe('parseWorktreePaths', () => {
+  it('keeps a newline-bearing path one record, fabricating no extra root', () => {
+    const evil = '/tmp/repo/evil\nworktree /tmp/injected-root';
+    const out =
+      `worktree /tmp/repo\0HEAD ${'a'.repeat(40)}\0branch refs/heads/main\0\0` +
+      `worktree ${evil}\0HEAD ${'b'.repeat(40)}\0detached\0\0`;
+    expect(parseWorktreePaths(out)).toEqual(['/tmp/repo', evil]);
+  });
+
+  it('parses ordinary worktrees and tolerates a stripped trailing NUL', () => {
+    const out = `worktree /tmp/repo\0HEAD ${'a'.repeat(40)}\0branch refs/heads/main\0`;
+    expect(parseWorktreePaths(out)).toEqual(['/tmp/repo']);
+    expect(parseWorktreePaths('')).toEqual([]);
+  });
+});
 
 describe('isBranchName', () => {
   it('accepts what git accepts as a branch name', () => {
@@ -463,6 +540,40 @@ describe('history', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+describe('readRegularFile', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'autofix-read-'));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reads a regular file, and nothing at all as null', () => {
+    writeFileSync(join(dir, 'f'), 'text');
+    expect(readRegularFile(join(dir, 'f'))).toBe('text');
+    expect(readRegularFile(join(dir, 'none'))).toBeNull();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'neither follows a link nor waits on a FIFO',
+    () => {
+      writeFileSync(join(dir, 'target'), 'text');
+      symlinkSync(join(dir, 'target'), join(dir, 'link'));
+      expect(() => readRegularFile(join(dir, 'link'))).toThrow();
+      execFileSync('mkfifo', [join(dir, 'fifo')]);
+      // No writer ever opens it: a blocking open would never return.
+      expect(() => readRegularFile(join(dir, 'fifo'))).toThrow(
+        /is not a regular file/,
+      );
+      mkdirSync(join(dir, 'sub'));
+      expect(() => readRegularFile(join(dir, 'sub'))).toThrow(
+        /is not a regular file/,
+      );
+    },
+  );
 });
 
 describe('ghNotFound', () => {

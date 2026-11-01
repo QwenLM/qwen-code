@@ -85,6 +85,8 @@ const EN = {
   'composer.editUnavailable':
     'The message cannot be edited before the session is ready.',
   'composer.editExpired': 'The original message can no longer be edited.',
+  'composer.editIdentityUnavailable':
+    'This checkpoint has no prompt identity to rewind to.',
   'composer.editFailed': 'Failed to edit the message. Please try again.',
   'composer.editSyncFailed':
     'Could not confirm the rewind. Please send the message again.',
@@ -172,6 +174,7 @@ const ZH: Record<ChromeStringKey, string> = {
   'composer.cancelEditing': '取消编辑',
   'composer.editUnavailable': '会话尚未就绪，暂时无法编辑该消息。',
   'composer.editExpired': '该消息已无法再编辑。',
+  'composer.editIdentityUnavailable': '该检查点没有可用于回退的 prompt 身份。',
   'composer.editFailed': '编辑消息失败，请重试。',
   'composer.editSyncFailed': '未能确认回退，请重新发送该消息。',
   'context.included': '已包含',

@@ -53,6 +53,8 @@ Regression coverage must include independent resident storage sharing a mount pa
 
 ## Follow-up platform-managed reclamation
 
+The [S2/S3 reclamation design](2026-10-27-resident-workspace-reclamation.md) specifies the proposed completion, atomic release, and retained-data handoff contract. Its implementation and platform qualification are tracked separately from the historical S1 evidence below.
+
 The next design delegates ordinary container termination and volume cleanup to supported ACK/Kubernetes lifecycle mechanisms. Complete CSI RPC history is no longer a required implementation choice. Before implementing release, that design must define:
 
 1. Exact eligibility and immutable identity joins for the original Workspace, runtime generation, Pod/node, registered volume and current reservation.

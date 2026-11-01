@@ -253,6 +253,31 @@ describe('Turn', () => {
   });
 
   describe('run', () => {
+    it('forwards dispatch notification without treating stream acquisition as dispatch', async () => {
+      const dispatched = vi.fn();
+      const isolated = new Turn(
+        { sendMessageStream: mockSendMessageStream } as unknown as LlmChat,
+        'mode-prompt',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        dispatched,
+      );
+      for await (const event of isolated.run(
+        'test-model',
+        [{ text: 'hello' }],
+        new AbortController().signal,
+      )) {
+        expect(event).toBeDefined();
+      }
+      expect(dispatched).not.toHaveBeenCalled();
+      expect(mockSendMessageStream.mock.lastCall?.[4]).toEqual({
+        onModelRequestDispatched: dispatched,
+      });
+    });
     it('should yield content events for text parts', async () => {
       const reqParts: Part[] = [{ text: 'Hi' }];
       const events = await run(

@@ -364,6 +364,27 @@ setInterval(() => {}, 1000);
 describe('Managed runtime publication gates', () => {
   const steps = workflow.jobs.release.steps;
   const step = (name) => steps.find((item) => item.name === name);
+  it('stages the executable classifier while retaining legacy fallback and runtime download names', () => {
+    const verification = step(
+      'Verify the executable JAR and publication profile',
+    ).run;
+    expect(verification).toContain(
+      'qwen-managed-agent-server-${CLI_VERSION}-exec.jar',
+    );
+    expect(verification).toContain(
+      'Main-Class: org.springframework.boot.loader.launch.JarLauncher',
+    );
+    expect(verification).toContain(
+      'if [[ ! -f "${runtime_jar}" ]]; then runtime_jar="packages/managed-agent-server/target/qwen-managed-agent-server-${CLI_VERSION}.jar"; fi',
+    );
+    expect(verification).toContain(
+      '--jar "${runtime_jar}" --version "${CLI_VERSION}" --out-dir dist/managed-runtime',
+    );
+    expect(step('Verify both public download channels').run).toContain(
+      'jar="qwen-managed-agent-server-${CLI_VERSION}.jar"',
+    );
+  });
+
   it('defaults manual runs to verification and restricts publication to the protected official repository', () => {
     expect(workflow.on.release.types).toEqual(['published']);
     expect(workflow.on.workflow_dispatch.inputs.dry_run.default).toBe(true);
@@ -377,8 +398,6 @@ describe('Managed runtime publication gates', () => {
     );
     for (const name of [
       'Recheck the immutable tag and existing publication bytes',
-      'Configure signed Central publication',
-      'Publish the signed server artifact to Central',
       'Attach only missing GitHub release assets',
       'Install the verified OSS uploader',
       'Configure authenticated OSS access',
@@ -395,10 +414,31 @@ describe('Managed runtime publication gates', () => {
       (item) =>
         item.name === 'Verify the executable JAR and publication profile',
     );
-    expect(build).toBeLessThan(
-      steps.findIndex(
-        (item) => item.name === 'Publish the signed server artifact to Central',
-      ),
+    for (const name of [
+      'Attach only missing GitHub release assets',
+      'Upload only missing OSS release assets',
+    ]) {
+      expect(build).toBeLessThan(steps.indexOf(step(name)));
+    }
+  });
+
+  it('distributes the verified runtime without Central publication access or signing credentials', () => {
+    const definition = JSON.stringify(workflow);
+    for (const dependency of [
+      'CENTRAL_USERNAME',
+      'CENTRAL_PASSWORD',
+      'MAVEN_GPG_PRIVATE_KEY',
+      'MAVEN_GPG_PASSPHRASE',
+      'repo.maven.apache.org',
+      'gpg-private-key',
+    ]) {
+      expect(definition).not.toContain(dependency);
+    }
+    expect(steps.some((item) => /\bmvn\b.*\bdeploy\b/u.test(item.run))).toBe(
+      false,
+    );
+    expect(workflow.on.workflow_dispatch.inputs.dry_run.description).toBe(
+      'Build and verify without publishing to GitHub or OSS.',
     );
   });
 
@@ -412,8 +452,9 @@ describe('Managed runtime publication gates', () => {
     expect(steps.indexOf(install)).toBeLessThan(steps.indexOf(configure));
     expect(steps.indexOf(configure)).toBeLessThan(steps.indexOf(preflight));
     expect(steps.indexOf(preflight)).toBeLessThan(
-      steps.indexOf(step('Publish the signed server artifact to Central')),
+      steps.indexOf(step('Attach only missing GitHub release assets')),
     );
+    expect(steps.indexOf(preflight)).toBeLessThan(steps.indexOf(upload));
     expect(install.env.OSSUTIL_URL).toContain('/1.7.19/');
     expect(install.env.OSSUTIL_SHA256).toBe(
       'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343',
@@ -481,9 +522,19 @@ describe('Managed runtime publication gates', () => {
     expect(
       step('Verify the executable JAR and publication profile').run,
     ).toContain('clean verify');
-    expect(step('Publish the signed server artifact to Central').run).toContain(
-      'cmp ',
+  });
+
+  it('isolates server test classes without filtering or bypassing release verification', () => {
+    const verification = step(
+      'Verify the executable JAR and publication profile',
+    ).run;
+    expect(verification).toContain('-DforkCount=1');
+    expect(verification).toContain('-DreuseForks=false');
+    expect(verification).toContain('clean verify -Pcentral-release');
+    expect(verification).not.toMatch(
+      /-D(?:test=|groups=|excludedGroups=|skipTests|maven\.test\.(?:skip|failure\.ignore)|surefire\.(?:includes|excludes|rerunFailingTestsCount))/,
     );
+    expect(verification).not.toContain('-DargLine=');
   });
 
   it('keeps auxiliary executable JARs out of Central without changing their ordinary build attachment', () => {
@@ -507,8 +558,12 @@ describe('Managed runtime publication gates', () => {
       'maven-gpg-plugin',
     ])
       expect(profile).toContain(plugin);
+    const serverPom = fs.readFileSync(
+      path.join(root, 'packages/managed-agent-server/server/pom.xml'),
+      'utf8',
+    );
     expect(
-      pom.match(/<attach>\$\{managed.operator-tools.attach\}<\/attach>/g),
+      serverPom.match(/<attach>\$\{managed.operator-tools.attach\}<\/attach>/g),
     ).toHaveLength(6);
   });
 });
@@ -546,6 +601,98 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
   const preflight = workflow.jobs.release.steps.find(
     (item) => item.id === 'publication',
   ).run;
+  const repair = workflow.jobs.release.steps.find(
+    (item) => item.name === 'Repair the 0.26.3 ownership test fixture',
+  );
+  const repairSource = 'eeee1443a7e36ab22b2f1dcded8dec64b621a7ee';
+  const repairedTest =
+    'packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/Issue13180HardenedVerificationTest.java';
+  const repairPatch = 'scripts/patches/managed-runtime-v0.26.3-tests.patch';
+
+  function repairFixture() {
+    const fixed = fs.readFileSync(
+      path.join(
+        root,
+        repairedTest.replace('/src/test/', '/verification/src/test/'),
+      ),
+      'utf8',
+    );
+    const target = path.join(temporary, repairedTest);
+    const patch = path.join(
+      temporary,
+      '.qwen/managed-release-tools',
+      repairPatch,
+    );
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.mkdirSync(path.dirname(patch), { recursive: true });
+    fs.writeFileSync(target, fixed);
+    fs.copyFileSync(path.join(root, repairPatch), patch);
+    const git = (...args) => {
+      const result = spawnSync(
+        'git',
+        [
+          '-c',
+          'core.hooksPath=/dev/null',
+          '-c',
+          'commit.gpgsign=false',
+          '-c',
+          'user.name=Release test',
+          '-c',
+          'user.email=release-test@example.invalid',
+          ...args,
+        ],
+        { cwd: temporary, encoding: 'utf8' },
+      );
+      expect(result.status, result.stderr).toBe(0);
+    };
+    git('init', '--quiet');
+    git('apply', '--reverse', patch);
+    const original = fs.readFileSync(target, 'utf8');
+    fs.writeFileSync(path.join(temporary, 'product.java'), 'original product');
+    git('add', repairedTest, 'product.java');
+    git('commit', '--quiet', '-m', 'Release test fixture');
+    return { fixed, original, target, patch };
+  }
+
+  it('repairs only the 0.26.3 test while retaining the original ownership assertions and product bytes', () => {
+    expect(repair.if).toBe("${{ env.RELEASE_TAG == 'v0.26.3' }}");
+    const { fixed, target } = repairFixture();
+    const result = run(repair.run, {
+      RELEASE_TAG: 'v0.26.3',
+      SOURCE_SHA: repairSource,
+      GITHUB_STEP_SUMMARY: path.join(temporary, 'summary'),
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(fs.readFileSync(target, 'utf8')).toBe(fixed);
+    expect(fs.readFileSync(path.join(temporary, 'product.java'), 'utf8')).toBe(
+      'original product',
+    );
+  });
+
+  it.each(['wrong source', 'production patch'])(
+    'refuses the 0.26.3 repair with %s before changing files',
+    (failure) => {
+      const { original, target, patch } = repairFixture();
+      if (failure === 'production patch') {
+        fs.writeFileSync(
+          patch,
+          fs
+            .readFileSync(patch, 'utf8')
+            .replaceAll(repairedTest, 'product.java'),
+        );
+      }
+      const result = run(repair.run, {
+        RELEASE_TAG: 'v0.26.3',
+        SOURCE_SHA: failure === 'wrong source' ? 'other-sha' : repairSource,
+        GITHUB_STEP_SUMMARY: path.join(temporary, 'summary'),
+      });
+      expect(result.status).not.toBe(0);
+      expect(fs.readFileSync(target, 'utf8')).toBe(original);
+      expect(
+        fs.readFileSync(path.join(temporary, 'product.java'), 'utf8'),
+      ).toBe('original product');
+    },
+  );
 
   it('requires both credentials before creating a private shared OSS configuration', () => {
     const configure = workflow.jobs.release.steps.find(
@@ -560,7 +707,17 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
       ALIYUN_OSS_ACCESS_KEY_SECRET: '',
       ALIYUN_OSS_ENDPOINT: 'https://example.invalid',
     };
-    expect(run(configure, env).status).not.toBe(0);
+    for (const missing of [
+      'ALIYUN_OSS_ACCESS_KEY_ID',
+      'ALIYUN_OSS_ACCESS_KEY_SECRET',
+    ]) {
+      const result = run(configure, {
+        ...env,
+        ALIYUN_OSS_ACCESS_KEY_SECRET: 'fixture-secret',
+        [missing]: '',
+      });
+      expect(result.status, result.stderr).not.toBe(0);
+    }
     expect(fs.existsSync(path.join(temporary, 'oss-called'))).toBe(false);
     expect(
       run(configure, { ...env, ALIYUN_OSS_ACCESS_KEY_SECRET: 'fixture-secret' })
@@ -601,20 +758,56 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
     expect(fs.existsSync(path.join(temporary, 'gh-called'))).toBe(false);
   });
 
-  it('aborts preflight on an artifact-verification error instead of treating it as present', () => {
+  it('prepares both distribution channels when Central publication is unavailable and its credentials are absent', () => {
     executable('git', "printf '%s\\tref\\n' original-sha");
     executable('gh', "printf '%s\\n' '{\"draft\":false}'");
     executable(
       'node',
-      'case "$*" in *github.com*".jar --file "*) echo mismatch >&2; exit 7 ;; *repo.maven.apache.org*) echo present ;; *) echo missing ;; esac',
+      'case "$*" in *repo.maven.apache.org*) echo unexpected-central >&2; exit 7 ;; *) echo missing ;; esac',
     );
     const result = run(preflight, {
       SOURCE_SHA: 'original-sha',
       CLI_VERSION: '0.25.4',
-      OSS_PUBLIC_BASE_URL: 'https://example.com',
       ALIYUN_OSS_BUCKET: 'release-bucket',
+      CENTRAL_USERNAME: '',
+      CENTRAL_PASSWORD: '',
+      MAVEN_USERNAME: '',
+      MAVEN_PASSWORD: '',
+      MAVEN_GPG_PRIVATE_KEY: '',
+      MAVEN_GPG_PASSPHRASE: '',
     });
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain('mismatch');
+    expect(result.status).toBe(0);
+    for (const channel of ['github', 'oss']) {
+      expect(
+        fs.readFileSync(
+          path.join(temporary, `managed-${channel}-missing`),
+          'utf8',
+        ),
+      ).toBe(
+        'dist/managed-runtime/qwen-managed-agent-server-0.25.4.jar\n' +
+          'dist/managed-runtime/qwen-managed-agent-server-0.25.4.jar.sha256\n',
+      );
+    }
   });
+
+  it.each(['github.com', 'oss://'])(
+    'aborts preflight on a %s artifact-verification error instead of treating it as present',
+    (channel) => {
+      executable('git', "printf '%s\\tref\\n' original-sha");
+      executable('gh', "printf '%s\\n' '{\"draft\":false}'");
+      executable(
+        'node',
+        'case "$*" in *"$MISMATCH_HOST"*) echo mismatch >&2; exit 7 ;; *) echo missing ;; esac',
+      );
+      const result = run(preflight, {
+        SOURCE_SHA: 'original-sha',
+        CLI_VERSION: '0.25.4',
+        OSS_PUBLIC_BASE_URL: 'https://example.com',
+        ALIYUN_OSS_BUCKET: 'release-bucket',
+        MISMATCH_HOST: channel,
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('mismatch');
+    },
+  );
 });

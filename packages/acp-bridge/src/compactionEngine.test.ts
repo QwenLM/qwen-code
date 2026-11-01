@@ -208,6 +208,7 @@ type ChunkIdentity = {
   parentToolCallId?: string;
   subagentType?: string;
   sourceRecordIds?: string[];
+  agent?: unknown;
   promptId?: string;
   originatorClientId?: string;
   sessionId?: string;
@@ -221,7 +222,8 @@ function withIdentity(
   if (
     identity.parentToolCallId !== undefined ||
     identity.subagentType !== undefined ||
-    identity.sourceRecordIds !== undefined
+    identity.sourceRecordIds !== undefined ||
+    identity.agent !== undefined
   ) {
     update['_meta'] = {
       ...(identity.parentToolCallId === undefined
@@ -230,6 +232,7 @@ function withIdentity(
       ...(identity.subagentType === undefined
         ? {}
         : { subagentType: identity.subagentType }),
+      ...(identity.agent === undefined ? {} : { agent: identity.agent }),
       ...(identity.sourceRecordIds === undefined
         ? {}
         : {
@@ -945,6 +948,38 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(snap.liveJournal).toHaveLength(1);
       expect(extractTexts(snap.liveJournal)).toEqual(['firstsecond']);
       expect(snap.liveJournal.map((event) => event.id)).toEqual([2]);
+    });
+
+    it('merges consecutive subagent chunks carrying the agent identity stamp', () => {
+      const identity = {
+        parentToolCallId: 'tool-a',
+        subagentType: 'explore',
+        agent: { agentName: '/root/explore', depth: 1, kind: 'subagent' },
+      };
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(withIdentity(makeTextChunk(1, 'first'), identity));
+      engine.ingest(withIdentity(makeTextChunk(2, 'second'), identity));
+
+      const snap = engine.snapshot();
+      expect(snap.liveJournal).toHaveLength(1);
+      expect(extractTexts(snap.liveJournal)).toEqual(['firstsecond']);
+      expect(snap.liveJournal.map((event) => event.id)).toEqual([2]);
+    });
+
+    it('keeps chunks discrete when the agent stamp is not a record', () => {
+      const identity = {
+        parentToolCallId: 'tool-a',
+        subagentType: 'explore',
+        agent: 'explore',
+      };
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(withIdentity(makeTextChunk(1, 'first'), identity));
+      engine.ingest(withIdentity(makeTextChunk(2, 'second'), identity));
+
+      const snap = engine.snapshot();
+      expect(snap.liveJournal).toHaveLength(2);
+      expect(extractTexts(snap.liveJournal)).toEqual(['first', 'second']);
+      expect(snap.liveJournal.map((event) => event.id)).toEqual([1, 2]);
     });
 
     it.each([

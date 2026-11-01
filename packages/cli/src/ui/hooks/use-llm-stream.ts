@@ -113,6 +113,7 @@ import {
   findLastUserItemIndex,
   stripLeadingSystemReminders,
 } from '../utils/historyUtils.js';
+import { expandPendingPastePlaceholders } from '../utils/paste-placeholders.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import {
   handleAtCommand,
@@ -1861,7 +1862,10 @@ export const useLlmStream = (
           displayText ??
           submittedPrompt ??
           (isSlash ? trimmedQuery : stripLeadingSystemReminders(trimmedQuery));
-        await logger?.logMessage(MessageSenderType.USER, userText);
+        const recallText = pasteExpansions?.size
+          ? expandPendingPastePlaceholders(userText, pasteExpansions)
+          : userText;
+        await logger?.logMessage(MessageSenderType.USER, recallText);
         if (abortSignal.aborted) {
           return { queryToSend: null, shouldProceed: false };
         }
@@ -1992,6 +1996,7 @@ export const useLlmStream = (
             {
               type: MessageType.USER,
               text: userText,
+              ...(recallText !== userText ? { recallText } : {}),
               promptId: prompt_id,
               // The envelope masked a leading `?` from the lexical fallback in
               // isRealUserTurn; an un-noticed prompt keeps that fallback.
@@ -4438,15 +4443,16 @@ export const useLlmStream = (
           }
 
           const workflowSessionId = config.getSessionId();
-          const humanInput =
+          const workflowModeEligible =
             submitType === SendMessageType.UserQuery &&
             !allowConcurrentBtwDuringResponse &&
             !isDetachedToolContinuation &&
             !(metadata?.shellMode ?? shellModeActive) &&
             !dispatchesSlashCommand &&
-            !(typeof query === 'string' && isBtwCommand(query))
-              ? metadata?.humanInput
-              : undefined;
+            !(typeof query === 'string' && isBtwCommand(query));
+          const humanInput = workflowModeEligible
+            ? metadata?.humanInput
+            : undefined;
           // A prompt the person submitted or retried is a turn the Mods hear.
           const startsModTurn =
             mods !== undefined &&
@@ -4457,6 +4463,7 @@ export const useLlmStream = (
               submitType === SendMessageType.Retry);
           const sendOptions = {
             type: submitType,
+            ...(workflowModeEligible ? { workflowModeEligible: true } : {}),
             ...(startsModTurn
               ? {
                   onPromptAdmitted: () => {

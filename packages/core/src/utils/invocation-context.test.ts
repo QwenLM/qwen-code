@@ -46,6 +46,23 @@ describe('invocation context wire contract', () => {
     });
   });
 
+  it.each([false, true])(
+    'preserves Workflow write permission %s',
+    (allowed) => {
+      const value = { ...context, workflowModeWriteAllowed: allowed };
+      expect(parseInvocationContext(value)).toEqual(value);
+    },
+  );
+
+  it.each([null, undefined, 'true', 1, {}])(
+    'rejects malformed Workflow write permission %#',
+    (value) => {
+      expect(
+        parseInvocationContext({ ...context, workflowModeWriteAllowed: value }),
+      ).toBeUndefined();
+    },
+  );
+
   it.each([
     undefined,
     null,

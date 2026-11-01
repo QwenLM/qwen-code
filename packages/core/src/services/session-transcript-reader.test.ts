@@ -1300,6 +1300,7 @@ describe('SessionTranscriptReader', () => {
       {
         ...record('u1', 'source', 'first prompt'),
         promptId: `${sessionId}########3`,
+        daemonPromptId: 'daemon-prompt-3',
       } as ChatRecord,
       {
         ...record('a1', 'u1', 'first answer'),
@@ -1398,6 +1399,7 @@ describe('SessionTranscriptReader', () => {
       turnState.turnParentUuids,
     );
     expect(runtime?.recording.turnPromptIds).toEqual([`${sessionId}########3`]);
+    expect(runtime?.recording.turnDaemonPromptIds).toEqual(['daemon-prompt-3']);
     expect(runtime?.initialTurn).toBe(turnState.initialTurn);
     expect(runtime?.backgroundNotificationTaskIds).toEqual(
       turnState.backgroundNotificationTaskIds,
@@ -1778,6 +1780,64 @@ describe('SessionTranscriptReader', () => {
     expect(recording?.lastAssistantModel).toBe('other-turn-model');
   });
 
+  it('selects the last valid workflow mode on the active branch independently of replay', async () => {
+    await writeRecords([
+      sys('mode-off', null, 'session_workflow_mode', { enabled: false }),
+      record('u1', 'mode-off', 'first'),
+      record('a1', 'u1', 'answer'),
+      sys('mode-abandoned', 'a1', 'session_workflow_mode', { enabled: true }),
+      record('u2', 'mode-abandoned', 'abandoned'),
+      record('a2', 'u2', 'abandoned answer'),
+      sys('rewind', 'a1', 'rewind', { truncatedCount: 1 }),
+      sys('mode-invalid', 'rewind', 'session_workflow_mode', {
+        enabled: 'true',
+      }),
+      record('u3', 'mode-invalid', 'active'),
+      record('a3', 'u3', 'active answer'),
+    ]);
+    const projection = await coldProjection();
+    expect(projection?.runtime.recording.sessionWorkflowMode).toEqual({
+      enabled: false,
+    });
+    expect(JSON.stringify(projection?.runtime.apiHistory)).not.toContain(
+      'enabled',
+    );
+    const loaded = await svc().loadSession(sessionId);
+    expect(
+      loaded?.conversation.messages.map((record) => record.uuid),
+    ).not.toContain('mode-abandoned');
+  });
+
+  it('retains mode metadata on a selected historical fork, not the source tip', async () => {
+    await writeRecords([
+      sys('mode-off', null, 'session_workflow_mode', { enabled: false }),
+      record('u1', 'mode-off', 'first'),
+      record('a1', 'u1', 'answer'),
+      sys('checkpoint', 'a1', 'branch_checkpoint', {
+        v: 1,
+        startExclusiveRecordUuid: null,
+        assistantRecordUuid: 'a1',
+      }),
+      sys('mode-on', 'checkpoint', 'session_workflow_mode', { enabled: true }),
+      record('u2', 'mode-on', 'second'),
+      record('a2', 'u2', 'answer'),
+    ]);
+    const service = svc();
+    expect(
+      (await coldProjection())?.runtime.recording.sessionWorkflowMode,
+    ).toEqual({ enabled: true });
+    await service.forkSession(sessionId, otherSessionId, {
+      atRecordId: 'checkpoint',
+    });
+    const fork = await service.readRestoreProjection(otherSessionId, NONE);
+    expect(fork?.runtime.recording.sessionWorkflowMode).toEqual({
+      enabled: false,
+    });
+    expect(
+      (await coldProjection())?.runtime.recording.sessionWorkflowMode,
+    ).toEqual({ enabled: true });
+  });
+
   it('restores the last valid session approval state independently of replay', async () => {
     const yolo: ChatRecord = {
       ...record('approval-1', null, ''),
@@ -2146,6 +2206,24 @@ describe('SessionTranscriptReader', () => {
     const page = await readPage({ limit: 2 });
     expect(uuids(page.records)).toEqual(['u1', 'a1']);
     expect(page.branchPointsByAssistantUuid).toEqual({ a1: 'checkpoint-1' });
+  });
+
+  it('advertises branch points on the restore replay pages', async () => {
+    await writeRecords([
+      ...chain('prompt', 'answer'),
+      branchCheckpoint('checkpoint-1'),
+    ]);
+    const reader = newReader();
+    const restored = await reader.readRestoreProjection(sessionId, all(false));
+    expect(uuids(restored?.replay?.records)).toContain('a1');
+    expect(restored?.replay?.branchPointsByAssistantUuid).toEqual({
+      a1: 'checkpoint-1',
+    });
+
+    const live = await reader.readLiveRestoreProjection(sessionId, all(false));
+    expect(live?.replay?.branchPointsByAssistantUuid).toEqual({
+      a1: 'checkpoint-1',
+    });
   });
 
   it('keeps a long user turn complete when it exceeds the record limit', async () => {

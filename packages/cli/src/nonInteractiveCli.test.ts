@@ -2558,43 +2558,48 @@ describe('runNonInteractive', () => {
     });
   });
 
-  it('waits for an active Goal turn before admitting real user input', async () => {
-    setupMetricsMock();
-    await prepareGoalState('active');
-    const occupyingPermit = goalRuntime.beginTurn('occupying-turn');
-    expect(occupyingPermit).toBeDefined();
-    const finishOccupyingTurn = goalRuntime.finishTurn.bind(goalRuntime);
-    mockFinishedGoalWorker();
-    const beginTurn = vi.spyOn(goalRuntime, 'beginTurn');
+  it.each(bothLoops)(
+    'waits for an active Goal turn before admitting real user input ($loop)',
+    async ({ shared }) => {
+      if (shared) useSharedLoopWithModToolHooks();
+      setupMetricsMock();
+      await prepareGoalState('active');
+      const occupyingPermit = goalRuntime.beginTurn('occupying-turn');
+      expect(occupyingPermit).toBeDefined();
+      const finishOccupyingTurn = goalRuntime.finishTurn.bind(goalRuntime);
+      mockFinishedGoalWorker();
+      const beginTurn = vi.spyOn(goalRuntime, 'beginTurn');
 
-    const run = runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'A queued user update',
-      'goal-queued-user',
-    );
+      const run = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'A queued user update',
+        'goal-queued-user',
+      );
 
-    await vi.waitFor(() =>
-      expect(beginTurn).toHaveBeenCalledWith('goal-queued-user'),
-    );
-    expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+      await vi.waitFor(() =>
+        expect(beginTurn).toHaveBeenCalledWith('goal-queued-user'),
+      );
+      expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
 
-    await finishOccupyingTurn(occupyingPermit!);
-    await run;
+      await finishOccupyingTurn(occupyingPermit!);
+      await run;
 
-    const sendOptions = mockLlmClient.sendMessageStream.mock.calls[0]![3];
-    expect(sendOptions).toMatchObject({
-      type: SendMessageType.UserQuery,
-      goalOrigin: 'user',
-      goalTurnKey: 'goal-queued-user',
-      goalPermit: {
-        goalId: occupyingPermit!.goalId,
-        revision: occupyingPermit!.revision,
-        turnId: expect.any(String),
-      },
-    });
-    expect(sendOptions.goalPermit.turnId).not.toBe(occupyingPermit!.turnId);
-  });
+      const sendOptions = mockLlmClient.sendMessageStream.mock.calls[0]![3];
+      expect(sendOptions).toMatchObject({
+        type: SendMessageType.UserQuery,
+        workflowModeEligible: false,
+        goalOrigin: 'user',
+        goalTurnKey: 'goal-queued-user',
+        goalPermit: {
+          goalId: occupyingPermit!.goalId,
+          revision: occupyingPermit!.revision,
+          turnId: expect.any(String),
+        },
+      });
+      expect(sendOptions.goalPermit.turnId).not.toBe(occupyingPermit!.turnId);
+    },
+  );
 
   it('emits Goal v2 state as the only Goal stream event with partial messages on', async () => {
     setupMetricsMock();
@@ -2668,40 +2673,46 @@ describe('runNonInteractive', () => {
     return { resolveForModel, runtimeView };
   }
 
-  it('should process input and write text output', async () => {
-    setupMetricsMock();
-    const events: ServerLlmStreamEvent[] = [
-      { type: LlmEventType.Content, value: 'Hello' },
-      { type: LlmEventType.Content, value: ' World' },
-      {
-        type: LlmEventType.Finished,
-        value: { reason: undefined, usageMetadata: { totalTokenCount: 10 } },
-      },
-    ];
-    mockLlmClient.sendMessageStream.mockReturnValue(
-      createStreamFromEvents(events),
-    );
+  it.each(bothLoops)(
+    'should process input and write text output ($loop)',
+    async ({ shared }) => {
+      if (shared) useSharedLoopWithModToolHooks();
+      setupMetricsMock();
+      const events: ServerLlmStreamEvent[] = [
+        { type: LlmEventType.Content, value: 'Hello' },
+        { type: LlmEventType.Content, value: ' World' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 10 } },
+        },
+      ];
+      mockLlmClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents(events),
+      );
 
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Test input',
-      'prompt-id-1',
-    );
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-id-1',
+      );
 
-    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
-      [{ text: 'Test input' }],
-      expect.any(AbortSignal),
-      'prompt-id-1',
-      {
-        type: SendMessageType.UserQuery,
-        modelOverride: undefined,
-        submittedPrompt: 'Test input',
-      },
-    );
-    expect(processStdoutSpy).toHaveBeenCalledWith('Hello World\n');
-    expect(mockShutdownTelemetry).toHaveBeenCalled();
-  });
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
+        [{ text: 'Test input' }],
+        expect.any(AbortSignal),
+        'prompt-id-1',
+        {
+          type: SendMessageType.UserQuery,
+          workflowModeEligible: true,
+          modelOverride: undefined,
+          submittedPrompt: 'Test input',
+          ...(shared ? { onPromptAdmitted: expect.any(Function) } : {}),
+        },
+      );
+      expect(processStdoutSpy).toHaveBeenCalledWith('Hello World\n');
+      expect(mockShutdownTelemetry).toHaveBeenCalled();
+    },
+  );
 
   it('registers and clears the stream-json workflow approval channel', async () => {
     setupMetricsMock();
@@ -2999,40 +3010,50 @@ describe('runNonInteractive', () => {
   });
 
   describe('continueInterrupted', () => {
-    it('re-submits an orphaned trailing user prompt with Retry semantics', async () => {
-      setupMetricsMock();
-      // The orphan strip + restore is owned by the Retry send path in
-      // client.ts (covered by client.test.ts); here we only assert the
-      // continuation hands off to that path with Retry semantics.
-      mockLlmClient.getChat = vi.fn(() => ({
-        getDebugResponses: mockGetDebugResponses,
-        getHistoryShallow: vi.fn().mockReturnValue([]),
-        getHistory: vi
-          .fn()
-          .mockReturnValue([
-            { role: 'user', parts: [{ text: 'do the thing' }] },
+    it.each(bothLoops)(
+      're-submits an orphaned trailing user prompt with Retry semantics ($loop)',
+      async ({ shared }) => {
+        if (shared) useSharedLoopWithModToolHooks();
+        setupMetricsMock();
+        // The orphan strip + restore is owned by the Retry send path in
+        // client.ts (covered by client.test.ts); here we only assert the
+        // continuation hands off to that path with Retry semantics.
+        mockLlmClient.getChat = vi.fn(() => ({
+          getDebugResponses: mockGetDebugResponses,
+          getHistoryShallow: vi.fn().mockReturnValue([]),
+          getHistory: vi
+            .fn()
+            .mockReturnValue([
+              { role: 'user', parts: [{ text: 'do the thing' }] },
+            ]),
+        }));
+        mockLlmClient.sendMessageStream.mockReturnValue(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 5 },
+              },
+            },
           ]),
-      }));
-      mockLlmClient.sendMessageStream.mockReturnValue(
-        createStreamFromEvents([
-          {
-            type: LlmEventType.Finished,
-            value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
-          },
-        ]),
-      );
+        );
 
-      await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c1', {
-        continueInterrupted: true,
-      });
+        await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c1', {
+          continueInterrupted: true,
+        });
 
-      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
-        [{ text: 'do the thing' }],
-        expect.any(AbortSignal),
-        'prompt-c1',
-        expect.objectContaining({ type: SendMessageType.Retry }),
-      );
-    });
+        expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
+          [{ text: 'do the thing' }],
+          expect.any(AbortSignal),
+          'prompt-c1',
+          expect.objectContaining({
+            type: SendMessageType.Retry,
+            workflowModeEligible: false,
+          }),
+        );
+      },
+    );
 
     it.each([
       { name: 'plain prompt', withSnapshot: false, withReminder: false },
@@ -3861,84 +3882,90 @@ describe('runNonInteractive', () => {
     expect(finalize).not.toHaveBeenCalled();
   });
 
-  it('should handle a single tool call and respond', async () => {
-    setupMetricsMock();
-    const toolCallEvent: ServerLlmStreamEvent = {
-      type: LlmEventType.ToolCallRequest,
-      value: {
-        callId: 'tool-1',
-        name: 'testTool',
-        args: { arg1: 'value1' },
-        isClientInitiated: false,
-        prompt_id: 'prompt-id-2',
-      },
-    };
-    const toolResponse: Part[] = [{ text: 'Tool response' }];
-    mockCoreExecuteToolCall.mockResolvedValue({
-      responseParts: toolResponse,
-      executionStatus: 'success',
-    });
+  it.each(bothLoops)(
+    'should handle a single tool call and respond ($loop)',
+    async ({ shared }) => {
+      if (shared) useSharedLoopWithModToolHooks();
+      setupMetricsMock();
+      const toolCallEvent: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-1',
+          name: 'testTool',
+          args: { arg1: 'value1' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-2',
+        },
+      };
+      const toolResponse: Part[] = [{ text: 'Tool response' }];
+      mockCoreExecuteToolCall.mockResolvedValue({
+        responseParts: toolResponse,
+        executionStatus: 'success',
+      });
 
-    const firstCallEvents: ServerLlmStreamEvent[] = [toolCallEvent];
-    const secondCallEvents: ServerLlmStreamEvent[] = [
-      { type: LlmEventType.Content, value: 'Final answer' },
-      {
-        type: LlmEventType.Finished,
-        value: { reason: undefined, usageMetadata: { totalTokenCount: 10 } },
-      },
-    ];
+      const firstCallEvents: ServerLlmStreamEvent[] = [toolCallEvent];
+      const secondCallEvents: ServerLlmStreamEvent[] = [
+        { type: LlmEventType.Content, value: 'Final answer' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 10 } },
+        },
+      ];
 
-    mockLlmClient.sendMessageStream
-      .mockReturnValueOnce(createStreamFromEvents(firstCallEvents))
-      .mockReturnValueOnce(createStreamFromEvents(secondCallEvents));
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(createStreamFromEvents(firstCallEvents))
+        .mockReturnValueOnce(createStreamFromEvents(secondCallEvents));
 
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      'Use a tool',
-      'prompt-id-2',
-      { humanInput: { text: 'ultracode use a tool' } },
-    );
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Use a tool',
+        'prompt-id-2',
+        { humanInput: { text: 'ultracode use a tool' } },
+      );
 
-    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
-    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
-      mockConfig,
-      expect.objectContaining({ name: 'testTool' }),
-      expect.any(AbortSignal),
-      expect.objectContaining({
-        outputUpdateHandler: expect.any(Function),
-      }),
-    );
-    // Verify first call has type: UserQuery
-    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
-      1,
-      [{ text: 'Use a tool' }],
-      expect.any(AbortSignal),
-      'prompt-id-2',
-      {
-        type: SendMessageType.UserQuery,
-        modelOverride: undefined,
-        submittedPrompt: 'Use a tool',
-        humanInput: { text: 'ultracode use a tool' },
-      },
-    );
-    // Verify second call (after tool execution) has type: ToolResult
-    expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
-      2,
-      [{ text: 'Tool response' }],
-      expect.any(AbortSignal),
-      'prompt-id-2',
-      { type: SendMessageType.ToolResult },
-    );
-    expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
-    // Verify recordCompletedToolCall is called with the tool name and args.
-    expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
-      'testTool',
-      { arg1: 'value1' },
-    );
-    // Verify consumePendingMemoryTaskPromises is called at the end of the session.
-    expect(mockLlmClient.consumePendingMemoryTaskPromises).toHaveBeenCalled();
-  });
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ name: 'testTool' }),
+        expect.any(AbortSignal),
+        expect.objectContaining({
+          outputUpdateHandler: expect.any(Function),
+        }),
+      );
+      // Verify first call has type: UserQuery
+      expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+        1,
+        [{ text: 'Use a tool' }],
+        expect.any(AbortSignal),
+        'prompt-id-2',
+        {
+          type: SendMessageType.UserQuery,
+          workflowModeEligible: true,
+          modelOverride: undefined,
+          submittedPrompt: 'Use a tool',
+          humanInput: { text: 'ultracode use a tool' },
+          ...(shared ? { onPromptAdmitted: expect.any(Function) } : {}),
+        },
+      );
+      // Verify second call (after tool execution) has type: ToolResult
+      expect(mockLlmClient.sendMessageStream).toHaveBeenNthCalledWith(
+        2,
+        [{ text: 'Tool response' }],
+        expect.any(AbortSignal),
+        'prompt-id-2',
+        { type: SendMessageType.ToolResult, workflowModeEligible: false },
+      );
+      expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
+      // Verify recordCompletedToolCall is called with the tool name and args.
+      expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
+        'testTool',
+        { arg1: 'value1' },
+      );
+      // Verify consumePendingMemoryTaskPromises is called at the end of the session.
+      expect(mockLlmClient.consumePendingMemoryTaskPromises).toHaveBeenCalled();
+    },
+  );
 
   it.each(bothLoops)(
     'uses a tool-selected full-turn model for the next request ($loop)',
@@ -4011,7 +4038,11 @@ describe('runNonInteractive', () => {
         [{ text: 'Tool response with image' }, { text: 'Skill response' }],
         expect.any(AbortSignal),
         'prompt-tool-image',
-        { type: SendMessageType.ToolResult, modelOverride: model },
+        {
+          type: SendMessageType.ToolResult,
+          workflowModeEligible: false,
+          modelOverride: model,
+        },
       );
     },
   );
@@ -4099,7 +4130,11 @@ describe('runNonInteractive', () => {
         [{ text: 'first image' }, { text: 'second image' }],
         expect.any(AbortSignal),
         'prompt-tool-image',
-        { type: SendMessageType.ToolResult, modelOverride: first },
+        {
+          type: SendMessageType.ToolResult,
+          workflowModeEligible: false,
+          modelOverride: first,
+        },
       );
     },
   );
@@ -5730,7 +5765,7 @@ describe('runNonInteractive', () => {
       ],
       expect.any(AbortSignal),
       'prompt-id-3',
-      { type: SendMessageType.ToolResult },
+      { type: SendMessageType.ToolResult, workflowModeEligible: false },
     );
     expect(processStdoutSpy).toHaveBeenCalledWith('Sorry, let me try again.\n');
   });
@@ -5939,6 +5974,7 @@ describe('runNonInteractive', () => {
       'prompt-id-7',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'Summarize @file.txt',
       },
@@ -6011,6 +6047,7 @@ describe('runNonInteractive', () => {
       'prompt-vision-route',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: selector,
         submittedPrompt: 'inspect @image.png',
       },
@@ -6020,7 +6057,11 @@ describe('runNonInteractive', () => {
       [{ text: 'tool response' }],
       expect.any(AbortSignal),
       'prompt-vision-route',
-      { type: SendMessageType.ToolResult, modelOverride: selector },
+      {
+        type: SendMessageType.ToolResult,
+        workflowModeEligible: false,
+        modelOverride: selector,
+      },
     );
     expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
       mockConfig,
@@ -6135,6 +6176,7 @@ describe('runNonInteractive', () => {
       'prompt-vision-bridge',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'inspect @image.png',
       },
@@ -6216,6 +6258,7 @@ describe('runNonInteractive', () => {
       'prompt-vision-bridge-failed',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'inspect @image.png',
       },
@@ -6254,6 +6297,7 @@ describe('runNonInteractive', () => {
       'prompt-vision-bridge-skipped',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'inspect @image.png',
       },
@@ -6301,6 +6345,7 @@ describe('runNonInteractive', () => {
       'prompt-oversized-image',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'inspect @image.png',
       },
@@ -6358,6 +6403,7 @@ describe('runNonInteractive', () => {
       'prompt-id-1',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'Test input',
       },
@@ -6517,6 +6563,7 @@ describe('runNonInteractive', () => {
       'prompt-id-empty',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'Empty response test',
       },
@@ -7298,51 +7345,57 @@ describe('runNonInteractive', () => {
     expect(processStderrSpy).toHaveBeenCalledWith(`${jsonError}\n`);
   });
 
-  it('should execute a slash command that returns a prompt', async () => {
-    setupMetricsMock();
-    const mockCommand = {
-      name: 'testcommand',
-      description: 'a test command',
-      kind: CommandKind.FILE,
-      action: vi.fn().mockResolvedValue({
-        type: 'submit_prompt',
-        content: [{ text: 'Prompt from command' }],
-      }),
-    };
-    mockGetCommands.mockReturnValue([mockCommand]);
+  it.each(bothLoops)(
+    'should execute a slash command that returns a prompt ($loop)',
+    async ({ shared }) => {
+      if (shared) useSharedLoopWithModToolHooks();
+      setupMetricsMock();
+      const mockCommand = {
+        name: 'testcommand',
+        description: 'a test command',
+        kind: CommandKind.FILE,
+        action: vi.fn().mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'Prompt from command' }],
+        }),
+      };
+      mockGetCommands.mockReturnValue([mockCommand]);
 
-    const events: ServerLlmStreamEvent[] = [
-      { type: LlmEventType.Content, value: 'Response from command' },
-      {
-        type: LlmEventType.Finished,
-        value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
-      },
-    ];
-    mockLlmClient.sendMessageStream.mockReturnValue(
-      createStreamFromEvents(events),
-    );
+      const events: ServerLlmStreamEvent[] = [
+        { type: LlmEventType.Content, value: 'Response from command' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+        },
+      ];
+      mockLlmClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents(events),
+      );
 
-    await runNonInteractive(
-      mockConfig,
-      mockSettings,
-      '/testcommand',
-      'prompt-id-slash',
-    );
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        '/testcommand',
+        'prompt-id-slash',
+      );
 
-    // Ensure the prompt sent to the model is from the command, not the raw input
-    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
-      [{ text: 'Prompt from command' }],
-      expect.any(AbortSignal),
-      'prompt-id-slash',
-      {
-        type: SendMessageType.UserQuery,
-        modelOverride: undefined,
-        submittedPrompt: '/testcommand',
-      },
-    );
+      // Ensure the prompt sent to the model is from the command, not the raw input
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledWith(
+        [{ text: 'Prompt from command' }],
+        expect.any(AbortSignal),
+        'prompt-id-slash',
+        {
+          type: SendMessageType.UserQuery,
+          workflowModeEligible: false,
+          modelOverride: undefined,
+          submittedPrompt: '/testcommand',
+          ...(shared ? { onPromptAdmitted: expect.any(Function) } : {}),
+        },
+      );
 
-    expect(processStdoutSpy).toHaveBeenCalledWith('Response from command\n');
-  });
+      expect(processStdoutSpy).toHaveBeenCalledWith('Response from command\n');
+    },
+  );
 
   describe('UserPromptSubmit admission before a command expands', () => {
     const spies: Array<{ mockRestore: () => void }> = [];
@@ -7431,6 +7484,7 @@ describe('runNonInteractive', () => {
         'prompt-id-admit',
         {
           type: SendMessageType.UserQuery,
+          workflowModeEligible: false,
           modelOverride: undefined,
           submittedPrompt: '/deploy prod',
           promptAdmission: admission,
@@ -7605,6 +7659,7 @@ describe('runNonInteractive', () => {
       'prompt-id-unknown',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: false,
         modelOverride: undefined,
         submittedPrompt: '/unknowncommand',
       },
@@ -8887,6 +8942,7 @@ describe('runNonInteractive', () => {
       'prompt-envelope',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'Message from stream-json input',
       },
@@ -9565,6 +9621,7 @@ describe('runNonInteractive', () => {
       'prompt-string-content',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'Simple string content',
       },
@@ -9602,6 +9659,7 @@ describe('runNonInteractive', () => {
       'prompt-blocks-content',
       {
         type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
         modelOverride: undefined,
         submittedPrompt: 'First part Second part',
       },

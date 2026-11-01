@@ -1490,15 +1490,15 @@ describe('ChatRecordingService', () => {
       'resolves prompt boundaries through %s without counting automatic records',
       async (mode) => {
         if (mode === 'live') {
-          user('A', undefined, undefined, 'p1');
+          user('A', undefined, undefined, 'p1', 'daemon-A');
           svc.recordGoalRuntimeMessage('automatic', goalPermit('automatic'));
-          user('B', undefined, undefined, 'p2');
+          user('B', undefined, undefined, 'p2', 'daemon-B');
         } else {
           const records = resumedChain(
             null,
-            ['a', 'user', 'A', { promptId: 'p1' }],
+            ['a', 'user', 'A', { promptId: 'p1', daemonPromptId: 'daemon-A' }],
             ['auto', 'user', 'automatic', { subtype: 'goal_runtime' }],
-            ['b', 'user', 'B', { promptId: 'p2' }],
+            ['b', 'user', 'B', { promptId: 'p2', daemonPromptId: 'daemon-B' }],
           );
           if (mode === 'full restore') svc.rebuildTurnBoundaries(records);
           else
@@ -1507,13 +1507,18 @@ describe('ChatRecordingService', () => {
               ...collectSessionTurnState(records, 'test-session-id'),
             });
         }
+        expect(svc.getRewindDaemonPromptId('p1')).toBe('daemon-A');
+        expect(svc.getRewindDaemonPromptId('p2')).toBe('daemon-B');
+        expect(svc.getRewindDaemonPromptId('missing')).toBeUndefined();
         expect(svc.getRewindTurnIndex('p2')).toBe(1);
         expect(svc.getRewindTurnIndex('missing')).toBe(-1);
         svc.rewindRecording(1, { truncatedCount: 1 });
         expect(svc.getRewindTurnIndex('p2')).toBe(-1);
+        expect(svc.getRewindDaemonPromptId('p2')).toBeUndefined();
         expect(svc.getRewindTurnIndex('p1')).toBe(0);
         user('duplicate', undefined, undefined, 'p1');
         expect(svc.getRewindTurnIndex('p1')).toBe(-1);
+        expect(svc.getRewindDaemonPromptId('p1')).toBeUndefined();
         await svc.flush();
       },
     );
@@ -2746,6 +2751,149 @@ describe('ChatRecordingService', () => {
         modelId: 'qwen3-coder-flash',
         authType: 'openai',
       });
+    });
+  });
+
+  describe('recordSessionWorkflowMode', () => {
+    it('strictly writes explicit false once and rejects non-booleans', async () => {
+      await svc.recordSessionWorkflowMode(false);
+      await svc.recordSessionWorkflowMode(false);
+      expect(writes()).toEqual([
+        expect.objectContaining({
+          subtype: 'session_workflow_mode',
+          systemPayload: { enabled: false },
+        }),
+      ]);
+      await expect(
+        svc.recordSessionWorkflowMode('false' as unknown as boolean),
+      ).rejects.toThrow('boolean');
+      expect(svc.getSessionWorkflowMode()).toBe(false);
+    });
+
+    it('restores a projected false without duplicating it', async () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false, {
+        lastCompletedUuid: 'leaf',
+        turnParentUuids: [],
+        sessionWorkflowMode: { enabled: false },
+      });
+      await service.recordSessionWorkflowMode(false);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      expect(service.getSessionWorkflowMode()).toBe(false);
+    });
+
+    it('re-anchors the live choice even when rewind abandons its record', async () => {
+      user('first');
+      await svc.recordSessionWorkflowMode(false);
+      user('second');
+      await svc.recordSessionWorkflowMode(true);
+      vi.mocked(jsonl.writeLine).mockClear();
+      svc.rewindRecording(1, { truncatedCount: 1 });
+      const records = await flushedAll();
+      expect(subtypes(records)).toEqual(['rewind', 'session_workflow_mode']);
+      expect(records[1]?.systemPayload).toEqual({ enabled: true });
+      expect(records[1]?.parentUuid).toBe(records[0]?.uuid);
+    });
+
+    it('re-anchors a pending mode only after its strict write succeeds', async () => {
+      user('first');
+      await svc.recordSessionWorkflowMode(false);
+      user('second');
+      await svc.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+      const held = holdNext(vi.mocked(jsonl.writeLine));
+      const pending = svc.recordSessionWorkflowMode(true);
+      await vi.waitFor(() => expect(jsonl.writeLine).toHaveBeenCalledOnce());
+
+      svc.rewindRecording(1, { truncatedCount: 1 });
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      held.resolve?.();
+      await pending;
+      const records = await flushedAll();
+      expect(subtypes(records)).toEqual([
+        'session_workflow_mode',
+        'rewind',
+        'session_workflow_mode',
+      ]);
+      expect(records[2]?.systemPayload).toEqual({ enabled: true });
+      expect(records[2]?.parentUuid).toBe(records[1]?.uuid);
+    });
+
+    it('never writes a queued rewind anchor after the pending mode write fails', async () => {
+      user('first');
+      await svc.recordSessionWorkflowMode(false);
+      user('second');
+      await svc.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+      const held = holdNext(vi.mocked(jsonl.writeLine));
+      const pending = svc.recordSessionWorkflowMode(true);
+      const failure = pending.catch((error: unknown) => error);
+      await vi.waitFor(() => expect(jsonl.writeLine).toHaveBeenCalledOnce());
+
+      svc.rewindRecording(1, { truncatedCount: 1 });
+      const writeError = new Error('disk full');
+      held.reject?.(writeError);
+      expect(await failure).toBe(writeError);
+      await expect(svc.flush()).rejects.toBe(writeError);
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      expect(svc.getSessionWorkflowMode()).toBe(false);
+    });
+
+    it('strictly reports append failure and does not poison deduplication', async () => {
+      const service = legacyRecorder();
+      vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
+        throw new Error('disk-full');
+      });
+      await expect(service.recordSessionWorkflowMode(true)).rejects.toThrow(
+        'disk-full',
+      );
+      expect(service.getSessionWorkflowMode()).toBeUndefined();
+      await service.recordSessionWorkflowMode(true);
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    });
+
+    it('does not re-anchor a mode rejected before the legacy write queue', async () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false, {
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null],
+        sessionWorkflowMode: { enabled: false },
+      });
+      vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
+        throw new Error('temporary file creation failure');
+      });
+      let settled = false;
+      let rewound = false;
+      const failure = service.recordSessionWorkflowMode(true).catch((error) => {
+        settled = true;
+        return error;
+      });
+      for (let step = 0; step < 20 && !settled; step++) {
+        await Promise.resolve();
+        if (service.getSessionWorkflowMode() === true) {
+          service.rewindRecording(0, { truncatedCount: 1 });
+          rewound = true;
+          break;
+        }
+      }
+      expect(await failure).toBeInstanceOf(Error);
+      if (!rewound) service.rewindRecording(0, { truncatedCount: 1 });
+      await service.flush();
+      expect(subtypes(writes())).toEqual(['rewind', 'session_workflow_mode']);
+      expect(writes().at(-1)?.systemPayload).toEqual({ enabled: false });
+      expect(writes()).not.toContainEqual(
+        expect.objectContaining({
+          subtype: 'session_workflow_mode',
+          systemPayload: { enabled: true },
+        }),
+      );
+    });
+
+    it('refuses a same-value request after writer ownership is lost', async () => {
+      await svc.recordSessionWorkflowMode(true);
+      vi.mocked(mockLease.assertOwnedAndUnchanged).mockRejectedValueOnce(
+        new SessionWriterLostError(),
+      );
+      await expect(svc.recordSessionWorkflowMode(true)).rejects.toThrow();
+      expect(writes()).toHaveLength(1);
     });
   });
 

@@ -18,7 +18,7 @@ import {
   assertWatching,
   autofixPrPaths,
   MAX_INSTRUCTIONS_CHARS,
-  repoRoot,
+  resolveWatchRoot,
   requireState,
   WATCH_INTERVALS,
   withWatchLock,
@@ -132,7 +132,7 @@ export interface ScheduleArgs {
 export function runSchedule(
   args: ScheduleArgs,
 ): ScheduledTask & AutofixPrWatchOptions {
-  const paths = autofixPrPaths(repoRoot(), args.pr);
+  const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
   if (
     args.again &&
     (args.every !== undefined || args.noReply || args.instructions)
@@ -156,6 +156,11 @@ export function runSchedule(
     // A watch `cleanup` ended is started again by a start, not here.
     assertWatching(state);
     assertNoFixInFlight(paths, args.pr);
+    if (state.inPlace) {
+      throw new Error(
+        `PR #${args.pr} is an in-place watch: its rounds run only when you ask (/autofix-pr ${args.pr} --in-place); there is no scheduled task.`,
+      );
+    }
     // Running someone else's code with the user's credentials in reach is
     // confirmed for one round at a time (`--once`), never for a watch; a
     // state that does not say the author can push is no permission either.

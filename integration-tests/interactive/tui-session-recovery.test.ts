@@ -459,6 +459,7 @@ it(`H02a image caption survives cold resume (${runtime}+${renderer})`, () =>
     const original = identity(api.users()[0]);
     await api.quit();
     await api.start(original.sessionId);
+    await api.visible('RECOVERY_image_0_DONE', 'cold-assistant-ready');
     const cold = await api.visible(caption, 'cold-caption');
     expect(cold).toContain('RECOVERY_image_0_DONE');
     expect(cold).not.toContain(png.toString('base64'));
@@ -518,6 +519,7 @@ it(`H02b typed file survives mutation and cold resume (${runtime}+${renderer})`,
     writeFileSync(file, changed);
     expect(readFileSync(file, 'utf8')).toBe(changed);
     await api.start(original.sessionId);
+    await api.visible('RECOVERY_file_0_DONE', 'cold-assistant-ready');
     const cold = await api.visible(submitted, 'cold-typed-form');
     expect(cold).toContain('RECOVERY_file_0_DONE');
     expect(cold).not.toContain(changed.trim());
