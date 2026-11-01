@@ -772,9 +772,10 @@ export function AddMenu({
                   {workflowControl && (
                     <Button
                       variant="ghost"
-                      className={`${mobileRowClass} h-auto py-2`}
+                      className={mobileRowClass}
                       aria-label={workflowControl.messages.label}
                       aria-describedby={workflowDescriptionId}
+                      title={workflowControl.description}
                       aria-pressed={Boolean(workflowControl.mode?.requested)}
                       aria-busy={workflowControl.pending || undefined}
                       disabled={workflowControl.disabled}
@@ -789,14 +790,11 @@ export function AddMenu({
                       }
                     >
                       <GitBranchIcon />
-                      <span className="flex min-w-0 flex-1 flex-col whitespace-normal text-left">
+                      <span className="min-w-0 flex-1 truncate text-left">
                         <span>
                           Workflow{workflowControl.mode?.requested ? ' ✓' : ''}
                         </span>
-                        <span
-                          id={workflowDescriptionId}
-                          className="text-xs text-muted-foreground"
-                        >
+                        <span id={workflowDescriptionId} className="sr-only">
                           {workflowControl.description}
                         </span>
                       </span>
@@ -1182,6 +1180,7 @@ export function AddMenu({
                   disabled={workflowControl.disabled}
                   aria-label={workflowControl.messages.label}
                   aria-describedby={workflowDescriptionId}
+                  title={workflowControl.description}
                   aria-busy={workflowControl.pending || undefined}
                   data-testid="composer-add-menu-workflow"
                   data-workflow-state={workflowControl.status}
@@ -1194,12 +1193,9 @@ export function AddMenu({
                   }
                 >
                   <GitBranchIcon />
-                  <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="min-w-0 flex-1 truncate">
                     <span>Workflow</span>
-                    <span
-                      id={workflowDescriptionId}
-                      className="max-w-72 whitespace-normal text-xs text-muted-foreground"
-                    >
+                    <span id={workflowDescriptionId} className="sr-only">
                       {workflowControl.description}
                     </span>
                   </span>

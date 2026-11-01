@@ -79,6 +79,13 @@ for (const { language, theme } of [
       );
     });
     await toggle.scrollIntoViewIfNeeded();
+    const rowBounds = await toggle.boundingBox();
+    const planBounds = await page
+      .getByTestId('composer-add-menu-plan')
+      .boundingBox();
+    expect(rowBounds).not.toBeNull();
+    expect(planBounds).not.toBeNull();
+    expect(rowBounds!.height).toBeLessThanOrEqual(planBounds!.height + 1);
     const detailsBounds = await details.boundingBox();
     expect(detailsBounds).not.toBeNull();
     expect(detailsBounds!.x).toBeGreaterThanOrEqual(0);

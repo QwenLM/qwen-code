@@ -198,6 +198,16 @@ test('preserves requested on when unavailable, permits off, and clears omitted s
   const toggle = await modeSwitch(page);
   await expect(toggle).toBeChecked();
   await expect(toggle).toBeEnabled();
+  await expect(toggle).toHaveAccessibleDescription(
+    /Workflow mode is on, but currently unavailable\./,
+  );
+  const rowBounds = await toggle.boundingBox();
+  const referenceBounds = await page
+    .getByTestId('composer-add-menu-reference-file')
+    .boundingBox();
+  expect(rowBounds).not.toBeNull();
+  expect(referenceBounds).not.toBeNull();
+  expect(rowBounds!.height).toBeLessThanOrEqual(referenceBounds!.height + 1);
   await page.screenshot({
     path: testInfo.outputPath('workflow-unavailable-on.png'),
   });
