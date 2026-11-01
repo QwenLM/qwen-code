@@ -189,6 +189,41 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(scripts.bundle).toBeTruthy();
   });
 
+  it('fails Java pool jobs before disk exhaustion reaches their suites', () => {
+    const jobs = parse(workflow).jobs;
+    const gatedJobs = [];
+
+    for (const [name, definition] of Object.entries(jobs)) {
+      const steps = definition.steps ?? [];
+      const gateIndex = steps.findIndex(
+        (candidate) => candidate.name === 'Disk floor gate (self-hosted)',
+      );
+      if (gateIndex < 0) continue;
+
+      gatedJobs.push(name);
+      expect(steps[gateIndex - 1]?.uses, name).toMatch(
+        /^actions\/checkout@/,
+      );
+      expect(steps[gateIndex].if, name).toBe(
+        "${{ runner.environment == 'self-hosted' }}",
+      );
+      expect(steps[gateIndex].run, name).toBe(
+        'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"',
+      );
+    }
+
+    expect(gatedJobs.sort()).toEqual(
+      [
+        'test',
+        'flyway-migrations',
+        'mysql-integration',
+        'event-transport-broker',
+        'event-transport-multi-node',
+        'daemon-e2e',
+      ].sort(),
+    );
+  });
+
   it('serializes the host-shared Maven cache write-back on each physical ECS host', () => {
     const block = job('test');
     expect(block).toContain(
