@@ -2660,7 +2660,8 @@ export const useLlmStream = (
           'Response stopped due to unexpected tool call.',
       };
 
-      const message = finishReasonMessages[finishReason];
+      const message =
+        event.value.finishMessage ?? finishReasonMessages[finishReason];
       if (message) {
         addItem(
           {

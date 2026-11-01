@@ -571,6 +571,13 @@ export class AnthropicContentConverter {
     if (finishReason) {
       candidate.finishReason = finishReason;
     }
+    const finishMessage = this.mapAnthropicStopDetailsToFinishMessage(
+      (response as Anthropic.Message & { stop_details?: unknown })
+        .stop_details,
+    );
+    if (finishMessage) {
+      candidate.finishMessage = finishMessage;
+    }
 
     llmResponse.candidates = [candidate];
     llmResponse.responseId = response.id;
@@ -1015,6 +1022,28 @@ export class AnthropicContentConverter {
       refusal: FinishReason.SAFETY,
     };
     return mapping[reason] || FinishReason.FINISH_REASON_UNSPECIFIED;
+  }
+
+  mapAnthropicStopDetailsToFinishMessage(
+    stopDetails?: unknown,
+  ): string | undefined {
+    if (!stopDetails || typeof stopDetails !== 'object') return undefined;
+    const details = stopDetails as Record<string, unknown>;
+    if (details['type'] !== 'refusal') return undefined;
+
+    const messages: Record<string, string> = {
+      cyber: 'Response refused due to cyber-related safety policy.',
+      bio: 'Response refused due to biological safety policy.',
+      frontier_llm:
+        'Response refused due to frontier model development policy.',
+      reasoning_extraction:
+        'Response refused because it requested hidden reasoning.',
+      general_harms: 'Response refused due to a general safety policy.',
+    };
+    const category = details['category'];
+    return typeof category === 'string'
+      ? (messages[category] ?? 'Response refused due to safety reasons.')
+      : 'Response refused due to safety reasons.';
   }
 
   private isContentObject(

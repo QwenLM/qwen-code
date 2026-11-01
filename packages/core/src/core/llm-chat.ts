@@ -6997,6 +6997,7 @@ export class LlmChat {
       currentUserTurn?.role === 'user' &&
       currentUserTurn.parts?.some((part) => part.functionResponse) === true;
     let deferredFinishReason: FinishReason | undefined;
+    let deferredFinishMessage: string | undefined;
     // Captured if the upstream stream throws mid-iteration (typical on weak
     // networks: SSE drops between `content_block_stop` of a tool_use and the
     // terminal `message_stop`). We still build / record / push a partial
@@ -7216,6 +7217,7 @@ export class LlmChat {
           for (const candidate of chunk.candidates ?? []) {
             if (candidate.finishReason) {
               deferredFinishReason ??= candidate.finishReason;
+              deferredFinishMessage ??= candidate.finishMessage;
               delete candidate.finishReason;
             }
           }
@@ -7853,7 +7855,14 @@ export class LlmChat {
     abortSignal?.throwIfAborted();
     if (deferredFinishReason) {
       yield {
-        candidates: [{ finishReason: deferredFinishReason }],
+        candidates: [
+          {
+            finishReason: deferredFinishReason,
+            ...(deferredFinishMessage
+              ? { finishMessage: deferredFinishMessage }
+              : {}),
+          },
+        ],
         usageMetadata,
       } as GenerateContentResponse;
     }

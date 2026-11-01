@@ -1740,6 +1740,25 @@ describe('AnthropicContentConverter', () => {
       expect(parts).toEqual([fnCall('tool', { x: 1 }, 't1')]);
     });
 
+    it('surfaces a refusal stop-details category', () => {
+      const response = respond({
+        stop_reason: 'refusal',
+        stop_details: {
+          type: 'refusal',
+          category: 'reasoning_extraction',
+          explanation: 'Provider-authored explanation',
+        },
+      });
+
+      expect(response.candidates?.[0]).toEqual(
+        expect.objectContaining({
+          finishReason: FinishReason.SAFETY,
+          finishMessage:
+            'Response refused because it requested hidden reasoning.',
+        }),
+      );
+    });
+
     it('forwards cache_read_input_tokens and cache_creation_input_tokens through to usageMetadata', () => {
       // A real mid-conversation Anthropic response carries all three prompt
       // buckets at once: `input_tokens` (non-cached tail),

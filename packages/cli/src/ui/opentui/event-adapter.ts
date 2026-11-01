@@ -943,8 +943,13 @@ export function createEventMapper(
         out.push({ type: 'retry-countdown-clear' });
         // ink parity: handleFinishedEvent adds `{type: 'info'}` for
         // non-STOP finish reasons.
-        const reason = (ev.value as { reason?: string } | undefined)?.reason;
-        const message = reason ? FINISH_REASON_NOTICES[reason] : undefined;
+        const value = ev.value as
+          | { reason?: string; finishMessage?: string }
+          | undefined;
+        const reason = value?.reason;
+        const message =
+          value?.finishMessage ??
+          (reason ? FINISH_REASON_NOTICES[reason] : undefined);
         if (message) out.push({ type: 'info', text: `⚠  ${message}` });
         // Segment marker only — the turn settles when the live generator
         // returns (backend emits `done`), NOT here: `finished` arrives

@@ -1329,6 +1329,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     let completionTokens = 0;
     let completionTokensReported = false;
     let finishReason: string | undefined;
+    let finishMessage: string | undefined;
 
     const blocks = new Map<number, StreamingBlockState>();
     const deferredToolCalls: GenerateContentResponse[] = [];
@@ -1535,6 +1536,10 @@ export class AnthropicContentGenerator implements ContentGenerator {
         }
         case 'message_delta': {
           const stopReasonValue = event.delta.stop_reason;
+          finishMessage ??=
+            this.converter.mapAnthropicStopDetailsToFinishMessage(
+              (event.delta as { stop_details?: unknown }).stop_details,
+            );
           if (stopReasonValue) {
             finishReason = stopReasonValue;
             const hasOpenToolCall = [...blocks.values()].some(
@@ -1634,6 +1639,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 cacheReadTokensReported: cachedTokensReported,
                 cacheCreationTokensReported,
               }),
+              finishMessage,
             );
             collectedResponses.push(chunk);
             yield chunk;
@@ -1663,6 +1669,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 cacheReadTokensReported: cachedTokensReported,
                 cacheCreationTokensReported,
               }),
+              finishMessage,
             );
             collectedResponses.push(chunk);
             yield chunk;
@@ -1810,6 +1817,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     model?: string,
     finishReason?: string,
     usageMetadata?: GenerateContentResponseUsageMetadata,
+    finishMessage?: string,
   ): GenerateContentResponse {
     const response = new GenerateContentResponse();
     response.responseId = responseId;
@@ -1831,6 +1839,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
         index: 0,
         safetyRatings: [],
         ...(mappedFinishReason ? { finishReason: mappedFinishReason } : {}),
+        ...(finishMessage ? { finishMessage } : {}),
       },
     ];
 

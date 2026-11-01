@@ -158,6 +158,7 @@ export interface SessionTokenLimitExceededValue {
 export interface LlmFinishedEventValue {
   reason: FinishReason | undefined;
   usageMetadata: GenerateContentResponseUsageMetadata | undefined;
+  finishMessage?: string;
 }
 
 /**
@@ -920,6 +921,7 @@ export class Turn {
 
         // Check if response was truncated or stopped for various reasons
         const finishReason = resp.candidates?.[0]?.finishReason;
+        const finishMessage = resp.candidates?.[0]?.finishMessage;
 
         // This is the key change: Only yield 'Finished' if there is a finishReason.
         if (finishReason) {
@@ -945,6 +947,7 @@ export class Turn {
             value: {
               reason: finishReason,
               usageMetadata: resp.usageMetadata,
+              ...(finishMessage ? { finishMessage } : {}),
             },
           };
         }

@@ -262,6 +262,22 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         text: '⚠  Response stopped due to image safety violations.',
       });
     });
+
+    it('prefers the provider refusal message', () => {
+      const map = createEventMapper();
+      const out = map({
+        type: 'finished',
+        value: {
+          reason: 'SAFETY',
+          finishMessage:
+            'Response refused due to cyber-related safety policy.',
+        },
+      } as unknown as AnyEv);
+      expect(out).toContainEqual({
+        type: 'info',
+        text: '⚠  Response refused due to cyber-related safety policy.',
+      });
+    });
   });
 
   describe('error events', () => {

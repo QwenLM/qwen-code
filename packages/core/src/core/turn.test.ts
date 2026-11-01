@@ -910,6 +910,28 @@ describe('Turn', () => {
       ]);
     });
 
+    it('should include a provider finish message', async () => {
+      const events = await run([
+        textChunk('Content blocked', {
+          finishReason: 'SAFETY',
+          finishMessage: 'Response refused due to cyber-related safety policy.',
+        }),
+      ]);
+
+      expect(events).toEqual([
+        contentEvent('Content blocked'),
+        {
+          type: LlmEventType.Finished,
+          value: {
+            reason: 'SAFETY',
+            usageMetadata: undefined,
+            finishMessage:
+              'Response refused due to cyber-related safety policy.',
+          },
+        },
+      ]);
+    });
+
     it('should yield finished event with undefined reason when there is no finish reason', async () => {
       const events = await run([textChunk('Response without finish reason')]);
 
