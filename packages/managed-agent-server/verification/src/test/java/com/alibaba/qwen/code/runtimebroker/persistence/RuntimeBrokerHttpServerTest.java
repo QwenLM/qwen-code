@@ -1383,16 +1383,8 @@ public class RuntimeBrokerHttpServerTest {
                 csiSessions, csiExecutions, "broker", Duration.ofMinutes(1),
                 Duration.ofMinutes(1));
                 var csiClient = HttpClient.newHttpClient()) {
-            var contextClass = Class.forName(
-                    RuntimeBrokerService.class.getName() + "$SessionContext");
-            var contextConstructor = contextClass.getDeclaredConstructor(
-                    RuntimeSession.class, RuntimeBindingRecord.class, RuntimeLease.class);
-            contextConstructor.setAccessible(true);
-            var installed = RuntimeBrokerService.class.getDeclaredField("sessions");
-            installed.setAccessible(true);
-            ((Map<String, CompletableFuture<?>>) installed.get(csiService)).put(csiSession,
-                    CompletableFuture.completedFuture(contextConstructor.newInstance(
-                            csiRuntime, csiBinding, csiLease)));
+            com.alibaba.qwen.code.runtimebroker.service.BrokerServiceTestAccess.installSession(
+                    csiService, csiRuntime, csiBinding, csiLease);
             var csiServer = new RuntimeBrokerHttpServer(
                     new InetSocketAddress("127.0.0.1", 0), "secret", csiService);
             csiServer.start();
@@ -1495,14 +1487,8 @@ public class RuntimeBrokerHttpServerTest {
                 sessions, new InMemoryToolExecutionRepository(Clock.systemUTC()),
                 "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
         // Install the ready Runtime Session the way a completed acquire leaves it.
-        var contextClass = Class.forName(RuntimeBrokerService.class.getName() + "$SessionContext");
-        var constructor = contextClass.getDeclaredConstructor(RuntimeSession.class, RuntimeBindingRecord.class,
-                RuntimeLease.class);
-        constructor.setAccessible(true);
-        var field = RuntimeBrokerService.class.getDeclaredField("sessions");
-        field.setAccessible(true);
-        ((Map<String, CompletableFuture<?>>) field.get(service)).put(session,
-                CompletableFuture.completedFuture(constructor.newInstance(runtime, binding, lease)));
+        com.alibaba.qwen.code.runtimebroker.service.BrokerServiceTestAccess.installSession(
+                service, runtime, binding, lease);
         try (RuntimeBrokerHttpServer server = new RuntimeBrokerHttpServer(
                 new InetSocketAddress("127.0.0.1", 0), "secret", service);
                 HttpClient client = HttpClient.newHttpClient()) {
