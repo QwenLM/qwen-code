@@ -18,6 +18,19 @@ interface Rendered {
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
+const activity = Array.from({ length: 44 }, (_, index) => ({
+  count: index % 4,
+  startAt: 1_000 + index * 60_000,
+  endAt: 61_000 + index * 60_000,
+}));
+const tokens = {
+  input: 5_000,
+  output: 3_000,
+  cached: 1_000,
+  context: 900,
+  contextLimit: 1_000,
+};
+
 beforeEach(() => {
   vi.useFakeTimers();
   vi.spyOn(Math, 'random').mockReturnValue(0);
@@ -37,15 +50,20 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function render(props: WaitingMinigameProps): Rendered {
+function render(props: Partial<WaitingMinigameProps> = {}): Rendered {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
-  const rerender = (next: WaitingMinigameProps) => {
+  const rerender = (next: Partial<WaitingMinigameProps>) => {
     act(() => {
       root.render(
         <I18nProvider language="en">
-          <WaitingMinigame {...next} />
+          <WaitingMinigame
+            open={next.open ?? true}
+            onClose={next.onClose ?? vi.fn()}
+            activity={next.activity ?? activity}
+            tokenUsage={next.tokenUsage ?? tokens}
+          />
         </I18nProvider>,
       );
     });
@@ -71,9 +89,32 @@ function key(keyName: string): void {
   keyOn(window, keyName);
 }
 
+function clickButton(container: HTMLElement, label: string): void {
+  const button = Array.from(container.querySelectorAll('button')).find(
+    (candidate) => candidate.textContent?.includes(label),
+  );
+  act(() => button?.click());
+}
+
+function startGame(container: HTMLElement, label: 'Tetris' | 'Snake'): void {
+  act(() =>
+    container
+      .querySelector<HTMLButtonElement>('[aria-label="Start a game"]')
+      ?.click(),
+  );
+  clickButton(container, label);
+}
+
+function activeCellIndexes(container: HTMLElement): number[] {
+  return Array.from(container.querySelectorAll('[data-state]')).flatMap(
+    (element, index) =>
+      element.getAttribute('data-state') === '2' ? [index] : [],
+  );
+}
+
 describe('WaitingMinigame', () => {
-  it('renders nothing while the board is closed', () => {
-    const { container } = render({ open: false, onClose: vi.fn() });
+  it('renders nothing while closed', () => {
+    const { container } = render({ open: false });
     act(() => {
       vi.advanceTimersByTime(2_000);
     });
@@ -82,44 +123,88 @@ describe('WaitingMinigame', () => {
     ).toBeNull();
   });
 
-  it('renders the board and its score when open', () => {
-    const { container } = render({ open: true, onClose: vi.fn() });
+  it('opens on the activity heatmap with the Qwen entry', () => {
+    const { container } = render();
     expect(
       container.querySelector('[data-component="waiting-minigame"]'),
     ).not.toBeNull();
+    expect(container.textContent).toContain('Activity');
+    expect(container.textContent).toContain('Usage');
+    expect(container.textContent).toContain('Click the Qwen mark to play');
+    expect(container.querySelectorAll('[data-level]')).toHaveLength(44);
+    expect(
+      container.querySelector('[aria-label="Start a game"]'),
+    ).not.toBeNull();
+    expect(container.textContent).not.toContain('Score 0');
+  });
+
+  it('shows token totals, input, output and context in the usage tab', () => {
+    const { container } = render();
+    clickButton(container, 'Usage');
+    expect(container.textContent).toContain('Total tokens');
+    expect(container.textContent).toContain('8.0k');
+    expect(container.textContent).toContain('5.0k');
+    expect(container.textContent).toContain('3.0k');
+    expect(container.textContent).toContain('1.0k');
+    expect(container.textContent).toContain('900 / 1.0k');
+    expect(container.textContent).not.toContain('No token data yet');
+  });
+
+  it('shows an empty token state when usage is unavailable', () => {
+    const { container } = render({
+      tokenUsage: { input: 0, output: 0, cached: 0 },
+    });
+    clickButton(container, 'Usage');
+    expect(container.textContent).toContain('No token data yet');
+  });
+
+  it('picks Tetris and supports pause, resume and Escape', () => {
+    const onClose = vi.fn();
+    const { container } = render({ onClose });
+    startGame(container, 'Tetris');
     expect(container.querySelectorAll('[data-state]')).toHaveLength(44 * 7);
-    expect(container.textContent).toContain('Juust Relax');
     expect(container.textContent).toContain('Score 0');
     expect(container.textContent).toContain('Best 0');
     expect(container.textContent).toContain('clear a column +50');
-  });
 
-  it('pauses and resumes with Space, and collapses with Escape', () => {
-    const onClose = vi.fn();
-    const { container, rerender } = render({ open: true, onClose });
     key(' ');
     expect(container.textContent).toContain('Paused');
     key(' ');
     expect(container.textContent).not.toContain('Paused');
     key('Escape');
     expect(onClose).toHaveBeenCalledTimes(1);
-    rerender({ open: false, onClose });
-    expect(
-      container.querySelector('[data-component="waiting-minigame"]'),
-    ).toBeNull();
   });
 
-  it('resumes a paused board when it reopens', () => {
-    const { container, rerender } = render({ open: true, onClose: vi.fn() });
+  it('picks Snake and supports pause, resume and turning', () => {
+    const { container } = render();
+    startGame(container, 'Snake');
+    expect(container.querySelectorAll('[data-state]')).toHaveLength(44 * 7);
+    expect(container.textContent).toContain('Arrows / WASD turn');
     key(' ');
     expect(container.textContent).toContain('Paused');
-    rerender({ open: false, onClose: vi.fn() });
-    rerender({ open: true, onClose: vi.fn() });
+    key(' ');
     expect(container.textContent).not.toContain('Paused');
+    const headBefore = activeCellIndexes(container);
+    key('ArrowUp');
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+    expect(activeCellIndexes(container)).not.toEqual(headBefore);
   });
 
-  it('resumes gravity after the tab becomes visible again', () => {
-    const { container } = render({ open: true, onClose: vi.fn() });
+  it('returns to the activity view on reopen', () => {
+    const { container, rerender } = render();
+    startGame(container, 'Tetris');
+    expect(container.textContent).toContain('Score 0');
+    rerender({ open: false });
+    rerender({ open: true });
+    expect(container.textContent).toContain('Click the Qwen mark to play');
+    expect(container.textContent).not.toContain('Score 0');
+  });
+
+  it('pauses gravity when the tab is hidden and resumes after Space', () => {
+    const { container } = render();
+    startGame(container, 'Tetris');
     expect(activeCellIndexes(container)).toEqual([0, 1, 2, 3]);
 
     Object.defineProperty(document, 'visibilityState', {
@@ -148,7 +233,8 @@ describe('WaitingMinigame', () => {
 
   it('leaves Space and Escape to focused controls and open dialogs', () => {
     const onClose = vi.fn();
-    const { container } = render({ open: true, onClose });
+    const { container } = render({ onClose });
+    startGame(container, 'Tetris');
     const mute = container.querySelector<HTMLButtonElement>('[aria-pressed]');
     expect(mute).not.toBeNull();
     act(() => mute?.focus());
@@ -164,8 +250,9 @@ describe('WaitingMinigame', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it('keeps the restart button out of the aria-hidden board', () => {
-    const { container } = render({ open: true, onClose: vi.fn() });
+  it('keeps game controls out of the aria-hidden board', () => {
+    const { container } = render();
+    startGame(container, 'Tetris');
     expect(container.querySelector('[aria-hidden="true"] button')).toBeNull();
     expect(
       container.querySelectorAll('[aria-hidden="true"] [data-state]'),
@@ -215,10 +302,3 @@ describe('WaitingMinigameButton', () => {
     ).toBe('true');
   });
 });
-
-function activeCellIndexes(container: HTMLElement): number[] {
-  return Array.from(container.querySelectorAll('[data-state]')).flatMap(
-    (element, index) =>
-      element.getAttribute('data-state') === '2' ? [index] : [],
-  );
-}

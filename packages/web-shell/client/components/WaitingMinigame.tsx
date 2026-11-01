@@ -5,8 +5,14 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Blocks, Worm } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { isCoarsePointerDevice } from '../hooks/useIsTouchComposer';
+import { formatTokenCount } from '../utils/formatTokenCount';
+import type {
+  WaitingActivityBucket,
+  WaitingTokenUsage,
+} from '../utils/waitingActivity';
 import {
   WAITING_MINIGAME_CLEAR_SCORE,
   WAITING_MINIGAME_COLS,
@@ -22,9 +28,22 @@ import {
   waitingMinigameTickMs,
   type WaitingMinigameState,
 } from '../utils/waitingMinigame';
+import {
+  createWaitingSnake,
+  setWaitingSnakePaused,
+  tickWaitingSnake,
+  toggleWaitingSnakePause,
+  turnWaitingSnake,
+  waitingSnakeRenderGrid,
+  waitingSnakeTickMs,
+  type WaitingSnakeDirection,
+  type WaitingSnakeState,
+} from '../utils/waitingSnake';
+import { QwenLogoIcon } from './QwenLogoIcon';
 import styles from './WaitingMinigame.module.css';
 
 const BEST_SCORE_KEY = 'qwen-code-web-shell-waiting-minigame-best';
+const SNAKE_BEST_SCORE_KEY = 'qwen-code-web-shell-waiting-minigame-snake-best';
 const SOUND_KEY = 'qwen-code-web-shell-waiting-minigame-sound';
 const NOTICE_MS = 1_200;
 const CELLS = Array.from(
@@ -32,9 +51,12 @@ const CELLS = Array.from(
   (_, index) => index,
 );
 
-function readBestScore(): number {
+type CardView = 'heatmap' | 'tokens' | 'picker' | 'tetris' | 'snake';
+type GameKind = 'tetris' | 'snake';
+
+function readBestScore(key: string): number {
   try {
-    const raw = window.localStorage.getItem(BEST_SCORE_KEY);
+    const raw = window.localStorage.getItem(key);
     const value = raw ? Number.parseInt(raw, 10) : 0;
     return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
   } catch {
@@ -42,9 +64,9 @@ function readBestScore(): number {
   }
 }
 
-function writeBestScore(value: number): void {
+function writeBestScore(key: string, value: number): void {
   try {
-    window.localStorage.setItem(BEST_SCORE_KEY, String(value));
+    window.localStorage.setItem(key, String(value));
   } catch {
     // localStorage can be unavailable in private or embedded contexts.
   }
@@ -93,18 +115,74 @@ function isVisibilityHidden(): boolean {
   );
 }
 
+function padActivity(
+  activity: readonly WaitingActivityBucket[],
+): readonly WaitingActivityBucket[] {
+  return Array.from(
+    { length: WAITING_MINIGAME_COLS },
+    (_, index) => activity[index] ?? { count: 0 },
+  );
+}
+
+function activityLevel(
+  bucket: WaitingActivityBucket,
+  maxCount: number,
+): number {
+  if (bucket.count <= 0) return 0;
+  if (maxCount <= 0) return 1;
+  return Math.min(4, Math.max(1, Math.ceil((bucket.count / maxCount) * 4)));
+}
+
+function snakeDirectionForKey(key: string): WaitingSnakeDirection | undefined {
+  switch (key) {
+    case 'ArrowUp':
+    case 'w':
+    case 'W':
+      return 'up';
+    case 'ArrowDown':
+    case 's':
+    case 'S':
+      return 'down';
+    case 'ArrowLeft':
+    case 'a':
+    case 'A':
+      return 'left';
+    case 'ArrowRight':
+    case 'd':
+    case 'D':
+      return 'right';
+    default:
+      return undefined;
+  }
+}
+
 export interface WaitingMinigameProps {
   open: boolean;
   onClose: () => void;
+  activity?: readonly WaitingActivityBucket[];
+  tokenUsage?: WaitingTokenUsage;
 }
 
-export function WaitingMinigame({ open, onClose }: WaitingMinigameProps) {
-  const { t } = useI18n();
+export function WaitingMinigame({
+  open,
+  onClose,
+  activity = [],
+  tokenUsage = { input: 0, output: 0, cached: 0 },
+}: WaitingMinigameProps) {
+  const { t, language } = useI18n();
+  const [view, setView] = useState<CardView>('heatmap');
   const [game, setGame] = useState<WaitingMinigameState>(() =>
     createWaitingMinigame(),
   );
   const gameRef = useRef(game);
-  const [best, setBest] = useState(readBestScore);
+  const [snake, setSnake] = useState<WaitingSnakeState>(() =>
+    createWaitingSnake(),
+  );
+  const snakeRef = useRef(snake);
+  const [best, setBest] = useState(() => readBestScore(BEST_SCORE_KEY));
+  const [snakeBest, setSnakeBest] = useState(() =>
+    readBestScore(SNAKE_BEST_SCORE_KEY),
+  );
   const [sound, setSound] = useState(readSoundEnabled);
   const [notice, setNotice] = useState<{
     count: number;
@@ -119,14 +197,21 @@ export function WaitingMinigame({ open, onClose }: WaitingMinigameProps) {
   const soundRef = useRef(sound);
   const previousCleared = useRef(game.cleared);
   const previousOver = useRef(game.over);
+  const previousSnakeScore = useRef(snake.score);
+  const previousSnakeOver = useRef(snake.over);
   const previousOpen = useRef(false);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const coarsePointer = isCoarsePointerDevice();
+  const gameView = view === 'tetris' || view === 'snake';
 
   useEffect(() => {
     gameRef.current = game;
   }, [game]);
+
+  useEffect(() => {
+    snakeRef.current = snake;
+  }, [snake]);
 
   useEffect(() => {
     soundRef.current = sound;
@@ -180,57 +265,98 @@ export function WaitingMinigame({ open, onClose }: WaitingMinigameProps) {
     setGame(next);
   }, []);
 
+  const applySnake = useCallback((next: WaitingSnakeState) => {
+    const current = snakeRef.current;
+    if (next === current) return;
+    snakeRef.current = next;
+    setSnake(next);
+  }, []);
+
   useEffect(() => {
     if (previousOpen.current === open) return;
     previousOpen.current = open;
-    const current = gameRef.current;
     if (open) {
-      if (current.over) {
-        apply(createWaitingMinigame());
-        setNotice(null);
-      } else if (current.paused) {
-        apply(setWaitingMinigamePaused(current, false));
-      }
-      ensureAudio();
+      setView('heatmap');
       return;
     }
-    if (!current.paused && !current.over) {
-      apply(setWaitingMinigamePaused(current, true));
+    if (!gameRef.current.paused && !gameRef.current.over) {
+      apply(setWaitingMinigamePaused(gameRef.current, true));
     }
-  }, [open, apply, ensureAudio]);
+    if (!snakeRef.current.paused && !snakeRef.current.over) {
+      applySnake(setWaitingSnakePaused(snakeRef.current, true));
+    }
+  }, [open, apply, applySnake]);
 
   useEffect(() => {
-    if (!open || !documentVisible) return;
+    if (!open || !documentVisible || view !== 'tetris') return;
     if (game.paused || game.over) return;
     const timer = window.setInterval(() => {
       apply(tickWaitingMinigame(gameRef.current));
     }, waitingMinigameTickMs(game.cleared));
     return () => window.clearInterval(timer);
-  }, [open, documentVisible, game.paused, game.over, game.cleared, apply]);
+  }, [
+    open,
+    documentVisible,
+    view,
+    game.paused,
+    game.over,
+    game.cleared,
+    apply,
+  ]);
+
+  useEffect(() => {
+    if (!open || !documentVisible || view !== 'snake') return;
+    if (snake.paused || snake.over) return;
+    const timer = window.setInterval(() => {
+      applySnake(tickWaitingSnake(snakeRef.current));
+    }, waitingSnakeTickMs(snake.score));
+    return () => window.clearInterval(timer);
+  }, [
+    open,
+    documentVisible,
+    view,
+    snake.paused,
+    snake.over,
+    snake.score,
+    applySnake,
+  ]);
 
   useEffect(() => {
     if (!open) return;
     const onVisibility = () => {
       const visibleNow = !isVisibilityHidden();
       setDocumentVisible(visibleNow);
-      if (!visibleNow) {
+      if (visibleNow) return;
+      if (view === 'tetris') {
         const current = gameRef.current;
         if (!current.paused && !current.over) {
           apply(setWaitingMinigamePaused(current, true));
+        }
+      } else if (view === 'snake') {
+        const current = snakeRef.current;
+        if (!current.paused && !current.over) {
+          applySnake(setWaitingSnakePaused(current, true));
         }
       }
     };
     document.addEventListener('visibilitychange', onVisibility);
     onVisibility();
     return () => document.removeEventListener('visibilitychange', onVisibility);
-  }, [open, apply]);
+  }, [open, view, apply, applySnake]);
 
   useEffect(() => {
     if (game.score > best) {
       setBest(game.score);
-      writeBestScore(game.score);
+      writeBestScore(BEST_SCORE_KEY, game.score);
     }
   }, [game.score, best]);
+
+  useEffect(() => {
+    if (snake.score > snakeBest) {
+      setSnakeBest(snake.score);
+      writeBestScore(SNAKE_BEST_SCORE_KEY, snake.score);
+    }
+  }, [snake.score, snakeBest]);
 
   useEffect(() => {
     if (game.cleared > previousCleared.current) {
@@ -248,6 +374,13 @@ export function WaitingMinigame({ open, onClose }: WaitingMinigameProps) {
   }, [game.cleared, game.over, playSound]);
 
   useEffect(() => {
+    if (snake.score > previousSnakeScore.current) playSound('clear');
+    if (snake.over && !previousSnakeOver.current) playSound('over');
+    previousSnakeScore.current = snake.score;
+    previousSnakeOver.current = snake.over;
+  }, [snake.score, snake.over, playSound]);
+
+  useEffect(() => {
     return () => {
       if (noticeTimer.current !== undefined) {
         window.clearTimeout(noticeTimer.current);
@@ -260,11 +393,40 @@ export function WaitingMinigame({ open, onClose }: WaitingMinigameProps) {
     };
   }, []);
 
-  const restart = useCallback(() => {
-    const next = createWaitingMinigame();
-    apply(next);
+  const restartTetris = useCallback(() => {
+    apply(createWaitingMinigame());
     setNotice(null);
   }, [apply]);
+
+  const restartSnake = useCallback(() => {
+    applySnake(createWaitingSnake());
+  }, [applySnake]);
+
+  const startGame = useCallback(
+    (kind: GameKind) => {
+      setView(kind);
+      ensureAudio();
+      if (kind === 'tetris') {
+        const current = gameRef.current;
+        if (current.over) restartTetris();
+        else if (current.paused) {
+          apply(setWaitingMinigamePaused(current, false));
+        }
+        return;
+      }
+      const current = snakeRef.current;
+      if (current.over) restartSnake();
+      else if (current.paused) {
+        applySnake(setWaitingSnakePaused(current, false));
+      }
+    },
+    [apply, applySnake, ensureAudio, restartSnake, restartTetris],
+  );
+
+  const restartActiveGame = useCallback(() => {
+    if (view === 'snake') restartSnake();
+    else if (view === 'tetris') restartTetris();
+  }, [restartSnake, restartTetris, view]);
 
   const toggleSound = useCallback(() => {
     const next = !sound;
@@ -299,11 +461,9 @@ export function WaitingMinigame({ open, onClose }: WaitingMinigameProps) {
         onCloseRef.current();
         return;
       }
+      if (!gameView || event.metaKey || event.ctrlKey || event.altKey) return;
       if (isEditableTarget(event.target)) return;
       const target = event.target;
-      // The card's own controls keep their native Space/Enter activation; the
-      // window listener is global, so leave anything outside the card to the
-      // game keys as before.
       const nativeControl =
         target instanceof Element &&
         Boolean(rootRef.current?.contains(target)) &&
@@ -319,44 +479,87 @@ export function WaitingMinigame({ open, onClose }: WaitingMinigameProps) {
       if (event.key === ' ' || event.code === 'Space') {
         if (!event.repeat) {
           event.preventDefault();
-          apply(toggleWaitingMinigamePause(gameRef.current));
+          if (view === 'tetris') {
+            apply(toggleWaitingMinigamePause(gameRef.current));
+          } else {
+            applySnake(toggleWaitingSnakePause(snakeRef.current));
+          }
         }
         return;
       }
-      if (event.key === 'Enter' && gameRef.current.over) {
-        if (!event.repeat) {
+      if (event.key === 'Enter') {
+        if (event.repeat) return;
+        const active = view === 'tetris' ? gameRef.current : snakeRef.current;
+        if (active.over) {
           event.preventDefault();
-          restart();
+          restartActiveGame();
         }
         return;
       }
-      if (gameRef.current.paused || gameRef.current.over) return;
-      switch (event.key) {
-        case 'ArrowUp':
-          event.preventDefault();
-          apply(moveWaitingMinigamePiece(gameRef.current, -1));
-          break;
-        case 'ArrowDown':
-          event.preventDefault();
-          apply(moveWaitingMinigamePiece(gameRef.current, 1));
-          break;
-        case 'ArrowRight':
-          event.preventDefault();
-          apply(dropWaitingMinigamePiece(gameRef.current));
-          break;
-        case 'ArrowLeft':
-          event.preventDefault();
-          apply(rotateWaitingMinigamePiece(gameRef.current));
-          break;
+      if (view === 'tetris') {
+        if (gameRef.current.paused || gameRef.current.over) return;
+        switch (event.key) {
+          case 'ArrowUp':
+            event.preventDefault();
+            apply(moveWaitingMinigamePiece(gameRef.current, -1));
+            break;
+          case 'ArrowDown':
+            event.preventDefault();
+            apply(moveWaitingMinigamePiece(gameRef.current, 1));
+            break;
+          case 'ArrowRight':
+            event.preventDefault();
+            apply(dropWaitingMinigamePiece(gameRef.current));
+            break;
+          case 'ArrowLeft':
+            event.preventDefault();
+            apply(rotateWaitingMinigamePiece(gameRef.current));
+            break;
+        }
+        return;
       }
+      if (snakeRef.current.paused || snakeRef.current.over) return;
+      const direction = snakeDirectionForKey(event.key);
+      if (!direction) return;
+      event.preventDefault();
+      applySnake(turnWaitingSnake(snakeRef.current, direction));
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [open, coarsePointer, apply, restart]);
+  }, [
+    open,
+    coarsePointer,
+    gameView,
+    view,
+    apply,
+    applySnake,
+    restartActiveGame,
+  ]);
 
   if (!open || coarsePointer) return null;
 
-  const grid = waitingMinigameRenderGrid(game);
+  const buckets = padActivity(activity);
+  const maxCount = Math.max(1, ...buckets.map((bucket) => bucket.count));
+  const tetrisGrid = waitingMinigameRenderGrid(game);
+  const snakeGrid = waitingSnakeRenderGrid(snake);
+  const locale =
+    language === 'zh-CN' ? 'zh-CN' : language === 'ru' ? 'ru-RU' : 'en';
+  const formatTime = (value: number | undefined) =>
+    value === undefined
+      ? ''
+      : new Intl.DateTimeFormat(locale, {
+          hour: '2-digit',
+          minute: '2-digit',
+        }).format(new Date(value));
+  const totalTokens = tokenUsage.input + tokenUsage.output;
+  const hasTokenUsage = totalTokens > 0 || tokenUsage.cached > 0;
+  const contextPercent =
+    tokenUsage.contextLimit && tokenUsage.contextLimit > 0
+      ? Math.min(
+          100,
+          ((tokenUsage.context ?? 0) / tokenUsage.contextLimit) * 100,
+        )
+      : 0;
 
   return (
     <div
@@ -364,78 +567,320 @@ export function WaitingMinigame({ open, onClose }: WaitingMinigameProps) {
       className={styles.root}
       data-component="waiting-minigame"
       role="group"
+      tabIndex={-1}
       aria-label={t('waitingGame.region')}
     >
       <div className={styles.card}>
         <div className={styles.head}>
-          <button type="button" className={styles.textButton} onClick={onClose}>
-            <span aria-hidden="true">←</span>
-            <span>{t('waitingGame.collapse')}</span>
-          </button>
-          <span className={styles.title}>{t('waitingGame.title')}</span>
           <button
             type="button"
-            className={styles.iconButton}
-            aria-pressed={sound}
-            aria-label={sound ? t('waitingGame.mute') : t('waitingGame.unmute')}
-            onClick={toggleSound}
-          >
-            <SoundIcon muted={!sound} />
-          </button>
-        </div>
-        <div className={styles.board}>
-          <div
-            className={styles.cells}
-            style={{
-              gridTemplateColumns: `repeat(${WAITING_MINIGAME_COLS}, minmax(0, 1fr))`,
+            className={styles.textButton}
+            onClick={() => {
+              if (view === 'heatmap' || view === 'tokens') onClose();
+              else setView('heatmap');
             }}
-            aria-hidden="true"
           >
-            {CELLS.map((index) => (
-              <span
-                key={index}
-                className={styles.cell}
-                data-state={grid[index] ?? 0}
-              />
-            ))}
-          </div>
-          {game.paused && !game.over && (
-            <div className={styles.overlay}>
-              <span className={styles.overlayTitle}>
-                {t('waitingGame.paused')}
-              </span>
-              <span className={styles.overlayHint}>
-                {t('waitingGame.pausedHint')}
-              </span>
-            </div>
-          )}
-          {game.over && (
-            <div className={styles.overlay}>
-              <span className={styles.overlayTitle}>
-                {t('waitingGame.gameOver')}
-              </span>
+            <span aria-hidden="true">←</span>
+            <span>
+              {view === 'heatmap' || view === 'tokens'
+                ? t('waitingGame.collapse')
+                : t('waitingGame.backToHeatmap')}
+            </span>
+          </button>
+          <span className={styles.title}>{t('waitingGame.title')}</span>
+          {gameView ? (
+            <>
               <button
                 type="button"
-                className={styles.restartButton}
-                onClick={restart}
+                className={styles.textButton}
+                onClick={() => setView('picker')}
               >
-                {t('waitingGame.restart')}
+                {t('waitingGame.switchGame')}
+              </button>
+              <button
+                type="button"
+                className={styles.iconButton}
+                aria-pressed={sound}
+                aria-label={
+                  sound ? t('waitingGame.mute') : t('waitingGame.unmute')
+                }
+                onClick={toggleSound}
+              >
+                <SoundIcon muted={!sound} />
+              </button>
+            </>
+          ) : (
+            <span className={styles.headSpacer} aria-hidden="true" />
+          )}
+        </div>
+
+        {(view === 'heatmap' || view === 'tokens') && (
+          <div className={styles.viewTabs} role="tablist">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === 'heatmap'}
+              className={styles.viewTab}
+              onClick={() => setView('heatmap')}
+            >
+              {t('waitingGame.heatmap')}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === 'tokens'}
+              className={styles.viewTab}
+              onClick={() => setView('tokens')}
+            >
+              {t('waitingGame.tokens')}
+            </button>
+          </div>
+        )}
+
+        {view === 'heatmap' && (
+          <>
+            <div className={styles.heatmap}>
+              <div
+                className={styles.heatColumns}
+                style={{
+                  gridTemplateColumns: `repeat(${WAITING_MINIGAME_COLS}, minmax(0, 1fr))`,
+                }}
+                aria-hidden="true"
+              >
+                {buckets.map((bucket, index) => (
+                  <div
+                    key={index}
+                    className={styles.heatColumn}
+                    data-level={activityLevel(bucket, maxCount)}
+                    title={
+                      bucket.startAt === undefined
+                        ? t('waitingGame.noActivity')
+                        : t('waitingGame.heatmapTooltip', {
+                            time: `${formatTime(bucket.startAt)}–${formatTime(bucket.endAt)}`,
+                            count: bucket.count,
+                          })
+                    }
+                  >
+                    {Array.from({ length: WAITING_MINIGAME_ROWS }, (_, row) => (
+                      <span key={row} className={styles.heatCell} />
+                    ))}
+                  </div>
+                ))}
+              </div>
+              <button
+                type="button"
+                className={styles.qwenStart}
+                style={{ background: '#ffffff' }}
+                data-component="waiting-minigame-start"
+                title={t('waitingGame.startGame')}
+                aria-label={t('waitingGame.startGame')}
+                onClick={() => setView('picker')}
+              >
+                <QwenLogoIcon className={styles.qwenLogo} />
               </button>
             </div>
-          )}
-          {notice && (
-            <span className={styles.notice} aria-live="polite">
-              {t('waitingGame.cleared', notice)}
+            <div className={styles.heatFoot}>
+              {t('waitingGame.heatmapHint')}
+            </div>
+          </>
+        )}
+
+        {view === 'tokens' && (
+          <div className={styles.tokenView}>
+            {hasTokenUsage ? (
+              <div className={styles.tokenGrid}>
+                <div className={styles.tokenMetric}>
+                  <span>{t('waitingGame.tokenTotal')}</span>
+                  <strong title={String(totalTokens)}>
+                    {formatTokenCount(totalTokens)}
+                  </strong>
+                </div>
+                <div className={styles.tokenMetric}>
+                  <span>{t('waitingGame.tokenInput')}</span>
+                  <strong title={String(tokenUsage.input)}>
+                    {formatTokenCount(tokenUsage.input)}
+                  </strong>
+                </div>
+                <div className={styles.tokenMetric}>
+                  <span>{t('waitingGame.tokenOutput')}</span>
+                  <strong title={String(tokenUsage.output)}>
+                    {formatTokenCount(tokenUsage.output)}
+                  </strong>
+                </div>
+                <div className={styles.tokenMetric}>
+                  <span>{t('waitingGame.tokenCached')}</span>
+                  <strong title={String(tokenUsage.cached)}>
+                    {formatTokenCount(tokenUsage.cached)}
+                  </strong>
+                </div>
+              </div>
+            ) : (
+              <div className={styles.tokenEmpty}>
+                {t('waitingGame.tokenEmpty')}
+              </div>
+            )}
+            {contextPercent > 0 && (
+              <div className={styles.context}>
+                <div className={styles.contextHead}>
+                  <span>{t('waitingGame.tokenContext')}</span>
+                  <span>
+                    {formatTokenCount(tokenUsage.context ?? 0)} /{' '}
+                    {formatTokenCount(tokenUsage.contextLimit ?? 0)}
+                  </span>
+                </div>
+                <div className={styles.contextTrack}>
+                  <span
+                    className={styles.contextFill}
+                    style={{ width: `${contextPercent}%` }}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {view === 'picker' && (
+          <div className={styles.picker}>
+            <span className={styles.pickerTitle}>
+              {t('waitingGame.chooseGame')}
             </span>
-          )}
-        </div>
-        <div className={styles.foot}>
-          <span className={styles.score} aria-live="polite">
-            {t('waitingGame.score', { score: game.score })}
-          </span>
-          <span>{t('waitingGame.best', { score: best })}</span>
-          <span className={styles.controls}>{t('waitingGame.controls')}</span>
-        </div>
+            <div className={styles.pickerButtons}>
+              <button
+                type="button"
+                className={styles.pickerButton}
+                onClick={() => startGame('tetris')}
+              >
+                <Blocks size={20} aria-hidden />
+                <span>{t('waitingGame.tetris')}</span>
+              </button>
+              <button
+                type="button"
+                className={styles.pickerButton}
+                onClick={() => startGame('snake')}
+              >
+                <Worm size={20} aria-hidden />
+                <span>{t('waitingGame.snake')}</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {view === 'tetris' && (
+          <>
+            <div className={styles.board}>
+              <div
+                className={styles.cells}
+                data-game="tetris"
+                style={{
+                  gridTemplateColumns: `repeat(${WAITING_MINIGAME_COLS}, minmax(0, 1fr))`,
+                }}
+                aria-hidden="true"
+              >
+                {CELLS.map((index) => (
+                  <span
+                    key={index}
+                    className={styles.cell}
+                    data-state={tetrisGrid[index] ?? 0}
+                  />
+                ))}
+              </div>
+              {game.paused && !game.over && (
+                <div className={styles.overlay}>
+                  <span className={styles.overlayTitle}>
+                    {t('waitingGame.paused')}
+                  </span>
+                  <span className={styles.overlayHint}>
+                    {t('waitingGame.pausedHint')}
+                  </span>
+                </div>
+              )}
+              {game.over && (
+                <div className={styles.overlay}>
+                  <span className={styles.overlayTitle}>
+                    {t('waitingGame.gameOver')}
+                  </span>
+                  <button
+                    type="button"
+                    className={styles.restartButton}
+                    onClick={restartTetris}
+                  >
+                    {t('waitingGame.restart')}
+                  </button>
+                </div>
+              )}
+              {notice && (
+                <span className={styles.notice} aria-live="polite">
+                  {t('waitingGame.cleared', notice)}
+                </span>
+              )}
+            </div>
+            <div className={styles.foot}>
+              <span className={styles.score} aria-live="polite">
+                {t('waitingGame.score', { score: game.score })}
+              </span>
+              <span>{t('waitingGame.best', { score: best })}</span>
+              <span className={styles.controls}>
+                {t('waitingGame.controls')}
+              </span>
+            </div>
+          </>
+        )}
+
+        {view === 'snake' && (
+          <>
+            <div className={styles.board}>
+              <div
+                className={styles.cells}
+                data-game="snake"
+                style={{
+                  gridTemplateColumns: `repeat(${WAITING_MINIGAME_COLS}, minmax(0, 1fr))`,
+                }}
+                aria-hidden="true"
+              >
+                {CELLS.map((index) => (
+                  <span
+                    key={index}
+                    className={styles.cell}
+                    data-state={snakeGrid[index] ?? 0}
+                  />
+                ))}
+              </div>
+              {snake.paused && !snake.over && (
+                <div className={styles.overlay}>
+                  <span className={styles.overlayTitle}>
+                    {t('waitingGame.paused')}
+                  </span>
+                  <span className={styles.overlayHint}>
+                    {t('waitingGame.pausedHint')}
+                  </span>
+                </div>
+              )}
+              {snake.over && (
+                <div className={styles.overlay}>
+                  <span className={styles.overlayTitle}>
+                    {t('waitingGame.gameOver')}
+                  </span>
+                  <button
+                    type="button"
+                    className={styles.restartButton}
+                    onClick={restartSnake}
+                  >
+                    {t('waitingGame.restart')}
+                  </button>
+                </div>
+              )}
+            </div>
+            <div className={styles.foot}>
+              <span className={styles.score} aria-live="polite">
+                {t('waitingGame.score', { score: snake.score })}
+              </span>
+              <span>{t('waitingGame.best', { score: snakeBest })}</span>
+              <span className={styles.controls}>
+                {t('waitingGame.snakeControls')}
+              </span>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

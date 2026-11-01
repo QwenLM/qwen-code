@@ -66,14 +66,31 @@ test('shows the waiting minigame during a running prompt and closes it when the 
   await trigger.click();
   const game = page.locator('[data-component="waiting-minigame"]');
   await expect(game).toBeVisible();
-  await expect(game.locator('[data-state]')).toHaveCount(44 * 7);
   await expect(game).toContainText('Juust Relax');
-  await expect(game).toContainText('Score 0');
+  await expect(game).toContainText('Activity');
+  await expect(game.locator('[data-level]')).toHaveCount(44);
+  await expect(
+    game.locator('[data-component="waiting-minigame-start"]'),
+  ).toBeVisible();
   await expect(trigger).toHaveAttribute('aria-expanded', 'true');
+  await page.waitForTimeout(250);
+  await page.screenshot({
+    path: testInfo.outputPath('waiting-minigame-heatmap.png'),
+  });
+
+  await game.locator('[data-component="waiting-minigame-start"]').click();
+  await expect(game).toContainText('Choose a game');
+  await page.screenshot({
+    path: testInfo.outputPath('waiting-minigame-picker.png'),
+  });
+  await game.getByRole('button', { name: 'Tetris', exact: true }).click();
+  await expect(game.locator('[data-state]')).toHaveCount(44 * 7);
+  await expect(game).toContainText('Score 0');
   await page.screenshot({
     path: testInfo.outputPath('waiting-minigame-board.png'),
   });
 
+  await game.focus();
   await page.keyboard.press('Space');
   await expect(game).toContainText('Paused');
   await page.screenshot({
@@ -81,6 +98,17 @@ test('shows the waiting minigame during a running prompt and closes it when the 
   });
   await page.keyboard.press('Space');
   await expect(game).not.toContainText('Paused');
+
+  await game.getByRole('button', { name: 'Switch game' }).click();
+  await game.getByRole('button', { name: 'Snake', exact: true }).click();
+  await expect(game).toContainText('Arrows / WASD turn');
+  await game.focus();
+  await page.keyboard.press('Space');
+  await expect(game).toContainText('Paused');
+  await page.screenshot({
+    path: testInfo.outputPath('waiting-minigame-snake.png'),
+  });
+  await page.keyboard.press('Space');
 
   await page.keyboard.press('Escape');
   await expect(game).toHaveCount(0);
@@ -116,6 +144,14 @@ test('renders the waiting minigame in dark theme and Chinese', async ({
   await trigger.click();
   const game = page.locator('[data-component="waiting-minigame"]');
   await expect(game).toBeVisible();
+  await expect(game).toContainText('热力图');
+  await page.waitForTimeout(250);
+  await page.screenshot({
+    path: testInfo.outputPath('waiting-minigame-dark-zh-heatmap.png'),
+  });
+  await game.locator('[data-component="waiting-minigame-start"]').click();
+  await expect(game).toContainText('选择一个游戏');
+  await game.getByRole('button', { name: '俄罗斯方块', exact: true }).click();
   await expect(game).toContainText('得分 0');
   await page.screenshot({
     path: testInfo.outputPath('waiting-minigame-dark-zh.png'),

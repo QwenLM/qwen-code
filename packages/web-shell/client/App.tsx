@@ -120,6 +120,10 @@ import { cancelledTurnProducedNothing } from './utils/cancelledTurn';
 import { useDaemonPromptSettled } from './daemon/session/DaemonSessionProvider';
 import { keepWorkspaceSplitSessionIds } from './utils/standalone-session-routing';
 import { setBoundedMapEntry } from './utils/bounded-map';
+import {
+  buildWaitingActivity,
+  buildWaitingTokenUsage,
+} from './utils/waitingActivity';
 import { type SessionGitIntent } from './components/GitModePopover';
 import { gitModeIntentMustReset } from './utils/gitModeIntent';
 import { LocalControlQrButton } from './components/LocalControlQrButton';
@@ -4830,6 +4834,25 @@ export function App({
   }, []);
 
   const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
+  const waitingMinigameActivity = useMemo(
+    () => buildWaitingActivity(messages),
+    [messages],
+  );
+  const waitingMinigameTokens = useMemo(
+    () =>
+      buildWaitingTokenUsage(
+        messages,
+        connection.tokenUsage ?? {},
+        connection.tokenCount,
+        connection.contextWindow,
+      ),
+    [
+      messages,
+      connection.tokenUsage,
+      connection.tokenCount,
+      connection.contextWindow,
+    ],
+  );
   const messagesRef = useRef(messages);
   const [failedPrompt, setFailedPrompt] = useState<FailedPrompt | null>(null);
   const failedPromptRef = useRef<FailedPrompt | null>(failedPrompt);
@@ -24502,6 +24525,8 @@ export function App({
                           <WaitingMinigame
                             open={waitingMinigameOpen}
                             onClose={() => setWaitingMinigameOpen(false)}
+                            activity={waitingMinigameActivity}
+                            tokenUsage={waitingMinigameTokens}
                           />
                         )}
                         {streamingState !== 'idle' ||
