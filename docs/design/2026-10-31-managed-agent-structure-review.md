@@ -227,7 +227,22 @@ cross-cutting "how the system works today" tour.
   permits connection-sharing SQL helpers to stay in one package.
   Replace the 7 public setters with constructor injection; express any real
   cycle with `ObjectProvider` or `@Lazy` instead of mutable wiring. Split the
-  mirrored test files in the same slices.
+  mirrored test files in the same slices. Setter investigation (2026-10-31):
+  four of the seven setters are Spring `@Autowired(required = false)`
+  optional-dependency injection (`lifecycle`, `definitions`,
+  `sessionWorktrees`, `journalEventTransport`) and three are required plain
+  `@Autowired` injection (`extensionPackages`, `creationSkills`,
+  `worktreeFiles` — its bean is supplied by
+  `ManagedAgentConfiguration.managedWorktreeFiles()`; the direct calls in
+  `VerificationFixtures` are test setup, not production wiring). Converting
+  them to constructor `ObjectProvider` injection is a large change to this
+  central 7,700-line class with ~30 test wiring sites, and its correctness
+  depends on Spring runtime assembly that the manual-setter unit tests do
+  not fully exercise. The dedicated [constructor-wiring design](2026-11-01-managed-agent-store-wiring.md)
+  covers the required/optional dependencies, the additional lazy record-store
+  field and its Session-store cycle, final references, direct-fixture migration
+  and real Spring context verification. Its implementation is independent
+  of the Broker workflow extraction; full CI qualification remains required.
 - `RuntimeBrokerService`: extract module-internal collaborators for recovery
   scanning, cancellation, tool holds, and observation cooldown; the service
   becomes a facade. The module already exists, so no cross-module contract
@@ -244,29 +259,29 @@ cross-cutting "how the system works today" tour.
   with a dozen injected callbacks rather than a clean seam; it waits for the
   reconciliation path to become its own collaborator. Cancellation follows
   the same rule: extract only where the seam is clean. Known coverage gap
-  carried into the reconciliation slice:
-  the stamp-before-in-flight-slot-drop ordering in `lookupOnce` has no test
-  pinning it (a pre-existing gap, identical at the base); pin it when the
-  reconciliation path becomes its own collaborator and the ordering is a
-  seam-level contract rather than a private lambda's internal sequence.
+  carried into the reconciliation slice: the stamp-before-in-flight-slot-drop
+  ordering in `lookupOnce` had no test pinning it at the base. The
+  [workflow extraction](2026-11-01-runtime-execution-workflows.md) now adds a
+  deterministic blocked-stamp regression at the reconciler boundary; its
+  verification evidence is recorded with that increment.
 - Reconciliation, recovery scanning and cancellation are **not** clean
-  standalone seams (investigated 2026-10-31). Unlike the cooldown and the
-  hold inventory — which own their state — these paths share the service's
-  core mutable state and lifecycle machinery: the `sessions`, `liveBindings`
-  and `reconciliations` concurrent maps, the binding-lifecycle helpers
-  (`requireAnswerableBinding`, `requireLiveBinding`, `invalidateBinding`,
-  `provisioner.isUsable`), and the CAS execution settle
-  (`absorbRuntimeStatus` → `settleUnstartedBackgroundSiblings`). Extracting
-  any of them now would inject a dozen maps/helpers/callbacks into a
-  "collaborator" that is the god class under another name. The prerequisite
-  is a **shared-state registry** slice: move the three maps and the
-  binding-lifecycle helpers behind a `RuntimeBindingRegistry` (or similar)
-  that owns them, leaving the service to delegate. Once that registry
-  exists, reconciliation/recovery/cancellation depend on a narrow owner
-  instead of the service's internals and become extractable, and the M6
-  ordering becomes a seam-level contract a test can pin. This registry
-  slice is larger and riskier than the two clean seams and should be
-  designed and reviewed on its own before implementation.
+  standalone seams (investigated 2026-10-31). Their prerequisite is the
+  [Runtime Binding Registry](2026-10-31-runtime-binding-registry.md) first
+  slice: it owns `liveBindings`, `bindingOperations`, `sessions`, local
+  Session contexts and Binding validation/invalidation helpers. The source
+  audit corrects the original three-map sketch: `bindingOperations` must
+  move with Binding lifecycle operations, whereas execution-keyed
+  `reconciliations` stays with `ExecutionObservationCooldown` and moves in
+  the later reconciliation slice. In the Registry slice the service retained
+  provisioning, drain, recovery, execution settlement, renewal and scheduler
+  lifecycle. This
+  establishes a concrete owner without injecting service callbacks. The M6
+  stamp-before-slot-removal coverage gap is addressed by the blocked-stamp
+  regression in the [execution workflow extraction](2026-11-01-runtime-execution-workflows.md),
+  which implements reconciliation, takeover scans and cancellation after
+  the Registry. The Registry slice itself does not claim that coverage.
+  See the linked bilingual designs for concurrency, cleanup and acceptance
+  requirements; local and CI qualification are recorded separately.
 - Apply the same treatment to `ManagedSessionStore` and
   `QwenHostedHarnessConnector` afterwards, each as its own slice.
 
