@@ -203,6 +203,7 @@ import { SessionRecoveryBanner } from './components/SessionRecoveryBanner';
 import composerStatusStyles from './components/ComposerStatusStack.module.css';
 import { GoalEditDialog } from './components/dialogs/GoalEditDialog';
 import { StreamingStatus } from './components/StreamingStatus';
+import { WaitingMinigame } from './components/WaitingMinigame';
 import {
   ToastHost,
   TOAST_REQUEST_EVENT,
@@ -24403,6 +24404,11 @@ export function App({
                             </span>
                           </div>
                         )}
+                        {!suppressFailedPromptRetryStreaming &&
+                          (streamingState !== 'idle' ||
+                            sessionHasActivePrompt) && (
+                            <WaitingMinigame active />
+                          )}
                         {streamingState !== 'idle' ||
                         sessionHasActivePrompt ? (
                           suppressFailedPromptRetryStreaming ? null : (

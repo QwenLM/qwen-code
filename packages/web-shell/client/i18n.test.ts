@@ -49,6 +49,35 @@ describe('web-shell i18n catalog', () => {
       '已选 2 组',
     );
   });
+  it('keeps the waiting minigame copy available in both locales', () => {
+    for (const language of ['en', 'zh-CN'] as const) {
+      const t = getTranslator(language);
+      for (const key of [
+        'waitingGame.title',
+        'waitingGame.hint',
+        'waitingGame.waiting',
+        'waitingGame.start',
+        'waitingGame.collapse',
+        'waitingGame.region',
+        'waitingGame.controls',
+        'waitingGame.paused',
+        'waitingGame.pausedHint',
+        'waitingGame.gameOver',
+        'waitingGame.restart',
+        'waitingGame.mute',
+        'waitingGame.unmute',
+      ]) {
+        expect(t(key)).not.toBe(key);
+      }
+    }
+    const zh = getTranslator('zh-CN');
+    expect(zh('waitingGame.waiting')).toBe('等待回复中');
+    expect(zh('waitingGame.score', { score: 100 })).toBe('得分 100');
+    expect(zh('waitingGame.cleared', { count: 2, score: 100 })).toBe(
+      '消除 2 列 · +100',
+    );
+  });
+
   it('keeps task cancellation and elapsed-time copy available in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');
