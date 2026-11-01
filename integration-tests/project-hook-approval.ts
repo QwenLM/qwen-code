@@ -7,6 +7,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { normalizeProjectRoot } from '../packages/cli/src/config/approval-project-root.js';
+import { readProjectEnvFiles } from '../packages/cli/src/config/environment.js';
 import { hashProjectHooks } from '../packages/cli/src/config/hook-approvals.js';
 
 /**
@@ -15,14 +16,18 @@ import { hashProjectHooks } from '../packages/cli/src/config/hook-approvals.js';
  * reads it.
  */
 export function approveProjectHooks(qwenHome: string, workspaceDir: string) {
-  const { hooks } = JSON.parse(
+  const { hooks, env } = JSON.parse(
     readFileSync(join(workspaceDir, '.qwen', 'settings.json'), 'utf8'),
-  ) as { hooks: Record<string, unknown> };
+  ) as { hooks: Record<string, unknown>; env?: unknown };
+  const root = normalizeProjectRoot(workspaceDir);
   writeFileSync(
     join(qwenHome, 'hookApprovals.json'),
     JSON.stringify({
-      [normalizeProjectRoot(workspaceDir)]: {
-        hash: hashProjectHooks(hooks),
+      [root]: {
+        hash: hashProjectHooks({
+          hooks,
+          env: { files: readProjectEnvFiles({}, root), settings: env ?? null },
+        }),
         status: 'approved',
       },
     }),
