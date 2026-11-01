@@ -117,7 +117,7 @@ describe('local batch commands with real settings loading', () => {
     const store = new BatchTaskStore(directory);
     const task = store.create(
       {
-        schemaVersion: 1,
+        version: 1,
         name,
         kind: 'document-transform',
         shared: { instructions: 'Translate' },
