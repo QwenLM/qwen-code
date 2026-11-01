@@ -79,8 +79,16 @@ final class WorkspaceMigrationAdmission {
         var registrations = jdbc.query("SELECT registration_json, registration_revision, physical_key FROM ma_storage"
                 + " WHERE alias_key = ? AND storage_kind = 'EXTERNAL' AND registration_state = 'REGISTERED'"
                 + (lock ? " FOR UPDATE" : ""), (row, index) -> {
-                    var registered = com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry
-                            .decodeRegistration(row.getString("registration_json"));
+                    com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry.RegisteredExternalStorage registered;
+                    try {
+                        registered = com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry
+                                .decodeRegistration(row.getString("registration_json"));
+                    } catch (RuntimeException unreadable) {
+                        // A registration this build cannot decode cannot prove that
+                        // the mount is safe. Refuse the admission with the stable
+                        // Workspace verdict instead of leaking a mapper 400/500.
+                        throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                    }
                     if (!storage.equals(registered.tenantWorkspaceId()) || !registered.ownerKey().equals(row.getString("physical_key"))
                             || registered.registrationRevision() != row.getLong("registration_revision")) {
                         throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();

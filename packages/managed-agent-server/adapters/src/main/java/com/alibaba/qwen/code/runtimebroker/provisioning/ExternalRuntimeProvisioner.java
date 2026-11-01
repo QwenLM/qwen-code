@@ -404,8 +404,11 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
 
     /** Validates durable originals without observing, allocating or adopting a placement. */
     protected final Map<String, Object> validatedSavedBoot(RuntimeBindingRecord binding) {
-        if (binding == null || binding.getLease() == null || executor.isShutdown()) {
+        if (binding == null || binding.getLease() == null) {
             throw conflict();
+        }
+        if (executor.isShutdown()) {
+            throw unavailable();
         }
         RuntimeProvisionRequest request = binding.getRequest();
         RuntimeProvisionSeed seed = binding.getProvisionSeed();

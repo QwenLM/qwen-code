@@ -559,6 +559,25 @@ class ExternalWorkspaceProvisionerTest {
     }
 
     @Test
+    void shutdownMakesSavedDrainChecksRetryableInsteadOfPermanent() throws Exception {
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        var original = place(subject, "closed-executor");
+        var saved = draining(original.request(), original.seed(), original.handle(), original.lease(), true);
+        subject.close();
+
+        var check = org.junit.jupiter.api.Assertions.assertThrows(
+                RuntimeBrokerException.class, () -> subject.supportsDrainedStop(saved));
+        assertEquals(503, check.getStatusCode());
+        assertEquals("runtime_external_unavailable", check.getCode());
+        assertTrue(check.isRetryable());
+
+        var stop = failure(subject.stopDrained(saved));
+        assertEquals(503, stop.getStatusCode());
+        assertEquals("runtime_external_unavailable", stop.getCode());
+        assertTrue(stop.isRetryable());
+    }
+
+    @Test
     void acquisitionRequiresPositiveContinuityButProvisionOnlyParityDoesNot() throws Exception {
         var subject = provisioner(registration(PROVIDER, 1, MOUNT));
         var original = place(subject, "acquire-missing");
