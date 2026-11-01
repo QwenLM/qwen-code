@@ -1563,8 +1563,8 @@ class Issue13181QueryBudgetTest {
                 properties.setModelCatalog(List.of(option));
                 when(harness.supportsModelSelection()).thenReturn(true);
             }
-            store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, clock, hub::publish,
-                    registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+            store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, clock, hub::publish,
+                    registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             service = new ManagedAgentService(store, new RequestDigests(),
                     mock(HarnessCoordinator.class),
                     harness, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
