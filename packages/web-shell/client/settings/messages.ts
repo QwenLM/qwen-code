@@ -264,6 +264,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.review.comment': '默认发布评论：review',
   'settings.description.review.comment':
     '把每次 PR /review 视为带 --comment 执行：不加旗标也会把发现发布到 PR。发布仍绑定调用时指定的 PR。仅在你希望评审总是发布时开启。仅在 User、System、SystemDefaults 作用域生效；Workspace 作用域的值会被忽略，仓库无法为其评审者设定评审策略。',
+  'settings.label.review.autoVerify': '自动验证干净评审：review',
+  'settings.description.review.autoVerify':
+    '一轮 PR 评审干净收尾后，daemon 在同一工作区派生一个会话执行“/verify-pr <number> --publish --repo <owner>/<repo> --expect-head <sha>”，让行为证据轮次无需手工交接即可开始。评审者不必是 qwen-code：它自己的评审流水线会自动记录这次交接，任何其他生产者（别的 agent、脚本、人）用“qwen review verify-event --pr <n> --repo <owner>/<repo> --head <sha>”记录同一条事件。每一轮都是该交接归属会话的子会话：qwen-code 自己的轮次取评审会话，外部生产者取它点名的会话（--session-id，默认取环境变量），观测端取拥有该 watch 的会话；不点名会话的交接在入口即被拒绝。对 qwen-code 自己的轮次，“干净”是流水线「本轮认证了自己的范围」的决定，而不只是发现计数：零 Critical **且**本轮记录带有 head 锚点，任何 fail-closed 上限（未决阻塞、覆盖未证实、PR 上下文不可用）都会让 compose-review 扣留该锚点。每个被评审的 head 只验证一次：同一提交上的两轮干净评审只派生一轮。可能在已经发布之后才失败的派生只记日志、不重试，以免重复发布报告；而在什么都没派生之前就发出的拒绝（例如并发上限已满）证明没有发布任何东西，记录会被撤销并在后续趟次重试。派生会话与手工调用 /verify-pr 采用同样的隔离姿态执行 PR 代码并发表评论。目前只对 github.com 目标派生——/verify-pr 没有 Aone 或 GitLab 后端也没有 --host 旗标——且工作区必须带有该项目 skill（.qwen/skills/verify-pr）。关闭此项可保持手工交接：生产者仍会写记录，但消费者拒绝并丢弃它而不是排队，daemon 也不再观测 watch 的 PR（qwen review verify-watch）。仅在 User、System、SystemDefaults 作用域生效；Workspace 作用域的值会被忽略，仓库无法为其评审者开启或关闭自动验证。',
   'settings.label.review.severityFloor': '发布下限：review',
   'settings.description.review.severityFloor':
     'PR /review 未指定 --severity-floor 时的最低发布级别。“auto”保持随轮次自适应的默认值：第 5 轮及以前发布 Suggestion，第 6 轮起只发布 Critical，其余本可发布的高置信 Suggestion 会被记录并推迟（低置信和 Nice-to-have 发现一如既往只留在终端）；“auto”下第 2–5 轮还会推迟针对上一轮以来未变更代码的新 Suggestion——正是这套规则防止评审轮次把 PR 越滚越大。“critical”从第 1 轮起就采用该姿态；“suggestion”每轮都发布 Suggestion。非 PR 目标没有轮次概念，忽略此项。仅在 User、System、SystemDefaults 作用域生效；Workspace 作用域的值会被忽略，仓库无法为其评审者设定评审策略。',
