@@ -389,5 +389,4 @@ final class RuntimeExecutionRecovery {
             after = batch.get(batch.size() - 1).getExecutionCallId();
         }
     }
-
 }

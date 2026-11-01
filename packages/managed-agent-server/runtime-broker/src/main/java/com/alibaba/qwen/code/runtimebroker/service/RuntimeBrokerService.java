@@ -2074,12 +2074,6 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         return executionCancellation.cancelExecution(harnessSessionId, runtimeSessionId, executionCallId, this::beginDispatch);
     }
 
-
-
-
-
-
-
     /**
      * Asks the original Runtime once whether an {@code UNKNOWN} execution
      * settled, and settles the record only on that evidence. Any other
@@ -2107,22 +2101,6 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
             String executionCallId) {
         return executionReconciler.observeExecution(harnessSessionId, runtimeSessionId, executionCallId);
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     public CompletionStage<Boolean> releaseOriginal(String harnessSessionId, String runtimeSessionId,
             String bindingId, long generation) {
@@ -2349,8 +2327,6 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                 });
     }
 
-
-
     private ToolExecutionRecord createExecution(SessionContext context,
             String idempotencyKey, Map<String, Object> reference, boolean dispatch) {
         ToolExecutionRecord record;
@@ -2476,28 +2452,6 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
             String executionCallId) {
         return executionRecovery.stopBackgroundProcess(tenantId, harnessSessionId, executionCallId);
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     private CompletionStage<Boolean> releaseSession(
             SessionContext context, boolean drain) {
@@ -3934,15 +3888,11 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         }
     }
 
-
-
     private RuntimeSessionRecord requireAcquireSessionRecord(SessionContext context) {
         RuntimeSessionRecord record = bindingRegistry.requireReadySessionRecord(context);
         return CsiFilesRetirementProfile.isProfile(record.getSession().getScope())
                 ? bindingRepository.requireSessionAdmission(sessionRepository, record) : record;
     }
-
-
 
     private void beginDispatch(SessionContext context,
             ToolExecutionRecord prepared) {
@@ -4245,30 +4195,6 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         return null;
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     private RuntimeSessionRecord transitionSessionToReleasing(
             SessionContext context) {
         RuntimeSessionRecord current = sessionRepository.findById(
@@ -4405,8 +4331,6 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         return resolveScope(harnessSessionId, false, authority);
     }
 
-
-
     private CompletionStage<RuntimeScope> resolveScope(
             String harnessSessionId, boolean admission, RuntimeLifecycleAuthority authority) {
         return RuntimeBrokerSupport.resolveScope(sessionResolver, harnessSessionId, admission, authority);
@@ -4443,18 +4367,12 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                 "executionCallId");
     }
 
-
-
     private boolean shouldDriveDispatch(ToolExecutionRecord record) {
         // The repository judges the lease: claimDispatch leaves a live claim
         // alone and fences a lapsed EXECUTING or CANCEL_REQUESTED record.
         return !record.isTerminal()
                 && record.getState() != ToolExecutionRecord.State.UNKNOWN;
     }
-
-
-
-
 
     private static boolean ownsDispatch(ToolExecutionRecord current,
             ToolExecutionRecord claimed) {
@@ -4464,8 +4382,6 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                         current.getDispatchOwner());
     }
 
-
-
     private static Duration requireDuration(Duration duration,
             String name) {
         if (duration == null || duration.isZero() || duration.isNegative()) {
@@ -4473,8 +4389,6 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         }
         return duration;
     }
-
-
 
     private static ScheduledExecutorService newScheduler() {
         return Executors.newSingleThreadScheduledExecutor(runnable -> {
@@ -4528,30 +4442,6 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
     private long stepCallTimeoutMillis() {
         return Math.max(1, operationDeadlineMillis() / 2);
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     private final class BindingRenewal implements AutoCloseable {
         // A monitor here would pin a virtual-thread carrier whenever a

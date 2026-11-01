@@ -424,6 +424,4 @@ final class RuntimeBindingRegistry {
                     return CompletableFuture.completedFuture(record);
                 });
     }
-
-
 }
