@@ -2308,12 +2308,19 @@ function skipAmendPrefixes(tokens: string[]): string[] {
 
   while (index < tokens.length) {
     const token = tokens[index]!;
-    if (AMEND_LEADING_NOISE.has(token) || isEnvAssignmentToken(token)) {
+    const program = amendExecutableBasename(token);
+    // A word can be both shell noise and a wrapper that takes flags — `time` is
+    // the only such word here. Letting the noise branch swallow it would skip its
+    // `-f`/`--format`/`-o`/`--output` value, leaving that value as the apparent
+    // program and the amend behind it unrecognised.
+    if (
+      !AMEND_PREFIX_COMMANDS.has(program) &&
+      (AMEND_LEADING_NOISE.has(token) || isEnvAssignmentToken(token))
+    ) {
       index++;
       continue;
     }
 
-    const program = amendExecutableBasename(token);
     if (!AMEND_PREFIX_COMMANDS.has(program)) break;
 
     index++;

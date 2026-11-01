@@ -193,6 +193,11 @@ describe('isDestructiveCommand — git commit --amend', () => {
     'sudo env GIT_COMMITTER_DATE=now git commit --amend --no-edit',
     'timeout 10 git commit --amend --no-edit',
     'if true; then git commit --amend --no-edit; fi',
+    // `time` is both shell noise and a wrapper that takes a value-taking flag;
+    // its value must not be mistaken for the program (#13570 review).
+    "time -f '%e' git commit --amend --no-edit",
+    'time --format=%e git commit --amend --no-edit',
+    'time -o /tmp/time.out git commit --amend --no-edit',
   ])('blocks amend through an execution wrapper: %s', (command) => {
     expectBlocked(command, 'amend the commit', 'amend');
   });
