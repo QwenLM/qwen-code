@@ -821,7 +821,7 @@ describe('ToolApproval accessibility', () => {
     });
 
     const path = container!.querySelector('[aria-label="File diff"]')!
-      .parentElement!.firstElementChild!;
+      .parentElement!.parentElement!.firstElementChild!;
     expect(path.textContent).toBe('src/\\u202eevil\\u001b[31m\\u0007.ts');
   });
 
