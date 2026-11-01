@@ -762,4 +762,62 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
       1,
     );
   });
+
+  // The artifact directory is writable by the PR code the round just ran, so
+  // its own context.json cannot pin the head. --context reads a copy the round
+  // never saw and must not fall back to the writable one.
+  it('pins the head from a host-held snapshot over the artifact copy', () => {
+    const dir = makeArtifactDir(validFiles(), ['01-ab-cells.png']);
+    writeFileSync(
+      join(dir, 'context.json'),
+      JSON.stringify({ headRefOid: 'e'.repeat(40) }),
+    );
+    const hostSnapshot = join(tmpdir(), `verify-pr-host-${Date.now()}.json`);
+    tmpDirs.push(hostSnapshot);
+    writeFileSync(hostSnapshot, JSON.stringify({ headRefOid: HEAD }));
+
+    const pinned = spawnSync(
+      process.execPath,
+      [SCRIPT, '--context', hostSnapshot, dir],
+      { encoding: 'utf8' },
+    );
+    expect(pinned.status).toBe(0);
+    expect(pinned.stdout).toContain(`head source: ${hostSnapshot}`);
+    expect(pinned.stdout).not.toContain('does not name the verified head');
+
+    const artifactOnly = run(dir);
+    expect(artifactOnly.status).toBe(0);
+    expect(artifactOnly.stdout).toContain('does not name the verified head');
+  });
+
+  it('refuses an unusable --context instead of falling back', () => {
+    const dir = makeArtifactDir(validFiles(), ['01-ab-cells.png']);
+    const empty = join(tmpdir(), `verify-pr-host-empty-${Date.now()}.json`);
+    tmpDirs.push(empty);
+    writeFileSync(empty, '{}');
+    for (const snapshot of [join(tmpdir(), 'verify-pr-no-such.json'), empty]) {
+      const result = spawnSync(
+        process.execPath,
+        [SCRIPT, '--context', snapshot, dir],
+        { encoding: 'utf8' },
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('--context');
+      expect(result.stdout).not.toContain('head source:');
+    }
+  });
+
+  it('exits 2 for an unknown option or a missing --context value', () => {
+    const dir = makeArtifactDir(validFiles(), ['01-ab-cells.png']);
+    expect(
+      spawnSync(process.execPath, [SCRIPT, '--bogus', dir], {
+        encoding: 'utf8',
+      }).status,
+    ).toBe(2);
+    expect(
+      spawnSync(process.execPath, [SCRIPT, '--context'], {
+        encoding: 'utf8',
+      }).status,
+    ).toBe(2);
+  });
 });

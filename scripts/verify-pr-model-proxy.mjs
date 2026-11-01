@@ -24,9 +24,16 @@
  * The CI lane deliberately keeps its own inline copy: the proxy handles the
  * real key, so it must not execute a script from the PR-head checkout.
  *
- * Usage:
- *   REVIEW_OPENAI_BASE_URL=<url> REVIEW_OPENAI_API_KEY=<key> \
- *     node scripts/verify-pr-model-proxy.mjs [--listen <host>] [--port <n>]
+ * Usage (from a trusted checkout, never the PR-head tree — this process holds
+ * the real key and a PR can rewrite a script in its own checkout):
+ *   read -rsp 'REVIEW_OPENAI_API_KEY: ' REVIEW_OPENAI_API_KEY; echo
+ *   export REVIEW_OPENAI_API_KEY
+ *   REVIEW_OPENAI_BASE_URL=<url> \
+ *     node <trusted-clone>/scripts/verify-pr-model-proxy.mjs \
+ *       [--listen <host>] [--port <n>]
+ *
+ * Reading the key instead of typing it as an inline assignment keeps it out
+ * of shell history, `set -x` traces, and terminal transcripts.
  *
  * Options:
  *   --listen <host>  address to bind (default 127.0.0.1; use the Docker
@@ -48,7 +55,12 @@ import http from 'node:http';
 import { Readable } from 'node:stream';
 import { isEntryPoint } from './lib/entry-point.js';
 
-const DEFAULT_IDLE_TIMEOUT_MS = 120_000;
+export const DEFAULT_IDLE_TIMEOUT_MS = 240_000;
+
+// The qwen client tolerates 240 s of silence inside one stream
+// (DEFAULT_STREAM_IDLE_TIMEOUT_MS in the OpenAI content generator), so a
+// tighter proxy window would cut a completion its own client would have
+// waited out. Keep the default equal; a caller may still pass its own value.
 
 // RFC 7230 hop-by-hop headers describe the client's connection to us, not the
 // upstream one. Forwarding them is never correct, and a copied
@@ -93,11 +105,29 @@ export function parseArgs(argv) {
   return options;
 }
 
+/** Strips the trailing slashes a base path may carry; `''` means none. */
+export function normalizeBasePath(pathname) {
+  const trimmed = (pathname ?? '').replace(/\/+$/, '');
+  return trimmed === '/' ? '' : trimmed;
+}
+
+/**
+ * Assembles the base URL the maintainer hands to the container. A host that
+ * carries a colon is an IPv6 literal and needs brackets, or `new URL()`
+ * rejects the string downstream.
+ */
+export function formatLocalBaseUrl(listen, port, basePath = '') {
+  const host = listen.includes(':') ? `[${listen}]` : listen;
+  return `http://${host}:${port}${basePath}`;
+}
+
 /**
  * Returns an http.Server that relays only POST /chat/completions to the
  * upstream, replacing the client's bearer token with the real key. The idle
  * watchdog is per-chunk, not total: qwen tolerates minutes of silence inside
- * one stream, so a total cap would cut healthy long completions.
+ * one stream, so a total cap would cut healthy long completions. It also
+ * stays quiet while the downstream is paused — backpressure from a slow but
+ * live client is not upstream idleness — and re-arms on 'drain'.
  */
 export function createModelProxy({
   baseUrl,
@@ -110,7 +140,7 @@ export function createModelProxy({
     throw new Error('baseUrl, apiKey, token and nonce are all required');
   }
   const base = new URL(baseUrl);
-  const basePath = base.pathname.replace(/\/+$/, '');
+  const basePath = normalizeBasePath(base.pathname);
 
   return http.createServer(async (req, res) => {
     if (req.url === '/__health') {
@@ -163,17 +193,49 @@ export function createModelProxy({
       init.duplex = 'half';
 
       const controller = new AbortController();
-      timer = setTimeout(() => controller.abort(), idleTimeoutMs);
+      let body = null;
+      let finished = false;
+      const arm = () => {
+        if (finished) return;
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          // A paused body is downstream backpressure, not upstream silence:
+          // the client is alive but slow, and aborting here would cut a
+          // healthy completion. The 'drain' listener re-arms this window.
+          if (body?.isPaused()) {
+            arm();
+            return;
+          }
+          controller.abort();
+        }, idleTimeoutMs);
+      };
+      // Registered before the fetch: a client that disconnects while the
+      // upstream headers are still in flight has already emitted 'close', so
+      // registering after the response would never abort that request.
+      res.on('close', () => {
+        finished = true;
+        clearTimeout(timer);
+        controller.abort();
+      });
+      res.on('drain', arm);
+      arm();
       let upstream;
       try {
         upstream = await fetch(target, { ...init, signal: controller.signal });
       } catch (error) {
         if (error instanceof Error && error.name === 'AbortError') {
-          res.writeHead(504, { 'content-type': 'text/plain' });
-          res.end('proxy error: upstream request timed out\n');
+          if (!res.destroyed && !res.writableEnded) {
+            res.writeHead(504, { 'content-type': 'text/plain' });
+            res.end('proxy error: upstream request timed out\n');
+          }
           return;
         }
         throw error;
+      }
+      if (res.destroyed) {
+        finished = true;
+        clearTimeout(timer);
+        return;
       }
       // The timer is deliberately NOT cleared here: fetch() resolves on
       // HEADERS, and the armed timer doubles as the first idle window for
@@ -187,8 +249,11 @@ export function createModelProxy({
       });
       res.writeHead(upstream.status, responseHeaders);
       if (upstream.body) {
-        const body = Readable.fromWeb(upstream.body);
-        const done = () => clearTimeout(timer);
+        body = Readable.fromWeb(upstream.body);
+        const done = () => {
+          finished = true;
+          clearTimeout(timer);
+        };
         body.on('end', done);
         // An idle watchdog firing mid-body aborts the upstream, which
         // surfaces here as an error: tear down the downstream response too.
@@ -196,18 +261,10 @@ export function createModelProxy({
           done();
           res.destroy();
         });
-        // A downstream disconnect must abort the upstream request too, or
-        // the stalled fetch keeps the socket alive.
-        res.on('close', () => {
-          done();
-          controller.abort();
-        });
         body.pipe(res);
-        body.on('data', () => {
-          clearTimeout(timer);
-          timer = setTimeout(() => controller.abort(), idleTimeoutMs);
-        });
+        body.on('data', arm);
       } else {
+        finished = true;
         clearTimeout(timer);
         res.end();
       }
@@ -245,11 +302,11 @@ async function main(argv) {
     server.listen(options.port, options.listen, resolve);
   });
   const { port } = server.address();
-  const base = new URL(baseUrl);
-  const basePath = base.pathname.replace(/\/+$/, '');
-  const localBaseUrl =
-    `http://${options.listen}:${port}` +
-    (basePath && basePath !== '/' ? basePath : '');
+  const localBaseUrl = formatLocalBaseUrl(
+    options.listen,
+    port,
+    normalizeBasePath(new URL(baseUrl).pathname),
+  );
   // One JSON line, on stdout: the maintainer pastes baseUrl/token into the
   // container's provider configuration. The real key is never printed.
   process.stdout.write(
