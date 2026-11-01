@@ -22,6 +22,20 @@ silently treated as workspace conversations. Qwen has no
 equivalent of ChatGPT's account history or explicit silent-heartbeat flag; do
 not invent those sources or suppress ordinary background work.
 
+Activity is an alternative mode of the existing conversation surface, not an
+additional list beside it. While open, it replaces the ordinary workspace
+navigation, session search and conversation groups in that surface, including
+the rail layout's Home column. The top-level New session action remains outside
+that surface and stays available when enabled by the host. Close activity with
+the bell or Cmd/Ctrl+Alt+U to restore ordinary navigation; Escape also closes it
+when a dialog or menu does not own that key.
+
+The entry requires the daemon's existing `session_organization` capability,
+the default conversation surface (no host-supplied `sessionContent`), and no
+special section view. There is no additional read-state capability requirement.
+Without these conditions the activity entry and shortcut are unavailable and
+the existing navigation remains in use.
+
 Use the existing directory, live-state feed, transcript page reads and archive
 APIs. No new directory database, model-generated summaries or per-row polling.
 Reuse the sidebar's existing in-memory `completedUnreadIds` for unread state.
@@ -124,14 +138,24 @@ or a shared daemon. Those decisions are outside this revision.
   remain, and undo restores successful archives without restarting work.
   Operations are bounded to eight concurrent requests. Navigation leaves an
   archived current conversation only after confirmed success.
+  Pending operations, result messages and the undo offer belong to the sidebar,
+  so closing and reopening activity does not discard them, including when a
+  request finishes while the view is closed. Changing the host/workspace scope
+  discards this operation state; late results from an earlier scope cannot
+  populate the new scope, even after switching back. List suppression and
+  restoration overlays remain local to the activity view and follow the
+  authoritative directory when it remounts.
 
 ## Implementation boundaries
 
 Unread state stays in the existing sidebar component; the activity model accepts
 the derived unread flag and the catalog controller handles directory reads,
 previews and archive operations. Each identity has one completion observer:
-the legacy trackers skip conversations currently covered by the activity
-catalog, so delayed responses cannot recreate a completion already marked read.
+only while activity is open do its covered conversations transfer to the
+activity observer and leave the legacy scans. With activity closed, the existing
+ordinary-sidebar observers retain their visibility and freshness rules. This
+preserves normal collapsed-rail reminders and prevents duplicate observers from
+recreating a completion already marked read.
 Core organization metadata, Bridge summaries
 and daemon organization routes gain no read-state fields. Live-state includes
 turn errors. Existing workspace routes must use resolved runtime storage,
@@ -151,7 +175,10 @@ header and row alignment, shared row actions and hover context, reset icon
 visibility and keyboard access, observed
 completion transitions, shared blue-dot/read behavior,
 refresh reset, absence of read-state writes, stale async responses, partial
-failures, archive scope and undo. Run a baseline against global `qwen`
+failures, archive scope and undo. Verify that activity replaces workspace/search
+navigation, preserves the enabled top-level New session action, and restores the
+ordinary surface through each exit; also verify the `session_organization`
+capability gate. Run a baseline against global `qwen`
 and browser fixtures before implementing, then focused tests, browser E2E,
 build, typecheck and bundle. Read the full diff in two clean audit passes and
 perform an independent review. Test only isolated conversations; never archive

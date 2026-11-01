@@ -335,9 +335,6 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     catalog(running);
     renderSidebar();
     await flushSidebar();
-    catalog(completed);
-    renderSidebar();
-    await flushSidebar();
     await act(async () => {
       click(
         container.querySelector<HTMLButtonElement>(
@@ -345,6 +342,9 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
         )!,
       );
     });
+    await flushSidebar();
+    catalog(completed);
+    renderSidebar();
     await flushSidebar();
     expect(
       container.querySelector('[data-web-shell-session-completed-unread]'),

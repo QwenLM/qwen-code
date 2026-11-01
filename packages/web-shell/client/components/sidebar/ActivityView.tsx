@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { EllipsisVerticalIcon, RotateCcwIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { Button } from '../ui/button';
@@ -56,7 +63,48 @@ export function readActivityPreferences(): ActivityPreferences {
   return { ...DEFAULT_ACTIVITY_PREFERENCES };
 }
 
+interface ActivityOperationState {
+  undo?: { entries: ActivityEntry[]; priorityKeys: string[] };
+  pending: boolean;
+  result?: string;
+}
+
+export function useActivityOperations(scope: string) {
+  const initial = useMemo(() => {
+    const state: ActivityOperationState = { pending: false };
+    return { scope, state };
+  }, [scope]);
+  const [stored, setStored] = useState({
+    owner: initial,
+    state: initial.state,
+  });
+  const currentOwner = useRef(initial);
+  currentOwner.current = initial;
+  const update = useCallback(
+    (change: (state: ActivityOperationState) => ActivityOperationState) => {
+      if (currentOwner.current !== initial) return;
+      setStored((previous) => {
+        if (currentOwner.current !== initial) return previous;
+        const current =
+          previous.owner === initial ? previous.state : initial.state;
+        const next = change(current);
+        if (previous.owner === initial && next === current) return previous;
+        return {
+          owner: initial,
+          state: next,
+        };
+      });
+    },
+    [initial],
+  );
+  return {
+    state: stored.owner === initial ? stored.state : initial.state,
+    update,
+  };
+}
+
 export interface ActivityViewProps {
+  operations: ReturnType<typeof useActivityOperations>;
   entries: ActivityEntry[];
   loading: boolean;
   unavailable: boolean;
@@ -126,6 +174,7 @@ function ActivityRow({
 }
 
 export function ActivityView({
+  operations,
   entries,
   loading,
   unavailable,
@@ -148,6 +197,8 @@ export function ActivityView({
   );
   const [budget, setBudget] = useState(10);
   const [priorityExpanded, setPriorityExpanded] = useState(true);
+  const { state, update } = operations;
+  const { undo, pending, result } = state;
   const [suppressed, setSuppressed] = useState<Set<string>>(() => new Set());
   const [restored, setRestored] = useState<ActivityEntry[]>([]);
   const effectiveEntries = useMemo(() => {
@@ -160,12 +211,6 @@ export function ActivityView({
   const [confirmation, setConfirmation] = useState<ActivityEntry[] | null>(
     null,
   );
-  const [undo, setUndo] = useState<{
-    entries: ActivityEntry[];
-    priorityKeys: string[];
-  }>();
-  const [pending, setPending] = useState(false);
-  const [result, setResult] = useState<string>();
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -272,14 +317,16 @@ export function ActivityView({
   const unread = sections.priority.filter(isActivityUnread);
   const execute = async (action: () => Promise<void>) => {
     if (pending) return;
-    setPending(true);
-    setResult(undefined);
+    update((previous) => ({ ...previous, pending: true, result: undefined }));
     try {
       await action();
     } catch {
-      if (mounted.current) setResult(t('activity.actionFailed'));
+      update((previous) => ({
+        ...previous,
+        result: t('activity.actionFailed'),
+      }));
     } finally {
-      if (mounted.current) setPending(false);
+      update((previous) => ({ ...previous, pending: false }));
     }
   };
   const archive = () => {
@@ -289,6 +336,16 @@ export function ActivityView({
     setConfirmation(null);
     void execute(async () => {
       const response = await onArchive(targets);
+      update((previous) => ({
+        ...previous,
+        undo: response.succeeded.length
+          ? { entries: response.succeeded, priorityKeys }
+          : previous.undo,
+        result: t('activity.result', {
+          succeeded: response.succeeded.length,
+          failed: response.failed,
+        }),
+      }));
       if (!mounted.current) return;
       setSuppressed(
         (previous) =>
@@ -301,14 +358,6 @@ export function ActivityView({
         previous.filter(
           (entry) => !response.succeeded.some((item) => item.key === entry.key),
         ),
-      );
-      if (response.succeeded.length)
-        setUndo({ entries: response.succeeded, priorityKeys });
-      setResult(
-        t('activity.result', {
-          succeeded: response.succeeded.length,
-          failed: response.failed,
-        }),
       );
     });
   };
@@ -340,10 +389,21 @@ export function ActivityView({
           onClick={() =>
             void execute(async () => {
               const response = await onUndo(undo.entries);
-              if (!mounted.current) return;
               const succeeded = new Set(
                 response.succeeded.map((entry) => entry.key),
               );
+              const failed = undo.entries.filter(
+                (entry) => !succeeded.has(entry.key),
+              );
+              update((previous) => ({
+                ...previous,
+                undo: failed.length ? { ...undo, entries: failed } : undefined,
+                result: t('activity.result', {
+                  succeeded: response.succeeded.length,
+                  failed: response.failed,
+                }),
+              }));
+              if (!mounted.current) return;
               setRestored((previous) => [
                 ...previous.filter((entry) => !succeeded.has(entry.key)),
                 ...response.succeeded.map((entry) => ({
@@ -368,16 +428,6 @@ export function ActivityView({
                   ]),
                 ],
               }));
-              const failed = undo.entries.filter(
-                (entry) => !succeeded.has(entry.key),
-              );
-              setUndo(failed.length ? { ...undo, entries: failed } : undefined);
-              setResult(
-                t('activity.result', {
-                  succeeded: response.succeeded.length,
-                  failed: response.failed,
-                }),
-              );
             })
           }
         >
@@ -465,7 +515,10 @@ export function ActivityView({
               setBudget((value) => value + 10);
               if (hasMore)
                 void Promise.resolve(onLoadMore()).catch(() =>
-                  setResult(t('activity.actionFailed')),
+                  update((previous) => ({
+                    ...previous,
+                    result: t('activity.actionFailed'),
+                  })),
                 );
             }}
           >
@@ -563,7 +616,10 @@ export function ActivityView({
             onSelect={() =>
               void execute(async () => {
                 await onMarkRead(unread);
-                if (mounted.current) setResult(t('activity.readDone'));
+                update((previous) => ({
+                  ...previous,
+                  result: t('activity.readDone'),
+                }));
               })
             }
           >

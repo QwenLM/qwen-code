@@ -114,11 +114,15 @@ export function useActivityCatalog({
     () => [...initialQueries, ...extraQueries],
     [initialQueries, extraQueries],
   );
-  const snapshots = useSessionCatalogQueries(client, queries, {
-    enabled,
-    autoLoad: enabled,
-    ...(!liveStateEnabled && enabled ? { pollIntervalMs: 30_000 } : {}),
-  });
+  const snapshots = useSessionCatalogQueries(
+    client,
+    enabled ? queries : EMPTY_QUERIES,
+    {
+      enabled,
+      autoLoad: enabled,
+      ...(!liveStateEnabled && enabled ? { pollIntervalMs: 30_000 } : {}),
+    },
+  );
   useEffect(() => {
     const reachable: SessionCatalogQuery[] = [];
     if (enabled && open) {

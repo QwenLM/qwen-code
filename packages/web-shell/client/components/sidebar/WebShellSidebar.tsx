@@ -186,6 +186,7 @@ import { DesktopRelayControl } from '../DesktopRelayControl';
 import { workspaceLabelForCwd } from '../../utils/workspace';
 import {
   ActivityView,
+  useActivityOperations,
   readActivityPreferences,
   ACTIVITY_PREFERENCES_EVENT,
 } from './ActivityView';
@@ -1939,6 +1940,8 @@ export function WebShellSidebar({
       : currentSessionIdentity;
   const activityEnabled = organizationEnabled && !sectionView;
   const [activityOpen, setActivityOpen] = useState(false);
+  const activityOperationScope = `${focusedHostOrigin}:${JSON.stringify(liveStateWorkspaceCwds)}`;
+  const activityOperations = useActivityOperations(activityOperationScope);
   const [activityPreferences, setActivityPreferences] = useState(
     readActivityPreferences,
   );
@@ -2450,9 +2453,11 @@ export function WebShellSidebar({
   const activityIdentities = useMemo(
     () =>
       new Set(
-        activity.entries.map(({ session }) => getIdentityForSession(session)),
+        (activityOpen ? activity.entries : []).map(({ session }) =>
+          getIdentityForSession(session),
+        ),
       ),
-    [activity.entries, getIdentityForSession],
+    [activity.entries, activityOpen, getIdentityForSession],
   );
   const markActivityRead = useCallback(
     async (entries: ActivityEntry[]) => {
@@ -2475,7 +2480,7 @@ export function WebShellSidebar({
   >(undefined);
   const activityScope = JSON.stringify(liveStateWorkspaceCwds);
   useEffect(() => {
-    if (!activityEnabled) {
+    if (!activityEnabled || !activityOpen) {
       previousActivityRunning.current = undefined;
       return;
     }
@@ -2511,6 +2516,7 @@ export function WebShellSidebar({
   }, [
     activity.entries,
     activityEnabled,
+    activityOpen,
     activityScope,
     currentSessionIdentity,
     getIdentityForSession,
@@ -2968,7 +2974,7 @@ export function WebShellSidebar({
     for (const session of [...sessions, ...eligibleSecondarySessions]) {
       byIdentity.set(getIdentityForSession(session), session);
     }
-    if (activityEnabled) {
+    if (activityEnabled && activityOpen) {
       for (const entry of activity.entries) {
         byIdentity.set(getIdentityForSession(entry.session), entry.session);
       }
@@ -2980,6 +2986,7 @@ export function WebShellSidebar({
     secondaryStatusQueriesActive,
     sessions,
     activityEnabled,
+    activityOpen,
     activity.entries,
   ]);
   const collapsedSessionStatus = useMemo(() => {
@@ -7293,7 +7300,8 @@ export function WebShellSidebar({
               content={
                 activityOpen && activityEnabled ? (
                   <ActivityView
-                    key={`${focusedHostOrigin}:${JSON.stringify(liveStateWorkspaceCwds)}`}
+                    key={activityScope}
+                    operations={activityOperations}
                     entries={activityEntries}
                     loading={activity.loading}
                     unavailable={activity.unavailable || !daemonAvailable}

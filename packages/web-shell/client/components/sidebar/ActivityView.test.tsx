@@ -2,7 +2,11 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ActivityView, type ActivityViewProps } from './ActivityView';
+import {
+  ActivityView,
+  useActivityOperations,
+  type ActivityViewProps,
+} from './ActivityView';
 import { ACTIVITY_MESSAGES_EN } from './activity-messages';
 import type { ActivityEntry } from './activity-model';
 import { installSidebarDomShims } from '../../test/sidebarHarness';
@@ -30,7 +34,7 @@ const makeEntry = (key: string): ActivityEntry => ({
 });
 let container: HTMLDivElement;
 let root: Root;
-let props: ActivityViewProps;
+let props: Omit<ActivityViewProps, 'operations'>;
 const openSession = vi.fn();
 const settle = async () => {
   await act(async () => {
@@ -65,9 +69,19 @@ const menuClick = async (text: string) => {
     item.click();
   });
 };
-const render = async () => {
+function ActivityHarness({
+  visible,
+  scope,
+}: {
+  visible: boolean;
+  scope: string;
+}) {
+  const operations = useActivityOperations(scope);
+  return visible ? <ActivityView {...props} operations={operations} /> : null;
+}
+const render = async (visible = true, scope = 'workspace') => {
   await act(async () => {
-    root.render(<ActivityView {...props} />);
+    root.render(<ActivityHarness visible={visible} scope={scope} />);
   });
 };
 
@@ -111,6 +125,95 @@ afterEach(() => {
 });
 
 describe('ActivityView', () => {
+  it.each([false, true])(
+    'retains archive progress and undo across closing the view (reopen before completion: %s)',
+    async (reopenBeforeCompletion) => {
+      const archived = props.entries[0];
+      let finishArchive!: (value: {
+        succeeded: ActivityEntry[];
+        failed: number;
+      }) => void;
+      props.onArchive = vi.fn(
+        () =>
+          new Promise((resolve) => {
+            finishArchive = resolve;
+          }),
+      );
+      let finishUndo!: (value: {
+        succeeded: ActivityEntry[];
+        failed: number;
+      }) => void;
+      props.onUndo = vi.fn(
+        () =>
+          new Promise((resolve) => {
+            finishUndo = resolve;
+          }),
+      );
+      await render();
+      await menuClick('Archive chats');
+      await click('Archive');
+      await render(false);
+      expect(container.querySelector('[data-web-shell-activity]')).toBeNull();
+      if (reopenBeforeCompletion) {
+        await render();
+        await menu();
+        const archive = [
+          ...document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+        ].find((item) => item.textContent === 'Archive chats')!;
+        expect(archive.getAttribute('data-disabled')).not.toBeNull();
+        await act(async () => {
+          archive
+            .closest('[role="menu"]')!
+            .dispatchEvent(
+              new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+            );
+        });
+      }
+      props.entries = props.entries.filter(
+        (entry) => entry.key !== archived.key,
+      );
+      await act(async () =>
+        finishArchive({ succeeded: [archived], failed: 1 }),
+      );
+      await render();
+      expect(container.textContent).toContain('1 succeeded · 1 failed');
+      expect(container.querySelector('[data-activity-key="a"]')).toBeNull();
+      await click('Undo');
+      expect(props.onUndo).toHaveBeenCalledWith([archived]);
+      await render(false);
+      props.entries = [archived, ...props.entries];
+      await act(async () => finishUndo({ succeeded: [archived], failed: 0 }));
+      await render();
+      expect(button('Undo')).toBeUndefined();
+      expect(container.textContent).toContain('1 succeeded · 0 failed');
+      expect(container.querySelector('[data-activity-key="a"]')).not.toBeNull();
+    },
+  );
+
+  it('discards pending operation results when the workspace scope changes', async () => {
+    let finishArchive!: (value: {
+      succeeded: ActivityEntry[];
+      failed: number;
+    }) => void;
+    props.onArchive = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          finishArchive = resolve;
+        }),
+    );
+    await render();
+    await menuClick('Archive chats');
+    await click('Archive');
+    await render(false, 'another-workspace');
+    await render();
+    await act(async () =>
+      finishArchive({ succeeded: [props.entries[0]], failed: 0 }),
+    );
+    expect(button('Undo')).toBeUndefined();
+    expect(container.textContent).not.toContain('succeeded');
+    expect(container.querySelector('[data-activity-key="a"]')).not.toBeNull();
+  });
+
   it('anchors its only options menu to the first enabled section without a fixed title', async () => {
     props.entries = [
       makeEntry('priority'),
