@@ -102,8 +102,8 @@ Captured from the Chromium Web Shell harness with the mock daemon
 - App regression suite (`client/App.test.tsx`) to prove the composer and
   streaming status still render.
 - Manual visual checks on the Web Shell harness at desktop width, light/dark
-  theme, and English/Chinese copy. Runtime E2E details are in the companion
-  plan under `.qwen/e2e-tests/`.
+  theme, and English/Chinese copy. The Chromium E2E scenario lives in
+  `packages/web-shell/client/e2e/waiting-minigame.spec.ts`.
 
 ## Acceptance criteria
 

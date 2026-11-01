@@ -69,7 +69,7 @@
 - 引擎单测：生成、重力、移动边界、旋转踢墙、落定、满列消除、计分、速度下限、游戏结束、暂停、渲染网格。
 - 组件测试：延迟出现、浮条文案、打开棋盘、格子数量、暂停/继续、Esc 收起、流式结束关闭。
 - App 回归套件（`client/App.test.tsx`）证明输入框和流式状态仍正常渲染。
-- 在 Web Shell harness 上人工核对桌面宽度、浅深主题和中英文文案。运行时 E2E 细节见 `.qwen/e2e-tests/` 下的配套计划。
+- 在 Web Shell harness 上人工核对桌面宽度、浅深主题和中英文文案。Chromium E2E 场景位于 `packages/web-shell/client/e2e/waiting-minigame.spec.ts`。
 
 ## 验收标准
 
