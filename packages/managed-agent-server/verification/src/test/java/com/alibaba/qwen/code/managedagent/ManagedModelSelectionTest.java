@@ -118,7 +118,7 @@ class ManagedModelSelectionTest {
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(
                 new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant, "storage", "/tmp/model-selection")));
         properties.setModelCatalog(List.of(option("model-a")));
-        var enabled = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var enabled = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
         when(harness.supportsApprovalSelection()).thenReturn(true);
         when(harness.supportsPublicChildAgents()).thenReturn(childrenSupported);
@@ -373,7 +373,7 @@ class ManagedModelSelectionTest {
         if (catalog) {
             properties.setModelCatalog(List.of(option("model-a"), option("model-b")));
         }
-        return com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 
     private ManagedAgentProperties.ModelOption option(String id) {

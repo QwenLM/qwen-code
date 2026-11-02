@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.EventProjectionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -35,10 +35,10 @@ public class ManagedToolResultStore
 
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
-    private final AgentStateStore sessions;
+    private final EventProjectionStore sessions;
 
     public ManagedToolResultStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
-            AgentStateStore sessions) {
+            EventProjectionStore sessions) {
         this.jdbc = jdbc;
         this.transactions = new TransactionTemplate(manager);
         this.sessions = sessions;

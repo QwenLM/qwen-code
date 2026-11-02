@@ -1368,9 +1368,12 @@ author-permission gate by design, not a head-repository gate: takeover
 engages maintainer fork PRs, and the pattern matches qwen-code-pr-review,
 whose ECS-routed review job also rides its upstream write+ check. The
 job therefore runs host-side (no `container:`): the branch code it
-executes is collaborator-authored — the same trust class ci.yml's
-pick_runner routes onto this pool — and persistent-workspace residue is
-scrubbed by the hygiene steps below. On pull_request /
+executes is collaborator-authored — a narrower trust class than ci.yml's
+pick_runner now routes onto this pool, since the 2026-10-31 decision
+sends every pull request, untrusted forks included, to lint_and_static
+(that lane pins a per-job HOME; this job does not) — and
+persistent-workspace residue is scrubbed by the hygiene steps below. On
+pull_request /
 pull_request_review events the ECS route additionally needs a same-repo
 head or a write+ author (ci.yml's pick_runner form); issue_comment and
 the other triggers skip that clause and rely on the live write+ gates.

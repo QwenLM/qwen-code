@@ -2278,6 +2278,48 @@ describe('NativeLspService disk document synchronization', () => {
       },
     );
 
+    it('names a starting server for goToDefinition instead of reporting no definitions', async () => {
+      handle.status = 'IN_PROGRESS';
+      const result = await execute(lspTool(), {
+        operation: 'goToDefinition',
+        filePath: file,
+        line: 1,
+        character: 1,
+      });
+      expect(result.llmContent).toContain(
+        'No LSP server is ready to provide definitions (test is in progress)',
+      );
+      expect(result.llmContent).not.toContain('No definitions found');
+      expect(connection.request).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['definitions', () => service.definitions({ uri, range })],
+      ['references', () => service.references({ uri, range })],
+      ['hover', () => service.hover({ uri, range })],
+      ['document symbols', () => service.documentSymbols(uri)],
+      ['implementations', () => service.implementations({ uri, range })],
+      ['call hierarchy', () => service.prepareCallHierarchy({ uri, range })],
+      [
+        'code actions',
+        () =>
+          service.codeActions(uri, range, {
+            diagnostics: [],
+            triggerKind: 'invoked',
+          }),
+      ],
+      ['workspace symbols', () => service.workspaceSymbols('fn')],
+    ] as Array<[string, () => Promise<unknown>]>)(
+      'rejects %s when no server is ready',
+      async (operation, query) => {
+        handle.status = 'IN_PROGRESS';
+        await expect(run(query())).rejects.toThrow(
+          `No LSP server is ready to provide ${operation} (test is in progress)`,
+        );
+        expect(connection.request).not.toHaveBeenCalled();
+      },
+    );
+
     it.each(['diagnostics', 'workspaceDiagnostics'] as const)(
       'still displays a successful empty %s report as clean',
       async (operation) => {

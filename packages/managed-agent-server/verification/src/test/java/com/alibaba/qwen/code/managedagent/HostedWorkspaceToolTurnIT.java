@@ -254,6 +254,23 @@ class HostedWorkspaceToolTurnIT {
         });
     }
 
+    static void holdExecutionResults(EmbeddedRuntimeBroker broker, String harnessSessionId,
+            CompletableFuture<Void> gate) {
+        Object service = ReflectionTestUtils.getField(broker, "service");
+        Object dispatcher = ReflectionTestUtils.getField(service, "executionDispatcher");
+        RuntimeTransport transport = (RuntimeTransport) ReflectionTestUtils.getField(dispatcher, "transport");
+        RuntimeTransport gated = (RuntimeTransport) Proxy.newProxyInstance(RuntimeTransport.class.getClassLoader(),
+                new Class<?>[] {RuntimeTransport.class}, (proxy, method, args) -> {
+                    Object result = method.invoke(transport, args);
+                    if (method.getName().equals("execute")
+                            && ((RuntimeSession) args[1]).getHarnessSessionId().equals(harnessSessionId)) {
+                        return ((CompletionStage<?>) result).thenCombine(gate, (value, ignored) -> value);
+                    }
+                    return result;
+                });
+        ReflectionTestUtils.setField(dispatcher, "transport", gated);
+    }
+
     private void runDriver(List<String> cases, String driverName) throws Exception {
         boolean latency = driverName.equals("latency");
         boolean unicode = driverName.equals("shell-unicode");
@@ -424,18 +441,7 @@ class HostedWorkspaceToolTurnIT {
             });
             if (faults && cases.contains("status")) {
                 String statusSession = sessions.get(cases.indexOf("status")).get("sessionId").toString();
-                Object service = ReflectionTestUtils.getField(broker, "service");
-                RuntimeTransport transport = (RuntimeTransport) ReflectionTestUtils.getField(service, "transport");
-                RuntimeTransport gated = (RuntimeTransport) Proxy.newProxyInstance(RuntimeTransport.class.getClassLoader(),
-                        new Class<?>[] {RuntimeTransport.class}, (proxy, method, args) -> {
-                            Object result = method.invoke(transport, args);
-                            if (method.getName().equals("execute")
-                                    && ((RuntimeSession) args[1]).getHarnessSessionId().equals(statusSession)) {
-                                return ((CompletionStage<?>) result).thenCombine(statusGate, (value, ignored) -> value);
-                            }
-                            return result;
-                        });
-                ReflectionTestUtils.setField(service, "transport", gated);
+                holdExecutionResults(broker, statusSession, statusGate);
             }
             HostedCancellationProbe cancellationProbe = cancellations
                     ? new HostedCancellationProbe(jdbc, tenant, sessions, broker, gateServer) : null;
