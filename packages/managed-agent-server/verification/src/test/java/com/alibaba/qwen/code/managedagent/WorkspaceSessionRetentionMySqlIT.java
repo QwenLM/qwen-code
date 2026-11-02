@@ -11,7 +11,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationRetentionStore;
@@ -198,7 +197,7 @@ class WorkspaceSessionRetentionMySqlIT {
         assertThat(jdbc.queryForObject("SELECT recovery_protected FROM ma_session WHERE retirement_generation > 0", Boolean.class)).isTrue();
         var retention = new ToolPublicationRetentionStore(jdbc, new DataSourceTransactionManager(source));
         assertThat(retention.observe(Duration.ZERO)).singleElement().extracting(ToolPublicationRetentionStore.Candidate::blocker).isEqualTo("recovery_protected");
-        assertThatThrownBy(() -> transaction(() -> com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).acquireWriter(tenant, session, TOKEN,
+        assertThatThrownBy(() -> transaction(() -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).acquireWriter(tenant, session, TOKEN,
                 new AcquireWriterRequest("workspace", "new-writer", 60_000L))))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("tool_output_session_retired"));
     }
@@ -264,7 +263,7 @@ class WorkspaceSessionRetentionMySqlIT {
                 awaitLatch(completingPublicLock);
                 var writer = pool.submit(() -> {
                     try {
-                        return transaction(() -> com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).acquireWriter(tenant, session, TOKEN,
+                        return transaction(() -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).acquireWriter(tenant, session, TOKEN,
                                 new AcquireWriterRequest("workspace", "late", 60_000L)));
                     } catch (ManagedAgentException rejected) {
                         return rejected;
@@ -325,7 +324,7 @@ class WorkspaceSessionRetentionMySqlIT {
                 MySqlLockProbe.awaitLockWaits(jdbc, schema, 1, "the queued writer renewal");
                 var renewal = pool.submit(() -> {
                     try {
-                        return transaction(() -> com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).renewWriter(tenant, session, TOKEN,
+                        return transaction(() -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).renewWriter(tenant, session, TOKEN,
                                 new RenewWriterRequest("workspace", "writer", 1, 60_000L)));
                     } catch (ManagedAgentException rejected) {
                         return rejected;
@@ -352,7 +351,7 @@ class WorkspaceSessionRetentionMySqlIT {
         // Restore a residual private writer to exercise the retirement safety check.
         jdbc.update("UPDATE ma_session_head SET state = 'ACTIVE', writer_lease_until = (" + ManagedSchemaTime.SQL_NOW + " + 60000)");
         var deletion = deleteClaim(store, tenant, session);
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         var renewed = new CountDownLatch(1);
         var release = new CountDownLatch(1);
         try (var pool = Executors.newFixedThreadPool(2)) {
@@ -441,7 +440,7 @@ class WorkspaceSessionRetentionMySqlIT {
     private String closed(ManagedAgentStore store, String tenant, boolean journal) {
         String session = create(store, tenant);
         if (journal) {
-            var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+            var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
             var grant = transaction(() -> sessions.acquireWriter(tenant, session, TOKEN,
                     new AcquireWriterRequest("workspace", "writer", 60_000L)));
             transaction(() -> sessions.sealWriter(tenant, session, TOKEN,

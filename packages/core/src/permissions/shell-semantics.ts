@@ -2585,7 +2585,8 @@ function resolveCdTargetCwd(
  * Behaviour:
  *   - `splitCompoundCommand` produces the segment boundaries.
  *   - Literal `cd <dir>` segments shift the effective cwd for subsequent
- *     segments and themselves emit no ops.
+ *     segments; redirects on a `cd` segment are reported from the cwd where
+ *     that segment starts.
  *   - Dynamic `cd` targets (variables, substitutions, `cd -`) keep the last
  *     known cwd for best-effort path extraction and mark subsequent relative
  *     file operations with `cwdUnknown`.
