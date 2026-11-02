@@ -1193,8 +1193,15 @@ export function AddMenu({
                   }
                 >
                   <GitBranchIcon />
-                  <span className="min-w-0 flex-1 truncate">
-                    <span>Workflow</span>
+                  <span className="flex min-w-0 flex-1 flex-col">
+                    <span className="truncate">Workflow</span>
+                    <span
+                      className="hidden truncate text-xs text-muted-foreground sm:block"
+                      aria-hidden="true"
+                      data-workflow-summary
+                    >
+                      {workflowControl.summary}
+                    </span>
                     <span id={workflowDescriptionId} className="sr-only">
                       {workflowControl.description}
                     </span>
