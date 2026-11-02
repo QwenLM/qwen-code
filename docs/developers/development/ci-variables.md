@@ -91,6 +91,13 @@ without the `prepare` build and unpack the tree `test_build` built once.
 `Test (ubuntu-latest, Node 22.x)` passes only when the build and every shard
 pass.
 
+`test_build` and the web-shell smoke shards build through
+`scripts/ci-build-cache.mjs`. A pull request restores the newest cached
+build and rebuilds only the workspaces whose inputs changed: a workspace's
+tracked files other than tests, the root files, `patches/` and `scripts/`
+outside `scripts/tests/`, and the workspaces it depends on. A push to `main`
+always builds from scratch and saves that build.
+
 ### Related variables outside test execution
 
 `release.yml` also exposes `QWEN_RELEASE_STATIC_TIMEOUT_MINUTES` (default `60`,
