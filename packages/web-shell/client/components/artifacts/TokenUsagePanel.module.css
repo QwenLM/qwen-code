@@ -72,6 +72,7 @@
 .overview {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  row-gap: 18px;
   margin: 20px 0 12px;
 }
 
@@ -79,13 +80,11 @@
   min-width: 0;
   padding: 0 8px;
 }
-.summaryMetric:first-child {
+.summaryMetric:nth-child(odd) {
   padding-left: 0;
 }
-.summaryMetric:last-child {
+.summaryMetric:nth-child(even) {
   padding-right: 0;
-}
-.summaryMetric + .summaryMetric {
   border-left: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
 }
 .summaryMetric dt {
@@ -98,6 +97,7 @@
 }
 .summaryValue {
   display: block;
+  white-space: nowrap;
   font-family: ui-monospace, monospace;
   font-size: 24px;
   line-height: 1.2;
@@ -110,6 +110,9 @@
 }
 .outputLabel {
   color: color-mix(in srgb, #00a8e8 70%, var(--foreground));
+}
+.summaryLabel {
+  color: color-mix(in srgb, var(--foreground) 70%, var(--card));
 }
 
 .modelList {
@@ -178,20 +181,164 @@ details[open] > summary > .collapseIcon {
   padding: 12px 0;
 }
 
-.modelCard[data-color='0'] {
-  --model-color: #4b67ff;
+/*
+ * Categorical model colors, checked for color-vision-deficiency separation
+ * between neighbors on the light and the dark card. They mark identity only;
+ * text next to them keeps the text colors.
+ */
+.panel [data-color='0'],
+.panel [data-share-color='0'] {
+  --model-color: #2a78d6;
 }
-.modelCard[data-color='1'] {
-  --model-color: #4f94e7;
+.panel [data-color='1'],
+.panel [data-share-color='1'] {
+  --model-color: #eb6834;
 }
-.modelCard[data-color='2'] {
-  --model-color: #42b17e;
+.panel [data-color='2'],
+.panel [data-share-color='2'] {
+  --model-color: #1baf7a;
 }
-.modelCard[data-color='3'] {
-  --model-color: #ed8b21;
+.panel [data-color='3'],
+.panel [data-share-color='3'] {
+  --model-color: #6250d6;
 }
-.modelCard[data-color='4'] {
-  --model-color: #9468ed;
+.panel [data-color='4'],
+.panel [data-share-color='4'] {
+  --model-color: #e87ba4;
+}
+.panel [data-color='5'],
+.panel [data-share-color='5'] {
+  --model-color: #eda100;
+}
+.panel [data-color='other'],
+.panel [data-share-color='other'] {
+  --model-color: #8a8f98;
+}
+:global(.dark) .panel [data-color='0'],
+:global(.dark) .panel [data-share-color='0'] {
+  --model-color: #3987e5;
+}
+:global(.dark) .panel [data-color='1'],
+:global(.dark) .panel [data-share-color='1'] {
+  --model-color: #d95926;
+}
+:global(.dark) .panel [data-color='2'],
+:global(.dark) .panel [data-share-color='2'] {
+  --model-color: #199e70;
+}
+:global(.dark) .panel [data-color='3'],
+:global(.dark) .panel [data-share-color='3'] {
+  --model-color: #9085e9;
+}
+:global(.dark) .panel [data-color='4'],
+:global(.dark) .panel [data-share-color='4'] {
+  --model-color: #d55181;
+}
+:global(.dark) .panel [data-color='5'],
+:global(.dark) .panel [data-share-color='5'] {
+  --model-color: #c98500;
+}
+
+.modelCard {
+  position: relative;
+  padding-left: 14px;
+}
+.modelCard::before {
+  content: '';
+  position: absolute;
+  top: 14px;
+  bottom: 14px;
+  left: 0;
+  width: 4px;
+  border-radius: 2px;
+  background: var(--model-color);
+}
+
+.modelShares {
+  margin: 12px 0 4px;
+}
+.shareStack {
+  display: flex;
+  gap: 2px;
+  height: 10px;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.shareSegment {
+  min-width: 2px;
+  background: var(--model-color);
+}
+.shareLegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+.shareLegend > li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+.shareSwatch {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  background: var(--model-color);
+}
+.shareLegendName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shareLegendValue {
+  flex-shrink: 0;
+  color: color-mix(in srgb, var(--foreground) 70%, var(--card));
+  font-family: ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.outcome {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+.outcome > svg {
+  flex-shrink: 0;
+}
+.summaryCaption .outcome {
+  align-items: flex-start;
+  white-space: normal;
+}
+.summaryCaption .outcome > svg {
+  margin-top: 0.3em;
+}
+.summaryUnit {
+  margin-left: 2px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: normal;
+}
+.outcome[data-level='ok'] {
+  color: var(--success-color);
+}
+.outcome[data-level='warning'] {
+  color: var(--warning-color);
+}
+.outcome[data-level='error'] {
+  color: var(--error-color);
 }
 
 .modelHeader {
@@ -258,10 +405,13 @@ details[open] > summary > .collapseIcon {
 }
 
 .subagentCard {
-  --model-color: #4b67ff;
+  --model-color: #2a78d6;
   padding: 12px 8px;
   border: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
   border-radius: 8px;
+}
+:global(.dark) .subagentCard {
+  --model-color: #3987e5;
 }
 .subagentHeader {
   display: flex;
@@ -329,7 +479,7 @@ details[open] > summary > .collapseIcon {
 
 .modelShare {
   flex-shrink: 0;
-  color: color-mix(in srgb, var(--model-color) 65%, var(--foreground));
+  color: var(--foreground);
   font-family: ui-monospace, monospace;
   font-size: 14px;
   font-weight: 700;
@@ -376,7 +526,7 @@ details[open] > summary > .collapseIcon {
   height: 8px;
   border-radius: 999px;
   overflow: hidden;
-  background: color-mix(in srgb, #4f94e7 12%, var(--card));
+  background: color-mix(in srgb, var(--model-color) 14%, var(--card));
 }
 
 .shareTrack:focus-visible {
@@ -387,7 +537,7 @@ details[open] > summary > .collapseIcon {
 .shareFill {
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, #4f94e7, var(--model-color));
+  background: var(--model-color);
 }
 
 .summaryCaption {

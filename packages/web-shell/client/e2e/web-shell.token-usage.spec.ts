@@ -36,8 +36,13 @@ for (const { width, language, theme } of [
       const daemon = await installMockDaemon(page, scenario, {
         baseURL: String(testInfo.project.use.baseURL),
       });
-      const metrics = (prompt: number, candidates: number, cached: number) => ({
-        api: { totalRequests: 105, totalErrors: 0, totalLatencyMs: 2404500 },
+      const metrics = (
+        prompt: number,
+        candidates: number,
+        cached: number,
+        totalErrors = 0,
+      ) => ({
+        api: { totalRequests: 105, totalErrors, totalLatencyMs: 2404500 },
         tokens: {
           prompt,
           candidates,
@@ -63,7 +68,7 @@ for (const { width, language, theme } of [
               totalThroughputOutputTokens: 898,
             },
           },
-          'qwen3.8-max-0902': metrics(3000000, 750000, 2700000),
+          'qwen3.8-max-0902': metrics(3000000, 750000, 2700000, 7),
           'gpt-6.1-sol': metrics(500000, 100000, 490000),
           'gpt-5.6-sol': metrics(300000, 100000, 294000),
           'bailian/kimi-k3-with-a-very-long-model-name-for-layout': metrics(
@@ -126,7 +131,36 @@ for (const { width, language, theme } of [
       });
       await expect(hero).toBeVisible();
       const panel = page.getByTestId('token-usage-panel');
-      await expect(panel.locator('dl').first().locator('dt')).toHaveCount(2);
+      const overview = panel.locator('dl').first();
+      await expect(overview.locator('dt')).toHaveText(
+        zh
+          ? ['输入', '总输出', '成功率', '输出速度']
+          : ['Input', 'Total output', 'Success rate', 'Output speed'],
+      );
+      // 7 failures in 525 requests across the session.
+      await expect(overview.locator(':scope > div').nth(2)).toHaveText(
+        zh
+          ? '成功率98.7%525 次请求中 7 次失败'
+          : 'Success rate98.7%7 of 525 requests failed',
+      );
+      const shares = panel.getByTestId('token-usage-model-shares');
+      await expect(shares.locator('li')).toHaveCount(5);
+      const segmentColors = await shares
+        .getByRole('img')
+        .locator(':scope > div')
+        .evaluateAll((elements) =>
+          elements.map((element) => getComputedStyle(element).backgroundColor),
+        );
+      expect(segmentColors).toHaveLength(5);
+      expect(new Set(segmentColors).size).toBe(5);
+      const cardColors = await panel
+        .locator('[data-color]')
+        .evaluateAll((elements) =>
+          elements.map(
+            (element) => getComputedStyle(element, '::before').backgroundColor,
+          ),
+        );
+      expect(cardColors).toEqual(segmentColors);
       const model = panel.locator('[data-color]').filter({
         has: page.locator('[title="qwen3.8-flash"]'),
       });
@@ -137,6 +171,7 @@ for (const { width, language, theme } of [
             ['输出速度', '449.0 tok/s'],
             ['生成', '500ms'],
             ['请求', '105'],
+            ['成功率', '100%'],
             ['平均延迟', '22.9s'],
           ]
         : [
@@ -144,6 +179,7 @@ for (const { width, language, theme } of [
             ['Output speed', '449.0 tok/s'],
             ['Generation', '500ms'],
             ['Requests', '105'],
+            ['Success rate', '100%'],
             ['Avg latency', '22.9s'],
           ];
       const timingText = timing.flat().join('');
@@ -187,7 +223,9 @@ for (const { width, language, theme } of [
         .filter({ has: page.locator('[title="qwen3.8-max-0902"]') });
       const otherTiming = otherModel.locator('dl').first().locator('dt');
       await expect(otherTiming).toHaveText(
-        zh ? ['请求', '平均延迟'] : ['Requests', 'Avg latency'],
+        zh
+          ? ['请求', '成功率', '平均延迟']
+          : ['Requests', 'Success rate', 'Avg latency'],
       );
       const timingPath = testInfo.outputPath('token-model-timing.png');
       await page.screenshot({ path: timingPath, animations: 'disabled' });
@@ -243,8 +281,19 @@ for (const { width, language, theme } of [
       }
       await checkContrast(hero, 'color', 4.5);
       for (const card of await panel.locator('[data-color]').all()) {
-        await checkContrast(card.getByText(/^\d+\.\d+%$/), 'color', 4.5);
+        await checkContrast(
+          card.locator(':scope > :last-child').getByText(/^\d+\.\d+%$/),
+          'color',
+          4.5,
+        );
       }
+      for (const outcome of await panel.locator('[data-level]').all()) {
+        await checkContrast(outcome, 'color', 4.5);
+      }
+      await expect(otherModel.locator('[data-level]')).toHaveAttribute(
+        'data-level',
+        'warning',
+      );
       for (const label of await panel
         .locator('dl')
         .first()
@@ -253,7 +302,7 @@ for (const { width, language, theme } of [
         await checkContrast(label, 'color', 4.5);
       }
       const longName = panel.locator(
-        '[title="bailian/kimi-k3-with-a-very-long-model-name-for-layout"]',
+        '[data-color] [title="bailian/kimi-k3-with-a-very-long-model-name-for-layout"]',
       );
       await expect(longName).toHaveCSS('white-space', 'nowrap');
       await expect(longName).toHaveCSS('text-overflow', 'ellipsis');
