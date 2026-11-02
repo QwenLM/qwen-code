@@ -4800,7 +4800,13 @@ describe('Session', () => {
     it('runs a channel prompt on the shared round, without a submitted prompt', async () => {
       const send = useSharedRounds([text('Hello'), finished()]);
 
-      await prompt({ _meta: { [CHANNEL_PROMPT_META_KEY]: true } });
+      // A channel's own submission is not passed on as the user's.
+      await prompt({
+        _meta: {
+          [CHANNEL_PROMPT_META_KEY]: true,
+          'qwen.daemon.submittedPrompt': 'hello',
+        },
+      });
 
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
       expect(send).toHaveBeenCalledOnce();
@@ -4822,7 +4828,66 @@ describe('Session', () => {
       );
     });
 
-    it('does not start the Goal a turn proposed once its Todo Stop Guard gave way', async () => {
+    it.each([
+      ['the Stop hook reached its cap', 'cap'],
+      ['the guard gave way to a queued prompt', 'queued'],
+      ['the guard was exhausted', 'exhausted'],
+    ] as const)(
+      'does not start the Goal a turn proposed once %s',
+      async (_label, way) => {
+        mockConfig.getGoalProposalHostSupported = vi.fn().mockReturnValue(true);
+        mockConfig.takePendingGoalProposal = vi.fn().mockReturnValue({
+          objective: 'make the tests pass',
+          turnKey: 'test-session-id########1',
+        });
+        const internals = session as unknown as {
+          todoStopGuardQueuedPromptPriority: boolean;
+          todoStopGuard: { decide: () => unknown };
+        };
+        if (way === 'exhausted') {
+          vi.spyOn(internals.todoStopGuard, 'decide').mockReturnValue({
+            kind: 'exhausted',
+            attempt: 2,
+            maxAttempts: 2,
+            unfinishedCount: 1,
+          });
+        }
+        const send = useSharedRounds();
+        send.mockImplementationOnce(
+          (
+            _parts: unknown,
+            signal: AbortSignal,
+            promptId: string,
+            options: { stopPolicies: core.StopPolicy[] },
+          ) =>
+            (async function* () {
+              yield text('Proposed a Goal.');
+              yield finished();
+              const [policy] = options.stopPolicies;
+              if (way === 'cap') {
+                policy!.onStopHookCap?.();
+                return;
+              }
+              if (way === 'queued') {
+                internals.todoStopGuardQueuedPromptPriority = true;
+              }
+              expect(await policy!.continueAt({ promptId, signal })).toBe(
+                undefined,
+              );
+            })(),
+        );
+
+        await prompt({ _meta: { 'qwen.goalProposalApproval': true } });
+
+        expect(send).toHaveBeenCalledOnce();
+        expect(agentText()).toContainEqual(
+          expect.stringContaining('/goal set'),
+        );
+        expect(mockConfig.getGoalRuntimeReady).not.toHaveBeenCalled();
+      },
+    );
+
+    it('starts the Goal a turn proposed when its stop point lets it stop', async () => {
       mockConfig.getGoalProposalHostSupported = vi.fn().mockReturnValue(true);
       mockConfig.takePendingGoalProposal = vi.fn().mockReturnValue({
         objective: 'make the tests pass',
@@ -4832,23 +4897,20 @@ describe('Session', () => {
       send.mockImplementationOnce(
         (
           _parts: unknown,
-          _signal: unknown,
-          _promptId: unknown,
+          signal: AbortSignal,
+          promptId: string,
           options: { stopPolicies: core.StopPolicy[] },
         ) =>
           (async function* () {
             yield text('Proposed a Goal.');
             yield finished();
-            // The client's Stop hook reached its cap.
-            options.stopPolicies[0]!.onStopHookCap?.();
+            await options.stopPolicies[0]!.continueAt({ promptId, signal });
           })(),
       );
 
       await prompt({ _meta: { 'qwen.goalProposalApproval': true } });
 
-      expect(send).toHaveBeenCalledOnce();
-      expect(agentText()).toContainEqual(expect.stringContaining('/goal set'));
-      expect(mockConfig.getGoalRuntimeReady).not.toHaveBeenCalled();
+      expect(mockConfig.getGoalRuntimeReady).toHaveBeenCalled();
     });
 
     it('takes the file-history snapshot of a prompt cancelled before its first send', async () => {
@@ -5828,6 +5890,86 @@ describe('Session', () => {
           ).toEqual([]);
         },
       );
+
+      it('does not put a retry back once its request reached history and its response failed', async () => {
+        let pushes = 0;
+        Object.assign(mockChat, {
+          getUserContentPushCount: vi.fn(() => pushes),
+        });
+        const send = useSharedRounds();
+        send.mockImplementationOnce(() =>
+          (async function* () {
+            // LlmChat pushed the retry's user entry, then the model failed.
+            pushes = 1;
+            yield {
+              type: core.LlmEventType.Error,
+              value: { error: { message: 'model failed again', status: 500 } },
+            };
+          })(),
+        );
+
+        await expect(reenter('retry')).rejects.toThrow();
+
+        expect(mockChat.addHistory).not.toHaveBeenCalledWith(orphan);
+      });
+
+      it('puts a continue back as it was, with its worktree notice pending, when cancelled before its first request', async () => {
+        Object.assign(mockChat, { getUserContentPushCount: vi.fn(() => 0) });
+        const send = useSharedRounds([text('done'), finished()]);
+        session.pendingWorktreeNotice = 'the worktree is still alive';
+        // The turn is cancelled while it builds its first message.
+        vi.mocked(mockConfig.takeActiveTodoReminder).mockImplementationOnce(
+          () => {
+            void session.cancelPendingPrompt();
+            return undefined;
+          },
+        );
+
+        await expect(reenter('continue')).resolves.toMatchObject({
+          stopReason: 'cancelled',
+        });
+
+        expect(send).not.toHaveBeenCalled();
+        expect(vi.mocked(mockChat.addHistory).mock.calls).toEqual([[orphan]]);
+        expect(session.pendingWorktreeNotice).toBe(
+          'the worktree is still alive',
+        );
+      });
+
+      it('keeps the worktree notice pending when a continue fails before sending', async () => {
+        Object.assign(mockChat, { getUserContentPushCount: vi.fn(() => 0) });
+        const send = useSharedRounds();
+        send.mockImplementationOnce(() =>
+          // eslint-disable-next-line require-yield
+          (async function* () {
+            throw new Error('request failed before it went out');
+          })(),
+        );
+        session.pendingWorktreeNotice = 'the worktree is still alive';
+
+        await expect(reenter('continue')).rejects.toThrow('before it went out');
+
+        expect(session.pendingWorktreeNotice).toBe(
+          'the worktree is still alive',
+        );
+      });
+
+      it('gives a Retry round the session reminders the client leaves to it', async () => {
+        const send = useSharedRounds([text('done'), finished()]);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+
+        await reenter('retry');
+
+        const parts = send.mock.calls[0][0] as Part[];
+        expect(
+          parts.some(
+            (part) =>
+              typeof part.text === 'string' &&
+              part.text.includes('<system-reminder>') &&
+              /plan mode/i.test(part.text),
+          ),
+        ).toBe(true);
+      });
     });
   });
 
@@ -9818,6 +9960,83 @@ describe('Session', () => {
         userTurnRecordedByHost: true,
       });
       expect(options).not.toHaveProperty('promptAdmission');
+    });
+
+    describe('on the shared loop, with notices waiting for the answer', () => {
+      let pushes: number;
+      let send: ReturnType<typeof vi.fn>;
+
+      beforeEach(() => {
+        mockConfig.isUnifiedAgentLoopEnabled = vi.fn().mockReturnValue(true);
+        mockChat.getHistory = vi.fn().mockReturnValue(danglingAuqHistory());
+        mockToolRegistry.getTool.mockReturnValue(
+          mockConfirmingTool(
+            'ask_user_question',
+            vi.fn().mockResolvedValue({
+              llmContent: 'User answers:\nQuestion: Polling',
+              returnDisplay: 'answered',
+            }),
+          ),
+        );
+        vi.mocked(mockClient.requestPermission).mockResolvedValue({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          answers: { '0': 'Polling' },
+        });
+        pushes = 0;
+        Object.assign(mockChat, {
+          getUserContentPushCount: vi.fn(() => pushes),
+        });
+        send = vi.fn();
+        Object.assign(mockLlmClient, { sendMessageStream: send });
+        session.pendingWorktreeNotice = 'the worktree is still alive';
+      });
+
+      const restore = () =>
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        } as unknown as Parameters<typeof session.prompt>[0]);
+
+      it('takes the notices once the answer reached history, even if the response fails', async () => {
+        send.mockImplementationOnce(() =>
+          (async function* () {
+            pushes = 1;
+            yield {
+              type: core.LlmEventType.Error,
+              value: { error: { message: 'model failed', status: 500 } },
+            };
+          })(),
+        );
+
+        await expect(restore()).rejects.toThrow();
+
+        expect(session.pendingWorktreeNotice).toBeNull();
+      });
+
+      it('keeps the answer with its notices, and takes them, when cancelled before it went out', async () => {
+        send.mockImplementationOnce(() =>
+          (async function* () {
+            await session.cancelPendingPrompt();
+            yield { type: core.LlmEventType.UserCancelled };
+          })(),
+        );
+
+        await expect(restore()).resolves.toMatchObject({
+          stopReason: 'cancelled',
+        });
+
+        expect(mockChat.addHistory).toHaveBeenCalledWith(
+          expect.objectContaining({
+            parts: expect.arrayContaining([
+              expect.objectContaining({
+                text: expect.stringContaining('the worktree is still alive'),
+              }),
+            ]),
+          }),
+        );
+        expect(session.pendingWorktreeNotice).toBeNull();
+      });
     });
 
     it('writes a decline result when the restored question is cancelled', async () => {

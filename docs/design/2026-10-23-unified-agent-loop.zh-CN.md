@@ -241,7 +241,7 @@ if (config.isUnifiedAgentLoopEnabled()) {
 
 ### ACP prompt 轮次迁到共享模型轮（PR 2a）
 
-PR 2 分步迁移 ACP。PR 2a 迁移全新用户 prompt 的模型轮：不是 retry、continue 或 restore，也不是 Goal、channel 或 Goal 提案审批轮次的 prompt（后五类由 PR 2c-2 迁移）。模型轮就是共享 loop 自己的 `runModelRound`：一次 `LlmClient.sendMessageStream` 调用，事件交给 ACP，终止事件变成停止原因。ACP 保留自己的工具步骤（`runToolCalls`、工具之后的下一条消息、daemon 工具循环守卫）以及轮次前后的全部逻辑。PR 2b 把这些轮次的工具批迁到 scheduler 上，PR 2c-1 把它们的 stop 点迁到 client 的链上。PR 2c-2 到 2c-4 再迁移其他轮次，因此 ACP 的每份 loop 主体只改动一次。
+PR 2 分步迁移 ACP。PR 2a 迁移全新用户 prompt 的模型轮：不是 retry、continue 或 restore，也不是 Goal、channel 或 Goal 提案审批轮次的 prompt（除 Goal 轮次由 PR 2c-3 迁移外，其余都由 PR 2c-2 迁移）。模型轮就是共享 loop 自己的 `runModelRound`：一次 `LlmClient.sendMessageStream` 调用，事件交给 ACP，终止事件变成停止原因。ACP 保留自己的工具步骤（`runToolCalls`、工具之后的下一条消息、daemon 工具循环守卫）以及轮次前后的全部逻辑。PR 2b 把这些轮次的工具批迁到 scheduler 上，PR 2c-1 把它们的 stop 点迁到 client 的链上。PR 2c-2 到 2c-4 再迁移其他轮次，因此 ACP 的每份 loop 主体只改动一次。
 
 | ACP 现在                                                                    | 设置开启后                                                                                                                                                                                      |
 | --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -330,6 +330,8 @@ PR 2c-2 让另外五类 ACP 轮次使用共享模型轮、共享工具批和 cli
 
 被恢复的问题保留 ACP 的工具步骤：共享工具批会记录每一个结果，而因超时没有回答的问题必须保持未记录，之后加载时才能再次提问。
 
+重新进入的轮次的第一条请求是否已经发出，在模型轮结束时按 chat 的推送计数判断，每条退出路径都一样。已进入历史的请求替换轮次剥离的内容，并带上 restore 的提醒，即使随后响应失败也是如此；一直没有发出的请求让历史保持轮次开始时的样子，提醒保持待发。
+
 这一步对 core 的改动：`userTurnRecordedByHost` 也覆盖 `Retry`，表示宿主已经启动了它的 todo 工作链；`Retry` 也接受 `promptAdmission`；新增输入 `historyPromptId`，即 `Retry` 的请求在历史中带的标识，由第一条请求使用。
 
 ## 迁移计划
@@ -402,8 +404,9 @@ PR 3–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两�
 - 被输出上限截断的编辑；
 - 中途断流后重试的流；
 - 同一会话中的两个 prompt；
-- 读取文件的 channel prompt；
+- 读取文件的 channel prompt，由持有私有父能力的客户端发出，因此 agent 保留 channel 标记；
 - 模型报错之后的 retry；
+- 请求进入历史后再次失败的 retry；
 - 模型报错；
 - 拦截 prompt 的 UserPromptSubmit hook；
 - 拦截一次的 Stop hook，以及一直拦截到上限的 Stop hook；
@@ -448,7 +451,7 @@ PR 3–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两�
   - Stop hook 和 Todo Stop Guard 的续发沿用这一轮的 prompt id，与 TUI 的续发一样运行 UserPromptSubmit；除 Live 和 Agent Host 会话保留 ACP 的工具调用守卫外，运行 client 的守卫；并像任何一批工具一样把工具结果发回；
   - 从 PR 2c-2 起，channel prompt 和 Goal 提案轮次在共享路径上得到与全新 prompt 相同的处理，包括日期提醒、系统提醒和 client 的召回；
   - retry、continue 和 restore 会开启 client 的一次交互：循环检测器、探索预算和轮次预算重新开始，它们的第一轮不计入会话轮数上限；
-  - continue 的第一条请求一直没有发出时，被打断的用户输入按原样放回，而不是作为一条合并后的条目保留；
+  - continue 的第一条请求一直没有发出时（被取消或失败），被打断的用户输入按原样放回，而不是作为一条合并后的条目保留，合并条目取走的 worktree 提醒也留给下一轮；
 
   ACP 对拍测试覆盖了保持不变的常见场景，并对日期提醒、工具结果上的 UserPromptSubmit、该 hook 运行时取消，以及一批的审批先于它的调用执行做了断言。
 

@@ -32,6 +32,10 @@ import {
 } from '../fake-openai-server.js';
 import { ACP_HOME_PREFIX, removeScratchDir } from '../scratch-dir.js';
 
+// The agent trusts a client that presents the capability it was started with.
+const PRIVATE_ACP_CAPABILITY_ENV = 'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
+const PARENT_CAPABILITY = 'acp-agent-loop-parity-parent';
+
 type JsonObject = Record<string, unknown>;
 
 interface Scenario {
@@ -43,6 +47,11 @@ interface Scenario {
   permission?: (request: JsonObject) => JsonObject;
   /** The `_meta` each prompt is sent with, by index. */
   promptMeta?: Array<JsonObject | undefined>;
+  /**
+   * The client holds the private parent capability, as the channel bridges
+   * do, so the agent keeps trusted prompt metadata such as a channel mark.
+   */
+  trustedParent?: boolean;
   /** Sends `session/cancel` once this file exists in the test directory. */
   cancelOnFile?: string;
   /**
@@ -262,6 +271,10 @@ const allowOnce = () => ({
       };
       delete env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'];
       if (shared) env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = '1';
+      delete env[PRIVATE_ACP_CAPABILITY_ENV];
+      if (scenario.trustedParent) {
+        env[PRIVATE_ACP_CAPABILITY_ENV] = PARENT_CAPABILITY;
+      }
       const agent = spawn(
         'node',
         [rig.bundlePath, '--acp', '--no-chat-recording'],
@@ -380,6 +393,11 @@ const allowOnce = () => ({
           clientCapabilities: {
             fs: { readTextFile: true, writeTextFile: true },
           },
+          ...(scenario.trustedParent && {
+            _meta: {
+              'qwen-code/private-parent-capability': PARENT_CAPABILITY,
+            },
+          }),
         });
         await request('authenticate', { methodId: 'openai' });
         ({ sessionId } = (await request('session/new', {
@@ -608,9 +626,24 @@ const allowOnce = () => ({
             : { content: 'Here is the answer.' },
       },
       {
+        name: 'a retry that fails again',
+        prompts: ['Answer, please.', 'Answer, please.', 'Answer, please.'],
+        // The second error comes after the retry's request reached history.
+        promptMeta: [
+          undefined,
+          { 'qwen.daemon.retry': true },
+          { 'qwen.daemon.retry': true },
+        ],
+        reply: (_messages, _dir, index) =>
+          index < 2
+            ? { errorContent: 'upstream exploded' }
+            : { content: 'Here is the answer.' },
+      },
+      {
         name: 'a channel prompt that reads a file',
         prompts: ['Read the readme.'],
         promptMeta: [{ 'qwen.channel.prompt': true }],
+        trustedParent: true,
         prepare: (r) => r.createFile('readme.txt', 'readme body\n'),
         reply: (messages, dir) =>
           toolResults(messages) === 0

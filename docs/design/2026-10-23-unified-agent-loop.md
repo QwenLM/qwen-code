@@ -241,7 +241,7 @@ Once surfaces change their defaults one at a time, the setting has no schema def
 
 ### ACP prompt turns on the shared round (PR 2a)
 
-PR 2 moves ACP in steps. PR 2a moves the model round of a fresh user prompt: one that is not a retry, a continue or a restore, and not a Goal, channel or goal-proposal approval turn (PR 2c-2 moves the last five). The round is the loop's own `runModelRound`: one `LlmClient.sendMessageStream` call whose events go to ACP and whose terminal events become stop reasons. ACP keeps its tool step (`runToolCalls`, the next message after tools, the daemon tool-loop guards) and everything around the turn. PR 2b moves the tool batch of these turns onto the scheduler, and PR 2c-1 their stop point onto the client's chain. PRs 2c-2 to 2c-4 then move the other turns, so each of ACP's loop bodies changes once.
+PR 2 moves ACP in steps. PR 2a moves the model round of a fresh user prompt: one that is not a retry, a continue or a restore, and not a Goal, channel or goal-proposal approval turn (PR 2c-2 moves all of them but Goal turns, which PR 2c-3 moves). The round is the loop's own `runModelRound`: one `LlmClient.sendMessageStream` call whose events go to ACP and whose terminal events become stop reasons. ACP keeps its tool step (`runToolCalls`, the next message after tools, the daemon tool-loop guards) and everything around the turn. PR 2b moves the tool batch of these turns onto the scheduler, and PR 2c-1 their stop point onto the client's chain. PRs 2c-2 to 2c-4 then move the other turns, so each of ACP's loop bodies changes once.
 
 | ACP today                                                                                         | With the setting on                                                                                                                                                                                                   |
 | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -330,6 +330,8 @@ A re-entered turn's first round is a `Retry`, not a `ToolResult`, even when it c
 
 The restored question keeps ACP's tool step: the shared batch records every result, and a question left unanswered on a timeout must stay unrecorded so a later load can ask it again.
 
+Whether a re-entered turn's first request went out is read from the chat's push count when the round ends, on every exit. A request in history replaces what the turn stripped and carries the restore's notices, even when its response then fails; a request that never went out leaves history as the turn found it, and the notices stay pending.
+
 The core changes of this step: `userTurnRecordedByHost` also covers a `Retry`, whose todo work chain the host started; `promptAdmission` is accepted on a `Retry`; and the new input `historyPromptId`, the history identity a `Retry`'s request carries, spent by its first request.
 
 ## Migration
@@ -402,8 +404,9 @@ A difference fails the scenario unless it is listed with a linked issue.
 - an edit cut off by the output limit;
 - a stream that drops and is retried;
 - two prompts in one session;
-- a channel prompt that reads a file;
+- a channel prompt that reads a file, from a client that holds the private parent capability so the agent keeps the channel mark;
 - a retry after a model error;
+- a retry that fails again after its request reached history;
 - a model error;
 - a UserPromptSubmit hook that blocks;
 - a Stop hook that blocks once, and one that blocks up to the cap;
@@ -448,7 +451,7 @@ The suite runs in the integration job. A scheduled job also runs the whole headl
   - Stop-hook and Todo Stop Guard continuations run under the turn's prompt id, run UserPromptSubmit as the TUI's do, run the client's tool-call guards except in Live and Agent Host sessions, which keep ACP's, and send their tool results back as any batch does;
   - from PR 2c-2, a channel prompt and a Goal-proposal turn get what a fresh prompt gets on the shared path, the date and system reminders and the client's recall included;
   - a retry, a continue and a restore start the client's interaction: its loop detector, exploration budget and turn budget start over, and their first round does not count toward the session turn cap;
-  - a continue whose first request never goes out puts the interrupted user run back as it was, instead of keeping it as one merged entry;
+  - a continue whose first request never goes out, cancelled or failed, puts the interrupted user run back as it was, instead of keeping it as one merged entry, and the worktree notice the merged entry took stays pending for the next turn;
 
   The ACP parity suite covers the common cases unchanged and asserts the date reminder, UserPromptSubmit on tool results, cancelling while that hook runs, and that a batch's approvals come before its calls run.
 
