@@ -377,6 +377,8 @@ describe('pathRulesFor — the shell/CI-lane rule', () => {
       '`test_macos_shards` runs on `merge_group`/`schedule`/`workflow_dispatch`',
     );
     expect(out).toContain('`node scripts/run-macos-ci-group.js scripts`');
+    expect(out).toContain('`npm run test:standalone:runtimes:ci`');
+    expect(out).toContain('`npm run test:scripts:unit`');
   });
 
   it('stacks with the workflow rule on a diff that changes embedded shell', () => {
