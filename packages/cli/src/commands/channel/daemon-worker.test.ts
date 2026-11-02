@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as os from 'node:os';
 import { CHANNEL_WORKER_KILL_GRACE_MS } from '@qwen-code/acp-bridge/channelControlTimeouts';
-import { BoundSessionGoneError } from '@qwen-code/channel-base';
+import {
+  BoundSessionGoneError,
+  BoundSessionQueueFullError,
+  BoundSessionUnavailableError,
+  CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+} from '@qwen-code/channel-base';
+import type { ChannelBoundSessions } from '@qwen-code/channel-base';
 
 const mockCanonicalizeWorkspace = vi.hoisted(() => vi.fn((p: string) => p));
 const mockLoadChannelsConfig = vi.hoisted(() => vi.fn());
@@ -395,6 +402,13 @@ function createSdk() {
     }),
   };
   return { client, DaemonClient, DaemonSessionClient, deleteSessionsData };
+}
+
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
 }
 
 beforeEach(() => {
@@ -2858,6 +2872,137 @@ describe('runChannelDaemonWorker', () => {
       handle.runWebhookTask({ ...webhookTask, channelName: 'missing' }),
     ).rejects.toThrow('Channel "missing" is not running.');
   });
+
+  describe('bound-session delivery wiring', () => {
+    function boundSessionResponse(): Response {
+      return jsonResponse(200, {
+        bindings: [
+          {
+            sessionId: 'bound-1',
+            workspaceCwd: '/ws/bound',
+            prs: [{ number: 7, url: 'https://github.com/o/r/pull/7' }],
+          },
+        ],
+        partial: false,
+      });
+    }
+
+    async function startBoundWorker(
+      sdk: ReturnType<typeof createSdk>,
+      promptAuthorization?: string,
+    ) {
+      const handle = await runChannelDaemonWorker({
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+        ...(promptAuthorization ? { promptAuthorization } : {}),
+      });
+      const channelOptions = mockCreateChannel.mock.calls[0]![3] as {
+        boundSessions?: ChannelBoundSessions;
+      };
+      const boundSessions = channelOptions.boundSessions;
+      if (!boundSessions) {
+        throw new Error(
+          'Expected the channel factory to receive boundSessions',
+        );
+      }
+      return { handle, boundSessions };
+    }
+
+    it('wakes dormant bound sessions through the SDK resume and releases after the retry', async () => {
+      const sdk = createSdk();
+      const detach = vi.fn().mockResolvedValue(undefined);
+      sdk.DaemonSessionClient.resume.mockResolvedValue({ detach });
+      sdk.client.requestRest
+        .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+        .mockResolvedValueOnce(boundSessionResponse())
+        .mockResolvedValueOnce(jsonResponse(202, { promptId: 'p-1' }));
+
+      const { handle, boundSessions } = await startBoundWorker(
+        sdk,
+        'worker-prompt-token',
+      );
+
+      await boundSessions.deliverPrompt('bound-1', 'event text');
+
+      expect(sdk.DaemonSessionClient.resume).toHaveBeenCalledTimes(1);
+      expect(sdk.DaemonSessionClient.resume).toHaveBeenCalledWith(
+        sdk.client,
+        'bound-1',
+        { workspaceCwd: '/ws/bound', sessionScope: 'thread' },
+        `qwen-channel-worker:${process.pid}`,
+      );
+      const retryInit = sdk.client.requestRest.mock.calls[2]![1] as RequestInit;
+      expect(JSON.parse(String(retryInit.body))).toEqual({
+        prompt: [{ type: 'text', text: 'event text' }],
+        _meta: {
+          [CHANNEL_PROMPT_META_KEY]: true,
+          [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]: 'worker-prompt-token',
+        },
+      });
+      expect(detach).toHaveBeenCalledOnce();
+      expect(sdk.client.requestRest.mock.invocationCallOrder[2]).toBeLessThan(
+        detach.mock.invocationCallOrder[0]!,
+      );
+      await handle.close();
+    });
+
+    it('maps a 404 wake failure to BoundSessionGoneError', async () => {
+      const sdk = createSdk();
+      sdk.DaemonSessionClient.resume.mockRejectedValue({ status: 404 });
+      sdk.client.requestRest
+        .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+        .mockResolvedValueOnce(boundSessionResponse());
+
+      const { handle, boundSessions } = await startBoundWorker(sdk);
+
+      await expect(
+        boundSessions.deliverPrompt('bound-1', 'x'),
+      ).rejects.toBeInstanceOf(BoundSessionGoneError);
+      expect(sdk.DaemonSessionClient.resume).toHaveBeenCalledTimes(1);
+      expect(sdk.client.requestRest).toHaveBeenCalledTimes(2);
+      await handle.close();
+    });
+
+    it('maps an unavailable wake failure to BoundSessionUnavailableError', async () => {
+      const sdk = createSdk();
+      sdk.DaemonSessionClient.resume.mockRejectedValue({
+        status: 503,
+        body: { code: 'workspace_runtime_unavailable' },
+      });
+      sdk.client.requestRest
+        .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+        .mockResolvedValueOnce(boundSessionResponse());
+
+      const { handle, boundSessions } = await startBoundWorker(sdk);
+
+      await expect(
+        boundSessions.deliverPrompt('bound-1', 'x'),
+      ).rejects.toBeInstanceOf(BoundSessionUnavailableError);
+      expect(sdk.client.requestRest).toHaveBeenCalledTimes(2);
+      await handle.close();
+    });
+
+    it('maps an archived wake conflict to BoundSessionGoneError', async () => {
+      const sdk = createSdk();
+      sdk.DaemonSessionClient.resume.mockRejectedValue({
+        status: 409,
+        body: { code: 'session_archived' },
+      });
+      sdk.client.requestRest
+        .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+        .mockResolvedValueOnce(boundSessionResponse());
+
+      const { handle, boundSessions } = await startBoundWorker(sdk);
+
+      await expect(
+        boundSessions.deliverPrompt('bound-1', 'x'),
+      ).rejects.toBeInstanceOf(BoundSessionGoneError);
+      expect(sdk.client.requestRest).toHaveBeenCalledTimes(2);
+      await handle.close();
+    });
+  });
 });
 
 describe('daemonWorkerCommand', () => {
@@ -4299,18 +4444,24 @@ describe('daemonWorkerCommand', () => {
 });
 
 describe('createBoundSessionsAccessor', () => {
-  function jsonResponse(status: number, body: unknown): Response {
-    return new Response(JSON.stringify(body), {
-      status,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
-
   function makeClient(requestRest: ReturnType<typeof vi.fn>) {
     return {
       capabilities: vi.fn(),
       requestRest,
     } as never;
+  }
+
+  function bindingsResponse(partial = false): Response {
+    return jsonResponse(200, {
+      bindings: [
+        {
+          sessionId: 'session-1',
+          workspaceCwd: '/ws/a',
+          prs: [{ number: 1, url: 'https://github.com/o/r/pull/1' }],
+        },
+      ],
+      partial,
+    });
   }
 
   it('lists and validates PR bindings', async () => {
@@ -4342,7 +4493,10 @@ describe('createBoundSessionsAccessor', () => {
 
     const snapshot = await accessor.listPrBindings();
 
-    expect(requestRest).toHaveBeenCalledWith('/sessions/pr-bindings');
+    expect(requestRest).toHaveBeenCalledWith(
+      '/sessions/pr-bindings',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(snapshot.partial).toBe(false);
     expect(snapshot.bindings).toEqual([
       {
@@ -4409,7 +4563,11 @@ describe('createBoundSessionsAccessor', () => {
     await accessor.listPrBindings();
     await accessor.listPrBindings();
 
-    await expect(accessor.deliverPrompt('session-1', 'x')).rejects.toThrow(
+    const err = await accessor
+      .deliverPrompt('session-1', 'x')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BoundSessionGoneError);
+    expect((err as Error).message).toBe(
       'Bound session session-1 no longer exists',
     );
     expect(wake).not.toHaveBeenCalled();
@@ -4446,14 +4604,57 @@ describe('createBoundSessionsAccessor', () => {
   });
 
   it('throws when the bindings route fails', async () => {
-    const requestRest = vi
-      .fn()
-      .mockResolvedValue(jsonResponse(500, { error: 'boom' }));
+    const res = jsonResponse(500, { error: 'boom' });
+    const cancel = vi.spyOn(res.body!, 'cancel');
+    const requestRest = vi.fn().mockResolvedValue(res);
     const accessor = createBoundSessionsAccessor(makeClient(requestRest));
 
     await expect(accessor.listPrBindings()).rejects.toThrow(
       'GET /sessions/pr-bindings failed: HTTP 500',
     );
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a malformed bindings payload on HTTP 200', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { partial: false, bindings: null }));
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    await expect(accessor.listPrBindings()).rejects.toThrow(
+      'malformed bindings (HTTP 200)',
+    );
+  });
+
+  it('accepts a legitimate empty bindings array', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { bindings: [], partial: false }));
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    await expect(accessor.listPrBindings()).resolves.toEqual({
+      bindings: [],
+      partial: false,
+    });
+  });
+
+  it('preserves merged and closed PR states in the snapshot', async () => {
+    const prs = [
+      { number: 1, url: 'https://github.com/o/r/pull/1', state: 'open' },
+      { number: 2, url: 'https://github.com/o/r/pull/2', state: 'merged' },
+      { number: 3, url: 'https://github.com/o/r/pull/3', state: 'closed' },
+    ];
+    const requestRest = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        bindings: [{ sessionId: 'session-1', workspaceCwd: '/ws/a', prs }],
+        partial: false,
+      }),
+    );
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    const snapshot = await accessor.listPrBindings();
+
+    expect(snapshot.bindings[0]!.prs).toEqual(prs);
   });
 
   it('delivers a prompt as text content and accepts 202', async () => {
@@ -4468,8 +4669,36 @@ describe('createBoundSessionsAccessor', () => {
       '/session/session-1/prompt',
       expect.objectContaining({
         method: 'POST',
+        signal: expect.any(AbortSignal),
         body: JSON.stringify({
           prompt: [{ type: 'text', text: 'event text' }],
+          _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+        }),
+      }),
+    );
+  });
+
+  it('rides the worker authorization alongside the prompt marker', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(202, { promptId: 'p-1' }));
+    const accessor = createBoundSessionsAccessor(
+      makeClient(requestRest),
+      undefined,
+      'worker-prompt-token',
+    );
+
+    await accessor.deliverPrompt('session-1', 'event text');
+
+    expect(requestRest).toHaveBeenCalledWith(
+      '/session/session-1/prompt',
+      expect.objectContaining({
+        body: JSON.stringify({
+          prompt: [{ type: 'text', text: 'event text' }],
+          _meta: {
+            [CHANNEL_PROMPT_META_KEY]: true,
+            [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]: 'worker-prompt-token',
+          },
         }),
       }),
     );
@@ -4481,7 +4710,11 @@ describe('createBoundSessionsAccessor', () => {
       .mockResolvedValue(jsonResponse(404, { code: 'session_not_found' }));
     const accessor = createBoundSessionsAccessor(makeClient(requestRest));
 
-    await expect(accessor.deliverPrompt('session-1', 'x')).rejects.toThrow(
+    const err = await accessor
+      .deliverPrompt('session-1', 'x')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BoundSessionGoneError);
+    expect((err as Error).message).toBe(
       'Bound session session-1 no longer exists',
     );
   });
@@ -4557,9 +4790,9 @@ describe('createBoundSessionsAccessor', () => {
     const accessor = createBoundSessionsAccessor(makeClient(requestRest), wake);
     await accessor.listPrBindings();
 
-    await expect(accessor.deliverPrompt('session-1', 'x')).rejects.toThrow(
-      'Bound session session-1 no longer exists',
-    );
+    await expect(
+      accessor.deliverPrompt('session-1', 'x'),
+    ).rejects.toBeInstanceOf(BoundSessionGoneError);
     expect(wake).toHaveBeenCalledTimes(1);
   });
 
@@ -4643,12 +4876,16 @@ describe('createBoundSessionsAccessor', () => {
       .mockResolvedValue(jsonResponse(503, { code: 'prompt_queue_full' }));
     const accessor = createBoundSessionsAccessor(makeClient(requestRest));
 
-    await expect(accessor.deliverPrompt('session-1', 'x')).rejects.toThrow(
+    const err = await accessor
+      .deliverPrompt('session-1', 'x')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BoundSessionQueueFullError);
+    expect((err as Error).message).toBe(
       'Prompt queue of bound session session-1 is full',
     );
   });
 
-  it('keeps other 503s as generic errors', async () => {
+  it('maps other 503s to BoundSessionUnavailableError', async () => {
     const requestRest = vi
       .fn()
       .mockResolvedValue(
@@ -4659,8 +4896,198 @@ describe('createBoundSessionsAccessor', () => {
     const err = await accessor
       .deliverPrompt('session-1', 'x')
       .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BoundSessionUnavailableError);
+    expect((err as Error).message).toContain(
+      'HTTP 503 (daemon_runtime_starting)',
+    );
+  });
+
+  it('maps a restore in progress to BoundSessionUnavailableError', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(409, { code: 'restore_in_progress' }));
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    const err = await accessor
+      .deliverPrompt('session-1', 'x')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BoundSessionUnavailableError);
+    expect((err as Error).message).toContain('HTTP 409 (restore_in_progress)');
+  });
+
+  it('maps a busy session to BoundSessionUnavailableError', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(409, { code: 'session_busy' }));
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    const err = await accessor
+      .deliverPrompt('session-1', 'x')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BoundSessionUnavailableError);
+    expect((err as Error).message).toContain('HTTP 409 (session_busy)');
+  });
+
+  it('keeps other 409s as generic errors', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(409, { code: 'binding_conflict' }));
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    const err = await accessor
+      .deliverPrompt('session-1', 'x')
+      .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(Error);
-    expect((err as Error).message).toContain('daemon_runtime_starting');
+    expect((err as Error).message).toBe(
+      'POST /session/:id/prompt failed: HTTP 409 (binding_conflict)',
+    );
+    expect((err as Error).name).not.toBe('BoundSessionUnavailableError');
+  });
+
+  it('keeps a 500 prompt failure transient', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(500, { error: 'boom' }));
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    const err = await accessor
+      .deliverPrompt('session-1', 'x')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain('failed: HTTP 500');
+    expect((err as Error).name).not.toBe('BoundSessionGoneError');
     expect((err as Error).name).not.toBe('BoundSessionQueueFullError');
+    expect((err as Error).name).not.toBe('BoundSessionUnavailableError');
+  });
+
+  it('maps a post-wake 404 to Gone after exactly one wake', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(bindingsResponse())
+      .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+      .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }));
+    const wake = vi.fn().mockResolvedValue(undefined);
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest), wake);
+    await accessor.listPrBindings();
+
+    const err = await accessor
+      .deliverPrompt('session-1', 'x')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BoundSessionGoneError);
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(requestRest).toHaveBeenCalledTimes(3);
+  });
+
+  it('defers delivery when a cold cache meets a partial snapshot', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+      .mockResolvedValueOnce(
+        jsonResponse(200, { bindings: [], partial: true }),
+      );
+    const wake = vi.fn().mockResolvedValue(undefined);
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest), wake);
+
+    const err = await accessor
+      .deliverPrompt('session-1', 'x')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain(
+      'absent from a partial bindings snapshot; deferring delivery',
+    );
+    expect((err as Error).name).not.toBe('BoundSessionGoneError');
+    expect(wake).not.toHaveBeenCalled();
+  });
+
+  it('treats absence from a complete snapshot as gone on a cold cache', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+      .mockResolvedValueOnce(
+        jsonResponse(200, { bindings: [], partial: false }),
+      );
+    const wake = vi.fn().mockResolvedValue(undefined);
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest), wake);
+
+    await expect(
+      accessor.deliverPrompt('session-1', 'x'),
+    ).rejects.toBeInstanceOf(BoundSessionGoneError);
+    expect(wake).not.toHaveBeenCalled();
+  });
+
+  it('releases the wake registration after the retried prompt is accepted', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(bindingsResponse())
+      .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+      .mockResolvedValueOnce(jsonResponse(202, { promptId: 'p-1' }));
+    const release = vi.fn().mockResolvedValue(undefined);
+    const wake = vi.fn().mockResolvedValue(release);
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest), wake);
+    await accessor.listPrBindings();
+
+    await accessor.deliverPrompt('session-1', 'event text');
+
+    expect(release).toHaveBeenCalledOnce();
+    // Detaching before the retry POST could close the session ahead of
+    // the prompt and misclassify the 404 as gone.
+    expect(requestRest.mock.invocationCallOrder[2]).toBeLessThan(
+      release.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it('releases the wake registration when the retried prompt fails', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(bindingsResponse())
+      .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+      .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }));
+    const release = vi.fn().mockResolvedValue(undefined);
+    const wake = vi.fn().mockResolvedValue(release);
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest), wake);
+    await accessor.listPrBindings();
+
+    await expect(
+      accessor.deliverPrompt('session-1', 'x'),
+    ).rejects.toBeInstanceOf(BoundSessionGoneError);
+    expect(release).toHaveBeenCalledOnce();
+    expect(requestRest.mock.invocationCallOrder[2]).toBeLessThan(
+      release.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it('discards the response body of an accepted prompt', async () => {
+    const res = jsonResponse(202, { promptId: 'p-1' });
+    const cancel = vi.spyOn(res.body!, 'cancel');
+    const requestRest = vi.fn().mockResolvedValue(res);
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    await accessor.deliverPrompt('session-1', 'x');
+
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it('discards the response body of a gone session', async () => {
+    const res = jsonResponse(404, { code: 'session_not_found' });
+    const cancel = vi.spyOn(res.body!, 'cancel');
+    const requestRest = vi.fn().mockResolvedValue(res);
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    await expect(
+      accessor.deliverPrompt('session-1', 'x'),
+    ).rejects.toBeInstanceOf(BoundSessionGoneError);
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it('discards the response body of a failed prompt', async () => {
+    const res = jsonResponse(500, { error: 'boom' });
+    const cancel = vi.spyOn(res.body!, 'cancel');
+    const requestRest = vi.fn().mockResolvedValue(res);
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    await expect(accessor.deliverPrompt('session-1', 'x')).rejects.toThrow(
+      'failed: HTTP 500',
+    );
+    expect(cancel).toHaveBeenCalledOnce();
   });
 });

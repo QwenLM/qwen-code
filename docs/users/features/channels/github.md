@@ -161,21 +161,36 @@ so the session that follows the PR handles the event with its existing context.
 - Comment sender gates still apply before delivery. When several sessions are
   bound to the same PR, the most recently updated non-archived session wins;
   channel-owned sessions are never candidates.
-- When no bound session exists (or it cannot be restored), the event falls
-  back to the normal channel path and its public-reply contract. A bound
+- When no bound session exists (or it cannot be restored), **comment** events
+  fall back to the normal channel path and its public-reply contract. A bound
   session that is dormant after a daemon restart is woken automatically for
   the delivery, so restarts do not divert events into public replies.
+  **Watch events (below) are private-only**: with no bound target they are
+  logged and retired, never published as PR comments.
+- A full prompt queue or a temporarily unavailable session defers the event
+  without consuming the retry budget; the deferral is bounded (~4 hours), and
+  events that exhaust it are retired to a private dead-letter log
+  (`github-bound-deadletter.jsonl` in the channel state directory) with a
+  stderr alert rather than silently dropped.
 - This feature requires a daemon-managed channel; standalone
   `qwen channel start` ignores the setting with a warning.
 
 With `prWatchEvents`, the channel additionally watches bound PRs for state
 transitions the Notifications API cannot deliver, inside its existing poll
-cycle: `ci_failure` (checks turn red on a head, once per head), `merge_conflict`
-(`mergeable_state` becomes `dirty`, edge-triggered), `head_change` (new commits
-pushed), and `state_change` (PR merged or closed). Detection is API-level and
-spends no model tokens until a transition fires; a steady-state PR costs one
-API call per poll, and at most 30 bound PRs are watched. Transitions are
-persisted before delivery, so restarts do not re-fire them.
+cycle: `ci_failure` (checks turn red on a head, once per head — including
+`startup_failure`), `merge_conflict` (`mergeable_state` becomes `dirty`,
+edge-triggered: `dirty → clean → dirty` fires again), `head_change` (new commits
+pushed, including a force-push revisit of a recent SHA), and `state_change`
+(PR merged or closed; close → reopen → close fires again). Detection is
+API-level and spends no model tokens until a transition fires. A quiet PR with
+settled CI costs one API call per poll; a PR whose CI is still pending is
+re-checked every poll, and settled heads are re-checked every 10 minutes
+(GitHub does not advance a PR's `updated_at` on check re-runs, so the periodic
+re-check is what catches a re-run turning red). At most 30 bound PRs are
+actively polled; CI-active bursts add check-list pages and can exceed the
+5 000 calls/hour token budget on large-CI repos — the watch then fails fast on
+rate limiting and retries next poll. Transitions are persisted before
+delivery, so restarts do not re-fire them.
 
 ## Known Limitations
 

@@ -31,7 +31,10 @@ export type {
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
-export { CHANNEL_PROMPT_META_KEY } from './ChannelAgentBridge.js';
+export {
+  CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+} from './ChannelAgentBridge.js';
 export type { AcpBridgeOptions } from './AcpBridge.js';
 export { DaemonChannelBridge } from './DaemonChannelBridge.js';
 export type {
@@ -55,6 +58,7 @@ export type { ChannelProactiveDeliveryDisposition } from './ChannelProactiveDeli
 export {
   BoundSessionGoneError,
   BoundSessionQueueFullError,
+  BoundSessionUnavailableError,
 } from './bound-session-delivery.js';
 export type {
   ChannelBaseOptions,

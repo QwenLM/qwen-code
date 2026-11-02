@@ -21,6 +21,9 @@ import { scrubAndReportInheritedLoaderEnv } from '../../config/shared-env-keys.j
 import {
   BoundSessionGoneError,
   BoundSessionQueueFullError,
+  BoundSessionUnavailableError,
+  CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
   ChannelLoopScheduler,
   ChannelLoopStore,
   DaemonChannelBridge,
@@ -308,26 +311,61 @@ export function createDaemonSessionFactory({
  * itself runs independently of the channel worker.
  *
  * `wake` restores a dormant (persisted but not live) session, which the
- * prompt route rejects with 404. The daemon worker passes the same resume
- * path the channel bridge uses for its own sessions, classifying a 404
- * restore as `BoundSessionGoneError`; any other wake failure propagates as
- * a transient delivery error so the adapter retries instead of falling
- * back to public channel delivery.
+ * prompt route rejects with 404, and returns a release callback for the
+ * client registration the restore minted. The accessor invokes that
+ * release once the retried prompt settles: a non-empty client registration
+ * blocks the daemon's prompt-settled idle close, so discarding it without
+ * detaching would pin the woken session live until the TTL reaper.
+ *
+ * Error classification: a 404 (session or workspace truly gone) becomes
+ * `BoundSessionGoneError` so the adapter falls back to the channel path;
+ * queue-full and temporarily-unavailable conditions (503, restore conflicts,
+ * session limits, draining workspaces) are backpressure that defers the
+ * event without consuming the failure budget; everything else propagates
+ * as a transient delivery error for the adapter to retry.
  */
 export function createBoundSessionsAccessor(
   client: DaemonClientLike,
-  wake?: (sessionId: string, workspaceCwd: string) => Promise<void>,
+  wake?: (
+    sessionId: string,
+    workspaceCwd: string,
+  ) => Promise<(() => Promise<void>) | undefined>,
+  promptAuthorization?: string,
 ): ChannelBoundSessions {
   const cwdBySession = new Map<string, string>();
+  // requestRest's timer covers the connection through response headers
+  // only; the signal also bounds body consumption so a half-open connection
+  // cannot hang the poll loop indefinitely.
+  const requestSignal = (): AbortSignal => AbortSignal.timeout(30_000);
+  const discardBody = (res: Response): Promise<void> =>
+    res.body?.cancel().catch(() => {}) ?? Promise.resolve();
   const postPrompt = (sessionId: string, prompt: string): Promise<Response> =>
     client.requestRest(`/session/${encodeURIComponent(sessionId)}/prompt`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: [{ type: 'text', text: prompt }] }),
+      signal: requestSignal(),
+      // Same classification the channel bridge rides: without the marker
+      // and worker authorization the daemon treats the relay as an
+      // interactive user prompt (loop-detected rejection instead of the
+      // graceful channel end-turn, and live PR-binding backfill on relayed
+      // external text). Admission strips the marker for unauthorized
+      // callers, so both keys must ride together.
+      body: JSON.stringify({
+        prompt: [{ type: 'text', text: prompt }],
+        _meta: {
+          [CHANNEL_PROMPT_META_KEY]: true,
+          ...(promptAuthorization
+            ? { [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]: promptAuthorization }
+            : {}),
+        },
+      }),
     });
   const listPrBindings = async (): Promise<PrBindingsSnapshot> => {
-    const res = await client.requestRest('/sessions/pr-bindings');
+    const res = await client.requestRest('/sessions/pr-bindings', {
+      signal: requestSignal(),
+    });
     if (!res.ok) {
+      await discardBody(res);
       throw new Error(`GET /sessions/pr-bindings failed: HTTP ${res.status}`);
     }
     const body = (await res.json()) as {
@@ -335,7 +373,14 @@ export function createBoundSessionsAccessor(
       partial?: unknown;
     };
     const partial = body.partial === true;
-    if (!Array.isArray(body.bindings)) return { bindings: [], partial };
+    // A malformed 200 is not an authoritative empty snapshot: throwing
+    // routes it into the adapter's fail-closed refresh handling (keep the
+    // previous map, skip the watch pass) instead of wiping watch state.
+    if (!Array.isArray(body.bindings)) {
+      throw new Error(
+        'GET /sessions/pr-bindings returned malformed bindings (HTTP 200)',
+      );
+    }
     const summaries: PrBindingSummary[] = [];
     // Rebuild (not accumulate) on complete answers so sessions that left
     // the bindings drop out of the wake cache. On a partial answer keep
@@ -374,13 +419,12 @@ export function createBoundSessionsAccessor(
         });
       }
       if (entries.length === 0) continue;
-      const { sourceType, sourceId, updatedAt } = record;
+      const { sourceType, updatedAt } = record;
       cwdBySession.set(sessionId, workspaceCwd);
       summaries.push({
         sessionId,
         workspaceCwd,
         ...(typeof sourceType === 'string' ? { sourceType } : {}),
-        ...(typeof sourceId === 'string' ? { sourceId } : {}),
         ...(typeof updatedAt === 'string' ? { updatedAt } : {}),
         prs: entries,
       });
@@ -391,40 +435,84 @@ export function createBoundSessionsAccessor(
     listPrBindings,
     deliverPrompt: async (sessionId, prompt) => {
       let res = await postPrompt(sessionId, prompt);
-      if (res.status === 404 && wake) {
-        // Dormant session: the bindings route lists persisted active
-        // sessions, but the prompt route only serves live ones. Wake it
-        // and retry once. A refresh failure here is transient and must
-        // propagate, not degrade into a gone-session public fallback.
-        let cwd = cwdBySession.get(sessionId);
-        if (cwd === undefined) {
-          await listPrBindings();
-          cwd = cwdBySession.get(sessionId);
+      let releaseWake: (() => Promise<void>) | undefined;
+      try {
+        if (res.status === 404 && wake) {
+          // Dormant session: the bindings route lists persisted active
+          // sessions, but the prompt route only serves live ones. Wake it
+          // and retry once. A refresh failure here is transient and must
+          // propagate, not degrade into a gone-session public fallback.
+          let cwd = cwdBySession.get(sessionId);
+          if (cwd === undefined) {
+            const snapshot = await listPrBindings();
+            cwd = cwdBySession.get(sessionId);
+            if (cwd === undefined && snapshot.partial) {
+              // Cold cache meets an incomplete enumeration: absence from a
+              // partial snapshot is not evidence of deletion. Defer to the
+              // adapter's retry instead of the public gone-session fallback.
+              throw new Error(
+                `Bound session ${sessionId} absent from a partial bindings snapshot; deferring delivery`,
+              );
+            }
+          }
+          if (cwd !== undefined) {
+            releaseWake = await wake(sessionId, cwd);
+            await discardBody(res);
+            res = await postPrompt(sessionId, prompt);
+          }
         }
-        if (cwd !== undefined) {
-          // The wake callback classifies a truly deleted session as
-          // BoundSessionGoneError; every other failure (restore conflict,
-          // session limit, timeout) propagates for the adapter to retry.
-          await wake(sessionId, cwd);
-          res = await postPrompt(sessionId, prompt);
+        if (res.status === 404) {
+          throw new BoundSessionGoneError(sessionId);
         }
-      }
-      if (res.status === 404) {
-        throw new BoundSessionGoneError(sessionId);
-      }
-      if (res.status === 503) {
-        const body = (await res.json().catch(() => ({}))) as {
-          code?: unknown;
-        };
-        if (body.code === 'prompt_queue_full') {
-          throw new BoundSessionQueueFullError(sessionId);
+        if (res.status === 503) {
+          const body = (await res.json().catch(() => ({}))) as {
+            code?: unknown;
+          };
+          if (body.code === 'prompt_queue_full') {
+            throw new BoundSessionQueueFullError(sessionId);
+          }
+          // Every other 503 (workspace draining/restarting, session limit,
+          // runtime starting) is a retry-later condition — the daemon even
+          // sends Retry-After. Burning the attempt budget on these
+          // steady states would silently lose the event after three polls.
+          throw new BoundSessionUnavailableError(
+            sessionId,
+            `HTTP 503 (${String(body.code)})`,
+          );
         }
-        throw new Error(
-          `POST /session/:id/prompt unavailable: HTTP 503 (${String(body.code)})`,
-        );
-      }
-      if (!res.ok) {
-        throw new Error(`POST /session/:id/prompt failed: HTTP ${res.status}`);
+        if (res.status === 409) {
+          const body = (await res.json().catch(() => ({}))) as {
+            code?: unknown;
+          };
+          if (
+            body.code === 'restore_in_progress' ||
+            body.code === 'session_busy'
+          ) {
+            throw new BoundSessionUnavailableError(
+              sessionId,
+              `HTTP 409 (${String(body.code)})`,
+            );
+          }
+          throw new Error(
+            `POST /session/:id/prompt failed: HTTP 409 (${String(body.code)})`,
+          );
+        }
+        if (!res.ok) {
+          throw new Error(
+            `POST /session/:id/prompt failed: HTTP ${res.status}`,
+          );
+        }
+      } finally {
+        // Never leave a response body unconsumed: an unread undici body
+        // holds its connection until GC, leaking sockets in this
+        // long-lived worker on every delivery, probe and failure.
+        await discardBody(res);
+        // Release the wake registration once the retried prompt settled
+        // (accepted or not). Detaching before the retry could close the
+        // session ahead of the POST and misclassify the 404 as gone.
+        if (releaseWake) {
+          await releaseWake().catch(() => {});
+        }
       }
     },
   };
@@ -796,26 +884,49 @@ export async function runChannelDaemonWorker(
       client,
       async (sessionId, workspaceCwd) => {
         // Same restore path the channel bridge uses for its own dormant
-        // sessions. The returned client is discarded: the prompt admitted
-        // right after holds the session for its turn, and the daemon's
-        // idle cleanup returns it to dormant once no prompt remains.
+        // sessions. The restore mints a client registration; return its
+        // release so the accessor can detach once the retried prompt
+        // settles — a non-empty registration blocks the daemon's
+        // prompt-settled idle close and would pin the session live until
+        // the TTL reaper (or forever with the reaper disabled).
         try {
-          await sdk.DaemonSessionClient.resume(
+          const restored = await sdk.DaemonSessionClient.resume(
             client,
             sessionId,
             { workspaceCwd, sessionScope: 'thread' },
             `qwen-channel-worker:${process.pid}`,
           );
+          return restored.detach?.bind(restored);
         } catch (err) {
-          // Only a missing session is gone; restore conflicts, session
-          // limits and timeouts are transient and must not trigger the
-          // adapter's public channel fallback.
-          if ((err as { status?: unknown }).status === 404) {
+          const status = (err as { status?: unknown }).status;
+          const code = (err as { body?: { code?: unknown } }).body?.code;
+          // A missing session (404) is gone. An archived session is not
+          // restorable either (409 session_archived) and is excluded from
+          // the candidate set by contract, so it takes the same fallback.
+          if (
+            status === 404 ||
+            (status === 409 && code === 'session_archived')
+          ) {
             throw new BoundSessionGoneError(sessionId);
+          }
+          // Draining/transitioning workspaces (400 workspace_mismatch,
+          // 503 unavailable), restore conflicts and session limits are
+          // retry-later backpressure, not delivery failures: burning the
+          // attempt budget on them would silently lose the event.
+          if (
+            status === 503 ||
+            status === 409 ||
+            (status === 400 && code === 'workspace_mismatch')
+          ) {
+            throw new BoundSessionUnavailableError(
+              sessionId,
+              `wake HTTP ${String(status)} (${String(code)})`,
+            );
           }
           throw err;
         }
       },
+      opts.promptAuthorization,
     );
     const createdRouter = new SessionRouter(
       bridgeFacade,

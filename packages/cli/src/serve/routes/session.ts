@@ -1129,6 +1129,24 @@ export function registerSessionRoutes(
     });
   };
 
+  // A workspace with no registry entry at all (removed, or never registered)
+  // is a PERMANENT absence, unlike the reversible draining/transitioning
+  // states that still have an entry and answer workspace_mismatch /
+  // workspace_runtime_unavailable. Callers (e.g. the channel worker's
+  // bound-session wake) may classify this 404 as gone without risking the
+  // reversible states.
+  const sendWorkspaceNotFound = (
+    res: Response,
+    requestedWorkspace: string,
+  ): void => {
+    res.status(404).json({
+      error: `Workspace not found: "${requestedWorkspace}" is not registered with this daemon.`,
+      code: 'workspace_not_found',
+      boundWorkspace,
+      requestedWorkspace,
+    });
+  };
+
   const resolveRuntimeForSessionCreation = (
     body: Record<string, unknown>,
     res: Response,
@@ -1857,6 +1875,20 @@ export function registerSessionRoutes(
       ? managedEntry.current?.runtime
       : workspaceRegistry.resolveWorkspaceCwd('cwd' in body ? key : undefined);
     if (!runtime) {
+      // Distinguish permanent absence (no registry entry at all) from the
+      // reversible non-active states (entry exists but is draining /
+      // transitioning / blocked): only the former is a gone workspace.
+      const entry =
+        'cwd' in body
+          ? workspaceRegistry.getEntryByWorkspaceCwd(key)
+          : undefined;
+      if ('cwd' in body && !entry) {
+        logSessionRoutingFailure(route, 'workspace_not_found', {
+          requestedWorkspace: key,
+        });
+        sendWorkspaceNotFound(res, key);
+        return undefined;
+      }
       logSessionRoutingFailure(route, 'workspace_mismatch', {
         requestedWorkspace: key,
       });

@@ -201,16 +201,16 @@ export interface PrBindingSummary {
   sessionId: string;
   workspaceCwd: string;
   sourceType?: string;
-  sourceId?: string;
   updatedAt?: string;
   prs: PrBindingEntry[];
 }
 
 /**
  * Result of a PR-binding reverse lookup. `partial` means the daemon could
- * not enumerate every binding (a workspace failed to list, or a scan cap
- * was hit); consumers must not treat a missing entry as an authoritative
- * absence — in particular they must not destroy state keyed by bindings.
+ * not enumerate every binding (a workspace failed to list or is not active,
+ * a scan needed more than one page, or a scan cap was hit); consumers must
+ * not treat a missing entry as an authoritative absence — in particular they
+ * must not destroy state keyed by bindings.
  */
 export interface PrBindingsSnapshot {
   bindings: PrBindingSummary[];
@@ -227,8 +227,12 @@ export interface ChannelBoundSessions {
   /**
    * Inject a prompt into an existing session. Resolves once the daemon
    * accepts the prompt into the session's queue; does not wait for the turn.
-   * Throws `BoundSessionGoneError` when the session no longer exists and
-   * `BoundSessionQueueFullError` when the session's prompt queue is full.
+   * Throws `BoundSessionGoneError` when the session no longer exists,
+   * `BoundSessionQueueFullError` when the session's prompt queue is full,
+   * and `BoundSessionUnavailableError` when the session or its workspace is
+   * temporarily unavailable (draining, session limit, restore in progress).
+   * The latter two are backpressure: defer without consuming the failure
+   * budget.
    */
   deliverPrompt(sessionId: string, prompt: string): Promise<void>;
 }

@@ -33,7 +33,6 @@ export interface SessionPrBindingSummary {
   sessionId: string;
   workspaceCwd: string;
   sourceType?: string;
-  sourceId?: string;
   updatedAt?: string;
   prs: SessionPrBindingEntry[];
 }
@@ -87,7 +86,18 @@ export function registerSessionPrBindingsRoutes(
       // was complete; callers hold state keyed by bindings and must not
       // destroy it on a partial answer.
       let partial = false;
-      for (const runtime of deps.workspaceRegistry.listAll()) {
+      for (const entry of deps.workspaceRegistry.listAllEntries()) {
+        const runtime = entry.current?.runtime;
+        if (!runtime || entry.state !== 'active') {
+          // A workspace that is draining/transitioning/blocked still serves
+          // sessions but cannot be enumerated here. Its absence is NOT an
+          // authoritative "no bindings": flag the answer incomplete so
+          // callers retain known bindings and skip watch-state pruning.
+          // listAllEntries() already excludes removed entries (legitimate
+          // absence); untrusted workspaces are skipped by contract below.
+          partial = true;
+          continue;
+        }
         if (!runtime.trusted) continue;
         let cursor: string | undefined;
         try {
@@ -106,9 +116,6 @@ export function registerSessionPrBindingsRoutes(
                 ...(session.sourceType !== undefined
                   ? { sourceType: session.sourceType }
                   : {}),
-                ...(session.sourceId !== undefined
-                  ? { sourceId: session.sourceId }
-                  : {}),
                 // Live-only summaries may lack updatedAt; createdAt is
                 // always present and keeps fresh live sessions from losing
                 // the recency comparison to stale persisted ones.
@@ -124,10 +131,12 @@ export function registerSessionPrBindingsRoutes(
             }
             pages += 1;
             if (!result.nextCursor) break;
-            if (pages >= MAX_PAGES) {
-              partial = true;
-              break;
-            }
+            // Activity-ordered pagination is not snapshot-isolated: a live
+            // session whose activity advances between page fetches can be
+            // skipped on every page while the scan still finishes clean.
+            // Any multi-page scan is therefore non-authoritative.
+            partial = true;
+            if (pages >= MAX_PAGES) break;
             cursor = result.nextCursor;
           }
         } catch {
