@@ -74,7 +74,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
                     com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONFIG_REF,
                     com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.POLICY_REF);
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'OWNER')",
-                    tenant, storageId, ManagedWorkspaceRegistry.actorKey(tenant, actorId));
+                    tenant, storageId, com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, actorId));
             long now = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW, Long.class);
             WorkspacePublication result = new WorkspacePublication(storageId, 1, storageId);
             ManagedReceipts.insert(jdbc, NAMESPACE, tenant, ReceiptScope.TENANT, tenant, requestKey,
@@ -183,7 +183,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
                 Long.class, JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage)) == 0) {
             return null;
         }
-        return registered(jdbc, tenant, storage, lock).orElseThrow(WorkspaceExecutionStore::unavailable);
+        return registered(jdbc, tenant, storage, lock).orElseThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore::unavailable);
     }
 
     static String ownerKey(RegisteredExternalStorage storage) {

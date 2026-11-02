@@ -64,7 +64,7 @@ final class WorkspaceMigrationAdmission {
         }
         if ("EXTERNAL".equals(alias.get("storage_kind"))) {
             if (ExternalStorageRegistrationStore.executionStorage(jdbc, tenant, storage, lock) == null) {
-                throw WorkspaceExecutionStore.unavailable();
+                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
             }
             return;
         }

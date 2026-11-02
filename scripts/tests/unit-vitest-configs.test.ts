@@ -131,6 +131,8 @@ const configModules: Record<
   string,
   () => Promise<{ default: ExemptionConfig }>
 > = {
+  'integrations/e2b-runtime-provider': () =>
+    import('../../integrations/e2b-runtime-provider/vitest.config.js'),
   'integrations/external-context': () =>
     import('../../integrations/external-context/vitest.config.js'),
   'integrations/external-context-mem0': () =>
@@ -252,13 +254,14 @@ describe('shared-pool test timeout', () => {
     'packages/web-shell',
   ] as const;
 
-  // cli and core gate the same way but pin 15s off the pool instead of the
-  // default. Naming the value is what stops either ternary being flattened to
-  // the pool number: the floor above passes on 60_000, so without this a real
-  // hang off CI would surface at 60s instead of 15s and nothing would go red.
+  // cli/core pin 15s and the E2B provider pins 20s off the pool instead of the
+  // default. Naming the value is what stops each ternary being flattened to
+  // the pool number: without this a real hang off CI would surface at 60s
+  // instead of its lower pinned ceiling and nothing would go red.
   // vscode-ide-companion pins the same 15s and is already asserted in both
   // branches by `bundle-guard timeout ceiling` below.
   const OFF_POOL_PINNED: Readonly<Record<string, number>> = {
+    'integrations/e2b-runtime-provider': 20_000,
     'packages/cli': 15_000,
     'packages/core': 15_000,
   };

@@ -46,7 +46,7 @@ final class WorkspaceStorageKindGuard {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
         if (ExternalStorageRegistrationStore.executionStorage(jdbc, tenantId, storageId, false) != null && !externalFiles) {
-            throw WorkspaceExecutionStore.unavailable();
+            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
     }
 }

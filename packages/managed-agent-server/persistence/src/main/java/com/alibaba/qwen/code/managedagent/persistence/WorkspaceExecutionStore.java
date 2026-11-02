@@ -792,7 +792,7 @@ public class WorkspaceExecutionStore
     public com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry.RegisteredExternalStorage externalStorage(ContextBinding binding) {
         var storage = ExternalStorageRegistrationStore.executionStorage(jdbc, binding.getTenantId(), binding.getStorageId(), false);
         if (storage != null && !externalFiles) {
-            throw unavailable();
+            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
         return storage;
     }

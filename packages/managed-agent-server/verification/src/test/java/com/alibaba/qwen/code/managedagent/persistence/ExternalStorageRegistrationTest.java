@@ -312,7 +312,7 @@ public class ExternalStorageRegistrationTest {
                 "tenant", "publish", "workspace", "provider", 1, "actor", "E2B Workspace").workspaceId()).isEqualTo("workspace");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_workspace", Integer.class)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT role FROM ma_workspace_access WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
-                String.class, "tenant", "workspace", ManagedWorkspaceRegistry.actorKey("tenant", "actor"))).isEqualTo("OWNER");
+                String.class, "tenant", "workspace", com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"))).isEqualTo("OWNER");
         assertConflict(() -> store.publishWorkspace("tenant", "publish", "workspace", "provider", 1, "other-actor", "E2B Workspace"), "idempotency_conflict");
         assertThatThrownBy(() -> store.publishWorkspace("foreign", "publish", "workspace", "provider", 1, "actor", "E2B Workspace"))
                 .isInstanceOf(RuntimeBrokerException.class);
@@ -344,23 +344,23 @@ public class ExternalStorageRegistrationTest {
         properties.getRuntimeBroker().setExternalProviderId("provider");
         var transactions = new org.springframework.transaction.support.TransactionTemplate(manager);
         var sessions = new ManagedAgentStore(jdbc, json, java.time.Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties);
-        var selection = new com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection("workspace", ".");
+        var selection = new com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection("workspace", ".");
         String id = transactions.execute(ignored -> sessions.insertWorkspaceSessionCommand("tenant", "actor", "create", "digest", "qwen-code",
                 null, null, List.of(), null, selection).sessionId());
         assertThatThrownBy(() -> transactions.execute(ignored -> sessions.insertWorkspaceSessionCommand("tenant", "foreign", "foreign-create", "digest", "qwen-code",
                 null, null, List.of(), null, selection))).isInstanceOf(RuntimeException.class);
         var saved = sessions.requireSession("tenant", id);
-        assertThat(saved.toolProfile()).isEqualTo(com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.FILES);
+        assertThat(saved.toolProfile()).isEqualTo(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES);
         var scope = new com.alibaba.qwen.code.runtimebroker.RuntimeScope("tenant", "workspace", "1", "/worker/workspace",
                 com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
-        var bindings = new JdbcRuntimeBindingRepository(jdbc.getDataSource(), new com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector("test", new byte[32]));
+        var bindings = new JdbcRuntimeBindingRepository(jdbc.getDataSource(), new com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector("test", new byte[32]));
         var request = new com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest(scope, id,
                 com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE_FILES, "workspace");
         var initial = bindings.findOrCreate(request);
         var seed = initial.getProvisionSeed();
         var lease = new com.alibaba.qwen.code.runtimebroker.RuntimeLease(seed.getProvisionalRuntimeId(), java.net.URI.create("http://127.0.0.1:1"), seed.getToken(), seed.getLeaseId(), seed.getEpoch());
         var ready = bindings.compareAndSet(initial, initial.withAttestation(lease, new com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle(request.getProvisionerKind(), 1, java.util.Map.of("fixture", true)), java.time.Instant.now(), java.time.Instant.now()));
-        var runtimeSessions = new com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository(jdbc.getDataSource());
+        var runtimeSessions = new com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository(jdbc.getDataSource());
         var session = new com.alibaba.qwen.code.runtimebroker.RuntimeSession(id, UUID.randomUUID().toString(), "bootstrap", scope);
         var record = runtimeSessions.findOrCreate(new com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord(session, ready.getBindingId(), ready.getGeneration(),
                 com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord.State.READY, 1, java.time.Instant.now()));

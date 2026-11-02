@@ -395,7 +395,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest) {
         if (externalFilesProvider != null) {
-            throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature",
+            throw new ManagedAgentException(409, "unsupported_feature",
                     "External Runtime requires a registered Workspace selection.");
         }
         AgentPin pin = resolveAgentPin(tenantId, agentId, requestedRevision,
