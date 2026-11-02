@@ -1,0 +1,27 @@
+[Unit]
+Description=Qwen Managed Agent control plane (selected Runtime backends)
+Documentation=file:/opt/qwen-managed-agent/DEPLOYMENT.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=qwen-managed-agent
+Group=qwen-managed-agent
+WorkingDirectory=/opt/qwen-managed-agent
+# Supply the variables required by config/application.yml, including remote
+# Harness credentials. Adapt paths and service permissions to the chosen backend.
+EnvironmentFile=/etc/qwen-managed-agent/server.env
+ExecStart=/opt/qwen-managed-agent/bin/qwen-managed-agent-server
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=60s
+KillMode=process
+KillSignal=SIGTERM
+SuccessExitStatus=143
+StateDirectory=qwen-managed-agent
+StateDirectoryMode=0750
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -41,7 +41,7 @@ class EmbeddedRuntimeBrokerTest {
         // slow-but-healthy runtime is cut mid-wait and never converges.
         long stepCallTimeoutMillis = EmbeddedRuntimeBroker.LEASE.toMillis() * 2;
         assertThat(stepCallTimeoutMillis)
-                .isGreaterThan(com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner.READY_TIMEOUT.toMillis());
+                .isGreaterThan(com.alibaba.qwen.code.runtimebroker.provisioning.local.LocalProcessRuntimeProvisioner.READY_TIMEOUT.toMillis());
         assertThat(stepCallTimeoutMillis)
                 .isGreaterThan(com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport.REQUEST_TIMEOUT.toMillis());
     }
@@ -442,7 +442,7 @@ class EmbeddedRuntimeBrokerTest {
                 properties))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("not supported")
-                .hasMessageContaining("local-process, static");
+                .hasMessageContaining("static").hasMessageContaining("local-process");
     }
 
     @Test

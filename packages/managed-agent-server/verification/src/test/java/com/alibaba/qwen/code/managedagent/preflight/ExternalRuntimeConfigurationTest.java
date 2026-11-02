@@ -2,8 +2,8 @@ package com.alibaba.qwen.code.managedagent.preflight;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
-import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalHttpRuntimeClient;
-import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.provisioning.external.ExternalHttpRuntimeClient;
+import com.alibaba.qwen.code.runtimebroker.provisioning.external.ExternalRuntimeProvisioner;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.mock.env.MockEnvironment;
@@ -97,17 +97,19 @@ class ExternalRuntimeConfigurationTest {
                 URI.create("https://provider.invalid/"), "replace-with-a-long-random-token", Duration.ofSeconds(1)));
     }
 
-    @Test
-    void preflightDoesNotRequireWorkerCwdOrLocalStateDirectory(@TempDir Path directory) {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"external-scratch,true", "external-scratch,false",
+        "external-workspace,true", "external-workspace,false"})
+    void preflightDoesNotRequireWorkerCwdOrLocalStateDirectory(String kind, boolean enabled, @TempDir Path directory) {
         Path missing = directory.resolve("worker-only");
         assertFalse(Files.exists(missing));
         var checks = ManagedAgentPreflight.checks(new String[] {
-                "--qwen.managed-agent.runtime-broker.provisioner=external-scratch",
+                "--qwen.managed-agent.runtime-broker.provisioner=" + kind,
                 "--qwen.managed-agent.runtime-broker.workspace-cwd=" + missing,
                 "--qwen.managed-agent.runtime-broker.state-directory=",
                 "--qwen.managed-agent.harness.enabled=false",
                 "--qwen.managed-agent.harness.capability-digest=sha256:" + "a".repeat(64),
-                "--qwen.managed-agent.runtime-broker.enabled=true",
+                "--qwen.managed-agent.runtime-broker.enabled=" + enabled,
                 "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.workspace-id=scratch",
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
@@ -202,10 +204,11 @@ class ExternalRuntimeConfigurationTest {
     void anUnknownExternalKindStillFailsClosed() {
         var broker = brokerCheck(properties("external-workspace-typo"));
         assertEquals(ManagedAgentPreflight.Status.FAIL, broker.status());
-        assertTrue(broker.detail().contains("unknown provisioner external-workspace-typo"),
+        assertTrue(broker.detail().contains("Runtime provider is not installed: external-workspace-typo"),
                 broker.detail());
-        assertTrue(broker.fix().contains("external-scratch"), broker.fix());
-        assertTrue(broker.fix().contains("external-workspace"), broker.fix());
+        assertTrue(broker.detail().contains("external-scratch"), broker.detail());
+        assertTrue(broker.detail().contains("external-workspace"), broker.detail());
+        assertTrue(broker.fix().contains("provider JAR"), broker.fix());
     }
 
     @Test

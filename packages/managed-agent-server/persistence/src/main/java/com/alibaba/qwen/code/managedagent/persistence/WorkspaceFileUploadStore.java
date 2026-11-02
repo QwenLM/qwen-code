@@ -287,6 +287,12 @@ public class WorkspaceFileUploadStore {
 
     private UploadStatus exchange(Operation operation, byte[] bytes) {
         Frozen target = operation.target();
+        String backend = target.remote() == null
+                ? com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS
+                : com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS;
+        if (!com.alibaba.qwen.code.runtimebroker.spi.RuntimeBackendSelection.from(properties).includes(backend)) {
+            throw pending();
+        }
         Map<String, Object> message = new LinkedHashMap<>();
         message.put("protocolVersion", 1);
         message.put("operation", bytes == null ? "upload-status" : "upload");

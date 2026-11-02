@@ -17,6 +17,34 @@
     <dependencies>
         <dependency>
             <groupId>com.alibaba</groupId>
+            <artifactId>qwen-managed-agent-runtime-http</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>qwen-managed-agent-runtime-host</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>qwen-managed-agent-runtime-local</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>qwen-managed-agent-runtime-external</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>qwen-managed-agent-runtime-kubernetes</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>qwen-managed-agent-runtime-ssh</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>qwen-managed-agent-runtime-static</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
             <artifactId>qwen-managed-agent-contracts</artifactId>
         </dependency>
         <dependency>
@@ -147,6 +175,12 @@
                     <systemPropertyVariables>
                         <managed.module.root>${managed.module.root}</managed.module.root>
                         <qwen.cli.entry>${qwen.cli.entry}</qwen.cli.entry>
+                        <managed.artifact.version>${project.version}</managed.artifact.version>
+                        <managed.artifact.directory>${managed.module.root}/server/target</managed.artifact.directory>
+                        <managed.operator.tools.enabled>${managed.operator-tools.attach}</managed.operator.tools.enabled>
+                        <managed.runtime.backends>${managed.runtime.backends}</managed.runtime.backends>
+                        <managed.runtime.variant>${managed.runtime.variant}</managed.runtime.variant>
+                        <managed.exec.classifier>${managed.exec.classifier}</managed.exec.classifier>
                     </systemPropertyVariables>
                     <environmentVariables>
                         <QWEN_MANAGED_AGENT_WORKER_ENV_PROBE>present</QWEN_MANAGED_AGENT_WORKER_ENV_PROBE>
@@ -171,6 +205,9 @@
                             </includes>
                             <systemPropertyVariables>
                                 <managed.artifact.version>${project.version}</managed.artifact.version>
+                                <managed.runtime.backends>${managed.runtime.backends}</managed.runtime.backends>
+                                <managed.runtime.variant>${managed.runtime.variant}</managed.runtime.variant>
+                                <managed.exec.classifier>${managed.exec.classifier}</managed.exec.classifier>
                                 <managed.operator.tools.enabled>${managed.operator-tools.attach}</managed.operator.tools.enabled>
                                 <managed.artifact.directory>${managed.module.root}/server/target</managed.artifact.directory>
                             </systemPropertyVariables>

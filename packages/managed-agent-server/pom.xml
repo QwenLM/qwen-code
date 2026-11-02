@@ -32,6 +32,9 @@
     </developers>
     <properties>
         <java.version>21</java.version>
+        <managed.runtime.backends>external,kubernetes,local,ssh,static</managed.runtime.backends>
+        <managed.runtime.variant>full</managed.runtime.variant>
+        <managed.exec.classifier>exec</managed.exec.classifier>
         <managed.operator-tools.attach>true</managed.operator-tools.attach>
         <managed.operator-tools.jar.phase>package</managed.operator-tools.jar.phase>
         <managed.operator-tools.skip>false</managed.operator-tools.skip>
@@ -55,12 +58,54 @@
         <module>control-plane</module>
         <module>runtime-broker</module>
         <module>persistence</module>
+        <module>runtime-http</module>
+        <module>runtime-host</module>
+        <module>runtime-local</module>
+        <module>runtime-external</module>
+        <module>runtime-kubernetes</module>
+        <module>runtime-ssh</module>
+        <module>runtime-static</module>
         <module>adapters</module>
         <module>server</module>
         <module>verification</module>
     </modules>
     <dependencyManagement>
         <dependencies>
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>qwen-managed-agent-runtime-http</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>qwen-managed-agent-runtime-host</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>qwen-managed-agent-runtime-local</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>qwen-managed-agent-runtime-external</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>qwen-managed-agent-runtime-kubernetes</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>qwen-managed-agent-runtime-ssh</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>qwen-managed-agent-runtime-static</artifactId>
+                <version>${project.version}</version>
+            </dependency>
             <dependency>
                 <groupId>com.aliyun.oss</groupId>
                 <artifactId>aliyun-sdk-oss</artifactId>

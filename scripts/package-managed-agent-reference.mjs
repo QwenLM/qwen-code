@@ -19,6 +19,10 @@ import { pipeline } from 'node:stream/promises';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { createGzip } from 'node:zlib';
+import {
+  inspectRuntimeArchive,
+  runtimeSelection,
+} from './managed-runtime-backends.mjs';
 
 import {
   CONTRACT_DOCUMENT,
@@ -112,6 +116,28 @@ export const ADMIN_COMMANDS = Object.freeze([
     'Print the Runtime state directory and auth mode the configuration resolves to.',
   ],
 ]);
+
+const OPERATOR_BACKENDS = {
+  'operator-recovery': { '*': 'local' },
+  'workspace-migration': { retire: 'local' },
+  'csi-protection': { '*': 'kubernetes' },
+  'csi-runtime': { serve: 'kubernetes' },
+  'resident-retirement': {
+    'delete-pod': 'kubernetes',
+    'prepare-reclamation': 'kubernetes',
+    reclaim: 'kubernetes',
+  },
+};
+
+export function supportedOperators(backends) {
+  return ADMIN_COMMANDS.flatMap(([command, main, summary]) => {
+    const unavailable = Object.entries(OPERATOR_BACKENDS[command] ?? {})
+      .filter(([, backend]) => !backends.includes(backend))
+      .map(([action]) => action);
+    if (unavailable.includes('*')) return [];
+    return [{ command, main, summary, unavailableActions: unavailable }];
+  });
+}
 
 async function sha256(file) {
   return createHash('sha256')
@@ -307,14 +333,24 @@ function launcher(jar) {
 `;
 }
 
-function adminLauncher(jar) {
-  const width = Math.max(...ADMIN_COMMANDS.map(([name]) => name.length));
-  const usage = ADMIN_COMMANDS.map(
-    ([name, , summary]) => `  ${name.padEnd(width)}  ${summary}`,
+function adminLauncher(jar, operators) {
+  const width = Math.max(...operators.map(({ command }) => command.length));
+  const usage = operators.map(
+    ({ command, summary, unavailableActions }) =>
+      `  ${command.padEnd(width)}  ${summary}${unavailableActions.length ? ` Unavailable in this distribution: ${unavailableActions.join(', ')}.` : ''}`,
   );
-  const cases = ADMIN_COMMANDS.map(
-    ([name, main]) => `  ${name}) main=${main} ;;`,
+  const cases = operators.map(
+    ({ command, main }) => `  ${command}) main=${main} ;;`,
   );
+  const blocked = operators.flatMap(({ command, unavailableActions }) =>
+    unavailableActions.map((action) => `${command}:${action}`),
+  );
+  const guard = blocked.length
+    ? `case "\${1:-}:\${2:-}" in
+  ${blocked.join('|')}) echo "Runtime backend required by $1 $2 is not included in this distribution" >&2; exit 2 ;;
+esac
+`
+    : '';
   return `${LAUNCHER_PREAMBLE}usage() {
   cat <<'USAGE'
 Usage: qwen-managed-agent-admin <command> [arguments]
@@ -324,7 +360,7 @@ Offline maintenance commands. Run one without arguments for its usage.
 ${usage.join('\n')}
 USAGE
 }
-case "\${1:-}" in
+${guard}case "\${1:-}" in
 ${cases.join('\n')}
   ''|help|-h|--help) usage; exit 0 ;;
   *) echo "qwen-managed-agent-admin: unknown command: $1" >&2; usage >&2; exit 2 ;;
@@ -400,6 +436,7 @@ export async function createReferenceDistribution({
   outputDirectory,
   version,
   sourceRevision,
+  backends = 'full',
 }) {
   if (!VERSION_PATTERN.test(version)) {
     throw new Error(
@@ -414,11 +451,18 @@ export async function createReferenceDistribution({
 
   const root = path.resolve(repoRoot);
   const output = path.resolve(outputDirectory);
-  const rootName = `${DISTRIBUTION_NAME}-${version}`;
+  const selection = runtimeSelection(backends);
+  const operators = supportedOperators(selection.backends);
+  const rootName = `${DISTRIBUTION_NAME}-${version}${selection.variant === 'full' ? '' : `-${selection.variant}`}`;
   const stage = path.join(output, rootName);
   const archive = path.join(output, `${rootName}.tar.gz`);
   const detachedManifest = path.join(output, `${rootName}.manifest.json`);
-  const detachedChecksums = path.join(output, 'SHA256SUMS.txt');
+  const detachedChecksums = path.join(
+    output,
+    selection.variant === 'full'
+      ? 'SHA256SUMS.txt'
+      : `${rootName}.SHA256SUMS.txt`,
+  );
 
   await mkdir(output, { recursive: true });
   await Promise.all([
@@ -489,18 +533,27 @@ export async function createReferenceDistribution({
     {
       name: 'qwen-managed-agent-server',
       version: serverVersion,
-      source: `packages/managed-agent-server/server/target/qwen-managed-agent-server-${serverVersion}-exec.jar`,
+      source: `packages/managed-agent-server/server/target/qwen-managed-agent-server-${serverVersion}-${selection.classifier}.jar`,
       destination: `lib/${serverJar}`,
       role: 'control-plane',
     },
-    {
-      name: 'qwen-managed-agent-operator-recovery',
-      version: serverVersion,
-      source: `packages/managed-agent-server/server/target/${recoveryJar}`,
-      destination: `lib/${recoveryJar}`,
-      role: 'operator-recovery',
-    },
+    ...(selection.operatorJars
+      ? [
+          {
+            name: 'qwen-managed-agent-operator-recovery',
+            version: serverVersion,
+            source: `packages/managed-agent-server/server/target/${recoveryJar}`,
+            destination: `lib/${recoveryJar}`,
+            role: 'operator-recovery',
+          },
+        ]
+      : []),
   ];
+
+  const runtimeDistribution = inspectRuntimeArchive(
+    path.join(root, componentSources[0].source),
+    selection,
+  );
 
   for (const component of componentSources) {
     await copy(root, stage, component.source, component.destination);
@@ -511,14 +564,34 @@ export async function createReferenceDistribution({
     'packages/managed-agent-server/distribution/config/application.example.yml',
     'config/application.example.yml',
   );
-  const systemdFiles = [
-    'qwen-hosted-harness.service',
-    'qwen-managed-agent-server.service',
-    'harness.env.example',
-    'server.env.example',
-    'README.md',
-    'README.zh-CN.md',
-  ];
+  if (selection.variant !== 'full') {
+    const primary = selection.backends.includes('local')
+      ? selection.backends.includes('ssh')
+        ? 'local-ssh'
+        : 'local'
+      : selection.backends[0];
+    await copy(
+      root,
+      stage,
+      `packages/managed-agent-server/distribution/config/runtime-${primary}.example.yml`,
+      'config/application.example.yml',
+    );
+    await writeFile(
+      path.join(stage, 'DEPLOYMENT.md'),
+      `# ${selection.variant} Runtime distribution\n\nIncluded backends: ${selection.backends.join(', ')}.\n\nInstall JDK 21 and configure MySQL, the Harness and the chosen Runtime host/provider before startup. Copy config/application.example.yml to config/application.yml, replace its required deployment values, and run bin/qwen-managed-agent-server. The sample selects ${primary}; installing multiple backends does not enable additional runtime combinations.\n\nUse bin/qwen-managed-agent-admin for supported maintenance branches. This distribution has no separate operator JAR, automatic bootstrap or upgrade launcher. The full reference deployment guide describes full-only automation; deploy and upgrade this variant manually.\n`,
+    );
+  }
+  const systemdFiles =
+    selection.variant === 'full'
+      ? [
+          'qwen-hosted-harness.service',
+          'qwen-managed-agent-server.service',
+          'harness.env.example',
+          'server.env.example',
+          'README.md',
+          'README.zh-CN.md',
+        ]
+      : ['qwen-managed-agent-manual.service'];
   for (const file of systemdFiles) {
     await copy(
       root,
@@ -527,12 +600,14 @@ export async function createReferenceDistribution({
       `systemd/${file}`,
     );
   }
-  for (const file of [
-    'qwen-managed-agent-bootstrap',
-    'qwen-managed-agent-bootstrap.mjs',
-    'qwen-managed-agent-upgrade',
-    'qwen-managed-agent-upgrade.mjs',
-  ]) {
+  for (const file of selection.variant === 'full'
+    ? [
+        'qwen-managed-agent-bootstrap',
+        'qwen-managed-agent-bootstrap.mjs',
+        'qwen-managed-agent-upgrade',
+        'qwen-managed-agent-upgrade.mjs',
+      ]
+    : []) {
     await copy(
       root,
       stage,
@@ -566,12 +641,14 @@ export async function createReferenceDistribution({
   await mkdir(path.dirname(serverLauncher), { recursive: true });
   await Promise.all([
     writeFile(serverLauncher, launcher(serverJar)),
-    writeFile(recoveryLauncher, launcher(recoveryJar)),
-    writeFile(adminCommand, adminLauncher(serverJar)),
+    ...(selection.operatorJars
+      ? [writeFile(recoveryLauncher, launcher(recoveryJar))]
+      : []),
+    writeFile(adminCommand, adminLauncher(serverJar, operators)),
   ]);
   await Promise.all([
     chmod(serverLauncher, 0o755),
-    chmod(recoveryLauncher, 0o755),
+    ...(selection.operatorJars ? [chmod(recoveryLauncher, 0o755)] : []),
     chmod(adminCommand, 0o755),
   ]);
 
@@ -590,7 +667,10 @@ export async function createReferenceDistribution({
 
   const manifest = {
     schemaVersion: 1,
-    name: DISTRIBUTION_NAME,
+    name:
+      selection.variant === 'full'
+        ? DISTRIBUTION_NAME
+        : `${DISTRIBUTION_NAME}-${selection.variant}`,
     version,
     status: 'experimental',
     source: {
@@ -598,6 +678,11 @@ export async function createReferenceDistribution({
       revision: sourceRevision,
     },
     components,
+    runtimeDistribution: {
+      ...runtimeDistribution,
+      classifier: selection.classifier,
+      operators,
+    },
     compatibility: {
       qwenCodeVersion: packageJson.version,
       hostedHarnessProfile: 'hosted-harness',
@@ -629,7 +714,9 @@ export async function createReferenceDistribution({
     referenceTopology: {
       operatingSystem: 'Linux',
       javaControlPlanes: 1,
-      hostTrust: 'trusted-single-host',
+      ...(selection.variant === 'full'
+        ? { hostTrust: 'trusted-single-host' }
+        : { configuration: 'manual' }),
       runtimeBroker: 'embedded',
       database: 'MySQL 8',
     },
@@ -660,13 +747,19 @@ export async function createReferenceDistribution({
     `${rootName}/manifest.json`,
     `${rootName}/SHA256SUMS`,
     `${rootName}/bin/qwen-managed-agent-server`,
-    `${rootName}/bin/qwen-managed-agent-operator-recovery`,
+    ...(selection.operatorJars
+      ? [`${rootName}/bin/qwen-managed-agent-operator-recovery`]
+      : []),
     `${rootName}/bin/qwen-managed-agent-admin`,
     // The two launchers exec these modules.
-    `${rootName}/bin/qwen-managed-agent-bootstrap`,
-    `${rootName}/bin/qwen-managed-agent-bootstrap.mjs`,
-    `${rootName}/bin/qwen-managed-agent-upgrade`,
-    `${rootName}/bin/qwen-managed-agent-upgrade.mjs`,
+    ...(selection.variant === 'full'
+      ? [
+          `${rootName}/bin/qwen-managed-agent-bootstrap`,
+          `${rootName}/bin/qwen-managed-agent-bootstrap.mjs`,
+          `${rootName}/bin/qwen-managed-agent-upgrade`,
+          `${rootName}/bin/qwen-managed-agent-upgrade.mjs`,
+        ]
+      : [`${rootName}/DEPLOYMENT.md`]),
     `${rootName}/config/application.example.yml`,
     ...systemdFiles.map((file) => `${rootName}/systemd/${file}`),
   ]) {
@@ -692,6 +785,7 @@ async function main() {
       version: { type: 'string' },
       'source-revision': { type: 'string' },
       output: { type: 'string' },
+      backends: { type: 'string', default: 'full' },
     },
   });
   if (!values.version || !values['source-revision'] || !values.output) {
@@ -704,6 +798,7 @@ async function main() {
     outputDirectory: values.output,
     version: values.version,
     sourceRevision: values['source-revision'],
+    backends: values.backends,
   });
   console.log(result.archive);
   console.log(result.detachedManifest);

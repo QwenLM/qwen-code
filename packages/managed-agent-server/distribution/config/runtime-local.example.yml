@@ -1,0 +1,36 @@
+# Copy to config/application.yml and provide every referenced environment value.
+# Configure MySQL/schema and an authenticated Harness before starting this server.
+# These examples enable a backend; they do not provision remote infrastructure.
+spring:
+  datasource:
+    url: '${SPRING_DATASOURCE_URL}'
+    username: '${SPRING_DATASOURCE_USERNAME}'
+    password: '${SPRING_DATASOURCE_PASSWORD}'
+qwen:
+  managed-agent:
+    session-store:
+      enabled: true
+    harness:
+      enabled: true
+      base-url: '${QWEN_MANAGED_AGENT_HARNESS_BASE_URL}'
+      token: '${QWEN_MANAGED_AGENT_HARNESS_TOKEN}'
+      capability-digest: '${QWEN_MANAGED_AGENT_CAPABILITY_DIGEST}'
+      workspace-files-enabled: false
+      workspace-shell-enabled: false
+    runtime-broker:
+      enabled: true
+      token: '${QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN}'
+      workspace-id: '${QWEN_MANAGED_AGENT_WORKSPACE_ID}'
+      workspace-cwd: '${QWEN_MANAGED_AGENT_WORKSPACE_CWD}'
+      credential-key-id: '${QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID}'
+      credential-key: '${QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY}'
+      provisioner: local-process
+      isolation-class: session
+      trusted-local-reboot-recovery: false
+      verified-workspace-recovery-enabled: false
+      operator-recovery-enabled: false
+      session-create-warm: false
+      state-directory: '${QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY}'
+      node-executable: '${QWEN_MANAGED_AGENT_NODE_EXECUTABLE}'
+      worker-entry: '${QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY}'
+      durable-local-process: true
