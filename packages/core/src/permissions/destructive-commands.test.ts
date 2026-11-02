@@ -212,6 +212,12 @@ describe('isDestructiveCommand — git commit --amend', () => {
     // must see the amend behind data-producing openers (#13570 review).
     "cat <<'EOF' | bash\ngit commit --amend --no-edit\nEOF",
     "sudo bash <<'EOF'\ngit commit --amend --no-edit\nEOF",
+    // Bash runs substitutions inside double quotes; only single quotes
+    // suppress them, so each of these executes a real amend (#13570 review).
+    'echo "$(git commit --amend --no-edit)"',
+    'x="$(git commit --amend --no-edit)"',
+    'git commit -m "$(git commit --amend)"',
+    'echo "`git commit --amend --no-edit`"',
   ])('blocks amend through an execution wrapper: %s', (command) => {
     expectBlocked(command, 'amend the commit', 'amend');
   });

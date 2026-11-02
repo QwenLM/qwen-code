@@ -2434,8 +2434,18 @@ function extractCommandSubstitutionBodies(command: string): string[] {
       index += 2;
       continue;
     }
-    if (quote) {
-      if (char === quote) quote = null;
+    if (quote === '"') {
+      // Inside double quotes bash still runs substitutions, so `$( … )` and
+      // backticks must be extracted; only a single-quoted string suppresses
+      // them. Reparsing here rather than skipping keeps
+      // `echo "$(git commit --amend)"` blocked while `echo '$(…)'` stays inert.
+      if (char === '"') {
+        quote = null;
+        index++;
+        continue;
+      }
+    } else if (quote === "'") {
+      if (char === "'") quote = null;
       index++;
       continue;
     }
