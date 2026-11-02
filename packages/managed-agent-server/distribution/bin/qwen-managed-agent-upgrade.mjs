@@ -2594,7 +2594,7 @@ const PROBE_TIMEOUT_MS = 5000;
 /**
  * Whether the health endpoint reports UP, and what it answered when it does
  * not: its status, or why fetch failed, which fetch itself words only as
- * "fetch failed".
+ * "fetch failed"; and whether the probe ran out of its time.
  */
 async function health(system, url, budgetMs, capMs = PROBE_TIMEOUT_MS) {
   let response;
@@ -2608,6 +2608,8 @@ async function health(system, url, budgetMs, capMs = PROBE_TIMEOUT_MS) {
     return {
       up: false,
       answer: error.cause?.message || error.cause?.code || error.message,
+      // How fetch rejects once the timeout signal fires.
+      timedOut: error.name === 'TimeoutError',
     };
   }
   const status = `HTTP ${response.status}`;
@@ -2725,7 +2727,12 @@ async function phaseStart(system, deployment, options) {
         return false;
       }
       const probe = await health(system, urls.health, budget);
-      answer = probe.answer;
+      // A probe the deadline cut short, as it cuts the last one to 1 ms, can
+      // time out before any endpoint answers; it does not replace what an
+      // earlier probe was told. One that ran out of its own time can.
+      if (!(probe.timedOut && budget < PROBE_TIMEOUT_MS && answer)) {
+        answer = probe.answer;
+      }
       return probe.up ? true : undefined;
     },
   );

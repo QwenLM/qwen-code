@@ -267,6 +267,8 @@ test('refuses only the URLs fetch refuses', async () => {
     'is not a URL: a URL cannot carry an IPv6 zone',
   );
   assert.equal(fetchRefusal('http://127.0.0.1:70000'), 'is not a URL');
+  // A percent outside the brackets is no zone.
+  assert.equal(fetchRefusal('http://127.0.0.1:70000/%'), 'is not a URL');
   assert.equal(fetchRefusal('proxy.test:8443'), 'is not an http or https URL');
   for (const url of [
     'http://admin@127.0.0.1:8080',
@@ -648,8 +650,11 @@ async function rig(t, overrides = {}) {
       }
       const { pathname, search } = new URL(url);
       const response = host.responses[`${init.method ?? 'GET'} ${pathname}`];
+      // A function may answer later, and reject as fetch does.
       const body =
-        typeof response === 'function' ? response(search, init) : response;
+        typeof response === 'function'
+          ? await response(search, init)
+          : response;
       return {
         ok: body !== undefined,
         status: body === undefined ? 404 : 200,
@@ -1930,6 +1935,56 @@ test('a health probe that never answers ends at the timeout', async (t) => {
     /within 1s \(the last probe: The operation was aborted due to timeout\) and keeps running/,
   );
   assert.ok(host.requests.every(({ init }) => init.signal));
+});
+
+test('start names what the endpoint answered, not a probe the deadline cut short', async (t) => {
+  const { host, target } = await backedUp(t);
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  // An endpoint that takes 50 ms to answer, on the real clock: the last
+  // probe, which the deadline leaves 1 ms, times out before it does.
+  const timedOut = [];
+  host.requests = [];
+  host.responses['GET /actuator/health'] = (search, { signal }) =>
+    new Promise((resolve, reject) => {
+      const abort = () => {
+        clearTimeout(answer);
+        timedOut.push(host.requests.length);
+        reject(signal.reason);
+      };
+      const answer = setTimeout(() => {
+        signal.removeEventListener('abort', abort);
+        resolve({ status: 'DOWN' });
+      }, 50);
+      signal.addEventListener('abort', abort);
+    });
+  assert.equal(await host.upgrade('start', '--timeout', '3'), 1);
+  assert.equal(host.requests.length, 4);
+  assert.deepEqual(timedOut, [4]);
+  assert.match(
+    host.output.at(-1),
+    /within 3s \(the last probe: HTTP 200, status DOWN\) and keeps running/,
+  );
+
+  // One that answered and then stopped: a probe that runs out of its own
+  // 5 s, not the deadline's, says so.
+  assert.equal(await host.upgrade('stop'), 0);
+  host.requests = [];
+  host.responses['GET /actuator/health'] = async () => {
+    if (host.requests.length === 1) {
+      return { status: 'DOWN' };
+    }
+    host.clock += 5;
+    throw new DOMException(
+      'The operation was aborted due to timeout',
+      'TimeoutError',
+    );
+  };
+  assert.equal(await host.upgrade('start', '--timeout', '6'), 1);
+  assert.equal(host.requests.length, 2);
+  assert.match(
+    host.output.at(-1),
+    /within 6s \(the last probe: The operation was aborted due to timeout\) and keeps running/,
+  );
 });
 
 test('verify says what the health endpoint answered instead of UP', async (t) => {
