@@ -270,12 +270,13 @@ describe('linter directories', () => {
         const executable = path.join(root, 'job', 'tool');
         const fixture = path.join(root, 'official.tar');
         const curlLog = path.join(root, 'curl.log');
+        const curlAttemptFile = path.join(root, 'curl-attempt');
         mkdirSync(binDir, { recursive: true });
         mkdirSync(path.dirname(localArchive), { recursive: true });
         writeFileSync(fixture, 'official archive');
         writeFileSync(
           path.join(binDir, 'curl'),
-          '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CURL_LOG"\nresume=0\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = "--continue-at" ]; then resume=1; shift 2; continue; fi\n  if [ "$1" = "-o" ]; then out="$2"; shift 2; continue; fi\n  shift\ndone\nif [ "$resume" = "0" ]; then\n  printf "offic" > "$out"\n  exit 28\nfi\nprintf "ial archive" >> "$out"\n',
+          `#!/bin/sh\nattempt=$(cat "${curlAttemptFile}" 2>/dev/null || echo 0)\nattempt=$((attempt + 1))\necho "$attempt" > "${curlAttemptFile}"\nprintf "%s\\n" "$*" >> "$CURL_LOG"\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = "-o" ]; then out="$2"; shift 2; continue; fi\n  shift\ndone\nif [ "$attempt" -eq 1 ]; then\n  printf "offic" > "$out"\n  exit 28\nfi\nprintf "ial archive" >> "$out"\n`,
         );
         writeFileSync(path.join(binDir, 'sleep'), '#!/bin/sh\nexit 0\n');
         chmodSync(path.join(binDir, 'curl'), 0o755);
@@ -304,8 +305,129 @@ describe('linter directories', () => {
         expect(readFileSync(executable, 'utf8')).toBe('official archive');
         const attempts = readFileSync(curlLog, 'utf8').trim().split('\n');
         expect(attempts).toHaveLength(2);
-        expect(attempts[0]).not.toContain('--continue-at');
+        expect(attempts[0]).toContain('--continue-at -');
         expect(attempts[1]).toContain('--continue-at -');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    15_000,
+  );
+
+  // curl resolves `--continue-at -` against a missing file to offset 0 and
+  // sends no Range header, so the resume flag cannot corrupt attempt 1 on its
+  // own. What does need pinning is the 33/36 branch: a mirror that answers a
+  // ranged request with 200 leaves a complete body behind the old partial, so
+  // without the rm -f the next attempt appends a second full body and the
+  // SHA-256 pin fails. Deleting that rm -f left the suite green before this
+  // test existed.
+  it.skipIf(process.platform === 'win32')(
+    'drops the partial archive when a mirror answers a ranged request with 200',
+    async () => {
+      const { getCachedArchiveInstaller } = await import('../lint.js');
+      const root = mkdtempSync(path.join(tmpdir(), 'linter-range-refusal-'));
+
+      try {
+        const binDir = path.join(root, 'bin');
+        const cacheArchive = path.join(root, 'cache', 'tool.tar');
+        const localArchive = path.join(root, 'job', 'tool.tar');
+        const executable = path.join(root, 'job', 'tool');
+        const fixture = path.join(root, 'official.tar');
+        const attemptFile = path.join(root, 'attempt');
+        mkdirSync(binDir, { recursive: true });
+        mkdirSync(path.dirname(localArchive), { recursive: true });
+        writeFileSync(fixture, 'official archive');
+        // Attempt 1 leaves a partial behind and reports a range refusal (33);
+        // every later attempt answers with 200 and appends the whole body.
+        writeFileSync(
+          path.join(binDir, 'curl'),
+          `#!/bin/sh\nattempt=$(cat "${attemptFile}" 2>/dev/null || echo 0)\nattempt=$((attempt + 1))\necho "$attempt" > "${attemptFile}"\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = "-o" ]; then out="$2"; shift 2; continue; fi\n  shift\ndone\nif [ "$attempt" -eq 1 ]; then\n  printf "offic" > "$out"\n  exit 33\nfi\nprintf "official archive" >> "$out"\n`,
+        );
+        writeFileSync(path.join(binDir, 'sleep'), '#!/bin/sh\nexit 0\n');
+        chmodSync(path.join(binDir, 'curl'), 0o755);
+        chmodSync(path.join(binDir, 'sleep'), 0o755);
+
+        const installer = getCachedArchiveInstaller({
+          cacheArchive,
+          localArchive,
+          expectedSha256: createHash('sha256')
+            .update(readFileSync(fixture))
+            .digest('hex'),
+          downloadUrl: 'https://example.invalid/tool.tar',
+          archiveCheck: 'true',
+          extract: `cp "${localArchive}" "${executable}" && chmod +x "${executable}"`,
+          executable,
+        });
+
+        execSync(installer, {
+          env: {
+            ...process.env,
+            PATH: `${binDir}:${process.env.PATH}`,
+          },
+        });
+
+        expect(readFileSync(executable, 'utf8')).toBe('official archive');
+        expect(readFileSync(attemptFile, 'utf8').trim()).toBe('2');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    15_000,
+  );
+
+  // Raising the attempt cap from 3 to 99 also left the suite green, so the
+  // loop's only exit was unpinned: a permanent failure would retry until the
+  // CI step timed out instead of failing with curl's own status.
+  it.skipIf(process.platform === 'win32')(
+    'stops after the attempt cap and exits with the last curl status',
+    async () => {
+      const { getCachedArchiveInstaller } = await import('../lint.js');
+      const root = mkdtempSync(path.join(tmpdir(), 'linter-attempt-cap-'));
+
+      try {
+        const binDir = path.join(root, 'bin');
+        const cacheArchive = path.join(root, 'cache', 'tool.tar');
+        const localArchive = path.join(root, 'job', 'tool.tar');
+        const executable = path.join(root, 'job', 'tool');
+        const curlLog = path.join(root, 'curl.log');
+        mkdirSync(binDir, { recursive: true });
+        mkdirSync(path.dirname(localArchive), { recursive: true });
+        writeFileSync(
+          path.join(binDir, 'curl'),
+          '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CURL_LOG"\nexit 7\n',
+        );
+        writeFileSync(path.join(binDir, 'sleep'), '#!/bin/sh\nexit 0\n');
+        chmodSync(path.join(binDir, 'curl'), 0o755);
+        chmodSync(path.join(binDir, 'sleep'), 0o755);
+
+        const installer = getCachedArchiveInstaller({
+          cacheArchive,
+          localArchive,
+          expectedSha256: 'a'.repeat(64),
+          downloadUrl: 'https://example.invalid/tool.tar',
+          archiveCheck: 'true',
+          extract: 'true',
+          executable,
+        });
+
+        let status;
+        try {
+          execSync(installer, {
+            env: {
+              ...process.env,
+              PATH: `${binDir}:${process.env.PATH}`,
+              CURL_LOG: curlLog,
+            },
+            stdio: 'ignore',
+          });
+        } catch (error) {
+          status = error.status;
+        }
+
+        expect(status).toBe(7);
+        expect(readFileSync(curlLog, 'utf8').trim().split('\n')).toHaveLength(
+          3,
+        );
       } finally {
         rmSync(root, { recursive: true, force: true });
       }

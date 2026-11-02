@@ -107,16 +107,17 @@ export function getCachedArchiveInstaller({
         || ! verify_sha256 "${localArchive}" "${expectedSha256}"; then
         rm -f "${localArchive}"
         download_attempt=1
-        download_max_attempts=5
+        download_max_attempts=3
         # curl --retry discards partial output before retrying, so keep our own
-        # loop and let each retry resume at the bytes already received. The
-        # first request must not resume: the stale copy was just removed, so a
-        # resumed request would append the tail to an empty file.
+        # loop and let each attempt resume at the bytes already received. The
+        # rm -f above leaves no file, so attempt 1 starts at offset 0 and sends
+        # no Range header; the 33/36 branch below drops a partial file so a
+        # mirror answering a Range request with 200 can still recover on the
+        # next attempt. Three attempts at --max-time 90 plus this loop's backoff
+        # is 285s, which keeps a stalled host failing inside the 5-minute step
+        # that runs this installer instead of being cut off mid-loop.
         while :; do
-          set -- -fsSL --connect-timeout 10 --max-time 90
-          if [ "$download_attempt" -gt 1 ]; then
-            set -- "$@" --continue-at -
-          fi
+          set -- -fsSL --connect-timeout 10 --max-time 90 --continue-at -
           if curl "$@" -o "${localArchive}" "${downloadUrl}"; then
             break
           else
