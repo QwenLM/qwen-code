@@ -196,8 +196,8 @@ images land; both defaults, and their `$QWEN_VERIFY_ASSETS_*` overrides, are
 resolved in the local publish rule below. Only coordinates like these are
 defaultable — posting stays a per-invocation request, because it writes to
 the PR. The one exception: a follow-up round in the same session inherits
-the session's current publish consent for the same PR — granted by a
-`--publish` invocation and kept by bare triggers until a round withdraws
+the session's current publish consent for the same PR — granted by an
+explicit publish request and kept by bare triggers until a round withdraws
 it (see **Manual re-verification** below).
 `--repo <owner>/<repo>` is still resolved as below: the flag does not license
 an `origin` fallback, but a maintainer checkout whose `origin` already is the
@@ -361,17 +361,19 @@ ambiguous rather than verify a guessed PR. Then, in order:
    finding at `H`.
 5. Inherit the previous round's coordinates (`--repo`, assets repo/branch)
    instead of asking again. Publish consent is a per-PR state of this
-   session that the trigger inherits: a round invoked with `--publish`
-   grants it; a fresh `/verify-pr` round invoked without `--publish`, or
-   a trigger carrying `--no-publish`, withdraws it; a bare trigger keeps
-   it unchanged, so consecutive bare triggers keep publishing under the
-   original grant until a round withdraws it. Watch rounds run under
-   their own standing consent and never change this state. While
-   consent is granted, publish under it and say so in one line before
-   posting, naming the round that granted it. Without that consent,
-   publishing stays a per-invocation request: the phrase alone does not
-   post a comment, and a published comment found on the PR is evidence of
-   a past round, not consent for this one.
+   session that the trigger inherits: a round invoked with an explicit
+   publish request — the `--publish` flag or the request in words —
+   grants it; a fresh `/verify-pr` round invoked without a publish
+   request, or a trigger carrying `--no-publish`, withdraws it; a bare
+   trigger keeps it unchanged, so consecutive bare triggers keep
+   publishing under the original grant until a round withdraws it.
+   Watch rounds run under their own standing consent and never change
+   this state. While consent is granted, publish under it and say so in
+   one line before posting, naming the round that granted it; the same
+   line goes into the comment body before the attribution footer.
+   Without that consent, publishing stays a per-invocation request: the
+   phrase alone does not post a comment, and a published comment found
+   on the PR is evidence of a past round, not consent for this one.
 
 To make this trigger automatic instead of typed, install `--watch` (above);
 the two share that head-dedup file.
@@ -381,7 +383,7 @@ post" yields when the maintainer running the local round explicitly asks
 for a PR comment; `--publish` in the invocation is that request, and needs
 nothing restated. A follow-up round inherits that request only as **Manual
 re-verification** defines: the session's standing consent for the same PR,
-granted by a `--publish` invocation and announced before posting. Publish
+granted by an explicit publish request and announced before posting. Publish
 onto an assets branch whose raw.githubusercontent.com URLs render inline,
 and resolve both coordinates instead of asking: the repository is
 `--assets-repo`, else `$QWEN_VERIFY_ASSETS_REPO`, else the resolved
@@ -409,8 +411,10 @@ JSON payload — `-f content="$(base64 …)"` blows past ARG_MAX around 100 KB.
 Keep the report.md contract in the comment body: verdict line first — a
 plain paragraph, never a `#` heading, which renders the whole verdict as
 one giant H1 — collapsed `<details>` Chinese summary immediately after,
-images referenced by the same kebab-case names the files carry. End the
-comment with the attribution footer, the same shape `/review` posts:
+images referenced by the same kebab-case names the files carry. A round
+publishing under inherited consent places its one-line announcement
+immediately before the footer. End the comment with the attribution footer,
+the same shape `/review` posts:
 
 ```text
 _— <model> via Qwen Code /verify-pr (v<cli-version>; skill <skill-hash>)_

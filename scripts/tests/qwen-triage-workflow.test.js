@@ -5464,10 +5464,10 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       "a follow-up round in the same session inherits the session's current publish consent",
     );
-    // Consent is granted by a --publish invocation and kept by bare
-    // triggers until a round withdraws it.
+    // Consent is granted by an explicit publish request (flag or words)
+    // and kept by bare triggers until a round withdraws it.
     expect(flat).toContain(
-      'granted by a `--publish` invocation and kept by bare triggers',
+      'granted by an explicit publish request and kept by bare triggers',
     );
     expect(flat).toContain('A follow-up round inherits that request only');
     // The Hard rules bullet must recognize the inherited request too, or
@@ -5547,28 +5547,49 @@ describe('qwen-triage verify hardening round 2', () => {
       flat.indexOf('Register the round in the shared watch state'),
     ).toBeLessThan(flat.indexOf('Run the follow-up protocol above'));
     // Publishing consent is a per-PR session state: R1 `/verify-pr <n>
-    // --publish` grants it, and the bare triggers R2 and R3 both publish
-    // under that original grant — an inherited round must not drop the
-    // chain just because its own invocation lacked the flag. Only a
-    // quiet round or --no-publish withdraws it; the phrase itself grants
-    // nothing, and neither does a published comment found on the PR.
+    // --publish` (or the request in words) grants it, and the bare
+    // triggers R2 and R3 both publish under that original grant — an
+    // inherited round must not drop the chain just because its own
+    // invocation lacked the flag. Only a quiet round or --no-publish
+    // withdraws it; the phrase itself grants nothing, and neither does a
+    // published comment found on the PR.
     expect(flat).toContain('the phrase alone does not post a comment');
     expect(flat).toContain('Publish consent is a per-PR state of this session');
-    expect(flat).toContain('a round invoked with `--publish` grants it');
+    // The grant rides on the explicit request, flag or words alike, so a
+    // words-request round seeds the same consent (review R1-2).
+    expect(flat).toContain('a round invoked with an explicit publish request');
     expect(flat).toContain(
-      'a fresh `/verify-pr` round invoked without `--publish`',
+      'the `--publish` flag or the request in words — grants it',
     );
-    expect(flat).toContain('carrying `--no-publish`, withdraws it');
-    expect(flat).toContain('a bare trigger keeps it unchanged');
+    // One contiguous withdrawal sentence: splitting it so a fresh round
+    // keeps consent must fail (deep-verification M06).
     expect(flat).toContain(
-      'consecutive bare triggers keep publishing under the original grant',
+      'a fresh `/verify-pr` round invoked without a publish request, or a trigger carrying `--no-publish`, withdraws it',
+    );
+    expect(flat).toContain('a bare trigger keeps it unchanged');
+    // The chain's upper bound is pinned too (deep-verification M15).
+    expect(flat).toContain(
+      'consecutive bare triggers keep publishing under the original grant until a round withdraws it',
     );
     // Watch consent stays in its own domain: a watch fire neither grants
     // nor withdraws the manual chain.
     expect(flat).toContain(
       'Watch rounds run under their own standing consent and never change this state',
     );
+    // The announcement names its grant (M08) and leaves a trace in the
+    // published comment, not only in the session (S4).
     expect(flat).toContain('say so in one line before posting');
+    expect(flat).toContain('naming the round that granted it');
+    expect(flat).toContain(
+      'the same line goes into the comment body before the attribution footer',
+    );
+    expect(flat).toContain(
+      'places its one-line announcement immediately before the footer',
+    );
+    // A published comment is history, not consent (S2).
+    expect(flat).toContain(
+      'a published comment found on the PR is evidence of a past round',
+    );
     expect(flat).toContain('not consent for this one');
   });
 
