@@ -257,9 +257,11 @@ function openSessionMenu(displayName: string): HTMLElement {
   return item!;
 }
 
-async function expandRecentSessions(): Promise<void> {
+async function expandStandaloneSessions(): Promise<void> {
+  // Standalone sessions render in their own "No-workspace sessions" section,
+  // not the workspace "Recent sessions" section.
   const section = document.querySelector(
-    'section[aria-label="Recent sessions"]',
+    'section[aria-label="No-workspace sessions"]',
   );
   expect(section).not.toBeNull();
   const toggle = section!.querySelector<HTMLButtonElement>(
@@ -277,6 +279,21 @@ async function expandRecentSessions(): Promise<void> {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
   });
+}
+
+function confirmArchiveButton(): HTMLButtonElement {
+  const dialog = document.querySelector<HTMLElement>('[data-web-shell-dialog]');
+  expect(dialog).not.toBeNull();
+  const buttons = Array.from(
+    dialog!.querySelectorAll<HTMLButtonElement>('button'),
+  );
+  // The confirm button is the one labelled "Archive" (the cancel is "Cancel",
+  // and the dialog title is a heading, not a button).
+  const confirm = buttons.find(
+    (button) => button.textContent?.trim() === 'Archive',
+  );
+  expect(confirm).toBeDefined();
+  return confirm!;
 }
 
 beforeEach(() => {
@@ -354,12 +371,117 @@ describe('WebShellSidebar current-session archive (issue #15480)', () => {
       click(archiveItem);
     });
 
+    // Archiving the session the tab is attached to leaves the current
+    // conversation, so it asks for confirmation before archiving (#15480).
+    expect(document.body.textContent).toContain(
+      'Archive "Current session" and leave this conversation',
+    );
+    expect(active.archiveSession).not.toHaveBeenCalled();
+
+    await act(async () => {
+      click(confirmArchiveButton());
+    });
+
     expect(active.archiveSession).toHaveBeenCalledWith('session-current', {
       requireIdle: true,
     });
     // The row is the attached one, so the sidebar reports the id it captured
     // before the request: the daemon's terminal `session_closed` frame clears
     // the attachment before the archive resolves (#15480).
+    expect(onSessionsDeleted).toHaveBeenCalledWith(['session-current'], {
+      attachedSessionId: 'session-current',
+    });
+  });
+
+  it('does not archive the current session when the confirmation is dismissed', async () => {
+    active.sessions = [
+      makeSession('session-current', { displayName: 'Current session' }),
+    ];
+    active.data = active.sessions;
+    connection.sessionId = 'session-current';
+    const onSessionsDeleted = vi.fn();
+
+    renderSidebar({ onSessionsDeleted });
+    await flushSidebar();
+
+    const archiveItem = openSessionMenu('Current session');
+    await act(async () => {
+      click(archiveItem);
+    });
+    expect(document.body.textContent).toContain(
+      'Archive "Current session" and leave this conversation',
+    );
+
+    // Dismiss via the cancel button; nothing should be archived or landed.
+    const dialog = document.querySelector<HTMLElement>(
+      '[data-web-shell-dialog]',
+    );
+    const cancel = Array.from(
+      dialog!.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.trim() === 'cancel');
+    expect(cancel).toBeDefined();
+    await act(async () => {
+      click(cancel!);
+    });
+
+    expect(active.archiveSession).not.toHaveBeenCalled();
+    expect(onSessionsDeleted).not.toHaveBeenCalled();
+  });
+
+  it('does not land the attached tab when the archive reports no success', async () => {
+    // `archiveSession` resolves `false` when the daemon archived nothing and
+    // alreadyArchived nothing. The landing must not fire in that case, or the
+    // tab is stranded on a conversation that did not actually archive (#15480).
+    active.archiveSession.mockResolvedValue(false);
+    active.sessions = [
+      makeSession('session-current', { displayName: 'Current session' }),
+    ];
+    active.data = active.sessions;
+    connection.sessionId = 'session-current';
+    const onSessionsDeleted = vi.fn();
+
+    renderSidebar({ onSessionsDeleted });
+    await flushSidebar();
+
+    const archiveItem = openSessionMenu('Current session');
+    await act(async () => {
+      click(archiveItem);
+    });
+    await act(async () => {
+      click(confirmArchiveButton());
+    });
+
+    expect(active.archiveSession).toHaveBeenCalledWith('session-current', {
+      requireIdle: true,
+    });
+    expect(onSessionsDeleted).not.toHaveBeenCalled();
+  });
+
+  it('archives the current session and lands when the daemon reports alreadyArchived', async () => {
+    // `archiveSession` resolves `true` for both a fresh archive and an
+    // already-archived session; either way the attached tab should land.
+    active.archiveSession.mockResolvedValue(true);
+    active.sessions = [
+      makeSession('session-current', { displayName: 'Current session' }),
+    ];
+    active.data = active.sessions;
+    connection.sessionId = 'session-current';
+    const onSessionsDeleted = vi.fn();
+
+    renderSidebar({ onSessionsDeleted });
+    await flushSidebar();
+
+    const archiveItem = openSessionMenu('Current session');
+    await act(async () => {
+      click(archiveItem);
+    });
+    await act(async () => {
+      click(confirmArchiveButton());
+    });
+
+    expect(active.archiveSession).toHaveBeenCalledWith('session-current', {
+      requireIdle: true,
+    });
     expect(onSessionsDeleted).toHaveBeenCalledWith(['session-current'], {
       attachedSessionId: 'session-current',
     });
@@ -444,7 +566,7 @@ describe('WebShellSidebar current-session archive (issue #15480)', () => {
     const onSessionsDeleted = vi.fn();
 
     renderSidebar({ onSessionsDeleted });
-    await expandRecentSessions();
+    await expandStandaloneSessions();
 
     const row = sessionRow('Standalone', 'button[aria-label="Archive"]');
     const archiveButton = row.querySelector<HTMLButtonElement>(
@@ -481,7 +603,7 @@ describe('WebShellSidebar current-session archive (issue #15480)', () => {
     const onSessionsDeleted = vi.fn();
 
     renderSidebar({ onSessionsDeleted });
-    await expandRecentSessions();
+    await expandStandaloneSessions();
 
     const row = sessionRow('Other standalone', 'button[aria-label="Archive"]');
     const archiveButton = row.querySelector<HTMLButtonElement>(
