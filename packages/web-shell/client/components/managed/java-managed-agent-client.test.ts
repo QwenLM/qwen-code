@@ -1224,6 +1224,7 @@ describe('JavaManagedAgentClient', () => {
             error: {
               code: 'agent_api_idempotency_conflict',
               message: 'conflict',
+              request_id: 'request-409',
             },
           },
           409,
@@ -1243,6 +1244,7 @@ describe('JavaManagedAgentClient', () => {
         status: 409,
         code: 'agent_api_idempotency_conflict',
         message: 'conflict',
+        requestId: 'request-409',
       }),
     );
   });
@@ -1396,7 +1398,10 @@ describe('JavaManagedAgentClient', () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
       new Response('<html>bad gateway</html>', {
         status: 502,
-        headers: { 'content-type': 'text/html' },
+        headers: {
+          'content-type': 'text/html',
+          'x-request-id': 'gateway-request-502',
+        },
       }),
     );
     const client = new JavaManagedAgentClient({
@@ -1409,6 +1414,7 @@ describe('JavaManagedAgentClient', () => {
       expect.objectContaining<Partial<JavaManagedAgentHttpError>>({
         status: 502,
         code: 'http_502',
+        requestId: 'gateway-request-502',
       }),
     );
   });

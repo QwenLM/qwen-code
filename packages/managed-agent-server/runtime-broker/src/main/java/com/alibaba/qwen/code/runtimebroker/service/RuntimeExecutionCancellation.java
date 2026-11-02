@@ -21,7 +21,6 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.BiConsumer;
 
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.MAX_CAS_ATTEMPTS;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.conflict;
@@ -38,7 +37,7 @@ final class RuntimeExecutionCancellation {
     private final RuntimeExecutionState executionState;
     private final ToolExecutionRepository executionRepository;
     private final RuntimeTransport transport;
-    private final Set<String> invocations;
+    private final RuntimeExecutionDispatcher dispatcher;
     private final ScheduledExecutorService scheduler;
     private final Duration operationLeaseDuration;
     private final AtomicBoolean closed;
@@ -47,7 +46,7 @@ final class RuntimeExecutionCancellation {
             RuntimeExecutionState executionState,
             ToolExecutionRepository executionRepository,
             RuntimeTransport transport,
-            Set<String> invocations,
+            RuntimeExecutionDispatcher dispatcher,
             ScheduledExecutorService scheduler,
             Duration operationLeaseDuration,
             AtomicBoolean closed) {
@@ -55,7 +54,7 @@ final class RuntimeExecutionCancellation {
         this.executionState = executionState;
         this.executionRepository = executionRepository;
         this.transport = transport;
-        this.invocations = invocations;
+        this.dispatcher = dispatcher;
         this.scheduler = scheduler;
         this.operationLeaseDuration = operationLeaseDuration;
         this.closed = closed;
@@ -67,7 +66,7 @@ final class RuntimeExecutionCancellation {
 
     CompletionStage<ToolExecutionRecord> cancelExecution(
             String harnessSessionId, String runtimeSessionId,
-            String executionCallId, BiConsumer<SessionContext, ToolExecutionRecord> dispatch) {
+            String executionCallId) {
         requireOpen(closed);
         String executionId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
@@ -141,7 +140,7 @@ final class RuntimeExecutionCancellation {
                             if (requested.isTerminal()
                                     || (requested.getState()
                                             == ToolExecutionRecord.State.UNKNOWN
-                                            && !invocations.contains(
+                                            && !dispatcher.isInvoking(
                                                     executionId)
                                             && !publicationV3
                                             && !requested.observableAfterLoss())) {
@@ -153,7 +152,7 @@ final class RuntimeExecutionCancellation {
                         }
                         if (requested.getState()
                                 == ToolExecutionRecord.State.DISPATCHING) {
-                            dispatch.accept(context, requested);
+                            dispatcher.beginDispatch(context, requested);
                             ToolExecutionRecord latest = executionRepository
                                     .findByExecutionCallId(executionId);
                             return CompletableFuture.completedFuture(
@@ -162,7 +161,7 @@ final class RuntimeExecutionCancellation {
                         if (requested.getState()
                                         == ToolExecutionRecord.State
                                                 .CANCEL_REQUESTED
-                                && !invocations.contains(executionId)) {
+                                && !dispatcher.isInvoking(executionId)) {
                             // Fence a lapsed claim nothing here is running. A
                             // claim the repository still holds live falls
                             // through to the physical cancel, as does an

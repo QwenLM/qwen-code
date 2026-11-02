@@ -2,11 +2,16 @@ package com.alibaba.qwen.code.runtimebroker.service;
 
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.StoreFailureException;
+import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 
+import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -202,5 +207,35 @@ final class RuntimeBrokerSupport {
         if (closed.get()) {
             throw new IllegalStateException("Runtime Broker is closed");
         }
+    }
+
+    static Map<String, Object> sshNoStartReceipt(RuntimeBindingRecord binding, ToolExecutionRecord execution) {
+        if (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind())
+                || !execution.isSettled() || !"not_started".equals(execution.getExecutionStatus())
+                || execution.getResult() == null || !execution.getResult().containsKey("capture")
+                || execution.getResult().get("capture") != null
+                || !(Integer.valueOf(3).equals(execution.getReference().get("runtimeProtocol"))
+                        || "deferred_v3".equals(execution.getReference().get("dispatchMode")))
+                || ProviderRuntimeProtocol.isReference(execution.getReference())) {
+            return null;
+        }
+        Map<String, Object> receipt = new LinkedHashMap<>();
+        receipt.put("executionCallId", execution.getExecutionCallId());
+        receipt.put("manifest", null);
+        receipt.put("deliveryStatus", "committed");
+        receipt.put("historyRevision", null);
+        return BrokerValues.immutableMap(receipt);
+    }
+
+    /** The detached capture family: success with a manifest-less capture. */
+    static boolean isDetachedCapture(Map<?, ?> result) {
+        return result != null && "success".equals(result.get("executionStatus"))
+                && result.get("capture") instanceof Map<?, ?> capture
+                && "detached".equals(capture.get("captureStatus"))
+                && capture.get("manifest") == null;
+    }
+
+    static long renewalDelayMillis(Duration duration) {
+        return Math.max(1, duration.toMillis() / 3);
     }
 }

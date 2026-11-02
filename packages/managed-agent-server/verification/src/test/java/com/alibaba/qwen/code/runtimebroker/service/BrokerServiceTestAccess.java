@@ -58,6 +58,6 @@ public final class BrokerServiceTestAccess {
                 new RuntimeBindingRegistry.SessionContext(session, binding, lease)));
     }
 
-    public static long pollDelay(int attempt) { return RuntimeBrokerService.v3PollDelayMillis(attempt); }
+    public static long pollDelay(int attempt) { return RuntimeExecutionDispatcher.v3PollDelayMillis(attempt); }
     public static final java.time.Duration UNKNOWN_LOOKUP_COOLDOWN = ExecutionObservationCooldown.WINDOW;
 }
