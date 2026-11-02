@@ -5215,6 +5215,30 @@ describe('createServeApp', () => {
       expect(res.status).toBe(403);
       expect(res.body).toEqual({ error: 'Invalid Host header' });
     });
+
+    it('admits a loopback Host whose port is a forwarded one (#12059)', async () => {
+      // A VS Code / Cursor remote window forwards the daemon through a
+      // client-side port of its own choosing, and the webview's browser then
+      // sends that port in the Host header. Matching the port turned every
+      // such request into a pre-auth 403, which no token could clear.
+      const app = createServeApp(baseOpts);
+      const res = await request(app)
+        .get('/health')
+        .set('Host', `127.0.0.1:${baseOpts.port + 1}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ status: 'ok' });
+    });
+
+    it('still rejects a rebinding Host that carries the bound port', async () => {
+      // The hostname is the whole defense: the attacker knowing the port must
+      // not buy anything.
+      const app = createServeApp(baseOpts);
+      const res = await request(app)
+        .get('/health')
+        .set('Host', `evil.example:${baseOpts.port}`);
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: 'Invalid Host header' });
+    });
   });
 
   describe('GET /workspace/channel/observed-contacts', () => {
@@ -14045,17 +14069,18 @@ describe('createServeApp', () => {
       expect(res.status).toBe(403);
     });
 
-    it.each([
-      [80, 200],
-      [443, 200],
-      [4170, 403],
-    ])(
-      'handles the port-less bound loopback Host on port %i with status %i',
-      async (port, expectedStatus) => {
+    // The port-less form used to be accepted only on the scheme-default
+    // ports (RFC 7230 §5.4), because the gate compared whole `<host>:<port>`
+    // authorities. It now matches the Host name alone, so the bound loopback
+    // address passes whatever port the listener ended up on — 4170, a 403
+    // before #12059, is the shape a port-forwarding hop produces.
+    it.each([80, 443, 4170])(
+      'accepts the port-less bound loopback Host on port %i',
+      async (port) => {
         const opts = { ...baseOpts, hostname: '127.0.0.2', port };
         const app = createServeApp(opts, () => port);
         const res = await request(app).get('/health').set('Host', '127.0.0.2');
-        expect(res.status).toBe(expectedStatus);
+        expect(res.status).toBe(200);
       },
     );
   });

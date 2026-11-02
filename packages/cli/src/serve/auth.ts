@@ -5,7 +5,10 @@
  */
 
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
-import { formatHostForAuthority, isLoopbackBind } from './loopback-binds.js';
+import {
+  hostHeaderMatchesLoopbackBind,
+  isLoopbackBind,
+} from './loopback-binds.js';
 import {
   singleTokenCredentials,
   type ListenerScopedCredentials,
@@ -408,15 +411,14 @@ export function allowOriginCors(
  * Reject requests whose Host header isn't one of the bound interfaces.
  * Defense against DNS rebinding when the daemon is on loopback.
  *
- * `bind` is the hostname the listener was started with. `getPort` is read
- * lazily on each request because callers commonly request port 0 (ephemeral)
- * and only learn the actual port once `listen()` has resolved.
+ * `bind` is the hostname the listener was started with. The primary gate
+ * matches on the Host *name* only — see `hostHeaderMatchesLoopbackBind` — so
+ * it no longer needs to know which port the listener ended up on, and a
+ * client reaching the daemon through a port-forwarding hop is no longer
+ * rejected before it can present its token.
  */
-export function hostAllowlist(
-  bind: string,
-  getPort: () => number,
-): RequestHandler {
-  const primaryGate = buildPrimaryHostGate(bind, getPort);
+export function hostAllowlist(bind: string): RequestHandler {
+  const primaryGate = buildPrimaryHostGate(bind);
   return (req: Request, res: Response, next: NextFunction) => {
     const listener = listenerIdentityOf(req);
     if (listener.kind !== 'local-control') {
@@ -448,58 +450,24 @@ export function hostAllowlist(
   };
 }
 
-function buildPrimaryHostGate(
-  bind: string,
-  getPort: () => number,
-): RequestHandler {
+function buildPrimaryHostGate(bind: string): RequestHandler {
   if (!isLoopbackBind(bind)) {
     // For non-loopback binds the operator chose the surface area; trust the
     // bearer token gate to cover Host header spoofing.
     return (_req: Request, _res: Response, next: NextFunction) => next();
   }
-  // Cache the allowed-Host Set per port. `getPort()` is invoked
-  // lazily because tests bind to ephemeral port 0 — the actual port
-  // is only known after `listen()` resolves and tests can call
-  // through with a placeholder port that flips later. SSE
-  // heartbeats and high-frequency probes go through this middleware,
-  // so allocating a fresh Set + 4 interpolated strings per request
-  // is wasted work. Rebuild only when the port changes.
-  let cachedPort = -1;
-  let cachedAllowed: Set<string> = new Set();
-  const boundHost = formatHostForAuthority(bind);
-  const allowedFor = (port: number): Set<string> => {
-    if (port === cachedPort) return cachedAllowed;
-    cachedPort = port;
-    cachedAllowed = new Set([
-      `localhost:${port}`,
-      `127.0.0.1:${port}`,
-      `[::1]:${port}`,
-      `host.docker.internal:${port}`,
-      `${boundHost}:${port}`,
-    ]);
-    // RFC 7230 §5.4: clients may omit the port suffix when it matches
-    // the URI scheme's default. http → 80, https → 443. Accept the
-    // no-port forms when we're listening on either default port
-    // (uncommon but valid for an operator who points at a privileged
-    // port for clean URLs, or who enables TLS on 443).
-    if (port === 80 || port === 443) {
-      cachedAllowed.add('localhost');
-      cachedAllowed.add('127.0.0.1');
-      cachedAllowed.add('[::1]');
-      cachedAllowed.add('host.docker.internal');
-      cachedAllowed.add(boundHost);
-    }
-    return cachedAllowed;
-  };
   return (req: Request, res: Response, next: NextFunction) => {
-    const port = getPort();
-    // Per RFC 7230 §5.4, Host is case-insensitive. Express normalizes
-    // header *names* to lowercase but NOT values, so a Docker-proxy
-    // that capitalizes the hostname (`Host: Localhost:4170`) or a
-    // platform with case-preserving DNS (`HOST.docker.internal`) would
-    // get 403 with an exact-string compare. Lowercase both sides.
-    const host = (req.headers.host || '').toLowerCase();
-    if (!allowedFor(port).has(host)) {
+    // `hostHeaderMatchesLoopbackBind` lowercases the Host value itself. Per
+    // RFC 7230 §5.4 Host is case-insensitive, and Express normalizes header
+    // *names* to lowercase but NOT values, so a Docker proxy that capitalizes
+    // the hostname (`Host: Localhost:4170`) or a platform with case-preserving
+    // DNS (`HOST.docker.internal`) must not get a 403.
+    //
+    // It also ignores the port, which is what lets a forwarded client-side
+    // port through; see that function for why the port is not part of the
+    // defense. The no-port forms RFC 7230 §5.4 allows on the scheme's default
+    // port (http→80, https→443) fall out of the same rule.
+    if (!hostHeaderMatchesLoopbackBind(req.headers.host ?? '', bind)) {
       markPreAuthReject(res);
       res.status(403).json({ error: 'Invalid Host header' });
       return;
