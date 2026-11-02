@@ -2704,10 +2704,20 @@ export const ChatEditor = memo(
         Boolean(gitContextControl));
 
     useLayoutEffect(() => {
-      if (currentModelLabel && currentModelLabel !== lastConfirmedModelLabel) {
+      if (!currentModel && availableModels.length === 0) {
+        setLastConfirmedModelLabel('');
+      } else if (
+        currentModelLabel &&
+        currentModelLabel !== lastConfirmedModelLabel
+      ) {
         setLastConfirmedModelLabel(currentModelLabel);
       }
-    }, [currentModelLabel, lastConfirmedModelLabel]);
+    }, [
+      currentModel,
+      availableModels.length,
+      currentModelLabel,
+      lastConfirmedModelLabel,
+    ]);
 
     const showWorkspaceSelectLabel =
       isMobile || toolbarLabelVisibility.workspaceSelect;

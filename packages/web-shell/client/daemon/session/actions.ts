@@ -1932,6 +1932,21 @@ export function createDaemonSessionActions({
                 ...current,
                 providers,
                 models: models.models,
+                ...(readOnly && current.context
+                  ? {
+                      context: {
+                        ...current.context,
+                        state: {
+                          ...current.context.state,
+                          _meta: {
+                            ...current.context.state._meta,
+                            authType: status.state._meta?.['authType'],
+                          },
+                          models: status.state.models,
+                        },
+                      },
+                    }
+                  : {}),
                 contextWindow:
                   models.models.find(
                     (model) => model.id === current.currentModel,

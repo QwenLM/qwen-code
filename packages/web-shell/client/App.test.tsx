@@ -12753,6 +12753,26 @@ describe('App subscription logout command', () => {
     testState.prompt = '/logout';
   });
 
+  it('uses the live session authentication when the workspace default is another provider', async () => {
+    mockConnection.context = {
+      v: 1,
+      sessionId: 'session-1',
+      workspaceCwd: '/tmp/project',
+      state: { _meta: { authType: 'qwen-subscription' } },
+    };
+    mockWorkspaceActions.loadProviders.mockResolvedValue({
+      ...mockConnection.providers!,
+      current: { authType: 'openai', modelId: 'qwen' },
+    });
+    const onToast = vi.fn();
+    const { container } = renderApp({ onToast });
+    await flush();
+    await clickSubmit(container);
+    await flush();
+    expect(mockWorkspaceActions.signOutSubscription).toHaveBeenCalledOnce();
+    expect(onToast).not.toHaveBeenCalled();
+  });
+
   it('signs out locally through the account API without dispatching an ACP prompt', async () => {
     const onToast = vi.fn();
     const { container } = renderApp({ onToast });

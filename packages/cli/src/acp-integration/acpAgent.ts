@@ -9241,7 +9241,10 @@ class QwenAgent implements Agent {
       workspaceCwd: this.workspaceCwd(config),
       recovery,
       state: {
-        ...(generatedUi ? { _meta: { generatedUi } } : {}),
+        _meta: {
+          ...(generatedUi ? { generatedUi } : {}),
+          authType: config.getAuthType(),
+        },
         models: this.buildAvailableModels(config),
         modes: this.buildModesData(config),
         configOptions: this.buildConfigOptions(

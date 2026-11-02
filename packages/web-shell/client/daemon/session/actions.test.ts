@@ -7658,6 +7658,14 @@ function createTimedCreateClient({
 describe('model catalog refresh', () => {
   it('reads a recovered live model without reloading providers', async () => {
     const h = setup();
+    h.replaceConnection({
+      ...h.getConnection(),
+      context: {
+        ...h.context,
+        state: { _meta: { authType: 'qwen-subscription' } },
+      },
+    });
+    h.context.state._meta = { authType: 'openai' };
     h.context.state.models = {
       currentModelId: 'bailian',
       availableModels: [
@@ -7668,6 +7676,7 @@ describe('model catalog refresh', () => {
     expect(h.workspace.reloadModelProviders).not.toHaveBeenCalled();
     expect(h.getConnection().currentModel).toBe('bailian');
     expect(h.getConnection().contextWindow).toBe(8192);
+    expect(h.getConnection().context?.state._meta?.['authType']).toBe('openai');
   });
 
   it('does not overwrite a model notification received during readback', async () => {

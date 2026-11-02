@@ -477,7 +477,7 @@ export function EmbeddedApp() {
           data: { flowId },
         });
     };
-  }, [daemonClient, runtime?.workspaceCwd, runtime?.sessionId, vscode]);
+  }, [daemonClient, runtime?.workspaceCwd, vscode]);
 
   const openAuthentication = async () => {
     if (authRequest.current && !authRequest.current.signal.aborted) return;

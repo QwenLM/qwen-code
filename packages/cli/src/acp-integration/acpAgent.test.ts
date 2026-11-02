@@ -15119,6 +15119,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         expectedModels,
       );
       expect(context.state.models).toMatchObject(session.models);
+      expect(context.state).toMatchObject({ _meta: { authType } });
 
       mockConnectionState.resolve();
       await agentPromise;

@@ -995,6 +995,14 @@ describe('EmbeddedApp host wiring', () => {
       expect(postMessagesOfType('auth')).toHaveLength(0);
       expect(refreshModels).toHaveBeenCalledOnce();
       await act(async () => {
+        callback<(sessionId: string) => void>(
+          mocks.embeddedProps.current!,
+          'onSessionIdChange',
+        )('session-after-logout');
+      });
+      expect(mocks.embeddedProps.current).not.toBeNull();
+      expect(document.body.textContent).not.toContain('Get Started');
+      await act(async () => {
         callback<(command: { command: string; input: string }) => boolean>(
           mocks.embeddedProps.current!,
           'onSlashCommand',

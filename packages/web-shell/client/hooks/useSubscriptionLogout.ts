@@ -26,6 +26,9 @@ export function useSubscriptionLogout(options: Options) {
   const pending = useRef(false);
   const [available, setAvailable] = useState(false);
   const { workspaceCwd, t } = options;
+  const sessionAuthType = connection.sessionId
+    ? connection.context?.state._meta?.['authType']
+    : undefined;
 
   useEffect(() => {
     const abort = new AbortController();
@@ -39,7 +42,10 @@ export function useSubscriptionLogout(options: Options) {
             return;
           const providers = await actions.loadProviders(workspaceCwd);
           if (!abort.signal.aborted && owner.isCurrent())
-            setAvailable(providers.current?.authType === 'qwen-subscription');
+            setAvailable(
+              (sessionAuthType ?? providers.current?.authType) ===
+                'qwen-subscription',
+            );
         })
         .catch(() => undefined);
     }
@@ -51,6 +57,7 @@ export function useSubscriptionLogout(options: Options) {
     connection.sessionId,
     connection.currentModel,
     connection.providers,
+    sessionAuthType,
   ]);
 
   const handleCommand = useCallback(
@@ -80,7 +87,10 @@ export function useSubscriptionLogout(options: Options) {
           }
           const providers = await actions.loadProviders(workspaceCwd);
           if (!owner.isCurrent()) return;
-          if (providers.current?.authType !== 'qwen-subscription') {
+          if (
+            (sessionAuthType ?? providers.current?.authType) !==
+            'qwen-subscription'
+          ) {
             callbacks.current.onNotice(
               'info',
               t('subscription.logoutNotRequired'),
@@ -124,7 +134,15 @@ export function useSubscriptionLogout(options: Options) {
         });
       return true;
     },
-    [actions, sessionActions, connection.commands, ownerGuard, t, workspaceCwd],
+    [
+      actions,
+      sessionActions,
+      connection.commands,
+      ownerGuard,
+      t,
+      workspaceCwd,
+      sessionAuthType,
+    ],
   );
 
   return { available, handleCommand };
