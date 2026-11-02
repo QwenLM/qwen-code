@@ -319,6 +319,11 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // `verifyPr.*` settings may supply them. Derived from the coordinate map so
   // a coordinate added there is gated here without a second edit.
   ...Object.values(VERIFY_PR_COORDINATE_ENV),
+  // Test/operator-only bound on the post-`session/cd` MCP approval carry. The
+  // wait happens while the session's close gate is held, so a repository that
+  // ships this key in its `.env` could stall every `cd` in that workspace.
+  // Excluded from project `.env` sources; the parser also caps the value.
+  'QWEN_SERVE_MCP_APPROVAL_CARRY_TIMEOUT_MS',
 ];
 
 // Windows env lookup is case-insensitive, so exact-case membership would let

@@ -187,7 +187,7 @@ export class LoadedMcpApprovals {
     serverName: string,
     config: MCPServerConfig,
     status: McpApprovalStatus,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const root = normalizeProjectRoot(projectRoot);
     const existing = this.file.config[root];
     const project: Record<string, McpApprovalRecord> = isApprovalRecordMap(
@@ -202,7 +202,10 @@ export class LoadedMcpApprovals {
       writable: true,
     });
     this.file.config[root] = project;
-    await saveMcpApprovals(this.file);
+    // The in-memory decision applies for this process either way; the return
+    // value tells callers that must persist before moving on (session `cd`
+    // carrying decisions to a new directory) whether the write landed.
+    return saveMcpApprovals(this.file);
   }
 }
 
@@ -308,10 +311,11 @@ export function getPromptableMcpServers(
   return promptable;
 }
 
+/** Persist the approvals file. Returns `false` when the write failed. */
 export async function saveMcpApprovals(file: {
   path: string;
   config: McpApprovalsConfig;
-}): Promise<void> {
+}): Promise<boolean> {
   try {
     const dirPath = path.dirname(file.path);
     if (!fs.existsSync(dirPath)) {
@@ -320,8 +324,10 @@ export async function saveMcpApprovals(file: {
     await atomicWriteFile(file.path, JSON.stringify(file.config, null, 2), {
       mode: 0o600,
     });
+    return true;
   } catch (error) {
     writeStderrLine('Error saving MCP approvals file.');
     writeStderrLine(error instanceof Error ? error.message : String(error));
+    return false;
   }
 }
