@@ -6135,7 +6135,7 @@ export abstract class ChannelBase {
     if (!envelope.isGroup) {
       return 0;
     }
-    const groupCfg = this.config.groups[envelope.chatId];
+    const groupCfg = this.groupConfigFor(envelope.chatId);
     const wildcardGroupCfg = this.config.groups['*'];
     const configured =
       groupCfg?.groupHistoryLimit ??
