@@ -18,8 +18,9 @@ replace it.
 - Uses the existing Qwen sandbox daemon lock for labelled image pruning.
   Build-cache pruning relies on Docker's in-use protection and runs even
   when that lock is busy or missing.
-- Changes the host `/tmp` retention policy from 30 days to 7 days through
-  `systemd-tmpfiles`.
+- Changes the host `/tmp` retention policy from 30 days to 1 day through
+  `systemd-tmpfiles` (measured 2026-10-31: CI hosts generate ~120-260k
+  temp files/day and a 7d steady state exceeds the tmpfs inode ceiling).
 
 Use this only on dedicated CI hosts. A sandbox-labelled or `qwen-code-*`-named
 container older than 24 hours is considered leaked and may be removed even if
@@ -42,7 +43,7 @@ sudo .github/scripts/ecs-runner/install-qwen-docker-cleanup.sh
 ```
 
 The installer copies the cleanup command and systemd units into the host,
-installs the seven-day `/tmp` policy, reloads systemd, and enables the timer.
+installs the one-day `/tmp` policy, reloads systemd, and enables the timer.
 Run the same command again after pulling a newer version to update the host.
 Merging changes does not update installed copies. Run the installer on every
 host, including hosts that do not yet have the timer, and check each host's
@@ -61,7 +62,7 @@ systemd-tmpfiles --cat-config | grep '^D /tmp '
 The expected `/tmp` policy is:
 
 ```text
-D /tmp 1777 root root 7d
+D /tmp 1777 root root 1d
 ```
 
 ## Run manually
@@ -110,7 +111,7 @@ the job log.
 
 This is a temporary-directory convention, not filesystem isolation: commands
 that explicitly write elsewhere bypass it. Existing arbitrary copies in `/tmp`
-remain covered only by the seven-day policy. This service does not remove them
+remain covered only by the one-day policy. This service does not remove them
 by name because they may belong to an active job. A later review job on the
 same runner registration retries removing stale `qwen-review-scratch.*`
 directories from `RUNNER_TEMP`; residue on an idle registration still requires

@@ -124,4 +124,47 @@ describe('check-disk-floor', () => {
       rmSync(temp, { recursive: true, force: true });
     }
   });
+
+  it('always checks the OS temp directory, deduplicated', () => {
+    // The 2026-10-31 hz incident: /tmp hit 100% inodes while the workspace
+    // and RUNNER_TEMP sat on a data disk, so caller directories alone were
+    // green while every mkdtemp died mid-suite. The gate must add the OS
+    // temp directory on its own — and not duplicate it when a caller
+    // already passed it.
+    const dir = mkdtempSync(join(tmpdir(), 'disk-floor-os-'));
+    const osTmp = mkdtempSync(join(tmpdir(), 'disk-floor-ostmp-'));
+    try {
+      // Explicit dirs: the OS temp dir is still checked (huge inode floor
+      // forces the breach on it deterministically).
+      const breached = runGate({
+        dirs: [dir],
+        env: {
+          TMPDIR: osTmp,
+          DISK_FLOOR_MIN_FREE_KB: '1',
+          DISK_FLOOR_MIN_FREE_INODES: '999999999999',
+        },
+      });
+      assert.equal(breached.status, 1);
+      assert.ok(breached.stdout.includes(`dir[${osTmp}]`));
+      assert.ok(breached.stdout.includes('free inodes'));
+
+      // Deduplication: passing the OS temp dir explicitly checks it once.
+      const counted = runGate({
+        dirs: [dir, osTmp],
+        env: {
+          TMPDIR: osTmp,
+          DISK_FLOOR_MIN_FREE_KB: '1',
+          DISK_FLOOR_MIN_FREE_INODES: '1',
+        },
+      });
+      assert.equal(counted.status, 0, counted.stderr);
+      const samples = counted.stdout
+        .split('\n')
+        .filter((line) => line.startsWith('DISKFLOOR '));
+      assert.equal(samples.length, 2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(osTmp, { recursive: true, force: true });
+    }
+  });
 });
