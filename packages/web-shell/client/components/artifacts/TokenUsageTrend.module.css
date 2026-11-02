@@ -1,0 +1,241 @@
+.trend {
+  --trend-ink: color-mix(in srgb, var(--foreground) 70%, var(--card));
+  --trend-grid: color-mix(in srgb, var(--border) 70%, transparent);
+  --trend-failure: var(--error-color);
+}
+
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.title {
+  margin: 0;
+  color: color-mix(in srgb, #6f86ac 80%, var(--foreground));
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.metricToggle {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+.metricToggle > button {
+  padding: 2px 8px;
+  border: none;
+  background: transparent;
+  color: var(--trend-ink);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+}
+.metricToggle > button + button {
+  border-left: 1px solid var(--border);
+}
+.metricToggle > button[aria-pressed='true'] {
+  background: var(--foreground);
+  color: var(--card);
+}
+.metricToggle > button:focus-visible,
+.legend button:focus-visible {
+  outline: 2px solid var(--foreground);
+  outline-offset: 1px;
+}
+
+.chart {
+  position: relative;
+  width: 100%;
+  touch-action: pan-y;
+}
+.chart > svg {
+  display: block;
+  overflow: visible;
+}
+
+.grid {
+  stroke: var(--trend-grid);
+  stroke-width: 1;
+}
+.axisLabel,
+.axisUnit {
+  fill: var(--trend-ink);
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.line {
+  fill: none;
+  stroke: var(--model-color);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.dot {
+  fill: var(--model-color);
+  fill-opacity: 0.45;
+}
+.failure {
+  fill: none;
+  stroke: var(--trend-failure);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+.crosshair {
+  stroke: var(--trend-ink);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+}
+.highlight {
+  fill: none;
+  stroke: var(--model-color);
+  stroke-width: 2;
+}
+.highlight[data-failure] {
+  stroke: var(--trend-failure);
+}
+
+.tooltip {
+  position: absolute;
+  z-index: 2;
+  max-width: 100%;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--foreground);
+  color: var(--card);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+.tooltipHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tooltipHead strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+
+.swatch {
+  flex-shrink: 0;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: var(--model-color);
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.legend li {
+  min-width: 0;
+  max-width: 100%;
+}
+.legend button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 2px 0;
+  border: none;
+  background: none;
+  color: var(--foreground);
+  font-size: 12px;
+  cursor: pointer;
+}
+.legend button[aria-pressed='false'] {
+  opacity: 0.45;
+}
+.legendName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.note {
+  margin: 6px 0 0;
+  color: var(--trend-ink);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.spread {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+.spreadTrack {
+  position: relative;
+  flex: 1;
+  min-width: 48px;
+  height: 12px;
+}
+.spreadTrack::before {
+  content: '';
+  position: absolute;
+  top: 5px;
+  right: 0;
+  left: 0;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--trend-grid);
+}
+.spreadRange {
+  position: absolute;
+  top: 3px;
+  height: 6px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--model-color) 35%, transparent);
+}
+.spreadDot {
+  position: absolute;
+  top: 3px;
+  width: 6px;
+  height: 6px;
+  margin-left: -3px;
+  border-radius: 50%;
+  background: var(--model-color);
+  opacity: 0.55;
+}
+.spreadMedian {
+  position: absolute;
+  top: 0;
+  width: 2px;
+  height: 12px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--foreground);
+}
+.spreadText {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--trend-ink);
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .legend button {
+    transition: none;
+  }
+}

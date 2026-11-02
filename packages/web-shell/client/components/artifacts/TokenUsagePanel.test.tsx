@@ -1461,4 +1461,168 @@ describe('TokenUsagePanel', () => {
       container.querySelector('[data-testid="token-usage-model-shares"]'),
     ).toBeNull();
   });
+
+  function timedStats(): DaemonSessionStatsStatus {
+    const stats = statsFixture();
+    const at = (minute: number) => Date.UTC(2026, 10, 2, 6, minute);
+    stats.models['qwen-plus::hybrid'].timingSamples = [
+      { at: at(0), ttftMs: 1_000, generationMs: 2_000, outputTokens: 100 },
+      { at: at(1), ttftMs: 1_200, generationMs: 1_000, outputTokens: 80 },
+      // Too short to measure a rate: plotted for first token only.
+      { at: at(2), ttftMs: 900, generationMs: 50, outputTokens: 10 },
+      {
+        at: at(3),
+        ttftMs: 1_500,
+        generationMs: 4_000,
+        outputTokens: 120,
+        source: 'explorer',
+      },
+    ];
+    stats.models['qwen-plus::hybrid'].failures = {
+      byKind: { timeout: 1, '429': 2 },
+      recent: [
+        { at: at(1), kind: '429' },
+        { at: at(2), kind: '429' },
+        { at: at(3), kind: 'timeout', source: 'explorer' },
+      ],
+    };
+    stats.models['qwen-max::auto'].timingSamples = [
+      { at: at(1), ttftMs: 400, generationMs: 1_000, outputTokens: 150 },
+      { at: at(2), ttftMs: 500, generationMs: 1_000, outputTokens: 130 },
+    ];
+    return stats;
+  }
+
+  function seriesDots(container: HTMLElement) {
+    const trend = container.querySelector('[data-testid="token-usage-trend"]')!;
+    return Array.from(trend.querySelectorAll('circle')).map((dot) =>
+      dot.getAttribute('data-share-color'),
+    );
+  }
+
+  it('plots each timed request per model and marks failures', async () => {
+    const container = renderPanel(vi.fn().mockResolvedValue(timedStats()));
+    await act(async () => {});
+    const trend = container.querySelector('[data-testid="token-usage-trend"]')!;
+
+    expect(trend.querySelector('h3')?.textContent).toBe('Speed over time');
+    // Output speed skips the 50 ms window; colors follow the model cards.
+    expect(seriesDots(container)).toEqual(['0', '0', '0', '1', '1']);
+    expect(trend.querySelectorAll('path[data-share-color]')).toHaveLength(2);
+    expect(trend.textContent).toContain('Failed');
+    expect(
+      Array.from(trend.querySelectorAll('svg > path')).filter(
+        (path) => !path.hasAttribute('data-share-color'),
+      ),
+    ).toHaveLength(3);
+    expect(trend.querySelector('svg')?.getAttribute('aria-label')).toBe(
+      'Output speed per request over time. Median: qwen-plus::hybrid 50, qwen-max::auto 140',
+    );
+
+    const [speedButton, ttftButton] = Array.from(
+      trend.querySelectorAll<HTMLButtonElement>('[role="group"] button'),
+    );
+    expect(speedButton?.getAttribute('aria-pressed')).toBe('true');
+    await act(async () => ttftButton!.click());
+    expect(ttftButton?.getAttribute('aria-pressed')).toBe('true');
+    expect(seriesDots(container)).toEqual(['0', '0', '0', '0', '1', '1']);
+    expect(trend.textContent).toContain('seconds');
+
+    const legend = Array.from(
+      trend.querySelectorAll<HTMLButtonElement>('ul button'),
+    );
+    expect(legend.map((button) => button.textContent)).toEqual([
+      'qwen-plus::hybrid',
+      'qwen-max::auto',
+    ]);
+    await act(async () => legend[0]!.click());
+    expect(legend[0]?.getAttribute('aria-pressed')).toBe('false');
+    expect(seriesDots(container)).toEqual(['1', '1']);
+    // Hiding the last visible series shows every series again.
+    await act(async () => legend[1]!.click());
+    expect(legend.map((b) => b.getAttribute('aria-pressed'))).toEqual([
+      'true',
+      'true',
+    ]);
+  });
+
+  it('shows the nearest request in a tooltip on pointer move', async () => {
+    const container = renderPanel(vi.fn().mockResolvedValue(timedStats()));
+    await act(async () => {});
+    const trend = container.querySelector('[data-testid="token-usage-trend"]')!;
+    const svg = trend.querySelector('svg')!;
+    const move = async (x: number, y: number) =>
+      act(async () => {
+        svg.dispatchEvent(
+          new MouseEvent('pointermove', {
+            bubbles: true,
+            clientX: x,
+            clientY: y,
+          }),
+        );
+      });
+    const lastDot = Array.from(svg.querySelectorAll('circle')).find(
+      (dot) => dot.getAttribute('data-share-color') === '0',
+    )!;
+    await move(
+      Number(lastDot.getAttribute('cx')),
+      Number(lastDot.getAttribute('cy')),
+    );
+    const tooltip = trend.querySelector('[role="status"]');
+    expect(tooltip?.textContent).toMatch(/^qwen-plus::hybrid/);
+    expect(tooltip?.textContent).toContain('50.0 tok/s · first token 1.0s');
+    expect(tooltip?.textContent).toContain('100 output tokens in 2.0s');
+
+    const failure = Array.from(svg.querySelectorAll('svg > path')).find(
+      (path) => !path.hasAttribute('data-share-color'),
+    )!;
+    const [, fx, fy] = /^M([\d.]+),([\d.]+)/.exec(failure.getAttribute('d')!)!;
+    await move(Number(fx) + 3.5, Number(fy) + 3.5);
+    expect(trend.querySelector('[role="status"]')?.textContent).toContain(
+      'Failed · 429',
+    );
+
+    await act(async () => {
+      svg.dispatchEvent(new MouseEvent('pointerleave', { bubbles: false }));
+    });
+    await move(-500, -500);
+    expect(trend.querySelector('[role="status"]')).toBeNull();
+  });
+
+  it('shows per-model speed spread and failure kinds on cards', async () => {
+    const container = renderPanel(
+      vi.fn().mockResolvedValue(timedStats()),
+      'zh-CN',
+    );
+    await act(async () => {});
+    const [plus, max] = Array.from(container.querySelectorAll('[data-color]'));
+
+    // Speeds 50, 80 and 30 tok/s; the 50 ms window has no rate.
+    expect(
+      plus?.querySelector('[data-testid="token-usage-speed-spread"]')
+        ?.textContent,
+    ).toBe('p50 50 · p10–p90 34–74 tok/s');
+    expect(plus?.textContent).toContain('失败：429 ×2 · timeout ×1');
+    expect(
+      max?.querySelector('[data-testid="token-usage-speed-spread"]')
+        ?.textContent,
+    ).toBe('p50 140 · p10–p90 132–148 tok/s');
+    expect(max?.textContent).not.toContain('失败：');
+    expect(
+      container.querySelector('[data-testid="token-usage-trend"] h3')
+        ?.textContent,
+    ).toBe('速度趋势');
+  });
+
+  it('omits the trend for daemons without timing samples', async () => {
+    const container = renderPanel(vi.fn().mockResolvedValue(statsFixture()));
+    await act(async () => {});
+
+    expect(
+      container.querySelector('[data-testid="token-usage-trend"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="token-usage-speed-spread"]'),
+    ).toBeNull();
+  });
 });
