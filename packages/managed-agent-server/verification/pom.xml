@@ -107,6 +107,21 @@
         </dependency>
     </dependencies>
     <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-failsafe-plugin</artifactId>
+                    <version>${maven-failsafe-plugin.version}</version>
+                    <configuration>
+                        <systemPropertyVariables>
+                            <managed.module.root>${managed.module.root}</managed.module.root>
+                            <qwen.cli.entry>${qwen.cli.entry}</qwen.cli.entry>
+                        </systemPropertyVariables>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
         <testResources>
             <testResource>
                 <directory>src/test/resources</directory>
@@ -162,17 +177,6 @@
                         </configuration>
                     </execution>
                 </executions>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-failsafe-plugin</artifactId>
-                <version>${maven-failsafe-plugin.version}</version>
-                <configuration>
-                    <systemPropertyVariables>
-                        <managed.module.root>${managed.module.root}</managed.module.root>
-                        <qwen.cli.entry>${qwen.cli.entry}</qwen.cli.entry>
-                    </systemPropertyVariables>
-                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.jacoco</groupId>
@@ -284,7 +288,7 @@
                                     qwen.hosted.mysql.isolation = true
                                 </configurationParameters>
                             </properties>
-                            <forkedProcessTimeoutInSeconds>11444</forkedProcessTimeoutInSeconds>
+                            <forkedProcessTimeoutInSeconds>11591</forkedProcessTimeoutInSeconds>
                         </configuration>
                         <executions>
                             <execution>

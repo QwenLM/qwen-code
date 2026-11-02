@@ -47,13 +47,13 @@ public class ManagedSchemaSessionStoreTest {
         tx = new TransactionTemplate(new DataSourceTransactionManager(source));
         tx.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_REPEATABLE_READ);
         store =
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
                         jdbc,
                         new ObjectMapper(),
                         clock,
                         ignored -> {},
                         new ManagedWorkspaceRegistry(jdbc),
-                        new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                        new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         tenant = "tenant-" + UUID.randomUUID();
         session =
                 tx.execute(
@@ -243,7 +243,7 @@ public class ManagedSchemaSessionStoreTest {
     @Test
     void projectionCleanupPreservesJournalReferencesAndRecoveryProtection() {
         alignProjectionClock();
-        var privateBody = tx.execute(status -> com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc))
+        var privateBody = tx.execute(status -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc)
                 .publishAgentInstructions(tenant, "workspace", session, "private instructions"));
         event("big", "a".repeat(70_000));
         materialize();
@@ -459,7 +459,7 @@ public class ManagedSchemaSessionStoreTest {
 
     @Test
     void writerHeartbeatCompletesWhileMessagePageReadIsPaused() throws Exception {
-        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String token = "a".repeat(32);
         var grant = tx.execute(status -> privateStore.acquireWriter(tenant, session, token,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 60_000L)));
@@ -492,7 +492,7 @@ public class ManagedSchemaSessionStoreTest {
                 tenant,
                 session,
                 session);
-        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         assertThatThrownBy(() -> privateStore.restore(tenant, "workspace", session, token))
                 .isInstanceOfSatisfying(
                         ManagedAgentException.class,
@@ -697,13 +697,13 @@ public class ManagedSchemaSessionStoreTest {
     void duplicateMessageBodyIdentityIsReusedOnlyWhenItsImmutableRowMatches(String corruption) {
         var duplicate = new DuplicateBodyJdbc(jdbc.getDataSource(), corruption);
         var subject =
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
                         duplicate,
                         new ObjectMapper(),
                         clock,
                         ignored -> {},
                         new ManagedWorkspaceRegistry(duplicate),
-                        new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                        new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         event("big", "x".repeat(70_000));
         if ("none".equals(corruption)) {
             tx.executeWithoutResult(status -> subject.materializeNextBatch(tenant, session, 100));
