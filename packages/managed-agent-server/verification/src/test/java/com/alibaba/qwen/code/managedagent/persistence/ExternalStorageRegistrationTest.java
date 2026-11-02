@@ -367,8 +367,10 @@ public class ExternalStorageRegistrationTest {
         var ready = bindings.compareAndSet(claimed, claimed.withAttestation(lease, new com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle(request.getProvisionerKind(), 1, java.util.Map.of("fixture", true)), java.time.Instant.now(), java.time.Instant.now()));
         var runtimeSessions = new com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository(jdbc.getDataSource());
         var session = new com.alibaba.qwen.code.runtimebroker.RuntimeSession(id, UUID.randomUUID().toString(), "bootstrap", scope);
-        var record = runtimeSessions.findOrCreate(new com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord(session, ready.getBindingId(), ready.getGeneration(),
-                com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord.State.READY, 1, java.time.Instant.now()));
+        var acquiring = runtimeSessions.findOrCreate(new com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord(session, ready.getBindingId(), ready.getGeneration(),
+                com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord.State.ACQUIRING, 0, java.time.Instant.now()));
+        var record = runtimeSessions.compareAndSet(acquiring,
+                acquiring.withState(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord.State.READY, java.time.Instant.now()));
         var authority = new WorkspaceExecutionStore(jdbc, manager, null, properties);
         authority.claim(saved.workspace(), record);
         assertThat(authority.isHeld(saved.workspace(), record)).isTrue();
