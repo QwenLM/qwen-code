@@ -23,11 +23,13 @@ import {
   type ConversationRootIdentity,
 } from '../../utils/conversation-directory-identity.js';
 import { normalizeSessionIdForLookup } from '../../config/session-id.js';
+import { isFullyQualifiedPath } from '../../config/storage-paths-lite.js';
 
 export type { ConversationRootIdentity } from '../../utils/conversation-directory-identity.js';
 
 export interface ConversationWorkspaceOptions {
   homeDir?: string;
+  rootPath?: string;
 }
 
 export type StandaloneDirectoryInspection =
@@ -148,7 +150,20 @@ export class ConversationWorkspace {
   private rootPromise?: Promise<ConversationRootIdentity>;
 
   constructor(options: ConversationWorkspaceOptions = {}) {
-    this.rootPath = getConversationRootPath(options.homeDir);
+    if (options.rootPath === undefined) {
+      this.rootPath = getConversationRootPath(options.homeDir);
+    } else {
+      if (
+        typeof options.rootPath !== 'string' ||
+        !isFullyQualifiedPath(options.rootPath) ||
+        options.rootPath.includes('\0')
+      ) {
+        throw new TypeError(
+          'Invalid Conversations directory (--conversations-dir / QWEN_CONVERSATIONS_DIR): expected a nonempty, fully qualified absolute path without NUL.',
+        );
+      }
+      this.rootPath = resolve(options.rootPath);
+    }
   }
 
   private getRootIdentity(): Promise<ConversationRootIdentity> {

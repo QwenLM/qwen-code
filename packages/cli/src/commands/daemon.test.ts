@@ -178,6 +178,38 @@ describe('qwen daemon command', () => {
       expect(result.stopArgs).toBeUndefined();
     });
 
+    it('preserves the recorded Conversations root over a changed restart environment', () => {
+      const conversationsDir = path.resolve('persistent', 'conversations root');
+      const result = plan(
+        recorded({ conversationsDir }),
+        {},
+        {
+          QWEN_CONVERSATIONS_DIR: path.resolve('different-root'),
+        },
+      );
+      expect(result.error).toBeUndefined();
+      const optionIndex = result.startArgs!.indexOf('--conversations-dir');
+      expect(optionIndex).toBeGreaterThan(-1);
+      expect(result.startArgs![optionIndex + 1]).toBe(conversationsDir);
+      expect(result.env?.['QWEN_CONVERSATIONS_DIR']).toBe(
+        path.resolve('different-root'),
+      );
+    });
+
+    it('keeps environment-based selection for older records without a Conversations root', () => {
+      const conversationsDir = path.resolve('legacy-launch-root');
+      const result = plan(
+        recorded(),
+        {},
+        {
+          QWEN_CONVERSATIONS_DIR: conversationsDir,
+        },
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.startArgs).not.toContain('--conversations-dir');
+      expect(result.env?.['QWEN_CONVERSATIONS_DIR']).toBe(conversationsDir);
+    });
+
     it('names the defaults it assumes for an older single-workspace record', () => {
       const none = plan(entry(4170).record);
       expect(none.error).toBeUndefined();
@@ -622,6 +654,22 @@ describe('qwen daemon command', () => {
       '--workspace',
       '/repo',
     ]);
+  });
+
+  it('forwards the Conversations root as one argument when starting a daemon', () => {
+    const conversationsDir = path.resolve('persistent', 'conversations root');
+    const { args } = buildDaemonStartArgs({
+      entry: '/opt/qwen/index.js',
+      port: 4170,
+      hostname: '127.0.0.1',
+      workspaces: ['/repo'],
+      conversationsDir,
+      web: true,
+      requireAuth: false,
+    });
+    const optionIndex = args.indexOf('--conversations-dir');
+    expect(optionIndex).toBeGreaterThan(-1);
+    expect(args[optionIndex + 1]).toBe(conversationsDir);
   });
 
   it('formats a start summary with the bound port', () => {

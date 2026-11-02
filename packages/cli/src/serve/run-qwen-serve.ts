@@ -200,6 +200,7 @@ import {
 } from './managed-scratch-workspace.js';
 import { ConversationRuntimeOwnershipError } from './conversations/conversation-runtime-errors.js';
 import { ConversationWorkspace } from './conversations/conversation-workspace.js';
+import { readEnvironmentVariable } from '../config/storage-paths-lite.js';
 import { LIVE_HOST_PROTOCOL_VERSION } from './live/types.js';
 import { ServeAppLifecycleController } from './serve-app-lifecycle.js';
 import {
@@ -3523,6 +3524,14 @@ async function runQwenServeImpl(
     hostedCsiSessionStoreUrl,
   });
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
+  const liveConversationWorkspace =
+    deps.liveConversationWorkspace ??
+    new ConversationWorkspace({
+      rootPath:
+        optsIn.conversationsDir !== undefined
+          ? optsIn.conversationsDir
+          : readEnvironmentVariable(baseEnv, 'QWEN_CONVERSATIONS_DIR'),
+    });
   const launchMemoryProjectScopeValue =
     baseEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
   const launchMemoryProjectScope = launchMemoryProjectScopeValue?.trim()
@@ -3959,8 +3968,6 @@ async function runQwenServeImpl(
   // Resolve the bound workspace list. The first explicit workspace remains the
   // primary workspace for legacy APIs; later workspaces are isolated secondary
   // runtimes.
-  const liveConversationWorkspace =
-    deps.liveConversationWorkspace ?? new ConversationWorkspace();
   const isReservedConversationWorkspace = (candidate: string): boolean => {
     const resolvedCandidate = path.resolve(candidate);
     const resolvedRoot = path.resolve(liveConversationWorkspace.rootPath);
@@ -4836,7 +4843,10 @@ async function runQwenServeImpl(
   const restartForUpdate = deps.updateRestartArgv
     ? createDaemonUpdateRestarter({
         argv: deps.updateRestartArgv,
-        env: daemonRuntimeBaseEnv,
+        env: {
+          ...daemonRuntimeBaseEnv,
+          QWEN_CONVERSATIONS_DIR: liveConversationWorkspace.rootPath,
+        },
         token,
         externalToolGuardToken: optsIn.externalToolGuard?.token,
         managedRuntimeBrokerUrl: opts.managedRuntimeBrokerUrl,
@@ -10893,6 +10903,7 @@ async function runQwenServeImpl(
             .filter((workspace) => !workspace.removable)
             .map((workspace) => workspace.cwd),
           primaryWorkspace: boundWorkspace,
+          conversationsDir: liveConversationWorkspace.rootPath,
           startedAt: new Date().toISOString(),
           auth: token ? 'bearer' : 'none',
           ...(generatedToken ? { tokenGenerated: true } : {}),

@@ -247,7 +247,11 @@ function readHomeEnvInto(file: string): void {
   try {
     const parsed = dotenv.parse(fs.readFileSync(file, 'utf-8'));
     for (const key of HOME_ENV_BOOTSTRAP_KEYS) {
-      if (parsed[key] && !Object.hasOwn(process.env, key)) {
+      if (
+        (parsed[key] ||
+          (key === 'QWEN_CONVERSATIONS_DIR' && parsed[key] !== undefined)) &&
+        !Object.hasOwn(process.env, key)
+      ) {
         process.env[key] = parsed[key];
       }
     }
@@ -766,7 +770,9 @@ export function loadEnvironment(
 
       const existingValue = process.env[key];
       const isEffectivelyUnset =
-        !Object.hasOwn(process.env, key) || existingValue === '';
+        !Object.hasOwn(process.env, key) ||
+        (existingValue === '' &&
+          key.toUpperCase() !== 'QWEN_CONVERSATIONS_DIR');
       if (isEffectivelyUnset) {
         process.env[key] = envFile.parsedEnv[key];
         dotEnvSourcedKeys.add(key);

@@ -89,6 +89,7 @@ interface StartArgs {
   port?: number;
   hostname: string;
   workspace?: string | string[];
+  'conversations-dir'?: string;
   web: boolean;
   'require-auth': boolean;
   token?: string;
@@ -566,6 +567,7 @@ export function buildDaemonStartArgs(options: {
   port: number;
   hostname: string;
   workspaces: readonly string[];
+  conversationsDir?: string;
   web: boolean;
   requireAuth: boolean;
 }): { command: string; args: string[] } {
@@ -579,6 +581,9 @@ export function buildDaemonStartArgs(options: {
   ];
   if (!options.web) childArgs.push('--no-web');
   if (options.requireAuth) childArgs.push('--require-auth');
+  if (options.conversationsDir !== undefined) {
+    childArgs.push('--conversations-dir', options.conversationsDir);
+  }
   for (const workspace of options.workspaces) {
     childArgs.push('--workspace', workspace);
   }
@@ -802,6 +807,7 @@ async function handleStart(argv: StartArgs): Promise<void> {
     port,
     hostname,
     workspaces,
+    conversationsDir: argv['conversations-dir'],
     web: argv.web,
     requireAuth: argv['require-auth'],
   });
@@ -1450,6 +1456,9 @@ export function buildDaemonRestartPlan(
     record.hostname,
     '--wait',
   ];
+  if (record.conversationsDir !== undefined) {
+    startArgs.push('--conversations-dir', record.conversationsDir);
+  }
   for (const workspace of workspaces) {
     startArgs.push('--workspace', workspace);
   }
@@ -1709,6 +1718,12 @@ const startCommand: CommandModule<unknown, StartArgs> = {
         requiresArg: true,
         describe:
           'Workspace path; repeat for multiple; defaults to the current directory',
+      })
+      .option('conversations-dir', {
+        type: 'string',
+        requiresArg: true,
+        describe:
+          'Absolute Conversations working-directory root (overrides QWEN_CONVERSATIONS_DIR)',
       })
       .option('web', {
         type: 'boolean',

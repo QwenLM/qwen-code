@@ -63,6 +63,19 @@ function buildParser(): Argv {
 }
 
 describe('serve command args', () => {
+  it('accepts a Conversations root without changing the supplied path', () => {
+    const root = '/persistent/Qwen Conversations ';
+    expect(
+      buildParser().parseSync(['--conversations-dir', root])[
+        'conversations-dir'
+      ],
+    ).toBe(root);
+    expect(buildParser().parseSync([])['conversations-dir']).toBeUndefined();
+    expect(() => buildParser().parseSync('--conversations-dir')).toThrow(
+      /Not enough arguments/u,
+    );
+  });
+
   it('parses and isolates the Managed Web gateway deployment options', () => {
     const parsed = buildParser().parseSync(
       '--managed-web-config /etc/qwen-web/gateway.json --hostname 0.0.0.0 --port 4171 --allow-origin https://managed.example',
@@ -83,6 +96,7 @@ describe('serve command args', () => {
     for (const flag of [
       '--managed',
       '--workspace=/run/secrets',
+      '--conversations-dir=/persistent/conversations',
       '--profile=hosted-harness',
       '--enable-session-shell',
       '--channel=telegram',
@@ -615,6 +629,23 @@ describe('serve rate limit env parsing', () => {
     const options = mockRunQwenServe.mock.calls[0]?.[0];
     expect(options).not.toHaveProperty('maxJournalEvents');
     expect(options).not.toHaveProperty('maxJournalBytes');
+  });
+
+  it('forwards the explicit Conversations root to runQwenServe', async () => {
+    process.env['QWEN_CONVERSATIONS_DIR'] = '/environment/conversations';
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+    await startServeHandlerWithArgs(
+      '--conversations-dir "/persistent/Qwen Conversations" --no-web',
+    );
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationsDir: '/persistent/Qwen Conversations',
+      }),
+      expect.anything(),
+    );
   });
 
   it('forwards pinned journal caps to runQwenServe', async () => {

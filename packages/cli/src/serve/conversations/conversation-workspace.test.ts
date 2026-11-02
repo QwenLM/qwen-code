@@ -16,7 +16,7 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import * as os from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -30,6 +30,11 @@ import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 const plantOnExpectedInspect = vi.hoisted(() => ({ armed: false }));
 const enoentOnInspect = vi.hoisted(() => ({ armed: false }));
+
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return { ...actual, platform: vi.fn(actual.platform) };
+});
 
 vi.mock(
   '../../utils/conversation-directory-identity.js',
@@ -71,6 +76,7 @@ const cleanup: string[] = [];
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.mocked(os.platform).mockReset();
   await Promise.all(
     cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })),
   );
@@ -78,13 +84,76 @@ afterEach(async () => {
 
 async function tempHome(): Promise<string> {
   const home = await mkdtemp(
-    join(realpathSync.native(tmpdir()), 'qwen-live-home-'),
+    join(realpathSync.native(os.tmpdir()), 'qwen-live-home-'),
   );
   cleanup.push(home);
   return home;
 }
 
 describe('Live conversation workspace root', () => {
+  it('uses an explicit root lazily and reuses its deterministic child after restart', async () => {
+    const home = await tempHome();
+    const rootPath = join(home, 'persistent files ');
+    const workspace = new ConversationWorkspace({ homeDir: home, rootPath });
+    expect(workspace.rootPath).toBe(rootPath);
+    await expect(lstat(rootPath)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    const sessionId = '22345678-1234-4234-9234-123456789ABC';
+    const child = await workspace.materializeConversationDirectory(sessionId);
+    expect(dirname(child)).toBe(realpathSync.native(rootPath));
+    await writeFile(join(child, 'persistent.txt'), 'kept');
+    const restarted = new ConversationWorkspace({ rootPath });
+    expect(
+      await restarted.materializeConversationDirectory(sessionId.toLowerCase()),
+    ).toBe(child);
+    expect(
+      await restarted.ensureStandaloneDirectory(sessionId.toLowerCase()),
+    ).toMatchObject({
+      status: 'ready',
+      identity: { canonicalPath: child },
+    });
+    expect((await lstat(join(child, 'persistent.txt'))).isFile()).toBe(true);
+    await expect(lstat(getConversationRootPath(home))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it.each(['', ' ', 'relative/root', '~/conversations', '/root\0invalid'])(
+    'rejects invalid explicit root %j without falling back',
+    (rootPath) => {
+      expect(() => new ConversationWorkspace({ rootPath })).toThrow(
+        /QWEN_CONVERSATIONS_DIR.*fully qualified absolute path/,
+      );
+    },
+  );
+
+  it.each(['C:relative', '\\rooted', '/rooted', '\\\\server'])(
+    'rejects Windows root %j that depends on the current drive or lacks a share',
+    (rootPath) => {
+      vi.mocked(os.platform).mockReturnValue('win32');
+      expect(() => new ConversationWorkspace({ rootPath })).toThrow(
+        /fully qualified absolute path/,
+      );
+    },
+  );
+
+  it('keeps filesystem acceptance lazy and rejects an explicit symlink root', async () => {
+    const home = await tempHome();
+    const rootPath = join(home, 'configured');
+    const target = join(home, 'target');
+    await mkdir(target, { mode: 0o700 });
+    await symlink(
+      target,
+      rootPath,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const workspace = new ConversationWorkspace({ homeDir: home, rootPath });
+    await expect(workspace.getRoot()).rejects.toThrow(/non-symlink/);
+    await expect(lstat(getConversationRootPath(home))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
   it('lazily creates the injected default root with a private canonical identity', async () => {
     const home = await tempHome();
     const workspace = new ConversationWorkspace({ homeDir: home });

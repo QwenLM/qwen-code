@@ -34,6 +34,8 @@ export const ENV_ACP_REPEATED_TOOL_FAILURE_GUARD =
 export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_HOME',
   'QWEN_RUNTIME_DIR',
+  // The shared Conversations root is selected by the operator at daemon boot.
+  'QWEN_CONVERSATIONS_DIR',
   // Project reloads must not replace or relabel an operator container requirement.
   'QWEN_AGENT_EXECUTION_BACKEND',
   'QWEN_CODE_MCP_APPROVALS_PATH',
@@ -376,6 +378,7 @@ export function isPrivateProvenanceEnvKey(key: string): boolean {
 export const HOME_ENV_BOOTSTRAP_KEYS = [
   'QWEN_HOME',
   'QWEN_RUNTIME_DIR',
+  'QWEN_CONVERSATIONS_DIR',
   'QWEN_CODE_MCP_APPROVALS_PATH',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
 ] as const;
