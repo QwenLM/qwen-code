@@ -1220,7 +1220,7 @@ describe('Repository-only channel access config', () => {
     });
   });
 
-  it('drops a direct-message policy stored by an earlier save', () => {
+  it('drops the private-access residue stored by an earlier save', () => {
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'release-bot',
       config: {
@@ -1237,7 +1237,7 @@ describe('Repository-only channel access config', () => {
 
     const request = buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance);
     expect(request.config).not.toHaveProperty('privatePolicy');
-    expect(request.config).toMatchObject({ allowedUsers: ['alice'] });
+    expect(request.config).not.toHaveProperty('allowedUsers');
   });
 
   it('requires owner/repo for an allowlisted repository', () => {

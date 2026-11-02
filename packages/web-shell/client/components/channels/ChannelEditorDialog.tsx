@@ -616,20 +616,30 @@ export function ChannelEditorDialog({
     if (field.kind === 'string-list' && field.options?.length) {
       const options = field.options;
       const selected = toList(String(value ?? ''));
-      const known = new Set(options.map((option) => option.value));
+      // The adapter matches these values case-insensitively, so a stored
+      // `COMMENT` has to tick the canonical `comment` box instead of rendering
+      // a second, stray entry beside it.
+      const selectedKeys = new Set(
+        selected.map((entry) => entry.toLowerCase()),
+      );
+      const known = new Set(
+        options.map((option) => option.value.toLowerCase()),
+      );
       // Values written by hand that the descriptor does not know stay visible
       // and removable instead of disappearing on the next save.
-      const stored = selected.filter((entry) => !known.has(entry));
+      const stored = selected.filter(
+        (entry) => !known.has(entry.toLowerCase()),
+      );
       const toggleValue = (target: string, checked: boolean) => {
-        const next = new Set(selected);
-        if (checked) next.add(target);
-        else next.delete(target);
+        const next = new Set(selectedKeys);
+        if (checked) next.add(target.toLowerCase());
+        else next.delete(target.toLowerCase());
         update(
           [
             ...options
               .map((option) => option.value)
-              .filter((entry) => next.has(entry)),
-            ...stored.filter((entry) => next.has(entry)),
+              .filter((entry) => next.has(entry.toLowerCase())),
+            ...stored.filter((entry) => next.has(entry.toLowerCase())),
           ].join(', '),
         );
       };
@@ -652,7 +662,7 @@ export function ChannelEditorDialog({
               ...options,
               ...stored.map((entry) => ({ value: entry, label: entry })),
             ].map((option) => {
-              const isSelected = selected.includes(option.value);
+              const isSelected = selectedKeys.has(option.value.toLowerCase());
               const optionLabel = fieldOptionLabel(
                 field,
                 option.value,
@@ -1200,7 +1210,9 @@ export function ChannelEditorDialog({
                         approveRequest={approvePairingRequest}
                         listApprovals={listPairingApprovals}
                         revokeApproval={revokePairingApproval}
-                        staticAllowedUsers={configuredAllowedUsers(instance)}
+                        staticAllowedUsers={
+                          repositoryOnly ? [] : configuredAllowedUsers(instance)
+                        }
                       />
                     ) : (
                       <Alert>

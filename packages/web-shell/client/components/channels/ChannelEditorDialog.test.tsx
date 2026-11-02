@@ -188,6 +188,7 @@ const GITHUB_CONFIGURED: DaemonChannelTypeDescriptor = {
         { value: 'mention', label: 'mention' },
         { value: 'review_requested', label: 'review_requested' },
         { value: 'ci_activity', label: 'ci_activity' },
+        { value: 'comment', label: 'comment' },
       ],
     },
     {
@@ -1206,6 +1207,7 @@ describe('ChannelEditorDialog', () => {
       'mention — the bot is @mentioned',
       'review_requested — the bot is asked to review a pull request',
       'ci_activity — CI and check-run results change',
+      'comment — a new comment on a subscribed thread',
     ]);
 
     await act(async () => {
@@ -1241,6 +1243,38 @@ describe('ChannelEditorDialog', () => {
         }),
       }),
     );
+  });
+
+  it('ticks the canonical reason box for a stored upper-case value', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'open',
+        reasonFilter: ['COMMENT'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, instance });
+
+    const boxes = Array.from(
+      document.querySelectorAll<HTMLInputElement>(
+        '[role="group"][aria-label="Reason Filter"] input[type="checkbox"]',
+      ),
+    );
+    // The adapter lowercases both sides, so `COMMENT` is the canonical
+    // `comment` reason: it must tick that box, not add a sixteenth entry that
+    // keeps processing comments after the operator unticks `comment`.
+    expect(boxes).toHaveLength(4);
+    const byLabel = new Map(
+      boxes.map((box) => [box.closest('label')?.textContent, box.checked]),
+    );
+    expect(byLabel.get('comment — a new comment on a subscribed thread')).toBe(
+      true,
+    );
+    expect(byLabel.get('mention — the bot is @mentioned')).toBe(false);
   });
 
   it('keeps a hand-written reason visible instead of dropping it on save', async () => {
@@ -1357,6 +1391,57 @@ describe('ChannelEditorDialog', () => {
 
     expect(document.body.textContent).not.toContain('Direct message policy');
     expect(document.body.textContent).not.toContain('Allowed user IDs');
+  });
+
+  it('asks a repository-only channel to save group pairing before showing approvals', async () => {
+    // Channels saved by the previous editor carry the injected
+    // privatePolicy: 'pairing'. That legacy value must not open the
+    // direct-message pairing panel when the operator switches the *group*
+    // policy to pairing in the draft.
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'open',
+        privatePolicy: 'pairing',
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, instance });
+
+    await selectOption('Group Policy', 'Pairing');
+
+    expect(document.body.textContent).toContain('Save pairing mode first');
+    expect(document.body.textContent).not.toContain('Pairing approvals');
+  });
+
+  it('still shows group pairing approvals for a repository-only channel', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'pairing',
+        allowedUsers: ['alice'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const listPairingRequests = vi.fn().mockResolvedValue({ requests: [] });
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance,
+      listPairingRequests,
+    });
+
+    expect(document.body.textContent).toContain('Pairing approvals');
+    expect(listPairingRequests).toHaveBeenCalledWith('github-bot');
+    // The private user list is not the effective sender allowlist for a
+    // repository, so it must not be presented as one.
+    expect(document.body.textContent).not.toContain('Configured allowlist');
+    expect(document.body.textContent).not.toContain('alice');
   });
 
   it('does not show the allowlist alert when no users are configured', async () => {

@@ -486,9 +486,11 @@ export function buildChannelUpsertRequest(
     assignField(config, field, draft.values[field.key]);
   }
   if (repositoryOnly) {
-    // The editor used to persist the injected "pairing" default here even
-    // though these channels never read it; drop the residue on the next save.
-    delete config['privatePolicy'];
+    // The editor used to persist the injected private-access defaults here
+    // even though these channels never read them, and the pairing panel would
+    // then present the stale user list as an authoritative allowlist. Drop the
+    // whole set on the next save; the effective list lives under `groups`.
+    for (const key of PRIVATE_ONLY_FIELD_KEYS) delete config[key];
   } else if (!hasDescriptorPrivatePolicy(descriptor)) {
     config['privatePolicy'] = draft.privatePolicy;
   }
