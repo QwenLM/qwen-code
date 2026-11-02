@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { useWorkspaceFileChanges } from './artifacts/useWorkspaceFileChanges';
 import { useModelRefresh } from '../hooks/useModelRefresh';
 import { CapacityRecoveryDialog } from './workspaces/CapacityRecoveryDialog';
 import { useCapacityRecovery } from '../hooks/useCapacityRecovery';
@@ -140,7 +141,6 @@ import { TURN_OUTPUT_KINDS } from './artifacts/TurnOutputs';
 import { useArtifactWorkspaceTarget } from './artifacts/useArtifactWorkspaceTarget';
 import {
   getArtifactsByTurn,
-  getFileChangesByTurn,
   getScheduledTasksByTurn,
 } from './artifacts/turnOutputSelectors';
 import { PaneHeaderActions } from './PaneHeaderActions';
@@ -198,6 +198,7 @@ export interface ChatPaneProps {
   title?: string;
   /** Session-list metadata for the shared title details. */
   sessionSummary?: DaemonSessionSummary;
+  showSessionDetails?: boolean;
   /** Last interacted pane, independent of whether its session is running. */
   isActive?: boolean;
   /** Must be referentially stable; reports pending state and unmount cleanup. */
@@ -285,6 +286,7 @@ export interface ChatPaneProps {
 export function ChatPane({
   title,
   sessionSummary,
+  showSessionDetails = true,
   isActive = false,
   onApprovalChange,
   workspaceCwd,
@@ -688,14 +690,18 @@ export function ChatPane({
       getArtifactsByTurn(messages, artifacts, connection.workspaceCwd || ''),
     [messages, artifacts, connection.workspaceCwd],
   );
-  const fileChangesByTurn = useMemo(
-    () =>
-      getFileChangesByTurn(
-        messages,
-        artifactsByTurn,
-        connection.workspaceCwd || '',
-      ),
-    [messages, artifactsByTurn, connection.workspaceCwd],
+  const fileChangesByTurn = useWorkspaceFileChanges(
+    messages,
+    artifactsByTurn,
+    connection.workspaceCwd ||
+      connection.standaloneSession?.projectlessOutputDirectory ||
+      '',
+    connection.sessionId,
+    connection.workspaceCwd && sessionSummary
+      ? (sessionSummary.worktree?.path ?? connection.workspaceCwd)
+      : connection.workspaceCwd
+        ? undefined
+        : null,
   );
   const scheduledTasksByTurn = useMemo(
     () => getScheduledTasksByTurn(messages),
@@ -1667,7 +1673,7 @@ export function ChatPane({
               <span className={styles.workspaceTagText}>{workspaceLabel}</span>
             </span>
           )}
-          {sessionSummary && !hidden ? (
+          {showSessionDetails && sessionSummary && !hidden ? (
             <SessionDetailsTooltip
               session={{
                 ...sessionSummary,

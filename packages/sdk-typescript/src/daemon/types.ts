@@ -326,6 +326,11 @@ export type DaemonGitOperation =
   | 'revert'
   | 'bisect';
 
+export interface DaemonWorkspaceGitIgnoredPaths {
+  v: 1;
+  ignoredPaths: string[];
+}
+
 /**
  * Current Git metadata returned from a workspace Git status route.
  *

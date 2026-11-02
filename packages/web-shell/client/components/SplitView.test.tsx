@@ -109,7 +109,12 @@ vi.mock('./ChatPane', () => ({
         data-plan-visible={String(props.planControlVisible)}
         data-model-management={JSON.stringify(props.modelManagement)}
         data-pane-workspace={props.workspaceCwd}
-        data-session-details={props.sessionSummary?.sessionId}
+        data-session-details={
+          props.showSessionDetails !== false
+            ? props.sessionSummary?.sessionId
+            : undefined
+        }
+        data-execution-worktree={props.sessionSummary?.worktree?.path}
         data-maximized={props.isMaximized ? 'true' : 'false'}
         data-pane-active={props.isActive ? '' : undefined}
         data-slash-handler={props.onSlashCommand ? 'true' : 'false'}
@@ -505,6 +510,7 @@ describe('SplitView', () => {
   });
 
   it('omits title details when the host disables them', () => {
+    sessionsState[0].worktree = { path: '/tmp/project/.qwen/worktrees/one' };
     waitingSessions = new Set(['s1']);
     const onPendingPanesChange = vi.fn();
     render({
@@ -516,6 +522,9 @@ describe('SplitView', () => {
     expect(
       panes().some((pane) => pane.hasAttribute('data-session-details')),
     ).toBe(false);
+    expect(panes()[0].getAttribute('data-execution-worktree')).toBe(
+      '/tmp/project/.qwen/worktrees/one',
+    );
     expect(
       container!.querySelector(
         '[title="Go to the next session awaiting input"]',

@@ -19,8 +19,12 @@ import {
 import {
   resolveSessionManagedGitCwdForRoute,
   resolveTrustedRuntime,
+  sendGenerationClosedError,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
+import { getGitIgnoredPaths, isGitIgnorePaths } from '../server/git-ignored.js';
+import { safeBody } from '../server/request-helpers.js';
+import { applyReadHeaders } from './workspace-file-read.js';
 
 export function registerWorkspaceGitRoutes(
   app: Application,
@@ -70,6 +74,50 @@ export function registerWorkspaceQualifiedGitRoutes(
     sendBridgeError: SendBridgeError;
   },
 ): void {
+  app.post('/workspaces/:workspace/git/check-ignore', async (req, res) => {
+    applyReadHeaders(res);
+    const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
+    if (!runtime) return;
+    const route = 'POST /workspaces/:workspace/git/check-ignore';
+    const paths = safeBody(req)['paths'];
+    if (!isGitIgnorePaths(paths)) {
+      res.status(400).json({ error: 'invalid_paths', code: 'invalid_paths' });
+      return;
+    }
+    const cwd = await resolveSessionManagedGitCwdForRoute(
+      req,
+      res,
+      runtime,
+      route,
+      deps.sendBridgeError,
+    );
+    if (cwd === undefined) return;
+    const abort = new AbortController();
+    const onClose = () => {
+      if (!res.writableEnded) abort.abort();
+    };
+    res.once('close', onClose);
+    try {
+      runtime.generationGuard?.assertOpen();
+      const ignoredPaths = await getGitIgnoredPaths(
+        cwd,
+        paths,
+        runtime.env.effectiveEnv,
+        abort.signal,
+      );
+      runtime.generationGuard?.assertOpen();
+      if (!res.destroyed) res.json({ v: 1, ignoredPaths });
+    } catch (error) {
+      if (!res.destroyed && !sendGenerationClosedError(res, error)) {
+        res.status(503).json({
+          code: 'git_ignore_unavailable',
+          error: 'Git ignore status is unavailable',
+        });
+      }
+    } finally {
+      res.off('close', onClose);
+    }
+  });
   app.get('/workspaces/:workspace/git', async (req, res) => {
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;

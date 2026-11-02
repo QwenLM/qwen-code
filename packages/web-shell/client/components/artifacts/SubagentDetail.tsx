@@ -1,3 +1,4 @@
+import { useWorkspaceFileChanges } from './useWorkspaceFileChanges';
 import { useDaemonAvailabilityController } from '../../daemon/availability-context.js';
 import { isDaemonUnavailableError } from '../../daemon/availability.js';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -21,10 +22,8 @@ import { MessageList } from '../MessageList';
 import { getAgentDescription } from '../messages/toolFormatting';
 import { Badge } from '../ui/badge';
 import type { TurnOutputOpenRequest } from './TurnOutputs';
-import {
-  getArtifactsByTurn,
-  getFileChangesByTurn,
-} from './turnOutputSelectors';
+import { getArtifactsByTurn } from './turnOutputSelectors';
+import { fileChangeOwnerSessionId } from './workspace-file-changes';
 import styles from './SubagentDetail.module.css';
 
 interface SubagentResolution {
@@ -149,14 +148,16 @@ function SubagentDetailContent({
       getArtifactsByTurn(messages, artifacts, connection.workspaceCwd || ''),
     [artifacts, connection.workspaceCwd, messages],
   );
-  const fileChangesByTurn = useMemo(
-    () =>
-      getFileChangesByTurn(
-        messages,
-        artifactsByTurn,
-        connection.workspaceCwd || '',
-      ),
-    [artifactsByTurn, connection.workspaceCwd, messages],
+  const fileChangesByTurn = useWorkspaceFileChanges(
+    messages,
+    artifactsByTurn,
+    connection.workspaceCwd ||
+      connection.standaloneSession?.projectlessOutputDirectory ||
+      '',
+    connection.sessionId
+      ? fileChangeOwnerSessionId(connection.sessionId)
+      : undefined,
+    connection.workspaceCwd ? undefined : null,
   );
   const description = getAgentDescription(rootTool);
   const metrics = useMemo(

@@ -555,6 +555,7 @@ export type {
   DaemonWorkspaceCapability,
   DaemonWorkspaceUpdate,
   DaemonWorkspaceGitStatus,
+  DaemonWorkspaceGitIgnoredPaths,
   DaemonGitOperation,
   DaemonWorkspaceGitDiff,
   DaemonWorkspaceGitDiffFile,
