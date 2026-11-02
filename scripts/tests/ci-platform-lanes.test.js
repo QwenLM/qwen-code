@@ -372,12 +372,28 @@ it('routes the browser smoke to ARM64 independently of the shared Linux test lan
   const smoke = ci.jobs.web_shell_e2e_smoke.steps.find(
     (step) => step.name === 'Run web-shell browser smoke',
   );
-  expect(smoke.run).toMatch(/ -- --workers=2$/);
+  // Each of the four shards runs a quarter of the smoke at the hosted
+  // worker count; the transcript gate runs once, on the first shard.
+  expect(smoke.run).toMatch(
+    / -- --shard=\$\{\{ matrix\.shard \}\}\/4 --workers=2$/,
+  );
+  expect(ci.jobs.web_shell_e2e_smoke.strategy.matrix.shard).toEqual([
+    1, 2, 3, 4,
+  ]);
+  expect(ci.jobs.web_shell_e2e_smoke.strategy['fail-fast']).toBe(false);
+  const result = ci.jobs.web_shell_e2e_smoke_result;
+  expect(result.name).toBe('web-shell E2E Smoke (ubuntu-latest, Node 22.x)');
+  expect(result.needs).toEqual(['classify_pr', 'web_shell_e2e_smoke']);
+  expect(condOf('web_shell_e2e_smoke_result')).toBe(
+    condOf('web_shell_e2e_smoke'),
+  );
+  expect(result.steps[0].run).toBe('test "$SMOKE_RESULT" = success');
   expect(smoke.env.TMPDIR).toBe('${{ runner.temp }}');
   const transcript = ci.jobs.web_shell_e2e_smoke.steps.find(
     (step) => step.name === 'Run transcript document browser gate',
   );
   expect(transcript.env.TMPDIR).toBe('${{ runner.temp }}');
+  expect(transcript.if).toBe('${{ matrix.shard == 1 }}');
   // Slow hosted browser installs took over 23 min, so reserve time in the
   // 60-minute job for transcript/smoke tests and artifact upload, while the
   // install step itself stays bounded.
