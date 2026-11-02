@@ -311,7 +311,9 @@ it('gives the shared Linux test lane one ceiling on both pools', () => {
 it('reports the required Linux check only when the build and every shard pass', () => {
   const gate = ci.jobs.test_ubuntu;
   expect(gate.name).toBe('Test (ubuntu-latest, Node 22.x)');
-  expect(gate.needs).toEqual(['test_build', 'test']);
+  expect(gate.needs).toEqual(['classify_pr', 'test_build', 'test']);
+  // On the shards' runners, not a hosted one that can queue it for minutes.
+  expect(gate['runs-on']).toBe(ci.jobs.test['runs-on']);
   expect(condOf('test_ubuntu')).toBe(condOf('test'));
   expect(gate.steps[0].run).toBe(
     'test "$BUILD_RESULT" = success && test "$SHARDS_RESULT" = success',
@@ -384,6 +386,7 @@ it('routes the browser smoke to ARM64 independently of the shared Linux test lan
   const result = ci.jobs.web_shell_e2e_smoke_result;
   expect(result.name).toBe('web-shell E2E Smoke (ubuntu-latest, Node 22.x)');
   expect(result.needs).toEqual(['classify_pr', 'web_shell_e2e_smoke']);
+  expect(result['runs-on']).toBe(ci.jobs.web_shell_e2e_smoke['runs-on']);
   expect(condOf('web_shell_e2e_smoke_result')).toBe(
     condOf('web_shell_e2e_smoke'),
   );

@@ -1362,9 +1362,11 @@ jobs:
 
   test_ubuntu:
     name: 'Test (ubuntu-latest, Node 22.x)'
-    needs: ['test_build', 'test']
+    needs: ['classify_pr', 'test_build', 'test']
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
-    runs-on: 'ubuntu-latest'
+    # The shards' runners: a hosted runner queued this one-line check for
+    # 9 minutes after the last shard finished.
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'
@@ -2251,6 +2253,7 @@ jobs:
         run: 'echo "key=$(node scripts/ci-build-cache.mjs key)" >> "${GITHUB_OUTPUT}"'
 
       - name: 'Restore the build cache'
+        id: 'build_cache'
         timeout-minutes: 5
         continue-on-error: true
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
@@ -2261,6 +2264,24 @@ jobs:
 
       - name: 'Build'
         run: 'node scripts/ci-build-cache.mjs build .qwen-build-cache'
+
+      # This lane runs on the ARM64 pool, which test_build may not. When the
+      # restore found nothing, the first shard saves the clean build it made.
+      - name: 'Pack the build cache'
+        id: 'pack_build_cache'
+        if: "${{ matrix.shard == 1 && steps.build_cache.outputs.cache-matched-key == '' }}"
+        run: |-
+          rm -rf .qwen-build-cache
+          node scripts/ci-build-cache.mjs pack .qwen-build-cache
+
+      - name: 'Save the build cache'
+        if: "${{ steps.pack_build_cache.outcome == 'success' }}"
+        timeout-minutes: 5
+        continue-on-error: true
+        uses: 'actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '.qwen-build-cache'
+          key: 'qwen-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.build_key.outputs.key }}'
 
       - name: 'Install Playwright Chromium and WebKit (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
@@ -2384,7 +2405,9 @@ jobs:
         needs.classify_pr.outputs.skip_ci != 'true' &&
         (needs.classify_pr.outputs.ci_profile || 'full') == 'full'
       }}
-    runs-on: 'ubuntu-latest'
+    # The shards' runners: a hosted runner queued this one-line check for
+    # 13 minutes after the last shard finished.
+    runs-on: '${{ contains(fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]''), ''self-hosted'') && fromJSON(''["self-hosted", "linux", "arm64"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'
