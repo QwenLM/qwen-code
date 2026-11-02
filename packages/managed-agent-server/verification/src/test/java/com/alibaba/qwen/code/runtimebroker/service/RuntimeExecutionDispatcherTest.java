@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.SessionContext;
 import org.junit.jupiter.api.Test;
@@ -24,6 +25,9 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.HexFormat;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -49,6 +53,33 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class RuntimeExecutionDispatcherTest {
+    @Test
+    void verifiedReadUsesValidatedClaimInsteadOfExclusiveFallback()
+            throws Exception {
+        var fixture = new Fixture();
+        String json = "{\"toolName\":\"read_file\",\"input\":{}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256")
+                        .digest(json.getBytes(StandardCharsets.UTF_8)));
+        var payload = Map.<String, Object>of(
+                "toolName", "read_file", "input", Map.of());
+        var verified = VerifiedDispatchPayload.verify(json, digest);
+        when(fixture.executions.claimValidatedDispatch(
+                "execution", "broker", Fixture.LEASE, verified))
+                .thenReturn(fixture.prepared);
+
+        fixture.dispatcher.beginDispatch(
+                fixture.context, fixture.prepared, payload, verified);
+
+        verify(fixture.executions).claimValidatedDispatch(
+                "execution", "broker", Fixture.LEASE, verified);
+        verify(fixture.executions, never()).claimDispatch(
+                "execution", "broker", Fixture.LEASE);
+        verify(fixture.transport).execute(
+                fixture.lease, fixture.session, Fixture.REFERENCE, payload);
+        fixture.answer.complete(Fixture.RESULT);
+    }
+
     @Test
     @Timeout(15)
     void concurrentDispatchesShareReservationWhileClaimIsPending() throws Exception {

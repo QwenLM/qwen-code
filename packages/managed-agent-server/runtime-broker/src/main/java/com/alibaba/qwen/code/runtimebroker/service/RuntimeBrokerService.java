@@ -1859,7 +1859,8 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                                     });
                         }
                         if (shouldDriveDispatch(record)) {
-                            executionDispatcher.beginDispatch(context, record, payload);
+                            executionDispatcher.beginDispatch(context, record,
+                                    payload, verifiedPayload);
                         }
                         ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
                         return CompletableFuture.completedFuture(latest == null ? record : latest);

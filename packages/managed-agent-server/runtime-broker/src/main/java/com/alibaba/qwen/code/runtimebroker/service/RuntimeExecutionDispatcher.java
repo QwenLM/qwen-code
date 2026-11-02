@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.SessionContext;
 
@@ -105,17 +106,25 @@ final class RuntimeExecutionDispatcher {
 
     void beginDispatch(SessionContext context,
             ToolExecutionRecord prepared) {
-        beginDispatch(context, prepared, null);
+        beginDispatch(context, prepared, null, null, null);
     }
 
     void beginDispatch(SessionContext context,
-            ToolExecutionRecord prepared, Map<String, Object> payload) {
-        beginDispatch(context, prepared, payload, null);
+            ToolExecutionRecord prepared, Map<String, Object> payload,
+            VerifiedDispatchPayload verifiedPayload) {
+        beginDispatch(context, prepared, payload, null, verifiedPayload);
     }
 
     void beginDispatch(SessionContext context,
             ToolExecutionRecord prepared, Map<String, Object> payload,
             RuntimePublicationGrant grant) {
+        beginDispatch(context, prepared, payload, grant, null);
+    }
+
+    void beginDispatch(SessionContext context,
+            ToolExecutionRecord prepared, Map<String, Object> payload,
+            RuntimePublicationGrant grant,
+            VerifiedDispatchPayload verifiedPayload) {
         if (CsiFilesRetirementProfile.isProfile(context.binding().getRequest().getScope())
                 && (!(bindingRepository instanceof NativeCsiExecutionRepository)
                         || payload == null || !Set.of("read_file", "write_file", "edit").contains(String.valueOf(payload.get("toolName"))) || grant != null)) {
@@ -139,7 +148,8 @@ final class RuntimeExecutionDispatcher {
         }
         CompletionStage<Void> operation;
         try {
-            operation = dispatch(context, prepared, payload, grant);
+            operation = dispatch(context, prepared, payload, grant,
+                    verifiedPayload);
         } catch (RuntimeException | Error exception) {
             dispatches.remove(prepared.getExecutionCallId(), created);
             created.completeExceptionally(exception);
@@ -161,10 +171,15 @@ final class RuntimeExecutionDispatcher {
 
     private CompletionStage<Void> dispatch(SessionContext context,
             ToolExecutionRecord prepared, Map<String, Object> payload,
-            RuntimePublicationGrant grant) {
-        ToolExecutionRecord claimed = executionRepository.claimDispatch(
-                prepared.getExecutionCallId(), brokerOwnerId,
-                dispatchLeaseDuration);
+            RuntimePublicationGrant grant,
+            VerifiedDispatchPayload verifiedPayload) {
+        ToolExecutionRecord claimed = verifiedPayload == null
+                ? executionRepository.claimDispatch(
+                        prepared.getExecutionCallId(), brokerOwnerId,
+                        dispatchLeaseDuration)
+                : executionRepository.claimValidatedDispatch(
+                        prepared.getExecutionCallId(), brokerOwnerId,
+                        dispatchLeaseDuration, verifiedPayload);
         if (claimed == null
                 || claimed.getState()
                         != ToolExecutionRecord.State.DISPATCHING) {
