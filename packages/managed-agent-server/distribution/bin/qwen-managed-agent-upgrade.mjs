@@ -2621,6 +2621,8 @@ async function health(system, url, budgetMs, capMs = PROBE_TIMEOUT_MS) {
     return {
       up: false,
       answer: response.ok ? `${status}, ${error.message}` : status,
+      // The signal ends a body that stalls after its headers as well.
+      timedOut: error.name === 'TimeoutError',
     };
   }
   return response.ok && body?.status === 'UP'
@@ -2729,7 +2731,8 @@ async function phaseStart(system, deployment, options) {
       const probe = await health(system, urls.health, budget);
       // A probe the deadline cut short, as it cuts the last one to 1 ms, can
       // time out before any endpoint answers; it does not replace what an
-      // earlier probe was told. One that ran out of its own time can.
+      // earlier probe was told. One whose own 5 s ran out before the
+      // deadline can, and so can any other failure.
       if (!(probe.timedOut && budget < PROBE_TIMEOUT_MS && answer)) {
         answer = probe.answer;
       }

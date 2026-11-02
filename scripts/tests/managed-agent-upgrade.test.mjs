@@ -24,6 +24,7 @@ import fsPromises, {
   symlink,
   writeFile,
 } from 'node:fs/promises';
+import http from 'node:http';
 import { syncBuiltinESMExports } from 'node:module';
 import net from 'node:net';
 import os from 'node:os';
@@ -1984,6 +1985,72 @@ test('start names what the endpoint answered, not a probe the deadline cut short
   assert.match(
     host.output.at(-1),
     /within 6s \(the last probe: The operation was aborted due to timeout\) and keeps running/,
+  );
+
+  // On real sockets. A body that stalls after its headers is cut short as
+  // well: the second probe reads 200, then nothing until the deadline.
+  let served = 0;
+  const stalls = http.createServer((request, response) => {
+    served += 1;
+    if (served === 1) {
+      response.writeHead(503, { 'content-type': 'application/json' });
+      response.end('{"status":"DOWN"}');
+    } else {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.write('{"status":');
+    }
+  });
+  await new Promise((resolve) => stalls.listen(0, '127.0.0.1', resolve));
+  t.after(() => {
+    stalls.closeAllConnections();
+    stalls.close();
+  });
+  host.system.fetch = fetch;
+  assert.equal(await host.upgrade('stop'), 0);
+  assert.equal(
+    await host.upgrade(
+      'start',
+      '--server-url',
+      `http://127.0.0.1:${stalls.address().port}`,
+      '--timeout',
+      '2',
+    ),
+    1,
+  );
+  assert.ok(served >= 2, `${served} requests`);
+  assert.match(
+    host.output.at(-1),
+    /within 2s \(the last probe: HTTP 503, status DOWN\) and keeps running/,
+  );
+
+  // A refused connection after an answer is what the endpoint says now,
+  // though the deadline cut that probe's time too.
+  const closes = http.createServer((request, response) => {
+    closes.close();
+    response.writeHead(503, {
+      'content-type': 'application/json',
+      connection: 'close',
+    });
+    response.end('{"status":"DOWN"}');
+  });
+  await new Promise((resolve) => closes.listen(0, '127.0.0.1', resolve));
+  const { port } = closes.address();
+  assert.equal(await host.upgrade('stop'), 0);
+  assert.equal(
+    await host.upgrade(
+      'start',
+      '--server-url',
+      `http://127.0.0.1:${port}`,
+      '--timeout',
+      '3',
+    ),
+    1,
+  );
+  assert.match(
+    host.output.at(-1),
+    new RegExp(
+      `within 3s \\(the last probe: connect ECONNREFUSED 127\\.0\\.0\\.1:${port}\\) and keeps running`,
+    ),
   );
 });
 
