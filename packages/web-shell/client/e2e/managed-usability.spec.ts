@@ -28,6 +28,15 @@ for (const width of [1280, 390]) {
         return route.fulfill({ json: { paused: false, messages: [] } });
       if (path.endsWith('/workspace-extensions/query'))
         return route.fulfill({ json: { supported: false, extensions: [] } });
+      if (path.endsWith('/workspaces/worktrees/options'))
+        return route.fulfill({
+          json: {
+            supported: true,
+            baseCommit: 'a'.repeat(40),
+            branches: ['main'],
+            currentBranch: 'main',
+          },
+        });
       if (path.endsWith('/runtime-nodes/query'))
         return route.fulfill({ json: { supported: false, data: [] } });
       if (path.endsWith('/sessions/query'))
@@ -261,6 +270,15 @@ test('abandoning an unconfirmed first input warns about execution and refreshes 
       return route.fulfill({ json: { paused: false, messages: [] } });
     if (path.endsWith('/workspace-extensions/query'))
       return route.fulfill({ json: { supported: false, extensions: [] } });
+    if (path.endsWith('/workspaces/worktrees/options'))
+      return route.fulfill({
+        json: {
+          supported: true,
+          baseCommit: 'a'.repeat(40),
+          branches: ['main'],
+          currentBranch: 'main',
+        },
+      });
     if (path.endsWith('/runtime-nodes/query'))
       return route.fulfill({ json: { supported: false, data: [] } });
     if (path.endsWith('/sessions/query')) {

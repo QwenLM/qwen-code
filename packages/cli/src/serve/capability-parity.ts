@@ -530,6 +530,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_session_live_state: NO_MANAGED_EQUIVALENT(
     'no Managed live-state snapshot',
   ),
+  workspace_session_live_state_batch: NO_MANAGED_EQUIVALENT(
+    'no Managed live-state snapshot',
+  ),
   workspace_session_metadata: NO_MANAGED_EQUIVALENT(
     'Managed renames a Session and has no metadata bag',
   ),
@@ -657,6 +660,7 @@ export const MANAGED_ONLY_REPORTED: readonly string[] = [
   'SESSION_CONTEXT_COMPRESSION',
   'SESSION_RECOVERY_QUERY',
   'SESSION_RECOVERY_RECHECK',
+  'SESSION_WORKTREE',
 ];
 
 /**

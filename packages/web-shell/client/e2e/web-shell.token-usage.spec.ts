@@ -36,8 +36,13 @@ for (const { width, language, theme } of [
       const daemon = await installMockDaemon(page, scenario, {
         baseURL: String(testInfo.project.use.baseURL),
       });
-      const metrics = (prompt: number, candidates: number, cached: number) => ({
-        api: { totalRequests: 105, totalErrors: 0, totalLatencyMs: 2404500 },
+      const metrics = (
+        prompt: number,
+        candidates: number,
+        cached: number,
+        totalErrors = 0,
+      ) => ({
+        api: { totalRequests: 105, totalErrors, totalLatencyMs: 2404500 },
         tokens: {
           prompt,
           candidates,
@@ -46,6 +51,20 @@ for (const { width, language, theme } of [
           thoughts: Math.floor(candidates / 2),
         },
       });
+      const at = (minute: number) =>
+        Date.UTC(2026, 9, 20, 11, 20) + minute * 60_000;
+      // Deterministic per-request timing: a wobble around `speed` tok/s.
+      const timeline = (count: number, speed: number, ttftMs: number) =>
+        Array.from({ length: count }, (_, index) => {
+          const generationMs = 2_000 + (index % 5) * 300;
+          const rate = speed * (1 + 0.25 * Math.sin(index * 1.7));
+          return {
+            at: at((index * 24) / count),
+            ttftMs: ttftMs + (index % 4) * 150,
+            generationMs,
+            outputTokens: Math.round((rate * generationMs) / 1000),
+          };
+        });
       const stats: DaemonSessionStatsStatus = {
         v: 1,
         sessionId: scenario.sessionId,
@@ -60,11 +79,24 @@ for (const { width, language, theme } of [
               timedRequests: 4,
               totalTtftMs: 4800,
               totalGenerationDurationMs: 2000,
-              totalThroughputOutputTokens: 170,
+              totalThroughputOutputTokens: 898,
             },
           },
-          'qwen3.8-max-0902': metrics(3000000, 750000, 2700000),
-          'gpt-6.1-sol': metrics(500000, 100000, 490000),
+          'qwen3.8-max-0902': {
+            ...metrics(3000000, 750000, 2700000, 7),
+            timingSamples: timeline(24, 62, 1100),
+            failures: {
+              byKind: { '429': 5, timeout: 2 },
+              recent: [9, 9.5, 10, 10.4, 11, 17, 19].map((minute, index) => ({
+                at: at(minute),
+                kind: index < 5 ? '429' : 'timeout',
+              })),
+            },
+          },
+          'gpt-6.1-sol': {
+            ...metrics(500000, 100000, 490000),
+            timingSamples: timeline(16, 148, 450),
+          },
           'gpt-5.6-sol': metrics(300000, 100000, 294000),
           'bailian/kimi-k3-with-a-very-long-model-name-for-layout': metrics(
             900000,
@@ -126,101 +158,108 @@ for (const { width, language, theme } of [
       });
       await expect(hero).toBeVisible();
       const panel = page.getByTestId('token-usage-panel');
-      await expect(panel.locator('dl').first().locator('dt')).toHaveCount(2);
+      const overview = panel.locator('dl').first();
+      await expect(overview.locator('dt')).toHaveText(
+        zh
+          ? ['输入', '总输出', '成功率', '输出速度']
+          : ['Input', 'Total output', 'Success rate', 'Output speed'],
+      );
+      // 7 failures in 525 requests across the session.
+      await expect(overview.locator(':scope > div').nth(2)).toHaveText(
+        zh
+          ? '成功率98.7%525 次请求中 7 次失败'
+          : 'Success rate98.7%7 of 525 requests failed',
+      );
+      const shares = panel.getByTestId('token-usage-model-shares');
+      await expect(shares.locator('li')).toHaveCount(5);
+      const segmentColors = await shares
+        .getByRole('img')
+        .locator(':scope > div')
+        .evaluateAll((elements) =>
+          elements.map((element) => getComputedStyle(element).backgroundColor),
+        );
+      expect(segmentColors).toHaveLength(5);
+      expect(new Set(segmentColors).size).toBe(5);
+      const cardColors = await panel
+        .locator('[data-color]')
+        .evaluateAll((elements) =>
+          elements.map(
+            (element) => getComputedStyle(element, '::before').backgroundColor,
+          ),
+        );
+      expect(cardColors).toEqual(segmentColors);
       const model = panel.locator('[data-color]').filter({
         has: page.locator('[title="qwen3.8-flash"]'),
       });
       await expect(model).toContainText('71.3%');
+      const timing = zh
+        ? [
+            ['首 token', '1.2s'],
+            ['输出速度', '449.0 tok/s'],
+            ['生成', '500ms'],
+            ['请求', '105'],
+            ['成功率', '100%'],
+            ['平均延迟', '22.9s'],
+          ]
+        : [
+            ['First token', '1.2s'],
+            ['Output speed', '449.0 tok/s'],
+            ['Generation', '500ms'],
+            ['Requests', '105'],
+            ['Success rate', '100%'],
+            ['Avg latency', '22.9s'],
+          ];
+      const timingText = timing.flat().join('');
       const modelText = (input: string, rate: string, share: string) =>
-        `qwen3.8-flash${zh ? '输入' : 'Input'}${zh ? `${input}（缓存率：${rate}%）` : `${input} (cache rate: ${rate}%)`}${zh ? '总输出' : 'Total output'}250K${share}%`;
+        `qwen3.8-flash${timingText}${zh ? '输入' : 'Input'}${zh ? `${input}（缓存率：${rate}%）` : `${input} (cache rate: ${rate}%)`}${zh ? '总输出' : 'Total output'}250K${share}%`;
       await expect(model).toHaveText(modelText('14M', '88.0', '71.3'));
       await expect(model.getByText('71.3%', { exact: true })).toBeVisible();
       await expect(model.locator('details, summary')).toHaveCount(0);
-      const info = model.getByRole('button', {
-        name: zh
-          ? 'qwen3.8-flash：请求 · 平均延迟'
-          : 'qwen3.8-flash: Requests · Avg latency',
-        exact: true,
-      });
-      await expect(model).not.toContainText(zh ? '请求 105' : 'Requests 105');
-      await expect(info).toHaveCSS('cursor', 'default');
-      const infoNames = await panel
-        .locator('[data-color] button')
-        .evaluateAll((buttons) =>
-          buttons.map((button) => button.getAttribute('aria-label')),
-        );
-      expect(new Set(infoNames).size).toBe(5);
-      for (const [index, card] of (
-        await panel.locator('[data-color]').all()
-      ).entries()) {
-        const name = await card
-          .locator('[title]')
-          .first()
-          .getAttribute('title');
-        expect(infoNames[index]).toBe(
-          zh ? `${name}：请求 · 平均延迟` : `${name}: Requests · Avg latency`,
-        );
-      }
-      await info.hover();
-      await expect(page.getByRole('tooltip')).toContainText(
-        zh ? '请求 105' : 'Requests 105',
+      const timingGrid = model.locator('dl').first();
+      const tokenRow = model.locator('dl').nth(1);
+      await expect(model.getByRole('button')).toHaveCount(0);
+      await expect(timingGrid.locator('dt')).toHaveText(
+        timing.map(([label]) => label),
       );
-      await expect(page.getByRole('tooltip')).toContainText(
-        zh ? '平均延迟 22.9s' : 'Avg latency 22.9s',
+      await expect(timingGrid.locator('dd')).toHaveText(
+        timing.map(([, value]) => value),
       );
-      for (const text of zh
-        ? ['首 token 延迟 1.2s', '生成 500ms', '输出速度 85.0 tok/s']
-        : [
-            'First-token latency 1.2s',
-            'Generation 500ms',
-            'Output speed 85.0 tok/s',
-          ]) {
-        await expect(page.getByRole('tooltip')).toContainText(text);
-        await expect(model).not.toContainText(text);
-      }
+      await expect(timingGrid).toHaveCSS('display', 'grid');
+      const checkTimingOverflow = async () => {
+        for (const text of await timingGrid.locator('dt, dd').all()) {
+          await expect(text).toBeVisible();
+          await expect(text).toHaveCSS('white-space', 'nowrap');
+          const { clipped, tagName } = await text.evaluate((element) => ({
+            clipped: element.scrollWidth > element.clientWidth,
+            tagName: element.tagName,
+          }));
+          if (width === 390 && tagName === 'DD') {
+            expect(clipped).toBe(false);
+          }
+          if (clipped) {
+            await expect(text).toHaveAttribute(
+              'title',
+              (await text.textContent())!,
+            );
+          }
+        }
+      };
+      await checkTimingOverflow();
+      const otherModel = panel
+        .locator('[data-color]')
+        .filter({ has: page.locator('[title="qwen3.8-max-0902"]') });
+      const otherTiming = otherModel.locator('dl').first().locator('dt');
+      await expect(otherTiming).toHaveText(
+        zh
+          ? ['请求', '成功率', '平均延迟']
+          : ['Requests', 'Success rate', 'Avg latency'],
+      );
       const timingPath = testInfo.outputPath('token-model-timing.png');
       await page.screenshot({ path: timingPath, animations: 'disabled' });
       await testInfo.attach('token-model-timing', {
         path: timingPath,
         contentType: 'image/png',
       });
-      await panel.locator('[data-color] button').nth(1).hover();
-      await expect(
-        page.locator('[data-slot="tooltip-content"][data-state$="open"]'),
-      ).toHaveAttribute('data-state', 'instant-open');
-      await page.mouse.move(0, 0);
-      await expect(page.locator('[data-slot="tooltip-content"]')).toHaveCount(
-        0,
-      );
-      await info.focus();
-      await expect(page.getByRole('tooltip')).toContainText(
-        zh ? '请求 105' : 'Requests 105',
-      );
-      await info.press('Escape');
-      await expect(page.locator('[data-slot="tooltip-content"]')).toHaveCount(
-        0,
-      );
-      await info.blur();
-      if (width === 390) {
-        await info.tap();
-        const touchTooltip = page.locator('[data-slot="tooltip-content"]');
-        await expect(touchTooltip).toHaveAttribute('data-state', /open$/);
-        await expect(touchTooltip).toHaveCSS('opacity', '1');
-        await expect(touchTooltip).toContainText(
-          zh ? '请求 105' : 'Requests 105',
-        );
-        const touchPath = testInfo.outputPath('token-info-touch.png');
-        await page.screenshot({ path: touchPath, animations: 'disabled' });
-        await expect(touchTooltip).toHaveAttribute('data-state', /open$/);
-        await testInfo.attach('Visible Info metadata after touch', {
-          path: touchPath,
-          contentType: 'image/png',
-        });
-        await hero.tap();
-        await expect(page.locator('[data-slot="tooltip-content"]')).toHaveCount(
-          0,
-        );
-      }
       const checkContrast = async (
         target: Locator,
         property: 'color' | 'outlineColor',
@@ -264,11 +303,24 @@ for (const { width, language, theme } of [
         }, property);
         expect(contrast).toBeGreaterThanOrEqual(minimum);
       };
-      await checkContrast(info, 'color');
+      for (const label of await timingGrid.locator('dt').all()) {
+        await checkContrast(label, 'color', 4.5);
+      }
       await checkContrast(hero, 'color', 4.5);
       for (const card of await panel.locator('[data-color]').all()) {
-        await checkContrast(card.getByText(/^\d+\.\d+%$/), 'color', 4.5);
+        await checkContrast(
+          card.locator(':scope > :last-child').getByText(/^\d+\.\d+%$/),
+          'color',
+          4.5,
+        );
       }
+      for (const outcome of await panel.locator('[data-level]').all()) {
+        await checkContrast(outcome, 'color', 4.5);
+      }
+      await expect(otherModel.locator('[data-level]')).toHaveAttribute(
+        'data-level',
+        'warning',
+      );
       for (const label of await panel
         .locator('dl')
         .first()
@@ -277,7 +329,7 @@ for (const { width, language, theme } of [
         await checkContrast(label, 'color', 4.5);
       }
       const longName = panel.locator(
-        '[title="bailian/kimi-k3-with-a-very-long-model-name-for-layout"]',
+        '[data-color] [title="bailian/kimi-k3-with-a-very-long-model-name-for-layout"]',
       );
       await expect(longName).toHaveCSS('white-space', 'nowrap');
       await expect(longName).toHaveCSS('text-overflow', 'ellipsis');
@@ -290,21 +342,21 @@ for (const { width, language, theme } of [
       ).toBe(true);
 
       expect(
-        await model
-          .locator('dl > div')
+        await tokenRow
+          .locator(':scope > div')
           .nth(1)
           .evaluate((node) => getComputedStyle(node, '::before').content),
       ).toContain('·');
-      await expect(model.locator('dl')).toHaveCSS('column-gap', 'normal');
-      await expect(model.locator('dl')).toHaveCSS('row-gap', 'normal');
+      await expect(tokenRow).toHaveCSS('column-gap', 'normal');
+      await expect(tokenRow).toHaveCSS('row-gap', 'normal');
       await expect(
         model.getByText(zh ? '输入' : 'Input', { exact: true }),
       ).toBeVisible();
       await expect(
         model.getByText(zh ? '总输出' : 'Total output', { exact: true }),
       ).toBeVisible();
-      await expect(model.locator('dt')).toHaveCount(2);
-      await expect(model.locator('dd').first()).toHaveText(
+      await expect(tokenRow.locator('dt')).toHaveCount(2);
+      await expect(tokenRow.locator('dd').first()).toHaveText(
         zh ? '14M（缓存率：88.0%）' : '14M (cache rate: 88.0%)',
       );
       await expect(model).not.toContainText(zh ? '思考' : 'Reasoning');
@@ -370,7 +422,7 @@ for (const { width, language, theme } of [
           ).toHaveCount(0);
         }
       };
-      await checkMetricTooltip(model.locator('dl'), [
+      await checkMetricTooltip(tokenRow, [
         '14M',
         zh ? '12.32M（88.0%）' : '12.32M (88.0%)',
         '250K',
@@ -380,6 +432,13 @@ for (const { width, language, theme } of [
       const modelTrack = model.getByRole('img', { name: modelShareLabel });
       await modelTrack.hover();
       await expect(page.getByRole('tooltip')).toHaveText(modelShareLabel);
+      const otherTrack = otherModel.getByRole('img');
+      await otherTrack.hover();
+      const otherShareLabel = (await otherTrack.getAttribute('aria-label'))!;
+      await expect(
+        page.getByRole('tooltip', { name: otherShareLabel, exact: true }),
+      ).toHaveText(otherShareLabel);
+      await expect(otherTrack).toHaveAttribute('data-state', 'instant-open');
       await page.mouse.move(0, 0);
       await expect(page.locator('[data-slot="tooltip-content"]')).toHaveCount(
         0,
@@ -397,7 +456,7 @@ for (const { width, language, theme } of [
         await expect(popup).toHaveCSS('opacity', '1');
         await expect(page.getByRole('tooltip')).toHaveText(modelShareLabel);
         await expect(popup).toHaveCSS('pointer-events', 'none');
-        await model.locator('dl').tap();
+        await tokenRow.tap();
         await expect(popup.locator(':scope > dl > div > dt')).toHaveText(
           zh
             ? ['输入', '缓存', '总输出', '思考']
@@ -408,6 +467,76 @@ for (const { width, language, theme } of [
           0,
         );
       }
+
+      const trend = panel.getByTestId('token-usage-trend');
+      await expect(
+        trend.getByText(zh ? '速度趋势' : 'Speed over time', { exact: true }),
+      ).toBeVisible();
+      await expect(trend.locator('svg circle')).toHaveCount(40);
+      await expect(trend.locator('svg path[data-share-color]')).toHaveCount(2);
+      await expect(
+        trend.locator('svg > path:not([data-share-color])'),
+      ).toHaveCount(7);
+      const trendColors = await trend
+        .locator('svg path[data-share-color]')
+        .evaluateAll((paths) =>
+          paths.map((path) => getComputedStyle(path).stroke),
+        );
+      const cardStrip = async (name: string) =>
+        panel
+          .locator('[data-color]')
+          .filter({ has: page.locator(`[title="${name}"]`) })
+          .evaluate(
+            (element) => getComputedStyle(element, '::before').backgroundColor,
+          );
+      expect(trendColors).toEqual([
+        await cardStrip('qwen3.8-max-0902'),
+        await cardStrip('gpt-6.1-sol'),
+      ]);
+      const firstDot = trend.locator('svg circle').first();
+      if (width === 390) await firstDot.tap({ force: true });
+      else await firstDot.hover({ force: true });
+      const trendTip = trend.getByRole('tooltip');
+      await expect(trendTip).toBeVisible();
+      await expect(trendTip).toContainText('qwen3.8-max-0902');
+      await expect(trendTip).toContainText('tok/s');
+      const trendPath = testInfo.outputPath('token-usage-trend.png');
+      await trend.screenshot({ path: trendPath, animations: 'disabled' });
+      await testInfo.attach('token-usage-trend', {
+        path: trendPath,
+        contentType: 'image/png',
+      });
+      await page.mouse.move(0, 0);
+      await trend
+        .getByRole('button', { name: zh ? '首 token' : 'First token' })
+        .click();
+      await expect(trend.getByText(zh ? '秒' : 'seconds')).toBeVisible();
+      const maxCard = panel
+        .locator('[data-color]')
+        .filter({ has: page.locator('[title="qwen3.8-max-0902"]') });
+      await expect(
+        maxCard.getByTestId('token-usage-speed-spread'),
+      ).toContainText('tok/s');
+      // The card spread sits outside the chart, so it needs its own colors.
+      const spread = maxCard.getByTestId('token-usage-speed-spread');
+      const spreadColors = await spread.evaluate((element) => {
+        const track = element.firstElementChild!;
+        return {
+          baseline: getComputedStyle(track, '::before').backgroundColor,
+          text: getComputedStyle(element.lastElementChild!).color,
+          card: getComputedStyle(element.parentElement!).color,
+        };
+      });
+      expect(spreadColors.baseline).not.toBe('rgba(0, 0, 0, 0)');
+      expect(spreadColors.text).toBe(
+        await trend
+          .locator('p')
+          .evaluate((note) => getComputedStyle(note).color),
+      );
+      expect(spreadColors.text).not.toBe(spreadColors.card);
+      await expect(maxCard).toContainText(
+        zh ? '失败：429 ×5 · timeout ×2' : 'Failed: 429 ×5 · timeout ×2',
+      );
 
       const subagents = panel
         .locator('details')
@@ -466,8 +595,14 @@ for (const { width, language, theme } of [
           model
             .getByText('71.3%', { exact: true })
             .evaluate((element) => getComputedStyle(element).fontSize),
-          model
-            .locator('dl')
+          tokenRow.evaluate((element) => getComputedStyle(element).fontSize),
+          timingGrid
+            .locator('dt')
+            .first()
+            .evaluate((element) => getComputedStyle(element).fontSize),
+          timingGrid
+            .locator('dd')
+            .first()
             .evaluate((element) => getComputedStyle(element).fontSize),
           hero
             .locator('..')
@@ -493,6 +628,8 @@ for (const { width, language, theme } of [
         '15px',
         '14px',
         '12px',
+        '11px',
+        '13px',
         '28px',
         '24px',
         '12px',
@@ -527,6 +664,7 @@ for (const { width, language, theme } of [
             String(targetWidth),
           );
           expect(await readFonts()).toEqual(dockedFonts);
+          await checkTimingOverflow();
           if (targetWidth === minWidth) {
             const alignment = await panel
               .getByRole('button', {
@@ -585,7 +723,7 @@ for (const { width, language, theme } of [
             ),
           ),
         ).toBeLessThanOrEqual(1);
-        const wideMetrics = model.locator('dl');
+        const wideMetrics = tokenRow;
         await expect(wideMetrics).toHaveAttribute('tabindex', '0');
         expect(
           await wideMetrics.evaluate(
@@ -603,6 +741,7 @@ for (const { width, language, theme } of [
         );
         await panel
           .locator('section')
+          .filter({ has: page.locator('[data-color]') })
           .screenshot({ path: referencePath, animations: 'disabled' });
         await testInfo.attach(
           'Reference-style model ranking (simulated daemon)',
@@ -689,9 +828,11 @@ for (const { width, language, theme } of [
         .all()) {
         await checkContrast(heading, 'color', 4.5);
       }
-      expect(headings).toHaveLength(3);
-      expect(headings[1]).toEqual(headings[0]);
-      expect(headings[2]).toEqual(headings[0]);
+      // Speed over time, By model, By agent and Tools.
+      expect(headings).toHaveLength(4);
+      for (const heading of headings.slice(1)) {
+        expect(heading).toEqual(headings[0]);
+      }
       const refresh = panel.getByRole('button', {
         name: zh ? '刷新' : 'Refresh',
         exact: true,
@@ -700,9 +841,8 @@ for (const { width, language, theme } of [
       for (const [index, target] of [
         subagents.locator(':scope > summary'),
         refresh,
-        info,
         modelTrack,
-        model.locator('dl'),
+        tokenRow,
       ].entries()) {
         await target.focus();
         expect(

@@ -70,6 +70,7 @@ import { toManagedPermissionRequest } from './managed-approval';
 import { isNonRetryableClientError } from './managed-request-error';
 import { ManagedSessionProgress } from './ManagedSessionProgress';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
+import { ManagedWorktreeStatus } from './ManagedSessionWorktrees';
 import type { ManagedCreationSkillsSource } from './managed-creation-skills';
 import { ManagedWorkspaceNavigation } from './ManagedWorkspaceNavigation';
 import { ManagedSessionNavigationRow } from './ManagedSessionNavigationRow';
@@ -109,6 +110,10 @@ interface PendingPrompt {
   queued?: boolean;
   sessionId?: string;
   input?: ManagedInputBlock[];
+}
+
+interface ManagedSessionListError {
+  readonly httpError?: JavaManagedAgentHttpError;
 }
 
 function mergeManagedSessionCatalog(
@@ -354,6 +359,8 @@ function ManagedSessionsContent({
   );
   const detail = useManagedSession(provider, clientId, sessionId);
   const summary = detail.summary;
+  const worktreeReady =
+    !summary?.worktree || summary.worktree.state === 'ready';
   const active = summary && isManagedSessionRunning(summary.phase);
   const recovery = useManagedRecovery(
     provider,
@@ -385,6 +392,7 @@ function ManagedSessionsContent({
     clientId,
     detail.summary &&
       detail.summary.sessionId === sessionId &&
+      worktreeReady &&
       detail.summary.capabilities.inputAttachments
       ? detail.summary.workspace
       : undefined,
@@ -481,6 +489,8 @@ function ManagedSessionsContent({
   }, [provider]);
   const [nextCursor, setNextCursor] = useState<string>();
   const [listLoading, setListLoading] = useState(false);
+  const [listLoaded, setListLoaded] = useState(false);
+  const [listError, setListError] = useState<ManagedSessionListError>();
   const [listRevision, setListRevision] = useState(0);
   const rename = useManagedSessionRename(
     provider,
@@ -834,6 +844,8 @@ function ManagedSessionsContent({
     listBusy.current = false;
     setSessions([]);
     setNextCursor(undefined);
+    setListLoaded(false);
+    setListError(undefined);
     setListLoading(true);
     void provider
       .listSessions({
@@ -849,12 +861,15 @@ function ManagedSessionsContent({
           mergeManagedSessionCatalog(current, page.sessions),
         );
         setNextCursor(page.nextCursor);
+        setListLoaded(true);
       })
       .catch((failure: unknown) => {
         if (!abort.signal.aborted)
-          setError(
-            failure instanceof Error ? failure.message : String(failure),
-          );
+          setListError({
+            ...(failure instanceof JavaManagedAgentHttpError
+              ? { httpError: failure }
+              : {}),
+          });
       })
       .finally(() => {
         if (!abort.signal.aborted) setListLoading(false);
@@ -941,6 +956,7 @@ function ManagedSessionsContent({
     if (!nextCursor || listBusy.current || !abort || abort.signal.aborted)
       return;
     listBusy.current = true;
+    setListError(undefined);
     setListLoading(true);
     try {
       const page = await provider.listSessions({
@@ -963,7 +979,11 @@ function ManagedSessionsContent({
       setNextCursor(page.nextCursor);
     } catch (failure) {
       if (!abort.signal.aborted)
-        setError(failure instanceof Error ? failure.message : String(failure));
+        setListError({
+          ...(failure instanceof JavaManagedAgentHttpError
+            ? { httpError: failure }
+            : {}),
+        });
     } finally {
       if (!abort.signal.aborted) {
         listBusy.current = false;
@@ -1168,7 +1188,7 @@ function ManagedSessionsContent({
     attachmentCapability.current = { sessionId, enabled: false };
   if (summary)
     attachmentCapability.current.enabled =
-      summary.capabilities.inputAttachments === true;
+      summary.capabilities.inputAttachments === true && worktreeReady;
   const { request: requestTurnCancel, busy: turnCancelBusy } = turnCancel;
   const failureMessage = summary?.failure
     ? (FAILURE_MESSAGES[summary.failure.code]?.[language === 'zh-CN' ? 1 : 0] ??
@@ -1405,6 +1425,36 @@ function ManagedSessionsContent({
           />
         </label>
       )}
+      {listError && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center gap-2 p-2 text-sm text-destructive"
+        >
+          <span className="min-w-0">
+            <span className="block">{t('managed.listLoadFailed')}</span>
+            {listError.httpError && (
+              <span className="block break-words text-xs">
+                {t('managed.errorDetails', {
+                  status: listError.httpError.status,
+                  code: listError.httpError.code,
+                  requestId: listError.httpError.requestId ?? '',
+                })}
+              </span>
+            )}
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={listLoading}
+            onClick={() => {
+              if (listLoaded) void loadMore();
+              else setListRevision((current) => current + 1);
+            }}
+          >
+            {t('managed.listRetry')}
+          </Button>
+        </div>
+      )}
       {home && provider.workspaceBinding ? (
         <ManagedWorkspaceNavigation
           provider={provider}
@@ -1495,7 +1545,9 @@ function ManagedSessionsContent({
             );
           })
       )}
-      {!sessions.length &&
+      {listLoaded &&
+        !listError &&
+        !sessions.length &&
         !listLoading &&
         !(home && provider.workspaceBinding) && (
           <p className="p-2 text-sm text-muted-foreground">
@@ -1787,6 +1839,13 @@ function ManagedSessionsContent({
               )}
             </div>
           )}
+          {summary?.worktree &&
+            (!home || summary.worktree.state !== 'ready') && (
+              <ManagedWorktreeStatus
+                worktree={summary.worktree}
+                compact={home}
+              />
+            )}
           {summary?.failure && (
             <p className="text-sm text-destructive">{failureMessage}</p>
           )}
