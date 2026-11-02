@@ -1255,6 +1255,49 @@ describe('Repository-only channel access config', () => {
     expect(validateChannelEditorDraft(GITHUB, draft, [])).toEqual({});
   });
 
+  it('stores repository allowlists under the canonical lower-case key', () => {
+    // The adapter matches the canonical `owner/repo` GitHub reports, so the
+    // editor must not certify a spelling that never matches at runtime.
+    for (const typed of ['qwenlm/qwen-code', 'QwenLM/Qwen-Code']) {
+      const draft = createChannelEditorDraft(GITHUB);
+      draft.name = 'release-bot';
+      draft.secrets.token = { operation: 'replace', value: 'ghp_test' };
+      draft.values.groupPolicy = 'allowlist';
+      draft.allowedGroupIds = typed;
+
+      const request = buildChannelUpsertRequest(GITHUB, draft, 'rev-1');
+      expect(Object.keys(request.config['groups'] as object)).toEqual([
+        'qwenlm/qwen-code',
+      ]);
+    }
+  });
+
+  it('keeps per-repository settings when the allowlist case changes', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'allowlist',
+        groups: {
+          'QwenLM/qwen-code': {
+            senders: 'allowlist',
+            allowedUsers: ['alice'],
+          },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    expect(draft.allowedGroupIds).toBe('qwenlm/qwen-code');
+
+    const request = buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance);
+    expect(request.config['groups']).toEqual({
+      'qwenlm/qwen-code': { senders: 'allowlist', allowedUsers: ['alice'] },
+    });
+  });
+
   it('drops a stored token once local gh authentication is selected', () => {
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'release-bot',

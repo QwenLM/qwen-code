@@ -207,8 +207,9 @@ export function createChannelEditorDraft(
   const configuredPolicy = instance
     ? configuredPrivatePolicy(instance)
     : 'pairing';
+  const repositoryOnly = isRepositoryOnlyChannelType(descriptor.type);
   if (
-    isRepositoryOnlyChannelType(descriptor.type) &&
+    repositoryOnly &&
     values['useLocalGh'] === true &&
     instance?.secrets['token']?.present
   ) {
@@ -216,6 +217,7 @@ export function createChannelEditorDraft(
     // defeat the authentication method this channel has selected.
     secrets['token'] = { operation: 'clear' };
   }
+  const configuredGroups = configuredGroupIds(instance);
   return {
     name: instance?.name ?? '',
     values,
@@ -225,7 +227,12 @@ export function createChannelEditorDraft(
       : ['disabled', 'allowlist', 'pairing', 'open'].includes(configuredPolicy)
         ? (configuredPolicy as ChannelPrivatePolicy)
         : '',
-    allowedGroupIds: configuredGroupIds(instance),
+    // Show repository IDs in the canonical lower-case form the editor writes,
+    // so re-saving an older mixed-case allowlist migrates it instead of
+    // rewriting the same spelling back.
+    allowedGroupIds: repositoryOnly
+      ? configuredGroups.toLowerCase()
+      : configuredGroups,
     groupSenders: configuredGroupSenders(instance),
     groupAllowedUsers: configuredGroupAllowedUsers(instance),
   };
@@ -402,18 +409,29 @@ function assignGroups(
   config: Record<string, unknown>,
   allowedGroupIds: string,
   instance?: DaemonChannelInstanceSnapshot,
+  normalizeKeys = false,
 ): void {
   const previous = instance?.config['groups'];
-  const previousGroups = isRecord(previous) ? previous : {};
+  const storedGroups = isRecord(previous) ? previous : {};
+  // Repository IDs are case-insensitive. Store the canonical lower-case key
+  // and look the previous per-repository settings up under it, so retyping the
+  // case does not silently drop that repository's sender policy.
+  const previousGroups = normalizeKeys
+    ? Object.fromEntries(
+        Object.entries(storedGroups).map(([key, value]) => [
+          key.toLowerCase(),
+          value,
+        ]),
+      )
+    : storedGroups;
   const groups: Record<string, unknown> = {};
   if (isRecord(previousGroups['*'])) {
     groups['*'] = previousGroups['*'];
   }
   for (const groupId of splitList(allowedGroupIds)) {
-    if (groupId === '*') continue;
-    groups[groupId] = isRecord(previousGroups[groupId])
-      ? previousGroups[groupId]
-      : {};
+    const key = normalizeKeys ? groupId.toLowerCase() : groupId;
+    if (key === '*') continue;
+    groups[key] = isRecord(previousGroups[key]) ? previousGroups[key] : {};
   }
   if (Object.keys(groups).length > 0) {
     config['groups'] = groups;
@@ -496,7 +514,7 @@ export function buildChannelUpsertRequest(
   }
   if (hasDescriptorGroupPolicy(descriptor)) {
     if (config['groupPolicy'] === 'allowlist') {
-      assignGroups(config, draft.allowedGroupIds, instance);
+      assignGroups(config, draft.allowedGroupIds, instance, repositoryOnly);
     } else if (instance?.config['groupPolicy'] === 'allowlist') {
       removeGroupAllowlistMembership(config, instance);
     }
