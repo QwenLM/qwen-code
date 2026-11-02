@@ -57,6 +57,7 @@ systemctl is-enabled qwen-docker-cleanup.timer
 systemctl is-active qwen-docker-cleanup.timer
 systemctl list-timers qwen-docker-cleanup.timer
 systemd-tmpfiles --cat-config | grep '^D /tmp '
+journalctl -u qwen-docker-cleanup.service -n 5 --no-pager
 ```
 
 The expected `/tmp` policy is:
@@ -64,6 +65,12 @@ The expected `/tmp` policy is:
 ```text
 D /tmp 1777 root root 1d
 ```
+
+The retention policy is enforced by the daily `qwen-docker-cleanup.service`
+itself (`ExecStartPost=systemd-tmpfiles --clean --prefix=/tmp`), not by the
+distro's `systemd-tmpfiles-clean.timer` — on hardened images that timer can
+be masked, and it reports `static` (unverifiable via `is-enabled`) on stock
+Ubuntu. The journal line above confirms the ExecStartPost ran.
 
 ## Run manually
 

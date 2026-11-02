@@ -102,3 +102,19 @@ test('installs a one-day /tmp retention policy', () => {
   assert.match(conf, /^D \/tmp 1777 root root 1d$/m);
   assert.doesNotMatch(conf, /^D \/tmp 1777 root root 7d$/m);
 });
+
+test('the daily service enforces the /tmp retention itself', () => {
+  // The distro's systemd-tmpfiles-clean.timer can be masked (hardened
+  // images) and reports "static" on stock Ubuntu — unverifiable via
+  // is-enabled — so the retention policy needs an enforcement agent the
+  // qwen stack owns. Dropping the ExecStartPost regrows the 2026-10-31
+  // incident class with every doc and test green.
+  const service = readFileSync(
+    new URL('./qwen-docker-cleanup.service', import.meta.url),
+    'utf8',
+  );
+  assert.match(
+    service,
+    /^ExecStartPost=\/usr\/bin\/systemd-tmpfiles --clean --prefix=\/tmp$/m,
+  );
+});
