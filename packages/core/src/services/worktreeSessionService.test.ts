@@ -608,6 +608,7 @@ describe('isSessionRuntimeActive', () => {
     pid: number,
     state: string,
     killImpl?: () => never,
+    procStart: string | null = null,
   ) {
     const repoRoot = path.join(tmpDir, `repo-${state}-${pid}`);
     await fs.mkdir(repoRoot, { recursive: true });
@@ -616,6 +617,7 @@ describe('isSessionRuntimeActive', () => {
     vi.doMock('node:fs', async (importOriginal) => {
       const actual = await importOriginal<typeof import('node:fs')>();
       const statPath = `/proc/${pid}/stat`;
+      const bootIdPath = '/proc/sys/kernel/random/boot_id';
       // Fields 4..22, so the state token sits at field 3 right after the
       // parenthesised `comm`. The parser anchors on the last ')'.
       // prettier-ignore
@@ -624,13 +626,13 @@ describe('isSessionRuntimeActive', () => {
         '0', '10', '20', '30', '40', '20', '0', '1', '0', '1000',
       ];
       const statLine = `4242 (node) ${state} ${fields.join(' ')} 1000 2000 3000\n`;
-      const readFileSync = ((p: unknown, ...rest: unknown[]) =>
-        String(p) === statPath
-          ? statLine
-          : (actual.readFileSync as (a: unknown, ...r: unknown[]) => unknown)(
-              p,
-              ...rest,
-            )) as typeof actual.readFileSync;
+      const readFileSync = ((p: unknown, ...rest: unknown[]) => {
+        if (String(p) === statPath) return statLine;
+        if (String(p) === bootIdPath) return 'deadbeef\n';
+        return (
+          actual.readFileSync as (a: unknown, ...r: unknown[]) => unknown
+        )(p, ...rest);
+      }) as typeof actual.readFileSync;
       return { ...actual, readFileSync };
     });
     vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
@@ -657,6 +659,7 @@ describe('isSessionRuntimeActive', () => {
         sessionId: 'owner-session',
         workDir: repoRoot,
         pid,
+        procStart,
       },
     );
 
@@ -682,6 +685,30 @@ describe('isSessionRuntimeActive', () => {
   it('still reports a running pid as active', async () => {
     // Guards the harness itself: the same fake `/proc`, one field different.
     const probe = await probeWithFakeProc(process.pid, 'S');
+
+    await expect(probe.liveness()).resolves.toBe('active');
+    await expect(probe.isActive()).resolves.toBe(true);
+  });
+
+  it('reports a recycled pid as inactive when proc_start differs', async () => {
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'previous-boot:1234',
+    );
+
+    await expect(probe.liveness()).resolves.toBe('inactive');
+    await expect(probe.isActive()).resolves.toBe(false);
+  });
+
+  it('still reports a running pid active when proc_start matches', async () => {
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'deadbeef:1000',
+    );
 
     await expect(probe.liveness()).resolves.toBe('active');
     await expect(probe.isActive()).resolves.toBe(true);

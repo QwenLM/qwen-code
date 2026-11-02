@@ -66,12 +66,12 @@ Otherwise (no arg, or symptom-only arg), run the general path below:
 
 1. **Enumerate live sessions via the runtime sidecar** (preferred, reliable):
 
-   Qwen Code writes a `runtime.json` sidecar for each interactive session at `"$RUNTIME_DIR"/projects/<sanitized-cwd>/chats/<sessionId>.runtime.json`. Each file contains `{schema_version, pid, session_id, work_dir, hostname, started_at, qwen_version}` — the authoritative source of `(pid, session_id, work_dir)` mappings.
+   Qwen Code writes a `runtime.json` sidecar for each interactive session at `"$RUNTIME_DIR"/projects/<sanitized-cwd>/chats/<sessionId>.runtime.json`. Each file contains `{schema_version, pid, proc_start, session_id, work_dir, hostname, started_at, qwen_version}` — the authoritative source of `(pid, session_id, work_dir)` mappings. On Linux, `proc_start` distinguishes the recorded process from an unrelated process that later reused its PID; older sidecars omit it.
 
    Filter to live `(pid, sidecar-path)` pairs in one shot. Use Node (guaranteed available — qwen-code requires it) instead of `jq` (often missing on default macOS / minimal Linux) so this path doesn't silently degrade:
 
    ```
-   node -e 'const fs=require("fs"); for (const f of process.argv.slice(1)) { try { const p=JSON.parse(fs.readFileSync(f,"utf8")).pid; if (p) { try { process.kill(p,0); console.log(p+" "+f); } catch {} } } catch {} }' "$RUNTIME_DIR"/projects/*/chats/*.runtime.json 2>/dev/null
+   node -e 'const fs=require("fs"); const bootPath="/proc/sys/kernel/random/boot_id"; const boot=fs.existsSync(bootPath)?fs.readFileSync(bootPath,"utf8").trim():null; const identify=p=>{try{const raw=fs.readFileSync(`/proc/${p}/stat`,"utf8"); const fields=raw.slice(raw.lastIndexOf(")")+1).trim().split(/\s+/); if(fields[0]==="Z")return "zombie"; return boot&&fields[19]?boot+":"+fields[19]:null}catch{return null}}; for (const f of process.argv.slice(1)) { try { const s=JSON.parse(fs.readFileSync(f,"utf8")); const p=s.pid; if (p) { try { process.kill(p,0); const current=identify(p); if (current==="zombie" || (s.proc_start && current && current!==s.proc_start)) continue; console.log(p+" "+f); } catch {} } } catch {} }' "$RUNTIME_DIR"/projects/*/chats/*.runtime.json 2>/dev/null
    ```
 
    PID reuse is rare but possible — when you cross-reference with `ps` in step 2, skip pairs whose live PID's command line no longer looks like a Qwen Code process.

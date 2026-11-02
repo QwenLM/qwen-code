@@ -23,8 +23,8 @@
  *   atomically overwrites whatever the previous PID wrote.
  * - **Not** deleted on clean `/quit` or on crash. From an external
  *   observer's standpoint the recorded PID no longer exists in either
- *   case, so a liveness check is sufficient and an explicit cleanup
- *   adds nothing.
+ *   case. Check both liveness and `proc_start` when present: a recycled
+ *   PID can otherwise make an old record look live.
  * - `clearRuntimeStatus` exists for the narrow case where the same PID
  *   keeps running while no longer serving the recorded session
  *   (e.g. a hypothetical future mode-switch). Not currently invoked.
@@ -39,6 +39,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { atomicWriteJSON } from './atomicFileWrite.js';
+import { readProcStartToken } from './process-liveness.js';
 
 export const RUNTIME_STATUS_SCHEMA_VERSION = 1;
 
@@ -46,6 +47,8 @@ export const RUNTIME_STATUS_SCHEMA_VERSION = 1;
 export interface RuntimeStatus {
   schemaVersion: number;
   pid: number;
+  /** Identity of the recorded PID; null when the platform has no token. */
+  procStart: string | null;
   sessionId: string;
   workDir: string;
   hostname: string;
@@ -62,6 +65,7 @@ export interface RuntimeStatus {
 interface RuntimeStatusOnDisk {
   schema_version: number;
   pid: number;
+  proc_start: string | null;
   session_id: string;
   work_dir: string;
   hostname: string;
@@ -74,6 +78,11 @@ export interface WriteRuntimeStatusFields {
   workDir: string;
   /** Defaults to `process.pid`. */
   pid?: number;
+  /**
+   * Defaults to the platform token for `pid`. Tests and trusted records can
+   * override it; `null` means no identity token is available.
+   */
+  procStart?: string | null;
   /** Defaults to `null`. Pass the value of `getCliVersion()`. */
   qwenVersion?: string | null;
 }
@@ -89,9 +98,14 @@ export async function writeRuntimeStatus(
   filePath: string,
   fields: WriteRuntimeStatusFields,
 ): Promise<string> {
+  const pid = fields.pid ?? process.pid;
   const payload: RuntimeStatusOnDisk = {
     schema_version: RUNTIME_STATUS_SCHEMA_VERSION,
-    pid: fields.pid ?? process.pid,
+    pid,
+    proc_start:
+      fields.procStart !== undefined
+        ? fields.procStart
+        : readProcStartToken(pid),
     session_id: fields.sessionId,
     work_dir: fields.workDir,
     hostname: os.hostname(),
@@ -115,8 +129,9 @@ export async function writeRuntimeStatus(
  *
  * Note: a returned record only proves that *some* Qwen Code process
  * once claimed this session. The PID may already be dead (clean quit
- * or crash). Consumers must verify liveness themselves before treating
- * the record as a currently-running session.
+ * or crash) or reused. Consumers must verify liveness and, when
+ * `procStart` is non-null, process identity before treating the record
+ * as a currently-running session.
  */
 export async function readRuntimeStatus(
   filePath: string,
@@ -157,6 +172,7 @@ export async function readRuntimeStatus(
 
   const schemaVersion = obj['schema_version'];
   const pid = obj['pid'];
+  const procStart = obj['proc_start'];
   const sessionId = obj['session_id'];
   const workDir = obj['work_dir'];
   const hostname = obj['hostname'];
@@ -165,6 +181,13 @@ export async function readRuntimeStatus(
 
   if (!isFiniteInteger(schemaVersion)) return null;
   if (!isFiniteInteger(pid)) return null;
+  if (
+    procStart !== undefined &&
+    procStart !== null &&
+    typeof procStart !== 'string'
+  ) {
+    return null;
+  }
   if (typeof sessionId !== 'string') return null;
   if (typeof workDir !== 'string') return null;
   if (typeof hostname !== 'string') return null;
@@ -176,6 +199,7 @@ export async function readRuntimeStatus(
   return {
     schemaVersion,
     pid,
+    procStart: procStart ?? null,
     sessionId,
     workDir,
     hostname,
@@ -187,10 +211,10 @@ export async function readRuntimeStatus(
 /**
  * Remove the runtime status file at `filePath`, if present.
  *
- * Intentionally **not** called on `/quit` — when the qwen-code process
- * exits, an external observer's PID-liveness check already detects the
- * missing process, so a stale record is harmless. This helper exists
- * for the narrow case where the **same PID continues running** but
+ * Intentionally **not** called on `/quit` — an external observer should
+ * combine PID liveness with `proc_start`, which is enough to recognize
+ * the exited process even if its PID is later reused. This helper exists
+ * for the narrow case where the **same process continues running** but
  * stops serving the recorded session.
  *
  * Safe to call multiple times and on paths that no longer exist;

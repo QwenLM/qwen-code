@@ -14,7 +14,10 @@ import { Storage } from '../config/storage.js';
 import { isNodeError } from '../utils/errors.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
-import { isZombie } from '../utils/process-liveness.js';
+import {
+  isZombie,
+  readProcStartToken,
+} from '../utils/process-liveness.js';
 import {
   readWorktreeSessionMarker,
   writeWorktreeSessionMarker,
@@ -656,8 +659,22 @@ async function getRuntimeStatusPathState(
     return 'unknown';
   }
 
+  const procStartMatches = (): boolean => {
+    if (status.procStart === null) return true;
+    const current = readProcStartToken(status.pid);
+    // An unreadable token degrades to plain liveness rather than declaring a
+    // live session dead; only a readable mismatch proves the PID was reused.
+    return current === null || current === status.procStart;
+  };
+
   try {
     process.kill(status.pid, 0);
+    if (!procStartMatches()) {
+      // The PID was recycled by an unrelated process after this record was
+      // written. Liveness alone cannot distinguish that from the original
+      // session (#14288).
+      return 'dead';
+    }
     // A zombie answers `kill(pid, 0)` — the pid still occupies a process-table
     // slot — but the process has exited and will never act again. Reporting
     // it as 'active' keeps a dead session listed as live for as long as its
@@ -672,7 +689,7 @@ async function getRuntimeStatusPathState(
       // Owned by another user. The kernel permission-checks signal 0
       // regardless of the target's state, so a cross-user zombie lands here
       // too and needs the same exclusion.
-      return isZombie(status.pid) ? 'dead' : 'active';
+      return !procStartMatches() || isZombie(status.pid) ? 'dead' : 'active';
     }
     // Any other errno establishes nothing about the pid, and folding it into
     // 'dead' would be the destructive direction: it feeds

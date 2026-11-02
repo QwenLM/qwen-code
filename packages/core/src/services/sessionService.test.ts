@@ -496,6 +496,7 @@ describe('SessionService', () => {
     vi.mocked(readRuntimeStatus).mockResolvedValue({
       schemaVersion: 1,
       pid: 123,
+      procStart: null,
       sessionId,
       workDir,
       hostname: 'host',

@@ -14,6 +14,7 @@ import {
   readRuntimeStatus,
   writeRuntimeStatus,
 } from './runtimeStatus.js';
+import { readProcStartToken } from './process-liveness.js';
 
 const fsMocks = vi.hoisted(() => ({
   readFile: vi.fn<typeof import('node:fs/promises').readFile>(),
@@ -66,7 +67,20 @@ describe('writeRuntimeStatus', () => {
     });
     const data = JSON.parse(await readFile(targetPath(), 'utf-8'));
     expect(data.pid).toBe(process.pid);
+    expect(data.proc_start).toBe(readProcStartToken(process.pid));
     expect(data.qwen_version).toBeNull();
+  });
+
+  it('round-trips an explicit process start token', async () => {
+    await writeRuntimeStatus(targetPath(), {
+      sessionId: 'abc',
+      workDir: '/w',
+      pid: 4242,
+      procStart: 'boot-id:1234',
+    });
+
+    const status = await readRuntimeStatus(targetPath());
+    expect(status?.procStart).toBe('boot-id:1234');
   });
 
   it('leaves no .tmp leftovers on success', async () => {
@@ -150,11 +164,13 @@ describe('readRuntimeStatus', () => {
       sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
       workDir: '/some/where',
       pid: 99,
+      procStart: 'boot-id:test',
       qwenVersion: '0.15.3',
     });
     const status = await readRuntimeStatus(targetPath());
     expect(status).not.toBeNull();
     expect(status!.pid).toBe(99);
+    expect(status!.procStart).toBe('boot-id:test');
     expect(status!.sessionId).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
     expect(status!.workDir).toBe('/some/where');
     expect(status!.schemaVersion).toBe(RUNTIME_STATUS_SCHEMA_VERSION);
@@ -221,6 +237,24 @@ describe('readRuntimeStatus', () => {
     expect(await readRuntimeStatus(targetPath())).toBeNull();
   });
 
+  it('returns null when proc_start has the wrong type', async () => {
+    await writeFile(
+      targetPath(),
+      JSON.stringify({
+        schema_version: RUNTIME_STATUS_SCHEMA_VERSION,
+        pid: 1,
+        proc_start: 42,
+        session_id: 'abc',
+        work_dir: '/w',
+        hostname: 'h',
+        started_at: 0,
+        qwen_version: null,
+      }),
+      'utf-8',
+    );
+    expect(await readRuntimeStatus(targetPath())).toBeNull();
+  });
+
   it('returns null when work_dir is an array', async () => {
     await writeFile(
       targetPath(),
@@ -241,6 +275,28 @@ describe('readRuntimeStatus', () => {
   it('returns null on an array root payload', async () => {
     await writeFile(targetPath(), JSON.stringify([1, 2, 3]), 'utf-8');
     expect(await readRuntimeStatus(targetPath())).toBeNull();
+  });
+
+  it('reads a legacy record without proc_start', async () => {
+    await writeFile(
+      targetPath(),
+      JSON.stringify({
+        schema_version: RUNTIME_STATUS_SCHEMA_VERSION,
+        pid: 1,
+        session_id: 'abc',
+        work_dir: '/w',
+        hostname: 'h',
+        started_at: 0,
+        qwen_version: null,
+      }),
+      'utf-8',
+    );
+
+    await expect(readRuntimeStatus(targetPath())).resolves.toMatchObject({
+      pid: 1,
+      procStart: null,
+      sessionId: 'abc',
+    });
   });
 
   it('returns null on invalid UTF-8 bytes', async () => {
