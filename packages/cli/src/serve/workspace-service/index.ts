@@ -1675,8 +1675,12 @@ export function createDaemonWorkspaceService(
       };
     },
 
-    async reloadModelProviders(_ctx: WorkspaceRequestContext) {
+    async reloadModelProviders(_ctx: WorkspaceRequestContext, options) {
       assertActiveGeneration();
+      if (options?.subscriptionSignedOut) {
+        await deps.preheatAcpChild?.();
+        assertActiveGeneration();
+      }
       let failed = false;
       const reloadModelProvidersDaemonEnv =
         deps.reloadModelProvidersDaemonEnv ?? deps.reloadDaemonEnv;
@@ -1702,10 +1706,29 @@ export function createDaemonWorkspaceService(
           configsFailed?: number;
         }>(
           SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
-          { cwd: boundWorkspace },
+          {
+            cwd: boundWorkspace,
+            ...(options?.subscriptionSignedOut
+              ? { subscriptionSignedOut: true }
+              : {}),
+          },
           { timeoutMs: 30_000 },
         );
         if ((child.configsFailed ?? 0) > 0) failed = true;
+        if (options?.subscriptionSignedOut) {
+          assertActiveGeneration();
+          if (reloadModelProvidersDaemonEnv) {
+            const result = await reloadModelProvidersDaemonEnv(
+              boundWorkspace,
+              assertGenerationOpen,
+            );
+            if (result.runtimeEnvironmentApplied === false) failed = true;
+          }
+          publishWorkspaceEvent({
+            type: 'settings_changed',
+            data: { key: 'security.auth.selectedType', scope: 'workspace' },
+          });
+        }
         return { status: failed ? 'failed' : 'applied' };
       } catch (err) {
         assertActiveGeneration();

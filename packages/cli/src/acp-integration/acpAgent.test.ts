@@ -35653,6 +35653,92 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
+  it('recovers subscription connections after logout without disturbing another provider', async () => {
+    const settings = {
+      merged: {},
+      isTrusted: false,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      forScope: vi.fn(() => ({ settings: {} })),
+      setValue: vi.fn(),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
+      getSystemHooks: vi.fn(),
+      getUserHooks: vi.fn(() => ({})),
+      getProjectHooks: vi.fn(() => ({})),
+    } as unknown as LoadedSettings;
+    const clearAuth = vi.fn();
+    const boot = makeConfig({
+      getAuthType: vi.fn(() => AuthType.QWEN_SUBSCRIPTION),
+      clearAuth,
+    });
+    const subscription = makeConfig({
+      getSessionId: vi.fn(() => 'sub'),
+      getAuthType: vi.fn(() => AuthType.QWEN_SUBSCRIPTION),
+    });
+    const other = makeConfig({
+      getSessionId: vi.fn(() => 'other'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+    });
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig)
+      .mockResolvedValueOnce(subscription as unknown as Config)
+      .mockResolvedValueOnce(other as unknown as Config);
+    const reloadSubscription = vi.fn().mockResolvedValue(undefined);
+    const reloadOther = vi.fn();
+    const cancelSubscription = vi.fn().mockResolvedValue(undefined);
+    let index = 0;
+    vi.mocked(Session).mockImplementation(() => {
+      const first = index++ === 0;
+      const config = first ? subscription : other;
+      return {
+        getDefaultReasoningConfig: vi.fn(),
+        getId: config.getSessionId,
+        shouldHintAskUserQuestionRestore: vi.fn(() => false),
+        getConfig: () => config,
+        isIdle: () => false,
+        cancelPendingPrompt: first ? cancelSubscription : vi.fn(),
+        reloadModelProvidersFromDisk: first ? reloadSubscription : reloadOther,
+        sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+        installRewriter: vi.fn(),
+        startCronScheduler: vi.fn(),
+        dispose: vi.fn(),
+      } as unknown as InstanceType<typeof Session>;
+    });
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+    const running = runAcpAgent(boot as unknown as Config, settings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+    await agent.newSession({ cwd: '/subscription', mcpServers: [] });
+    await agent.newSession({ cwd: '/other', mcpServers: [] });
+    try {
+      expect(
+        await agent.extMethod(
+          SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+          { cwd: '/subscription', subscriptionSignedOut: true },
+        ),
+      ).toMatchObject({ configsFailed: 0 });
+      expect(clearAuth).toHaveBeenCalledOnce();
+      expect(boot.reloadModelProvidersConfig).toHaveBeenCalledBefore(clearAuth);
+      expect(boot.refreshSubscriptionModels).not.toHaveBeenCalled();
+      expect(cancelSubscription).toHaveBeenCalledOnce();
+      expect(reloadSubscription).toHaveBeenCalledWith({
+        subscriptionSignedOut: true,
+      });
+      expect(reloadOther).not.toHaveBeenCalled();
+      expect(other.switchModel).not.toHaveBeenCalled();
+    } finally {
+      mockConnectionState.resolve();
+      await running;
+    }
+  });
+
   it('clears removed providerProtocol mappings and refreshes auth on workspace reload', async () => {
     const providerConfig = {
       idealab: [

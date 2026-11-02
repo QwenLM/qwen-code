@@ -1064,7 +1064,10 @@ export function EmbeddedApp() {
         setAuthConnecting(false);
         setAuthError(undefined);
         setSubscriptionFlowId(undefined);
-        setHostNotice({ tone: 'info', text: t('auth.signedOut') });
+        setHostNotice(undefined);
+        void shellRef.current?.refreshModels().catch((error: unknown) => {
+          console.error('Unable to refresh models after sign-out', error);
+        });
         clearInsight();
       } else if (
         message.type === 'authSuccess' ||

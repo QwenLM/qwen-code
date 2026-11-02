@@ -64,6 +64,7 @@ function publicUser(info: SubscriptionUserInfo): SubscriptionUserInfo {
 export function registerSubscriptionAuthRoutes(
   app: Application,
   mutate: (opts?: { strict?: boolean }) => RequestHandler,
+  onSignedOut?: () => Promise<void>,
 ): () => void {
   const enabled = process.env['DEV'] === 'true';
   const { webOrigin } = getQwenOAuthConfig();
@@ -220,7 +221,19 @@ export function registerSubscriptionAuthRoutes(
       for (const id of flows.keys()) cancel(id);
       for (const query of queries) query.abort();
       try {
-        await new QwenSubscriptionSession().signOut();
+        let revokeError: unknown;
+        try {
+          await new QwenSubscriptionSession().signOut();
+        } catch (error) {
+          if (
+            !(error instanceof SubscriptionOAuthError) ||
+            error.stage !== 'revoke'
+          )
+            throw error;
+          revokeError = error;
+        }
+        await onSignedOut?.();
+        if (revokeError) throw revokeError;
         res.status(204).end();
       } catch (error) {
         const failure = subscriptionError(error, 'cleanup');

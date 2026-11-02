@@ -28,6 +28,27 @@ export async function runNativeSubscriptionAction({
   signal: ownerSignal,
   action,
 }: NativeSubscriptionActionOptions): Promise<NativeSubscriptionActionResult> {
+  if (action === 'logout') {
+    ownerSignal.throwIfAborted();
+    const config = await transport.getSubscriptionConfig({
+      signal: ownerSignal,
+    });
+    ownerSignal.throwIfAborted();
+    if (!config.enabled) return { kind: 'unavailable' };
+    try {
+      await transport.signOutSubscription();
+    } catch (error) {
+      if (
+        (error as { body?: { errorStage?: string } })?.body?.errorStage !==
+        'revoke'
+      )
+        throw error;
+      logger.warn(
+        '[QwenSubscription] Remote revocation failed after local sign-out',
+      );
+    }
+    return { kind: ownerSignal.aborted ? 'cancelled' : 'signed-out' };
+  }
   const lifetime = new AbortController();
   const signal = AbortSignal.any([ownerSignal, lifetime.signal]);
   const picker = vscode.window.createQuickPick<Choice>();
@@ -37,7 +58,6 @@ export async function runNativeSubscriptionAction({
   const hidden = picker.onDidHide(() => lifetime.abort());
   const abort = () => picker.hide();
   signal.addEventListener('abort', abort, { once: true });
-  let signedOut = false;
 
   const status = (label: string) => {
     signal.throwIfAborted();
@@ -82,13 +102,6 @@ export async function runNativeSubscriptionAction({
           });
           return { kind: 'unavailable' };
         }
-        if (action === 'logout') {
-          status('Signing out…');
-          await transport.signOutSubscription();
-          signedOut = true;
-          await choose('Signed out of Qwen', { label: 'Done', value: 'done' });
-          return { kind: 'signed-out' };
-        }
         status('Opening subscription plans…');
         if (!(await vscode.env.openExternal(vscode.Uri.parse(config.plansUrl))))
           throw new Error('Unable to open the browser.');
@@ -107,17 +120,6 @@ export async function runNativeSubscriptionAction({
           };
           status?: unknown;
         } | null;
-        if (action === 'logout' && failure?.body?.errorStage === 'revoke') {
-          signedOut = true;
-          await choose(
-            'Signed out locally; the remote session could not be revoked.',
-            {
-              label: 'Done',
-              value: 'done',
-            },
-          );
-          return { kind: 'signed-out' };
-        }
         if (signal.aborted) throw error;
         const code =
           typeof failure?.body?.code === 'string' &&
@@ -140,16 +142,11 @@ export async function runNativeSubscriptionAction({
           status('Too many requests. Waiting before retry…');
           await delay(retryAfter, undefined, { signal });
         }
-        await choose(
-          action === 'logout'
-            ? 'Unable to sign out of Qwen'
-            : 'Unable to open Qwen subscription plans',
-          {
-            label: 'Retry',
-            value: 'retry',
-            detail: `Check your connection and retry${statusCode ? ` (HTTP ${statusCode})` : ''}.`,
-          },
-        );
+        await choose('Unable to open Qwen subscription plans', {
+          label: 'Retry',
+          value: 'retry',
+          detail: `Check your connection and retry${statusCode ? ` (HTTP ${statusCode})` : ''}.`,
+        });
       }
     }
   } catch (error) {
@@ -160,7 +157,5 @@ export async function runNativeSubscriptionAction({
     picker.hide();
     picker.dispose();
   }
-  return {
-    kind: signedOut && !ownerSignal.aborted ? 'signed-out' : 'cancelled',
-  };
+  return { kind: 'cancelled' };
 }

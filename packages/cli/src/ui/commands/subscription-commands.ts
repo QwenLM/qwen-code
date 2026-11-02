@@ -9,10 +9,7 @@ import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscrip
 import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import { openBrowserSecurely } from '@qwen-code/qwen-code-core/utils/secure-browser-launcher.js';
-import {
-  getPersistScopeForModelSelection,
-  getWritableScopes,
-} from '../../config/modelProvidersScope.js';
+import { restoreModelAfterSubscriptionLogout } from '../../config/subscription-logout.js';
 import { t } from '../../i18n/index.js';
 import { MessageType } from '../types.js';
 import { CommandKind, type SlashCommand } from './types.js';
@@ -45,7 +42,6 @@ export const logoutCommand: SlashCommand = {
         ),
       };
     }
-    const persistScope = getPersistScopeForModelSelection(settings);
     let warning: string | undefined;
     try {
       await new QwenSubscriptionSession().signOut();
@@ -65,74 +61,21 @@ export const logoutCommand: SlashCommand = {
       }
     }
     context.ui.cancelBtw();
-    config.clearAuth();
-    try {
-      for (const scope of getWritableScopes(settings)) {
-        if (
-          settings.forScope(scope).settings.security?.auth?.selectedType ===
-          AuthType.QWEN_SUBSCRIPTION
-        ) {
-          for (const key of [
-            'security.auth.selectedType',
-            'model.name',
-            'model.baseUrl',
-          ]) {
-            settings.setValue(scope, key, undefined, undefined, {
-              throwOnWriteFailure: true,
-            });
-          }
-        }
-      }
-    } catch {
+    const selectionWarning = await restoreModelAfterSubscriptionLogout(
+      config,
+      settings,
+    );
+    if (selectionWarning) {
       warning = [
         warning,
-        t(
-          'You are signed out, but the saved authentication selection could not be cleared.',
-        ),
+        selectionWarning === 'clear'
+          ? t(
+              'You are signed out, but the saved authentication selection could not be cleared.',
+            )
+          : t('Model switched, but the selection could not be saved.'),
       ]
         .filter(Boolean)
         .join('\n');
-    }
-    const enforcedType = settings.merged.security?.auth?.enforcedType;
-    for (const model of config.getAllConfiguredModels()) {
-      if (
-        model.authType === AuthType.QWEN_SUBSCRIPTION ||
-        model.authType === AuthType.QWEN_OAUTH ||
-        (enforcedType && model.authType !== enforcedType) ||
-        model.fastOnly ||
-        model.voiceOnly ||
-        model.visionOnly ||
-        model.imageOnly
-      ) {
-        continue;
-      }
-      try {
-        await config.switchModel(model.authType, model.id, {
-          baseUrl: model.baseUrl,
-        });
-      } catch {
-        continue;
-      }
-      const selected = config.getContentGeneratorConfig();
-      try {
-        for (const [key, value] of [
-          ['security.auth.selectedType', selected?.authType ?? model.authType],
-          ['model.name', selected?.model ?? model.id],
-          ['model.baseUrl', selected?.baseUrl ?? model.baseUrl ?? ''],
-        ] as const) {
-          settings.setValue(persistScope, key, value, undefined, {
-            throwOnWriteFailure: true,
-          });
-        }
-      } catch {
-        warning = [
-          warning,
-          t('Model switched, but the selection could not be saved.'),
-        ]
-          .filter(Boolean)
-          .join('\n');
-      }
-      break;
     }
     if (warning) {
       context.ui.addItem(

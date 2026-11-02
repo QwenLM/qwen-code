@@ -110,6 +110,8 @@ export function normalizeDaemonEvent(
     case 'permission_already_resolved':
       return normalizePermissionResolved(event, base);
     case 'model_switched':
+      if (isRecord(event.data) && event.data['subscriptionSignedOut'] === true)
+        return [];
       return [
         {
           ...base,

@@ -472,7 +472,11 @@ import {
   deleteNestedPropertySafe,
   settingExistsInScope,
 } from '../../config/settingsUtils.js';
-import { recordDaemonSessionModel } from '../session-model-persistence.js';
+import {
+  recordDaemonSessionModel,
+  recordDaemonSessionModelFromConfig,
+} from '../session-model-persistence.js';
+import { restoreModelAfterSubscriptionLogout } from '../../config/subscription-logout.js';
 import {
   recordDaemonSessionApprovalMode,
   recordDaemonSessionApprovalModeFromConfig,
@@ -4609,7 +4613,9 @@ export class Session implements SessionContext {
     }
   }
 
-  async reloadModelProvidersFromDisk(): Promise<void> {
+  async reloadModelProvidersFromDisk(options?: {
+    subscriptionSignedOut?: boolean;
+  }): Promise<void> {
     if (
       !this.settings.reloadScopesFromDiskAtomically([
         SettingScope.User,
@@ -4623,6 +4629,33 @@ export class Session implements SessionContext {
       this.settings.merged.providerProtocol ?? {},
     );
     await this.config.setImageModel(this.settings.merged.imageModel);
+    if (
+      options?.subscriptionSignedOut &&
+      this.config.getAuthType() === AuthType.QWEN_SUBSCRIPTION
+    ) {
+      await restoreModelAfterSubscriptionLogout(
+        this.config,
+        this.settings,
+        false,
+      );
+      await recordDaemonSessionModelFromConfig(this.config);
+      const authType = this.config.getAuthType();
+      const currentModelId = authType
+        ? getCurrentAcpModelId(
+            buildAcpModelOptions(this.config.getAllConfiguredModels()),
+            this.config.getModel(),
+            authType,
+            this.config.getCurrentModelRegistryBaseUrl(),
+          )
+        : '';
+      await this.client.extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        sessionId: this.sessionId,
+        currentModelId,
+        subscriptionSignedOut: true,
+      });
+      await this.sendAvailableCommandsUpdate();
+    }
   }
 
   installPendingManagedConversationBinding(

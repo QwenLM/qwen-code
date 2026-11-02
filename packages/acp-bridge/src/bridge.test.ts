@@ -31548,49 +31548,58 @@ describe('createAcpSessionBridge', () => {
   });
 
   describe('extNotification — in-session model update (A1, #4511)', () => {
-    it('promotes current_model_update to model_switched when no bridge roundtrip is in flight', async () => {
-      let capturedConn: AgentSideConnection | undefined;
-      const factory: ChannelFactory = async () => {
-        const { clientStream, agentStream } = createInMemoryChannel();
-        const fakeAgent = new FakeAgent();
-        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
-        return {
-          stream: clientStream,
-          exited: new Promise<
-            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
-            | undefined
-          >(() => {}),
-          kill: async () => {},
-          killSync: () => {},
+    it.each([
+      [undefined, 'qwen-max'],
+      [true, 'qwen-max'],
+      [true, ''],
+    ] as const)(
+      'promotes current_model_update to model_switched when no bridge roundtrip is in flight (logout: %s, model: %s)',
+      async (subscriptionSignedOut, modelId) => {
+        let capturedConn: AgentSideConnection | undefined;
+        const factory: ChannelFactory = async () => {
+          const { clientStream, agentStream } = createInMemoryChannel();
+          const fakeAgent = new FakeAgent();
+          capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+          return {
+            stream: clientStream,
+            exited: new Promise<
+              | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+              | undefined
+            >(() => {}),
+            kill: async () => {},
+            killSync: () => {},
+          };
         };
-      };
-      const bridge = makeBridge({ channelFactory: factory });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      const abort = new AbortController();
-      const iter = bridge.subscribeEvents(session.sessionId, {
-        signal: abort.signal,
-      });
+        const bridge = makeBridge({ channelFactory: factory });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const abort = new AbortController();
+        const iter = bridge.subscribeEvents(session.sessionId, {
+          signal: abort.signal,
+        });
 
-      void capturedConn!.extNotification('qwen/notify/session/model-update', {
-        v: 1,
-        sessionId: session.sessionId,
-        currentModelId: 'qwen-max',
-      });
+        void capturedConn!.extNotification('qwen/notify/session/model-update', {
+          v: 1,
+          sessionId: session.sessionId,
+          currentModelId: modelId,
+          ...(subscriptionSignedOut ? { subscriptionSignedOut: true } : {}),
+        });
 
-      const collected: Array<{ type: string; data: unknown }> = [];
-      for await (const e of iter) {
-        collected.push({ type: e.type, data: e.data });
-        if (collected.length === 1) break;
-      }
-      // Promoted to model_switched with currentModelId mapped to modelId.
-      expect(collected[0]?.type).toBe('model_switched');
-      expect(collected[0]?.data).toEqual({
-        sessionId: session.sessionId,
-        modelId: 'qwen-max',
-      });
-      abort.abort();
-      await bridge.shutdown();
-    });
+        const collected: Array<{ type: string; data: unknown }> = [];
+        for await (const e of iter) {
+          collected.push({ type: e.type, data: e.data });
+          if (collected.length === 1) break;
+        }
+        // Promoted to model_switched with currentModelId mapped to modelId.
+        expect(collected[0]?.type).toBe('model_switched');
+        expect(collected[0]?.data).toEqual({
+          sessionId: session.sessionId,
+          modelId,
+          ...(subscriptionSignedOut ? { subscriptionSignedOut: true } : {}),
+        });
+        abort.abort();
+        await bridge.shutdown();
+      },
+    );
 
     it('suppresses current_model_update while a bridge model roundtrip is in flight', async () => {
       // Hang the agent's unstable_setSessionModel so the bridge roundtrip

@@ -442,11 +442,12 @@ export function updateConnectionFromDaemonEvent(
       break;
     }
     case 'model_switched': {
-      const modelId = getString(getRecord(event.data), 'modelId');
-      if (modelId) {
+      const modelId = getRecord(event.data)?.['modelId'];
+      if (typeof modelId === 'string') {
         setConnection((current) => ({
           ...current,
-          currentModel: modelId,
+          currentModel: modelId || undefined,
+          ...(modelId ? {} : { contextWindow: undefined }),
           reasoning:
             current.currentModel === modelId ? current.reasoning : undefined,
         }));

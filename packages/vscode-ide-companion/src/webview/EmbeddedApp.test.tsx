@@ -949,6 +949,11 @@ describe('EmbeddedApp host wiring', () => {
     'keeps the composer after logout and waits for explicit /auth (sidebar flow: %s)',
     async (sidebarFlow) => {
       await renderApp();
+      const refreshModels = vi.fn().mockResolvedValue(undefined);
+      const shellRef = mocks.embeddedProps.current?.shellRef as {
+        current: unknown;
+      };
+      shellRef.current = { refreshModels };
       await act(async () => {
         window.dispatchEvent(
           new MessageEvent('message', {
@@ -984,10 +989,11 @@ describe('EmbeddedApp host wiring', () => {
       expect(
         document.querySelector('[data-testid="subscription-real"]'),
       ).toBeNull();
-      expect(document.body.textContent).toContain(
+      expect(document.body.textContent).not.toContain(
         'Signed out of Qwen. Use /auth to sign in again.',
       );
       expect(postMessagesOfType('auth')).toHaveLength(0);
+      expect(refreshModels).toHaveBeenCalledOnce();
       await act(async () => {
         callback<(command: { command: string; input: string }) => boolean>(
           mocks.embeddedProps.current!,

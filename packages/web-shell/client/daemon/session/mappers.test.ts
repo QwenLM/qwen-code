@@ -23,6 +23,24 @@ import {
 } from './mappers.js';
 import type { DaemonConnectionState } from './types.js';
 
+it('clears an observer selection on an empty model switch after logout', () => {
+  const after = applyEvent(
+    {
+      status: 'connected',
+      currentModel: 'qwen3.8-max',
+      contextWindow: 1234,
+    },
+    {
+      v: 1,
+      id: 1,
+      type: 'model_switched',
+      data: { sessionId: 'observer', modelId: '', subscriptionSignedOut: true },
+    } as DaemonEvent,
+  );
+  expect(after.currentModel).toBeUndefined();
+  expect(after.contextWindow).toBeUndefined();
+});
+
 function availableCommandsEvent(
   availableCommands: Array<Record<string, unknown>>,
   availableSkills: string[],

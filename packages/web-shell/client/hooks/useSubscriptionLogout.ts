@@ -3,6 +3,7 @@ import {
   useConnection,
   useDaemonSessionOwnerGuard,
   useWorkspaceActions,
+  useActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { useI18n } from '../i18n';
 
@@ -18,6 +19,7 @@ interface Options {
 export function useSubscriptionLogout(options: Options) {
   const connection = useConnection();
   const actions = useWorkspaceActions();
+  const sessionActions = useActions();
   const ownerGuard = useDaemonSessionOwnerGuard();
   const callbacks = useRef(options);
   callbacks.current = options;
@@ -91,12 +93,24 @@ export function useSubscriptionLogout(options: Options) {
           }
           await actions.signOutSubscription();
           if (!owner.isCurrent()) return;
-          callbacks.current.onNotice('success', t('subscription.signedOut'));
+          await sessionActions.refreshModels(undefined, {
+            reloadProviders: false,
+          });
+          if (owner.isCurrent()) setAvailable(false);
         })
         .catch((error: unknown) => {
           if (!owner.isCurrent()) return;
           const failure = error as { body?: { errorStage?: string } };
           if (failure?.body?.errorStage === 'revoke') {
+            void sessionActions
+              .refreshModels(undefined, { reloadProviders: false })
+              .catch((refreshError: unknown) => {
+                if (owner.isCurrent())
+                  callbacks.current.onError(
+                    refreshError,
+                    t('subscription.signOutFailed'),
+                  );
+              });
             callbacks.current.onNotice(
               'warning',
               t('subscription.signedOutLocally'),
@@ -110,7 +124,7 @@ export function useSubscriptionLogout(options: Options) {
         });
       return true;
     },
-    [actions, connection.commands, ownerGuard, t, workspaceCwd],
+    [actions, sessionActions, connection.commands, ownerGuard, t, workspaceCwd],
   );
 
   return { available, handleCommand };

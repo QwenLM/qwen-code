@@ -3550,7 +3550,30 @@ export function createServeApp(
     persistSettings: deps.persistSettings,
     sendBridgeError,
   });
-  const stopSubscriptionAuth = registerSubscriptionAuthRoutes(app, mutate);
+  const stopSubscriptionAuth = registerSubscriptionAuthRoutes(
+    app,
+    mutate,
+    async () => {
+      let failed = false;
+      for (const runtime of workspaceRegistry.listAll()) {
+        if (runtime.generationGuard?.closed) continue;
+        try {
+          runtime.generationGuard?.assertOpen();
+          const result = await runtime.workspaceService.reloadModelProviders(
+            createBuildWorkspaceCtx(runtime.workspaceCwd)(
+              'POST /auth/subscription/revoke',
+            ),
+            { subscriptionSignedOut: true },
+          );
+          if (result.status !== 'applied') failed = true;
+        } catch {
+          failed = true;
+        }
+      }
+      if (failed)
+        throw new Error('Unable to restore model connections after sign-out.');
+    },
+  );
   app.locals['stopSubscriptionAuth'] = stopSubscriptionAuth;
 
   registerWorkspaceAuthRoutes(app, {

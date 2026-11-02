@@ -1315,6 +1315,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const repairReloadRef = useRef<
     DaemonSessionActions['reloadSession'] | undefined
   >(undefined);
+  const refreshModelsRef = useRef<
+    DaemonSessionActions['refreshModels'] | undefined
+  >(undefined);
   const tryLiveJournalRepairRef = useRef<(() => void) | undefined>(undefined);
   const passiveAssistantDoneTimerRef = useRef<
     ReturnType<typeof setTimeout> | undefined
@@ -3969,6 +3972,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 addNotice,
                 dismissNotice,
               );
+              if (
+                event.type === 'model_switched' &&
+                isRecord(event.data) &&
+                event.data['subscriptionSignedOut'] === true &&
+                activeWorkspaceScoped &&
+                sessionRef.current === activeSession
+              ) {
+                void refreshModelsRef
+                  .current?.(undefined, { reloadProviders: false })
+                  .catch((error: unknown) =>
+                    console.warn(
+                      'Unable to read models after a model switch',
+                      error,
+                    ),
+                  );
+              }
               const recoveryEventCurrent =
                 (context?.recovery ||
                   connectionRef.current.context?.recovery) &&
@@ -5476,6 +5495,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     ],
   );
   repairReloadRef.current = actions.reloadSession;
+  refreshModelsRef.current = actions.refreshModels;
   useEffect(() => {
     if (promptStatus !== 'idle') return;
     queueMicrotask(() => tryLiveJournalRepairRef.current?.());

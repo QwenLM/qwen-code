@@ -695,6 +695,7 @@ const {
     },
   };
   const mockSessionActions = {
+    refreshModels: vi.fn().mockResolvedValue(undefined),
     setDaemonActivePrompt: vi.fn(),
     sendPrompt: vi.fn().mockResolvedValue(undefined),
     continueSession: vi.fn().mockResolvedValue(undefined),
@@ -12661,6 +12662,7 @@ beforeEach(() => {
   });
   mockWorkspaceActions.signOutSubscription.mockReset();
   mockWorkspaceActions.signOutSubscription.mockResolvedValue(undefined);
+  mockSessionActions.refreshModels.mockReset().mockResolvedValue(undefined);
   mockWorkspaceActions.controlGoal.mockResolvedValue({
     snapshot: { v: 2, activity: 'idle', goal: null },
   });
@@ -12764,10 +12766,11 @@ describe('App subscription logout command', () => {
     expect(mockWorkspaceActions.loadProviders).toHaveBeenCalledWith(
       '/tmp/project',
     );
-    expect(onToast).toHaveBeenCalledWith(
-      'success',
-      'Signed out of Qwen. Use /auth to sign in again.',
-    );
+    expect(onToast).not.toHaveBeenCalled();
+    expect(mockSessionActions.refreshModels).toHaveBeenCalledOnce();
+    expect(mockSessionActions.refreshModels).toHaveBeenCalledWith(undefined, {
+      reloadProviders: false,
+    });
     expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(rawEnqueuePrompt).not.toHaveBeenCalled();

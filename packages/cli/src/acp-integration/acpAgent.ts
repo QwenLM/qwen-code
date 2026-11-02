@@ -5,6 +5,7 @@
  */
 
 import { QWEN_SUBSCRIPTION_BASE_URL } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
+import { restoreModelAfterSubscriptionLogout } from '../config/subscription-logout.js';
 import {
   proposeMemoryImport,
   type MemoryImportModelInput,
@@ -11001,7 +11002,13 @@ class QwenAgent implements Agent {
           if (params['tightening'] === true) {
             await Promise.allSettled(
               [...this.sessions.values()]
-                .filter((session) => !session.isIdle())
+                .filter(
+                  (session) =>
+                    !session.isIdle() &&
+                    (params['subscriptionSignedOut'] !== true ||
+                      session.getConfig().getAuthType() ===
+                        AuthType.QWEN_SUBSCRIPTION),
+                )
                 .map((session) => session.cancelPendingPrompt()),
             );
           }
@@ -11061,12 +11068,26 @@ class QwenAgent implements Agent {
                 { cwd: changeCwd, enabled: params['enabled'] === true },
               );
               break;
-            case 'modelProviders':
-              await this.extMethodInternal(
+            case 'modelProviders': {
+              const result = await this.extMethodInternal(
                 SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
-                { cwd: changeCwd },
+                {
+                  cwd: changeCwd,
+                  ...(params['subscriptionSignedOut'] === true
+                    ? { subscriptionSignedOut: true }
+                    : {}),
+                },
               );
+              if (
+                params['subscriptionSignedOut'] === true &&
+                Number(result['configsFailed']) > 0
+              ) {
+                throw new Error(
+                  'Subscription logout did not reach every connection.',
+                );
+              }
               break;
+            }
             case 'skills':
               await this.extMethodInternal(
                 SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
@@ -15353,6 +15374,62 @@ class QwenAgent implements Agent {
         }
         const reloadRevision = ++this.modelProviderReloadRevision;
         const merged = this.settings.merged;
+        if (params['subscriptionSignedOut'] === true) {
+          reloadEnvironment(merged, cwd);
+          let configsRefreshed = 0;
+          let configsFailed = 0;
+          const recoverConfig = async (config: Config, persist: boolean) => {
+            try {
+              config.reloadModelProvidersConfig(
+                merged.modelProviders,
+                merged.providerProtocol ?? {},
+              );
+              await config.setImageModel(merged.imageModel);
+              const warning = await restoreModelAfterSubscriptionLogout(
+                config,
+                this.settings,
+                persist,
+              );
+              if (warning) configsFailed++;
+              else configsRefreshed++;
+            } catch {
+              configsFailed++;
+            }
+          };
+          if (
+            this.config.getAuthType() === AuthType.QWEN_SUBSCRIPTION ||
+            merged.security?.auth?.selectedType === AuthType.QWEN_SUBSCRIPTION
+          ) {
+            await recoverConfig(
+              this.config,
+              this.hostExecutionEngine === 'legacy',
+            );
+          }
+          for (const config of this.initializingConfigs) {
+            if (
+              config !== this.config &&
+              config.getAuthType() === AuthType.QWEN_SUBSCRIPTION
+            ) {
+              await recoverConfig(config, false);
+            }
+          }
+          for (const session of this.sessions.values()) {
+            if (
+              session.getConfig().getAuthType() !== AuthType.QWEN_SUBSCRIPTION
+            )
+              continue;
+            try {
+              if (!session.isIdle()) await session.cancelPendingPrompt();
+              await session.reloadModelProvidersFromDisk({
+                subscriptionSignedOut: true,
+              });
+              configsRefreshed++;
+            } catch {
+              configsFailed++;
+            }
+          }
+          return { configsRefreshed, configsFailed };
+        }
         let subscriptionModels: string[] | undefined;
         if (
           merged.security?.auth?.selectedType === AuthType.QWEN_SUBSCRIPTION ||

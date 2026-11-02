@@ -1835,9 +1835,11 @@ export function createDaemonSessionActions({
       }
     },
 
-    async refreshModels(beforeRefresh) {
+    async refreshModels(beforeRefresh, options) {
       const session = sessionRef.current;
       const before = getConnection();
+      const readOnly = options?.reloadProviders === false;
+      const priorModelMutation = modelMutationGeneration;
       const context = before.sessionContext;
       const client = session?.client ?? getClient?.();
       const workspaceCwd =
@@ -1851,6 +1853,13 @@ export function createDaemonSessionActions({
       ) {
         throw new Error('Model refresh requires a connected workspace.');
       }
+      if (readOnly && session) {
+        // Invalidate older reconnect snapshots while preserving mutation parity.
+        sessionConfigGeneration.set(
+          session,
+          (sessionConfigGeneration.get(session) ?? 0) + 2,
+        );
+      }
       const isCurrent = (current = getConnection()) =>
         sessionRef.current === session &&
         current.sessionId === before.sessionId &&
@@ -1858,7 +1867,10 @@ export function createDaemonSessionActions({
           sessionContextKey(context) &&
         current.workspaceCwd === before.workspaceCwd &&
         current.status === 'connected' &&
-        (session ? session.client === client : getClient?.() === client);
+        (session ? session.client === client : getClient?.() === client) &&
+        (!readOnly ||
+          (priorModelMutation === modelMutationGeneration &&
+            current.currentModel === before.currentModel));
       const checkSubscriptionSelection = (models: typeof before.models) => {
         const selected = before.models?.find(
           (model) => model.id === before.currentModel,
@@ -1875,26 +1887,24 @@ export function createDaemonSessionActions({
       await beforeRefresh?.({ workspaceCwd, sessionId: session?.sessionId });
       if (!isCurrent()) return;
       const workspace = client.workspaceByCwd(workspaceCwd);
-      const reload = workspace.reloadModelProviders({
-        clientId: session?.clientId,
-      });
-      const result = await (session
-        ? trackSessionConfigMutation(session, reload)
-        : reload);
-      if (!isCurrent()) return;
-      if (
-        result.status !== 'applied' &&
-        !(result.status === 'deferred' && !session)
-      ) {
-        throw new Error('Unable to reload model providers.');
+      if (!readOnly) {
+        const reload = workspace.reloadModelProviders({
+          clientId: session?.clientId,
+        });
+        const result = await (session
+          ? trackSessionConfigMutation(session, reload)
+          : reload);
+        if (!isCurrent()) return;
+        if (
+          result.status !== 'applied' &&
+          !(result.status === 'deferred' && !session)
+        ) {
+          throw new Error('Unable to reload model providers.');
+        }
       }
       if (session) {
         const status = await session.context();
         if (!isCurrent()) return;
-        const models = mapSessionContextModels(status);
-        if (status.sessionId !== session.sessionId || !models) {
-          throw new Error('Unable to read the refreshed session model list.');
-        }
         const providers = await workspace.workspaceProviders();
         if (!isCurrent()) return;
         if (!providers.initialized) {
@@ -1903,6 +1913,19 @@ export function createDaemonSessionActions({
               'Unable to read the refreshed model list.',
           );
         }
+        const refreshed = mapSessionContextModels(status);
+        if (
+          status.sessionId !== session.sessionId ||
+          (!refreshed && providers.current?.authType)
+        ) {
+          throw new Error('Unable to read the refreshed session model list.');
+        }
+        const models = refreshed ?? { models: [] };
+        const currentModel = models.models.some(
+          (model) => model.id === refreshed?.currentModel,
+        )
+          ? refreshed?.currentModel
+          : undefined;
         setConnection((current) =>
           isCurrent(current)
             ? {
@@ -1913,24 +1936,59 @@ export function createDaemonSessionActions({
                   models.models.find(
                     (model) => model.id === current.currentModel,
                   )?.contextWindow ?? current.contextWindow,
+                ...((readOnly ||
+                  (models.models.length === 0 &&
+                    !providers.current?.authType)) &&
+                priorModelMutation === modelMutationGeneration
+                  ? {
+                      currentModel,
+                      contextWindow: models.models.find(
+                        (model) => model.id === currentModel,
+                      )?.contextWindow,
+                      reasoning:
+                        current.currentModel === currentModel
+                          ? current.reasoning
+                          : undefined,
+                    }
+                  : {}),
               }
             : current,
         );
-        checkSubscriptionSelection(models.models);
+        if (!readOnly) checkSubscriptionSelection(models.models);
       } else {
         const providers = await workspace.workspaceProviders();
         if (!isCurrent()) return;
-        const { models } = mapProviderStatus(providers);
-        if (!providers.initialized || models.length === 0) {
+        const { models, currentModel, contextWindow } =
+          mapProviderStatus(providers);
+        if (
+          !providers.initialized ||
+          (models.length === 0 && providers.current?.authType)
+        ) {
           throw new Error(
             providers.errors?.[0]?.error ??
               'Unable to read the refreshed model list.',
           );
         }
         setConnection((current) =>
-          isCurrent(current) ? { ...current, providers, models } : current,
+          isCurrent(current)
+            ? {
+                ...current,
+                providers,
+                models,
+                ...(readOnly
+                  ? {
+                      currentModel: providers.current?.authType
+                        ? currentModel
+                        : undefined,
+                      contextWindow: providers.current?.authType
+                        ? contextWindow
+                        : undefined,
+                    }
+                  : {}),
+              }
+            : current,
         );
-        checkSubscriptionSelection(models);
+        if (!readOnly) checkSubscriptionSelection(models);
       }
     },
 

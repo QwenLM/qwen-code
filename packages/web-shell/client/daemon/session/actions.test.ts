@@ -7656,6 +7656,82 @@ function createTimedCreateClient({
 }
 
 describe('model catalog refresh', () => {
+  it('reads a recovered live model without reloading providers', async () => {
+    const h = setup();
+    h.context.state.models = {
+      currentModelId: 'bailian',
+      availableModels: [
+        { modelId: 'bailian', name: 'Bailian', _meta: { contextLimit: 8192 } },
+      ],
+    };
+    await h.actions.refreshModels(undefined, { reloadProviders: false });
+    expect(h.workspace.reloadModelProviders).not.toHaveBeenCalled();
+    expect(h.getConnection().currentModel).toBe('bailian');
+    expect(h.getConnection().contextWindow).toBe(8192);
+  });
+
+  it('does not overwrite a model notification received during readback', async () => {
+    const h = setup();
+    const gate = createDeferred<DaemonSessionContextStatus>();
+    h.session.context.mockImplementation(() => gate.promise);
+    const refresh = h.actions.refreshModels(undefined, {
+      reloadProviders: false,
+    });
+    await vi.waitFor(() => expect(h.session.context).toHaveBeenCalled());
+    h.replaceConnection({
+      ...h.getConnection(),
+      currentModel: 'newer-model',
+      models: [{ id: 'newer-model' }],
+    });
+    gate.resolve(h.context);
+    await refresh;
+    expect(h.getConnection().currentModel).toBe('newer-model');
+    expect(h.getConnection().models).toEqual([{ id: 'newer-model' }]);
+    expect(h.workspace.reloadModelProviders).not.toHaveBeenCalled();
+  });
+
+  it('preserves a non-subscription live model when the workspace signs out', async () => {
+    const session = createMockSession('other-provider');
+    const workspace = session.client.workspaceByCwd();
+    session.client.workspaceByCwd.mockReturnValue(workspace);
+    workspace.workspaceProviders.mockResolvedValue({
+      v: 1,
+      initialized: true,
+      workspaceCwd: '/workspace',
+      providers: [],
+      current: { modelId: 'coder-model' },
+    });
+    const context = contextStatus('other-provider');
+    context.state.models = {
+      currentModelId: 'manual-bailian',
+      availableModels: [
+        {
+          modelId: 'manual-bailian',
+          name: 'Bailian',
+          _meta: { authType: 'openai' },
+        },
+      ],
+    };
+    session.context.mockResolvedValue(context);
+    const h = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        sessionId: 'other-provider',
+        workspaceCwd: '/workspace',
+        currentModel: 'manual-bailian',
+        providers: {
+          current: { authType: 'qwen-subscription', modelId: 'qwen3.8-max' },
+        },
+        models: [{ id: 'manual-bailian', authType: 'openai', isRuntime: true }],
+      },
+    });
+    await h.actions.refreshModels();
+    expect(h.getConnection().currentModel).toBe('manual-bailian');
+    await h.actions.refreshModels(undefined, { reloadProviders: false });
+    expect(h.getConnection().currentModel).toBe('manual-bailian');
+  });
+
   function setup() {
     const session = createMockSession('session-a');
     const workspace = session.client.workspaceByCwd();
@@ -7682,26 +7758,75 @@ describe('model catalog refresh', () => {
     return { ...h, session, workspace, context };
   }
 
-  it('keeps a removed subscription selection and publishes the new catalog for reselection', async () => {
-    const h = setup();
-    h.replaceConnection({
-      ...h.getConnection(),
-      models: [
-        { id: 'old-model', label: 'Old', authType: 'qwen-subscription' },
-      ],
-    });
-    h.context.state.models!.availableModels = [
-      { modelId: 'new-model', name: 'New' },
-    ];
-    await expect(h.actions.refreshModels()).rejects.toThrow(
-      'Run /model to choose another model',
-    );
-    expect(h.getConnection().currentModel).toBe('old-model');
-    expect(h.getConnection().models?.map((model) => model.id)).toEqual([
-      'new-model',
-    ]);
-    expect(h.session.setModel).not.toHaveBeenCalled();
-  });
+  it.each([false, true])(
+    'clears a signed-out subscription selection without another provider (live session: %s)',
+    async (live) => {
+      const session = createMockSession('unused');
+      const workspace = session.client.workspaceByCwd();
+      workspace.reloadModelProviders.mockResolvedValue({
+        status: live ? 'applied' : 'deferred',
+      });
+      workspace.workspaceProviders.mockResolvedValue({
+        v: 1,
+        initialized: true,
+        workspaceCwd: '/workspace',
+        providers: [],
+        current: { modelId: 'coder-model' },
+      });
+      session.client.workspaceByCwd.mockReturnValue(workspace);
+      const context = contextStatus('unused');
+      delete context.state.models;
+      session.context.mockResolvedValue(context);
+      const h = createActionsHarness({
+        ...(live ? { session } : {}),
+        getClient: () => session.client as unknown as DaemonClient,
+        connection: {
+          status: 'connected',
+          ...(live ? { sessionId: 'unused' } : {}),
+          workspaceCwd: '/workspace',
+          currentModel: 'old',
+          providers: {
+            current: { authType: 'qwen-subscription', modelId: 'old' },
+          },
+          models: [{ id: 'old', label: 'Qwen', authType: 'qwen-subscription' }],
+        },
+      });
+      await expect(
+        h.actions.refreshModels(undefined, { reloadProviders: false }),
+      ).resolves.toBeUndefined();
+      expect(h.getConnection().currentModel).toBeUndefined();
+      expect(h.getConnection().models).toEqual([]);
+      expect(h.getConnection().sessionId).toBe(live ? 'unused' : undefined);
+      expect(workspace.reloadModelProviders).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['openai', 'qwen-subscription'] as const)(
+    'keeps a removed subscription selection and publishes the new catalog for reselection (workspace: %s)',
+    async (authType) => {
+      const h = setup();
+      const providers = workspaceProvidersStatus('high');
+      providers.current = { authType, modelId: 'old-model' };
+      h.workspace.workspaceProviders.mockResolvedValue(providers);
+      h.replaceConnection({
+        ...h.getConnection(),
+        models: [
+          { id: 'old-model', label: 'Old', authType: 'qwen-subscription' },
+        ],
+      });
+      h.context.state.models!.availableModels = [
+        { modelId: 'new-model', name: 'New' },
+      ];
+      await expect(h.actions.refreshModels()).rejects.toThrow(
+        'Run /model to choose another model',
+      );
+      expect(h.getConnection().currentModel).toBe('old-model');
+      expect(h.getConnection().models?.map((model) => model.id)).toEqual([
+        'new-model',
+      ]);
+      expect(h.session.setModel).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([false, true])(
     'refreshes with an absent or void callback (callback=%s)',

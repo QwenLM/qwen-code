@@ -87,6 +87,7 @@ const readAttachment = vi.fn();
 const getContextUsage = vi.fn();
 const loadSession = vi.fn(async () => {});
 const daemonActions = {
+  refreshModels: vi.fn().mockResolvedValue(undefined),
   loadSession,
   sendPrompt,
   submitPermission,
@@ -578,11 +579,11 @@ describe('pane subscription logout', () => {
     expect(subscriptionActions.signOutSubscription).toHaveBeenCalledOnce();
     expect(sendPrompt).not.toHaveBeenCalled();
     expect(enqueuePrompt).not.toHaveBeenCalled();
-    expect(transcriptDispatch).toHaveBeenCalledWith([
-      expect.objectContaining({
-        type: 'status',
-        text: 'Signed out of Qwen. Use /auth to sign in again.',
-      }),
+    expect(daemonActions.refreshModels).toHaveBeenCalledWith(undefined, {
+      reloadProviders: false,
+    });
+    expect(transcriptDispatch).not.toHaveBeenCalledWith([
+      expect.objectContaining({ type: 'status' }),
     ]);
   });
 

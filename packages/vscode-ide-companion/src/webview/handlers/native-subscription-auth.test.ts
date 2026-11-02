@@ -109,6 +109,11 @@ describe('native subscription authentication', () => {
       f.transport.getSubscriptionConfig.mockResolvedValue({ enabled: false });
       const result = f.run(action);
       await settle();
+      if (action === 'logout') {
+        await expect(result).resolves.toEqual({ kind: 'unavailable' });
+        expect(mocks.createQuickPick).not.toHaveBeenCalled();
+        return;
+      }
       expect(f.picker.status()).toContain('not available');
       expect(f.transport.signOutSubscription).not.toHaveBeenCalled();
       expect(mocks.openExternal).not.toHaveBeenCalled();
@@ -118,7 +123,7 @@ describe('native subscription authentication', () => {
     },
   );
 
-  it.each(['logout', 'upgrade'] as const)(
+  it.each(['upgrade'] as const)(
     'offers only a usable Retry after a shortcut %s failure',
     async (action) => {
       const f = fixture();
@@ -135,19 +140,18 @@ describe('native subscription authentication', () => {
       await settle();
       f.picker.select('Done');
       await expect(result).resolves.toEqual({
-        kind: action === 'logout' ? 'signed-out' : 'upgrade-opened',
+        kind: 'upgrade-opened',
       });
     },
   );
 
-  it('logs out directly with a native status row without starting OAuth', async () => {
+  it('logs out without opening a native picker or showing a success row', async () => {
     const f = fixture();
     const result = f.run('logout');
     await settle();
-    expect(f.picker.status()).toBe('Signed out of Qwen');
+    expect(mocks.createQuickPick).not.toHaveBeenCalled();
     expect(f.transport.signOutSubscription).toHaveBeenCalledOnce();
     expect(f.transport.getSubscriptionConfig).toHaveBeenCalledOnce();
-    f.picker.select('Done');
     await expect(result).resolves.toEqual({ kind: 'signed-out' });
   });
 
@@ -202,14 +206,13 @@ describe('native subscription authentication', () => {
         body: { errorStage: stage },
       });
       const result = f.run('logout');
-      await settle();
-      expect(f.picker.status()).toContain(
-        stage === 'revoke' ? 'Signed out locally' : 'Unable to sign out',
-      );
-      f.picker.hide();
-      await expect(result).resolves.toEqual({
-        kind: stage === 'revoke' ? 'signed-out' : 'cancelled',
-      });
+      if (stage === 'revoke')
+        await expect(result).resolves.toEqual({ kind: 'signed-out' });
+      else
+        await expect(result).rejects.toMatchObject({
+          body: { errorStage: 'cleanup' },
+        });
+      expect(mocks.createQuickPick).not.toHaveBeenCalled();
     },
   );
 
@@ -232,7 +235,7 @@ describe('native subscription authentication', () => {
       await expect(result).resolves.toEqual({
         kind: abortOwner ? 'cancelled' : 'signed-out',
       });
-      expect(f.picker.dispose).toHaveBeenCalledOnce();
+      expect(mocks.createQuickPick).not.toHaveBeenCalled();
     },
   );
 

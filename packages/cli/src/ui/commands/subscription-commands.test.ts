@@ -10,6 +10,7 @@ import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscript
 import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import type { AvailableModel } from '@qwen-code/qwen-code-core/models/types.js';
 import { setLanguageAsync } from '../../i18n/index.js';
+import { restoreModelAfterSubscriptionLogout } from '../../config/subscription-logout.js';
 
 const mocks = vi.hoisted(() => ({ browser: vi.fn(), signOut: vi.fn() }));
 vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
@@ -90,6 +91,45 @@ const bailianModel: AvailableModel = {
   baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
   envKey: 'LOGOUT_TEST_BAILIAN_KEY',
 };
+
+it('keeps an existing non-subscription bootstrap connection while clearing stale subscription settings', async () => {
+  const context = memberContext();
+  const config = context.services.config!;
+  vi.spyOn(config, 'getAuthType').mockReturnValue(AuthType.USE_OPENAI);
+  config.getModel = vi.fn(() => 'existing-model');
+  config.getCurrentModelRegistryBaseUrl = vi.fn(
+    () => 'https://existing.example/v1',
+  );
+  expect(
+    await restoreModelAfterSubscriptionLogout(
+      config,
+      context.services.settings,
+    ),
+  ).toBeUndefined();
+  expect(config.clearAuth).not.toHaveBeenCalled();
+  expect(config.switchModel).not.toHaveBeenCalled();
+  expect(context.services.settings.setValue).toHaveBeenCalledWith(
+    'Workspace',
+    'security.auth.selectedType',
+    AuthType.USE_OPENAI,
+    undefined,
+    { throwOnWriteFailure: true },
+  );
+  expect(context.services.settings.setValue).toHaveBeenCalledWith(
+    'Workspace',
+    'model.name',
+    'existing-model',
+    undefined,
+    { throwOnWriteFailure: true },
+  );
+  expect(context.services.settings.setValue).toHaveBeenCalledWith(
+    'Workspace',
+    'model.baseUrl',
+    'https://existing.example/v1',
+    undefined,
+    { throwOnWriteFailure: true },
+  );
+});
 
 it('silently activates another provider using its loaded credentials and endpoint', async () => {
   const context = memberContext();

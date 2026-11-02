@@ -543,6 +543,7 @@ export interface DaemonSessionActions {
       workspaceCwd: string;
       sessionId?: string;
     }) => void | Promise<void>,
+    options?: { reloadProviders?: boolean },
   ): Promise<void>;
 
   setReasoningEffort(

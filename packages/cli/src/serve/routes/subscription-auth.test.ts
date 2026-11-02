@@ -31,14 +31,14 @@ const user = {
   member_type: 'free',
 };
 let dispose: (() => void) | undefined;
-function makeApp() {
+function makeApp(onSignedOut?: () => Promise<void>) {
   const app = express();
   app.use(express.json());
   app.use(bearerAuth('daemon'));
   const mutate = vi.fn(
     createMutationGate({ tokenConfigured: true, requireAuth: true }),
   );
-  dispose = registerSubscriptionAuthRoutes(app, mutate);
+  dispose = registerSubscriptionAuthRoutes(app, mutate, onSignedOut);
   const get = (path: string) =>
     request(app).get(path).set('Authorization', 'Bearer daemon');
   const post = (path: string) =>
@@ -61,6 +61,27 @@ afterEach(() => {
 });
 
 describe('process-global Subscription routes', () => {
+  it.each([undefined, 'revoke', 'cleanup'] as const)(
+    'recovers workspace connections only after local cleanup (%s)',
+    async (stage) => {
+      const recover = vi.fn().mockResolvedValue(undefined);
+      if (stage)
+        mocks.signOut.mockRejectedValue(
+          new SubscriptionOAuthError(
+            'network_error',
+            undefined,
+            undefined,
+            undefined,
+            stage,
+          ),
+        );
+      const { post } = makeApp(recover);
+      const result = await post(`${base}/revoke`);
+      expect(result.status).toBe(stage ? 502 : 204);
+      expect(recover).toHaveBeenCalledTimes(stage === 'cleanup' ? 0 : 1);
+      if (stage === 'revoke') expect(result.body.errorStage).toBe('revoke');
+    },
+  );
   it('keeps existing daemon authentication and strict write protection', async () => {
     const { app, post, mutate } = makeApp();
     expect((await request(app).get(base)).status).toBe(401);
