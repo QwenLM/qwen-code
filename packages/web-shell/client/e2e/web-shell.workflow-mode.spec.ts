@@ -195,13 +195,11 @@ test('preserves requested on when unavailable, permits off, and clears omitted s
   await expect(toggle).toHaveAccessibleDescription(
     /Workflow mode is on, but currently unavailable\./,
   );
-  const rowBounds = await toggle.boundingBox();
-  const referenceBounds = await page
-    .getByTestId('composer-add-menu-reference-file')
-    .boundingBox();
-  expect(rowBounds).not.toBeNull();
-  expect(referenceBounds).not.toBeNull();
-  expect(rowBounds!.height).toBeLessThanOrEqual(referenceBounds!.height + 1);
+  const summary = toggle.locator('[data-workflow-summary]');
+  await expect(summary).toHaveText('On, but unavailable now');
+  const summaryBounds = await summary.boundingBox();
+  expect(summaryBounds).not.toBeNull();
+  expect(summaryBounds!.height).toBeLessThanOrEqual(17);
   await page.screenshot({
     path: testInfo.outputPath('workflow-unavailable-on.png'),
   });
@@ -213,6 +211,58 @@ test('preserves requested on when unavailable, permits off, and clears omitted s
   scenario.state.configOptions = [];
   await daemon.sendEvent(configUpdate(scenario, 1, false));
   await expect(page.getByTestId('composer-add-menu-workflow')).toHaveCount(0);
+  expect(daemon.configOptionRequests().map((request) => request.body)).toEqual([
+    { configId: 'workflow_mode', value: 'off' },
+  ]);
+});
+
+test('shows a dismissible toolbar chip while Workflow is requested @smoke', async ({
+  page,
+  baseURL,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    state: { configOptions: [workflowOption()] },
+  });
+  const daemon = await installMockDaemon(page, scenario, { baseURL });
+  await openSession(page, daemon);
+  const chip = page.locator('[data-web-shell-workflow-chip]');
+  await expect(chip).toHaveCount(0);
+  await (await modeSwitch(page)).click();
+  await expect(chip).toBeVisible();
+  await expect(chip).toHaveAttribute('aria-pressed', 'true');
+  await expect(chip).not.toHaveAttribute('data-unavailable', /.*/);
+  await chip.hover();
+  await expect(page.getByRole('tooltip')).toContainText('Click to turn off.');
+  await page.screenshot({ path: testInfo.outputPath('workflow-chip-on.png') });
+
+  await chip.click();
+  await expect(chip).toHaveCount(0);
+  expect(daemon.configOptionRequests().map((request) => request.body)).toEqual([
+    { configId: 'workflow_mode', value: 'on' },
+    { configId: 'workflow_mode', value: 'off' },
+  ]);
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('marks the chip while the requested mode is unavailable', async ({
+  page,
+  baseURL,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    state: { configOptions: [workflowOption(true, false)] },
+  });
+  const daemon = await installMockDaemon(page, scenario, { baseURL });
+  await openSession(page, daemon);
+  const chip = page.locator('[data-web-shell-workflow-chip]');
+  await expect(chip).toHaveAttribute('data-unavailable', '');
+  await expect(chip).toHaveAccessibleDescription(
+    /Workflow mode is on, but currently unavailable\./,
+  );
+  await page.screenshot({
+    path: testInfo.outputPath('workflow-chip-unavailable.png'),
+  });
+  await chip.click();
+  await expect(chip).toHaveCount(0);
   expect(daemon.configOptionRequests().map((request) => request.body)).toEqual([
     { configId: 'workflow_mode', value: 'off' },
   ]);

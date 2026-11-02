@@ -117,6 +117,27 @@ export interface ModelMetrics extends ModelMetricsCore {
   bySource: Record<string, ModelMetricsCore>;
 }
 
+/** One timed, non-internal response, for the per-request speed timeline. */
+export interface RequestTimingSample {
+  /** Event time, epoch ms. */
+  at: number;
+  ttftMs: number;
+  /** Generation window; below 100 ms it measures no output rate. */
+  generationMs: number;
+  outputTokens: number;
+  /** Subagent that issued the request; absent for the main conversation. */
+  source?: string;
+}
+
+/** One failed API call. */
+export interface RequestFailureSample {
+  /** Event time, epoch ms. */
+  at: number;
+  /** HTTP status code, else error type, else `unknown`. */
+  kind: string;
+  source?: string;
+}
+
 /**
  * Model totals for the daemon stats route. Generation timing lives here, not
  * in `ModelMetrics`, because `models` is also written to managed usage records
@@ -124,6 +145,28 @@ export interface ModelMetrics extends ModelMetricsCore {
  */
 export interface StatsModelMetrics extends ModelMetricsCore {
   generation?: GenerationMetrics;
+  /** Most recent timed responses, oldest first, capped at `MAX_TIMING_SAMPLES`. */
+  timingSamples?: RequestTimingSample[];
+  /** Failed calls by kind, and the most recent ones (oldest first). */
+  failures?: {
+    byKind: Record<string, number>;
+    recent: RequestFailureSample[];
+  };
+}
+
+/** Per-model response timeline length kept for the stats route. */
+export const MAX_TIMING_SAMPLES = 200;
+/** Per-model failure timeline length kept for the stats route. */
+export const MAX_FAILURE_SAMPLES = 50;
+
+function eventTime(event: { 'event.timestamp'?: string }): number {
+  const parsed = Date.parse(event['event.timestamp'] ?? '');
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+function pushCapped<T>(list: T[], item: T, cap: number): void {
+  list.push(item);
+  if (list.length > cap) list.splice(0, list.length - cap);
 }
 
 export interface SessionMetrics {
@@ -220,6 +263,14 @@ const cloneSessionMetrics = (metrics: SessionMetrics): SessionMetrics => {
       Object.create(null) as NonNullable<SessionMetrics['statsModels']>,
       clone.statsModels,
     );
+    for (const model of Object.values(clone.statsModels)) {
+      if (model.failures) {
+        model.failures.byKind = Object.assign(
+          Object.create(null) as Record<string, number>,
+          model.failures.byKind,
+        );
+      }
+    }
   }
   if (clone.billableOutputTokens) {
     clone.billableOutputTokens = Object.assign(
@@ -736,6 +787,17 @@ export class UiTelemetryService extends EventEmitter {
       accumulateGeneration(
         (statsModelMetrics.generation ??= createInitialGenerationMetrics()),
       );
+      pushCapped(
+        (statsModelMetrics.timingSamples ??= []),
+        {
+          at: eventTime(event),
+          ttftMs,
+          generationMs: generationDurationMs,
+          outputTokens: event.output_token_count,
+          ...(event.subagent_name ? { source: event.subagent_name } : {}),
+        },
+        MAX_TIMING_SAMPLES,
+      );
     }
     generation.last = {
       model: event.model,
@@ -772,6 +834,26 @@ export class UiTelemetryService extends EventEmitter {
       bucket.api.totalRequests++;
       bucket.api.totalErrors++;
       bucket.api.totalLatencyMs += event.duration_ms;
+    }
+    if (statsModelMetrics) {
+      const kind =
+        event.status_code !== undefined && event.status_code !== ''
+          ? String(event.status_code)
+          : event.error_type || 'unknown';
+      const failures = (statsModelMetrics.failures ??= {
+        byKind: Object.create(null) as Record<string, number>,
+        recent: [],
+      });
+      failures.byKind[kind] = (failures.byKind[kind] ?? 0) + 1;
+      pushCapped(
+        failures.recent,
+        {
+          at: eventTime(event),
+          kind,
+          ...(event.subagent_name ? { source: event.subagent_name } : {}),
+        },
+        MAX_FAILURE_SAMPLES,
+      );
     }
   }
 

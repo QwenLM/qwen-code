@@ -96,7 +96,23 @@ class ToolPublicationAcknowledgementTest {
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
-        sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var objects = new HashMap<String, byte[]>();
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            public void putIfAbsent(String key, byte[] value) {
+                assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+                objects.putIfAbsent(key, value.clone());
+            }
+            public InputStream open(String key) {
+                assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+                objectReads++;
+                duringObjectRead.run();
+                return new ByteArrayInputStream(objects.get(key));
+            }
+            public void validateConfiguration() { }
+        };
+        sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc,
+                new ManagedExtensionRecordStore(jdbc), null, null, null, bucket, null, null,
+                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("fixture", new byte[32]));
         runtimeSessions = new JdbcRuntimeSessionRepository(source);
         executions = new JdbcToolExecutionRepository(source);
@@ -119,21 +135,6 @@ class ToolPublicationAcknowledgementTest {
         runtimeSession = runtimeSessions.compareAndSet(acquiring, acquiring.withState(RuntimeSessionRecord.State.READY, Instant.now()));
         grants = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
                 new ToolPublicationStore.Capacity(2048, 16 * 1024 * 1024, 16 * 1024 * 1024, 10));
-        var objects = new HashMap<String, byte[]>();
-        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
-            public void putIfAbsent(String key, byte[] value) {
-                assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
-                objects.putIfAbsent(key, value.clone());
-            }
-            public InputStream open(String key) {
-                assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
-                objectReads++;
-                duringObjectRead.run();
-                return new ByteArrayInputStream(objects.get(key));
-            }
-            public void validateConfiguration() { }
-        };
-        sessions.setPublicationObjects(bucket);
         data = new ToolPublicationDataStore(jdbc, manager, grants, sessions, bucket,
                 Duration.ofMinutes(2), Duration.ofSeconds(30),
                 new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
@@ -371,7 +372,7 @@ class ToolPublicationAcknowledgementTest {
     void mismatchedSessionAuthorityAtEveryInjectionSiteRefusesBeforeRpcAndObjectReads(String component) {
         var other = new JdbcDataSource();
         other.setURL("jdbc:h2:mem:foreign-session-" + UUID.randomUUID());
-        var foreignSessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(new ManagedSchemaJdbcTemplate(other)));
+        var foreignSessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(new ManagedSchemaJdbcTemplate(other));
         var selectedGrants = new ToolPublicationStore(jdbc, manager,
                 "grants".equals(component) ? foreignSessions : sessions, executions, bindings,
                 new ToolPublicationStore.Capacity(2048, 16 * 1024 * 1024, 16 * 1024 * 1024, 10));

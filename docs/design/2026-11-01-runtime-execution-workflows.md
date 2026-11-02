@@ -10,7 +10,9 @@
 
 The Registry gives Binding and Session state an owner, but execution reconciliation, takeover scans and cancellation still live in `RuntimeBrokerService`. Their shared execution reads, fenced settlement and background-hold settlement make a three-way copy of private helpers unsafe. Extract the three workflows with direct module-internal collaborators and one shared execution-state boundary. Preserve current observable behavior, including failure timing, async continuations, writer fencing and cleanup order.
 
-No public interface, HTTP route, schema, protocol, dependency or Runtime launch policy changes. Provisioning, Binding recovery/drain, dispatch, renewal scheduling and physical Session release stay in the service. This is structural work; full integration acceptance remains separate from implementation completion.
+No public interface, HTTP route, schema, protocol, dependency or Runtime launch policy changes. Provisioning, Binding recovery/drain, Binding renewal scheduling and physical Session release stay in the service. This is structural work; full integration acceptance remains separate from implementation completion.
+
+This document records the workflow extraction merged in #16029. The [Dispatcher follow-up](2026-11-01-runtime-execution-dispatcher.md) moves dispatch reservations, invocations and completion together and replaces the original cancellation callback. The ownership table and cancellation wiring below reflect that follow-up.
 
 ## Ownership and dependencies
 
@@ -21,8 +23,9 @@ No public interface, HTTP route, schema, protocol, dependency or Runtime launch 
 | `RuntimeExecutionReconciler`   | Execution-ID lookup reservations, `ExecutionObservationCooldown`, evidence validation and reconciliation CAS                           | Service observation endpoints and takeover scanner                                          |
 | `RuntimeExecutionRecovery`     | Bounded takeover scan and background-hold observation/sweep workflows                                                                  | Acquire/adoption, routine/drain release, background observation and task stop               |
 | `RuntimeExecutionCancellation` | Durable cancellation intent and physical cancellation/confirmation workflow                                                            | Service cancellation endpoint                                                               |
-| `RuntimeBrokerSupport`         | Unchanged stateless future/error mapping, payload/reference validation and status projection                                           | The extracted collaborators and service                                                     |
-| Service                        | Public facade, `closed`, dispatch reservations/invocations, schedulers, provisioner lifetime, Binding/Session lifecycle orchestration  | Existing adapters and assembly                                                              |
+| `RuntimeExecutionDispatcher`   | Dispatch reservations/invocations, claim transition, dispatch renewal, v3 result waiting, completion and persisted SSH acknowledgement | Service execution/start and drain paths; cancellation                                       |
+| `RuntimeBrokerSupport`         | Unchanged stateless future/error mapping, payload/reference validation, status/receipt projection and renewal-delay calculation        | The extracted collaborators and service                                                     |
+| Service                        | Public facade, `closed`, schedulers, provisioner lifetime, Binding/Session lifecycle orchestration                                     | Existing adapters and assembly                                                              |
 
 All classes remain package-private in the existing runtime-broker service package; no new interface or Spring wiring is needed. Repositories remain the sole durable authority. Context locks still belong to the Registry, and every compound read/admit/release decision retains its current lock region. The support class shares existing rules across several real callers; it is not a configurable workflow framework.
 
@@ -48,7 +51,7 @@ Task stop keeps tenant/Harness ownership validation and the original Session rou
 
 ## Cancellation design
 
-Move cancellation admission, prepared-provider confirmation, physical cancel and cancellation-result validation into `RuntimeExecutionCancellation`. It uses Registry, execution state, execution repository, transport, the existing invocation set, coordination scheduler, cancellation duration and close fence. The service facade supplies its existing two-argument dispatch action for the one DISPATCHING branch; this per-call `BiConsumer` is the only service action passed to an extracted workflow. Do not store a service reference or pass maps/private lifecycle helpers as callbacks.
+Move cancellation admission, prepared-provider confirmation, physical cancel and cancellation-result validation into `RuntimeExecutionCancellation`. It uses Registry, execution state, execution repository, transport, the concrete dispatcher, coordination scheduler, cancellation duration and close fence. Cancellation queries `isInvoking` and calls `beginDispatch` for the unsent DISPATCHING branch. It receives neither a mutable invocation set nor a per-call service callback. Do not store a service reference or pass maps/private lifecycle helpers as callbacks.
 
 Preserve terminal-receipt ownership reads before requiring a live Session. A prepared provider's cancelled receipt still requires original-worker confirmation when that worker may retain the preparation. Nonterminal cancellation persists intent before sending a worker request. Hold rows and authorized private CSI calls retain their existing refusals. An invocation still running here may receive cancellation after lease lapse; an invocation absent here first follows the repository-clock dispatch fence. UNKNOWN remains UNKNOWN until reconciliation evidence resolves it.
 
@@ -68,10 +71,10 @@ Reuse the existing service regressions for explicit versus automatic lookup, tim
 
 Within the module's shared 10-minute local verification budget, reuse the source-matching SDK and JDK 21/Maven environment, run affected Java suites with Checkstyle and the minimum subprocess path, and inspect the actual selected reports. Full MySQL 8.4, bundled Hosted/fault recovery and SpotBugs remain required CI qualification; fixture/H2 or test-worker subprocess passes do not establish those results. No JavaScript build is required because this change has no TypeScript/shared-contract change.
 
-Acceptance: all three facade entry families delegate to their named collaborators; lookup reservations and cooldown share one owner; no collaborator reaches back into service internals; the sole cancellation dispatch action is explicit; no SQL/schema/public-contract diff; moved algorithms retain their semantics; the ordering witness and focused regressions pass; bilingual documents and two clean self-audit passes are complete. CI acceptance is pending until its required gates run on the accepted revision.
+Acceptance: all three facade entry families delegate to their named collaborators; lookup reservations and cooldown share one owner; no collaborator reaches back into service internals; cancellation uses the dispatcher without a service callback or raw invocation set; no SQL/schema/public-contract diff; moved algorithms retain their semantics; the ordering witness and focused regressions pass; bilingual documents and two clean self-audit passes are complete. CI acceptance is pending until its required gates run on the accepted revision.
 
 ## Risks and open questions
 
 The main risks are altered synchronous exception mapping, completion ordering, guard accounting and cross-generation routing. Mechanical moves and unchanged call-site envelopes reduce these risks, while the existing integration tests exercise them through the public service facade. Shared immutable dependencies are passed directly rather than hidden in a generic context object.
 
-The callback exception is deliberately limited to cancellation's unsent-dispatch branch; extracting the entire dispatcher would widen this task. No product decisions remain open. A later dispatcher extraction may replace that action with a concrete collaborator without changing cancellation semantics.
+The original #16029 slice deliberately limited its callback exception to cancellation's unsent-dispatch branch. The Dispatcher follow-up replaces it with a concrete collaborator while preserving cancellation semantics and moving dispatch state and completion together. No product decisions remain open. Further provisioning or Session lifecycle extraction is outside this increment.
