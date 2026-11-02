@@ -3486,7 +3486,12 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     // requested, not the fixed 20K ceiling: output can never exceed what
     // was requested, so against the ceiling the guard could never fire on a
     // clamped request and a truncated summary would be persisted.
-    mockVllmBackend(WINDOW, true);
+    // The snapshot is closed so that this guard is the only one that can
+    // drop it: an unclosed one at a filled window is dropped by the
+    // mid-snapshot check too, which would leave this comparison unpinned.
+    mockVllmBackend(WINDOW, true, {
+      text: '<state_snapshot>summary</state_snapshot>',
+    });
 
     const result = await compressChars(182_000, 45_000);
     expect(capturedMaxOutputTokens).toBeLessThan(COMPACT_MAX_OUTPUT_TOKENS);
