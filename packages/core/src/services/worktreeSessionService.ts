@@ -14,10 +14,7 @@ import { Storage } from '../config/storage.js';
 import { isNodeError } from '../utils/errors.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
-import {
-  isZombie,
-  readProcStartToken,
-} from '../utils/process-liveness.js';
+import { isZombie, readProcStartToken } from '../utils/process-liveness.js';
 import {
   readWorktreeSessionMarker,
   writeWorktreeSessionMarker,
