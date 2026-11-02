@@ -37,7 +37,7 @@ Persist the two catalogs in `desktop-state.json` through a small, allowlisted Ta
 
 Two commands are added: `shell_state_read(key)` and `shell_state_write(key, value)`.
 
-Both call `require_runtime_origin`, which compares the calling webview's URL origin with the runtime origin recorded for this launch. The bootstrap page and any other origin are rejected. The commands are registered in `build.rs` and granted only to the daemon-served capability `web-shell-external-url`, whose `remote.urls` is already `http://127.0.0.1:*`.
+Both call `require_runtime_origin`, which compares the calling webview's URL origin with the runtime origin recorded for this launch. The bootstrap page and any other origin are rejected. That URL is the top-level document, so a cross-origin frame inside the Web Shell — the web preview frames arbitrary http(s) pages — satisfies it too; both commands therefore also require the launch nonce, which the boot URL carries in its fragment beside `token=`. A cross-origin frame cannot read the top document's fragment, and the shell keeps the value in session storage so an in-app reload that drops the fragment still works. The commands are registered in `build.rs` and granted only to the daemon-served capability `web-shell-external-url`, whose `remote.urls` is already `http://127.0.0.1:*`.
 
 `shell_state_read` returns `null` for a missing key. `shell_state_write` returns no payload.
 
@@ -63,7 +63,7 @@ Both call `require_runtime_origin`, which compares the calling webview's URL ori
 
 - Persisted values are addresses and workspace identities, never tokens or other secrets.
 - The allowlist and the 256 KiB cap keep the surface from becoming a general-purpose file store.
-- The runtime-origin gate keeps the bootstrap page and any other origin out; the capability is scoped to the daemon-served page.
+- The runtime-origin gate keeps the bootstrap page and any other origin out, and the launch nonce keeps a cross-origin frame the Web Shell may embed out of both commands; the capability is scoped to the daemon-served page.
 - A malicious script inside the Web Shell could alter the catalogs, for example by pointing a saved connection at an attacker host, but cannot read credentials from this store because none are stored there. Credential persistence is Part 2 and needs a separate decision.
 - `desktop-state.json` remains plaintext; it now contains no secrets.
 

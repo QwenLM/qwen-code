@@ -33,6 +33,9 @@ pub struct DesktopRuntime {
     id: u64,
     pub base_url: Url,
     token: String,
+    /// Beside `token` in the boot fragment; the `shell_state_*` commands demand
+    /// it, so only the document that can read that fragment may use them.
+    shell_nonce: String,
     child: Arc<Mutex<Option<GroupChild>>>,
     stopping: Arc<AtomicBool>,
 }
@@ -52,6 +55,7 @@ impl DesktopRuntime {
         let layout = RuntimeLayout::resolve(app)?;
         // Callers pass a workspace already resolved by resolve_workspace.
         let token = random_token();
+        let shell_nonce = random_token();
         let mut command = Command::new(&layout.node);
         command
             .arg(&layout.entry)
@@ -114,6 +118,7 @@ impl DesktopRuntime {
             id,
             base_url,
             token,
+            shell_nonce,
             child,
             stopping,
         })
@@ -128,9 +133,16 @@ impl DesktopRuntime {
         &self.base_url
     }
 
+    pub fn shell_nonce(&self) -> &str {
+        &self.shell_nonce
+    }
+
     pub fn authenticated_web_url(&self) -> Url {
         let mut url = self.base_url.clone();
-        url.set_fragment(Some(&format!("token={}", self.token)));
+        url.set_fragment(Some(&format!(
+            "token={}&shell={}",
+            self.token, self.shell_nonce
+        )));
         url
     }
 
@@ -784,17 +796,18 @@ mod tests {
     }
 
     #[test]
-    fn carries_the_daemon_token_only_in_the_url_fragment() {
+    fn carries_the_daemon_token_and_shell_nonce_only_in_the_url_fragment() {
         let runtime = DesktopRuntime {
             id: 1,
             base_url: Url::parse("http://127.0.0.1:49152/").expect("base URL"),
             token: "secret-token".to_string(),
+            shell_nonce: "launch-nonce".to_string(),
             child: std::sync::Arc::new(std::sync::Mutex::new(None)),
             stopping: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         assert_eq!(
             runtime.authenticated_web_url().as_str(),
-            "http://127.0.0.1:49152/#token=secret-token"
+            "http://127.0.0.1:49152/#token=secret-token&shell=launch-nonce"
         );
         assert_eq!(runtime.base_url().as_str(), "http://127.0.0.1:49152/");
     }
@@ -805,6 +818,7 @@ mod tests {
             id: 1,
             base_url: Url::parse("http://127.0.0.1:49152/").expect("base URL"),
             token: "secret-token".to_string(),
+            shell_nonce: "launch-nonce".to_string(),
             child: std::sync::Arc::new(std::sync::Mutex::new(None)),
             stopping: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -814,7 +828,10 @@ mod tests {
             "https://remote.example".to_string(),
         ]);
         let parsed = Url::parse(url.as_str()).expect("boot URL");
-        assert_eq!(parsed.fragment(), Some("token=secret-token"));
+        assert_eq!(
+            parsed.fragment(),
+            Some("token=secret-token&shell=launch-nonce")
+        );
         let fanout: Vec<_> = parsed
             .query_pairs()
             .filter(|(name, _)| name == "fanout")

@@ -53,6 +53,7 @@ describe('workspace host catalog', () => {
       expect(invoke).toHaveBeenCalledWith('shell_state_write', {
         key: 'qwen-workspace-hosts',
         value: expect.stringContaining('https://remote.example'),
+        nonce: expect.any(String),
       });
     } finally {
       delete (window as { __TAURI__?: unknown }).__TAURI__;

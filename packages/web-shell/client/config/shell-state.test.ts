@@ -17,11 +17,16 @@ describe('desktop shell state', () => {
   beforeEach(() => {
     vi.resetModules();
     window.localStorage.clear();
+    window.sessionStorage.clear();
+    // The desktop boot URL carries this beside `token=`; the shell passes it on
+    // every shell_state_* call.
+    window.history.replaceState(null, '', '/#token=secret&shell=launch-nonce');
     delete (window as { __TAURI__?: unknown }).__TAURI__;
   });
 
   afterEach(() => {
     delete (window as { __TAURI__?: unknown }).__TAURI__;
+    window.history.replaceState(null, '', '/');
   });
 
   it('migrates the current origin catalog into the desktop store', async () => {
@@ -45,6 +50,7 @@ describe('desktop shell state', () => {
     expect(invoke).toHaveBeenCalledWith('shell_state_write', {
       key: 'qwen-remote-connections',
       value: '["https://remote.example"]',
+      nonce: 'launch-nonce',
     });
   });
 
@@ -98,6 +104,7 @@ describe('desktop shell state', () => {
     expect(invoke).toHaveBeenCalledWith('shell_state_write', {
       key: 'qwen-remote-connections',
       value: '[]',
+      nonce: 'launch-nonce',
     });
   });
 
@@ -161,6 +168,45 @@ describe('desktop shell state', () => {
     expect(invoke).toHaveBeenCalledWith('shell_state_write', {
       key: 'qwen-workspace-hosts',
       value: '[]',
+      nonce: 'launch-nonce',
+    });
+  });
+
+  it('sends the launch nonce with every shell-state call', async () => {
+    const invoke = vi.fn(async (): Promise<unknown> => null);
+    installDesktop(invoke);
+
+    const { hydrateShellState } = await import('./shell-state');
+    await hydrateShellState();
+
+    expect(invoke).toHaveBeenCalledWith('shell_state_read', {
+      key: 'qwen-remote-connections',
+      nonce: 'launch-nonce',
+    });
+    expect(invoke).toHaveBeenCalledWith('shell_state_read', {
+      key: 'qwen-workspace-hosts',
+      nonce: 'launch-nonce',
+    });
+  });
+
+  it('keeps the launch nonce across a reload that drops the fragment', async () => {
+    const invoke = vi.fn(async (): Promise<unknown> => null);
+    installDesktop(invoke);
+    const first = await import('./shell-state');
+    await first.hydrateShellState();
+
+    // An in-app navigation can land on a URL without the fragment; this
+    // origin's session storage still holds the value.
+    vi.resetModules();
+    window.history.replaceState(null, '', '/');
+    invoke.mockClear();
+
+    const second = await import('./shell-state');
+    await second.hydrateShellState();
+
+    expect(invoke).toHaveBeenCalledWith('shell_state_read', {
+      key: 'qwen-remote-connections',
+      nonce: 'launch-nonce',
     });
   });
 

@@ -14,8 +14,41 @@ export const SHELL_STATE_KEYS = [
 
 export type ShellStateKey = (typeof SHELL_STATE_KEYS)[number];
 
+const SHELL_NONCE_STORAGE_KEY = 'qwen-shell-nonce';
+
 const cache = new Map<string, string | null>();
 let hydration: Promise<void> | undefined;
+let shellNonce: string | undefined;
+
+/**
+ * The per-launch value Rust appends beside `token=` in the boot fragment. The
+ * `shell_state_*` commands require it because Tauri reports the top-level
+ * document's URL: a cross-origin frame inside the Web Shell clears the origin
+ * check on Windows, and this is the piece it cannot read. Session storage keeps
+ * it across an in-app reload that drops the fragment; memory keeps every call
+ * in this document on the same value.
+ */
+function readShellNonce(): string {
+  if (shellNonce !== undefined) return shellNonce;
+  try {
+    const fromHash = new URLSearchParams(
+      window.location.hash.replace(/^#/, ''),
+    ).get('shell');
+    if (fromHash) {
+      shellNonce = fromHash;
+      try {
+        window.sessionStorage.setItem(SHELL_NONCE_STORAGE_KEY, fromHash);
+      } catch {
+        // This document's own memory is enough.
+      }
+      return shellNonce;
+    }
+    shellNonce = window.sessionStorage.getItem(SHELL_NONCE_STORAGE_KEY) ?? '';
+  } catch {
+    shellNonce = '';
+  }
+  return shellNonce;
+}
 
 function readLocal(key: string): string | null {
   try {
@@ -58,7 +91,11 @@ export function writeShellState(key: ShellStateKey, value: string): void {
   const invoke = invokeDesktop();
   if (!invoke) return;
   cache.set(key, value);
-  void invoke('shell_state_write', { key, value }).catch(() => {
+  void invoke('shell_state_write', {
+    key,
+    value,
+    nonce: readShellNonce(),
+  }).catch(() => {
     // The in-memory copy keeps this session usable, and the mirror below is
     // re-pushed at the next same-origin hydration: only a launch on a fresh
     // loopback origin loses a write the shell never stored.
@@ -82,14 +119,21 @@ async function hydrateDesktop(): Promise<void> {
   await Promise.all(
     SHELL_STATE_KEYS.map(async (key) => {
       try {
-        const native = await invoke('shell_state_read', { key });
+        const native = await invoke('shell_state_read', {
+          key,
+          nonce: readShellNonce(),
+        });
         const local = readLocal(key);
         if (local !== null && local !== native) {
           // Within one launch every change writes the mirror and hydration
           // clears it, so a copy that differs from the native value can only
           // be newer: a native write that silently never landed. Re-push it
           // instead of deleting the only surviving copy.
-          await invoke('shell_state_write', { key, value: local });
+          await invoke('shell_state_write', {
+            key,
+            value: local,
+            nonce: readShellNonce(),
+          });
           cache.set(key, local);
           removeLocal(key);
           return;

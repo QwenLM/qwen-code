@@ -37,7 +37,7 @@ WebView2 按 origin 隔离 `localStorage` 与 `sessionStorage`，因此每次启
 
 新增两个命令：`shell_state_read(key)` 和 `shell_state_write(key, value)`。
 
-两者都会调用 `require_runtime_origin`，把调用方 webview 的 URL origin 与本次启动记录的运行时 origin 比较。bootstrap 页面和其他 origin 都会被拒绝。命令在 `build.rs` 中注册，并且只授予 daemon 提供的 `web-shell-external-url` capability；其 `remote.urls` 已经是 `http://127.0.0.1:*`。
+两者都会调用 `require_runtime_origin`，把调用方 webview 的 URL origin 与本次启动记录的运行时 origin 比较。bootstrap 页面和其他 origin 都会被拒绝。该 URL 是顶层文档，因此 Web Shell 内部跨源子框架（网页预览会嵌入任意 http(s) 页面）同样能通过；因此两个命令还要求本次启动的 nonce——它随 `token=` 一起放在启动 URL 的 fragment 中。跨源子框架读不到顶层文档的 fragment，而外壳会把它存进 session storage，使丢失 fragment 的应用内重载仍然可用。命令在 `build.rs` 中注册，并且只授予 daemon 提供的 `web-shell-external-url` capability；其 `remote.urls` 已经是 `http://127.0.0.1:*`。
 
 `shell_state_read` 对缺失的键返回 `null`。`shell_state_write` 不返回负载。
 
@@ -63,7 +63,7 @@ WebView2 按 origin 隔离 `localStorage` 与 `sessionStorage`，因此每次启
 
 - 持久化的值是地址和工作区标识，绝不是令牌或其他秘密。
 - 白名单与 256 KiB 上限使该接口不会变成通用的文件存储。
-- 运行时 origin 检查把 bootstrap 页面和其他 origin 挡在外面；capability 只作用于 daemon 提供的页面。
+- 运行时 origin 检查把 bootstrap 页面和其他 origin 挡在外面，启动 nonce 则把 Web Shell 可能嵌入的跨源子框架挡在两个命令之外；capability 只作用于 daemon 提供的页面。
 - Web Shell 内的恶意脚本可以修改目录，例如把已保存连接指向攻击者主机，但无法从该存储读取凭据，因为其中不保存凭据。凭据持久化属于第二部分，需要单独决策。
 - `desktop-state.json` 仍是明文；现在其中不含秘密。
 

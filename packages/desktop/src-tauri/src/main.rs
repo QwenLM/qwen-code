@@ -157,6 +157,10 @@ struct ApplicationState {
     settings: SettingsStore,
     log_path: PathBuf,
     origin: Arc<Mutex<Option<Url>>>,
+    /// This launch's value from the boot fragment. `webview.url()` is the
+    /// top-level document, so a cross-origin frame inside the Web Shell passes
+    /// `require_runtime_origin`; the nonce is what it cannot obtain.
+    shell_nonce: Arc<Mutex<Option<String>>>,
     last_error: Mutex<Option<String>>,
     last_workspace: Mutex<Option<(PathBuf, bool)>>,
     window_dirty: AtomicBool,
@@ -272,6 +276,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
     let _ = fs::write(&log_path, b"");
     let origin = Arc::new(Mutex::new(None));
+    let shell_nonce = Arc::new(Mutex::new(None));
     let navigation_origin = Arc::clone(&origin);
     let runtime_exit_handle = handle.clone();
     handle.listen("runtime-process-stopped", move |event| {
@@ -351,6 +356,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         settings,
         log_path,
         origin,
+        shell_nonce,
         last_error: Mutex::new(None),
         last_workspace: Mutex::new(None),
         window_dirty: AtomicBool::new(false),
@@ -442,8 +448,10 @@ fn shell_state_read(
     webview: WebviewWindow,
     state: State<'_, ApplicationState>,
     key: String,
+    nonce: String,
 ) -> Result<Option<String>, String> {
     require_runtime_origin(&webview, state.inner())?;
+    require_shell_nonce(state.inner(), &nonce)?;
     if !is_shell_state_key_allowed(&key) {
         return Err(format!("Unsupported desktop shell state key: {key}"));
     }
@@ -456,8 +464,10 @@ fn shell_state_write(
     state: State<'_, ApplicationState>,
     key: String,
     value: String,
+    nonce: String,
 ) -> Result<(), String> {
     require_runtime_origin(&webview, state.inner())?;
+    require_shell_nonce(state.inner(), &nonce)?;
     state.settings.set_shell_state(&key, &value)
 }
 
@@ -682,7 +692,9 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bo
                     }
                 };
                 let fanout = launch_fanout_origins(&state.settings, origin.as_str());
+                let shell_nonce = runtime.shell_nonce().to_string();
                 *lock(&state.origin) = Some(origin);
+                *lock(&state.shell_nonce) = Some(shell_nonce);
                 let Some(window) = app.get_webview_window("main") else {
                     runtime.stop();
                     clear_pending_runtime(&state, generation);
@@ -914,6 +926,24 @@ fn is_runtime_origin(url: &Url, runtime_origin: Option<&Url>) -> bool {
     runtime_origin.is_some_and(|origin| is_same_origin(url, origin))
 }
 
+/// `require_runtime_origin` reads `webview.url()`, which is the top-level
+/// document, so a cross-origin frame inside the Web Shell satisfies it too.
+/// Tauri reports no frame origin, so the check that separates them is this
+/// launch's nonce: it rides in the boot fragment, and a cross-origin frame
+/// cannot read the top document's fragment.
+fn require_shell_nonce(state: &ApplicationState, nonce: &str) -> Result<(), String> {
+    let expected = lock(&state.shell_nonce).clone();
+    if is_shell_nonce(expected.as_deref(), nonce) {
+        Ok(())
+    } else {
+        Err("This command is only available from the Qwen Code Web Shell.".to_string())
+    }
+}
+
+fn is_shell_nonce(expected: Option<&str>, provided: &str) -> bool {
+    expected.is_some_and(|expected| !expected.is_empty() && expected == provided)
+}
+
 fn is_allowed_navigation(url: &Url, origin: &Mutex<Option<Url>>) -> bool {
     is_bootstrap_url(url)
         || lock(origin)
@@ -1039,7 +1069,8 @@ mod tests {
         bootstrap_workspace, default_workspace_override_dir, default_workspace_path,
         ensure_workspace_dir, fanout_origins_from_catalogs, is_allowed_navigation,
         is_bootstrap_url, is_runtime_origin, is_safe_external_url, is_same_origin,
-        is_shell_state_key_allowed, launch_fanout_origins, origin_of, updates_disabled_value,
+        is_shell_nonce, is_shell_state_key_allowed, launch_fanout_origins, origin_of,
+        updates_disabled_value,
         BOOTSTRAP_URL, MAX_LAUNCH_FANOUT_ORIGINS, REMOTE_CONNECTIONS_KEY, SettingsStore,
         WORKSPACE_HOSTS_KEY,
     };
@@ -1236,6 +1267,16 @@ mod tests {
             &Url::parse("http://127.0.0.1:49152/").expect("runtime"),
             None,
         ));
+    }
+
+    #[test]
+    fn shell_state_commands_require_the_launch_nonce() {
+        assert!(is_shell_nonce(Some("launch-nonce"), "launch-nonce"));
+        assert!(!is_shell_nonce(Some("launch-nonce"), "other-nonce"));
+        assert!(!is_shell_nonce(Some("launch-nonce"), ""));
+        assert!(!is_shell_nonce(None, "launch-nonce"));
+        // A launch that never recorded one must not authorise anyone.
+        assert!(!is_shell_nonce(Some(""), ""));
     }
 
     #[test]

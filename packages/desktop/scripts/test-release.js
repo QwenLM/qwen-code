@@ -1932,6 +1932,16 @@ function testBootstrapBridgeConfiguration() {
         'shell_state_read must check the key allowlist before touching the store.',
       );
     }
+    // `webview.url()` is the top-level document, so a cross-origin frame inside
+    // the shell passes the origin gate above; the launch nonce is what it lacks.
+    const nonceAt = body.indexOf(
+      'require_shell_nonce(state.inner(), &nonce)?;',
+    );
+    assert.ok(nonceAt >= 0, `${command} must check the launch nonce.`);
+    assert.ok(
+      nonceAt < storeAt,
+      `${command} must check the launch nonce before touching the store.`,
+    );
   }
 
   assert.match(main, /title_bar_style\(tauri::TitleBarStyle::Overlay\)/);
