@@ -35,6 +35,17 @@ export interface ChannelEditorDraft {
   allowedGroupIds: string;
   groupSenders: ChannelGroupSenders;
   groupAllowedUsers: string;
+  groupOverrides: Record<string, ChannelGroupOverrideDraft>;
+}
+
+/**
+ * Per-repository settings. `''` means the key is absent, so the repository
+ * inherits from `groups["*"]` and then from the built-in default.
+ */
+export interface ChannelGroupOverrideDraft {
+  requireMention: '' | 'true' | 'false';
+  senders: '' | 'open' | 'allowlist';
+  allowedUsers: string;
 }
 
 export type ChannelEditorValidationCode =
@@ -64,6 +75,17 @@ export const PRIVATE_ONLY_FIELD_KEYS = new Set([
 ]);
 
 const REPOSITORY_FULL_NAME_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+/**
+ * Canonical repository IDs the allowlist currently names, in typing order.
+ * Entries that are not `owner/repo` are left out: the save path rejects them,
+ * and a row for a half-typed repository would only flicker.
+ */
+export function repositoryAllowlistIds(value: string): string[] {
+  return [...new Set(toList(value.toLowerCase()))].filter((id) =>
+    REPOSITORY_FULL_NAME_RE.test(id),
+  );
+}
 
 export function toList(value: string): string[] {
   return value
@@ -188,6 +210,55 @@ function initialFieldValue(
   return typeof value === 'string' ? value : '';
 }
 
+/**
+ * Read one repository's overrides. Shared by the draft seed and the save path:
+ * the save compares against this same reading, so a field the operator never
+ * touched keeps its stored key verbatim — including shapes the form cannot
+ * express, such as an empty allowlist or a list with no policy beside it.
+ */
+function readGroupOverride(
+  group: Record<string, unknown>,
+): ChannelGroupOverrideDraft {
+  const requireMention = group['requireMention'];
+  const senders = group['senders'];
+  const users = group['allowedUsers'];
+  return {
+    requireMention:
+      typeof requireMention === 'boolean'
+        ? requireMention
+          ? 'true'
+          : 'false'
+        : '',
+    senders: senders === 'open' || senders === 'allowlist' ? senders : '',
+    allowedUsers: Array.isArray(users)
+      ? users
+          .filter((user): user is string => typeof user === 'string')
+          .join(', ')
+      : '',
+  };
+}
+
+function configuredGroupOverrides(
+  instance?: DaemonChannelInstanceSnapshot,
+): Record<string, ChannelGroupOverrideDraft> {
+  const groups = instance?.config['groups'];
+  if (!isRecord(groups)) return {};
+  // fromEntries defines own properties, so a hand-written `__proto__` group key
+  // in settings.json becomes an ordinary entry instead of reassigning the
+  // prototype of the map every row is looked up in.
+  return Object.fromEntries(
+    Object.entries(groups)
+      .filter(
+        (entry): entry is [string, Record<string, unknown>] =>
+          entry[0] !== '*' && isRecord(entry[1]),
+      )
+      .map(([groupId, group]) => [
+        groupId.toLowerCase(),
+        readGroupOverride(group),
+      ]),
+  );
+}
+
 export function createChannelEditorDraft(
   descriptor: DaemonChannelTypeDescriptor,
   instance?: DaemonChannelInstanceSnapshot,
@@ -236,6 +307,7 @@ export function createChannelEditorDraft(
       : configuredGroups,
     groupSenders: configuredGroupSenders(instance),
     groupAllowedUsers: configuredGroupAllowedUsers(instance),
+    groupOverrides: repositoryOnly ? configuredGroupOverrides(instance) : {},
   };
 }
 
@@ -460,11 +532,43 @@ function splitList(value: string): string[] {
   return [...new Set(toList(value))];
 }
 
+/**
+ * Apply one repository's draft over its stored settings. Only a field that
+ * differs from the stored reading is written, so an untouched repository keeps
+ * every key it had — including ones this form does not model.
+ */
+function mergeGroupOverride(
+  stored: Record<string, unknown>,
+  override: ChannelGroupOverrideDraft,
+): Record<string, unknown> {
+  const initial = readGroupOverride(stored);
+  const group = { ...stored };
+  if (override.requireMention !== initial.requireMention) {
+    if (override.requireMention === '') delete group['requireMention'];
+    else group['requireMention'] = override.requireMention === 'true';
+  }
+  if (override.senders !== initial.senders) {
+    if (override.senders === '') delete group['senders'];
+    else group['senders'] = override.senders;
+  }
+  if (override.allowedUsers !== initial.allowedUsers) {
+    const users = splitList(override.allowedUsers);
+    // An explicit allowlist owns its list: empty means nobody, not "inherit".
+    if (users.length > 0 || group['senders'] === 'allowlist') {
+      group['allowedUsers'] = users;
+    } else {
+      delete group['allowedUsers'];
+    }
+  }
+  return group;
+}
+
 function assignGroups(
   config: Record<string, unknown>,
   allowedGroupIds: string,
   instance?: DaemonChannelInstanceSnapshot,
   normalizeKeys = false,
+  overrides?: Record<string, ChannelGroupOverrideDraft>,
 ): void {
   const previous = instance?.config['groups'];
   const storedGroups = isRecord(previous) ? previous : {};
@@ -486,7 +590,9 @@ function assignGroups(
   for (const groupId of splitList(allowedGroupIds)) {
     const key = normalizeKeys ? groupId.toLowerCase() : groupId;
     if (key === '*') continue;
-    groups[key] = isRecord(previousGroups[key]) ? previousGroups[key] : {};
+    const stored = isRecord(previousGroups[key]) ? previousGroups[key] : {};
+    const override = overrides?.[key];
+    groups[key] = override ? mergeGroupOverride(stored, override) : stored;
   }
   if (Object.keys(groups).length > 0) {
     config['groups'] = groups;
@@ -569,7 +675,13 @@ export function buildChannelUpsertRequest(
   }
   if (hasDescriptorGroupPolicy(descriptor)) {
     if (config['groupPolicy'] === 'allowlist') {
-      assignGroups(config, draft.allowedGroupIds, instance, repositoryOnly);
+      assignGroups(
+        config,
+        draft.allowedGroupIds,
+        instance,
+        repositoryOnly,
+        repositoryOnly ? draft.groupOverrides : undefined,
+      );
     } else if (instance?.config['groupPolicy'] === 'allowlist') {
       removeGroupAllowlistMembership(config, instance);
     }

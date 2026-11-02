@@ -4439,6 +4439,32 @@ const EN: Messages = {
   'channels.editor.field.github.baseUrl': 'API Base URL',
   'channels.editor.field.github.baseUrl.description':
     'GitHub Enterprise API root (e.g. https://ghe.example.com/api/v3). Leave empty for github.com',
+  'channels.editor.field.github.pollInterval': 'Poll Interval (ms)',
+  'channels.editor.field.github.pollInterval.description':
+    'How often to check GitHub for new notifications. Leave empty for 60000 (one minute).',
+  'channels.editor.field.github.repositorySettings': 'Per-repository settings',
+  'channels.editor.field.github.repositorySettings.description':
+    'Each allowlisted repository inherits the channel-wide settings below until you override it here.',
+  'channels.editor.field.github.requireMention': 'Require a mention',
+  'channels.editor.field.github.requireMention.inheritOn':
+    'Inherit (require a mention)',
+  'channels.editor.field.github.requireMention.inheritOff':
+    'Inherit (answer without a mention)',
+  'channels.editor.field.github.requireMention.on': 'Require a mention',
+  'channels.editor.field.github.requireMention.off': 'Answer without a mention',
+  'channels.editor.field.github.repositorySenders': 'Who may speak',
+  'channels.editor.field.github.repositorySenders.inheritOpen':
+    'Inherit (anyone)',
+  'channels.editor.field.github.repositorySenders.inheritAllowlist':
+    'Inherit (allowlist only)',
+  'channels.editor.field.github.repositorySenders.open': 'Anyone',
+  'channels.editor.field.github.repositorySenders.allowlist': 'Allowlist only',
+  'channels.editor.field.github.repositorySpeakers': 'Allowed speakers',
+  'channels.editor.field.github.repositorySpeakers.placeholder': 'alice, bob',
+  'channels.editor.field.github.repositorySpeakers.description':
+    'GitHub logins allowed to start tasks in this repository. Empty means nobody.',
+  'channels.editor.field.github.repositorySpeakers.inherited':
+    'GitHub logins allowed in this repository. Leave empty to keep the channel-wide list.',
   'channels.editor.field.github.groupPolicy': 'Group Policy',
   'channels.editor.field.github.groupPolicy.description':
     'Must be "Open", "Allowlist", or "Pairing" for notifications to flow',
@@ -8811,6 +8837,31 @@ const ZH: Messages = {
   'channels.editor.field.github.baseUrl': 'API 基础 URL',
   'channels.editor.field.github.baseUrl.description':
     'GitHub Enterprise API 根地址（如 https://ghe.example.com/api/v3），github.com 留空',
+  'channels.editor.field.github.pollInterval': '轮询间隔（毫秒）',
+  'channels.editor.field.github.pollInterval.description':
+    '多久向 GitHub 查一次新通知。留空为 60000（一分钟）。',
+  'channels.editor.field.github.repositorySettings': '按仓库设置',
+  'channels.editor.field.github.repositorySettings.description':
+    '每个已允许的仓库都继承下面的渠道级设置，直到你在这里覆盖它。',
+  'channels.editor.field.github.requireMention': '需要 @',
+  'channels.editor.field.github.requireMention.inheritOn': '继承（需要 @）',
+  'channels.editor.field.github.requireMention.inheritOff':
+    '继承（无需 @ 也响应）',
+  'channels.editor.field.github.requireMention.on': '需要 @',
+  'channels.editor.field.github.requireMention.off': '无需 @ 也响应',
+  'channels.editor.field.github.repositorySenders': '谁可以发言',
+  'channels.editor.field.github.repositorySenders.inheritOpen':
+    '继承（任何人）',
+  'channels.editor.field.github.repositorySenders.inheritAllowlist':
+    '继承（仅允许列表）',
+  'channels.editor.field.github.repositorySenders.open': '任何人',
+  'channels.editor.field.github.repositorySenders.allowlist': '仅允许列表',
+  'channels.editor.field.github.repositorySpeakers': '允许的发言人',
+  'channels.editor.field.github.repositorySpeakers.placeholder': 'alice, bob',
+  'channels.editor.field.github.repositorySpeakers.description':
+    '可以在该仓库发起任务的 GitHub 登录名。留空表示没有人。',
+  'channels.editor.field.github.repositorySpeakers.inherited':
+    '可以在该仓库发言的 GitHub 登录名。留空则沿用渠道级列表。',
   'channels.editor.field.github.groupPolicy': '群组策略',
   'channels.editor.field.github.groupPolicy.description':
     '必须设为 "Open"、"Allowlist" 或 "Pairing" 才能接收通知',

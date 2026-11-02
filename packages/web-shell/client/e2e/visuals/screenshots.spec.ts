@@ -1532,6 +1532,156 @@ for (const theme of THEMES) {
         ]);
     });
 
+    test(`GitHub channel repository settings`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'workspace_settings',
+            'workspace_voice',
+            'channel_management',
+          ],
+        },
+        channelTypes: [
+          {
+            type: 'github',
+            displayName: 'GitHub',
+            manageable: true,
+            fields: [
+              {
+                key: 'token',
+                label: 'Personal Access Token',
+                kind: 'secret',
+                envResolvable: true,
+              },
+              {
+                key: 'useLocalGh',
+                label: 'Use Local GitHub CLI Authentication',
+                kind: 'boolean',
+              },
+              {
+                key: 'baseUrl',
+                label: 'Base URL',
+                kind: 'string',
+                envResolvable: true,
+              },
+              {
+                key: 'pollInterval',
+                label: 'Poll Interval (ms)',
+                kind: 'number',
+                exclusiveMinimum: 0,
+                default: '60000',
+              },
+              {
+                key: 'groupPolicy',
+                label: 'Group Policy',
+                kind: 'enum',
+                required: true,
+                default: 'open',
+                options: [
+                  { value: 'open', label: 'Open' },
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'disabled', label: 'Disabled' },
+                ],
+              },
+              {
+                key: 'privatePolicy',
+                label: 'Private Policy',
+                kind: 'enum',
+                required: true,
+                options: [
+                  { value: 'disabled', label: 'Disabled' },
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'pairing', label: 'Pairing' },
+                  { value: 'open', label: 'Open' },
+                ],
+              },
+              {
+                key: 'allowedUsers',
+                label: 'Allowed Users',
+                kind: 'string-list',
+              },
+            ],
+          },
+        ],
+        channels: {
+          revision: '1',
+          instances: {
+            'github-bot': {
+              name: 'github-bot',
+              config: {
+                type: 'github',
+                useLocalGh: true,
+                pollInterval: 30000,
+                groupPolicy: 'allowlist',
+                groups: {
+                  '*': { senders: 'allowlist', allowedUsers: ['operator'] },
+                  'qwenlm/qwen-code': {
+                    requireMention: false,
+                    senders: 'allowlist',
+                    allowedUsers: ['alice', 'bob'],
+                  },
+                  'acme/widgets': {},
+                },
+              },
+              secrets: {},
+              startsWithServe: false,
+              runtime: { state: 'stopped' },
+            },
+          },
+        },
+      });
+      await page.addInitScript(() => {
+        window.sessionStorage.setItem('qwen-daemon-token', 'visual-token');
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await page.getByRole('button', { name: 'Channels' }).click();
+      await page.getByRole('button', { name: 'Edit github-bot' }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Edit GitHub' }),
+      ).toBeVisible();
+
+      // Anchor the capture to the rows themselves: a regression that drops them
+      // must fail here rather than republish a picture of the old form.
+      await expect(page.getByText('Per-repository settings')).toBeVisible();
+      await expect(
+        page.getByText('qwenlm/qwen-code', { exact: true }),
+      ).toBeVisible();
+      await expect(
+        page.getByText('acme/widgets', { exact: true }),
+      ).toBeVisible();
+      await expect(page.getByLabel('Require a mention')).toHaveCount(2);
+      await expect(page.getByLabel('Who may speak')).toHaveCount(2);
+      // The customized repository shows its stored explicit values; the empty
+      // one shows what it inherits from the channel-wide allowlist.
+      await expect(page.getByLabel('Require a mention').first()).toContainText(
+        'Answer without a mention',
+      );
+      await expect(page.getByLabel('Who may speak').nth(1)).toContainText(
+        'Inherit (allowlist only)',
+      );
+      await expect(page.getByLabel('Allowed speakers')).toHaveCount(2);
+      await expect(page.getByLabel('Poll Interval (ms)')).toHaveValue('30000');
+
+      await page
+        .getByText('Per-repository settings', { exact: true })
+        .scrollIntoViewIfNeeded();
+      await expect(
+        page.getByText('Per-repository settings', { exact: true }),
+      ).toBeInViewport({ ratio: 1 });
+      await captureScreenshot(page, `github-channel-repositories-${theme}`);
+    });
+
     test(`mermaid diagram`, async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         events: [

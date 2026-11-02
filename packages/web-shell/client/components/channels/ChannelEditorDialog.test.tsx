@@ -1766,3 +1766,261 @@ describe('ChannelEditorDialog', () => {
     expect(listPairingRequests).toHaveBeenCalledWith('release-bot');
   });
 });
+
+describe('GitHub per-repository settings', () => {
+  const GITHUB_POLLING: DaemonChannelTypeDescriptor = {
+    ...GITHUB_CONFIGURED,
+    fields: [
+      ...GITHUB_CONFIGURED.fields,
+      {
+        key: 'pollInterval',
+        label: 'Poll Interval (ms)',
+        kind: 'number',
+        exclusiveMinimum: 0,
+        default: '60000',
+      },
+    ],
+  };
+
+  function githubInstance(
+    groups: Record<string, unknown>,
+  ): DaemonChannelInstanceSnapshot {
+    return {
+      name: 'github-bot',
+      config: { type: 'github', groupPolicy: 'allowlist', groups },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+  }
+
+  function rowLabels(text: string): HTMLElement[] {
+    return Array.from(document.querySelectorAll('label')).filter((label) =>
+      label.textContent?.includes(text),
+    );
+  }
+
+  function rowControl(
+    repositoryId: string,
+    kind: 'mention' | 'senders' | 'speakers',
+  ): HTMLElement | null {
+    return document.querySelector(`[id$="-${kind}-${repositoryId}"]`);
+  }
+
+  async function chooseRowOption(
+    repositoryId: string,
+    kind: 'mention' | 'senders',
+    optionLabel: string,
+  ) {
+    const trigger = rowControl(repositoryId, kind);
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      trigger!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const option = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((item) => item.textContent?.trim() === optionLabel);
+    expect(option).toBeDefined();
+    await act(async () => {
+      option!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+  }
+
+  async function save() {
+    const button = Array.from(document.querySelectorAll('button')).find(
+      (item) => item.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      button?.click();
+    });
+  }
+
+  it('renders one row per allowlisted repository', async () => {
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': {},
+        'qwenlm/qwen-code': {},
+        'acme/widgets': {},
+      }),
+    });
+
+    expect(rowLabels('Require a mention')).toHaveLength(2);
+    expect(rowLabels('Who may speak')).toHaveLength(2);
+    expect(document.body.textContent).toContain('qwenlm/qwen-code');
+    expect(document.body.textContent).toContain('acme/widgets');
+  });
+
+  it('adds a row as soon as a repository is typed into the allowlist', async () => {
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({ 'qwenlm/qwen-code': {} }),
+    });
+    expect(rowLabels('Require a mention')).toHaveLength(1);
+
+    const allowlist = inputByLabel('Allowed repositories');
+    expect(allowlist).not.toBeNull();
+    await act(async () => {
+      setInputValue(allowlist!, 'qwenlm/qwen-code, acme/widgets');
+    });
+
+    expect(rowLabels('Require a mention')).toHaveLength(2);
+    expect(rowControl('acme/widgets', 'mention')).not.toBeNull();
+  });
+
+  it('names the inherited value in the inherit option', async () => {
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { requireMention: false, senders: 'allowlist' },
+        'qwenlm/qwen-code': {},
+      }),
+    });
+
+    expect(rowControl('qwenlm/qwen-code', 'mention')?.textContent).toContain(
+      'Inherit (answer without a mention)',
+    );
+    expect(rowControl('qwenlm/qwen-code', 'senders')?.textContent).toContain(
+      'Inherit (allowlist only)',
+    );
+  });
+
+  it('shows the speaker input only once the row allows a list', async () => {
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { senders: 'open' },
+        'qwenlm/qwen-code': {},
+      }),
+    });
+    expect(rowControl('qwenlm/qwen-code', 'speakers')).toBeNull();
+
+    await chooseRowOption('qwenlm/qwen-code', 'senders', 'Allowlist only');
+
+    expect(rowControl('qwenlm/qwen-code', 'speakers')).not.toBeNull();
+  });
+
+  it('shows the speaker input for a row inheriting an allowlist', async () => {
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { senders: 'allowlist', allowedUsers: ['op'] },
+        'qwenlm/qwen-code': {},
+      }),
+    });
+
+    expect(rowControl('qwenlm/qwen-code', 'speakers')).not.toBeNull();
+    expect(rowControl('qwenlm/qwen-code', 'senders')?.textContent).toContain(
+      'Inherit (allowlist only)',
+    );
+  });
+
+  it('saves an explicit per-repository override', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({ 'qwenlm/qwen-code': {} }),
+      onSave,
+    });
+
+    await chooseRowOption(
+      'qwenlm/qwen-code',
+      'mention',
+      'Answer without a mention',
+    );
+    await chooseRowOption('qwenlm/qwen-code', 'senders', 'Allowlist only');
+    await act(async () => {
+      setInputValue(
+        rowControl('qwenlm/qwen-code', 'speakers') as HTMLInputElement,
+        'alice, bob',
+      );
+    });
+    await save();
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const request = onSave.mock.calls[0][1] as {
+      config: Record<string, unknown>;
+    };
+    expect(request.config['groups']).toEqual({
+      'qwenlm/qwen-code': {
+        requireMention: false,
+        senders: 'allowlist',
+        allowedUsers: ['alice', 'bob'],
+      },
+    });
+  });
+
+  it('labels each row so repeated control names stay distinguishable', async () => {
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        'qwenlm/qwen-code': {},
+        'acme/widgets': {},
+      }),
+    });
+
+    const rows = Array.from(
+      document.querySelectorAll('[role="group"][aria-labelledby]'),
+    ).filter((row) => row.querySelector('h4'));
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.querySelector('h4')?.textContent)).toEqual([
+      'qwenlm/qwen-code',
+      'acme/widgets',
+    ]);
+    for (const row of rows) {
+      expect(row.getAttribute('aria-labelledby')).toBe(
+        row.querySelector('h4')?.id,
+      );
+    }
+  });
+
+  it('renders the poll interval under Connection', async () => {
+    await renderDialog({ descriptor: GITHUB_POLLING });
+
+    expect(sectionHeadingOfLabel('Poll Interval (ms)')).toBe('Connection');
+    expect(inputByLabel('Poll Interval (ms)')?.type).toBe('number');
+  });
+
+  it('files the poll interval under Connection for any platform declaring it', async () => {
+    // The section map is keyed by field name, so Email's existing interval
+    // moves too. Pin the documented side effect instead of leaving it to prose.
+    const email: DaemonChannelTypeDescriptor = {
+      type: 'email',
+      displayName: 'Email',
+      manageable: true,
+      fields: [
+        {
+          key: 'pollInterval',
+          label: 'Poll Interval (ms)',
+          kind: 'number',
+          exclusiveMinimum: 0,
+          default: '60000',
+        },
+      ],
+    };
+    await renderDialog({ descriptor: email });
+
+    expect(sectionHeadingOfLabel('Poll Interval (ms)')).toBe('Connection');
+    expect(document.body.textContent).not.toContain('Per-repository settings');
+  });
+
+  it('keeps repository rows away from chat platforms', async () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'chat-bot',
+      config: {
+        type: 'dingtalk',
+        clientId: 'id',
+        clientSecret: 'secret',
+        groupPolicy: 'allowlist',
+        groups: { 'group-a': {} },
+      },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: DINGTALK_WITH_ACCESS, instance });
+
+    expect(rowLabels('Require a mention')).toHaveLength(0);
+    expect(document.body.textContent).not.toContain('Per-repository settings');
+  });
+});

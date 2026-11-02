@@ -12,6 +12,7 @@ import type {
 import {
   buildChannelUpsertRequest,
   createChannelEditorDraft,
+  repositoryAllowlistIds,
   validateChannelEditorDraft,
 } from './channel-editor-state';
 
@@ -1408,5 +1409,365 @@ describe('Repository-only channel access config', () => {
         secrets: { token: { operation: 'clear' } },
       }),
     );
+  });
+});
+
+describe('Per-repository overrides', () => {
+  function githubInstance(
+    groups: Record<string, unknown>,
+  ): DaemonChannelInstanceSnapshot {
+    return {
+      name: 'release-bot',
+      config: { type: 'github', groupPolicy: 'allowlist', groups },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+  }
+
+  function draftFor(
+    instance: DaemonChannelInstanceSnapshot,
+    allowedGroupIds = 'qwenlm/qwen-code',
+  ) {
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    draft.allowedGroupIds = allowedGroupIds;
+    return draft;
+  }
+
+  it('reads a stored override into the draft', () => {
+    const instance = githubInstance({
+      '*': { senders: 'open' },
+      'qwenlm/qwen-code': {
+        requireMention: false,
+        senders: 'allowlist',
+        allowedUsers: ['alice', 'bob'],
+      },
+    });
+
+    expect(draftFor(instance).groupOverrides).toEqual({
+      'qwenlm/qwen-code': {
+        requireMention: 'false',
+        senders: 'allowlist',
+        allowedUsers: 'alice, bob',
+      },
+    });
+  });
+
+  it('keys the draft overrides by the canonical repository id', () => {
+    // The rows are looked up by the canonical id the allowlist produces, so a
+    // mixed-case stored key must not leave its own row showing "inherit".
+    const instance = githubInstance({
+      'QwenLM/Qwen-Code': { requireMention: false },
+    });
+
+    expect(Object.keys(draftFor(instance).groupOverrides)).toEqual([
+      'qwenlm/qwen-code',
+    ]);
+  });
+
+  it('reads an absent key as inherit rather than as the resolved default', () => {
+    const instance = githubInstance({
+      '*': { requireMention: false, senders: 'allowlist' },
+      'qwenlm/qwen-code': {},
+    });
+
+    expect(draftFor(instance).groupOverrides['qwenlm/qwen-code']).toEqual({
+      requireMention: '',
+      senders: '',
+      allowedUsers: '',
+    });
+  });
+
+  it('round-trips an untouched channel without materializing inherited values', () => {
+    // Writing the resolved default into every repository would freeze today's
+    // inheritance and stop a later change to "*" from reaching them.
+    const groups = {
+      '*': {
+        requireMention: false,
+        senders: 'allowlist',
+        allowedUsers: ['op'],
+      },
+      'qwenlm/qwen-code': {},
+      'acme/widgets': { dispatchMode: 'collect', groupHistoryLimit: 25 },
+    };
+    // Clone into the instance: comparing against the same reference would let
+    // an in-place mutation of the stored config satisfy the assertion.
+    const instance = githubInstance(structuredClone(groups));
+
+    const request = buildChannelUpsertRequest(
+      GITHUB,
+      draftFor(instance, 'qwenlm/qwen-code, acme/widgets'),
+      'rev-2',
+      instance,
+    );
+
+    expect(request.config['groups']).toEqual(groups);
+  });
+
+  it('keeps shapes the form cannot express when nothing was edited', () => {
+    // An empty allowlist means "nobody", and a list with no policy beside it
+    // inherits the policy but overrides the members. Neither may be normalized
+    // away by a save the operator meant as a no-op.
+    const groups = {
+      'qwenlm/qwen-code': { senders: 'allowlist', allowedUsers: [] },
+      'acme/widgets': { allowedUsers: ['alice'] },
+    };
+    const instance = githubInstance(structuredClone(groups));
+
+    const request = buildChannelUpsertRequest(
+      GITHUB,
+      draftFor(instance, 'qwenlm/qwen-code, acme/widgets'),
+      'rev-2',
+      instance,
+    );
+
+    expect(request.config['groups']).toEqual(groups);
+  });
+
+  it('writes an explicit require-mention as a boolean and deletes it on inherit', () => {
+    const instance = githubInstance({ 'qwenlm/qwen-code': {} });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].requireMention = 'false';
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({ 'qwenlm/qwen-code': { requireMention: false } });
+
+    draft.groupOverrides['qwenlm/qwen-code'].requireMention = 'true';
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({ 'qwenlm/qwen-code': { requireMention: true } });
+
+    draft.groupOverrides['qwenlm/qwen-code'].requireMention = '';
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({ 'qwenlm/qwen-code': {} });
+  });
+
+  it('writes an explicit speaker allowlist as a string array', () => {
+    const instance = githubInstance({ 'qwenlm/qwen-code': {} });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].senders = 'allowlist';
+    draft.groupOverrides['qwenlm/qwen-code'].allowedUsers = 'alice, bob';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({
+      'qwenlm/qwen-code': {
+        senders: 'allowlist',
+        allowedUsers: ['alice', 'bob'],
+      },
+    });
+  });
+
+  it('treats an emptied explicit allowlist as nobody, not as inherit', () => {
+    const instance = githubInstance({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': { senders: 'allowlist', allowedUsers: ['alice'] },
+    });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].allowedUsers = '';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': { senders: 'allowlist', allowedUsers: [] },
+    });
+  });
+
+  it('drops the per-repository list when an inheriting row is cleared', () => {
+    const instance = githubInstance({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': { allowedUsers: ['alice'] },
+    });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].allowedUsers = '';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': {},
+    });
+  });
+
+  it('preserves unmodelled keys beside an edited one', () => {
+    const instance = githubInstance({
+      'qwenlm/qwen-code': { dispatchMode: 'collect', groupHistoryLimit: 25 },
+    });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].requireMention = 'false';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({
+      'qwenlm/qwen-code': {
+        dispatchMode: 'collect',
+        groupHistoryLimit: 25,
+        requireMention: false,
+      },
+    });
+  });
+
+  it('keeps the settings when the repository is retyped in another case', () => {
+    const instance = githubInstance({
+      'QwenLM/Qwen-Code': { requireMention: false },
+    });
+    const draft = draftFor(instance, 'qwenlm/qwen-code');
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({ 'qwenlm/qwen-code': { requireMention: false } });
+  });
+
+  it('drops the entry of a repository removed from the allowlist', () => {
+    const instance = githubInstance({
+      'qwenlm/qwen-code': { requireMention: false },
+      'acme/widgets': { senders: 'open' },
+    });
+    const draft = draftFor(instance, 'qwenlm/qwen-code');
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({ 'qwenlm/qwen-code': { requireMention: false } });
+  });
+
+  it('leaves chat platforms reading and writing groups exactly as before', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'chat-bot',
+      config: {
+        type: 'dingtalk',
+        clientId: 'id',
+        clientSecret: 'secret',
+        groupPolicy: 'allowlist',
+        groups: { 'group-a': { requireMention: false } },
+      },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS, instance);
+    draft.allowedGroupIds = 'group-a';
+
+    expect(draft.groupOverrides).toEqual({});
+    expect(
+      buildChannelUpsertRequest(DINGTALK_WITH_ACCESS, draft, 'rev-2', instance)
+        .config['groups'],
+    ).toEqual({ 'group-a': { requireMention: false } });
+  });
+
+  it('names only the repositories the allowlist can actually admit', () => {
+    expect(
+      repositoryAllowlistIds(
+        'QwenLM/qwen-code, qwen-code, acme/widgets, QwenLM/Qwen-Code',
+      ),
+    ).toEqual(['qwenlm/qwen-code', 'acme/widgets']);
+  });
+});
+
+describe('GitHub poll interval', () => {
+  const GITHUB_POLLING: DaemonChannelTypeDescriptor = {
+    ...GITHUB,
+    fields: [
+      ...GITHUB.fields,
+      {
+        key: 'pollInterval',
+        label: 'Poll Interval (ms)',
+        kind: 'number',
+        exclusiveMinimum: 0,
+        default: '60000',
+      },
+    ],
+  };
+
+  function pollingDraft(value?: number) {
+    const instance: DaemonChannelInstanceSnapshot | undefined =
+      value === undefined
+        ? undefined
+        : {
+            name: 'release-bot',
+            config: {
+              type: 'github',
+              groupPolicy: 'open',
+              pollInterval: value,
+            },
+            secrets: { token: { present: true, source: 'literal' } },
+            startsWithServe: false,
+            runtime: { state: 'stopped' },
+          };
+    const draft = createChannelEditorDraft(GITHUB_POLLING, instance);
+    draft.name = 'release-bot';
+    draft.secrets.token = { operation: 'replace', value: 'ghp_test' };
+    return { draft, instance };
+  }
+
+  it('leaves a new channel unset instead of persisting the descriptor default', () => {
+    // The runtime owns the 60-second default. Writing it here would freeze
+    // today's value into every channel created from the form.
+    const { draft } = pollingDraft();
+
+    expect(draft.values.pollInterval).toBe('');
+    expect(
+      buildChannelUpsertRequest(GITHUB_POLLING, draft, 'rev-1').config,
+    ).not.toHaveProperty('pollInterval');
+  });
+
+  it('reads a stored interval and saves a typed one as a number', () => {
+    const { draft, instance } = pollingDraft(30000);
+    expect(draft.values.pollInterval).toBe('30000');
+
+    draft.values.pollInterval = '45000';
+    expect(
+      buildChannelUpsertRequest(GITHUB_POLLING, draft, 'rev-2', instance)
+        .config['pollInterval'],
+    ).toBe(45000);
+  });
+
+  it('clears the key when the input is emptied', () => {
+    const { draft, instance } = pollingDraft(30000);
+
+    draft.values.pollInterval = '';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB_POLLING, draft, 'rev-2', instance)
+        .config,
+    ).not.toHaveProperty('pollInterval');
+  });
+
+  it('rejects a non-positive interval', () => {
+    const { draft } = pollingDraft();
+
+    draft.values.pollInterval = '0';
+    expect(validateChannelEditorDraft(GITHUB_POLLING, draft, [])).toEqual({
+      pollInterval: 'outOfRange',
+    });
+
+    draft.values.pollInterval = 'soon';
+    expect(validateChannelEditorDraft(GITHUB_POLLING, draft, [])).toEqual({
+      pollInterval: 'number',
+    });
   });
 });

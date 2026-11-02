@@ -34,6 +34,15 @@ export const plugin: ChannelPlugin = {
           'GitHub Enterprise API root (e.g. https://ghe.example.com/api/v3). Leave empty for github.com',
       },
       {
+        key: 'pollInterval',
+        label: 'Poll Interval (ms)',
+        kind: 'number',
+        exclusiveMinimum: 0,
+        default: '60000',
+        description:
+          'How often to poll the notifications API. Leave empty for 60000',
+      },
+      {
         key: 'groupPolicy',
         label: 'Group Policy',
         kind: 'enum',

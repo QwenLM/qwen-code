@@ -96,6 +96,16 @@ Valid `reasonFilter` values are `mention`, `review_requested`, `assign`, `author
 
 Filtered notifications are marked read only after all accepted work in the poll window completes. Removing the filter later will not replay notifications the channel already skipped.
 
+### Editing from the Web Shell
+
+Settings → Channels → GitHub exposes the poll interval under **Connection**. When `groupPolicy` is `"allowlist"`, the **Access control** section also shows one row per allowlisted repository, each with a require-mention control and a speaker control.
+
+Every row starts at **Inherit**, and the option label names the value it inherits — for example `Inherit (require a mention)`. A row left at Inherit writes no key, so the repository keeps following `groups["*"]` and any later change to `"*"` still reaches it. Choosing an explicit value writes that repository's `groups` entry; choosing Inherit again removes the key.
+
+The speaker list appears whenever the row's effective policy is an allowlist, whether the row set it or inherited it. Under an explicit **Allowlist only**, an empty list means _nobody_. Under an inherited policy, an empty list means _no per-repository list_, so the channel-wide `groups["*"].allowedUsers` applies.
+
+Per-repository settings the editor does not model, such as `dispatchMode` and `groupHistoryLimit`, are preserved when you save.
+
 ## ⚠️ Security
 
 On a **public repository**, setting `groups: { "*": { "senders": "open" } }` allows **any GitHub user** who triggers a supported notification reason to submit prompts that drive the agent in your `cwd`. This includes reading code, spending tokens, posting comments, and (subject to permission policy) running tools.
