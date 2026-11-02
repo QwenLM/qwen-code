@@ -15814,6 +15814,41 @@ describe('App read-only local commands mid-turn', () => {
     ]);
   });
 
+  it.each(['en', 'zh-CN'] as const)(
+    'shows Qwen Subscription for status and about in %s',
+    async (language) => {
+      mockWorkspaceActions.loadProviders.mockResolvedValue({
+        current: { authType: 'qwen-subscription' },
+      });
+      renderApp({ language });
+      await flush();
+
+      for (const command of ['/status', '/about']) {
+        mockWorkspaceActions.loadPreflight.mockResolvedValue(
+          command === '/about'
+            ? {
+                cells: [
+                  { kind: 'auth', detail: { source: 'qwen-subscription' } },
+                ],
+              }
+            : null,
+        );
+        mockStore.dispatch.mockClear();
+        await act(async () => {
+          testState.latestChatEditorProps?.onSubmit(command);
+          await vi.waitFor(() => {
+            expect(mockStore.dispatch).toHaveBeenCalledWith([
+              expect.objectContaining({
+                type: 'status',
+                text: expect.stringContaining('"auth":"Qwen Subscription"'),
+              }),
+            ]);
+          });
+        });
+      }
+    },
+  );
+
   it.each(['/about', '/status'])(
     'does not append a late %s result after switching sessions',
     async (command) => {

@@ -19109,7 +19109,9 @@ export function App({
 
                 let formattedAuth = '';
                 if (authSource) {
-                  if (
+                  if (authSource === 'qwen-subscription') {
+                    formattedAuth = 'Qwen Subscription';
+                  } else if (
                     authSource.startsWith('oauth') ||
                     authSource === 'qwen-oauth'
                   ) {
