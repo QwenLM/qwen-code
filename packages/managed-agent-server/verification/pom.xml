@@ -128,6 +128,9 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
                     <failIfNoTests>true</failIfNoTests>
+                    <!-- H2 fixtures with DB_CLOSE_DELAY=-1 survive connection closure. -->
+                    <forkCount>1</forkCount>
+                    <reuseForks>false</reuseForks>
                     <excludedGroups>fault-gate</excludedGroups>
                     <systemPropertyVariables>
                         <managed.module.root>${managed.module.root}</managed.module.root>
