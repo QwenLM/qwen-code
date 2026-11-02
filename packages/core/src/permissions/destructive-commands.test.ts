@@ -218,8 +218,22 @@ describe('isDestructiveCommand — git commit --amend', () => {
     'x="$(git commit --amend --no-edit)"',
     'git commit -m "$(git commit --amend)"',
     'echo "`git commit --amend --no-edit`"',
+    // Mutation-gap pins: each of these behaviours was correct but unheld by
+    // any test, so a mutation could remove it silently (#13570 review).
+    "eval 'git commit --amend --no-edit'",
+    'command git commit --amend --no-edit',
   ])('blocks amend through an execution wrapper: %s', (command) => {
     expectBlocked(command, 'amend the commit', 'amend');
+  });
+
+  it('fails closed when eval nesting exceeds the unwrap depth cap', () => {
+    // The cap is 8; a benign chain deeper than that is still refused rather
+    // than allowed, so pathological nesting cannot hide an amend.
+    const deep = Array.from({ length: 9 }).reduce<string>(
+      (inner) => `eval '${inner}'`,
+      'git commit --amend --no-edit',
+    );
+    expectBlocked(deep, 'amend the commit', 'amend');
   });
 
   it.each([
@@ -230,6 +244,8 @@ describe('isDestructiveCommand — git commit --amend', () => {
     'git commit -m --amend',
     'git log --grep="git commit --amend"',
     `cat > notes.txt <<'EOF'\ngit commit --amend\nEOF`,
+    // After `--` the token is a pathspec, not a flag, so this is not an amend.
+    'git commit -- foo --amend',
   ])('allows inert text that mentions amend: %s', (command) => {
     expectAllowed([command], 'write a report');
   });
