@@ -343,7 +343,8 @@ public class ExternalStorageRegistrationTest {
         properties.getRuntimeBroker().setProvisioner(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE_FILES);
         properties.getRuntimeBroker().setExternalProviderId("provider");
         var transactions = new org.springframework.transaction.support.TransactionTemplate(manager);
-        var sessions = new ManagedAgentStore(jdbc, json, java.time.Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties);
+        var sessions = new ManagedAgentStore(jdbc, json, java.time.Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties,
+                new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var selection = new com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection("workspace", ".");
         String id = transactions.execute(ignored -> sessions.insertWorkspaceSessionCommand("tenant", "actor", "create", "digest", "qwen-code",
                 null, null, List.of(), null, selection).sessionId());

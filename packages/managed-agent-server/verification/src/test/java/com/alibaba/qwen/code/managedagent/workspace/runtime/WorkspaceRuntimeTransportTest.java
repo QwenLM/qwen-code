@@ -104,7 +104,7 @@ class WorkspaceRuntimeTransportTest {
     @Test
     void failedExternalProbeAndUnsupportedControlsNeverClaimOrForwardTools() throws Exception {
         var fixture = externalFilesFixture();
-        when(fixture.http().attest(any(), any(), any())).thenReturn(CompletableFuture.failedFuture(WorkspaceExecutionStore.unavailable()));
+        when(fixture.http().attest(any(), any(), any())).thenReturn(CompletableFuture.failedFuture(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable()));
         assertThatThrownBy(() -> fixture.transport().acquire(fixture.lease(), fixture.session()).toCompletableFuture().join())
                 .hasCauseInstanceOf(RuntimeBrokerException.class);
         verify(fixture.ownership(), never()).claim(any(), any());
