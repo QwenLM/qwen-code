@@ -1,12 +1,8 @@
 # Daemon mode (`qwen serve`)
 
-Run Qwen Code as a local HTTP daemon so multiple clients (IDE plugins, web UIs, CI scripts, custom CLIs) share one agent session over HTTP + Server-Sent Events instead of each spawning their own subprocess.
+Run Qwen Code as an HTTP daemon so multiple clients (IDE plugins, web UIs, CI scripts, custom CLIs) can share agent sessions over HTTP + Server-Sent Events instead of each spawning their own subprocess.
 
-> **🚧 v0.16-alpha**: `qwen serve` first ships to npm in v0.16-alpha as **text-only chat / coding** with **local-only deployment**. Image / file attachments on the prompt path, containerized deployment (Docker / k8s / nginx reverse-proxy), and remote / multi-daemon hardening land in a follow-up patch when an enterprise pilot is committed. See [v0.16-alpha known limits](#v016-alpha-known-limits) for the full deferred list.
-
-> **Status:** Stage 1 (experimental). The protocol surface is locked at the §04 routes table from issue [#3803](https://github.com/QwenLM/qwen-code/issues/3803). Stage 1.5 (`qwen --serve` flag — TUI co-hosts the same HTTP server) and Stage 2 (in-process refactor + `mDNS`/OpenAPI/WebSocket/Prometheus polish) are immediately downstream.
->
-> **Scope honesty:** Stage 1 is sized for **developers prototyping clients against the protocol surface** and for **local single-user / small-team collaboration**. Production-grade multi-client / long-running / network-flaky workloads (mobile companions, IM bots reaching 1000+ chats) need Stage 1.5+ guarantees that aren't in this release. See [Stage 1.5+ runtime guarantees](#stage-15-runtime-guarantees) for the full gap list and #3803 for the convergence roadmap.
+> **Status:** Experimental. The daemon supports local and remote Web Shell/API deployments. Before exposing it beyond loopback, review [Authentication](#authentication) and the [deployment threat model](#default-deployment-threat-model).
 
 ## What it gives you
 
@@ -25,34 +21,13 @@ Run Qwen Code as a local HTTP daemon so multiple clients (IDE plugins, web UIs, 
   - **Known limit — token-cost amplification:** the route is a pure-cost endpoint (each call is an LLM side-query, no state benefit) and the daemon has no per-route rate limit in v1. On a no-token loopback default a buggy or malicious local client can spam it to burn tokens. Configure `--token` (and optionally `--require-auth`) on shared dev hosts before exposing the daemon.
   - **Concurrent recap safety:** two simultaneous `/recap` calls on the same session run two independent side-queries. `generateSessionRecap` reads a snapshot of the chat history via `GeminiClient.getChat().getHistory()` and feeds it to a separate `BaseLlmClient.generateText` call (via `runSideQuery`); it never appends to or mutates the session's `GeminiChat`. Safe to call from multiple clients without coordination.
 
-## v0.16-alpha known limits
+## Deployment and security notes
 
-The first npm release of `qwen serve` (v0.16-alpha) is intentionally narrow — text-only chat / coding for developers running the daemon on their own machine. The list below makes the deferred surface explicit so adopters can plan around it; everything here is on the v0.16.x patch roadmap or a near-term follow-up release.
-
-**Product surface — text-only:**
-
-- ✅ Text prompts and text responses (chat, coding, tool calls, MCP integration)
-- ❌ **Image / file attachments on the prompt path** — `MessageEmitter` currently only renders text; multimodal echo lands when an alpha target with image needs is committed (#4175 chiga0 #27 P0 item)
-- ❌ **Streaming uploads** — same gating as multimodal
-
-**Deployment surface — local-only:**
-
-- ✅ Loopback (`127.0.0.1`, default) — no auth required, suitable for dev workstations
-- ✅ Local launch via `systemd` / `launchd` / `nohup &` / `tmux` — see [Local launch templates](./qwen-serve-deploy-local.md)
-- ✅ Bring-your-own bearer token via `QWEN_SERVER_TOKEN` env var ([Authentication](#authentication) for setup)
-- ❌ **Containerized deployment** — Docker / Compose / Kubernetes / nginx reverse-proxy with TLS termination NOT in v0.16-alpha. Defers to v0.16.x once an enterprise pilot is committed (would otherwise rot from no-one-validating).
-- ❌ **Multi-daemon coordination on one host** — one daemon can host several explicitly registered workspaces, but daemons do not coordinate with each other. Cross-host federation, instance-path token keying, and stale-token cleanup defer to v0.16.x.
-- ✅ **Revocable Local Control pairing tokens** — `--local-control` mints a separate LAN pairing token owned by the daemon. General daemon token storage remains BYO-token.
-
-**Hardening — minimum viable for local single-user:**
-
-- ✅ Boot-time security gate (non-loopback binds always carry a bearer token — operator-supplied or generated at startup; explicitly empty sources still refuse to boot, [PR 15 / #4236](https://github.com/QwenLM/qwen-code/pull/4236))
-- ✅ Mutation-route auth gate, session-scoped permission routing (Wave 4 PRs)
-- ✅ MCP guardrails + multi-client permission coordination (F2 / F3)
-- ✅ **Prompt absolute deadline + SSE writer idle timeout** — opt-in via `--prompt-deadline-ms` and `--writer-idle-timeout-ms`; advertised through `prompt_absolute_deadline` and `writer_idle_timeout` when enabled.
-- ✅ **HTTP rate limiting** — opt-in via `--rate-limit` and per-tier thresholds; advertised through `rate_limit` when enabled.
-- ⏸️ **Prometheus metrics + load test harness** — defers to v0.17 F4 Phase-1 scale instrumentation when 30-50 active sessions becomes a real target.
-- ⏸️ **`--max-body-size` CLI flag** — daemon enforces `express.json({ limit: '10mb' })` by default which comfortably covers text-only prompts (model context windows are well under 10 MiB of chars). Tunable via flag in v0.16.x.
+- **Loopback is trusted by default** — `127.0.0.1:4170` starts without bearer authentication, and every local process that can reach it receives full API authority, including code execution as the daemon user. Use a stable `QWEN_SERVER_TOKEN` with `--require-auth` on shared or untrusted hosts.
+- **Non-loopback listeners always carry a bearer token** — supply your own token or use the ephemeral token printed at startup. Generated tokens rotate on restart, so reusable clients need a stable token. HTTP is unencrypted; configure TLS before crossing untrusted networks.
+- **Background launch has two paths** — use `qwen daemon start` for built-in local lifecycle management, or the [systemd / launchd / tmux / nohup templates](./qwen-serve-deploy-local.md) when you need service-manager supervision or startup after reboot.
+- **Token persistence is opt-in** — `qwen daemon start --save-token` stores an explicitly supplied bearer in an owner-only sidecar for `qwen daemon token`; ordinary `qwen serve` and generated tokens do not use that sidecar. See [Inspect and control a local daemon](#inspect-and-control-a-local-daemon).
+- **Multi-workspace is single-operator** — registered workspaces share the daemon's bearer token, listener, quotas, and process fault boundary. Use separate daemons and an external orchestrator for independent users or security principals; see [Multi-session & multi-workspace deployment](#multi-session--multi-workspace-deployment).
 
 For the deeper "what we won't fix in Stage 1" enumeration (single-host session-state mutation model + N parallel sessions sharing one ACP child inside each workspace runtime), see [Stage 1 scope boundaries](#stage-1-scope-boundaries--what-we-wont-fix-in-stage-15) below.
 
@@ -141,6 +116,17 @@ Records live under the runtime directory (`$QWEN_RUNTIME_DIR`, `$QWEN_HOME`, or 
 `status --detail` asks the daemon for its own status: version, uptime, active sessions, and issue count. It sends `QWEN_SERVER_TOKEN` only when the record says the daemon uses a bearer and the recorded process is alive, addressable, and started when the record says it did; a record whose recorded PID namespace this process cannot address is never sent the bearer. Without a token, a daemon that requires a bearer reports that authentication is required.
 
 `qwen daemon start` spawns `qwen serve` detached, waits for its discovery record, and prints the bound URL, PID, log path, and stop command. It drops the launching session's identifiers and private capability bindings so the child is a fresh daemon, keeps the operator's model/auth environment, and passes `--no-token-qr` so the startup log cannot contain a token. Workspaces are canonicalized, relative runtime directories are pinned to the launching directory before spawn, and Windows drive-relative roots are resolved against the launching drive. A non-loopback bind requires `QWEN_SERVER_TOKEN`; use `qwen serve` directly if you want an ephemeral token. The startup log is `0600` and is removed after a successful start. `--wait` waits until the runtime is serving (no `daemon_runtime_starting` issue and not `error`); a timeout keeps the startup log and exits non-zero.
+
+For an authenticated background daemon with a reusable local credential, supply a stable token through the environment and opt in to the token sidecar:
+
+```bash
+export QWEN_SERVER_TOKEN="$(openssl rand -hex 32)"
+qwen daemon start --require-auth --save-token --wait
+qwen daemon token --port 4170          # print the saved bearer; treat the output as a secret
+qwen daemon token --port 4170 --remove # delete only the local sidecar
+```
+
+Prefer `QWEN_SERVER_TOKEN` over `--token`, which is visible in the shell process list. `--save-token` requires an explicitly supplied token and refuses to spawn without one. The sidecar is `daemon/daemon-<port>-<pid>.token` under the same runtime directory as the discovery record; it is `0600` on POSIX and is never included in the discovery record or daemon log. `qwen daemon stop` removes it, while `qwen daemon restart` carries it to the replacement instance. `qwen daemon token --remove` deletes the local copy but does not change or revoke the running daemon's credential; stop and start the daemon with a new token to rotate it. Ordinary `qwen serve`, including `--open-with-auth`, does not write this sidecar.
 
 `qwen daemon restart` stops one registered daemon through `daemon stop` and starts it again through `daemon start --wait` on its recorded port and hostname, with its recorded startup workspaces, Web Shell mode, and `--require-auth` setting; `--web`/`--no-web` and `--require-auth`/`--no-require-auth` override the record. Persisted workspace registrations are restored by the new daemon itself, not replayed as `--workspace`. Every other `qwen serve` option (for example `--profile`, `--channel`, `--allow-origin`, or rate limits) resets to its default, so relaunch a daemon configured with those through `qwen serve`. Before stopping anything, restart refuses an HTTPS daemon, a startup workspace that no longer exists, a run from inside a shell the daemon hosts (such as its Web Shell terminal), and a bearer daemon without `--token` or `QWEN_SERVER_TOKEN`; a running bearer daemon must accept the token, so restart never rotates the credential. A token kept only in a workspace `.env` or settings file is not read by `qwen daemon`. `--force` is forwarded to `daemon stop` only when you pass it. If the recorded port is taken, the daemon starts on the next free port and restart exits non-zero.
 
@@ -948,7 +934,7 @@ Note: live-session history replay is bounded twice: by the SSE ring for `Last-Ev
 
 ## Durability model
 
-**Sessions are still ephemeral in Stage 1 across daemon restarts**, but persisted sessions on disk can be reloaded:
+**Live sessions are interrupted by daemon restarts, but persisted sessions remain on disk and can be reloaded:**
 
 - A child process crash publishes `session_died` and removes the live session from the daemon's maps. The persisted on-disk session **can** be reloaded via `POST /session/:id/load` if a fresh agent child is spawnable.
 - A daemon restart loses every in-flight live session. The persisted sessions remain on disk and can be loaded against a new daemon process, subject to the same workspace binding rules.
@@ -1289,7 +1275,7 @@ Budget-related events from the existing `mcp_guardrail_events` surface (`mcp_bud
 
 ## What's next
 
-- **Setting up a long-running daemon?** [Local launch templates (systemd / launchd / nohup / tmux)](./qwen-serve-deploy-local.md) for v0.16-alpha (local-only).
+- **Setting up a long-running daemon?** Use the [local launch templates (systemd / launchd / nohup / tmux)](./qwen-serve-deploy-local.md) for service-manager supervision and startup after reboot.
 - **Build a client?** See the [DaemonClient TypeScript quickstart](../developers/examples/daemon-client-quickstart.md) and the [HTTP protocol reference](../developers/qwen-serve-protocol.md).
 - **Reading the source?** Bridge code lives at `packages/cli/src/serve/`; SDK client at `packages/sdk-typescript/src/daemon/`.
 - **Tracking the roadmap?** Stage 1.5 / Stage 2 progress is tracked on issue [#3803](https://github.com/QwenLM/qwen-code/issues/3803).

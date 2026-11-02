@@ -1643,6 +1643,13 @@ public class ManagedExtensionRecordStore
             new AutomationLedgerStore(jdbc).projectSchedule(tenantId, workspaceId,
                     sessionId, revision, record, committedAt);
         }
+        if (domain.equals("child_run") && "consumed".equals(deliveryState)) {
+            // The relay may have classified its ledger row between the
+            // acceptance and this consuming revision; the parent's commit
+            // carries the later fact and corrects the mirror with it.
+            new ChildResultRelayStore(jdbc).markConsumed(tenantId, sessionId,
+                    recordId, committedAt);
+        }
         jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ?"
                         + " AND owner_kind = 'SESSION_RECORD' AND owner_key = ?", scopeKey, recordKey);
         jdbc.update(

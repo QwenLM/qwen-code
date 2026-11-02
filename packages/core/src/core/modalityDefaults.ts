@@ -96,7 +96,11 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   // -------------------
   // Moonshot / Kimi
   // -------------------
-  [/^kimi-k3/, { image: true, video: true }],
+  // Kimi Code exposes the K3 generation without the `kimi-` prefix, so the
+  // prefix is optional here too. Its 256K variant accepts images but not
+  // video, so it is named ahead of the video-capable row.
+  [/^(?:kimi-)?k3-256k/, { image: true }],
+  [/^(?:kimi-)?k3/, { image: true, video: true }],
   [/^kimi-k2\./, { image: true, video: true }],
   [/^kimi-/, {}],
 
