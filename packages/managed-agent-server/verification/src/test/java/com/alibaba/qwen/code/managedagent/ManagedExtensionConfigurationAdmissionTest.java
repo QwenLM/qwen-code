@@ -17,7 +17,6 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.AopTestUtils;
-import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -46,7 +45,7 @@ class ManagedExtensionConfigurationAdmissionTest {
     @BeforeEach
     void enableOnlyTheStoreAdmissionBranch() {
         Object target = AopTestUtils.getUltimateTargetObject(sessions);
-        ReflectionTestUtils.setField(target, "workspaceFilesEnabled", true);
+        com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "workspaceFilesEnabled", true);
     }
 
     @Test

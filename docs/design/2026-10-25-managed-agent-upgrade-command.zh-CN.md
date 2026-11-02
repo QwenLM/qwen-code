@@ -109,11 +109,21 @@
 
 Spring 会从许多地方解析 `qwen.managed-agent.runtime-broker.state-directory`：服务端 `application.yml` 所映射的变量 `QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`；Spring 默认位置和 launcher 的 `SPRING_CONFIG_ADDITIONAL_LOCATION` 中的每个配置文件；import 或 profile 引入的文件；`SPRING_APPLICATION_JSON`；系统属性；命令行参数；以及该属性在 relaxed binding 下的每种写法。本命令前几轮自己读取这份清单，并对识别出的来源拒绝执行，结果每一轮都发现有遗漏。Spring 的配置解析没有一份封闭的清单，因此命令不再自己读取。
 
-改为由 `check` 和 `backup` 询问服务端。服务端 jar 中有一个主类 `ResolvedConfiguration`，它按 `SpringApplication` 在创建 context 之前的方式准备环境：命令行参数、进程环境，以及 class path 上的所有 environment post-processor，由它们加载配置文件、import 和 profile。随后它绑定服务端的属性，在固定前缀之后用一行打印：状态目录（与服务端一样按工作目录转成绝对路径）及其来源、认证模式和可信 actor 请求头。它不启动 context，不输出日志，也不建立任何连接。
+改为由 `check` 和 `backup` 询问服务端。服务端 jar 中有一个主类 `ResolvedConfiguration`，它按 `SpringApplication` 在创建 context 之前的方式准备环境：命令行参数、进程环境，以及 class path 上的所有 environment post-processor，由它们加载配置文件、import 和 profile。随后它绑定服务端的属性，在固定前缀之后用一行打印：状态目录（与服务端一样按工作目录转成绝对路径）及其来源、认证模式、可信 actor 请求头，以及下文所述的监听 URL。它不启动 context，不输出日志，也不建立任何连接。
 
-命令通过 `systemd-run`，按控制面 unit 运行服务端的方式运行它：使用该 unit 的账号、工作目录、环境文件和 `Environment=` 赋值，以及 unit `PATH` 上的 `java`，并带上 launcher 唯一的默认值，即 `SPRING_CONFIG_ADDITIONAL_LOCATION` 未设置或为空时使用 `config/application.yml`。运行的是本版本的 jar：它被复制到服务账号能读取的位置，因此不受压缩包解压位置的影响；通过 `PropertiesLauncher` 加 `loader.main` 启动，因此没有该类的旧 jar 会直接失败，而不会启动一个服务端。`verify` 在 `install` 之后运行，使用已安装的 jar，并从同一份输出读取认证模式。admin 启动脚本以 `resolved-configuration` 命令运行同一个类，供其他布局的手工流程使用。
+命令通过 `systemd-run`，按控制面 unit 运行服务端的方式运行它：使用该 unit 的账号、工作目录、环境文件和 `Environment=` 赋值，以及 unit `PATH` 上的 `java`，并带上 launcher 唯一的默认值，即 `SPRING_CONFIG_ADDITIONAL_LOCATION` 未设置或为空时使用 `config/application.yml`。运行的是本版本的 jar：它被复制到服务账号能读取的位置，因此不受压缩包解压位置的影响；通过 `PropertiesLauncher` 加 `loader.main` 启动，因此没有该类的旧 jar 会直接失败，而不会启动一个服务端。`start` 和 `verify` 在 `install` 之后运行，使用已安装的 jar；`verify` 从同一份输出读取认证模式。admin 启动脚本以 `resolved-configuration` 命令运行同一个类，供其他布局的手工流程使用。
 
 有两种情况留给运维处理。一是 jar 无法解析配置，例如 import 指向的文件不存在，这时服务端同样会拒绝启动。二是 `systemctl show` 打印 `ExecStart` 参数时用空格拼接且不加引号，命令无法准确地转交 unit 传给 launcher 的参数。这两种情况下，`backup` 都会拒绝执行，直到 `--runtime-state <目录>` 指明目录，或用 `--runtime-state none` 表示部署不保存 Runtime 状态。缺少数据库所引用的 Runtime 状态的备份无法一致地恢复，因此悄悄漏掉状态的备份比拒绝更糟。配置中没有指定目录时（例如未开启工具路径的部署），`backup` 不归档 Runtime 状态，并打印说明。
+
+### 监听 URL
+
+`start` 等待 Harness 的端口和控制面的健康端点，`verify` 探测该端点并读取 API。这些地址都可能设置在 `server.env` 看不到的地方：`config/application.yml` 中的 `server.port`、relaxed 形式的 `SERVER_ADDRESS`、命令行参数，或者把 actuator 移到独立监听上的 `management.server.port`。只从 `server.env` 推算时，`start` 会在一个无人监听的端口上等满 `--timeout`。因此两个阶段都从同一份 `ResolvedConfiguration` 输出中取得 URL：
+
+- **控制面：** `server.address` 绑定的地址、`server.port` 绑定的端口；启用 `server.ssl` 时用 `https`。通配地址经其地址族的回环接口访问，其他地址按绑定的地址访问。
+- **健康端点：** 遵循 Spring Boot 关于 management 端口的规则（`ManagementPortType`）。未设置或与服务端端口相同时，它与服务端共用监听；为负数时关闭 HTTP 端点；其他值则在 `management.server.address` 上打开独立监听（未设置时绑定所有接口），位于 `management.server.base-path` 之下，并沿用服务端的 TLS，除非 `management.server.ssl` 替换它。两种情况下都应用 `management.endpoints.web.base-path` 和 `health` 的路径映射；路径映射为空白时 Spring Boot 会忽略它，仍使用名称 `health`。
+- **Harness：** `qwen.managed-agent.harness.base-url`，即控制面访问它所用的 URL。
+
+端口为 0（启动时选取）或负数时没有可等待的 URL，因此两个阶段都会拒绝执行，直到 `--server-url` 指定一个。URL 无法表示该监听时（例如保留了 zone 的 IPv6 链路本地地址），或者 `--server-url` 不是 URL 时，两个阶段同样拒绝执行，而不是在根本发不出去的探测上等满 `--timeout`。`--server-url` 仍可指定控制面的地址，例如位于代理之后，此时健康端点为 `<url>/actuator/health`；`verify` 不访问 Harness，这时只为 `--tenant` 解析配置。无法解析配置时（即上文的两种情况），两个阶段与以前一样使用 `server.env` 中给出的 URL，并打印一行说明用了哪些：猜错的代价是等满一次 `--timeout`，而拒绝执行会挡住猜对时本可以完成的升级。
 
 ### 备份是否仍然有效
 
@@ -160,7 +170,7 @@ Spring 会从许多地方解析 `qwen.managed-agent.runtime-broker.state-directo
   - Flyway 顺序；
   - 校验钩子；
   - `databaseCheck` 实际执行的校验，在 Flyway 迁移出的 H2 数据库上运行。
-- **`ResolvedConfiguration` 单元测试**，走 Spring 自己的环境准备：launcher 配置文件中的 import、带同级键的 flow mapping、merge key、目录位置旁的 profile 文件、`SPRING_CONFIG_NAME` 选中的 properties 文件、各种环境变量写法、`SPRING_APPLICATION_JSON`、相对路径的目录、认证模式与 actor 请求头、缺失的 import，以及打印的那一行。
+- **`ResolvedConfiguration` 单元测试**，走 Spring 自己的环境准备：launcher 配置文件中的 import、带同级键的 flow mapping、merge key、目录位置旁的 profile 文件、`SPRING_CONFIG_NAME` 选中的 properties 文件、各种环境变量写法、`SPRING_APPLICATION_JSON`、相对路径的目录、认证模式与 actor 请求头、上述每种端口、地址、TLS 和 management 设置下的监听 URL、缺失的 import，以及打印的那一行。
 - **真实主机端到端**（systemd 257、MySQL 8.4，真实 Hosted Harness 配合伪造模型）。旧版本按 `systemd/README.md` 的方式安装，并在服务端 cgroup 中留一个替身 worker。
   - **兼容的升级：** 跑完所有阶段，并验证：
     - 在服务运行时或阶段顺序不对时的拒绝；

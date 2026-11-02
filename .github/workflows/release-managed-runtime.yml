@@ -152,6 +152,27 @@ jobs:
             echo 'The complete SDK and server verification gates remain enabled.'
           } >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: 'Repair the 0.26.5 Javadoc'
+        if: "${{ env.RELEASE_TAG == 'v0.26.5' }}"
+        run: |-
+          set -euo pipefail
+          if [[ "${SOURCE_SHA}" != 'db0e4e24a0d89b211b2a15f4af2be22adac71dfc' ]]; then
+            echo 'The 0.26.5 Javadoc repair requires the original release commit.' >&2
+            exit 1
+          fi
+          patch='.qwen/managed-release-tools/scripts/patches/managed-runtime-v0.26.5-javadoc.patch'
+          echo "f0f569810b4966857fc173848386cda2cfb77acd9c3bd6239836c061ce97aadf  ${patch}" | sha256sum --check -
+          git diff --exit-code HEAD
+          git apply --check "${patch}"
+          git apply "${patch}"
+          {
+            echo '### Managed runtime 0.26.5 Javadoc repair'
+            echo "Product source: ${SOURCE_SHA}; original tag unchanged."
+            echo 'Javadoc-only repair from #16099: escape the numeric range and resolve its documentation link.'
+            echo "Patch blob: $(git hash-object "${patch}")"
+            echo 'The complete CLI, SDK and server verification gates remain enabled.'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: 'Build the matching CLI prerequisites'
         env:
           QWEN_SKIP_PREPARE: '1'
