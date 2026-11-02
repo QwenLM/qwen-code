@@ -178,18 +178,19 @@ describe('check-disk-floor', () => {
     // The incident fleet's os.tmpdir() is /tmp with TMPDIR unset; the
     // script's `${TMPDIR:-/tmp}` default must keep gating that path. A
     // regression to plain `${TMPDIR}` appends nothing and the incident
-    // class returns with the suite green. RUNNER_TEMP is pinned to a
-    // different directory so a dir[/tmp] sample can ONLY come from the
+    // class returns with the suite green. An empty-string TMPDIR is the
+    // bash-equivalent of unset for `:-` (but not for a bare expansion),
+    // which is exactly the distinction under test. RUNNER_TEMP is pinned
+    // to a distinct directory so a dir[/tmp] sample can only come from the
     // OS-temp append, not the RUNNER_TEMP default (mutation-verified).
-    const { TMPDIR, ...envWithoutTmpdir } = process.env;
     const ws = mkdtempSync(join(tmpdir(), 'disk-floor-ws-'));
     const temp = mkdtempSync(join(tmpdir(), 'disk-floor-tmp-'));
     try {
       const result = runGate({
         env: {
-          ...envWithoutTmpdir,
           GITHUB_WORKSPACE: ws,
           RUNNER_TEMP: temp,
+          TMPDIR: '',
           DISK_FLOOR_MIN_FREE_KB: '1',
           DISK_FLOOR_MIN_FREE_INODES: '1',
         },
