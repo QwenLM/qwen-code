@@ -245,6 +245,9 @@ const createInitialSkillMetrics = (): SkillMetrics => ({
   byName: {},
 });
 
+/** Shortest generation window that counts toward output speed. */
+const MIN_THROUGHPUT_WINDOW_MS = 100;
+
 const createInitialGenerationMetrics = (): GenerationMetrics => ({
   timedRequests: 0,
   totalTtftMs: 0,
@@ -699,27 +702,28 @@ export class UiTelemetryService extends EventEmitter {
     }
 
     const ttftMs = event.ttft_ms;
+    const generationDurationMs = event.generation_ms;
+    // Events recorded before `generation_ms` existed also predate counting
+    // tool-call preparations as visible output, so their TTFT can span a
+    // whole tool-call-only request. Leave them out of timing entirely.
     if (
       ttftMs === undefined ||
       !Number.isFinite(ttftMs) ||
       ttftMs < 0 ||
+      generationDurationMs === undefined ||
+      !Number.isFinite(generationDurationMs) ||
+      generationDurationMs < 0 ||
       isInternalPromptId(event.prompt_id)
     ) {
       return;
     }
 
-    // Events recorded before `generation_ms` existed fall back to everything
-    // after the first visible output.
-    const generationDurationMs =
-      event.generation_ms !== undefined &&
-      Number.isFinite(event.generation_ms) &&
-      event.generation_ms >= 0
-        ? event.generation_ms
-        : Math.max(0, event.duration_ms - ttftMs);
     const accumulateGeneration = (generation: GenerationMetrics) => {
       generation.timedRequests++;
       generation.totalTtftMs += ttftMs;
-      if (generationDurationMs > 0) {
+      // A window this short means the output arrived in a burst, so dividing
+      // the whole response's tokens by it reads as thousands of tokens/s.
+      if (generationDurationMs >= MIN_THROUGHPUT_WINDOW_MS) {
         generation.totalGenerationDurationMs += generationDurationMs;
         generation.totalThroughputOutputTokens += event.output_token_count;
       }

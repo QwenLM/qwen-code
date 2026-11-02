@@ -13,6 +13,18 @@ type ContentGeneratorConfig =
   import('../core/contentGenerator.js').ContentGeneratorConfig;
 
 /**
+ * The Kimi K3 generation's 1M window, matched across every id shape it is
+ * served under: Moonshot's `kimi-k3` / `kimi-k3.1-pro`, and Kimi Code's bare
+ * aliases (`k3.1-pro`, `k3.1-pro-highspeed`). The curated window table and the
+ * catalog correction both read this one pattern, so a new sub-version needs no
+ * second entry in either place.
+ *
+ * `k3-256k` shares the prefix but not the window: it serves 262,144 tokens,
+ * so it is excluded here and named by its own row in the curated table.
+ */
+export const KIMI_K3_GENERATION = /^(?:kimi-)?k3(?!-256k)/;
+
+/**
  * Field keys for model-scoped generation config.
  *
  * Kept in a small standalone module to avoid circular deps. The `import('...')`

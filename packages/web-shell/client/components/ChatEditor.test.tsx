@@ -408,6 +408,7 @@ interface ChatEditorRenderProps
     | 'btwEnabled'
     | 'isPreparing'
     | 'contextChipPlacement'
+    | 'gitContextControl'
     | 'standaloneTargetSupported'
     | 'onSelectStandaloneTarget'
     | 'workspaceSelectionDisabled'
@@ -415,6 +416,10 @@ interface ChatEditorRenderProps
     | 'contextUsageAlwaysVisible'
     | 'contextUsageControls'
     | 'onOpenContextUsage'
+    | 'workflowMode'
+    | 'workflowModeStatus'
+    | 'workflowModePending'
+    | 'onWorkflowModeChange'
   > {
   composerTags?: WebShellComposerTag[];
   pastedImages?: Array<{ data: string; media_type: string }>;
@@ -2193,6 +2198,30 @@ describe('ChatEditor context chip placement', () => {
     expect(
       toolbar!.querySelector('[aria-label^="Current Git branch:"]'),
     ).toBeNull();
+  });
+
+  it('places a service-owned Git control beside the workspace without a Local Git picker', () => {
+    const container = renderChatEditor({
+      ...workspaceProps,
+      contextChipPlacement: 'below',
+      gitContextControl: <button type="button">Managed worktree</button>,
+    });
+    const row = container.querySelector(
+      '[data-web-shell-composer-context-row]',
+    )!;
+    expect(row.querySelector('button[aria-label="Workspace"]')).not.toBeNull();
+    expect(row.textContent).toContain('Managed worktree');
+    expect(
+      container
+        .querySelector('[data-web-shell-composer-surface]')!
+        .contains(row),
+    ).toBe(false);
+    expect(
+      [...container.querySelectorAll('button')].filter(
+        (button) => button.textContent === 'Managed worktree',
+      ),
+    ).toHaveLength(1);
+    expect(container.querySelector('[data-testid="branch-picker"]')).toBeNull();
   });
 
   it('leaves the workspace to the header and keeps git in the toolbar', () => {
@@ -4955,6 +4984,25 @@ describe('ChatEditor mobile composer actions', () => {
     ).not.toBeNull();
   });
 
+  it('keeps the service-owned Git control once in the mobile context row', () => {
+    mobileComposer();
+    const container = renderChatEditor({
+      contextChipPlacement: 'below',
+      gitContextControl: <button type="button">Managed worktree</button>,
+      visibleToolbarActions: [],
+    });
+    const row = container.querySelector('[class*="mobileContextRow"]')!;
+    expect(row.textContent).toContain('Managed worktree');
+    expect(
+      [...container.querySelectorAll('button')].filter(
+        (button) => button.textContent === 'Managed worktree',
+      ),
+    ).toHaveLength(1);
+    expect(
+      container.querySelector('[data-web-shell-composer-context-row]'),
+    ).toBeNull();
+  });
+
   it.each([{ sessionId: 'b' }, { atWorkspaceCwd: '/b' }, { disabled: true }])(
     'closes expanded editing only when its owner changes: %j',
     async (change) => {
@@ -6817,4 +6865,124 @@ describe('ChatEditor file upload gating', () => {
       expect(restore).toHaveBeenCalledTimes(1);
     });
   });
+});
+
+describe('ChatEditor Workflow mode', () => {
+  const ready = {
+    workflowModeStatus: 'ready' as const,
+    workflowMode: { requested: true, available: true, effective: true },
+  };
+
+  it('moves Workflow into the menu and keeps it usable during a running response', async () => {
+    const onWorkflowModeChange = vi.fn();
+    const container = renderChatEditor({
+      ...ready,
+      isRunning: true,
+      disabled: true,
+      visibleToolbarActions: ['addMenu', 'plan', 'workflowMode', 'model'],
+      onTogglePlan: vi.fn(),
+      onWorkflowModeChange,
+    });
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-add-menu-trigger"]',
+    )!;
+    expect(trigger.disabled).toBe(false);
+    await act(async () =>
+      trigger.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      ),
+    );
+    const portal = mounted.find(
+      (entry) => entry.container === container,
+    )!.portalRoot;
+    const control = portal.querySelector<HTMLElement>(
+      '[data-testid="composer-add-menu-workflow"]',
+    )!;
+    expect(control.getAttribute('aria-checked')).toBe('true');
+    expect(control.getAttribute('data-disabled')).toBeNull();
+    expect(
+      portal.querySelector('[data-testid="composer-add-menu-file"]'),
+    ).toBeNull();
+    await act(async () => control.click());
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(false);
+    expect(composerCoreState.submitText).not.toHaveBeenCalled();
+  });
+
+  it('hides Workflow when the host excludes the add menu', () => {
+    const container = renderChatEditor({
+      ...ready,
+      visibleToolbarActions: ['workflowMode', 'model'],
+    });
+    expect(
+      container.querySelector('[data-testid="composer-add-menu-trigger"]'),
+    ).toBeNull();
+  });
+
+  it.each([
+    {
+      name: 'allowed and supported',
+      allowWorkflow: true,
+      status: 'ready' as const,
+      visible: true,
+    },
+    {
+      name: 'excluded by the host',
+      allowWorkflow: false,
+      status: 'ready' as const,
+      visible: false,
+    },
+    {
+      name: 'unsupported',
+      allowWorkflow: true,
+      status: 'unsupported' as const,
+      visible: false,
+    },
+    {
+      name: 'not reported',
+      allowWorkflow: true,
+      status: undefined,
+      visible: false,
+    },
+  ])(
+    'checks the opened menu when Workflow is $name',
+    async ({ allowWorkflow, status, visible }) => {
+      const onWorkflowModeChange = vi.fn();
+      const container = renderChatEditor({
+        ...ready,
+        workflowModeStatus: status,
+        visibleToolbarActions: allowWorkflow
+          ? ['addMenu', 'workflowMode']
+          : ['addMenu'],
+        onWorkflowModeChange,
+      });
+      const trigger = container.querySelector<HTMLButtonElement>(
+        '[data-testid="composer-add-menu-trigger"]',
+      )!;
+      await act(async () =>
+        trigger.dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        ),
+      );
+      const portal = mounted.find(
+        (entry) => entry.container === container,
+      )!.portalRoot;
+      expect(portal.querySelector('[role="menu"]')).not.toBeNull();
+      const row = portal.querySelector<HTMLElement>(
+        '[data-testid="composer-add-menu-workflow"]',
+      );
+      expect(Boolean(row)).toBe(visible);
+      if (row) {
+        expect(row.getAttribute('role')).toBe('menuitemcheckbox');
+        expect(row.getAttribute('aria-checked')).toBe('true');
+        await act(async () => row.click());
+        await act(
+          async () => new Promise((resolve) => setTimeout(resolve, 50)),
+        );
+        expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(false);
+      } else {
+        expect(onWorkflowModeChange).not.toHaveBeenCalled();
+      }
+    },
+  );
 });

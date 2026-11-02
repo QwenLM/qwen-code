@@ -275,6 +275,49 @@ describe('Managed file reference snapshots', () => {
     ).rejects.toThrow('select the file again');
   });
 
+  it('resolves an existing Session from its ID for query, read and upload', async () => {
+    const api = enableUploads();
+    await render('.qwen-managed-worktrees/owned/src', 'session-a');
+    expect(api.query).toHaveBeenLastCalledWith(
+      { sessionId: 'session-a', directory: '.', query: '' },
+      { clientId: 'client', signal: expect.any(AbortSignal) },
+    );
+    await select();
+    expect(api.read).toHaveBeenLastCalledWith(
+      {
+        sessionId: 'session-a',
+        path: 'src/a.ts',
+        expectedScopeRevision: revision,
+      },
+      { clientId: 'client' },
+    );
+    const data = new Blob(['session upload']);
+    await current.uploadTarget!.client.uploadWorkspaceFile({
+      path: 'file.txt',
+      data,
+    });
+    expect(api.upload).toHaveBeenLastCalledWith(
+      {
+        sessionId: 'session-a',
+        path: 'file.txt',
+        expectedScopeRevision: revision,
+        uploadId: expect.any(String),
+      },
+      data,
+      { clientId: 'client', signal: undefined },
+    );
+    const prepared = await current.prepareInput(
+      '@src/a.ts explain',
+      [],
+      await metadata(),
+    );
+    expect(prepared.files[0]?.text).toBe(text);
+    expect(api.query).toHaveBeenLastCalledWith(
+      { sessionId: 'session-a', directory: '.', query: '' },
+      { clientId: 'client' },
+    );
+  });
+
   it('blocks submission until every selected file has finished loading', async () => {
     const read = provider.workspaceFiles!.read;
     const original = vi.mocked(read).getMockImplementation()!;
