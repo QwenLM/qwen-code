@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,6 +10,66 @@ import {
   verifyBundledRipgrep,
   verifyRuntimeIntegrity,
 } from './runtime-smoke-checks.js';
+
+// AppImage's excludelist: these are supplied by the AppImage runtime or the
+// host's graphics/C++ runtime. Bundling them conflicts with the host drivers
+// or its glibc and C++ ABI. Keep this list in sync with the upstream file.
+// https://github.com/AppImageCommunity/pkg2appimage/blob/master/excludelist
+const APPIMAGE_HOST_LIBRARIES = new Set([
+  'ld-linux-aarch64.so.1',
+  'ld-linux-x86-64.so.2',
+  'ld-linux.so.2',
+  'libBrokenLocale.so.1',
+  'libEGL.so.1',
+  'libGL.so.1',
+  'libGLdispatch.so.0',
+  'libGLX.so.0',
+  'libICE.so.6',
+  'libOpenGL.so.0',
+  'libSM.so.6',
+  'libX11-xcb.so.1',
+  'libX11.so.6',
+  'libanl.so.1',
+  'libasound.so.2',
+  'libc.so.6',
+  'libcidn.so.1',
+  'libcom_err.so.2',
+  'libdl.so.2',
+  'libdrm.so.2',
+  'libexpat.so.1',
+  'libfontconfig.so.1',
+  'libfreetype.so.6',
+  'libfribidi.so.0',
+  'libgbm.so.1',
+  'libgcc_s.so.1',
+  'libglapi.so.0',
+  'libgmp.so.10',
+  'libgpg-error.so.0',
+  'libharfbuzz.so.0',
+  'libjack.so.0',
+  'libm.so.6',
+  'libmvec.so.1',
+  'libnss_compat.so.2',
+  'libnss_dns.so.2',
+  'libnss_files.so.2',
+  'libnss_hesiod.so.2',
+  'libnss_nis.so.2',
+  'libnss_nisplus.so.2',
+  'libpipewire-0.3.so.0',
+  'libpthread.so.0',
+  'libresolv.so.2',
+  'librt.so.1',
+  'libstdc++.so.6',
+  'libthread_db.so.1',
+  'libusb-1.0.so.0',
+  'libutil.so.1',
+  'libuuid.so.1',
+  'libwayland-client.so.0',
+  'libxcb.so.1',
+  'libxcb-dri2.so.0',
+  'libxcb-dri3.so.0',
+  'libz.so.1',
+]);
 
 export function findLinuxInstallers(bundleRoot) {
   const files = walkFiles(bundleRoot);
@@ -56,6 +116,56 @@ export function verifyExtractedRuntime(extractedRoot) {
   verifyBundledNode(runtimeRoot);
 }
 
+export function verifyAppImageClosure(extractedRoot) {
+  const files = walkFiles(extractedRoot);
+  const bundled = new Set(files.map((file) => path.basename(file)));
+  const elfFiles = files.filter(isElf);
+  if (elfFiles.length === 0) {
+    throw new Error('AppImage contains no ELF files');
+  }
+  const missing = new Set();
+  for (const elf of elfFiles) {
+    const result = spawnSync('readelf', ['-d', elf], {
+      encoding: 'utf8',
+      env: { ...process.env, LC_ALL: 'C' },
+    });
+    if (result.error || result.status !== 0) {
+      throw new Error(
+        `Failed to read dynamic dependencies for ${path.relative(extractedRoot, elf)}: ${result.error?.message ?? result.stderr}`,
+      );
+    }
+    for (const [, soname] of result.stdout.matchAll(
+      /\(NEEDED\).*\[([^\]]+)\]/g,
+    )) {
+      if (!bundled.has(soname) && !APPIMAGE_HOST_LIBRARIES.has(soname)) {
+        missing.add(soname);
+      }
+    }
+  }
+  if (missing.size > 0) {
+    throw new Error(
+      `AppImage dependency closure is incomplete: ${[...missing].sort().join(', ')}`,
+    );
+  }
+}
+
+function isElf(file) {
+  try {
+    const buffer = Buffer.alloc(4);
+    const fd = fs.openSync(file, 'r');
+    try {
+      return (
+        fs.readSync(fd, buffer, 0, 4, 0) === 4 &&
+        buffer.equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))
+      );
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
+}
+
 function smokeInstaller(installer, type) {
   const extractedRoot = fs.mkdtempSync(
     path.join(os.tmpdir(), `qwen-desktop-${type}-smoke-`),
@@ -73,6 +183,7 @@ function smokeInstaller(installer, type) {
       });
     }
     verifyExtractedRuntime(extractedRoot);
+    if (type === 'appimage') verifyAppImageClosure(extractedRoot);
   } finally {
     fs.rmSync(extractedRoot, { recursive: true, force: true });
   }

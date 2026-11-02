@@ -16,6 +16,7 @@ import {
 import {
   findLinuxInstallers,
   findRuntimeRoot,
+  verifyAppImageClosure,
   verifyExtractedRuntime,
 } from './smoke-linux-installers.js';
 
@@ -61,6 +62,10 @@ try {
   testDesktopReleaseHardening();
   testImmutableRuntimePatchelf(path.join(root, 'patchelf'), canSpawnShebang);
   testLinuxInstallerSmokeDiscovery(path.join(root, 'linux-installers'));
+  testAppImageDependencyClosure(
+    path.join(root, 'appimage-closure'),
+    canSpawnShebang,
+  );
   testRuntimeSmokeChecks(path.join(root, 'runtime-smoke'), canSpawnShebang);
   testRuntimeTargetMappings();
   testUpdaterMirrorConfiguration();
@@ -843,6 +848,62 @@ function testLinuxInstallerSmokeDiscovery(directory) {
     () => findLinuxInstallers(bundleRoot),
     /Expected one AppImage, found 2/,
   );
+}
+
+function testAppImageDependencyClosure(directory, canSpawnShebang) {
+  if (!canSpawnShebang) {
+    console.log('SKIP AppImage dependency closure: shebang unavailable');
+    return;
+  }
+  const extractedRoot = path.join(directory, 'extracted');
+  const binaryDirectory = path.join(directory, 'bin');
+  const fakeReadelf = path.join(binaryDirectory, 'readelf');
+  fs.mkdirSync(path.join(extractedRoot, 'usr', 'lib'), { recursive: true });
+  fs.mkdirSync(binaryDirectory, { recursive: true });
+  const writeElf = (relative) => {
+    const file = path.join(extractedRoot, relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.rmSync(file, { force: true });
+    fs.writeFileSync(file, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+    return file;
+  };
+  const executable = writeElf('usr/bin/qwen-code-desktop');
+  const bundledLibrary = writeElf('usr/lib/libbundled.so');
+  fs.writeFileSync(path.join(extractedRoot, 'README'), 'not an ELF');
+  fs.writeFileSync(
+    fakeReadelf,
+    [
+      '#!/usr/bin/env sh',
+      'case "$2" in',
+      '  *qwen-code-desktop)',
+      "    printf '  (NEEDED) Shared library: [libbundled.so]\\\\n'",
+      "    printf '  (NEEDED) Shared library: [libc.so.6]\\\\n'",
+      '    ;;',
+      '  *libbundled.so)',
+      "    printf '  (NEEDED) Shared library: [libmystery.so.1]\\\\n'",
+      '    ;;',
+      'esac',
+      '',
+    ].join('\n'),
+  );
+  fs.chmodSync(fakeReadelf, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${binaryDirectory}:${previousPath}`;
+  try {
+    assert.equal(fs.existsSync(executable), true);
+    assert.equal(fs.existsSync(bundledLibrary), true);
+    assert.throws(
+      () => verifyAppImageClosure(extractedRoot),
+      /AppImage dependency closure is incomplete: libmystery\.so\.1/,
+    );
+    fs.writeFileSync(
+      path.join(extractedRoot, 'usr', 'lib', 'libmystery.so.1'),
+      '',
+    );
+    verifyAppImageClosure(extractedRoot);
+  } finally {
+    process.env.PATH = previousPath;
+  }
 }
 
 function testRuntimeSmokeChecks(directory, canSpawnShebang) {
