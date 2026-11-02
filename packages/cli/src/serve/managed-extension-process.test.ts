@@ -336,4 +336,74 @@ describe('ManagedExtensionProcessOwners', () => {
       }
     },
   );
+
+  it.skipIf(process.platform !== 'linux')(
+    'detaches preread listeners when startup fails after spawn on Linux',
+    async () => {
+      const directory = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'extension-preread-fail-linux-'),
+      );
+      directories.push(directory);
+      const owners = new ManagedExtensionProcessOwners('linux-cgroup', {
+        cgroupRoot: directory,
+        directory: path.join(directory, 'owners'),
+      });
+      // Reject the post-spawn durable save (its record carries pgid) after a
+      // short delay so the real child's sentinels reach the preread buffers
+      // before the failure. This pins the failed-start cleanup on the platform
+      // CI actually runs; the darwin-only regression never executes there.
+      const proto = ManagedExtensionProcessOwners.prototype as unknown as {
+        saveOwner: (owner: Record<string, unknown>) => Promise<void>;
+      };
+      const originalSave = proto.saveOwner;
+      const save = vi
+        .spyOn(proto, 'saveOwner')
+        .mockImplementation(async function (
+          this: ManagedExtensionProcessOwners,
+          owner: Record<string, unknown>,
+        ) {
+          if ('pgid' in owner) {
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            throw new Error('injected post-spawn journal failure');
+          }
+          return originalSave.call(this, owner);
+        });
+      try {
+        await expect(
+          owners.start({
+            sessionId: 'root',
+            configRevision: 1,
+            executable: process.execPath,
+            args: ['-e', 'ignored-by-mock-launch'],
+            env: { PATH: '/usr/bin:/bin' },
+            cwd: directory,
+            prereadOutput: true,
+          }),
+        ).rejects.toThrow('injected post-spawn journal failure');
+        // The stopped child stays in the owner map; removing the failed-start
+        // detach leaves its data listeners attached (listenerCount 1).
+        const retained = [
+          ...(
+            owners as unknown as {
+              owners: Map<
+                string,
+                {
+                  child?: {
+                    stdout?: { listenerCount: (event: string) => number };
+                    stderr?: { listenerCount: (event: string) => number };
+                  };
+                }
+              >;
+            }
+          ).owners.values(),
+        ];
+        expect(retained).toHaveLength(1);
+        expect(retained[0].child?.stdout?.listenerCount('data')).toBe(0);
+        expect(retained[0].child?.stderr?.listenerCount('data')).toBe(0);
+      } finally {
+        save.mockRestore();
+        await owners.stopAll();
+      }
+    },
+  );
 });
