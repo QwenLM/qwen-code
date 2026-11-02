@@ -4599,7 +4599,17 @@ export class ShellToolInvocation extends BaseToolInvocation<
       );
       const sha = String(stdout).trim();
       if (sha.length > 0) return { sha, unborn: false };
-    } catch {
+      return null;
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !('status' in error) ||
+        error.status !== 128 ||
+        !('signal' in error) ||
+        error.signal !== null
+      ) {
+        return null;
+      }
       // A failed HEAD lookup is either an unborn branch or no repository.
     }
     try {

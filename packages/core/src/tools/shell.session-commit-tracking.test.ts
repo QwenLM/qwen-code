@@ -700,6 +700,32 @@ describe.skipIf(process.platform === 'win32')(
       expect(amendVerdict()).toBeNull();
     });
 
+    it('does not register an existing root commit when the pre-spawn HEAD probe is terminated', async () => {
+      initUnbornRepo();
+      rawCommit('human.txt', 'human\n', 'human root');
+      const humanSha = headSha();
+      const gitPath = execSync('command -v git', { encoding: 'utf-8' }).trim();
+      const probeBinDir = makeScratchDir('qwen-12514-probe-');
+      const probeGitPath = path.join(probeBinDir, 'git');
+      fs.writeFileSync(
+        probeGitPath,
+        '#!/bin/sh\n' +
+          'if [ "$1" = rev-parse ] && [ "$2" = --verify ] && [ "$3" = HEAD ]; then\n' +
+          '  kill -TERM "$$"\n' +
+          'fi\n' +
+          `exec ${JSON.stringify(gitPath)} "$@"\n`,
+      );
+      fs.chmodSync(probeGitPath, 0o755);
+      vi.stubEnv('PATH', `${probeBinDir}${path.delimiter}${process.env['PATH']}`);
+
+      await runPromoted('git commit -m "nothing staged"', true);
+      firePromoteSettle!();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      expect(headSha()).toBe(humanSha);
+      expect(amendVerdict()?.blocked).toBe(true);
+    });
+
     it('does not adopt a commit somebody else landed while a promoted child ran (issue #12514)', async () => {
       // The promoted window is the child's whole lifetime, which #12523's
       // accepted foreground window does not cover: at settle the newest
