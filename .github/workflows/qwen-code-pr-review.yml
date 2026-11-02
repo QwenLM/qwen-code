@@ -1748,9 +1748,7 @@ jobs:
           # without its own key would send the default key to another
           # provider — and an unparseable URL routes nowhere, so both shapes
           # degrade to the default cohort, the same direction every canary
-          # misconfiguration takes. configure_qwen_network has already run on
-          # the default endpoint, so the canary host joins NO_PROXY here to
-          # keep the proxy bypass symmetric.
+          # misconfiguration takes.
           REVIEW_BASE_URL_CANARY="${REVIEW_BASE_URL_CANARY:-}"
           REVIEW_BASE_URL_CANARY="${REVIEW_BASE_URL_CANARY#"${REVIEW_BASE_URL_CANARY%%[![:space:]]*}"}"
           REVIEW_BASE_URL_CANARY="${REVIEW_BASE_URL_CANARY%"${REVIEW_BASE_URL_CANARY##*[![:space:]]}"}"
@@ -1769,8 +1767,6 @@ jobs:
               OPENAI_BASE_URL="$REVIEW_BASE_URL_CANARY"
               OPENAI_API_KEY="$REVIEW_API_KEY_CANARY"
               export OPENAI_BASE_URL OPENAI_API_KEY
-              export NO_PROXY="${NO_PROXY:+$NO_PROXY,}${CANARY_HOST}"
-              export no_proxy="${no_proxy:+$no_proxy,}${CANARY_HOST}"
             else
               echo "::warning::canary endpoint unusable (REVIEW_OPENAI_API_KEY_CANARY missing or QWEN_PR_REVIEW_BASE_URL_CANARY unparseable); falling back to the default cohort."
               OPENAI_MODEL="${REVIEW_MODEL_DEFAULT:-}"
