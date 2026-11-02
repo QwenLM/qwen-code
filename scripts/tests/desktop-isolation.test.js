@@ -88,7 +88,7 @@ describe('desktop rpm build-root dependencies', () => {
     expect(filename).toMatch(/^epel-release-10-\d+\.el10_\d+\.noarch\.rpm$/);
     expect(source).toContain(`epel_rpm="$RUNNER_TEMP/${filename}"`);
     expect(source).toMatch(
-      /echo '[0-9a-f]{64}  '"\$epel_rpm" \| sha256sum -c -/,
+      /echo '[0-9a-f]{64} {2}'"\$epel_rpm" \| sha256sum -c -/,
     );
     expect(source).toContain('set -euo pipefail');
     expect(source.indexOf('sha256sum -c -')).toBeGreaterThan(
