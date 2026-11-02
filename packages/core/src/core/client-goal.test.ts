@@ -776,6 +776,27 @@ describe('LlmClient Goal admission', () => {
     expect(runtime.dispatch).not.toHaveBeenCalled();
   });
 
+  it('leaves a host-owned proposal parked when its turn exits with a provider error', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    vi.mocked(config.getGoalProposalHostSupported).mockReturnValue(true);
+    vi.mocked(config.getMaxSessionTurns).mockReturnValue(0);
+    withoutGoal(runtime);
+    const store = pendingGoalProposalStore();
+    useProposals(config, store.take, {
+      getSkipNextSpeakerCheck: vi.fn(() => true),
+    });
+    turnMocks.run.mockImplementationOnce(async function* () {
+      store.set(proposal('host proposal', 'host-failed-key'));
+      yield { type: LlmEventType.Error, value: { error: { status: 500 } } };
+    });
+
+    await drain(userQuery(client, 'set a goal for this', 'host-failed-key'));
+
+    // The host settles it when its turn ends and reports that it did not start.
+    expect(store.get()).toEqual(proposal('host proposal', 'host-failed-key'));
+    expect(runtime.dispatch).not.toHaveBeenCalled();
+  });
+
   it('drops a proposal when cancellation lands during runtime readiness', async () => {
     const { client, config, runtime } = setupGoalClient();
     // No Goal at the boundary, as in production: the only thing standing

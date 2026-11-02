@@ -54,8 +54,12 @@ jobs:
       ${{ github.repository == 'QwenLM/qwen-code' }}
     permissions:
       contents: 'read'
+      actions: 'read'
     outputs:
       release_sha: '${{ steps.source.outputs.release_sha }}'
+      audio_prebuild_key: '${{ steps.audio_key.outputs.cache_key }}'
+      audio_artifact_id: '${{ steps.audio_reuse.outputs.artifact_id }}'
+      audio_run_id: '${{ steps.audio_reuse.outputs.run_id }}'
       release_tag: '${{ steps.version.outputs.RELEASE_TAG }}'
       release_version: '${{ steps.version.outputs.RELEASE_VERSION }}'
       npm_tag: '${{ steps.version.outputs.NPM_TAG }}'
@@ -85,6 +89,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: |-
             /.github/scripts
+            /.github/workflows/audio-capture-prebuilds.yml
             /scripts/assert-release-version.mjs
             /scripts/check-release-tarball-exec-bits.mjs
             /scripts/release-packages.mjs
@@ -145,6 +150,59 @@ jobs:
         run: 'rm -rf -- .release-workflow'
 
       - *checkout_release_workflow_scripts
+
+      - name: 'Fingerprint audio build inputs'
+        id: 'audio_key'
+        continue-on-error: true
+        env:
+          RELEASE_SHA: '${{ steps.source.outputs.release_sha }}'
+        run: |-
+          directory=$(mktemp -d "${RUNNER_TEMP}/audio-reuse.XXXXXX")
+          echo "directory=$directory" >> "$GITHUB_OUTPUT"
+          node .release-workflow/.github/scripts/audio-prebuilds.mjs key "$RELEASE_SHA" .release-workflow >> "$GITHUB_OUTPUT"
+
+      - name: 'Find reusable audio prebuilds'
+        id: 'audio_candidate'
+        continue-on-error: true
+        uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3' # v9.0.0
+        env:
+          AUDIO_KEY: '${{ steps.audio_key.outputs.cache_key }}'
+        with:
+          script: |-
+            const { findAudioArtifact } = await import(process.env.GITHUB_WORKSPACE + '/.release-workflow/.github/scripts/audio-prebuilds.mjs');
+            const artifact = await findAudioArtifact(github, context.repo, process.env.AUDIO_KEY, core.warning);
+            for (const [key, value] of Object.entries(artifact ?? {})) core.setOutput(key, value);
+
+      - name: 'Try reusable audio prebuilds'
+        id: 'audio_download'
+        if: "${{ steps.audio_candidate.outputs.artifact_id != '' }}"
+        continue-on-error: true
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          artifact-ids: '${{ steps.audio_candidate.outputs.artifact_id }}'
+          run-id: '${{ steps.audio_candidate.outputs.run_id }}'
+          github-token: '${{ github.token }}'
+          merge-multiple: true
+          path: '${{ steps.audio_key.outputs.directory }}'
+
+      - name: 'Accept complete audio prebuilds'
+        id: 'audio_reuse'
+        if: "${{ steps.audio_download.outcome == 'success' }}"
+        continue-on-error: true
+        env:
+          AUDIO_DIRECTORY: '${{ steps.audio_key.outputs.directory }}'
+          AUDIO_ARTIFACT_ID: '${{ steps.audio_candidate.outputs.artifact_id }}'
+          AUDIO_RUN_ID: '${{ steps.audio_candidate.outputs.run_id }}'
+        run: |-
+          node .release-workflow/.github/scripts/audio-prebuilds.mjs validate "$AUDIO_DIRECTORY"
+          echo "artifact_id=$AUDIO_ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+          echo "run_id=$AUDIO_RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: 'Remove trial audio download'
+        if: "${{ always() && steps.audio_key.outputs.directory != '' }}"
+        env:
+          AUDIO_DIRECTORY: '${{ steps.audio_key.outputs.directory }}'
+        run: 'rm -rf -- "$AUDIO_DIRECTORY"'
 
       - name: 'Get the version'
         id: 'version'
@@ -518,10 +576,11 @@ jobs:
     name: 'Audio Capture Prebuilds'
     needs: 'prepare'
     if: |-
-      ${{ github.repository == 'QwenLM/qwen-code' }}
+      ${{ github.repository == 'QwenLM/qwen-code' && needs.prepare.outputs.audio_artifact_id == '' }}
     uses: './.github/workflows/audio-capture-prebuilds.yml'
     with:
       ref: '${{ needs.prepare.outputs.release_sha }}'
+      cache_key: '${{ needs.prepare.outputs.audio_prebuild_key }}'
 
   build_release:
     name: 'Build Release Artifacts'
@@ -542,7 +601,10 @@ jobs:
         github.repository == 'QwenLM/qwen-code' &&
         vars.ECS_RELEASE_HOST_RUNNER_ENABLED == 'true' &&
         needs.prepare.result == 'success' &&
-        needs.audio_capture_prebuilds.result == 'success' &&
+        (
+          needs.audio_capture_prebuilds.result == 'success' ||
+          (needs.audio_capture_prebuilds.result == 'skipped' && needs.prepare.outputs.audio_artifact_id != '')
+        ) &&
         (
           github.event.inputs.force_skip_tests == 'true' ||
           (
@@ -591,14 +653,44 @@ jobs:
 
       - *reset_release_workflow_scripts
       - *checkout_release_workflow_scripts
+      - &verify_reused_audio
+        name: 'Verify reusable audio source'
+        if: "${{ needs.prepare.outputs.audio_artifact_id != '' }}"
+        uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3' # v9.0.0
+        env:
+          RELEASE_SHA: '${{ needs.prepare.outputs.release_sha }}'
+          AUDIO_ARTIFACT_ID: '${{ needs.prepare.outputs.audio_artifact_id }}'
+        with:
+          script: |-
+            const { audioPrebuildKey, verifyAudioArtifact } = await import(process.env.GITHUB_WORKSPACE + '/.release-workflow/.github/scripts/audio-prebuilds.mjs');
+            const key = audioPrebuildKey(process.env.GITHUB_WORKSPACE, process.env.RELEASE_SHA, process.env.GITHUB_WORKSPACE + '/.release-workflow');
+            const { data: artifact } = await github.rest.actions.getArtifact({ ...context.repo, artifact_id: Number(process.env.AUDIO_ARTIFACT_ID) });
+            await verifyAudioArtifact(github, context.repo, artifact, key);
+
+      - &download_reused_audio
+        name: 'Download reusable audio prebuilds'
+        if: "${{ needs.prepare.outputs.audio_artifact_id != '' }}"
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          artifact-ids: '${{ needs.prepare.outputs.audio_artifact_id }}'
+          run-id: '${{ needs.prepare.outputs.audio_run_id }}'
+          github-token: '${{ github.token }}'
+          merge-multiple: true
+          path: 'packages/audio-capture/prebuilds'
+
       - &download_fresh_audio
         name: 'Download audio capture prebuilds'
         if: |-
-          ${{ github.repository == 'QwenLM/qwen-code' }}
+          ${{ github.repository == 'QwenLM/qwen-code' && needs.prepare.outputs.audio_artifact_id == '' }}
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
         with:
           name: 'audio-capture-prebuilds'
           path: 'packages/audio-capture/prebuilds'
+
+      - &validate_audio
+        name: 'Validate complete audio prebuilds'
+        if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+        run: 'node .release-workflow/.github/scripts/audio-prebuilds.mjs validate packages/audio-capture/prebuilds'
 
       - *reset_release_workflow_scripts
       - *checkout_release_workflow_scripts
@@ -660,7 +752,8 @@ jobs:
         ) &&
         (
           github.repository != 'QwenLM/qwen-code' ||
-          needs.audio_capture_prebuilds.result == 'success'
+          needs.audio_capture_prebuilds.result == 'success' ||
+          (needs.audio_capture_prebuilds.result == 'skipped' && needs.prepare.outputs.audio_artifact_id != '')
         ) &&
         (
           github.event.inputs.force_skip_tests == 'true' ||
@@ -693,7 +786,9 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          # Read-only fetch; the bot PAT is only exported to the write steps.
+          # Read-only fetch with the job token; the bot PAT is only exported
+          # to the write steps.
+          token: '${{ github.token }}'
           ref: '${{ needs.prepare.outputs.release_sha }}'
           fetch-depth: 0
           persist-credentials: false
@@ -759,7 +854,11 @@ jobs:
 
       - *reset_release_workflow_scripts
       - *checkout_release_workflow_scripts
+      - *verify_reused_audio
+      - *download_reused_audio
       - *download_fresh_audio
+
+      - *validate_audio
 
       - *reset_release_workflow_scripts
       - *checkout_release_workflow_scripts

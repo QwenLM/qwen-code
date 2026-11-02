@@ -558,8 +558,12 @@ describe('Managed runtime publication gates', () => {
       'maven-gpg-plugin',
     ])
       expect(profile).toContain(plugin);
+    const serverPom = fs.readFileSync(
+      path.join(root, 'packages/managed-agent-server/server/pom.xml'),
+      'utf8',
+    );
     expect(
-      pom.match(/<attach>\$\{managed.operator-tools.attach\}<\/attach>/g),
+      serverPom.match(/<attach>\$\{managed.operator-tools.attach\}<\/attach>/g),
     ).toHaveLength(6);
   });
 });
@@ -606,7 +610,13 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
   const repairPatch = 'scripts/patches/managed-runtime-v0.26.3-tests.patch';
 
   function repairFixture() {
-    const fixed = fs.readFileSync(path.join(root, repairedTest), 'utf8');
+    const fixed = fs.readFileSync(
+      path.join(
+        root,
+        repairedTest.replace('/src/test/', '/verification/src/test/'),
+      ),
+      'utf8',
+    );
     const target = path.join(temporary, repairedTest);
     const patch = path.join(
       temporary,
@@ -684,6 +694,133 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
     },
   );
 
+  const steps = workflow.jobs.release.steps;
+  const step = (name) => steps.find((item) => item.name === name);
+  const javadocRepair = step('Repair the 0.26.5 Javadoc');
+  const javadocPaths = [
+    'packages/managed-agent-server/adapters/src/main/java/com/alibaba/qwen/code/runtimebroker/provisioning/ExternalRuntimeProvisioner.java',
+    'packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/event/ManagedEventEnvelopes.java',
+  ];
+
+  function javadocFixture() {
+    const fixed = javadocPaths.map((file) =>
+      fs.readFileSync(path.join(root, file), 'utf8'),
+    );
+    for (const [index, file] of javadocPaths.entries()) {
+      const target = path.join(temporary, file);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, fixed[index]);
+    }
+    const patch = path.join(
+      temporary,
+      '.qwen/managed-release-tools/scripts/patches/managed-runtime-v0.26.5-javadoc.patch',
+    );
+    fs.mkdirSync(path.dirname(patch), { recursive: true });
+    fs.copyFileSync(
+      path.join(root, 'scripts/patches/managed-runtime-v0.26.5-javadoc.patch'),
+      patch,
+    );
+    const git = (...args) => {
+      const result = spawnSync(
+        'git',
+        [
+          '-c',
+          'core.hooksPath=/dev/null',
+          '-c',
+          'commit.gpgsign=false',
+          '-c',
+          'user.name=Release test',
+          '-c',
+          'user.email=release-test@example.invalid',
+          ...args,
+        ],
+        { cwd: temporary, encoding: 'utf8' },
+      );
+      expect(result.status, result.stderr).toBe(0);
+    };
+    git('init', '--quiet');
+    git('apply', '--reverse', patch);
+    fs.writeFileSync(path.join(temporary, 'product.java'), 'original product');
+    git('add', ...javadocPaths, 'product.java');
+    git('commit', '--quiet', '-m', 'Original 0.26.5 documentation fixture');
+    return { fixed, patch };
+  }
+
+  it('repairs only the pinned 0.26.5 Javadoc before the complete build gates', () => {
+    expect(javadocRepair.if).toBe("${{ env.RELEASE_TAG == 'v0.26.5' }}");
+    expect(steps.indexOf(javadocRepair)).toBeLessThan(
+      steps.indexOf(step('Build the matching CLI prerequisites')),
+    );
+    const { fixed, patch } = javadocFixture();
+    const additions = fs
+      .readFileSync(patch, 'utf8')
+      .split('\n')
+      .filter((line) => line.startsWith('+') && !line.startsWith('+++'));
+    expect(additions).toEqual([
+      '+import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;',
+      '+     * decimal form while 1e-6 ≤ |x| &lt; 1e21, exponential outside it.',
+    ]);
+    expect(
+      fs
+        .readFileSync(patch, 'utf8')
+        .split('\n')
+        .filter((line) => line.startsWith('-') && !line.startsWith('---')),
+    ).toEqual([
+      '-     * decimal form while 1e-6 ≤ |x| < 1e21, exponential outside it.',
+    ]);
+    const result = run(javadocRepair.run, {
+      RELEASE_TAG: 'v0.26.5',
+      SOURCE_SHA: 'db0e4e24a0d89b211b2a15f4af2be22adac71dfc',
+      GITHUB_STEP_SUMMARY: path.join(temporary, 'summary'),
+    });
+    expect(result.status, result.stderr).toBe(0);
+    for (const [index, file] of javadocPaths.entries()) {
+      expect(fs.readFileSync(path.join(temporary, file), 'utf8')).toBe(
+        fixed[index],
+      );
+    }
+    expect(fs.readFileSync(path.join(temporary, 'product.java'), 'utf8')).toBe(
+      'original product',
+    );
+    expect(fs.readFileSync(path.join(temporary, 'summary'), 'utf8')).toContain(
+      'original tag unchanged',
+    );
+    expect(JSON.stringify(workflow)).not.toMatch(
+      /-D(?:maven\.javadoc\.skip|doclint=|additionalJOption=)/,
+    );
+  });
+
+  it.each(['wrong source', 'changed patch', 'dirty checkout'])(
+    'refuses the 0.26.5 Javadoc repair with %s before applying it',
+    (failure) => {
+      const { patch } = javadocFixture();
+      if (failure === 'changed patch') {
+        fs.writeFileSync(patch, `${fs.readFileSync(patch, 'utf8')}\n`);
+      }
+      if (failure === 'dirty checkout') {
+        const target = path.join(temporary, javadocPaths[0]);
+        fs.writeFileSync(target, `${fs.readFileSync(target, 'utf8')}\n`);
+      }
+      const before = javadocPaths.map((file) =>
+        fs.readFileSync(path.join(temporary, file), 'utf8'),
+      );
+      const result = run(javadocRepair.run, {
+        RELEASE_TAG: 'v0.26.5',
+        SOURCE_SHA:
+          failure === 'wrong source'
+            ? 'other-sha'
+            : 'db0e4e24a0d89b211b2a15f4af2be22adac71dfc',
+        GITHUB_STEP_SUMMARY: path.join(temporary, 'summary'),
+      });
+      expect(result.status).not.toBe(0);
+      for (const [index, file] of javadocPaths.entries()) {
+        expect(fs.readFileSync(path.join(temporary, file), 'utf8')).toBe(
+          before[index],
+        );
+      }
+    },
+  );
+
   it('requires both credentials before creating a private shared OSS configuration', () => {
     const configure = workflow.jobs.release.steps.find(
       (item) => item.name === 'Configure authenticated OSS access',
@@ -697,7 +834,17 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
       ALIYUN_OSS_ACCESS_KEY_SECRET: '',
       ALIYUN_OSS_ENDPOINT: 'https://example.invalid',
     };
-    expect(run(configure, env).status).not.toBe(0);
+    for (const missing of [
+      'ALIYUN_OSS_ACCESS_KEY_ID',
+      'ALIYUN_OSS_ACCESS_KEY_SECRET',
+    ]) {
+      const result = run(configure, {
+        ...env,
+        ALIYUN_OSS_ACCESS_KEY_SECRET: 'fixture-secret',
+        [missing]: '',
+      });
+      expect(result.status, result.stderr).not.toBe(0);
+    }
     expect(fs.existsSync(path.join(temporary, 'oss-called'))).toBe(false);
     expect(
       run(configure, { ...env, ALIYUN_OSS_ACCESS_KEY_SECRET: 'fixture-secret' })

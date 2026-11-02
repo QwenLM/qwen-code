@@ -16,6 +16,7 @@ import {
 import {
   findLinuxInstallers,
   findRuntimeRoot,
+  verifyAppImageClosure,
   verifyExtractedRuntime,
 } from './smoke-linux-installers.js';
 
@@ -53,6 +54,7 @@ try {
   testZoomHotkeyScript();
   await testBootstrapWorkspaceVisibility();
   testLegacyApplicationIdentity();
+  testWindowsInstallerStopsBundledRuntime();
   testElectronBridgeWorkflow();
   testReleaseMatrixCoversUpdaterPlatforms();
   testLinuxReleaseLegsShareGlibcFloor();
@@ -60,6 +62,10 @@ try {
   testDesktopReleaseHardening();
   testImmutableRuntimePatchelf(path.join(root, 'patchelf'), canSpawnShebang);
   testLinuxInstallerSmokeDiscovery(path.join(root, 'linux-installers'));
+  testAppImageDependencyClosure(
+    path.join(root, 'appimage-closure'),
+    canSpawnShebang,
+  );
   testRuntimeSmokeChecks(path.join(root, 'runtime-smoke'), canSpawnShebang);
   testRuntimeTargetMappings();
   testUpdaterMirrorConfiguration();
@@ -272,6 +278,61 @@ function testLegacyApplicationIdentity() {
     /ExecWait '"\$R0\\Uninstall Qwen Code Desktop\.exe" \/currentuser \/S --updated _\?=\$R0'/,
   );
   assert.match(migrationHook, /\$\{If\} \$R2 != 0\s*\n\s*Abort/);
+}
+
+function testWindowsInstallerStopsBundledRuntime() {
+  const hook = fs.readFileSync(
+    path.join(packageDir, 'src-tauri', 'windows', 'electron-migration.nsh'),
+    'utf8',
+  );
+  const macroBody = (name) => {
+    const match = hook.match(
+      new RegExp(`!macro ${name}\\s([\\s\\S]*?)!macroend`),
+    );
+    assert.ok(match, `${name} must define the installer step`);
+    return match[1];
+  };
+  // An update driven by a build that predates the app-side runtime stop can
+  // only be unlocked by the installer, and the pre-install stage is the only
+  // hook that runs before the copy stage (#15933).
+  assert.match(
+    macroBody('NSIS_HOOK_PREINSTALL'),
+    /!insertmacro StopBundledRuntime/,
+  );
+  assert.ok(
+    hook.indexOf('!macro StopBundledRuntime') <
+      hook.indexOf('!insertmacro StopBundledRuntime'),
+    'StopBundledRuntime must be defined before the hook inserts it',
+  );
+  const stop = macroBody('StopBundledRuntime');
+  assert.match(
+    stop,
+    /StrCpy \$R0 "\$INSTDIR\\runtime\\qwen-code\\node\\node\.exe"/,
+  );
+  // Matching the image path, not the process name, is what keeps a node.exe
+  // the user runs elsewhere alive; a name-only kill has to redden the gate.
+  assert.match(stop, /Get-CimInstance Win32_Process/);
+  assert.match(
+    stop,
+    /\$\$_\.ExecutablePath\.StartsWith\(\$\$root,\[StringComparison\]::OrdinalIgnoreCase\)/,
+  );
+  assert.match(stop, /Stop-Process -Id \$\$_\.ProcessId -Force/);
+  assert.doesNotMatch(stop, /KillProcess|taskkill/i);
+  // Killing is not unlocking: the step has to wait for the image to become
+  // writable instead of running into the copy while a handle lingers.
+  assert.match(
+    stop,
+    /\[IO\.File\]::Open\(\$\$exe,\[IO\.FileMode\]::Open,\[IO\.FileAccess\]::Write,/,
+  );
+  assert.match(stop, /if\(\$\$locked\)\{exit 1\}/);
+  // Only an explicit zero continues. A lock that survives the wait, or
+  // nsExec failing to run PowerShell, must abort before the copy rather than
+  // falling through to the Ignore dialog. The message gives the user an
+  // actionable recovery path; a silent install must not show a dialog.
+  assert.match(
+    stop,
+    /\$\{If\} \$R1 != "0"\s*\n\s*\$\{If\} \$\{Silent\}\s*\n\s*Abort\s*\n\s*\$\{Else\}\s*\n\s*Abort "/,
+  );
 }
 
 function testElectronBridgeWorkflow() {
@@ -787,6 +848,62 @@ function testLinuxInstallerSmokeDiscovery(directory) {
     () => findLinuxInstallers(bundleRoot),
     /Expected one AppImage, found 2/,
   );
+}
+
+function testAppImageDependencyClosure(directory, canSpawnShebang) {
+  if (!canSpawnShebang) {
+    console.log('SKIP AppImage dependency closure: shebang unavailable');
+    return;
+  }
+  const extractedRoot = path.join(directory, 'extracted');
+  const binaryDirectory = path.join(directory, 'bin');
+  const fakeReadelf = path.join(binaryDirectory, 'readelf');
+  fs.mkdirSync(path.join(extractedRoot, 'usr', 'lib'), { recursive: true });
+  fs.mkdirSync(binaryDirectory, { recursive: true });
+  const writeElf = (relative) => {
+    const file = path.join(extractedRoot, relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.rmSync(file, { force: true });
+    fs.writeFileSync(file, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+    return file;
+  };
+  const executable = writeElf('usr/bin/qwen-code-desktop');
+  const bundledLibrary = writeElf('usr/lib/libbundled.so');
+  fs.writeFileSync(path.join(extractedRoot, 'README'), 'not an ELF');
+  fs.writeFileSync(
+    fakeReadelf,
+    [
+      '#!/usr/bin/env sh',
+      'case "$2" in',
+      '  *qwen-code-desktop)',
+      "    printf '  (NEEDED) Shared library: [libbundled.so]\\\\n'",
+      "    printf '  (NEEDED) Shared library: [libc.so.6]\\\\n'",
+      '    ;;',
+      '  *libbundled.so)',
+      "    printf '  (NEEDED) Shared library: [libmystery.so.1]\\\\n'",
+      '    ;;',
+      'esac',
+      '',
+    ].join('\n'),
+  );
+  fs.chmodSync(fakeReadelf, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${binaryDirectory}:${previousPath}`;
+  try {
+    assert.equal(fs.existsSync(executable), true);
+    assert.equal(fs.existsSync(bundledLibrary), true);
+    assert.throws(
+      () => verifyAppImageClosure(extractedRoot),
+      /AppImage dependency closure is incomplete: libmystery\.so\.1/,
+    );
+    fs.writeFileSync(
+      path.join(extractedRoot, 'usr', 'lib', 'libmystery.so.1'),
+      '',
+    );
+    verifyAppImageClosure(extractedRoot);
+  } finally {
+    process.env.PATH = previousPath;
+  }
 }
 
 function testRuntimeSmokeChecks(directory, canSpawnShebang) {

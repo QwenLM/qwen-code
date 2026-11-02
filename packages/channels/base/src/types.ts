@@ -88,6 +88,7 @@ export interface ChannelConfig {
   /**
    * Who may operate a shared session (/approve, /cancel, /clear, /loop, ...).
    * Unset or empty grants no shared-session operator permissions.
+   * An attended request owner may still approve once or deny their own request.
    */
   operators?: string[];
   groupHistoryLimit?: number;
