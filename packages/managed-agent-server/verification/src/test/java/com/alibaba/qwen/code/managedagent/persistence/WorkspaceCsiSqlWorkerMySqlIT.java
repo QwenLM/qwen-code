@@ -434,9 +434,9 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE native_authorization_json IS NOT NULL"
                         + " AND execution_state = 'SETTLED'", Integer.class)).isEqualTo(4);
                 // The receipts of those executions were committed through the private CSI
-                // lane, which records none for projection. The journal still holds the
+                // lane, which records none for projection. The journal commit component still holds the
                 // result store, so the zero below is the capture guard's, not a missing store's.
-                assertThat(journal).extracting("toolResults").isSameAs(toolResults);
+                assertThat(journal).extracting("commits.toolResults").isSameAs(toolResults);
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation"
                         + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION'", Integer.class)).isZero();
                 assertThat(jdbc.queryForObject("SELECT writer_generation FROM ma_session_head", Long.class))

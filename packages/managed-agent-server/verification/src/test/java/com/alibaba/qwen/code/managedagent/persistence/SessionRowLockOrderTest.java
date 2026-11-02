@@ -1977,6 +1977,76 @@ class SessionRowLockOrderTest {
     }
 
     @Test
+    void theAuditResolvesFieldTypesOutsideMethodLocalTypeScopes() {
+        for (String receiver : List.of("rows", "this.rows")) {
+            for (String localType : List.of("record QueuedInput(String value) { }",
+                    "record AgentRows(String value) { }")) {
+                List<String> sources = splitStore(localType + receiver + ".lockSession();"
+                        + " jdbc.update(\"UPDATE ma_turn SET status = 'FAILED'\");",
+                        "jdbc.queryForMap(\"SELECT session_id FROM ma_session FOR UPDATE\");");
+                Audit result = audit(sources);
+                assertThat(result.violations()).isEmpty();
+                assertThat(result.lockers()).containsExactlyInAnyOrder("writer", "write", "lockSession");
+                List<String> generic = new ArrayList<>(sources);
+                generic.set(1, generic.get(1).replace(localType, "")
+                        .replace("void write()", "<AgentRows> void write()"));
+                assertThat(audit(generic).lockers()).isEqualTo(result.lockers());
+                assertThat(audit(generic).violations()).isEmpty();
+            }
+        }
+    }
+
+    @Test
+    void theAuditKeepsFieldLockChecksWithLocalRecords() {
+        String localType = "record QueuedInput(String value) { }";
+        String lock = "jdbc.queryForMap(\"SELECT session_id FROM ma_session FOR UPDATE\");";
+        String turn = "jdbc.update(\"UPDATE ma_turn SET status = 'FAILED'\");";
+        for (String receiver : List.of("rows", "this.rows")) {
+            String call = receiver + ".lockSession();";
+            assertThat(audit(splitStore(localType + turn + call, lock)).violations())
+                    .containsExactlyInAnyOrder("writer", "write");
+            Audit removed = audit(splitStore(localType + call + turn, ""));
+            assertThat(removed.turnRowAccessors()).contains("writer");
+            assertThat(removed.lockers()).doesNotContain("writer");
+            List<String> hidden = new ArrayList<>(splitStore(localType + call + turn, lock));
+            hidden.set(1, hidden.get(1).replace("final AgentRows rows", "final Port rows"));
+            assertThatThrownBy(() -> audit(hidden)).isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("lockSession").hasMessageContaining("write");
+        }
+    }
+
+    @Test
+    void theAuditDoesNotUseOuterFieldTypesInsideClassBodies() {
+        for (String receiver : List.of("rows", "this.rows")) {
+            for (String body : List.of(
+                    "class Local { final DangerRows rows; void run() { " + receiver + ".touch(); } }",
+                    "Runnable action = new Runnable() { final DangerRows rows;"
+                            + " public void run() { " + receiver + ".touch(); } };",
+                    "class Local { void run(DangerRows rows) { rows.touch(); } }",
+                    "Runnable action = new Runnable() { final DangerRows rows;"
+                            + " Object value = " + receiver + ".touch(); public void run() { } };")) {
+                List<String> sources = List.of("""
+                        class SyntheticStore {
+                            final SafeRows rows;
+                            void writer() { %s }
+                        }
+                        """.formatted(body), """
+                        final class SafeRows { Object touch() { return null; } }
+                        """, """
+                        final class DangerRows {
+                            Object touch() {
+                                jdbc.update("UPDATE ma_turn SET status = 'FAILED'");
+                                return null;
+                            }
+                        }
+                        """);
+                assertThatThrownBy(() -> audit(sources)).isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("touch").hasMessageContaining("writer");
+            }
+        }
+    }
+
+    @Test
     void theAuditRejectsAMovedLockAcrossSourceFiles() {
         Audit result = audit(splitStore("jdbc.update(\"UPDATE ma_turn SET status = 'FAILED'\");"
                 + " rows.lockSession();",
@@ -2563,8 +2633,9 @@ class SessionRowLockOrderTest {
         for (String owner = caller.owner(); owner != null;
                 owner = owner.lastIndexOf('.') < 0 ? null : owner.substring(0, owner.lastIndexOf('.'))) {
             for (VariableTree field : fields.getOrDefault(owner, Map.of()).values()) {
+                // Method-local types cannot change the declared type of a field.
                 fieldReceivers.putIfAbsent(field.getName().toString(),
-                        typedReceivers && field.getModifiers().getFlags().contains(Modifier.FINAL)
+                        field.getModifiers().getFlags().contains(Modifier.FINAL)
                                 ? receiverType(field, owner, visibleFinalTypes) : "");
             }
         }
@@ -2814,20 +2885,20 @@ class SessionRowLockOrderTest {
             scan(node.getIdentifier(), null);
             scan(node.getTypeArguments(), null);
             scan(node.getArguments(), null);
-            EventScanner held = new EventScanner(new ArrayList<>(), caller,
-                    methods, constants, importedTypes, finalTypes,
-                    receivers, fieldReceivers, typedReceivers, ambiguous);
+            EventScanner held = classBodyScanner(node.getClassBody(), new ArrayList<>());
+            EventScanner immediate = classBodyScanner(node.getClassBody(), events);
             for (Tree member : node.getClassBody().getMembers()) {
                 if (member instanceof MethodTree method) {
                     if (method.getBody() != null) {
                         held.scan(method.getBody(), null);
                     }
                 } else {
-                    scan(member, null);
+                    immediate.scan(member, null);
                 }
             }
             heldLambdas.add(held.events);
             heldLambdas.addAll(held.heldLambdas);
+            heldLambdas.addAll(immediate.heldLambdas);
             return null;
         }
 
@@ -2838,9 +2909,7 @@ class SessionRowLockOrderTest {
             // declaration — so its bodies must be held aside exactly like
             // an anonymous-class body; folding them inline would score the
             // session lock the body takes where it never runs.
-            EventScanner held = new EventScanner(new ArrayList<>(), caller,
-                    methods, constants, importedTypes, finalTypes,
-                    receivers, fieldReceivers, typedReceivers, ambiguous);
+            EventScanner held = classBodyScanner(node, new ArrayList<>());
             for (Tree member : node.getMembers()) {
                 if (member instanceof MethodTree method
                         && method.getBody() != null
@@ -2851,6 +2920,22 @@ class SessionRowLockOrderTest {
             heldLambdas.add(held.events);
             heldLambdas.addAll(held.heldLambdas);
             return null;
+        }
+
+        private EventScanner classBodyScanner(ClassTree type, List<Event> targetEvents) {
+            // A local or anonymous class changes `this` and can shadow outer fields.
+            Map<String, String> unknown = new HashMap<>(receivers);
+            fieldReceivers.keySet().forEach(name -> unknown.put(name, ""));
+            unknown.replaceAll((name, owner) -> "");
+            for (Tree member : type.getMembers()) {
+                if (member instanceof VariableTree field) {
+                    unknown.put(field.getName().toString(), "");
+                } else if (member instanceof MethodTree method) {
+                    method.getParameters().forEach(parameter -> unknown.put(parameter.getName().toString(), ""));
+                }
+            }
+            return new EventScanner(targetEvents, caller, methods, constants, importedTypes, finalTypes,
+                    unknown, unknown, false, ambiguous);
         }
 
         @Override
