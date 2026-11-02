@@ -23,7 +23,7 @@
 4193 codeql.yml
 9389 comment-attachment-guard.yml
 2090 desktop-packaging-check.yml
-45089 desktop-release.yml
+49858 desktop-release.yml
 2038 docs-page-action.yml
 10005 dsw-swe-verified-release.yml
 40188 e2e.yml

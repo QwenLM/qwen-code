@@ -16,7 +16,9 @@ import {
 import {
   findLinuxInstallers,
   findRuntimeRoot,
+  parseInstallerArgs,
   verifyAppImageClosure,
+  verifyRpmDependencies,
   verifyExtractedRuntime,
 } from './smoke-linux-installers.js';
 
@@ -57,11 +59,13 @@ try {
   testWindowsInstallerStopsBundledRuntime();
   testElectronBridgeWorkflow();
   testReleaseMatrixCoversUpdaterPlatforms();
-  testLinuxReleaseLegsShareGlibcFloor();
+  testLinuxReleaseLegsHaveGlibcContracts();
   testDesktopReleaseSigningWorkflow();
   testDesktopReleaseHardening();
   testImmutableRuntimePatchelf(path.join(root, 'patchelf'), canSpawnShebang);
   testLinuxInstallerSmokeDiscovery(path.join(root, 'linux-installers'));
+  testLinuxInstallerSmokeArguments();
+  testRpmDependencyVerification();
   testAppImageDependencyClosure(
     path.join(root, 'appimage-closure'),
     canSpawnShebang,
@@ -417,36 +421,21 @@ function testReleaseMatrixCoversUpdaterPlatforms() {
   );
 }
 
-function testLinuxReleaseLegsShareGlibcFloor() {
+function testLinuxReleaseLegsHaveGlibcContracts() {
   const workflow = fs.readFileSync(
     path.join(repoRoot, '.github', 'workflows', 'desktop-release.yml'),
     'utf8',
   );
-  // The AppImage and .deb link against the glibc of the runner image that
-  // builds them, and the updater feed publishes whatever the matrix built.
-  // Both Linux legs therefore have to stay on the same Ubuntu generation:
-  // 22.04 gives glibc 2.35, which Ubuntu 22.04 and Debian 12 users can run,
-  // while 24.04 gives 2.39, which they cannot. A runner bump on one leg
-  // (`ubuntu-24.04-arm`, or an `ubuntu-latest` sweep) keeps every other check
-  // here green because the rust target does not change, and the artifact
-  // only refuses to start on the user's machine (#12877). The image floor is
-  // pinned here so that raising it is a deliberate edit of both legs and of
-  // this line, never a side effect of a runner modernisation.
   const linuxImageFloor = 'ubuntu-22.04';
-  // `os:` only names the image when the job runs on it directly. The build
-  // job binds `runs-on` to the matrix field and runs no `container:`, and
-  // both facts are what make the pin below a statement about the glibc the
-  // artifacts link against rather than about a label nothing reads.
   assert.match(
     workflow,
     /^ {4}runs-on: '\$\{\{ matrix\.os \}\}'$/m,
-    'the build job must run directly on the matrix `os:` image',
+    'the build job must run on the matrix `os:` image',
   );
-  assert.doesNotMatch(
+  assert.match(
     workflow,
-    /^ +container:/m,
-    'desktop-release.yml must not build inside a container: the glibc floor ' +
-      'is pinned to the runner image, so a container needs its own witness',
+    /^ {4}container: \$\{\{ matrix\.container \|\| null \}\}[ ]# yamllint disable-line rule:quoted-strings$/m,
+    'the build job must only add a container when the matrix leg names one',
   );
   const legs = [];
   for (const [, name, body] of workflow.matchAll(
@@ -454,7 +443,16 @@ function testLinuxReleaseLegsShareGlibcFloor() {
   )) {
     const field = (key) =>
       body.match(new RegExp(`^ {12}${key}: '([^']*)'[ \\t]*$`, 'm'))?.[1];
-    legs.push({ name, os: field('os'), rustTarget: field('rust_target') });
+    legs.push({
+      name,
+      os: field('os'),
+      container: field('container'),
+      artifactSuffix: field('artifact_suffix'),
+      glibcFloor: field('glibc_floor'),
+      rpm: field('rpm'),
+      epel: field('epel'),
+      rustTarget: field('rust_target'),
+    });
   }
   // The parity check above keys on `rust_target:` lines alone; this walk keys
   // on whole matrix entries, so a shape drift that hides an `os:` from the
@@ -481,13 +479,48 @@ function testLinuxReleaseLegsShareGlibcFloor() {
     'the build matrix must declare both Linux legs',
   );
   for (const leg of linuxLegs) {
-    assert.ok(
-      leg.os === linuxImageFloor || leg.os === `${linuxImageFloor}-arm`,
-      `${leg.name} (${leg.rustTarget}) builds on '${leg.os}', but the Linux ` +
-        `artifacts must link against the glibc of ${linuxImageFloor}; raise ` +
-        'the floor for both Linux legs together, or keep this leg on the ' +
-        'pinned image',
+    assert.ok(leg.artifactSuffix, `${leg.name} must declare artifact_suffix`);
+    assert.match(
+      leg.glibcFloor,
+      /^\d+\.\d+$/,
+      `${leg.name} must declare its glibc floor`,
     );
+    assert.ok(
+      leg.rpm === 'true' || leg.rpm === 'false',
+      `${leg.name} must declare whether it builds rpm`,
+    );
+    assert.ok(
+      leg.epel === 'true' || leg.epel === 'false',
+      `${leg.name} must declare whether it enables EPEL`,
+    );
+    if (leg.rpm === 'true') {
+      assert.match(
+        leg.container,
+        /^(?:docker\.io|quay\.io)\/[^@]+@sha256:[0-9a-f]{64}$/,
+        `${leg.name} must use a digest-pinned container`,
+      );
+      assert.doesNotMatch(
+        leg.container,
+        /^docker:\/\//,
+        `${leg.name} must not use a docker:// container ref`,
+      );
+      assert.equal(
+        leg.epel,
+        leg.artifactSuffix.endsWith('rhel10') ? 'true' : 'false',
+        `${leg.name} must declare EPEL for the target root`,
+      );
+    } else {
+      assert.equal(leg.container, '', `${leg.name} must not use a container`);
+      assert.equal(leg.epel, 'false', `${leg.name} must not enable EPEL`);
+      assert.ok(
+        leg.os === linuxImageFloor || leg.os === `${linuxImageFloor}-arm`,
+        `${leg.name} (${leg.rustTarget}) builds on '${leg.os}', but the Linux ` +
+          `artifacts must link against the glibc of ${linuxImageFloor}; raise ` +
+          'the floor for both Linux legs together, or keep this leg on the ' +
+          'pinned image',
+      );
+      assert.equal(leg.glibcFloor, '2.35');
+    }
   }
 }
 
@@ -651,7 +684,12 @@ function testDesktopReleaseHardening() {
   assert.match(
     workflow,
     /\*\.AppImage\|\*\.AppImage\.sig\|\*\.deb\|\*\.deb\.sig/,
-    'Linux release collection must allow only installers and updater signatures',
+    'Linux release collection must keep allowing AppImage, deb, and signatures',
+  );
+  assert.match(
+    workflow,
+    /\*\.rpm\) name="\$\{name%\.rpm\}-\$\{\{ matrix\.artifact_suffix \}\}\.rpm"/,
+    'rpm artifacts must carry a unique root suffix',
   );
 
   const prepareRuntime = fs.readFileSync(
@@ -665,7 +703,7 @@ function testDesktopReleaseHardening() {
   );
   assert.match(
     workflow,
-    /desktop-node-v2-\$\{\{ matrix\.rust_target \}\}-\$\{\{ env\.NODE_VERSION \}\}-\$\{\{ inputs\.dry_run \}\}/,
+    /desktop-node-v2-\$\{\{ matrix\.artifact_suffix \}\}-\$\{\{ env\.NODE_VERSION \}\}-\$\{\{ inputs\.dry_run \}\}/,
     'release builds must persist the bundled Node.js archive cache',
   );
   assert.match(workflow, /actions\/cache\/restore@/);
@@ -691,8 +729,8 @@ function testDesktopReleaseHardening() {
   );
   assert.match(
     workflow,
-    /^ {12}QWEN_DESKTOP_PATCHELF="\$\(command -v patchelf\)"$/m,
-    'the patchelf wrapper must be given the real patchelf to delegate to',
+    /^ {12}QWEN_DESKTOP_PATCHELF="\$\(command -v patchelf \|\| true\)"$/m,
+    'the rpm path must tolerate a root without patchelf',
   );
   assert.match(
     workflow,
@@ -824,11 +862,19 @@ function testLinuxInstallerSmokeDiscovery(directory) {
   const bundleRoot = path.join(directory, 'bundle');
   const appImage = path.join(bundleRoot, 'appimage', 'Desktop.AppImage');
   const deb = path.join(bundleRoot, 'deb', 'desktop.deb');
+  const rpm = path.join(
+    bundleRoot,
+    'rpm',
+    'Qwen-Code-Desktop-0.1.0-1.x86_64.rpm',
+  );
   fs.mkdirSync(path.dirname(appImage), { recursive: true });
   fs.mkdirSync(path.dirname(deb), { recursive: true });
+  fs.mkdirSync(path.dirname(rpm), { recursive: true });
   fs.writeFileSync(appImage, 'appimage');
   fs.writeFileSync(deb, 'deb');
+  fs.writeFileSync(rpm, 'rpm');
   assert.deepEqual(findLinuxInstallers(bundleRoot), { appImage, deb });
+  assert.deepEqual(findLinuxInstallers(bundleRoot, ['rpm']), { rpm });
 
   const extractedRoot = path.join(directory, 'extracted');
   const runtimeRoot = path.join(
@@ -848,6 +894,112 @@ function testLinuxInstallerSmokeDiscovery(directory) {
     () => findLinuxInstallers(bundleRoot),
     /Expected one AppImage, found 2/,
   );
+}
+
+function testLinuxInstallerSmokeArguments() {
+  assert.deepEqual(parseInstallerArgs(['bundle']), {
+    bundleRoot: 'bundle',
+    required: ['appImage', 'deb'],
+    expectGlibc: '',
+  });
+  assert.deepEqual(
+    parseInstallerArgs([
+      'bundle',
+      '--require',
+      'rpm',
+      '--expect-glibc',
+      '2.43',
+    ]),
+    {
+      bundleRoot: 'bundle',
+      required: ['rpm'],
+      expectGlibc: '2.43',
+    },
+  );
+  for (const [argv, message] of [
+    [['bundle', '--require'], /--require needs/],
+    [['bundle', '--require', 'msi'], /--require accepts/],
+    [['bundle', '--expect-glibc'], /--expect-glibc needs/],
+    [['bundle', '--expect-glibc', 'latest'], /--expect-glibc needs/],
+    [['bundle', '--unknown'], /Unknown installer smoke option/],
+    [['first', 'second'], /Expected one bundle root/],
+    [['bundle', '--require', 'rpm'], /RPM smoke checks require --expect-glibc/],
+    [
+      ['bundle', '--expect-glibc', '2.43'],
+      /--expect-glibc is only valid with --require rpm/,
+    ],
+  ]) {
+    assert.throws(() => parseInstallerArgs(argv), message);
+  }
+}
+
+function testRpmDependencyVerification() {
+  const installer = '/tmp/qwen-code.rpm';
+  const runWith =
+    ({ arch = 'x86_64', requires, files }) =>
+    (command, args) => {
+      assert.equal(command, 'rpm');
+      if (args[0] === '-qpl') return `${files.join('\n')}\n`;
+      if (args[1] === '--qf') return `${arch}\n`;
+      if (args[1] === '--requires') return `${requires.join('\n')}\n`;
+      throw new Error(`Unexpected rpm arguments: ${args.join(' ')}`);
+    };
+  const valid = {
+    requires: [
+      'libwebkit2gtk-4.1.so.0()(64bit)',
+      'glibc >= 2.39',
+      'GLIBC_2.34()(64bit)',
+    ],
+    files: [
+      '/usr/bin/qwen-code-desktop',
+      '/usr/lib/Qwen Code Desktop/runtime/qwen-code/lib/cli-entry.js',
+    ],
+  };
+
+  verifyRpmDependencies(installer, '2.39', runWith(valid));
+  verifyRpmDependencies(installer, '2.43', runWith(valid));
+
+  for (const [overrides, message] of [
+    [{ arch: 'noarch' }, /native architecture/],
+    [
+      {
+        ...valid,
+        requires: ['glibc >= 2.39'],
+      },
+      /must require libwebkit2gtk-4\.1\.so\.0/,
+    ],
+    [
+      {
+        ...valid,
+        requires: valid.requires.filter(
+          (entry) => !entry.startsWith('GLIBC_') && !entry.startsWith('glibc'),
+        ),
+      },
+      /must declare a glibc requirement/,
+    ],
+    [
+      {
+        ...valid,
+        files: [
+          ...valid.files,
+          '/usr/lib/Qwen Code Desktop/libwebkit2gtk-4.1.so.0',
+        ],
+      },
+      /must not carry its own WebKitGTK library/,
+    ],
+    [
+      {
+        ...valid,
+        requires: [...valid.requires, 'glibc >= 2.43'],
+      },
+      /no newer than 2\.39/,
+    ],
+  ]) {
+    assert.throws(
+      () => verifyRpmDependencies(installer, '2.39', runWith(overrides)),
+      message,
+    );
+  }
 }
 
 function testAppImageDependencyClosure(directory, canSpawnShebang) {
