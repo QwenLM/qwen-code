@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ChildProcess } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -306,7 +307,7 @@ describe('ManagedExtensionProcessOwners', () => {
       });
       // The mocked cgroup unit does not actually kill the child, so track it
       // for explicit cleanup.
-      let spawned: { kill: (signal?: string) => void } | undefined;
+      let spawned: ChildProcess | undefined;
       try {
         const started = await owners.start({
           sessionId: 'root',
