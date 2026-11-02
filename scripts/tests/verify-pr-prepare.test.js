@@ -277,6 +277,35 @@ describe('git hardening', () => {
     spawnSync('git', gitStatusArgs(dir), { encoding: 'utf8' });
     expect(existsSync(marker)).toBe(false);
   });
+
+  // --local alone names one file and skips include.path, while the config
+  // parsing `git status` uses follows it: a filter defined in an included
+  // worktree file must be enumerated too, or it runs on the host unopposed.
+  it('empties a clean filter that arrives through include.path', () => {
+    const { dir } = makeRepo();
+    const marker = join(dir, 'filter-fired');
+    writeFileSync(
+      join(dir, 'evil.inc'),
+      `[filter "pwn"]\n\tclean = sh -c 'echo fired > ${marker}'\n`,
+    );
+    execFileSync('git', ['config', '--local', 'include.path', '../evil.inc'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    mkdirSync(join(dir, '.git', 'info'), { recursive: true });
+    writeFileSync(join(dir, '.git', 'info', 'attributes'), '* filter=pwn\n');
+    writeFileSync(join(dir, 'base.txt'), 'changed\n');
+    // Positive control: an ordinary hardened status follows the include and
+    // executes the planted filter on the host.
+    spawnSync('git', [...GIT_HARDENING, '-C', dir, 'status', '--porcelain'], {
+      encoding: 'utf8',
+    });
+    expect(existsSync(marker)).toBe(true);
+    rmSync(marker);
+    expect(localFilterOverrides(dir)).toEqual(['-c', 'filter.pwn.clean=']);
+    spawnSync('git', gitStatusArgs(dir), { encoding: 'utf8' });
+    expect(existsSync(marker)).toBe(false);
+  });
 });
 
 describe('validateContext', () => {
@@ -670,6 +699,16 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     const result = runPrepare(dir, ['42'], gitEnv);
     expect(result.status).toBe(2);
     expect(result.stderr).toContain('--repo <owner>/<repo> is required');
+  });
+
+  // Outside a worktree the filter enumeration fails before any git read;
+  // the refusal must stay the clean exit 3, not an uncaught stack trace.
+  it('refuses a non-git cwd with the worktree message, not a stack trace', () => {
+    const dir = makeTmpDir();
+    const result = runPrepare(dir, ['42', '--repo', REPO], gitEnv);
+    expect(result.status).toBe(3);
+    expect(result.stderr).toContain('not inside a git worktree');
+    expect(result.stderr).not.toContain('Error: could not enumerate');
   });
 });
 

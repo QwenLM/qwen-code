@@ -289,13 +289,17 @@ export const GIT_HARDENING = [
 /**
  * Empty `-c` overrides for every locally defined filter command. The filter
  * name is attacker-chosen, so the override set has to be enumerated from the
- * tree's own config instead of hardcoded.
+ * tree's own config instead of hardcoded. `--includes` is load-bearing:
+ * `--local` alone names one file and skips `include.path`, while the config
+ * parsing `git status` uses follows it — a filter defined in an included
+ * worktree file would otherwise execute on the host unenumerated.
  */
 export function localFilterOverrides(root) {
   const result = run('git', [
     ...(root ? ['-C', root] : []),
     'config',
     '--local',
+    '--includes',
     '--get-regexp',
     '^filter\\..*\\.(clean|smudge|process)$',
   ]);

@@ -130,13 +130,18 @@ export function nestedGitRepos(root, { maxBuffer = 8 * 1024 * 1024 } = {}) {
 }
 
 /**
- * Returns local config entries whose URL embeds a credential. Both
- * `remote.*.url` and `url.*.insteadOf` are read, and any userinfo on an
- * http(s) URL counts — a token used as the username (`https://<pat>@…`) is as
- * readable by PR code as `user:pass@`. `ssh://git@…` stays benign: SSH keys
- * are not in the URL.
+ * Returns local config entries that carry a credential PR code could read
+ * with plain `git config`: fetch and push URLs (`remote.*.url`,
+ * `remote.*.pushurl`), submodule URLs, `url.*.insteadOf` rewrites, and
+ * `http.*.extraheader` values — the shape GitHub Actions itself writes an
+ * `Authorization` header into. The credential-bearing headers are the
+ * RFC 7235 pair, `Authorization` and `Proxy-Authorization`; other header
+ * names stay clean. On an http(s) URL any userinfo counts: a token
+ * used as the username (`https://<pat>@…`) is as readable as `user:pass@`.
+ * The bare conventional username `git@` carries no secret and stays benign,
+ * matching `ssh://git@…` (SSH keys are not in the URL either).
  */
-export function credentialBearingRemotes(
+export function credentialBearingConfig(
   root,
   { maxBuffer = 8 * 1024 * 1024 } = {},
 ) {
@@ -148,7 +153,7 @@ export function credentialBearingRemotes(
       'config',
       '--local',
       '--get-regexp',
-      '^(remote\\..*\\.url|url\\..*\\.insteadof)$',
+      '^(remote\\..*\\.(url|pushurl)|url\\..*\\.insteadof|submodule\\..*\\.url|http\\..*\\.extraheader)$',
     ],
     { encoding: 'utf8', maxBuffer },
   );
@@ -156,10 +161,17 @@ export function credentialBearingRemotes(
   if (result.status === 1) return [];
   if (result.status !== 0) {
     throw new Error(
-      `could not read local remotes: ${(result.stderr || '').trim() || 'git failed'}`,
+      `could not read local git config: ${(result.stderr || '').trim() || 'git failed'}`,
     );
   }
-  const hasUserinfo = (value) => /^https?:\/\/[^/@\s]+@/i.test(value);
+  const hasUserinfo = (value) => {
+    const match = /^https?:\/\/([^/@\s]+)@/i.exec(value);
+    // `git` is the conventional account name, not a secret; any other
+    // username-only userinfo may be a token, so it stays refused.
+    return match !== null && match[1] !== 'git';
+  };
+  const isAuthHeader = (value) =>
+    /^\s*(?:proxy-)?authorization\s*:/i.test(value);
   const hits = [];
   for (const line of result.stdout.split('\n')) {
     if (!line) continue;
@@ -167,7 +179,12 @@ export function credentialBearingRemotes(
     const key = space === -1 ? line : line.slice(0, space);
     const value = space === -1 ? '' : line.slice(space + 1);
     const instead = /^url\.(.*)\.insteadof$/.exec(key);
-    if (hasUserinfo(value) || (instead && hasUserinfo(instead[1]))) {
+    const extraheader = /^http\..*\.extraheader$/.test(key);
+    if (
+      extraheader
+        ? isAuthHeader(value)
+        : hasUserinfo(value) || (instead && hasUserinfo(instead[1]))
+    ) {
       hits.push(key);
     }
   }
@@ -190,10 +207,10 @@ export function scanIgnoredCredentials(
       `nested git repository under ${nested[0]} — scan that clone separately or remove it`,
     );
   }
-  const remotes = credentialBearingRemotes(root, { maxBuffer });
-  if (remotes.length > 0) {
+  const configHits = credentialBearingConfig(root, { maxBuffer });
+  if (configHits.length > 0) {
     throw new Error(
-      `credential-bearing remote URL in ${remotes[0]} — remove the token from .git/config`,
+      `credential-bearing git config in ${configHits[0]} — remove the credential from .git/config`,
     );
   }
   const result = spawnSync('git', gitScanArgs(root), {

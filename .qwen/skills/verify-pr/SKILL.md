@@ -258,7 +258,9 @@ authority to certify the round.
    `<pr-clone>` — including `.git/config`. After a round the clone is
    PR-controlled: re-clone before another round instead of trusting it
    again, and note that prepare's host-side git commands disable
-   `core.fsmonitor`, hooks and credential helpers.
+   `core.fsmonitor`, hooks and credential helpers, and empty every locally
+   defined clean/smudge/process filter — including one arriving through
+   `include.path`, which the enumeration follows.
    Mounting the base commit's `.qwen` over the tree (step 3) keeps the
    round's instructions and project settings out of PR control, as the CI
    lane's base-pin does; the root `AGENTS.md`/`QWEN.md` are not covered and
@@ -364,14 +366,18 @@ authority to certify the round.
    ```
 
    The scan names credential-shaped ignored files (nested ones included, but
-   not public keys) and credential-bearing URLs in `remote.*.url` or
+   not public keys) and credential-bearing git config: URLs in
+   `remote.*.url`, `remote.*.pushurl`, `submodule.*.url` or
    `url.*.insteadOf` (any userinfo on http(s), including a token used as the
-   username). It leaves installed dependencies and build output alone — a
-   vendored git dependency under `node_modules`/`dist` is excluded, not
-   refused — and refuses a nested git repository outright: git does not
-   descend into it, so a credential file inside one would otherwise pass
-   silently. The abort is structural (`|| exit 1`), not a side effect of
-   `set -e`. Exit 4 means this is not a boundary: stop and run nothing else.
+   username — the bare `git@` account name carries no secret and stays
+   benign, like `ssh://git@`), plus `http.*.extraheader` values carrying an
+   `Authorization` or `Proxy-Authorization` header. It leaves installed
+   dependencies and build output alone — a vendored git dependency under
+   `node_modules`/`dist` is excluded, not refused — and refuses a nested
+   git repository outright: git does not descend into it, so a credential
+   file inside one would otherwise pass silently. The abort is structural
+   (`|| exit 1`), not a side effect of `set -e`. Exit 4 means this is not a
+   boundary: stop and run nothing else.
 
 6. **Run the round inside**, installing the CLI into the fresh home because
    the container is not root. Each `docker exec` is a new shell, so the

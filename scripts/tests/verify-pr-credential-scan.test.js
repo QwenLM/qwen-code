@@ -167,11 +167,11 @@ describe('scanIgnoredCredentials', () => {
       { cwd: dir, env: gitEnv },
     );
     expect(() => scanIgnoredCredentials(dir)).toThrow(
-      /credential-bearing remote URL/,
+      /credential-bearing git config/,
     );
     const result = run(dir);
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain('credential-bearing remote URL');
+    expect(result.stderr).toContain('credential-bearing git config');
   });
 
   it('refuses a token used as the URL username and insteadOf credentials', () => {
@@ -187,7 +187,7 @@ describe('scanIgnoredCredentials', () => {
       { cwd: dir, env: gitEnv },
     );
     expect(() => scanIgnoredCredentials(dir)).toThrow(
-      /credential-bearing remote URL/,
+      /credential-bearing git config/,
     );
     const dir2 = makeRepo(['src/app.ts'], []);
     execFileSync(
@@ -201,11 +201,57 @@ describe('scanIgnoredCredentials', () => {
       { cwd: dir2, env: gitEnv },
     );
     expect(() => scanIgnoredCredentials(dir2)).toThrow(
-      /credential-bearing remote URL/,
+      /credential-bearing git config/,
     );
   });
 
-  it('keeps ssh URLs and public keys out of the refusal', () => {
+  // The same credential class as remote.*.url: a push URL is the natural
+  // place for a PAT, and submodule URLs and the Actions-written extraheader
+  // are equally readable from inside the tree with plain `git config`.
+  it('refuses pushurl, submodule URL and Authorization extraheader credentials', () => {
+    const cases = [
+      ['remote.origin.pushurl', 'https://ghp_FAKEPAT@github.com/o/r.git'],
+      ['submodule.lib.url', 'https://x:ghp_FAKEPAT@github.com/o/lib.git'],
+      [
+        'http.https://github.com/.extraheader',
+        'AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46Z2hwX0ZBS0VQQVQ=',
+      ],
+      [
+        'http.https://proxy.internal/.extraheader',
+        'Proxy-Authorization: Bearer ghp_FAKEPAT',
+      ],
+    ];
+    for (const [key, value] of cases) {
+      const dir = makeRepo(['src/app.ts'], []);
+      execFileSync('git', ['config', '--local', key, value], {
+        cwd: dir,
+        env: gitEnv,
+      });
+      expect(() => scanIgnoredCredentials(dir), key).toThrow(
+        /credential-bearing git config/,
+      );
+      const result = run(dir);
+      expect(result.status, key).toBe(1);
+      expect(result.stderr, key).toContain('credential-bearing git config');
+    }
+  });
+
+  it('keeps a non-Authorization extraheader out of the refusal', () => {
+    const dir = makeRepo(['src/app.ts'], []);
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--local',
+        'http.https://github.com/.extraheader',
+        'X-Request-Id: trace-123',
+      ],
+      { cwd: dir, env: gitEnv },
+    );
+    expect(scanIgnoredCredentials(dir)).toEqual([]);
+  });
+
+  it('keeps ssh URLs, the bare git username and public keys out of the refusal', () => {
     const dir = makeRepo(['id_rsa.pub'], ['id_rsa*']);
     execFileSync(
       'git',
@@ -218,6 +264,35 @@ describe('scanIgnoredCredentials', () => {
       { cwd: dir, env: gitEnv },
     );
     expect(scanIgnoredCredentials(dir)).toEqual([]);
+    // The conventional account name carries no secret on http(s) either;
+    // refusing it would disagree with ssh://git@ on the same non-secret.
+    const dir2 = makeRepo(['src/app.ts'], []);
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--local',
+        'remote.origin.url',
+        'https://git@github.com/o/r.git',
+      ],
+      { cwd: dir2, env: gitEnv },
+    );
+    expect(scanIgnoredCredentials(dir2)).toEqual([]);
+    expect(run(dir2).status).toBe(0);
+    // A password after the same username is still a credential.
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--local',
+        'remote.origin.url',
+        'https://git:ghp_FAKEPAT@github.com/o/r.git',
+      ],
+      { cwd: dir2, env: gitEnv },
+    );
+    expect(() => scanIgnoredCredentials(dir2)).toThrow(
+      /credential-bearing git config/,
+    );
   });
 
   it('does not refuse a vendored real git repository under node_modules', () => {

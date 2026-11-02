@@ -741,6 +741,15 @@ describe('local container recipe pins', () => {
     expect(skill).toContain('not public keys');
   });
 
+  it('names the full config-credential coverage and the include-following enumeration', () => {
+    expect(skill).toContain('`remote.*.pushurl`');
+    expect(skill).toContain('`submodule.*.url`');
+    expect(skill).toContain('`http.*.extraheader`');
+    expect(skill).toContain('`Authorization` or `Proxy-Authorization` header');
+    expect(skill).toContain('bare `git@` account name');
+    expect(skill).toMatch(/including one arriving through\s+`include\.path`/);
+  });
+
   it('snapshots the previous report and pins both checker call sites', () => {
     expect(skill).toContain('previous-report.md');
     expect(skill).toContain('issues/<n>/comments');

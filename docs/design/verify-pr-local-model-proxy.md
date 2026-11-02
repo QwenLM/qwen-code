@@ -53,8 +53,10 @@ A host-side relay plus a recipe that names its trust boundaries.
   is a standalone clone at the PR head that the container mounts and that
   prepare is given as its cwd. The clone's `.git` is PR-controlled after a
   round, so it is not reused, and host-side git commands disable fsmonitor,
-  hooks and credential helpers. A linked worktree is rejected by
-  construction because its gitfile points outside the mount.
+  hooks and credential helpers and empty every locally defined
+  clean/smudge/process filter, following `include.path` so a filter defined
+  in an included worktree file is enumerated too. A linked worktree is
+  rejected by construction because its gitfile points outside the mount.
 - The container is named and detached (`sleep infinity` plus `docker exec`)
   and runs with `--user "$(id -u):$(id -g)"` and `HOME=/tmp/qwen-home`, so
   files written into the mounted tree stay maintainer-owned; the CLI installs
@@ -67,10 +69,12 @@ A host-side relay plus a recipe that names its trust boundaries.
   it stays out of shell history. The credential-free attestation is passed to
   the shell that starts the round, after `verify-pr-credential-scan.mjs`
   (trusted copy) rejects credential-shaped ignored files and
-  credential-bearing remote URLs; that scan lists ignored files one by one
-  and leaves `node_modules`/`dist` alone, so a built tree is not refused. The
-  round's engine is the released CLI unless the tree's own build is installed
-  over it.
+  credential-bearing git config — fetch, push and submodule URLs,
+  `url.*.insteadOf` rewrites, and `Authorization`/`Proxy-Authorization`
+  extraheaders; that scan lists ignored files one by one and leaves
+  `node_modules`/`dist` alone, so a built tree is not refused. The round's
+  engine is the released CLI unless the tree's own build is installed over
+  it.
 - The round reads `$QWEN_VERIFY_CONTEXT` from the full snapshot. After the
   round, the checker runs from `<trusted-clone>` with `--context <host copy>`,
   so a writable artifact `context.json` cannot pin its own expected head.
@@ -109,17 +113,24 @@ the real key.
 - Credential scan: a nested ignored `.env`, `.env~`, `backup.env~`, `*.pem`,
   `*.key`, `*.p12`, `id_rsa*`, `credentials*`, `.git-credentials`, `.npmrc`,
   `.netrc` or `gha-creds-*.json` is refused (a `.pub` public key is not), as
-  is any http(s) userinfo in `remote.*.url` or `url.*.insteadOf`, including a
-  token used as the username; installed `node_modules`/`dist` are ignored at
-  any depth, including inside a workspace package, and a vendored git
-  repository under them is excluded rather than refused; enumeration is
-  path-limited so a large ignored dependency tree is never buffered; a nested
-  project git repository is refused because git does not descend into it; a
-  missing `--ignored` mode or a dropped pattern turns its test red.
+  is any http(s) userinfo in `remote.*.url`, `remote.*.pushurl`,
+  `submodule.*.url` or `url.*.insteadOf`, including a token used as the
+  username (the bare `git@` account name carries no secret and stays benign,
+  like `ssh://git@`), and any `http.*.extraheader` value carrying an
+  `Authorization` or `Proxy-Authorization` header (other header names stay
+  clean); installed `node_modules`/`dist` are ignored at any depth,
+  including inside a workspace package, and a vendored git repository under
+  them is excluded rather than refused; enumeration is path-limited so a
+  large ignored dependency tree is never buffered; a nested project git
+  repository is refused because git does not descend into it; a missing
+  `--ignored` mode or a dropped pattern turns its test red.
 - Host git hardening: prepare disables fsmonitor, hooks and credential
-  helpers and empties every locally defined clean/smudge/process filter
-  before reading the PR-controlled tree; a planted-filter fixture proves the
-  override, with a positive control that fires without it.
+  helpers and empties every locally defined clean/smudge/process filter —
+  following `include.path` — before reading the PR-controlled tree;
+  planted-filter fixtures prove the override for a directly defined filter
+  and for one arriving through an included worktree file, each with a
+  positive control that fires without it; a non-git cwd is refused with the
+  worktree message (exit 3), not an uncaught enumeration error.
 - Checker: `--context` overrides the writable artifact copy, refuses an
   unusable snapshot instead of falling back (with a usable writable copy
   seeded), and keeps its existing exit codes.
