@@ -752,6 +752,26 @@ function mergeSettings(
   } else if (merged.tools && typeof merged.tools === 'object') {
     delete merged.tools.executionSandbox;
   }
+  const operatorCatalogRefresh = [systemDefaults, user, system].reduce<
+    boolean | undefined
+  >(
+    (current, scope) =>
+      typeof scope.model?.catalogRefresh === 'boolean'
+        ? scope.model.catalogRefresh
+        : current,
+    undefined,
+  );
+  // Same shape as the executionSandbox restore: a project that replaces the
+  // whole `model` section cannot reset the operator's refresh opt-out.
+  if (operatorCatalogRefresh !== undefined) {
+    const model = merged.model;
+    merged.model = {
+      ...(model && typeof model === 'object' && !Array.isArray(model)
+        ? model
+        : {}),
+      catalogRefresh: operatorCatalogRefresh,
+    } as Settings['model'];
+  }
   return merged;
 }
 

@@ -101,6 +101,19 @@ describe('operator execution sandbox policy', () => {
       ).toEqual(restricted);
     },
   );
+  it.each([null, false, 'replace', [], { name: 'x' }])(
+    'project model=%j cannot re-enable the operator catalog refresh opt-out',
+    (model) => {
+      write(user, { model: { catalogRefresh: false } });
+      write(path.join(workspace, '.qwen', 'settings.json'), { model });
+      expect(
+        loadSettings(workspace, {
+          skipLoadEnvironment: true,
+          workspaceTrusted: true,
+        }).merged.model?.catalogRefresh,
+      ).toBe(false);
+    },
+  );
   it('workspace cannot enable the mode', () => {
     write(path.join(workspace, '.qwen', 'settings.json'), {
       tools: { executionSandbox: writable },

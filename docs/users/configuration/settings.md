@@ -184,9 +184,9 @@ label is shown, including on narrow screens, the parentheses are omitted.
 
 #### privacy
 
-| Setting                          | Type    | Description                            | Default |
-| -------------------------------- | ------- | -------------------------------------- | ------- |
-| `privacy.usageStatisticsEnabled` | boolean | Enable collection of usage statistics. | `true`  |
+| Setting                          | Type    | Description                                                                                                                                                           | Default |
+| -------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `privacy.usageStatisticsEnabled` | boolean | Enable collection of usage statistics. Disabling this also stops the models.dev catalog refresh. Unlike `model.catalogRefresh`, this key is not workspace-restricted. | `true`  |
 
 #### model
 
@@ -1078,6 +1078,12 @@ You can opt out of usage statistics collection at any time by setting the `usage
 Alternatively, set `QWEN_USAGE_STATISTICS_ENABLED=false` (or `0`) in the
 environment. The environment variable takes precedence over the setting.
 Restart Qwen Code after changing either value.
+
+Disabling usage statistics also stops the models.dev catalog refresh. Unlike
+`model.catalogRefresh`, `privacy.usageStatisticsEnabled` is not restricted to
+User, System, and SystemDefaults scopes, so a trusted workspace's
+`.qwen/settings.json` can set it back to `true`; operators who need an opt-out a
+repository cannot override should use `model.catalogRefresh`.
 
 > [!note]
 >
