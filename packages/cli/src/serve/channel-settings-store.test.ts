@@ -125,6 +125,13 @@ describe('WorkspaceChannelSettingsStore', () => {
             exclusiveMinimum: 0,
           },
           {
+            key: 'boundedSeconds',
+            label: 'Bounded seconds',
+            kind: 'number',
+            exclusiveMinimum: 0,
+            maximum: 10,
+          },
+          {
             key: 'mode',
             label: 'Mode',
             kind: 'enum',
@@ -3268,6 +3275,77 @@ describe('WorkspaceChannelSettingsStore', () => {
       } finally {
         resetHomeEnvBootstrapForTesting();
       }
+    });
+  });
+
+  describe('numeric bounds and unchanged stored values', () => {
+    const baseConfig = {
+      type: 'management-validation-test',
+      clientId: 'client-id',
+    };
+
+    it('tolerates re-sending a stored number a newer bound would reject', async () => {
+      // The editor re-sends stored values verbatim on every save. Declaring a
+      // field must not block an unrelated edit to a channel whose stored value
+      // the runtime already tolerates.
+      writeWorkspaceSettings(
+        JSON.stringify({
+          channels: {
+            bounded: {
+              ...baseConfig,
+              clientSecret: '$BOT_TOKEN',
+              backoffSeconds: 0,
+            },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      const next = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, backoffSeconds: 0, retries: 4 } as never,
+        secrets: {},
+      });
+
+      expect(next.channels['bounded']['backoffSeconds']).toBe(0);
+      expect(next.channels['bounded']['retries']).toBe(4);
+    });
+
+    it('still rejects a number the operator changed to an invalid value', async () => {
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, backoffSeconds: 5 } as never,
+        secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+      });
+
+      await expect(
+        store.upsert('bounded', {
+          expectedRevision: store.snapshot().revision,
+          config: { ...baseConfig, backoffSeconds: 0 } as never,
+          secrets: {},
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+    });
+
+    it('enforces a declared maximum', async () => {
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      const revision = store.snapshot().revision;
+
+      await expect(
+        store.upsert('bounded', {
+          expectedRevision: revision,
+          config: { ...baseConfig, boundedSeconds: 11 } as never,
+          secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+
+      const next = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, boundedSeconds: 10 } as never,
+        secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+      });
+      expect(next.channels['bounded']['boundedSeconds']).toBe(10);
     });
   });
 });

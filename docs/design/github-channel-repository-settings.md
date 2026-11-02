@@ -266,11 +266,43 @@ the transcript build-artifact guard rejects that prefix.
    an empty `value`, so the controls map `''` to `'inherit'` at the widget
    boundary and back on change. The draft keeps `''`, which is what makes the
    comparison against the stored reading straightforward.
-7. **Switching a row to "Anyone" keeps its stored speaker list.** The list is
-   inert under an open policy, and deleting it would destroy work the operator
-   may want back when they return to an allowlist. Only the field the operator
+7. **Switching a row to "Anyone" keeps a speaker list that has names in it.**
+   The list is inert under an open policy, and deleting it would destroy work the
+   operator may want back when they return to an allowlist. An **empty** list is
+   the exception: it is released, because leaving it behind would keep denying
+   everyone while the row reads as inheriting. Only the field the operator
    actually changed is written, which is the same rule that makes an untouched
    save a no-op.
+8. **The hint is derived from the save projection, not the draft.** The row calls
+   the same `projectRepositoryGroup(stored, override)` the save path calls and
+   asks whether the result owns an `allowedUsers` array. Reading the hint off
+   `override.senders` alone tells two deliberately preserved shapes the opposite
+   of the truth, and no amount of care keeps two independent derivations in sync
+   across later edits.
+9. **The poll interval gets a real upper bound in the descriptor vocabulary.**
+   `maximum` joins `exclusiveMinimum` on number fields, mirrored in the SDK, the
+   registry's metadata validation, the store, and the editor. Node clamps a
+   timeout above its 32-bit range to 1 ms, so an unbounded interval field lets
+   the form persist a hot loop that burns the API quota. The ceiling is
+   86 400 000 ms, the same one Email already enforces at runtime, and
+   `PollingChannelBase` also falls back past it so a hand-written configuration
+   cannot hot-loop either.
+10. **A newly declared bound forgives an unchanged stored number, and only its
+    range.** The editor re-sends stored values verbatim, so declaring
+    `pollInterval` would otherwise block every unrelated edit to a channel
+    storing `0` — a value `PollingChannelBase` deliberately tolerates by falling
+    back to 60 s. Both the editor and the store skip the range check when the
+    value is a finite number deep-equal to what is stored. The tolerance is
+    deliberately **not** generalized to all kinds: an existing contract test
+    pins that an unchanged stored scalar of the wrong type is still re-validated
+    and rejected, and that is the right rule — a type error should be fixed, a
+    tolerated range should not strand the operator.
+11. **Settings that outlive the policy are named, not deleted.** Per-repository
+    senders and `requireMention` are resolved without consulting `groupPolicy`,
+    so switching the policy away from Allowlist leaves them enforced while the
+    rows disappear. Deleting them would destroy hand-written configuration;
+    instead the editor lists the repositories that still carry settings and says
+    how to edit them.
 
 ## Constraints
 
@@ -310,8 +342,12 @@ the transcript build-artifact guard rejects that prefix.
   removed repository drops its entry, case-retyped repository keeps its
   settings, empty allowlist, invalid repository entry.
 - Component: rows appear per allowlisted repository, typing a repository adds a
-  row, the speaker input appears only for an explicit allowlist, the inherited
-  hint reflects `"*"`, and the poll interval renders in Connection.
+  row, the speaker input appears when the row's **effective** policy is an
+  allowlist — its own or the inherited one — and is hidden when it is `open`,
+  the inherited hint reflects `"*"`, each row shows and edits only its own
+  speakers, the hint's wording follows what the save will own rather than the
+  draft policy, repositories whose settings outlive the policy are named, and
+  the poll interval renders in Connection in both locales.
 - Mutation: each behavioural claim above is pinned by introducing the
   corresponding mutation and confirming exactly the describing cases fail.
 - Build guards: the three vite builds plus `client/build-artifact.test.ts`,
@@ -325,17 +361,24 @@ the transcript build-artifact guard rejects that prefix.
 ## Acceptance criteria
 
 1. A GitHub Channel's poll interval can be set, cleared, and validated from the
-   editor, and an empty input leaves the key absent.
+   editor between 1 and 86400000 ms; an empty input leaves the key absent, and a
+   stored value outside the bounds does not block an unrelated edit.
 2. Each allowlisted repository shows a require-mention control and a speaker
    control whose default is "inherit".
 3. Saving an untouched channel writes exactly the same `groups` object it read.
 4. An explicit override writes a boolean `requireMention` and, for an allowlist,
-   a string array `allowedUsers`; returning a control to "inherit" removes the
-   key again.
+   a string array `allowedUsers`. Returning the **policy** to "inherit" removes
+   the policy key; a speaker list the operator typed survives until the box is
+   cleared too, and an empty list left behind by a policy the operator abandoned
+   is released so inheritance really returns the channel-wide members.
 5. Keys the editor does not model survive a save unchanged.
 6. No chat platform's form changes. Email's poll interval moves to Connection
    alongside GitHub's, because the section map is keyed by field name.
 7. Both locales render the new copy, and the build-artifact guard passes.
+8. The speaker hint describes what the save will own, so a stored allowlist with
+   no list reads as inheriting and a stored empty list reads as nobody.
+9. Repositories whose settings outlive a switch away from the allowlist policy
+   are named in the editor rather than becoming invisible while still enforced.
 
 ## Open questions
 

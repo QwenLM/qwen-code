@@ -60,7 +60,11 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
     if (
       typeof configured === 'number' &&
       Number.isFinite(configured) &&
-      configured > 0
+      configured > 0 &&
+      // Node clamps a timeout above its 32-bit range to 1ms, so an unbounded
+      // interval turns the poll loop into a hot loop that burns the platform's
+      // rate quota. One day matches the ceiling the Email channel enforces.
+      configured <= 86_400_000
     ) {
       return configured;
     }

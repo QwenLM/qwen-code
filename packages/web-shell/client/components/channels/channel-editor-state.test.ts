@@ -1771,7 +1771,14 @@ describe('Per-repository overrides', () => {
 
   it('keeps the settings when the repository is retyped in another case', () => {
     const instance = githubInstance({
-      'QwenLM/Qwen-Code': { requireMention: false },
+      // Unmodelled keys on purpose: with only `requireMention` the draft would
+      // reproduce the entry even if the save path stopped folding the stored
+      // keys, so the case-fold itself would go unwitnessed.
+      'QwenLM/Qwen-Code': {
+        requireMention: false,
+        dispatchMode: 'collect',
+        groupHistoryLimit: 25,
+      },
     });
     const draft = draftFor(instance, 'qwenlm/qwen-code');
 
@@ -1779,7 +1786,13 @@ describe('Per-repository overrides', () => {
       buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
         'groups'
       ],
-    ).toEqual({ 'qwenlm/qwen-code': { requireMention: false } });
+    ).toEqual({
+      'qwenlm/qwen-code': {
+        requireMention: false,
+        dispatchMode: 'collect',
+        groupHistoryLimit: 25,
+      },
+    });
   });
 
   it('drops the entry of a repository removed from the allowlist', () => {
@@ -1804,20 +1817,23 @@ describe('Per-repository overrides', () => {
         clientId: 'id',
         clientSecret: 'secret',
         groupPolicy: 'allowlist',
-        groups: { 'group-a': { requireMention: false } },
+        // Mixed case on purpose: chat group IDs are case-sensitive, so a
+        // lower-cased fixture could not detect the repository case-fold
+        // leaking into other platforms.
+        groups: { 'Group-A': { requireMention: false } },
       },
       secrets: {},
       startsWithServe: false,
       runtime: { state: 'stopped' },
     };
     const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS, instance);
-    draft.allowedGroupIds = 'group-a';
+    draft.allowedGroupIds = 'Group-A';
 
     expect(draft.groupOverrides).toEqual({});
     expect(
       buildChannelUpsertRequest(DINGTALK_WITH_ACCESS, draft, 'rev-2', instance)
         .config['groups'],
-    ).toEqual({ 'group-a': { requireMention: false } });
+    ).toEqual({ 'Group-A': { requireMention: false } });
   });
 
   it('names only the repositories the allowlist can actually admit', () => {
@@ -1839,6 +1855,7 @@ describe('GitHub poll interval', () => {
         label: 'Poll Interval (ms)',
         kind: 'number',
         exclusiveMinimum: 0,
+        maximum: 86_400_000,
         default: '60000',
       },
     ],
@@ -1910,5 +1927,46 @@ describe('GitHub poll interval', () => {
     expect(validateChannelEditorDraft(GITHUB_POLLING, draft, [])).toEqual({
       pollInterval: 'number',
     });
+  });
+
+  it('rejects an interval above the ceiling that would become a hot loop', () => {
+    // Node clamps a timeout above its 32-bit range to 1ms, so "once a month"
+    // would poll in a tight loop and burn the API quota.
+    const { draft } = pollingDraft();
+
+    draft.values.pollInterval = '2592000000';
+    expect(validateChannelEditorDraft(GITHUB_POLLING, draft, [])).toEqual({
+      pollInterval: 'outOfRange',
+    });
+
+    draft.values.pollInterval = '86400000';
+    expect(validateChannelEditorDraft(GITHUB_POLLING, draft, [])).toEqual({});
+  });
+
+  it('does not block an unrelated edit over a stored interval the runtime tolerates', () => {
+    // PollingChannelBase falls back to 60s for a non-positive stored value, so
+    // a channel carrying 0 or -5 works today. Declaring the field must not
+    // strand its operator on a setting they never touched.
+    for (const stored of [0, -5]) {
+      const { draft, instance } = pollingDraft(stored);
+      draft.values.useLocalGh = true;
+
+      expect(
+        validateChannelEditorDraft(GITHUB_POLLING, draft, [], instance),
+      ).toEqual({});
+      expect(
+        buildChannelUpsertRequest(GITHUB_POLLING, draft, 'rev-2', instance)
+          .config['pollInterval'],
+      ).toBe(stored);
+    }
+  });
+
+  it('still rejects an out-of-range interval the operator actually typed', () => {
+    const { draft, instance } = pollingDraft(30000);
+
+    draft.values.pollInterval = '0';
+    expect(
+      validateChannelEditorDraft(GITHUB_POLLING, draft, [], instance),
+    ).toEqual({ pollInterval: 'outOfRange' });
   });
 });

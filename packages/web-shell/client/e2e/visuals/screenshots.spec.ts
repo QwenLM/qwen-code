@@ -1654,31 +1654,39 @@ for (const theme of THEMES) {
       // Anchor the capture to the rows themselves: a regression that drops them
       // must fail here rather than republish a picture of the old form.
       await expect(page.getByText('Per-repository settings')).toBeVisible();
-      await expect(
-        page.getByText('qwenlm/qwen-code', { exact: true }),
-      ).toBeVisible();
-      await expect(
-        page.getByText('acme/widgets', { exact: true }),
-      ).toBeVisible();
       await expect(page.getByLabel('Require a mention')).toHaveCount(2);
       await expect(page.getByLabel('Who may speak')).toHaveCount(2);
-      // The customized repository shows its stored explicit values; the empty
-      // one shows what it inherits from the channel-wide allowlist.
-      await expect(page.getByLabel('Require a mention').first()).toContainText(
+      await expect(page.getByLabel('Allowed speakers')).toHaveCount(2);
+      // Scope every assertion to its own row: counting controls alone would
+      // still pass if the rows were wired to the wrong repository, or if the
+      // speaker boxes all showed the channel-wide list.
+      const customized = page.getByRole('group', { name: 'qwenlm/qwen-code' });
+      const inheriting = page.getByRole('group', { name: 'acme/widgets' });
+      await expect(customized.getByLabel('Require a mention')).toContainText(
         'Answer without a mention',
       );
-      await expect(page.getByLabel('Who may speak').nth(1)).toContainText(
+      await expect(customized.getByLabel('Who may speak')).toContainText(
+        'Allowlist only',
+      );
+      await expect(customized.getByLabel('Allowed speakers')).toHaveValue(
+        'alice, bob',
+      );
+      await expect(inheriting.getByLabel('Require a mention')).toContainText(
+        'Inherit (require a mention)',
+      );
+      await expect(inheriting.getByLabel('Who may speak')).toContainText(
         'Inherit (allowlist only)',
       );
-      await expect(page.getByLabel('Allowed speakers')).toHaveCount(2);
+      await expect(inheriting.getByLabel('Allowed speakers')).toHaveValue('');
       await expect(page.getByLabel('Poll Interval (ms)')).toHaveValue('30000');
 
-      await page
-        .getByText('Per-repository settings', { exact: true })
-        .scrollIntoViewIfNeeded();
-      await expect(
-        page.getByText('Per-repository settings', { exact: true }),
-      ).toBeInViewport({ ratio: 1 });
+      // Put the last row in frame, not just the section title: a capture can
+      // otherwise show the heading with every row below the fold. Only the last
+      // row is required to fit — at this viewport the two rows together are
+      // taller than the dialog body, so demanding both would fail on geometry
+      // rather than on a regression.
+      await inheriting.scrollIntoViewIfNeeded();
+      await expect(inheriting).toBeInViewport({ ratio: 1 });
       await captureScreenshot(page, `github-channel-repositories-${theme}`);
     });
 

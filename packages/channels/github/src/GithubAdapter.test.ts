@@ -4966,7 +4966,7 @@ describe('GithubChannel', () => {
       );
     });
 
-    it.each([0, -1, NaN, Infinity, '60000'])(
+    it.each([0, -1, NaN, Infinity, '60000', 2_592_000_000, 86_400_001])(
       'falls back to 60000 for invalid pollInterval %s',
       (value) => {
         const ch = new TestableGithubChannel(
@@ -4979,12 +4979,39 @@ describe('GithubChannel', () => {
         );
       },
     );
+
+    it('respects the one-day ceiling', () => {
+      // Node clamps a timeout above its 32-bit range to 1ms, so an interval
+      // past the ceiling has to fall back rather than become a hot loop.
+      const ch = new TestableGithubChannel(
+        'test',
+        makeConfig({ pollInterval: 86_400_000 }),
+        makeBridge(),
+      );
+      expect((ch as unknown as { pollInterval: number }).pollInterval).toBe(
+        86_400_000,
+      );
+    });
   });
 
   describe('plugin', () => {
     it('declares chat_thread as defaultSessionScope', async () => {
       const { plugin } = await import('./index.js');
       expect(plugin.defaultSessionScope).toBe('chat_thread');
+    });
+
+    it('declares a bounded poll interval so the form cannot persist a hot loop', async () => {
+      const { plugin } = await import('./index.js');
+      const field = plugin.management?.fields.find(
+        (item) => item.key === 'pollInterval',
+      );
+      // The ceiling matches the one the Email channel enforces at runtime.
+      expect(field).toMatchObject({
+        kind: 'number',
+        exclusiveMinimum: 0,
+        maximum: 86_400_000,
+        default: '60000',
+      });
     });
 
     it('allows explicit local gh authentication without a configured token', async () => {

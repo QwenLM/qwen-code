@@ -363,11 +363,21 @@ export function validateChannelEditorDraft(
       draftValue.trim() !== ''
     ) {
       const parsed = Number(draftValue);
+      // A stored value the runtime already tolerates must not block an
+      // unrelated edit. The editor re-sends it verbatim and the store applies
+      // the same unchanged-value tolerance, so rejecting it here would strand
+      // the operator on a field they never touched.
+      const unchanged =
+        instance !== undefined &&
+        typeof instance.config[field.key] === 'number' &&
+        instance.config[field.key] === parsed;
       if (!Number.isFinite(parsed)) {
         errors[field.key] = 'number';
       } else if (
-        field.exclusiveMinimum !== undefined &&
-        parsed <= field.exclusiveMinimum
+        !unchanged &&
+        ((field.exclusiveMinimum !== undefined &&
+          parsed <= field.exclusiveMinimum) ||
+          (field.maximum !== undefined && parsed > field.maximum))
       ) {
         errors[field.key] = 'outOfRange';
       }

@@ -38,9 +38,10 @@ export const plugin: ChannelPlugin = {
         label: 'Poll Interval (ms)',
         kind: 'number',
         exclusiveMinimum: 0,
+        maximum: 86_400_000,
         default: '60000',
         description:
-          'How often to poll the notifications API. Leave empty for 60000',
+          'How often to poll the notifications API, from 1 to 86400000 (one day). Leave empty for 60000',
       },
       {
         key: 'groupPolicy',

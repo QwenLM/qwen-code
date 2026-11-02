@@ -4465,6 +4465,10 @@ const EN: Messages = {
     'GitHub logins allowed to start tasks in this repository. Empty means nobody.',
   'channels.editor.field.github.repositorySpeakers.inherited':
     'GitHub logins allowed in this repository. Leave empty to keep the channel-wide list.',
+  'channels.editor.field.github.retainedRepositorySettings.title':
+    'Repository settings still apply',
+  'channels.editor.field.github.retainedRepositorySettings.description': (v) =>
+    `These repositories keep their own speaker and mention settings even though the group policy no longer uses an allowlist: ${v?.repositories ?? ''}. Switch the group policy back to Allowlist to edit them.`,
   'channels.editor.field.github.groupPolicy': 'Group Policy',
   'channels.editor.field.github.groupPolicy.description':
     'Must be "Open", "Allowlist", or "Pairing" for notifications to flow',
@@ -4684,7 +4688,9 @@ const EN: Messages = {
     "Remove values that aren't in the allowed list.",
   'channels.editor.validation.number': 'Enter a valid number.',
   'channels.editor.validation.outOfRange': (v) =>
-    `Enter a number greater than ${v?.min ?? 0}.`,
+    v?.max === undefined
+      ? `Enter a number greater than ${v?.min ?? 0}.`
+      : `Enter a number greater than ${v?.min ?? 0} and at most ${v.max}.`,
   'channels.editor.validation.policy': 'Choose an access policy.',
   'channels.editor.saveError': 'Changes were not saved',
   'channels.editor.reloadLatest': 'Reload latest',
@@ -8862,6 +8868,10 @@ const ZH: Messages = {
     '可以在该仓库发起任务的 GitHub 登录名。留空表示没有人。',
   'channels.editor.field.github.repositorySpeakers.inherited':
     '可以在该仓库发言的 GitHub 登录名。留空则沿用渠道级列表。',
+  'channels.editor.field.github.retainedRepositorySettings.title':
+    '按仓库设置仍然生效',
+  'channels.editor.field.github.retainedRepositorySettings.description': (v) =>
+    `虽然群组策略已不再使用允许列表，这些仓库仍保留自己的发言人与 @ 设置：${v?.repositories ?? ''}。把群组策略切回「允许列表」即可编辑它们。`,
   'channels.editor.field.github.groupPolicy': '群组策略',
   'channels.editor.field.github.groupPolicy.description':
     '必须设为 "Open"、"Allowlist" 或 "Pairing" 才能接收通知',
@@ -9071,7 +9081,9 @@ const ZH: Messages = {
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.number': '请输入有效数字。',
   'channels.editor.validation.outOfRange': (v) =>
-    `请输入大于 ${v?.min ?? 0} 的数字。`,
+    v?.max === undefined
+      ? `请输入大于 ${v?.min ?? 0} 的数字。`
+      : `请输入大于 ${v?.min ?? 0} 且不超过 ${v.max} 的数字。`,
   'channels.editor.validation.policy': '请选择准入策略。',
   'channels.editor.saveError': '未能保存更改',
   'channels.editor.reloadLatest': '加载最新配置',

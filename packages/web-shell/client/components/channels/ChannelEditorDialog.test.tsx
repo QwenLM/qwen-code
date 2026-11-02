@@ -1777,6 +1777,7 @@ describe('GitHub per-repository settings', () => {
         label: 'Poll Interval (ms)',
         kind: 'number',
         exclusiveMinimum: 0,
+        maximum: 86_400_000,
         default: '60000',
       },
     ],
@@ -2113,5 +2114,54 @@ describe('GitHub per-repository settings', () => {
 
     expect(inputByLabel('轮询间隔（毫秒）')).not.toBeNull();
     expect(sectionHeadingOfLabel('轮询间隔（毫秒）')).toBe('连接');
+  });
+
+  it('names the repositories whose settings outlive the allowlist policy', async () => {
+    // The runtime resolves per-repository senders without consulting
+    // groupPolicy, so switching the policy away must not make those entries
+    // invisible while they still decide who may drive the agent.
+    const instance = githubInstance({
+      '*': {},
+      'acme/widgets': { senders: 'allowlist', allowedUsers: ['alice'] },
+    });
+    instance.config['groupPolicy'] = 'open';
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, instance });
+
+    expect(rowLabels('Require a mention')).toHaveLength(0);
+    expect(document.body.textContent).toContain(
+      'Repository settings still apply',
+    );
+    expect(document.body.textContent).toContain('acme/widgets');
+  });
+
+  it('says nothing about retained settings when there are none', async () => {
+    const instance = githubInstance({ '*': { senders: 'open' } });
+    instance.config['groupPolicy'] = 'open';
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, instance });
+
+    expect(document.body.textContent).not.toContain(
+      'Repository settings still apply',
+    );
+  });
+
+  it('saves an unrelated edit on a channel whose stored interval the runtime tolerates', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: { type: 'github', groupPolicy: 'open', pollInterval: 0 },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_POLLING, instance, onSave });
+
+    expect(inputByLabel('Poll Interval (ms)')?.value).toBe('0');
+    await save();
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const request = onSave.mock.calls[0][1] as {
+      config: Record<string, unknown>;
+    };
+    expect(request.config['pollInterval']).toBe(0);
   });
 });

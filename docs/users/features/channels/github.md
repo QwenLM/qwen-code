@@ -98,11 +98,18 @@ Filtered notifications are marked read only after all accepted work in the poll 
 
 ### Editing from the Web Shell
 
-Settings → Channels → GitHub exposes the poll interval under **Connection**. When `groupPolicy` is `"allowlist"`, the **Access control** section also shows one row per allowlisted repository, each with a require-mention control and a speaker control.
+Settings → Channels → GitHub exposes the poll interval under **Connection**, from 1 to 86400000 ms (one day). Leave it empty for the 60000 ms default. When `groupPolicy` is `"allowlist"`, the **Access control** section also shows one row per allowlisted repository, each with a require-mention control and a speaker control.
 
-Every row starts at **Inherit**, and the option label names the value it inherits — for example `Inherit (require a mention)`. A row left at Inherit writes no key, so the repository keeps following `groups["*"]` and any later change to `"*"` still reaches it. Choosing an explicit value writes that repository's `groups` entry; choosing Inherit again removes the key.
+Every row starts at **Inherit**, and the option label names the value it inherits — for example `Inherit (require a mention)`. A row left at Inherit writes no key, so the repository keeps following `groups["*"]` and any later change to `"*"` still reaches it.
 
-The speaker list appears whenever the row's effective policy is an allowlist, whether the row set it or inherited it. Under an explicit **Allowlist only**, an empty list means _nobody_. Under an inherited policy, an empty list means _no per-repository list_, so the channel-wide `groups["*"].allowedUsers` applies.
+Choosing an explicit value writes that repository's `groups` entry. Choosing Inherit again removes the **policy** key, but a speaker list you typed stays until you clear the box as well — the box still shows those names, so the repository keeps using them. Clear both to return the repository to the channel-wide list.
+
+The speaker list appears whenever the row's effective policy is an allowlist, whether the row set it or inherited it. What an empty box means depends on what the row owns, and the hint under the box says which case you are in:
+
+- The row owns a list — it is set to **Allowlist only**, or it already stores one. An empty list means _nobody_: the repository admits no one, and it does not fall back to the channel-wide list.
+- The row owns no list — a stored `"senders": "allowlist"` with no `allowedUsers` beside it. An empty box means _inherit_, so the channel-wide `groups["*"].allowedUsers` applies.
+
+Switching the group policy away from `"allowlist"` hides the rows but does not delete these entries, and the runtime keeps enforcing them: per-repository senders and `requireMention` are resolved without consulting `groupPolicy`. The editor names the repositories that still carry settings and tells you to switch back to Allowlist to edit them.
 
 Per-repository settings the editor does not model, such as `dispatchMode` and `groupHistoryLimit`, are preserved when you save.
 

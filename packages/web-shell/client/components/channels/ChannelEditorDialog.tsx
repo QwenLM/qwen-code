@@ -372,9 +372,12 @@ export function ChannelEditorDialog({
       return t('channels.editor.validation.invalidOption');
     if (code === 'number') return t('channels.editor.validation.number');
     if (code === 'outOfRange') {
+      const numberField = field && field.kind === 'number' ? field : undefined;
       return t('channels.editor.validation.outOfRange', {
-        min:
-          field && field.kind === 'number' ? (field.exclusiveMinimum ?? 0) : 0,
+        min: numberField?.exclusiveMinimum ?? 0,
+        ...(numberField?.maximum !== undefined
+          ? { max: numberField.maximum }
+          : {}),
       });
     }
     if (code === 'policy') return t('channels.editor.validation.policy');
@@ -1003,6 +1006,36 @@ export function ChannelEditorDialog({
     );
   };
 
+  const renderRetainedRepositoryOverrides = () => {
+    const groups = instance?.config['groups'];
+    if (!isRecord(groups)) return null;
+    const retained = Object.entries(groups)
+      .filter(
+        ([groupId, group]) =>
+          groupId !== '*' && isRecord(group) && Object.keys(group).length > 0,
+      )
+      .map(([groupId]) => groupId);
+    if (retained.length === 0) return null;
+    // The runtime resolves per-repository senders and requireMention without
+    // consulting groupPolicy, so these entries keep deciding who may drive the
+    // agent after the policy moves off Allowlist. Say so rather than letting
+    // the form imply the channel-wide control is the whole story.
+    return (
+      <Alert>
+        <KeyRoundIcon />
+        <AlertTitle>
+          {t('channels.editor.field.github.retainedRepositorySettings.title')}
+        </AlertTitle>
+        <AlertDescription>
+          {t(
+            'channels.editor.field.github.retainedRepositorySettings.description',
+            { repositories: retained.join(', ') },
+          )}
+        </AlertDescription>
+      </Alert>
+    );
+  };
+
   return (
     <Dialog
       open={open}
@@ -1351,6 +1384,9 @@ export function ChannelEditorDialog({
                   ) : null}
                   {repositoryOnly && effectiveGroupPolicy === 'allowlist'
                     ? renderRepositoryOverrides()
+                    : null}
+                  {repositoryOnly && effectiveGroupPolicy !== 'allowlist'
+                    ? renderRetainedRepositoryOverrides()
                     : null}
                   {showGroupSenders ? (
                     <FieldShell
