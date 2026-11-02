@@ -3311,7 +3311,7 @@ export const ChatEditor = memo(
                 <TooltipTrigger asChild>
                   <button
                     type="button"
-                    className={`${styles.toolBtn} ${styles.planChip}`}
+                    className={`${styles.toolBtn} ${styles.planChip} ${styles.workflowChip}`}
                     data-web-shell-workflow-chip
                     data-workflow-state={workflowControl.status}
                     data-unavailable={workflowChipUnavailable ? '' : undefined}

@@ -1906,7 +1906,7 @@
 }
 
 /* Workflow mode saved on but not currently able to take effect. */
-.planChip[data-unavailable] {
+.workflowChip[data-unavailable] {
   color: var(--warning-color);
 }
 
