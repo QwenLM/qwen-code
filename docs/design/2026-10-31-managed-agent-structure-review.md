@@ -71,7 +71,7 @@ exclusion; zero `TODO`/`FIXME` markers in production code.
 
 | Class                              | Module         | Lines | Notes                                                                                                                                                |
 | ---------------------------------- | -------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ManagedAgentStore`                | persistence    | 7,657 | 300+ methods, 7 public setters                                                                                                                       |
+| `ManagedAgentStore`                | persistence    | 7,657 | 300+ methods; dependencies constructor-injected and final (#16061)                                                                                   |
 | `RuntimeBrokerService`             | runtime-broker | 4,270 | ~150 methods; binding registry, execution reconciler/recovery/cancellation/dispatcher, support/state, cooldown and hold inventory extracted (see P1) |
 | `ManagedSessionStore`              | persistence    | 3,931 |                                                                                                                                                      |
 | `WorkspaceCsiApplicationInventory` | persistence    | 3,319 |                                                                                                                                                      |
@@ -82,8 +82,9 @@ exclusion; zero `TODO`/`FIXME` markers in production code.
 
 `ManagedAgentStore` mixes session admission, turns, events, item/message
 projection, worktrees, MCP management, definition pins, skills, and extension
-projection. Its 7 public `set*`/`configure*` methods are mutable post-
-construction wiring: the bean can be observed before it is fully assembled.
+projection. Its dependencies are now constructor-injected into `final` fields
+(#16061), with `@Nullable` optional collaborators and a `@Lazy` record-store
+cycle, so the bean can no longer be observed half-assembled.
 `RuntimeBrokerService` originally mixed provisioning, binding CAS, leases,
 cancellation, recovery scans, and extension commands in a single class; the
 P1 extraction slices have since delegated the binding registry, execution
@@ -227,24 +228,24 @@ cross-cutting "how the system works today" tour.
   projection, turn/message queries, worktrees, definitions/skills — sharing
   the same `JdbcTemplate` and transaction manager. The module README already
   permits connection-sharing SQL helpers to stay in one package.
-  Replace the 7 public setters with constructor injection; express any real
-  cycle with `ObjectProvider` or `@Lazy` instead of mutable wiring. Split the
-  mirrored test files in the same slices. Setter investigation (2026-10-31):
-  four of the seven setters are Spring `@Autowired(required = false)`
-  optional-dependency injection (`lifecycle`, `definitions`,
-  `sessionWorktrees`, `journalEventTransport`) and three are required plain
-  `@Autowired` injection (`extensionPackages`, `creationSkills`,
-  `worktreeFiles` — its bean is supplied by
-  `ManagedAgentConfiguration.managedWorktreeFiles()`; the direct calls in
-  `VerificationFixtures` are test setup, not production wiring). Converting
-  them to constructor `ObjectProvider` injection is a large change to this
-  central 7,657-line class with ~30 test wiring sites, and its correctness
-  depends on Spring runtime assembly that the manual-setter unit tests do
-  not fully exercise. The dedicated [constructor-wiring design](2026-11-01-managed-agent-store-wiring.md)
+  The constructor-injection prerequisite is done (#16061): the 7 public
+  setters were replaced by a single `@Autowired` constructor holding `final`
+  references, with `@Nullable` optional collaborators and a `@Lazy`
+  record-store cycle, and the mirrored verification fixtures were migrated.
+  Setter investigation (2026-10-31, before the conversion): four of the seven
+  setters were Spring `@Autowired(required = false)` optional-dependency
+  injection (`lifecycle`, `definitions`, `sessionWorktrees`,
+  `journalEventTransport`) and three were required plain `@Autowired`
+  injection (`extensionPackages`, `creationSkills`, `worktreeFiles` — its bean
+  was supplied by `ManagedAgentConfiguration.managedWorktreeFiles()`; the
+  direct calls in `VerificationFixtures` were test setup, not production
+  wiring). The dedicated [constructor-wiring design](2026-11-01-managed-agent-store-wiring.md)
   covers the required/optional dependencies, the additional lazy record-store
   field and its Session-store cycle, final references, direct-fixture migration
-  and real Spring context verification. Its implementation is independent
-  of the Broker workflow extraction; full CI qualification remains required.
+  and real Spring context verification. It is implemented locally with focused
+  verification passed and full CI qualification pending; the conversion touched
+  this central 7,657-line class and ~30 test wiring sites. The remaining work is
+  the physical aggregate split itself, each aggregate its own slice.
 - `RuntimeBrokerService`: extract module-internal collaborators for recovery
   scanning, cancellation, tool holds, and observation cooldown; the service
   becomes a facade. The module already exists, so no cross-module contract
