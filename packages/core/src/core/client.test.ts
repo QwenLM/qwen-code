@@ -14022,6 +14022,58 @@ Other open files:
         );
       });
 
+      it('counts the Mods context and the hook context as delivered each on its own', async () => {
+        installHistoryChat([
+          {
+            role: 'user',
+            parts: [
+              { text: 'earlier prompt' },
+              createUserPromptSubmitContextPart(
+                'mod one\n\nextra hook context',
+                ['mod one', 'extra hook context'],
+              ),
+            ],
+          },
+        ]);
+        promptSubmitBus(extraHookContext());
+        const recordUserMessage = vi.fn();
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordUserMessage,
+          recordCronPrompt: vi.fn(),
+          recordAttributionSnapshot: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+        mockTurnRunFn.mockReturnValue(textTurn('ok'));
+        const tag = (context: string) =>
+          `<qwen:user-prompt-submit-context>\n${context}\n</qwen:user-prompt-submit-context>`;
+
+        // A Mod context that changed is sent; the unchanged hook context is
+        // not sent again beside it.
+        await run([{ text: 'my prompt' }], 'prompt-mod-context-changed', {
+          type: SendMessageType.UserQuery,
+          promptContext: ['mod two'],
+        });
+        expect(
+          recordUserMessage.mock.calls[0]![0].map(
+            (part: { text: string }) => part.text,
+          ),
+        ).toEqual(['my prompt', tag('mod two')]);
+        expect(recordUserMessage.mock.calls[0]![2]).toEqual({
+          displayText: 'my prompt',
+          hookContext: 'mod two',
+        });
+
+        // Both already delivered: nothing is appended.
+        await run([{ text: 'again' }], 'prompt-mod-context-same', {
+          type: SendMessageType.UserQuery,
+          promptContext: ['mod one'],
+        });
+        expect(
+          recordUserMessage.mock.calls[1]![0].map(
+            (part: { text: string }) => part.text,
+          ),
+        ).toEqual(['again']);
+      });
+
       it('still appends an unchanged block to a request with no parts of its own', async () => {
         installHistoryChat([
           {

@@ -699,8 +699,9 @@ These differ from Claude Code:
   into `{drop}`: the Mod hooks have settled by the time it runs.
 - `next(e)` resolves once the hooks beneath have answered, not once the turn
   starts.
-- A context block the conversation already holds word for word, UserPromptSubmit's
-  context included, is not sent again, as for UserPromptSubmit alone.
+- A context the conversation already holds word for word is not sent again.
+  Each Mod context and UserPromptSubmit's context count on their own, so a
+  context that changes every turn does not make the others repeat.
 - `$.prompt.submit` does not exist yet.
 
 ## Elements

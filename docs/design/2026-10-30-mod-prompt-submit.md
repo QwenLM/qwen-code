@@ -63,7 +63,7 @@ A hook that answers a drop after calling `next` fails, as in Claude Code: its `.
 
 ### 4. Rewrite and context
 
-A rewritten text replaces the prompt everywhere the host keeps it: the text sent to the model, the text `@` processing reads, the `turn.start` text, the transcript record and its display text. A stream-json message that also has blocks other than text reaches the model as text with those blocks serialized; the hooks hear only its text blocks, and a rewrite replaces them, with the other blocks after it.
+A rewritten text replaces the prompt everywhere the host keeps it: the text sent to the model, the text `@` processing reads, the `turn.start` text, the transcript record and its display text. A stream-json message that also has blocks other than text reaches the model as text with those blocks serialized; the hooks hear only its text blocks, and a rewrite replaces them, with the other blocks after it, in the model's text and in the transcript alike, as without a rewrite.
 
 The context joins UserPromptSubmit's `additionalContext` in the hidden block core already appends after the prompt, ahead of it, escaped the same way. The client takes it as a new send option, `promptContext`, which only the prompt's own UserQuery spends. The transcript records the block as hook context, so resume hides it and compaction keeps it the way it keeps UserPromptSubmit's.
 
@@ -80,7 +80,7 @@ A prompt longer than half a Mod payload (128 KiB as JSON) reaches no hook, and t
 - **The host raises the event.** Each host already holds the submitted text before it expands or records it. Raising the event there keeps the rewrite ahead of every use of the text without changing core's send.
 - **UserPromptSubmit runs after the Mod hooks, in core.** Claude Code runs both in one admission and lets a settings hook's block beneath turn `next(e)` into `{ drop }`. Here the bottom of the chain does not wait for UserPromptSubmit, which runs later in the send and can take as long as its commands. A Mod that must know whether UserPromptSubmit blocked a prompt can read `turn.start`, which only an admitted prompt raises.
 - **Hosts opt in.** The load request says whether the host raises `prompt.submit`, as it names the sites it draws for `ui.render`, so each step enables only the host it adds.
-- **The context shares the hook context block.** It reaches the model, the transcript and resume the way UserPromptSubmit's context does, so no new record kind is needed. A block the conversation already holds word for word is not sent again, as for UserPromptSubmit.
+- **The context shares the hook context block.** It reaches the model, the transcript and resume the way UserPromptSubmit's context does, so no new record kind is needed. A context the conversation already holds word for word is not sent again, as for UserPromptSubmit. Each Mod context and UserPromptSubmit's count on their own, so a Mod context that changes every turn does not make an unchanged UserPromptSubmit context repeat.
 
 ## Differences from Claude Code
 
@@ -90,7 +90,7 @@ These go into the user guide:
 - Slash commands and prompts the person did not type raise none, so `command` and `isMeta` never appear.
 - `attachments` never appears, and `$.prompt.media` does not exist.
 - A UserPromptSubmit block does not turn `next(e)` into `{ drop }`, and `next(e)` resolves before the turn starts.
-- A context block the conversation already holds word for word is not sent again.
+- A context the conversation already holds word for word is not sent again, each Mod context and UserPromptSubmit's on its own.
 - A prompt longer than 128 KiB as JSON reaches no hook.
 - A headless drop is an error result with exit code 1.
 

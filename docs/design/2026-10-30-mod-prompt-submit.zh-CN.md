@@ -63,7 +63,7 @@ hook 可以把改过的 `text` 和 `context` 传给 `next`；`origin`、`wait`�
 
 ### 4. 改写与上下文
 
-改写后的文本在宿主保存提示的每一处都替换掉原文：发给模型的文本、`@` 处理读取的文本、`turn.start` 的文本、transcript 记录及其显示文本。stream-json 消息若还带有非文本块，这些块会序列化后随文本发给模型；hook 只听到其中的文本块，改写替换的也是文本块，其他块接在改写后的文本之后。
+改写后的文本在宿主保存提示的每一处都替换掉原文：发给模型的文本、`@` 处理读取的文本、`turn.start` 的文本、transcript 记录及其显示文本。stream-json 消息若还带有非文本块，这些块会序列化后随文本发给模型；hook 只听到其中的文本块，改写替换的也是文本块，其他块接在改写后的文本之后；发给模型的文本和 transcript 都是这样，与没有改写时一致。
 
 上下文并入 core 已有的隐藏块，即追加在提示之后、存放 UserPromptSubmit `additionalContext` 的那一块，排在后者之前，转义方式相同。client 通过新的发送选项 `promptContext` 接收它，只有该提示自己的 UserQuery 会用掉它。transcript 把这一块记作 hook 上下文，因此恢复会话时它仍然隐藏，压缩时也和 UserPromptSubmit 的上下文一样保留。
 
@@ -80,7 +80,7 @@ drop 在 UserPromptSubmit 和任何模型请求之前拦下提示，不开始回
 - **由宿主触发事件。** 每个宿主在展开或记录提示之前就已拿到提交的文本。在这里触发，改写就能先于文本的每一次使用，且不必改 core 的发送流程。
 - **UserPromptSubmit 在 Mod hook 之后、在 core 里运行。** Claude Code 把两者放在同一次准入里，下层设置 hook 的拦截会让 `next(e)` 变成 `{ drop }`。这里链底不等 UserPromptSubmit：它在发送流程更靠后的位置运行，耗时取决于它的命令。需要知道 UserPromptSubmit 是否拦下提示的 Mod 可以看 `turn.start`，只有获准的提示才会触发它。
 - **宿主自行声明。** 加载请求说明宿主是否触发 `prompt.submit`，就像它为 `ui.render` 列出绘制的位置一样。每一步只为它新增的宿主开启。
-- **上下文共用 hook 上下文块。** 它到达模型、进入 transcript、在恢复时的处理都和 UserPromptSubmit 的上下文一致，不需要新的记录类型。会话里已有一字不差的同一块时不再发送，与 UserPromptSubmit 相同。
+- **上下文共用 hook 上下文块。** 它到达模型、进入 transcript、在恢复时的处理都和 UserPromptSubmit 的上下文一致，不需要新的记录类型。会话里已有一字不差的同一上下文时不再发送，与 UserPromptSubmit 相同。每条 Mod 上下文和 UserPromptSubmit 的上下文分别判断，所以每轮都变的 Mod 上下文不会让没变的 UserPromptSubmit 上下文重复发送。
 
 ## 与 Claude Code 的差异
 
@@ -90,7 +90,7 @@ drop 在 UserPromptSubmit 和任何模型请求之前拦下提示，不开始回
 - 斜杠命令和不是用户输入的提示不触发它，所以不会出现 `command` 和 `isMeta`。
 - 不会出现 `attachments`，也没有 `$.prompt.media`。
 - UserPromptSubmit 的拦截不会让 `next(e)` 变成 `{ drop }`；`next(e)` 在回合开始之前就返回。
-- 会话里已有一字不差的同一上下文块时不再发送。
+- 会话里已有一字不差的同一上下文时不再发送，每条 Mod 上下文和 UserPromptSubmit 的上下文分别判断。
 - 超过 JSON 128 KiB 的提示不经过任何 hook。
 - headless 的 drop 是错误结果，退出码为 1。
 
