@@ -559,6 +559,19 @@ function mergeGroupOverride(
     } else {
       delete group['allowedUsers'];
     }
+  } else if (
+    override.senders !== initial.senders &&
+    group['senders'] === 'allowlist' &&
+    !Array.isArray(group['allowedUsers'])
+  ) {
+    // Choosing an allowlist owns the list even when the text never moved.
+    // Without the key the runtime's `??` hands the channel-wide list back, so
+    // the row's "empty means nobody" would silently keep the wider audience —
+    // the most restrictive action available would be a no-op. Scoped to a
+    // policy the operator actually changed: a row that already stored the
+    // policy with no list legitimately inherits its members, and writing []
+    // there would narrow a channel nobody edited.
+    group['allowedUsers'] = [];
   }
   return group;
 }

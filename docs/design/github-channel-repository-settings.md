@@ -149,10 +149,25 @@ already writes for repository-only channels.
   reading makes an untouched field untouchable by construction, so the
   round-trip is exact without tracking dirty flags.
 - **An explicit allowlist owns its list.** When the row's own policy is
-  `allowlist`, clearing the text writes `[]` — nobody — rather than deleting the
+  `allowlist`, an empty text box writes `[]` — nobody — rather than deleting the
   key and silently inheriting the channel-wide list. When the row inherits,
   clearing the text deletes the per-repository list so the channel-wide one
   applies again. The two cases are told apart by the merged group's `senders`.
+- **Choosing the policy owns the list too, even if the text never moved.** This
+  is the default state of a freshly added row, so it is the most likely path
+  rather than an edge case: the operator picks "Allowlist only", leaves the box
+  empty, and both readings of `allowedUsers` are `''`. A guard that only fires
+  when the _text_ changed would skip the write, persist `{senders: 'allowlist'}`
+  with no list, and the runtime's `??` would hand the channel-wide list straight
+  back — the most restrictive action available would be a no-op that the UI
+  reports as success. So the empty list is also written when the operator
+  **changed the policy** to `allowlist` and the stored group has no list.
+- **That rule is scoped to a changed policy, deliberately.** A stored
+  `{senders: 'allowlist'}` with no `allowedUsers` is a legitimate hand-written
+  shape meaning "allowlist policy, members inherited from `'*'`". Writing `[]`
+  there would narrow a channel nobody edited — the same class of silent
+  migration the compare-with-initial rule exists to prevent. Both directions
+  are pinned by their own case and their own mutation.
 - **Inheritance is the default.** A repository with no customization writes `{}`
   and keeps inheriting. The editor must never materialize `requireMention: true`
   or `senders: 'open'` into an untouched repository: doing so would freeze

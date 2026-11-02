@@ -1588,6 +1588,49 @@ describe('Per-repository overrides', () => {
     });
   });
 
+  it('writes nobody when a row is switched to an allowlist and the box is left empty', () => {
+    // The operator changed only the policy, never the text. Omitting the key
+    // would hand the channel-wide list back through the runtime's `??`
+    // fallback, so the most restrictive action available would silently keep
+    // the wider audience while the row claims "empty means nobody".
+    const instance = githubInstance({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': {},
+    });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].senders = 'allowlist';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': { senders: 'allowlist', allowedUsers: [] },
+    });
+  });
+
+  it('keeps inheriting the member list when an untouched row already had an allowlist policy', () => {
+    // A stored policy with no list legitimately means "allowlist, members
+    // inherited". Writing [] here would narrow a channel nobody edited, so the
+    // empty-list rule fires only when the operator actually changed the policy.
+    const groups = {
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': { senders: 'allowlist' },
+    };
+    const instance = githubInstance(structuredClone(groups));
+
+    const request = buildChannelUpsertRequest(
+      GITHUB,
+      draftFor(instance),
+      'rev-2',
+      instance,
+    );
+
+    expect(request.config['groups']).toEqual(groups);
+  });
+
   it('drops the per-repository list when an inheriting row is cleared', () => {
     const instance = githubInstance({
       '*': { senders: 'allowlist', allowedUsers: ['op'] },
