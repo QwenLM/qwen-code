@@ -15,10 +15,26 @@ public final class VerificationFixtures {
         return moduleRoot().resolve("../..").normalize();
     }
 
-    public static ManagedAgentStore configure(ManagedAgentStore store) {
-        store.configureWorktreeFiles(
-                new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles());
-        return store;
+    public static ManagedAgentStore managedAgentStore(org.springframework.jdbc.core.JdbcTemplate jdbc,
+            com.fasterxml.jackson.databind.ObjectMapper json, java.time.Clock clock,
+            com.alibaba.qwen.code.managedagent.contracts.event.CommittedEventPublisher publisher,
+            ManagedWorkspaceRegistry workspaces,
+            com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings properties,
+            com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules harnessRules) {
+        return managedAgentStore(jdbc, json, clock, publisher, workspaces, properties, harnessRules, null, null);
+    }
+
+    public static ManagedAgentStore managedAgentStore(org.springframework.jdbc.core.JdbcTemplate jdbc,
+            com.fasterxml.jackson.databind.ObjectMapper json, java.time.Clock clock,
+            com.alibaba.qwen.code.managedagent.contracts.event.CommittedEventPublisher publisher,
+            ManagedWorkspaceRegistry workspaces,
+            com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings properties,
+            com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules harnessRules,
+            ManagedAgentDefinitionStore definitions, WorkspaceLifecycleStore lifecycle) {
+        return new ManagedAgentStore(jdbc, json, clock, publisher, workspaces, properties, harnessRules,
+                new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(),
+                new ManagedSessionSkills(jdbc, json, new com.alibaba.qwen.code.managedagent.model.RequestDigests(), null),
+                null, lifecycle, definitions, null, null, null);
     }
 
     public static ManagedSessionStore configure(ManagedSessionStore store) {

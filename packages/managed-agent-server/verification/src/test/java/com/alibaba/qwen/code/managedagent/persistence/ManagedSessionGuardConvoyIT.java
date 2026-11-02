@@ -263,8 +263,8 @@ class ManagedSessionGuardConvoyIT {
 
             // A Turn submit admits through the same placement row on its
             // per-turn path, so it is bounded and named the same way.
-            var agents = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                    new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+            var agents = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
+                    new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             assertFastGuardFailure(() -> transactions.execute(ignored -> agents.insertTurnCommand(tenant,
                     "turn.submit", "submit-witness", "a".repeat(64), "victim", List.of(), "b".repeat(64))));
         } finally {
