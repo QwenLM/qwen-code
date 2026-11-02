@@ -1,11 +1,15 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.ManagedSessionStoreController;
+import com.alibaba.qwen.code.managedagent.api.TenantContextArgumentResolver;
+import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.harness.SdkHarnessBoundary;
 import com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.SessionModelConfig;
@@ -28,8 +32,10 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.support.DefaultListableBeanFactory;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -42,7 +48,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:session-model-config;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE",
@@ -76,6 +85,10 @@ class ManagedSessionModelConfigTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getSessionStore().setEnabled(true);
         properties.setModelConfigBaseUrls(List.of("https://models.example/v1"));
+        var model = new ManagedAgentProperties.ModelOption();
+        model.setModelId("catalog");
+        model.setLabel("Catalog model");
+        properties.setModelCatalog(List.of(model));
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(
                 new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant, "storage", "/tmp/model-config")));
         beans = new DefaultListableBeanFactory();
@@ -88,7 +101,8 @@ class ManagedSessionModelConfigTest {
                 null, null, null, null, null, null, configs);
         harness = mock(HarnessConnector.class);
         when(harness.supportsModelConfiguration()).thenReturn(true);
-        service = new ManagedAgentService(store, new RequestDigests(), mock(HarnessCoordinator.class), harness, registry,
+        when(harness.supportsModelSelection()).thenReturn(true);
+        service = new ManagedAgentService(store, new RequestDigests(), mock(HarnessCoordinator.class), new SdkHarnessBoundary(harness), registry,
                 new SdkHarnessRules());
     }
 
@@ -135,6 +149,41 @@ class ManagedSessionModelConfigTest {
     }
 
     @Test
+    void checksWorkspaceAccessBeforeEndpointPolicy() {
+        properties.setModelConfigBaseUrls(List.of());
+        assertCode(() -> new TransactionTemplate(manager).execute(status -> service.createWorkspaceSession(
+                tenant, "stranger", "unauthorized", "qwen-code", null, null, null, List.of(),
+                new WorkspaceSelection("ws", "."), null, null, null, null, null, null, config("key"))),
+                "workspace_not_found");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id=?", Integer.class, tenant)).isZero();
+    }
+
+    @Test
+    void configuredSessionsDoNotAdvertiseCatalogSwitching() {
+        String configured = create("configured", config("key"));
+        assertThat(service.getWebShellSession(tenant, "actor", configured).capabilities().modelChange()).isFalse();
+        assertThat(service.queryWebShellSessionModels(tenant, "actor", configured).supported()).isFalse();
+        String ordinary = create("ordinary", null);
+        assertThat(service.getWebShellSession(tenant, "actor", ordinary).capabilities().modelChange()).isTrue();
+        assertThat(service.queryWebShellSessionModels(tenant, "actor", ordinary).supported()).isTrue();
+    }
+
+    @Test
+    void refusesCatalogSelectionTogetherWithACompleteConfigurationAtBothAdmissionLayers() {
+        var config = config("key");
+        assertCode(() -> new TransactionTemplate(manager).execute(status -> service.createWorkspaceSession(
+                tenant, "actor", "service-pair", "qwen-code", null, null, null, List.of(),
+                new WorkspaceSelection("ws", "."), null, null, null, "catalog", null, null, config)),
+                "invalid_model_config");
+        var command = SessionCreationCommand.builder().tenantId(tenant).actorId("actor")
+                .idempotencyKey("store-pair").requestDigest("pair-digest").agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws", ".")).modelId("catalog").modelConfig(config).build();
+        assertCode(() -> new TransactionTemplate(manager).execute(status -> store.insertWorkspaceSessionCommand(command)),
+                "invalid_model_config");
+        assertThat(store.requireSession(tenant, create("config-only", config)).modelConfigDigest()).isEqualTo(config.digest());
+    }
+
+    @Test
     void reencryptsInheritedConfigurationForTheChildIdentity() {
         var config = config("parent-key");
         String parent = create("parent", config);
@@ -149,7 +198,42 @@ class ManagedSessionModelConfigTest {
         assertThat(jdbc.queryForObject("SELECT model_config_ciphertext FROM ma_session WHERE tenant_id=? AND session_id=?",
                 String.class, tenant, child)).isNotEqualTo(parentCiphertext);
         jdbc.update("UPDATE ma_session SET model_config_ciphertext=? WHERE tenant_id=? AND session_id=?", parentCiphertext, tenant, child);
-        assertThatThrownBy(() -> configs.read(tenant, child, config.digest())).isInstanceOf(RuntimeException.class);
+        assertCode(() -> configs.read(tenant, child, config.digest()), "model_config_unavailable");
+    }
+
+    @Test
+    void missingEncryptionKeyIsAConfigurationRefusal() {
+        var config = config("key");
+        String session = create("key-rotation", config);
+        beans.destroySingleton("protector");
+        beans.registerSingleton("protector", new AesGcmSecretProtector("replacement-key", new byte[32]));
+        assertCode(() -> configs.read(tenant, session, config.digest()), "model_config_unavailable");
+    }
+
+    @Test
+    void privateReadValidatesWriterBeforeAuthorization() throws Exception {
+        var authority = mock(ManagedSessionStore.class);
+        var modelConfigs = mock(ManagedSessionModelConfigs.class);
+        var config = config("key");
+        when(modelConfigs.read(tenant, "session", config.digest())).thenReturn(config);
+        var controller = new ManagedSessionStoreController(authority, null, null);
+        ReflectionTestUtils.setField(controller, "modelConfigs", modelConfigs);
+        var mvc = MockMvcBuilders.standaloneSetup(controller)
+                .setCustomArgumentResolvers(new TenantContextArgumentResolver()).build();
+        var body = json.createObjectNode().put("workspaceId", "ws").put("writerGeneration", 1)
+                .put("expectedDigest", config.digest());
+        mvc.perform(post("/internal/managed-session-store/v1/sessions/session/model-config:query")
+                .requestAttr(TenantContextFilter.ATTRIBUTE, new TenantContext(tenant, null))
+                .header(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.WRITER_TOKEN_HEADER, token)
+                .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(body)))
+                .andExpect(status().isBadRequest());
+        verifyNoInteractions(authority, modelConfigs);
+        body.put("writerId", "writer");
+        mvc.perform(post("/internal/managed-session-store/v1/sessions/session/model-config:query")
+                .requestAttr(TenantContextFilter.ATTRIBUTE, new TenantContext(tenant, null))
+                .header(com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.WRITER_TOKEN_HEADER, token)
+                .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(body)))
+                .andExpect(status().isOk());
     }
 
     @Test
@@ -200,6 +284,11 @@ class ManagedSessionModelConfigTest {
         controller.modelConfig(new TenantContext(tenant, null), session, token,
                 new ManagedSessionStoreController.ModelConfigQuery("ws", "writer", 1, config.digest(), null), headers);
         verify(authority).authorizeLifecycle(tenant, session, token,
+                new com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AuthorizeLifecycleRequest(
+                        "ws", "writer", 1, null), lifecycle);
+        controller.modelConfig(new TenantContext(tenant, null), session, token,
+                new ManagedSessionStoreController.ModelConfigQuery("ws", "writer", 1, config.digest(), "legacy-close"), headers);
+        verify(authority, org.mockito.Mockito.times(2)).authorizeLifecycle(tenant, session, token,
                 new com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AuthorizeLifecycleRequest(
                         "ws", "writer", 1, null), lifecycle);
     }

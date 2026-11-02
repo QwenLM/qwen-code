@@ -131,6 +131,6 @@ export function parseHostedModelConfig(
     model: text('model', 512),
     apiKey: text('api_key', 4096),
     baseUrl,
-    samplingParams,
+    ...(config['generation_config'] !== undefined ? { samplingParams } : {}),
   };
 }

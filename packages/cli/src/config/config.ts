@@ -2298,7 +2298,27 @@ export async function loadCliConfig(
           model: modelConfiguration.model,
           apiKey: modelConfiguration.apiKey ?? '',
           baseUrl: modelConfiguration.baseUrl ?? '',
-          generationConfig: { ...modelConfiguration },
+          generationConfig: {
+            ...resolveCliGenerationConfig({
+              argv: {
+                model: modelConfiguration.model,
+                openaiApiKey: modelConfiguration.apiKey ?? '',
+                openaiBaseUrl: modelConfiguration.baseUrl ?? '',
+                openaiLogging: argv.openaiLogging,
+                openaiLoggingDir: argv.openaiLoggingDir,
+              },
+              settings: {
+                model: {
+                  enableOpenAILogging: settings.model?.enableOpenAILogging,
+                  openAILoggingDir: settings.model?.openAILoggingDir,
+                  reasoningEffort: settings.model?.reasoningEffort,
+                },
+              },
+              selectedAuthType: modelConfiguration.authType,
+              env: {},
+            }).generationConfig,
+            ...modelConfiguration,
+          },
           sources: {},
           warnings: [],
         }

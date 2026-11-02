@@ -952,9 +952,11 @@ Configure `qwen.managed-agent.model-config-base-urls` as a YAML list containing
 the exact allowed base URLs; its empty default disables this path. The Session
 Store and `session-model-config/1` Harness capability are required. The standard
 server also needs the Runtime Broker's `SecretProtector` and credential key ring.
-Protocols are `openai`, `openai-responses`, `anthropic` and `gemini`; supported
-generation parameters are `temperature`, `top_p`, `top_k`, `max_tokens`,
-`presence_penalty`, `frequency_penalty` and `seed`. Providers may reject parameters
+Protocols are `openai`, `openai-responses`, `anthropic` and `gemini`; accepted
+generation fields are `temperature`, `top_p`, `top_k`, `max_tokens`,
+`presence_penalty`, `frequency_penalty` and `seed`. The Anthropic adapter forwards
+only `temperature`, `top_p`, `top_k` and `max_tokens`; it ignores `seed` and both
+penalty fields. Other provider support varies, and providers may reject parameters
 they do not support. URL userinfo, query strings, fragments, OAuth and arbitrary
 headers are not supported. Credentials are literal values, without environment
 substitution.

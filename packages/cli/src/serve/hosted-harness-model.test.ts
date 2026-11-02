@@ -510,6 +510,7 @@ describe('Hosted Harness model boundary', () => {
     'legacy-explicit-same',
     'endpoint-drift',
     'provider-pin-drift',
+    'model-id-drift',
   ])(
     'inherits a configured child route with an empty host registry (%s)',
     async (scenario) => {
@@ -621,7 +622,11 @@ describe('Hosted Harness model boundary', () => {
       const child = runHostedHarnessTextTurn({
         ...input,
         modelConfig,
-        modelSelection: { modelId: generation.model, revision: 1 },
+        modelSelection: {
+          modelId:
+            scenario === 'model-id-drift' ? 'other-model' : generation.model,
+          revision: 1,
+        },
         publicChildModelRoute: route,
       });
       if (scenario === 'same' || scenario.startsWith('explicit-')) {

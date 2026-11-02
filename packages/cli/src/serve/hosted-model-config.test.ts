@@ -40,6 +40,30 @@ describe('Hosted Session model configuration', () => {
     },
   );
 
+  it.each([undefined, {}])(
+    'preserves omitted versus explicit generation parameters: %j',
+    (generation) => {
+      const parsed = parseHostedModelConfig(
+        {
+          digest,
+          config: {
+            protocol: config.protocol,
+            model: config.model,
+            base_url: config.base_url,
+            api_key: config.api_key,
+            ...(generation === undefined
+              ? {}
+              : { generation_config: generation }),
+          },
+        },
+        digest,
+      );
+      if (generation === undefined)
+        expect(parsed).not.toHaveProperty('samplingParams');
+      else expect(parsed.samplingParams).toEqual({});
+    },
+  );
+
   it.each([
     { protocol: 'qwen-oauth' },
     { api_key: '' },

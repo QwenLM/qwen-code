@@ -1846,7 +1846,7 @@ describe('loadCliConfig', () => {
     expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
       expect.objectContaining({
         authType: AuthType.USE_ANTHROPIC,
-        generationConfig: modelConfiguration,
+        generationConfig: expect.objectContaining(modelConfiguration),
         modelProvidersConfig: {},
         providerProtocolConfig: {},
         fastModel: undefined,
@@ -1859,6 +1859,57 @@ describe('loadCliConfig', () => {
     expect(settings.modelProviders?.openai?.[0]?.apiKey).toBe('catalog-key');
     expect(process.env['OPENAI_API_KEY']).toBe('ambient-key');
   });
+
+  it.each<[string, Record<string, boolean>, number | undefined]>([
+    ['gpt-4o-mini', { image: true }, 131072],
+    ['unknown-session-model', {}, undefined],
+  ])(
+    'derives capabilities for a Session connection using %s without ambient generation settings',
+    async (model, modalities, contextWindowSize) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const modelConfiguration = {
+        authType: AuthType.USE_OPENAI,
+        model,
+        apiKey: 'session-key',
+        baseUrl: 'https://session.example/v1',
+      };
+      await loadCliConfig(
+        {
+          model: {
+            generationConfig: {
+              modalities: { video: true },
+              contextWindowSize: 7,
+              samplingParams: { temperature: 1.9 },
+            },
+            enableOpenAILogging: true,
+            openAILoggingDir: '/tmp/session-model-audit',
+            reasoningEffort: 'high',
+          },
+        },
+        argv,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+        { modelConfiguration },
+      );
+      const actual =
+        mockConfigConstructorParams.mock.calls.at(-1)?.[0].generationConfig;
+      expect(actual).toMatchObject({
+        ...modelConfiguration,
+        enableOpenAILogging: true,
+        openAILoggingDir: '/tmp/session-model-audit',
+        reasoning: { effort: 'high' },
+      });
+      expect(actual?.modalities).toEqual(modalities);
+      expect(actual?.contextWindowSize).toBe(contextWindowSize);
+      expect(actual?.samplingParams).toBeUndefined();
+    },
+  );
 
   it('passes the effective model API to Config at startup', async () => {
     process.argv = ['node', 'script.js'];

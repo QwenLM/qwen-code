@@ -135,9 +135,15 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
-  it.each(['synthetic-secret-invalid-json', 'x'.repeat(17000)])(
+  it.each([
+    [
+      'synthetic-secret-invalid-json',
+      'Model configuration response is invalid JSON.',
+    ],
+    ['x'.repeat(17000), 'Model configuration response exceeds its byte limit.'],
+  ])(
     'bounds and redacts an invalid private model response',
-    async (body) => {
+    async (body, message) => {
       const server = new FakeManagedSessionStore();
       const stores = createHttpManagedSessionStores({
         baseUrl: 'http://127.0.0.1:8080',
@@ -146,7 +152,7 @@ describe('HTTP Managed Session store', () => {
         writerToken: TOKEN_A,
         fetchFn: async (input, init) =>
           requestUrl(input).endsWith('/model-config:query')
-            ? new Response(body)
+            ? new Response(body, { headers: { 'Cache-Control': 'no-store' } })
             : server.fetch(input, init),
       });
       try {
@@ -155,12 +161,53 @@ describe('HTTP Managed Session store', () => {
           .modelConfig(`sha256:${'a'.repeat(64)}`)
           .catch((error: unknown) => error);
         expect(failure).toBeInstanceOf(Error);
+        expect((failure as Error).message).toContain(message);
         expect(String(failure)).not.toContain(body);
       } finally {
         await stores.stopLocal();
       }
     },
   );
+
+  it('retries and classifies private model response stream failures without exposing transport details', async () => {
+    const server = new FakeManagedSessionStore();
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) =>
+      requestUrl(input).endsWith('/model-config:query')
+        ? new Response(
+            new ReadableStream({
+              pull() {
+                throw new TypeError('synthetic-private-transport-detail');
+              },
+            }),
+            { headers: { 'Cache-Control': 'no-store' } },
+          )
+        : server.fetch(input, init),
+    );
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      const failure = await stores
+        .modelConfig(`sha256:${'a'.repeat(64)}`)
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(ManagedSessionStoreTransportError);
+      expect(String(failure)).not.toContain(
+        'synthetic-private-transport-detail',
+      );
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).endsWith('/model-config:query'),
+        ),
+      ).toHaveLength(3);
+    } finally {
+      await stores.stopLocal();
+    }
+  });
 
   it.each([false, true])(
     'claims user messages with the current writer and initialOnly=%s',

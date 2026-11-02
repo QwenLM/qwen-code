@@ -16,6 +16,10 @@ Public creation accepts optional `model_config`; WebShell creation accepts
 `api_key`, and optional `generation_config`. Supported key-based protocols are
 `openai`, `openai-responses`, `anthropic`, and `gemini`. Generation parameters are
 explicitly validated sampling parameters; they cannot replace connection fields.
+Omitting `generation_config` retains normal request sampling defaults; an explicit
+object supplies wire sampling parameters. The Anthropic adapter ignores `seed`,
+`presence_penalty` and `frequency_penalty`; accepted fields are not a promise of
+support by every provider.
 OAuth, ADC, arbitrary headers, environment-variable expansion and credential
 rotation are outside this change. No browser credential editor is added.
 
@@ -67,6 +71,9 @@ Bypass environment and user provider resolution for this connection, remove
 ambient model registries, auxiliary model selectors and fallbacks, and preserve
 all unrelated operator settings. Do not change process environment or settings
 files. Do not look up the supplied model in the host registry.
+Derive modalities and context capacity from the supplied model name, preserving
+operator logging and reasoning-effort preferences without importing ambient
+connection or generation settings. Unknown models retain text-only defaults.
 
 Apply the same binding to normal Turns, approval continuations, workflow Turns,
 context compression and lifecycle model Hooks. Existing provider-pin checks

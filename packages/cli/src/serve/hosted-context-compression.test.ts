@@ -45,6 +45,7 @@ const config = {
   getFastModel: () => undefined,
   getModelsConfig: () => ({ getCurrentAuthType: () => 'openai' }),
   refreshAuth: vi.fn(),
+  switchModel: vi.fn(),
   getLlmClient: () => ({ getChat: () => chat }),
   getHookSystem: () => undefined,
 };
@@ -198,7 +199,10 @@ describe('Hosted context compression', () => {
       modelConfig: async () => modelConfiguration,
     });
     engine();
-    const request = intent();
+    const request = {
+      ...intent(),
+      modelSelection: { modelId: modelConfiguration.model, revision: 1 },
+    };
     await compression.admit(request);
     await compression.wait();
     expect(compression.status(request.operationId)).toMatchObject({
@@ -207,6 +211,7 @@ describe('Hosted context compression', () => {
     expect(
       vi.mocked(loadCliConfig).mock.calls[0]?.[9]?.modelConfiguration,
     ).toEqual(modelConfiguration);
+    expect(config.switchModel).not.toHaveBeenCalled();
   });
 
   it('durably compresses without a user Turn and replays the exact operation', async () => {

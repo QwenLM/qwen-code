@@ -168,7 +168,6 @@ final class AgentSessionAdmissions {
             return replayWorkspaceCommand(tenantId, actorId,
                     requestDigest, existing.getFirst(), false);
         }
-        requireModelConfiguration(modelConfig);
         if (modelConfig != null && modelId != null) {
             throw new ManagedAgentException(400, "invalid_model_config", "Choose either a model ID or a complete configuration.");
         }
@@ -192,6 +191,7 @@ final class AgentSessionAdmissions {
         requireCreationScope(tenantId, idempotencyKey, true);
         ResolvedBinding workspace = workspaces.resolveForCreation(
                 tenantId, actorId, selection);
+        requireModelConfiguration(modelConfig);
         if (extensionPins != null) {
             if (extensionPackages == null) {
                 throw AgentSessionPolicies.workspaceExecutionUnavailable();

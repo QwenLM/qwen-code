@@ -6059,7 +6059,8 @@ export function registerHostedHarnessSessionRoutes(
                     await stores.modelConfig(modelConfigDigest, kind),
                     modelConfigDigest,
                   );
-                } catch {
+                } catch (cause) {
+                  if (namedStoreFailure(cause)) throw cause;
                   throw new HostedModelUnavailableError();
                 }
               },

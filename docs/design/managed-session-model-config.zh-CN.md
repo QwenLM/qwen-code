@@ -14,6 +14,9 @@ ID，公共创建 API 没有模型选择字段。业务应用无法在不修改 
 相同对象：`protocol`、`model`、`base_url`、`api_key` 和可选的
 `generation_config`。支持基于 API Key 的 `openai`、`openai-responses`、
 `anthropic` 和 `gemini` 协议。生成参数使用明确校验的采样参数，不能覆盖连接字段。
+省略 `generation_config` 时保留正常请求的采样默认值；显式对象用于下发 wire 采样参数。
+Anthropic 适配器忽略 `seed`、`presence_penalty` 和 `frequency_penalty`；
+接受字段不代表每个服务商都支持这些参数。
 OAuth、ADC、任意请求头、环境变量展开和凭据轮换不在本次范围内。不新增浏览器凭据编辑器。
 
 完整连接在 Session 内不可变。不能同时提交显式 `modelId` 和完整配置。已有 Session
@@ -51,6 +54,8 @@ Session 仅保存密文、密钥 ID 和配置摘要。API 响应、公共事件�
 Config。该连接跳过环境变量和用户 provider 解析，清除宿主模型注册表、辅助模型选择和
 回退配置，保留其他运维设置。不修改进程环境或 settings 文件，不在宿主注册表中查找
 下发的模型。
+从下发的模型名称推导输入模态和上下文容量，保留运维的日志与推理强度偏好，但不引入
+宿主连接或生成设置。未知模型保留仅文本的默认能力。
 
 普通 Turn、审批继续执行、workflow Turn、上下文压缩和生命周期模型 Hook 使用同一绑定。
 已有 provider pin 校验继续保护恢复请求和子会话执行。子会话请求其他路由时，不能借用

@@ -928,7 +928,17 @@ class ManagedSessionStoreHttpClient {
         let length = 0;
         try {
           while (true) {
-            const item = await reader.read();
+            let item: ReadableStreamReadResult<Uint8Array>;
+            try {
+              item = await reader.read();
+            } catch (error) {
+              if (error instanceof TypeError || error instanceof DOMException) {
+                throw new ManagedSessionStoreTransportError(
+                  'Managed Session Store model configuration response failed.',
+                );
+              }
+              throw error;
+            }
             if (item.done) break;
             length += item.value.byteLength;
             if (length > 16 * 1024) {

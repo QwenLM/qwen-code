@@ -71,15 +71,15 @@ public class ManagedSessionModelConfigs {
                     if (protector == null) {
                         throw unavailable();
                     }
-                    byte[] bytes = protector.unprotect(context(tenant, session),
-                            new ProtectedSecret(row.getString(2), row.getString(3)));
                     try {
+                        byte[] bytes = protector.unprotect(context(tenant, session),
+                                new ProtectedSecret(row.getString(2), row.getString(3)));
                         SessionModelConfig config = SessionModelConfig.parse(json.readTree(bytes));
                         if (config == null || !expectedDigest.equals(config.digest())) {
                             throw unavailable();
                         }
                         return config;
-                    } catch (java.io.IOException error) {
+                    } catch (java.io.IOException | RuntimeException error) {
                         throw unavailable();
                     }
                 }, tenant, session);

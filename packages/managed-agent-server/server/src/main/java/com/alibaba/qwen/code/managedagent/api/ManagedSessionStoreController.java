@@ -23,6 +23,10 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonUnwrapped;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -57,13 +61,17 @@ public class ManagedSessionStoreController {
 
     public record QueueClaim(String workspaceId, String writerId, long writerGeneration, String promptId, boolean initialOnly) { }
 
-    public record ModelConfigQuery(String workspaceId, String writerId, long writerGeneration, String expectedDigest, String kind) { }
+    public record ModelConfigQuery(
+            @NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 512) String writerId,
+            @Min(1) @Max(ManagedSessionStoreModels.MAX_SAFE_COUNTER) long writerGeneration,
+            String expectedDigest, String kind) { }
 
     @PostMapping("/model-config:query")
     @org.springframework.transaction.annotation.Transactional
     public ResponseEntity<Object> modelConfig(TenantContext tenant, @PathVariable String sessionId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
-            @RequestBody ModelConfigQuery request, @RequestHeader HttpHeaders headers) {
+            @Valid @RequestBody ModelConfigQuery request, @RequestHeader HttpHeaders headers) {
         var authority = lifecycleAuthority(headers);
         if (request.kind() != null && !"legacy-close".equals(request.kind())) {
             throw new ManagedAgentException(400, "invalid_model_config_query", "Invalid model configuration query.");
