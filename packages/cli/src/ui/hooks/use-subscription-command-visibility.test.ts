@@ -27,7 +27,7 @@ it.each([
   AuthType.USE_VERTEX_AI,
   AuthType.QWEN_OAUTH,
 ])(
-  'hides subscription entries for %s while retaining manual dispatch',
+  'removes subscription entries for %s from presentation and manual dispatch',
   (authType) => {
     const config = {
       getAuthType: () => authType,
@@ -37,12 +37,11 @@ it.each([
       useSubscriptionCommandVisibility(commands, config),
     );
 
-    expect(result.current.every((command) => command.hidden)).toBe(true);
+    expect(result.current).toEqual([]);
     for (const command of commands) {
       expect(
-        parseSlashCommand(`/${command.name}`, result.current).commandToExecute
-          ?.action,
-      ).toBe(command.action);
+        parseSlashCommand(`/${command.name}`, result.current).commandToExecute,
+      ).toBeUndefined();
       expect(command.hidden).toBeUndefined();
     }
   },
@@ -68,7 +67,7 @@ it('updates on connection changes even when the model ID stays the same and unsu
     authType = AuthType.USE_OPENAI;
     notify('same-model');
   });
-  expect(result.current.every((command) => command.hidden)).toBe(true);
+  expect(result.current).toEqual([]);
 
   act(() => {
     authType = AuthType.QWEN_SUBSCRIPTION;
@@ -99,4 +98,9 @@ it('preserves custom commands with the same names and unrelated hidden commands'
   expect(result.current[0]?.hidden).toBeUndefined();
   expect(result.current[1]?.hidden).toBeUndefined();
   expect(result.current[2]?.hidden).toBe(true);
+  for (const command of customCommands) {
+    expect(
+      parseSlashCommand(`/${command.name}`, result.current).commandToExecute,
+    ).toBe(command);
+  }
 });

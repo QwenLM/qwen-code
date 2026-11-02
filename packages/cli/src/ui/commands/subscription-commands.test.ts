@@ -8,6 +8,7 @@ import { createMockCommandContext } from '../../test-utils/mockCommandContext.js
 import { logoutCommand, upgradeCommand } from './subscription-commands.js';
 import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import type { AvailableModel } from '@qwen-code/qwen-code-core/models/types.js';
 import { setLanguageAsync } from '../../i18n/index.js';
 
 const mocks = vi.hoisted(() => ({ browser: vi.fn(), signOut: vi.fn() }));
@@ -30,9 +31,20 @@ function memberContext() {
       config: {
         getAuthType: () => 'qwen-subscription',
         clearAuth: vi.fn(),
+        getAllConfiguredModels: vi.fn(() => []),
+        switchModel: vi.fn().mockResolvedValue(undefined),
+        getContentGeneratorConfig: vi.fn(() => undefined),
         isBrowserLaunchSuppressed: () => false,
       },
       settings: {
+        isTrusted: true,
+        merged: {},
+        user: { settings: {} },
+        workspace: {
+          settings: {
+            security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
+          },
+        },
         forScope: vi.fn(() => ({
           settings: {
             security: { auth: { selectedType: 'qwen-subscription' } },
@@ -45,13 +57,10 @@ function memberContext() {
   });
 }
 
-it('signs out and resets the session before opening the authentication picker', async () => {
+it('silently returns to the initial state when no other providers exist', async () => {
   const context = memberContext();
   expect(logoutCommand.canCancel).toBe(false);
-  expect(await logoutCommand.action!(context, '')).toEqual({
-    type: 'dialog',
-    dialog: 'auth',
-  });
+  expect(await logoutCommand.action!(context, '')).toBeUndefined();
   expect(mocks.signOut).toHaveBeenCalledOnce();
   expect(context.services.config?.clearAuth).toHaveBeenCalledOnce();
   expect(context.services.settings.setValue).toHaveBeenCalledWith(
@@ -61,13 +70,140 @@ it('signs out and resets the session before opening the authentication picker', 
     undefined,
     { throwOnWriteFailure: true },
   );
-  expect(context.ui.addItem).toHaveBeenCalledWith(
-    expect.objectContaining({
-      type: 'info',
-      text: expect.stringContaining('Signed out'),
-    }),
-    expect.any(Number),
+  for (const key of ['model.name', 'model.baseUrl']) {
+    expect(context.services.settings.setValue).toHaveBeenCalledWith(
+      'Workspace',
+      key,
+      undefined,
+      undefined,
+      { throwOnWriteFailure: true },
+    );
+  }
+  expect(context.ui.addItem).not.toHaveBeenCalled();
+  expect(context.ui.clear).not.toHaveBeenCalled();
+});
+
+const bailianModel: AvailableModel = {
+  id: 'qwen3.6-plus',
+  label: 'Bailian',
+  authType: AuthType.USE_OPENAI,
+  baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+  envKey: 'LOGOUT_TEST_BAILIAN_KEY',
+};
+
+it('silently activates another provider using its loaded credentials and endpoint', async () => {
+  const context = memberContext();
+  const config = context.services.config!;
+  vi.stubEnv(bailianModel.envKey!, 'saved-test-key');
+  vi.mocked(config.getAllConfiguredModels).mockReturnValue([bailianModel]);
+  try {
+    expect(await logoutCommand.action!(context, '')).toBeUndefined();
+    expect(config.switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      bailianModel.id,
+      { baseUrl: bailianModel.baseUrl },
+    );
+    expect(process.env[bailianModel.envKey!]).toBe('saved-test-key');
+    for (const [key, value] of [
+      ['security.auth.selectedType', AuthType.USE_OPENAI],
+      ['model.name', bailianModel.id],
+      ['model.baseUrl', bailianModel.baseUrl],
+    ]) {
+      expect(context.services.settings.setValue).toHaveBeenCalledWith(
+        'Workspace',
+        key,
+        value,
+        undefined,
+        { throwOnWriteFailure: true },
+      );
+    }
+    expect(context.ui.addItem).not.toHaveBeenCalled();
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
+
+it('does not inject settings environment variables when a fallback fails', async () => {
+  const context = memberContext();
+  const config = context.services.config!;
+  vi.stubEnv('NODE_OPTIONS', undefined);
+  context.services.settings.merged.env = {
+    NODE_OPTIONS: '--max-old-space-size=1234',
+  };
+  vi.mocked(config.getAllConfiguredModels).mockReturnValue([
+    { ...bailianModel, envKey: 'NODE_OPTIONS' },
+  ]);
+  vi.mocked(config.switchModel).mockRejectedValue(new Error('Missing key'));
+  try {
+    await logoutCommand.action!(context, '');
+    expect(config.switchModel).toHaveBeenCalledOnce();
+    expect(process.env['NODE_OPTIONS']).toBeUndefined();
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
+
+it('skips unavailable providers and models reserved for auxiliary selectors', async () => {
+  const context = memberContext();
+  const config = context.services.config!;
+  const tokenPlan = {
+    ...bailianModel,
+    baseUrl:
+      'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+  };
+  vi.mocked(config.getAllConfiguredModels).mockReturnValue([
+    { ...bailianModel, authType: AuthType.QWEN_OAUTH },
+    { ...bailianModel, authType: AuthType.QWEN_SUBSCRIPTION },
+    ...['fastOnly', 'voiceOnly', 'visionOnly', 'imageOnly'].map((flag) => ({
+      ...bailianModel,
+      [flag]: true,
+    })),
+    bailianModel,
+    tokenPlan,
+  ]);
+  vi.mocked(config.switchModel).mockRejectedValueOnce(new Error('Missing key'));
+  expect(await logoutCommand.action!(context, '')).toBeUndefined();
+  expect(config.switchModel).toHaveBeenCalledTimes(2);
+  expect(config.switchModel).toHaveBeenLastCalledWith(
+    AuthType.USE_OPENAI,
+    tokenPlan.id,
+    { baseUrl: tokenPlan.baseUrl },
   );
+  expect(context.ui.addItem).not.toHaveBeenCalled();
+});
+
+it('does not open authentication or show a notice when every candidate fails', async () => {
+  const context = memberContext();
+  const config = context.services.config!;
+  vi.mocked(config.getAllConfiguredModels).mockReturnValue([bailianModel]);
+  vi.mocked(config.switchModel).mockRejectedValue(new Error('Missing key'));
+  expect(await logoutCommand.action!(context, '')).toBeUndefined();
+  expect(context.ui.addItem).not.toHaveBeenCalled();
+  expect(
+    vi
+      .mocked(context.services.settings.setValue)
+      .mock.calls.map(([, key]) => key),
+  ).toEqual([
+    'security.auth.selectedType',
+    'model.name',
+    'model.baseUrl',
+    'security.auth.selectedType',
+    'model.name',
+    'model.baseUrl',
+  ]);
+});
+
+it('respects an enforced subscription provider without switching to another provider', async () => {
+  const context = memberContext();
+  context.services.settings.merged.security = {
+    auth: { enforcedType: AuthType.QWEN_SUBSCRIPTION },
+  };
+  vi.mocked(context.services.config!.getAllConfiguredModels).mockReturnValue([
+    bailianModel,
+  ]);
+  expect(await logoutCommand.action!(context, '')).toBeUndefined();
+  expect(context.services.config!.switchModel).not.toHaveBeenCalled();
+  expect(context.ui.addItem).not.toHaveBeenCalled();
 });
 
 it('finishes local logout even if remote revocation fails', async () => {
@@ -81,10 +217,11 @@ it('finishes local logout even if remote revocation fails', async () => {
       'revoke',
     ),
   );
-  expect(await logoutCommand.action!(context, '')).toEqual({
-    type: 'dialog',
-    dialog: 'auth',
-  });
+  vi.mocked(context.services.config!.getAllConfiguredModels).mockReturnValue([
+    bailianModel,
+  ]);
+  expect(await logoutCommand.action!(context, '')).toBeUndefined();
+  expect(context.services.config!.switchModel).toHaveBeenCalledOnce();
   expect(context.services.config?.clearAuth).toHaveBeenCalledOnce();
   expect(context.ui.addItem).toHaveBeenCalledWith(
     expect.objectContaining({
@@ -130,10 +267,7 @@ it('still clears local runtime if saving the auth selection fails and preserves 
   vi.mocked(context.services.settings.setValue).mockImplementation(() => {
     throw new Error('private-token');
   });
-  expect(await logoutCommand.action!(context, '')).toEqual({
-    type: 'dialog',
-    dialog: 'auth',
-  });
+  expect(await logoutCommand.action!(context, '')).toBeUndefined();
   expect(context.services.config?.clearAuth).toHaveBeenCalledOnce();
   expect(context.ui.cancelBtw).toHaveBeenCalledOnce();
   expect(context.ui.addItem).toHaveBeenCalledWith(

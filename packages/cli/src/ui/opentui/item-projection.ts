@@ -118,7 +118,9 @@ export function projectAbout(systemInfo: Record<string, unknown>): string {
   let authLabel = '';
   if (selectedAuthType) {
     const matched = findProviderByCredentials(baseUrl, apiKeyEnvKey);
-    if (matched && resolveMetadataKey(matched) && matched.label) {
+    if (selectedAuthType === 'qwen-subscription') {
+      authLabel = 'Qwen Subscription';
+    } else if (matched && resolveMetadataKey(matched) && matched.label) {
       authLabel = matched.label;
     } else if (
       selectedAuthType.startsWith('oauth') ||

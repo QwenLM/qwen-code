@@ -170,18 +170,17 @@ async function switchMainModel(
   config: Config,
   settings: LoadedSettings,
   currentAuthType: AuthType,
-  modelArg: string,
+  parsed: ReturnType<typeof parseAcpModelOption>,
   scopeOverride?: SettingScope,
   persistSelection = true,
 ): Promise<string> {
-  const parsed = parseAcpModelOption(modelArg);
-
   if (parsed.authType) {
     await config.switchModel(
       parsed.authType,
       parsed.modelId,
-      parsed.authType !== currentAuthType &&
-        parsed.authType === AuthType.QWEN_OAUTH
+      parsed.authType === AuthType.QWEN_OAUTH &&
+        (parsed.authType !== currentAuthType ||
+          !config.getContentGeneratorConfig()?.authType)
         ? { requireCachedCredentials: true }
         : undefined,
     );
@@ -203,12 +202,12 @@ async function switchMainModel(
     return parsed.modelId;
   }
 
-  await config.switchModel(currentAuthType, modelArg, undefined);
+  await config.switchModel(currentAuthType, parsed.modelId, undefined);
   if (persistSelection) {
-    persistSetting(settings, 'model.name', modelArg, scopeOverride);
+    persistSetting(settings, 'model.name', parsed.modelId, scopeOverride);
     persistSetting(settings, 'model.baseUrl', '', scopeOverride);
   }
-  return modelArg;
+  return parsed.modelId;
 }
 
 function formatUnavailableModelMessage(
@@ -1106,13 +1105,30 @@ export const modelCommand: SlashCommand = {
       };
     }
 
+    // `/model <id>` switches the session model; `/model <id> <prompt>` runs the
+    // prompt on <id> for this turn only (inline one-shot override) without
+    // changing or persisting the session model.
+    const trimmedArgs = args.trim();
+    const firstSpace = trimmedArgs.search(/\s/);
+    const modelName =
+      firstSpace === -1 ? trimmedArgs : trimmedArgs.slice(0, firstSpace);
+    const inlinePrompt =
+      firstSpace === -1 ? '' : trimmedArgs.slice(firstSpace + 1).trim();
+    const parsed = parseAcpModelOption(modelName);
     const contentGeneratorConfig = config.getContentGeneratorConfig();
     const authType =
       contentGeneratorConfig?.authType ??
       (settings.merged.security?.auth?.selectedType ===
       AuthType.QWEN_SUBSCRIPTION
         ? AuthType.QWEN_SUBSCRIPTION
-        : undefined);
+        : parsed.authType);
+    if (!authType && !trimmedArgs && context.executionMode === 'interactive') {
+      return {
+        type: 'dialog',
+        dialog: 'model',
+        ...persistScopeSpread(scopeOverride),
+      };
+    }
     if (authType === AuthType.QWEN_SUBSCRIPTION) {
       context.ui.addItem(
         { type: MessageType.INFO, text: t('Loading models from provider…') },
@@ -1146,7 +1162,11 @@ export const modelCommand: SlashCommand = {
         };
       }
     }
-    if (!contentGeneratorConfig && authType !== AuthType.QWEN_SUBSCRIPTION) {
+    if (
+      !contentGeneratorConfig &&
+      authType !== AuthType.QWEN_SUBSCRIPTION &&
+      !parsed.authType
+    ) {
       return {
         type: 'message',
         messageType: 'error',
@@ -1162,17 +1182,7 @@ export const modelCommand: SlashCommand = {
       };
     }
 
-    // `/model <id>` switches the session model; `/model <id> <prompt>` runs the
-    // prompt on <id> for this turn only (inline one-shot override) without
-    // changing or persisting the session model.
-    const trimmedArgs = args.trim();
-    const firstSpace = trimmedArgs.search(/\s/);
-    const modelName =
-      firstSpace === -1 ? trimmedArgs : trimmedArgs.slice(0, firstSpace);
-    const inlinePrompt =
-      firstSpace === -1 ? '' : trimmedArgs.slice(firstSpace + 1).trim();
     if (modelName) {
-      const parsed = parseAcpModelOption(modelName);
       const targetAuthType = parsed.authType ?? authType;
       const availableModels = config
         .getAvailableModelsForAuthType(targetAuthType)
@@ -1267,7 +1277,7 @@ export const modelCommand: SlashCommand = {
         config,
         settings,
         authType,
-        modelName,
+        parsed,
         scopeOverride,
         context.executionPolicy?.persistModelSelection !== false,
       );

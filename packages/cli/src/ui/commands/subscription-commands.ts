@@ -9,7 +9,10 @@ import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscrip
 import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import { openBrowserSecurely } from '@qwen-code/qwen-code-core/utils/secure-browser-launcher.js';
-import { SettingScope } from '../../config/settings.js';
+import {
+  getPersistScopeForModelSelection,
+  getWritableScopes,
+} from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
 import { MessageType } from '../types.js';
 import { CommandKind, type SlashCommand } from './types.js';
@@ -42,6 +45,7 @@ export const logoutCommand: SlashCommand = {
         ),
       };
     }
+    const persistScope = getPersistScopeForModelSelection(settings);
     let warning: string | undefined;
     try {
       await new QwenSubscriptionSession().signOut();
@@ -63,18 +67,20 @@ export const logoutCommand: SlashCommand = {
     context.ui.cancelBtw();
     config.clearAuth();
     try {
-      for (const scope of [SettingScope.Workspace, SettingScope.User]) {
+      for (const scope of getWritableScopes(settings)) {
         if (
           settings.forScope(scope).settings.security?.auth?.selectedType ===
           AuthType.QWEN_SUBSCRIPTION
         ) {
-          settings.setValue(
-            scope,
+          for (const key of [
             'security.auth.selectedType',
-            undefined,
-            undefined,
-            { throwOnWriteFailure: true },
-          );
+            'model.name',
+            'model.baseUrl',
+          ]) {
+            settings.setValue(scope, key, undefined, undefined, {
+              throwOnWriteFailure: true,
+            });
+          }
         }
       }
     } catch {
@@ -87,16 +93,54 @@ export const logoutCommand: SlashCommand = {
         .filter(Boolean)
         .join('\n');
     }
-    context.ui.addItem(
-      {
-        type: warning ? MessageType.WARNING : MessageType.INFO,
-        text:
-          warning ??
-          t('Signed out of Qwen. Use /auth to sign in with another account.'),
-      },
-      Date.now(),
-    );
-    return { type: 'dialog', dialog: 'auth' };
+    const enforcedType = settings.merged.security?.auth?.enforcedType;
+    for (const model of config.getAllConfiguredModels()) {
+      if (
+        model.authType === AuthType.QWEN_SUBSCRIPTION ||
+        model.authType === AuthType.QWEN_OAUTH ||
+        (enforcedType && model.authType !== enforcedType) ||
+        model.fastOnly ||
+        model.voiceOnly ||
+        model.visionOnly ||
+        model.imageOnly
+      ) {
+        continue;
+      }
+      try {
+        await config.switchModel(model.authType, model.id, {
+          baseUrl: model.baseUrl,
+        });
+      } catch {
+        continue;
+      }
+      const selected = config.getContentGeneratorConfig();
+      try {
+        for (const [key, value] of [
+          ['security.auth.selectedType', selected?.authType ?? model.authType],
+          ['model.name', selected?.model ?? model.id],
+          ['model.baseUrl', selected?.baseUrl ?? model.baseUrl ?? ''],
+        ] as const) {
+          settings.setValue(persistScope, key, value, undefined, {
+            throwOnWriteFailure: true,
+          });
+        }
+      } catch {
+        warning = [
+          warning,
+          t('Model switched, but the selection could not be saved.'),
+        ]
+          .filter(Boolean)
+          .join('\n');
+      }
+      break;
+    }
+    if (warning) {
+      context.ui.addItem(
+        { type: MessageType.WARNING, text: warning },
+        Date.now(),
+      );
+    }
+    return;
   },
 };
 
@@ -136,3 +180,18 @@ export const upgradeCommand: SlashCommand = {
     };
   },
 };
+
+export function filterSubscriptionCommands(
+  commands: readonly SlashCommand[],
+  authType: AuthType | undefined,
+): readonly SlashCommand[] {
+  return authType === AuthType.QWEN_SUBSCRIPTION
+    ? commands
+    : Object.freeze(
+        commands.filter(
+          (command) =>
+            command.action !== logoutCommand.action &&
+            command.action !== upgradeCommand.action,
+        ),
+      );
+}

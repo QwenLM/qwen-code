@@ -14,6 +14,7 @@ import { SubscriptionOAuthError } from './subscription-oauth-client.js';
 import {
   readCachedSubscriptionModels,
   selectSubscriptionModel,
+  SUBSCRIPTION_MODELS_UNAVAILABLE,
 } from './subscription-models.js';
 
 const modelFetch = vi.hoisted(() => vi.fn());
@@ -198,16 +199,22 @@ it('does not hide a refresh service failure behind the cached catalog', async ()
   expect(readCachedSubscriptionModels()).toEqual(['served']);
 });
 
-it('reports an unavailable catalog without clearing login or inventing models', async () => {
-  const session = new QwenSubscriptionSession();
-  await session.signIn(() => {});
-  modelFetch.mockResolvedValue(modelResponse([]));
-  await expect(session.getModels()).rejects.toThrow(
-    'Could not load Qwen Subscription models',
-  );
-  expect(readCachedSubscriptionModels()).toEqual([]);
-  expect(await session.getUserInfo()).toEqual(user);
-});
+it.each(['empty response', 'network failure'])(
+  'reports %s as an unavailable catalog without clearing login or inventing models',
+  async (failure) => {
+    const session = new QwenSubscriptionSession();
+    await session.signIn(() => {});
+    if (failure === 'network failure')
+      modelFetch.mockRejectedValue(new TypeError('fetch failed'));
+    else modelFetch.mockResolvedValue(modelResponse([]));
+    const error = await session.getModels().catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(SubscriptionOAuthError);
+    expect(error).toMatchObject({ message: SUBSCRIPTION_MODELS_UNAVAILABLE });
+    expect(readCachedSubscriptionModels()).toEqual([]);
+    expect(await session.getUserInfo()).toEqual(user);
+  },
+);
 
 it('does not commit a late catalog after logout or a new login', async () => {
   const session = new QwenSubscriptionSession();

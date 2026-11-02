@@ -441,14 +441,15 @@ export class QwenSubscriptionSession {
         (error.stage || !error.status || error.status < 500)
       )
         throw error;
-      return this.locked(async () => {
+      const cachedModels = await this.locked(async () => {
         const credentials = await current();
-        if (!credentials.models?.length)
-          throw error instanceof SubscriptionOAuthError
-            ? error
-            : new Error(SUBSCRIPTION_MODELS_UNAVAILABLE);
-        return { models: credentials.models, cached: true };
+        return credentials.models;
       }, signal);
+      if (!cachedModels?.length)
+        throw error instanceof SubscriptionOAuthError
+          ? error
+          : new Error(SUBSCRIPTION_MODELS_UNAVAILABLE);
+      return { models: cachedModels, cached: true };
     }
   }
 }

@@ -167,20 +167,19 @@ describe('modelCommand', () => {
     });
   });
 
-  it('should return error when content generator config is not available', async () => {
+  it('opens the model picker without an initialized content generator', async () => {
     const mockConfig = createMockConfig(null);
     mockContext.services.config = mockConfig as Config;
 
     const result = await modelCommand.action!(mockContext, '');
 
     expect(result).toEqual({
-      type: 'message',
-      messageType: 'error',
-      content: 'Content generator configuration not available.',
+      type: 'dialog',
+      dialog: 'model',
     });
   });
 
-  it('should return error when auth type is not available', async () => {
+  it('opens the model picker after the active authentication was cleared', async () => {
     const mockConfig = createMockConfig({
       model: 'test-model',
       authType: undefined,
@@ -190,9 +189,8 @@ describe('modelCommand', () => {
     const result = await modelCommand.action!(mockContext, '');
 
     expect(result).toEqual({
-      type: 'message',
-      messageType: 'error',
-      content: 'Authentication type not available.',
+      type: 'dialog',
+      dialog: 'model',
     });
   });
 
@@ -251,10 +249,56 @@ describe('modelCommand', () => {
     const result = await modelCommand.action!(mockContext, '');
 
     expect(result).toEqual({
-      type: 'message',
-      messageType: 'error',
-      content: 'Authentication type not available.',
+      type: 'dialog',
+      dialog: 'model',
     });
+  });
+
+  it.each([null, { model: '' }])(
+    'switches an explicitly qualified provider without active auth (%j)',
+    async (generationConfig) => {
+      const switchModel = vi.fn().mockResolvedValue(undefined);
+      mockContext.services.config = {
+        ...createMockConfig(generationConfig),
+        getAvailableModelsForAuthType: vi.fn(() => [
+          { id: 'qwen3.6-plus', authType: AuthType.USE_OPENAI },
+        ]),
+        switchModel,
+      } as unknown as Config;
+      mockContext.services.settings = createMockSettings() as LoadedSettings;
+
+      expect(
+        await modelCommand.action!(mockContext, 'qwen3.6-plus(openai)'),
+      ).toMatchObject({
+        type: 'message',
+        messageType: 'info',
+      });
+      expect(switchModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'qwen3.6-plus',
+        undefined,
+      );
+    },
+  );
+
+  it('requires cached credentials for an explicit OAuth selection without active auth', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    mockContext.services.config = {
+      ...createMockConfig({ model: '' }),
+      getAvailableModelsForAuthType: vi.fn(() => [
+        { id: 'coder-model', authType: AuthType.QWEN_OAUTH },
+      ]),
+      switchModel,
+    } as unknown as Config;
+    mockContext.services.settings = createMockSettings() as LoadedSettings;
+    await modelCommand.action!(mockContext, 'coder-model(qwen-oauth)');
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.QWEN_OAUTH,
+      'coder-model',
+      {
+        requireCachedCredentials: true,
+      },
+    );
   });
 
   it('should switch a dual-role model directly in interactive mode', async () => {
