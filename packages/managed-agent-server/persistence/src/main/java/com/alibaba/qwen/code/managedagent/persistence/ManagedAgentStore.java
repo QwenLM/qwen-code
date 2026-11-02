@@ -298,7 +298,8 @@ public class ManagedAgentStore implements AgentStateStore {
     public Admission insertTurnCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest) {
-        return sessionCommands.insertTurnCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId, input, payloadDigest);
+        return sessionCommands.insertTurnCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId, input,
+                payloadDigest, null);
     }
 
     @Transactional
@@ -313,7 +314,8 @@ public class ManagedAgentStore implements AgentStateStore {
     public Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId) {
-        return sessionCommands.insertCancelCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId, turnId);
+        return sessionCommands.insertCancelCommand(tenantId, operation, idempotencyKey, requestDigest, sessionId,
+                turnId, null);
     }
 
     @Transactional
@@ -327,7 +329,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public SessionMutationCommand beginSessionRename(String tenantId, String key,
             String digest, String sessionId, String title) {
-        return sessionCommands.beginSessionRename(tenantId, key, digest, sessionId, title);
+        return sessionCommands.beginSessionRename(tenantId, key, digest, sessionId, title, null);
     }
 
     @Override
@@ -383,7 +385,8 @@ public class ManagedAgentStore implements AgentStateStore {
     public SessionMutationCommand beginSessionMutation(String tenantId,
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind) {
-        return sessionCommands.beginSessionMutation(tenantId, operation, idempotencyKey, requestDigest, sessionId, kind);
+        return sessionCommands.beginSessionMutation(tenantId, operation, idempotencyKey, requestDigest, sessionId,
+                kind, null);
     }
 
     @Transactional
@@ -672,7 +675,8 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
             String owner, long generation, String failureCode, long availableAt) {
-        lifecycleOperations.blockLifecycleOperation(tenantId, sessionId, operationId, owner, generation, failureCode, availableAt);
+        lifecycleOperations.blockLifecycleOperation(tenantId, sessionId, operationId, owner, generation, failureCode,
+                availableAt, false);
     }
 
     @Override
@@ -688,7 +692,8 @@ public class ManagedAgentStore implements AgentStateStore {
     public void retryOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             long availableAt) {
-        lifecycleOperations.retryOperation(tenantId, sessionId, operationId, owner, claimGeneration, availableAt);
+        lifecycleOperations.retryOperation(tenantId, sessionId, operationId, owner,
+                claimGeneration, availableAt, false);
     }
 
     @Override
@@ -727,12 +732,13 @@ public class ManagedAgentStore implements AgentStateStore {
 
     public SessionPage listSessions(String tenantId, String actorId,
             Long beforeCreatedAt, String beforeSessionId, int limit) {
-        return sessionQueries.listSessions(tenantId, actorId, beforeCreatedAt, beforeSessionId, limit);
+        return sessionQueries.listSessions(tenantId, actorId, beforeCreatedAt, beforeSessionId, limit, "all", "");
     }
 
     public SessionPage listSessions(String tenantId, String actorId,
             Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState) {
-        return sessionQueries.listSessions(tenantId, actorId, beforeCreatedAt, beforeSessionId, limit, archiveState);
+        return sessionQueries.listSessions(tenantId, actorId, beforeCreatedAt, beforeSessionId,
+                limit, archiveState, "");
     }
 
     public SessionPage listSessions(String tenantId, String actorId,
@@ -813,7 +819,8 @@ public class ManagedAgentStore implements AgentStateStore {
     public WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
             String sessionId, String key, String digest, String mode, long expectedRevision,
             boolean supported, boolean agentDefinitionSupported) {
-        return sessionPolicies.changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode, expectedRevision, supported, agentDefinitionSupported);
+        return sessionPolicies.changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode, expectedRevision,
+                supported, agentDefinitionSupported, null, false, false, null, false, false);
     }
 
     @Override
@@ -821,7 +828,8 @@ public class ManagedAgentStore implements AgentStateStore {
     public WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
             String sessionId, String key, String digest, String mode, long expectedRevision,
             boolean supported, boolean agentDefinitionSupported, Boolean requestedPlanMode, boolean planModeSupported) {
-        return sessionPolicies.changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode, expectedRevision, supported, agentDefinitionSupported, requestedPlanMode, planModeSupported);
+        return sessionPolicies.changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode, expectedRevision,
+                supported, agentDefinitionSupported, requestedPlanMode, planModeSupported, false, null, false, false);
     }
 
     @Override
@@ -830,7 +838,9 @@ public class ManagedAgentStore implements AgentStateStore {
             String sessionId, String key, String digest, String mode, long expectedRevision,
             boolean supported, boolean agentDefinitionSupported, Boolean requestedPlanMode, boolean planModeSupported,
             boolean liveSupported) {
-        return sessionPolicies.changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode, expectedRevision, supported, agentDefinitionSupported, requestedPlanMode, planModeSupported, liveSupported);
+        return sessionPolicies.changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode, expectedRevision,
+                supported, agentDefinitionSupported, requestedPlanMode, planModeSupported, liveSupported,
+                null, false, false);
     }
 
     @Override
@@ -879,7 +889,7 @@ public class ManagedAgentStore implements AgentStateStore {
             isolation = org.springframework.transaction.annotation.Isolation.REPEATABLE_READ)
     public StoreModels.MessagePage findMessagePage(String tenantId, String sessionId,
             String cursor, int limit, boolean backward) {
-        return messageProjection.findMessagePage(tenantId, sessionId, cursor, limit, backward);
+        return messageProjection.findMessagePage(tenantId, sessionId, cursor, limit, backward, 0);
     }
 
     @Override
@@ -1047,7 +1057,8 @@ public class ManagedAgentStore implements AgentStateStore {
     public void retractHarnessTurnOutput(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,
             long fromSourceId, long retractionSourceId) {
-        turnExecution.retractHarnessTurnOutput(tenantId, sessionId, turnId, owner, eventEpoch, fromSourceId, retractionSourceId);
+        turnExecution.retractHarnessTurnOutput(tenantId, sessionId, turnId, owner, eventEpoch, fromSourceId,
+                retractionSourceId, null, null, null);
     }
 
     @Transactional

@@ -108,11 +108,6 @@ final class JournalResourceWrites {
     }
 
     ToolResultResourceRef publishToolResult(String tenantId, String sessionId,
-            String writerToken, PublishToolResultRequest request) {
-        return publishToolResult(tenantId, sessionId, writerToken, request, null);
-    }
-
-    ToolResultResourceRef publishToolResult(String tenantId, String sessionId,
             String writerToken, PublishToolResultRequest request,
             com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
