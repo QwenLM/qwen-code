@@ -820,3 +820,35 @@ describe('models.dev catalog', () => {
     expect(hasExplicitOutputLimit('unknown-model')).toBe(false);
   });
 });
+
+describe('Bedrock model ids', () => {
+  it('keeps the model name of a Bedrock id', () => {
+    expect(normalize('us.anthropic.claude-sonnet-4-5-20250929-v1:0')).toBe(
+      'claude-sonnet-4-5',
+    );
+    expect(normalize('anthropic.claude-3-5-sonnet-20240620-v1:0')).toBe(
+      'claude-3-5-sonnet',
+    );
+    expect(normalize('global.anthropic.claude-opus-4-6-v1')).toBe(
+      'claude-opus-4-6',
+    );
+    expect(
+      normalize('bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0'),
+    ).toBe('claude-sonnet-4-5');
+    expect(normalize('qwen.qwen3-coder-480b-a35b-v1:0')).toBe(
+      'qwen3-coder-480b-a35b',
+    );
+
+    for (const [bedrockId, bare] of [
+      ['us.anthropic.claude-sonnet-4-5-20250929-v1:0', 'claude-sonnet-4-5'],
+      ['global.anthropic.claude-opus-4-6-v1', 'claude-opus-4-6'],
+      ['qwen.qwen3-coder-480b-a35b-v1:0', 'qwen3-coder-480b-a35b'],
+    ] as Array<[string, string]>) {
+      expect(tokenLimit(bedrockId)).toBe(tokenLimit(bare));
+      expect(tokenLimit(bedrockId, 'output')).toBe(tokenLimit(bare, 'output'));
+    }
+    // Pinned absolutely too, so both sides falling back to the default
+    // would not pass.
+    expect(tokenLimit('global.anthropic.claude-opus-4-6-v1')).toBe(1_000_000);
+  });
+});

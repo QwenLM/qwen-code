@@ -152,6 +152,16 @@ export function normalize(model: string): string {
   s = s.replace(/^.*\//, '');
   s = s.split('|').pop() ?? s;
 
+  // Bedrock ids put an optional cross-region prefix and the provider before
+  // the model, and a revision after it:
+  // `us.anthropic.claude-sonnet-4-5-20250929-v1:0`. Left alone, the colon
+  // split below keeps only the revision (`0`) and every Bedrock id falls
+  // through to the default limit.
+  const bedrock = s.match(
+    /^(?:[a-z]+(?:-[a-z]+)?\.)?(?:anthropic|meta|amazon|mistral|cohere|ai21|deepseek|qwen|openai)\.(.+)$/,
+  );
+  if (bedrock) s = bedrock[1]!.replace(/-(?:v\d+(?::\d+)?|\d+:\d+)$/, '');
+
   // A colon can sit on either side of the model name. `authType:model` and
   // `family:model` put it on the left, and the split below keeps the right
   // half. But OpenRouter variant suffixes and Ollama / LM Studio tags put it
