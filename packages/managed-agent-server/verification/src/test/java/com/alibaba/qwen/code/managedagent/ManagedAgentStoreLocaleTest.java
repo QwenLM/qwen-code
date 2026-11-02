@@ -32,10 +32,10 @@ class ManagedAgentStoreLocaleTest {
                 + ";LOCK_TIMEOUT=10000");
         ManagedSchema.initialize(source);
         JdbcTemplate jdbc = new ManagedSchemaJdbcTemplate(source);
-        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc,
+        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc,
                 new ObjectMapper(), Clock.systemUTC(), events -> {},
                 mock(ManagedWorkspaceRegistry.class),
-                new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
 
         Admission session = store.insertSessionCommand("tenant-locale",
                 "CREATE_SESSION", "create-key", "digest-create", "qwen-code",

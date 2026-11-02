@@ -89,8 +89,8 @@ public final class ResidentRetirementFixture {
     }
 
     public StoreModels.Admission create(String key) {
-        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), mock(CommittedEventPublisher.class),
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), mock(CommittedEventPublisher.class),
+                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         return new TransactionTemplate(manager).execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                 .tenantId("tenant")
                 .actorId("owner")

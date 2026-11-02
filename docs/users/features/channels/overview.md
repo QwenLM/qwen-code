@@ -123,11 +123,13 @@ New managed channels default to `pairing`. The deprecated `senderPolicy` and `dm
 
 ### Shared-Session Operators
 
-In a shared session (`sessionScope: "chat_thread"` or `"single"`, and group chats under `"thread"`), some commands affect everyone in the conversation: `/approve`, `/deny`, `/cancel`, `/clear`, `/who`, `/status`, `/loop`, `/btw`, the loop tool, and steering an in-flight turn. Only the session's operators may use them; other members' messages queue instead of steering. Sessions that are not shared belong to their own sender, who may always use them.
+In a shared session (`sessionScope: "chat_thread"` or `"single"`, and group chats under `"thread"`), session management requires operator privileges: `/approve-always`, `/cancel`, `/clear`, `/who`, `/status`, `/loop`, `/btw`, the loop tool, and steering an in-flight turn. Other members' messages queue instead of steering. Sessions that are not shared belong to their own sender, who may always use them.
+
+An admitted sender may use `/approve` (allow once) or `/deny` for their own pending tool request in their current attended turn, in direct messages and groups. This request-specific authority does not depend on `operators`, even when the list is empty. Another ordinary member cannot answer it, and an attempt from another chat or thread is rejected. Operators may still answer another sender's text permission request in the same chat and thread; native interactive cards retain their existing owner checks.
 
 Set `operators` to the user IDs allowed to manage shared sessions. Omitted or empty `operators` grants nobody this role. Private allowlists, user pairing, group pairing, and group member lists never imply operator permissions. Operators must still pass normal conversation admission.
 
-For example, `groups: { "*": { "senders": "open" } }` with `operators: ["alice"]` lets every admitted group member start a turn, but only Alice can manage its shared session.
+For example, `groups: { "*": { "senders": "open" } }` with `operators: ["alice"]` lets every admitted group member start a turn and approve once or deny their own current request. Only Alice can manage its shared session or answer another sender's text permission request.
 
 A saved loop is checked against the same rule when it fires, using its creator as the sender, and is disabled if the creator is no longer an operator.
 
