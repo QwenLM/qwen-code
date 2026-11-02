@@ -12,12 +12,13 @@ export function subscriptionSuccessMessage(
   model: string,
 ): string {
   return [
-    `✓ ${t('Signed in as {{email}}', { email: info.email })}`,
-    `✓ ${t('Qwen {{plan}} is active · usage is included with your plan', {
+    `✓ ${t('Signed in successfully · {{email}}', { email: info.email })}`,
+    `✓ ${t('Current plan: Qwen {{plan}}. Qwen Code is ready.', {
       plan:
         info.member_type.charAt(0).toUpperCase() +
         info.member_type.slice(1).toLowerCase(),
     })}`,
-    `  ${t('Model: {{model}} · Run /usage to see your plan usage', { model })}`,
+    `  ${t('Model: {{model}}. Run /upgrade to upgrade your plan or /usage to view usage.', { model })}`,
+    `  ${t('Common commands: /usage   /upgrade   /status   /logout')}`,
   ].join('\n');
 }

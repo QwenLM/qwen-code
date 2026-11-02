@@ -953,7 +953,7 @@ it.each([
     },
     'server-model',
   );
-  expect(text).toContain(`Qwen ${plan} is active`);
+  expect(text).toContain(`Current plan: Qwen ${plan}. Qwen Code is ready.`);
 });
 
 it.each([true, false])(
@@ -994,15 +994,18 @@ it.each([true, false])(
       const check = inkChalk.hex(theme.status.success)('✓');
       if (subscriptionPresentation) {
         expect(stripAnsi(frame)).not.toMatch(/[●•]/u);
-        expect(frame).toContain(`${check} Signed in as builder@example.com`);
         expect(frame).toContain(
-          `${check} Qwen Pro is active · usage is included with your plan`,
+          `${check} Signed in successfully · builder@example.com`,
+        );
+        expect(frame).toContain(
+          `${check} Current plan: Qwen Pro. Qwen Code is ready.`,
         );
         expect(frame).toContain(
           inkChalk.hex(theme.text.secondary)(
-            'Model: qwen3.8-max · Run /usage to see your plan usage',
+            'Model: qwen3.8-max. Run /upgrade to upgrade your plan or /usage to view usage.',
           ),
         );
+        expect(frame).toContain('/usage   /upgrade   /status   /logout');
       } else {
         expect(stripAnsi(frame)).toMatch(/[●•]/u);
         expect(frame).not.toContain(check);

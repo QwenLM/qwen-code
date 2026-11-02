@@ -782,6 +782,28 @@ describe('modelConfigResolver', () => {
 describe('Qwen Subscription model resolution', () => {
   afterEach(() => vi.unstubAllEnvs());
 
+  it.each(['qwen3.8-max', 'qwen3.8-flash'])(
+    'uses confirmed subscription modalities for %s without inheriting provider settings',
+    (model) => {
+      for (const selection of [
+        {},
+        { cli: { model } },
+        { settings: { model } },
+        { modelProvider: { id: model } },
+      ]) {
+        const result = resolve({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          settings: { generationConfig: { modalities: { audio: true } } },
+          ...selection,
+        });
+        expect(result.config.model).toBe(
+          Object.keys(selection).length ? model : QWEN_SUBSCRIPTION_MODEL,
+        );
+        expect(result.config.modalities).toEqual({ image: true, video: true });
+      }
+    },
+  );
+
   it.each([undefined, 'false', 'true'])(
     'resolves the subscription gateway when DEV=%s',
     (dev) => {

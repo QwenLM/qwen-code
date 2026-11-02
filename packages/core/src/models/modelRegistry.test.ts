@@ -1094,6 +1094,19 @@ describe('providerProtocol mapping (custom provider ids)', () => {
 describe('Qwen Subscription model registry', () => {
   afterEach(() => vi.unstubAllEnvs());
 
+  it('keeps every server model and its order when refreshing', () => {
+    const registry = new ModelRegistry();
+    const ids = ['future-model', 'qwen3.8-flash', 'qwen3.8-max'];
+    registry.setSubscriptionModels(ids);
+    const models = registry.getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION);
+    expect(models.map(({ id }) => id)).toEqual(ids);
+    expect(models.map(({ modalities }) => modalities)).toEqual([
+      {},
+      { image: true, video: true },
+      { image: true, video: true },
+    ]);
+  });
+
   it.each([undefined, 'false', 'true'])(
     'loads cached models when DEV=%s',
     (dev) => {
@@ -1114,11 +1127,12 @@ describe('Qwen Subscription model registry', () => {
     },
   );
 
-  it('loads cached models without assumed gateway capabilities', () => {
+  it('loads cached models with confirmed modalities and preserves unknown IDs', () => {
     vi.stubEnv('DEV', false);
     delete process.env['DEV'];
     vi.mocked(readCachedSubscriptionModels).mockReturnValueOnce([
       'qwen3.8-max',
+      'qwen3.8-flash',
       'future-model',
     ]);
     const registry = new ModelRegistry();
@@ -1126,10 +1140,14 @@ describe('Qwen Subscription model registry', () => {
       expect.objectContaining({
         id: QWEN_SUBSCRIPTION_MODEL,
         baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
-        modalities: {},
+        modalities: { image: true, video: true },
         capabilities: {},
       }),
-      expect.objectContaining({ id: 'future-model' }),
+      expect.objectContaining({
+        id: 'qwen3.8-flash',
+        modalities: { image: true, video: true },
+      }),
+      expect.objectContaining({ id: 'future-model', modalities: {} }),
     ]);
     expect(
       registry.getDefaultModelForAuthType(AuthType.QWEN_SUBSCRIPTION)?.id,
@@ -1159,7 +1177,7 @@ describe('Qwen Subscription model registry', () => {
       registry.getModel(AuthType.QWEN_SUBSCRIPTION, QWEN_SUBSCRIPTION_MODEL),
     ).toMatchObject({
       baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
-      generationConfig: { modalities: {} },
+      generationConfig: { modalities: { image: true, video: true } },
     });
     expect(
       registry.getModel(AuthType.QWEN_SUBSCRIPTION, QWEN_SUBSCRIPTION_MODEL)

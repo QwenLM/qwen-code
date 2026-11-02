@@ -178,7 +178,7 @@ describe('OpenTuiBanner', () => {
   });
 
   it.each([undefined, 'Custom subtitle'])(
-    'shows the fixed usage tip and omits only the default subscription spacer (%s)',
+    'omits the subscription usage tip and only the default spacer (%s)',
     (customBannerSubtitle) => {
       const config = fakeConfig({
         getContentGeneratorConfig: () => ({
@@ -194,7 +194,7 @@ describe('OpenTuiBanner', () => {
           settings={fakeSettings({ customBannerSubtitle })}
         />,
       );
-      expect(ui.container.textContent).toContain(
+      expect(ui.container.textContent).not.toContain(
         'Tip: Run /usage to see your plan usage.',
       );
       const rows = [

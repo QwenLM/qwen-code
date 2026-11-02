@@ -16,7 +16,6 @@ import {
   type SetStateAction,
 } from 'react';
 import { type DOMElement, measureElement } from 'ink';
-import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import { App } from './App.js';
 import { AppContext } from './contexts/AppContext.js';
 import { UIStateContext, type UIState } from './contexts/UIStateContext.js';
@@ -994,14 +993,6 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const [isConfigInitialized, setConfigInitialized] = useState(false);
 
-  const [subscriptionHintsDismissed, setSubscriptionHintsDismissed] = useState(
-    () => Boolean(config.getResumedSessionData()),
-  );
-  const dismissSubscriptionHints = useCallback(
-    () => setSubscriptionHintsDismissed(true),
-    [],
-  );
-
   const [userMessages, setUserMessages] = useState<string[]>([]);
 
   // Ctrl+O / Alt+T inline expansion toggle for thinking blocks (expands all at once).
@@ -1836,9 +1827,6 @@ export const AppContainer = (props: AppContainerProps) => {
   } = useOutputStyleCommand(settings, config, historyManager.addItem);
 
   const handleAuthChange = useCallback(() => {
-    if (config.getAuthType() === AuthType.QWEN_SUBSCRIPTION) {
-      setSubscriptionHintsDismissed(false);
-    }
     const model = config.getModel();
     lastNotifiedModelRef.current = model;
     refreshStatic();
@@ -5275,7 +5263,6 @@ export const AppContainer = (props: AppContainerProps) => {
     () => ({
       history: historyManager.history,
       historyManager,
-      subscriptionHintsDismissed,
       isThemeDialogOpen,
       themeError,
       auth: authState,
@@ -5429,7 +5416,6 @@ export const AppContainer = (props: AppContainerProps) => {
       isThemeDialogOpen,
       themeError,
       authState,
-      subscriptionHintsDismissed,
       isConfigInitialized,
       editorError,
       isEditorDialogOpen,
@@ -5580,7 +5566,6 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const uiActions: UIActions = useMemo(
     () => ({
-      dismissSubscriptionHints,
       openThemeDialog,
       openEditorDialog,
       openMemoryDialog,
@@ -5676,7 +5661,6 @@ export const AppContainer = (props: AppContainerProps) => {
       closeDiffDialog,
     }),
     [
-      dismissSubscriptionHints,
       openThemeDialog,
       openEditorDialog,
       openMemoryDialog,

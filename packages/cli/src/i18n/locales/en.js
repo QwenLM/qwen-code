@@ -1834,6 +1834,13 @@ export default {
   'Authentication timed out. Please try again or select a different authentication method.':
     'Authentication timed out. Please try again or select a different authentication method.',
   'Signed in as {{email}}': 'Signed in as {{email}}',
+  'Signed in successfully · {{email}}': 'Signed in successfully · {{email}}',
+  'Current plan: Qwen {{plan}}. Qwen Code is ready.':
+    'Current plan: Qwen {{plan}}. Qwen Code is ready.',
+  'Model: {{model}}. Run /upgrade to upgrade your plan or /usage to view usage.':
+    'Model: {{model}}. Run /upgrade to upgrade your plan or /usage to view usage.',
+  'Common commands: /usage   /upgrade   /status   /logout':
+    'Common commands: /usage   /upgrade   /status   /logout',
   'Signed in as {{email}} (Qwen {{plan}})':
     'Signed in as {{email}} (Qwen {{plan}})',
   'Qwen {{plan}} is active · usage is included with your plan':

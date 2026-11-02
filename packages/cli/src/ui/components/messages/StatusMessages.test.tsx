@@ -20,6 +20,22 @@ vi.mock('ink-link', () => ({
 }));
 
 describe('InfoMessage', () => {
+  it('renders all four subscription summary lines without truncating commands', () => {
+    const { lastFrame, unmount } = render(
+      <InfoMessage
+        presentation="subscription-success"
+        text={
+          '✓ Signed in successfully · user@example.com\n✓ Current plan: Qwen Plus. Qwen Code is ready.\n  Model: qwen3.8-flash\n  Common commands: /usage   /upgrade   /status   /logout'
+        }
+      />,
+    );
+    expect(lastFrame()).toContain('Signed in successfully · user@example.com');
+    expect(lastFrame()).toContain('Current plan: Qwen Plus');
+    expect(lastFrame()).toContain('Model: qwen3.8-flash');
+    expect(lastFrame()).toContain('/usage   /upgrade   /status   /logout');
+    unmount();
+  });
+
   it('renders a clickable link label when link metadata is provided', () => {
     const url = 'https://example.com/report';
     const { lastFrame } = render(

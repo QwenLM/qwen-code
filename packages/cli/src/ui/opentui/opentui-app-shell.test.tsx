@@ -50,7 +50,6 @@ import {
   STATIC_EXTRA_HEIGHT,
 } from '../utils/layoutUtils.js';
 import { STATUS_INDICATOR_WIDTH } from './messages.js';
-import { C } from './theme.js';
 import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import {
   logoutCommand,
@@ -493,6 +492,61 @@ describe('OpenTuiApp shell wiring', () => {
 
   afterEach(() => {
     mocks.state.executeUserShell.mockImplementation(() => Promise.resolve());
+  });
+
+  it('keeps subscription commands working without the composer hint row', async () => {
+    renderApp({
+      config: { ...CONFIG, getAuthType: () => 'qwen-subscription' } as Config,
+    });
+    await settle();
+    expect(mocks.state.inputProps?.['placeholder']).toBe(
+      '  Type your request, or /usage',
+    );
+    expect(document.body.textContent).not.toContain('Try:');
+    expect(document.body.textContent).not.toContain(
+      '/usage  /status  /upgrade  /logout',
+    );
+    expect(screen.getByText('footer')).toBeTruthy();
+    await submit('/usage');
+    expect(mocks.state.handledTexts).toEqual(['/usage']);
+  });
+
+  it('keeps hints absent after login and a response', async () => {
+    const config = {
+      ...CONFIG,
+      getAuthType: () => 'qwen-subscription',
+    } as Config;
+    const props = {
+      config,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+    };
+    const ui = render(
+      <OpenTuiApp {...props} initialDialog={{ dialog: 'auth' }} />,
+    );
+    await settle();
+    act(() => {
+      (mocks.state.host as OpenTuiAppHost).addItem(
+        {
+          type: 'info',
+          text: 'new login',
+          presentation: 'subscription-success',
+        },
+        Date.now(),
+      );
+      (mocks.state.dialogProps?.['onClose'] as () => void)();
+    });
+    await settle();
+    expect(document.body.textContent).not.toContain('Try:');
+    ui.rerender(<OpenTuiApp {...props} streaming />);
+    await settle();
+    ui.rerender(<OpenTuiApp {...props} streaming={false} />);
+    await settle();
+    expect(document.body.textContent).not.toContain('Try:');
+    expect(screen.getByText('footer')).toBeTruthy();
+    ui.unmount();
   });
 
   it.each(['control', 'retry', 'image'] as const)(
@@ -4138,127 +4192,4 @@ describe('OpenTuiApp transcript scroll region', () => {
     );
     expect(region?.textContent).not.toContain('QUEUE_ROW_MARKER');
   });
-});
-
-it('shows subscription hints and keeps /usage on the normal command dispatcher', async () => {
-  renderApp({
-    config: { ...CONFIG, getAuthType: () => 'qwen-subscription' } as Config,
-  });
-  await settle();
-  expect(mocks.state.inputProps?.['placeholder']).toBe(
-    '  Type your request, or /usage',
-  );
-  expect(document.body.textContent).toContain(
-    '/usage  /status  /upgrade  /logout',
-  );
-  const commands = ['/usage', '/status', '/upgrade', '/logout'];
-  const hints = [...document.querySelectorAll('[data-p]')].find(
-    (element) => element.textContent === 'Try:  ' + commands.join('  '),
-  )!;
-  expect(hints).toBeDefined();
-  const hintStyles = JSON.parse(hints.getAttribute('data-p')!) as {
-    attributes?: number;
-  };
-  expect((hintStyles.attributes ?? 0) & 8).toBe(0);
-  expect([...hints.children].map((element) => element.textContent)).toEqual(
-    commands,
-  );
-  for (const [index, element] of [...hints.children].entries()) {
-    const styles = JSON.parse(element.getAttribute('data-p')!) as {
-      attributes?: number;
-      fg?: string;
-    };
-    expect((styles.attributes ?? 0) & 8).toBe(8);
-    expect(styles.fg).toBe(C.purple);
-    if (index < commands.length - 1) {
-      expect(element.nextSibling?.nodeType).toBe(Node.TEXT_NODE);
-      expect(element.nextSibling?.textContent).toBe('  ');
-    }
-  }
-  await submit('/usage');
-  expect(mocks.state.handledTexts).toEqual(['/usage']);
-  expect(document.body.textContent).not.toContain(
-    '/usage  /status  /upgrade  /logout',
-  );
-});
-
-it('restores hints after re-login and ignores inputs from the previous account session', async () => {
-  const ui = renderApp({
-    config: { ...CONFIG, getAuthType: () => 'qwen-subscription' } as Config,
-    initialDialog: { dialog: 'auth' },
-    startupHistory: [
-      { id: 1, type: 'user', text: 'old conversation' },
-      { id: 2, type: 'user', text: '/logout' },
-    ],
-    userMessages: ['old conversation', '/logout'],
-  });
-  await settle();
-  const host = mocks.state.host as OpenTuiAppHost;
-  act(() => {
-    host.addItem(
-      { type: 'info', text: 'new login', presentation: 'subscription-success' },
-      Date.now(),
-    );
-    (mocks.state.dialogProps?.['onSubscriptionActivated'] as () => void)();
-    (mocks.state.dialogProps?.['onClose'] as () => void)();
-  });
-  await settle();
-  expect(document.body.textContent).toContain(
-    '/usage  /status  /upgrade  /logout',
-  );
-  act(() => (mocks.state.inputProps?.['onInputActivity'] as () => void)());
-  await settle();
-  expect(document.body.textContent).not.toContain(
-    '/usage  /status  /upgrade  /logout',
-  );
-  ui.unmount();
-});
-
-it('keeps subscription hints dismissed after input activity and response completion', async () => {
-  const config = {
-    ...CONFIG,
-    getAuthType: () => 'qwen-subscription',
-  } as Config;
-  const props = {
-    config,
-    settings: SETTINGS,
-    logger: null,
-    commands: [] as readonly SlashCommand[],
-    getSessionStats,
-  };
-  const ui = render(<OpenTuiApp {...props} />);
-  await settle();
-  expect(document.body.textContent).toContain(
-    '/usage  /status  /upgrade  /logout',
-  );
-  act(() => (mocks.state.inputProps?.['onInputActivity'] as () => void)());
-  await settle();
-  expect(document.body.textContent).not.toContain(
-    '/usage  /status  /upgrade  /logout',
-  );
-  ui.rerender(<OpenTuiApp {...props} streaming />);
-  await settle();
-  ui.rerender(<OpenTuiApp {...props} streaming={false} />);
-  await settle();
-  expect(document.body.textContent).not.toContain(
-    '/usage  /status  /upgrade  /logout',
-  );
-});
-
-it('does not show subscription hints when startup resumes a saved conversation', async () => {
-  renderApp({
-    config: {
-      ...CONFIG,
-      getAuthType: () => 'qwen-subscription',
-      getResumedSessionData: () => ({
-        conversation: {
-          messages: [{ type: 'user', content: 'previous prompt' }],
-        },
-      }),
-    } as unknown as Config,
-  });
-  await settle();
-  expect(document.body.textContent).not.toContain(
-    '/usage  /status  /upgrade  /logout',
-  );
 });

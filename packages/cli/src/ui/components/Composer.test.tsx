@@ -5,10 +5,6 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { useCallback, useState } from 'react';
-import { createRequire } from 'node:module';
-import type chalk from 'chalk';
-import { theme } from '../semantic-colors.js';
 import { render } from 'ink-testing-library';
 import { Text } from 'ink';
 import { Composer } from './Composer.js';
@@ -133,7 +129,6 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     isConfigInitialized: true,
     buffer: { text: '' },
     history: [],
-    subscriptionHintsDismissed: false,
     inputWidth: 80,
     suggestionsWidth: 40,
     userMessages: [],
@@ -204,21 +199,10 @@ function ComposerOwner({
   uiActions: UIActions;
   showComposer: boolean;
 }) {
-  const [subscriptionHintsDismissed, setSubscriptionHintsDismissed] = useState(
-    uiState.subscriptionHintsDismissed,
-  );
-  const dismissSubscriptionHints = useCallback(
-    () => setSubscriptionHintsDismissed(true),
-    [],
-  );
   return (
     <ConfigContext.Provider value={config as unknown as Config}>
-      <UIStateContext.Provider
-        value={{ ...uiState, subscriptionHintsDismissed }}
-      >
-        <UIActionsContext.Provider
-          value={{ ...uiActions, dismissSubscriptionHints }}
-        >
+      <UIStateContext.Provider value={uiState}>
+        <UIActionsContext.Provider value={uiActions}>
           {showComposer ? <Composer /> : <Text>Auth dialog</Text>}
         </UIActionsContext.Provider>
       </UIStateContext.Provider>
@@ -602,240 +586,31 @@ describe('Composer', () => {
   });
 });
 
-it('shows the subscription input and blue underlined command hints in the main composer', async () => {
-  const inkRequire = createRequire(
-    createRequire(import.meta.url).resolve('ink'),
-  );
-  const inkChalk: typeof chalk = (await import(inkRequire.resolve('chalk')))
-    .default;
-  const previousLevel = inkChalk.level;
-  inkChalk.level = 3;
-  const ui = renderComposer(
-    createMockUIState(),
-    createMockConfig({ getAuthType: () => 'qwen-subscription' }),
-  );
-  try {
-    expect(ui.lastFrame()).toContain(
-      ['/usage', '/status', '/upgrade', '/logout']
-        .map((command) =>
-          inkChalk.underline(inkChalk.hex(theme.text.link)(command)),
-        )
-        .join('  '),
+it.each<{ history: UIState['history'] }>([
+  { history: [] },
+  { history: [{ id: 1, type: MessageType.USER, text: '/auth' }] },
+])(
+  'keeps the subscription placeholder without the command hint row (%j)',
+  ({ history }) => {
+    const actions = createMockUIActions();
+    const ui = renderComposer(
+      createMockUIState({ history }),
+      createMockConfig({ getAuthType: () => 'qwen-subscription' }),
+      actions,
     );
-    expect(vi.mocked(InputPrompt).mock.calls.at(-1)?.[0].placeholder).toBe(
-      '  Type your request, or /usage',
-    );
-  } finally {
-    ui.unmount();
-    inkChalk.level = previousLevel;
-  }
-});
-
-it('shows hints after a fresh login despite earlier conversation and logout history', async () => {
-  const history: UIState['history'] = [
-    { id: 1, type: MessageType.USER, text: 'earlier conversation' },
-    { id: 2, type: MessageType.USER, text: '/logout' },
-    {
-      id: 3,
-      type: MessageType.INFO,
-      text: 'new login',
-      presentation: 'subscription-success',
-    },
-  ];
-  const config = createMockConfig({ getAuthType: () => 'qwen-subscription' });
-  const ui = renderComposer(createMockUIState({ history }), config);
-  try {
-    expect(ui.lastFrame()).toContain('/usage  /status  /upgrade  /logout');
-    ui.rerender(
-      composerElement(
-        createMockUIState({
-          history: [
-            ...history,
-            { id: 4, type: MessageType.USER, text: 'new question' },
-          ],
-        }),
-        config,
-      ),
-    );
-    await vi.waitFor(() =>
+    try {
+      expect(ui.lastFrame()).not.toContain('Try:');
       expect(ui.lastFrame()).not.toContain(
         '/usage  /status  /upgrade  /logout',
-      ),
-    );
-  } finally {
-    ui.unmount();
-  }
-});
-
-it('dismisses the subscription welcome hints after first input and keeps them dismissed after clearing or a response', async () => {
-  const config = createMockConfig({ getAuthType: () => 'qwen-subscription' });
-  const actions = createMockUIActions();
-  const idle = createMockUIState({
-    buffer: { text: '' } as UIState['buffer'],
-    history: [],
-    userMessages: [],
-  });
-  const ui = render(composerElement(idle, config, actions));
-  try {
-    expect(ui.lastFrame()).toContain('/usage  /status  /upgrade  /logout');
-    ui.rerender(
-      composerElement(
-        { ...idle, buffer: { text: 'hello' } as UIState['buffer'] },
-        config,
-        actions,
-      ),
-    );
-    await vi.waitFor(() =>
-      expect(vi.mocked(InputPrompt).mock.calls.at(-1)?.[0].buffer.text).toBe(
-        'hello',
-      ),
-    );
-    expect
-      .soft(ui.lastFrame())
-      .not.toContain('/usage  /status  /upgrade  /logout');
-    ui.rerender(composerElement(idle, config, actions));
-    await vi.waitFor(() =>
-      expect(vi.mocked(InputPrompt).mock.calls.at(-1)?.[0].buffer.text).toBe(
-        '',
-      ),
-    );
-    expect
-      .soft(ui.lastFrame())
-      .not.toContain('/usage  /status  /upgrade  /logout');
-    ui.rerender(
-      composerElement(
-        { ...idle, streamingState: StreamingState.Responding },
-        config,
-        actions,
-      ),
-    );
-    await vi.waitFor(() =>
-      expect(ui.lastFrame()).not.toContain(
-        '/usage  /status  /upgrade  /logout',
-      ),
-    );
-    ui.rerender(composerElement(idle, config, actions));
-    await vi.waitFor(() => expect(ui.lastFrame()).toContain('InputPrompt'));
-    expect
-      .soft(ui.lastFrame())
-      .not.toContain('/usage  /status  /upgrade  /logout');
-  } finally {
-    ui.unmount();
-  }
-});
-
-it('does not show subscription welcome hints when opening an existing conversation', () => {
-  const ui = renderComposer(
-    createMockUIState({
-      buffer: { text: '' } as UIState['buffer'],
-      history: [{ id: 1, type: 'user', text: 'hello' }],
-      userMessages: ['hello'],
-    }),
-    createMockConfig({ getAuthType: () => 'qwen-subscription' }),
-  );
-  try {
-    expect(ui.lastFrame()).not.toContain('/usage  /status  /upgrade  /logout');
-  } finally {
-    ui.unmount();
-  }
-});
-
-it('dismisses subscription welcome hints on submission even before buffer updates', async () => {
-  const config = createMockConfig({ getAuthType: () => 'qwen-subscription' });
-  const state = createMockUIState();
-  const actions = createMockUIActions();
-  const ui = renderComposer(state, config, actions);
-  try {
-    expect(ui.lastFrame()).toContain('/usage  /status  /upgrade  /logout');
-    const props = vi.mocked(InputPrompt).mock.calls.at(-1)![0];
-    const options = { deferUntilIdle: true, submittedPrompt: 'hello' };
-    props.onSubmit('hello', options);
-    expect(actions.handleFinalSubmit).toHaveBeenCalledWith('hello', options);
-    await vi.waitFor(() =>
-      expect(ui.lastFrame()).not.toContain(
-        '/usage  /status  /upgrade  /logout',
-      ),
-    );
-    ui.rerender(composerElement(state, config, actions));
-    await vi.waitFor(() =>
-      expect(ui.lastFrame()).not.toContain(
-        '/usage  /status  /upgrade  /logout',
-      ),
-    );
-  } finally {
-    ui.unmount();
-  }
-});
-
-it('keeps subscription hints dismissed when a response finishes without local typing', async () => {
-  const config = createMockConfig({ getAuthType: () => 'qwen-subscription' });
-  const idle = createMockUIState();
-  const actions = createMockUIActions();
-  const ui = renderComposer(idle, config, actions);
-  try {
-    expect(ui.lastFrame()).toContain('/usage  /status  /upgrade  /logout');
-    ui.rerender(
-      composerElement(
-        { ...idle, streamingState: StreamingState.Responding },
-        config,
-        actions,
-      ),
-    );
-    await vi.waitFor(() =>
-      expect(ui.lastFrame()).not.toContain(
-        '/usage  /status  /upgrade  /logout',
-      ),
-    );
-    const calls = vi.mocked(InputPrompt).mock.calls.length;
-    ui.rerender(composerElement(idle, config, actions));
-    await vi.waitFor(() =>
-      expect(vi.mocked(InputPrompt).mock.calls.length).toBeGreaterThan(calls),
-    );
-    expect(ui.lastFrame()).not.toContain('/usage  /status  /upgrade  /logout');
-  } finally {
-    ui.unmount();
-  }
-});
-
-it('allows initial subscription welcome hints after /auth setup history', () => {
-  const ui = renderComposer(
-    createMockUIState({
-      history: [{ id: 1, type: 'user', text: '/auth' }],
-      userMessages: ['/auth'],
-    }),
-    createMockConfig({ getAuthType: () => 'qwen-subscription' }),
-  );
-  try {
-    expect(ui.lastFrame()).toContain('/usage  /status  /upgrade  /logout');
-  } finally {
-    ui.unmount();
-  }
-});
-
-it('keeps welcome hints dismissed across auth-dialog unmount and remount within the same owner', async () => {
-  const config = createMockConfig({ getAuthType: () => 'qwen-subscription' });
-  const actions = createMockUIActions();
-  const initial = createMockUIState();
-  const ui = renderComposer(initial, config, actions);
-  try {
-    expect(ui.lastFrame()).toContain('/usage  /status  /upgrade  /logout');
-    vi.mocked(InputPrompt).mock.calls.at(-1)![0].onSubmit('/auth');
-    await vi.waitFor(() =>
-      expect(ui.lastFrame()).not.toContain(
-        '/usage  /status  /upgrade  /logout',
-      ),
-    );
-    const withAuthHistory = createMockUIState({
-      history: [{ id: 1, type: 'user', text: '/auth' }],
-      userMessages: ['/auth'],
-    });
-    ui.rerender(composerElement(withAuthHistory, config, actions, false));
-    await vi.waitFor(() => expect(ui.lastFrame()).toContain('Auth dialog'));
-    expect(ui.lastFrame()).not.toContain('InputPrompt');
-    ui.rerender(composerElement(withAuthHistory, config, actions, true));
-    await vi.waitFor(() => expect(ui.lastFrame()).toContain('InputPrompt'));
-    expect(ui.lastFrame()).not.toContain('/usage  /status  /upgrade  /logout');
-  } finally {
-    ui.unmount();
-  }
-});
+      );
+      expect(ui.lastFrame()).toContain('Footer');
+      const props = vi.mocked(InputPrompt).mock.calls.at(-1)![0];
+      expect(props.placeholder).toBe('  Type your request, or /usage');
+      const options = { deferUntilIdle: true, submittedPrompt: '/usage' };
+      props.onSubmit('/usage', options);
+      expect(actions.handleFinalSubmit).toHaveBeenCalledWith('/usage', options);
+    } finally {
+      ui.unmount();
+    }
+  },
+);

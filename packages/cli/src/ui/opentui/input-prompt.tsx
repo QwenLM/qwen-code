@@ -260,7 +260,6 @@ export interface InputPromptProps {
     handleInput: (key: Key) => boolean;
     enabled: boolean;
   };
-  onInputActivity?: () => void;
   /** Submitted prompts (chronological) feeding history navigation. */
   userMessages: readonly string[];
   config?: Config;
@@ -320,7 +319,6 @@ export interface InputPromptProps {
 export function OpenTuiInputPrompt(props: InputPromptProps) {
   const {
     onSubmit,
-    onInputActivity,
     onNotice,
     userMessages,
     config,
@@ -551,11 +549,6 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     () => setAttachments([...draftRef.current.attachments]),
     [],
   );
-  useEffect(() => {
-    if (editorRef.current?.plainText || attachments.length > 0) {
-      onInputActivity?.();
-    }
-  }, [textVersion, attachments.length, onInputActivity]);
   const completionModeRef = useRef<CompletionMode>(CompletionMode.IDLE);
   // History-restored text suppresses re-opening the dropdown, like the
   // original's isHistoryRestoredText.

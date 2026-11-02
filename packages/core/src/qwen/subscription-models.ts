@@ -7,6 +7,7 @@
 import { closeSync, constants, openSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
+import type { InputModalities } from '../core/contentGenerator.js';
 import { Storage } from '../config/storage.js';
 import { getQwenOAuthConfig, QWEN_SUBSCRIPTION_MODEL } from './oauth-config.js';
 
@@ -25,6 +26,12 @@ export const SUBSCRIPTION_MODELS_UNAVAILABLE =
   'Could not load Qwen Subscription models. Your account is still signed in. Please try again.';
 export const SUBSCRIPTION_MODELS_CACHED =
   'Provider model list unavailable; using the last successfully loaded models.';
+
+export function subscriptionModelModalities(model: string): InputModalities {
+  return model === 'qwen3.8-max' || model === 'qwen3.8-flash'
+    ? { image: true, video: true }
+    : {};
+}
 
 export function subscriptionModelUnavailable(model: string): string {
   return `The selected model, ${model}, is no longer available. Run /model to choose another model.`;

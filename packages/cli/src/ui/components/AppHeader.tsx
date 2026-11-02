@@ -5,16 +5,12 @@
  */
 
 import { useMemo } from 'react';
-import { Box, Text } from 'ink';
-import {
-  AuthType,
-  findProviderByCredentials,
-  resolveMetadataKey,
-} from '@qwen-code/qwen-code-core';
+import { Box } from 'ink';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import { findProviderByCredentials } from '@qwen-code/qwen-code-core/providers/all-providers.js';
+import { resolveMetadataKey } from '@qwen-code/qwen-code-core/providers/provider-config.js';
 import { Header, AuthDisplayType } from './Header.js';
 import { Tips } from './Tips.js';
-import { theme } from '../semantic-colors.js';
-import { t } from '../../i18n/index.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
@@ -95,16 +91,7 @@ export const AppHeader = ({ version }: AppHeaderProps) => {
           customBannerSubtitle={resolvedBanner?.subtitle}
         />
       )}
-      {showTips &&
-        (authType === AuthType.QWEN_SUBSCRIPTION ? (
-          <Box marginLeft={2} marginRight={2}>
-            <Text color={theme.text.secondary}>
-              {t('Tip: Run /usage to see your plan usage.')}
-            </Text>
-          </Box>
-        ) : (
-          <Tips />
-        ))}
+      {showTips && authType !== AuthType.QWEN_SUBSCRIPTION && <Tips />}
     </Box>
   );
 };

@@ -48,7 +48,6 @@ import {
   type Logger,
 } from '@qwen-code/qwen-code-core';
 import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
-import { C } from './theme.js';
 import type { PartListUnion } from '@google/genai';
 import { MessageSenderType } from '@qwen-code/qwen-code-core/core/logger.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -378,12 +377,6 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const [showSuggestions, setShowSuggestions] = useState(false);
   const subscriptionActive =
     config.getAuthType() === AuthType.QWEN_SUBSCRIPTION;
-  const [subscriptionHintsDismissed, setSubscriptionHintsDismissed] = useState(
-    () => Boolean(config.getResumedSessionData()),
-  );
-  const dismissSubscriptionHints = useCallback(() => {
-    if (subscriptionActive) setSubscriptionHintsDismissed(true);
-  }, [subscriptionActive]);
   const onSuggestionsVisibilityChange = useCallback(
     (visible: boolean) => setShowSuggestions(visible),
     [],
@@ -1500,20 +1493,6 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     return [...new Set([...typed].reverse().concat(pastMessages))].reverse();
   }, [props.userMessages, hostHistory, pastMessages]);
 
-  const lastSubscriptionLogin = hostHistory.findLastIndex(
-    (item) =>
-      item.type === 'info' && item.presentation === 'subscription-success',
-  );
-  const hasPriorInput =
-    lastSubscriptionLogin < 0
-      ? userMessages.some((text) => text.trim() !== '/auth')
-      : hostHistory
-          .slice(lastSubscriptionLogin + 1)
-          .some((item) => item.type === 'user' && item.text.trim() !== '/auth');
-  useEffect(() => {
-    if (hasPriorInput || streaming) dismissSubscriptionHints();
-  }, [hasPriorInput, streaming, dismissSubscriptionHints]);
-
   // ink's Composer drops the phrase (not the row) when this setting is off.
   const showLoadingPhrases =
     config.getAccessibility()?.enableLoadingPhrases !== false;
@@ -1655,9 +1634,6 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 settings={settings}
                 commands={presentedCommands}
                 onClose={() => setDialog(null)}
-                onSubscriptionActivated={() =>
-                  setSubscriptionHintsDismissed(false)
-                }
                 notify={notify}
                 fillInput={fillComposer}
                 onSelectSetting={handleSelectSetting}
@@ -1697,11 +1673,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                     ? '  ' + t('Type your request, or /usage')
                     : undefined
                 }
-                onSubmit={(text, imagePaths, options) => {
-                  dismissSubscriptionHints();
-                  return onSubmit(text, imagePaths, options);
-                }}
-                onInputActivity={dismissSubscriptionHints}
+                onSubmit={onSubmit}
                 onNotice={notify}
                 voice={{
                   settings,
@@ -1754,31 +1726,6 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
                 onCycleApprovalMode={cycleApprovalMode}
               />
-              {subscriptionActive &&
-                !subscriptionHintsDismissed &&
-                !hasPriorInput &&
-                !streaming &&
-                !showSuggestions && (
-                  <text marginTop={1} fg={C.dim}>
-                    {t('Try:')}
-                    {'  '}
-                    <span attributes={8} fg={C.purple}>
-                      /usage
-                    </span>
-                    {'  '}
-                    <span attributes={8} fg={C.purple}>
-                      /status
-                    </span>
-                    {'  '}
-                    <span attributes={8} fg={C.purple}>
-                      /upgrade
-                    </span>
-                    {'  '}
-                    <span attributes={8} fg={C.purple}>
-                      /logout
-                    </span>
-                  </text>
-                )}
             </box>
           )}
           {/* An armed quit warning forces the footer to mount: a dialog unmounts

@@ -5,13 +5,7 @@
  */
 
 import { Box, Text, useIsScreenReaderEnabled, type DOMElement } from 'ink';
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type RefObject,
-} from 'react';
+import { useCallback, useRef, useState, type RefObject } from 'react';
 import { LoadingIndicator } from './LoadingIndicator.js';
 import { InputPrompt } from './InputPrompt.js';
 import { Footer } from './Footer.js';
@@ -66,28 +60,6 @@ export const Composer = ({ footerRef }: ComposerProps) => {
   const suppressBottomLoadingIndicator =
     uiState.streamingState === StreamingState.Responding &&
     uiState.terminalWidth <= 30;
-
-  const { subscriptionHintsDismissed } = uiState;
-  const { dismissSubscriptionHints } = uiActions;
-  const lastSubscriptionLogin = uiState.history.findLastIndex(
-    (item) =>
-      item.type === 'info' && item.presentation === 'subscription-success',
-  );
-  const hasPriorInput = uiState.history
-    .slice(lastSubscriptionLogin + 1)
-    .some((item) => item.type === 'user' && item.text.trim() !== '/auth');
-  const hasInput = uiState.buffer.text.length > 0;
-  useEffect(() => {
-    if (subscriptionActive && (hasInput || hasPriorInput || isStreaming)) {
-      dismissSubscriptionHints();
-    }
-  }, [
-    subscriptionActive,
-    hasInput,
-    hasPriorInput,
-    isStreaming,
-    dismissSubscriptionHints,
-  ]);
 
   // State for keyboard shortcuts display toggle
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -164,10 +136,7 @@ export const Composer = ({ footerRef }: ComposerProps) => {
           onPendingPastesChange={uiActions.setPendingPastes}
           inputWidth={uiState.inputWidth}
           suggestionsWidth={uiState.suggestionsWidth}
-          onSubmit={(text, options) => {
-            if (subscriptionActive) dismissSubscriptionHints();
-            uiActions.handleFinalSubmit(text, options);
-          }}
+          onSubmit={uiActions.handleFinalSubmit}
           userMessages={uiState.userMessages}
           onClearScreen={uiActions.handleClearScreen}
           config={config}
@@ -201,38 +170,6 @@ export const Composer = ({ footerRef }: ComposerProps) => {
           voiceMicWarnedStatusRef={uiState.voiceMicWarnedStatusRef}
         />
       )}
-
-      {uiState.isInputActive &&
-        subscriptionActive &&
-        !subscriptionHintsDismissed &&
-        !hasPriorInput &&
-        !hasInput &&
-        !showSuggestions &&
-        !isStreaming && (
-          <Box marginTop={1}>
-            <Text color={theme.text.secondary}>
-              {t('Try:')}
-              {'  '}
-            </Text>
-            <Text>
-              <Text color={theme.text.link} underline>
-                /usage
-              </Text>
-              {'  '}
-              <Text color={theme.text.link} underline>
-                /status
-              </Text>
-              {'  '}
-              <Text color={theme.text.link} underline>
-                /upgrade
-              </Text>
-              {'  '}
-              <Text color={theme.text.link} underline>
-                /logout
-              </Text>
-            </Text>
-          </Box>
-        )}
 
       {/* Exclusive area: only one component visible at a time */}
       {/* Hide footer when a confirmation dialog (e.g. ask_user_question) is active */}

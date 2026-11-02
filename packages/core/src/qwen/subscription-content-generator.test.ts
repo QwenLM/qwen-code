@@ -13,6 +13,7 @@ import { preloadRuntimeFetchModule } from '../utils/runtimeFetchOptions.js';
 import { createSubscriptionContentGenerator } from './subscription-content-generator.js';
 import { SubscriptionOAuthError } from './subscription-oauth-client.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { resolveModelConfig } from '../models/modelConfigResolver.js';
 import {
   QWEN_SUBSCRIPTION_BASE_URL,
   QWEN_SUBSCRIPTION_MODEL,
@@ -75,6 +76,46 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
 });
+
+it.each(['qwen3.8-max', 'qwen3.8-flash'])(
+  'sends image and video inputs through the subscription pipeline for %s',
+  async (model) => {
+    fetchMock.mockResolvedValue(completion());
+    const { config } = resolveModelConfig({
+      authType: AuthType.QWEN_SUBSCRIPTION,
+      cli: { model },
+      settings: {},
+      env: {},
+    });
+    await generator(config).generateContent(
+      {
+        model,
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: 'Describe these inputs' },
+              { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
+              { inlineData: { mimeType: 'video/mp4', data: 'dmlkZW8=' } },
+            ],
+          },
+        ],
+      },
+      'media-prompt',
+    );
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    expect(body.model).toBe(model);
+    expect(body.messages).toContainEqual(
+      expect.objectContaining({
+        role: 'user',
+        content: expect.arrayContaining([
+          expect.objectContaining({ type: 'image_url' }),
+          expect.objectContaining({ type: 'video_url' }),
+        ]),
+      }),
+    );
+  },
+);
 
 it('uses the real Chat pipeline with dynamic credentials and no DashScope extras', async () => {
   fetchMock.mockResolvedValue(completion());

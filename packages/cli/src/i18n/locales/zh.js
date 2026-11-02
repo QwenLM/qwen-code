@@ -1750,6 +1750,13 @@ export default {
   'Authentication timed out. Please try again or select a different authentication method.':
     '身份验证超时。请重试或选择其他身份验证方式。',
   'Signed in as {{email}}': '已登录为 {{email}}',
+  'Signed in successfully · {{email}}': '登录成功 · {{email}}',
+  'Current plan: Qwen {{plan}}. Qwen Code is ready.':
+    '当前套餐：Qwen {{plan}}，已可使用 Qwen Code',
+  'Model: {{model}}. Run /upgrade to upgrade your plan or /usage to view usage.':
+    '模型：{{model}}，输入 /upgrade 升级套餐，/usage 查看用量。',
+  'Common commands: /usage   /upgrade   /status   /logout':
+    '常用命令：/usage   /upgrade   /status   /logout',
   'Signed in as {{email}} (Qwen {{plan}})':
     '已登录为 {{email}}（Qwen {{plan}}）',
   'Qwen {{plan}} is active · usage is included with your plan':

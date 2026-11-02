@@ -9,7 +9,10 @@ import { defaultModalities } from '../core/modalityDefaults.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import { QWEN_SUBSCRIPTION_BASE_URL } from '../qwen/oauth-config.js';
-import { readCachedSubscriptionModels } from '../qwen/subscription-models.js';
+import {
+  readCachedSubscriptionModels,
+  subscriptionModelModalities,
+} from '../qwen/subscription-models.js';
 import {
   type ModelConfig,
   type ModelProvidersConfig,
@@ -507,7 +510,7 @@ export class ModelRegistry {
       ids.map((id) => ({
         id,
         baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
-        generationConfig: { modalities: {} },
+        generationConfig: { modalities: subscriptionModelModalities(id) },
       })),
     );
   }

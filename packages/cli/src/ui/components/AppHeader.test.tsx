@@ -140,7 +140,7 @@ describe('<AppHeader />', () => {
     ui.unmount();
   });
 
-  it('shows the fixed subscription usage tip instead of a random startup tip', () => {
+  it('omits the redundant subscription startup tip', () => {
     const ui = renderWithProviders(
       createMockUIState(),
       createSettings({ hideTips: false }),
@@ -148,7 +148,9 @@ describe('<AppHeader />', () => {
         getContentGeneratorConfig: () => ({ authType: 'qwen-subscription' }),
       }),
     );
-    expect(ui.lastFrame()).toContain('Tip: Run /usage to see your plan usage.');
+    expect(ui.lastFrame()).not.toContain(
+      'Tip: Run /usage to see your plan usage.',
+    );
     expect(ui.lastFrame()).not.toContain('Tips:');
     ui.unmount();
   });

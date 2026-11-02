@@ -854,21 +854,6 @@ describe('OpenTuiInputPrompt printable fallback', () => {
     mocks.state.slashCommands = [];
   });
 
-  it('reports input activity only after the editor receives content', async () => {
-    const onInputActivity = vi.fn();
-    render(
-      <OpenTuiInputPrompt
-        onSubmit={() => true}
-        userMessages={[]}
-        onInputActivity={onInputActivity}
-      />,
-    );
-    expect(onInputActivity).not.toHaveBeenCalled();
-    await typeText('hello');
-    expect(currentEditor().plainText).toBe('hello');
-    expect(onInputActivity).toHaveBeenCalled();
-  });
-
   it('preserves ASCII, CJK and emoji, inserting each exactly once', async () => {
     render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
     const editor = currentEditor();

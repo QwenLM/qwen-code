@@ -1834,67 +1834,6 @@ describe('AppContainer State Management', () => {
       }).not.toThrow();
     });
 
-    it('keeps subscription welcome dismissal at AppContainer scope across rerenders', async () => {
-      const initialize = vi
-        .spyOn(mockConfig, 'initialize')
-        .mockResolvedValue(undefined);
-      let updateVersion!: (value: string) => void;
-      function Wrapper() {
-        const [version, setVersion] = useState('1.0.0');
-        updateVersion = setVersion;
-        return (
-          <AppContainer
-            config={mockConfig}
-            settings={mockSettings}
-            version={version}
-            initializationResult={mockInitResult}
-          />
-        );
-      }
-      const view = render(<Wrapper />);
-      try {
-        expect(capturedUIState.subscriptionHintsDismissed).toBe(false);
-        const dismiss = capturedUIActions.dismissSubscriptionHints;
-        await act(async () => capturedUIActions.dismissSubscriptionHints());
-        expect(capturedUIState.subscriptionHintsDismissed).toBe(true);
-        await act(async () => updateVersion('1.0.1'));
-        expect(capturedUIState.subscriptionHintsDismissed).toBe(true);
-        expect(capturedUIActions.dismissSubscriptionHints).toBe(dismiss);
-        expect(initialize).toHaveBeenCalledTimes(1);
-      } finally {
-        view.unmount();
-      }
-    });
-
-    it('starts resumed sessions with subscription welcome hints dismissed', () => {
-      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
-      vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue({
-        conversation: {
-          sessionId: 'session-1',
-          projectHash: 'test-project-hash',
-          startTime: '2024-01-01T00:00:00Z',
-          lastUpdated: '2024-01-01T00:00:01Z',
-          messages: [],
-        },
-        filePath: '/tmp/session.jsonl',
-        lastCompletedUuid: null,
-      } as ReturnType<typeof mockConfig.getResumedSessionData>);
-      vi.spyOn(mockConfig, 'loadPausedBackgroundAgents').mockResolvedValue([]);
-      const view = render(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
-      try {
-        expect(capturedUIState.subscriptionHintsDismissed).toBe(true);
-      } finally {
-        view.unmount();
-      }
-    });
-
     it('refreshStatic clears the terminal before remounting history', () => {
       render(
         <AppContainer

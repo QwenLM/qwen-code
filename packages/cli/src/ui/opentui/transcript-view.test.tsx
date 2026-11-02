@@ -1773,7 +1773,7 @@ it('preserves subscription success styles through history projection and folding
     {
       type: 'info',
       presentation: 'subscription-success',
-      text: '✓ Signed in as builder@example.com\n✓ Qwen Pro is active · usage is included with your plan\n  Model: qwen3.8-max · Run /usage to see your plan usage',
+      text: '✓ Signed in successfully · builder@example.com\n✓ Current plan: Qwen Pro. Qwen Code is ready.\n  Model: qwen3.8-max. Run /upgrade to upgrade your plan or /usage to view usage.\n  Common commands: /usage   /upgrade   /status   /logout',
     },
     {},
   );
@@ -1784,17 +1784,24 @@ it('preserves subscription success styles through history projection and folding
   expect(container.textContent).not.toContain('●');
   expect(container.querySelectorAll(`[data-fg="${C.green}"]`)).toHaveLength(2);
   expect(
-    getByText('Signed in as builder@example.com').getAttribute('data-fg'),
+    getByText('Signed in successfully · builder@example.com').getAttribute(
+      'data-fg',
+    ),
+  ).toBe(C.text);
+  expect(
+    getByText('Current plan: Qwen Pro. Qwen Code is ready.').getAttribute(
+      'data-fg',
+    ),
   ).toBe(C.text);
   expect(
     getByText(
-      'Qwen Pro is active · usage is included with your plan',
+      'Model: qwen3.8-max. Run /upgrade to upgrade your plan or /usage to view usage.',
     ).getAttribute('data-fg'),
-  ).toBe(C.text);
+  ).toBe(C.dim);
   expect(
-    getByText(
-      'Model: qwen3.8-max · Run /usage to see your plan usage',
-    ).getAttribute('data-fg'),
+    getByText('Common commands: /usage   /upgrade   /status   /logout', {
+      normalizer: (text) => text.trim(),
+    }).getAttribute('data-fg'),
   ).toBe(C.dim);
 });
 

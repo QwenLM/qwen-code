@@ -21,15 +21,14 @@
 import { useMemo } from 'react';
 import { useTerminalDimensions } from '@opentui/react';
 import type { Config } from '@qwen-code/qwen-code-core';
+import { findProviderByCredentials } from '@qwen-code/qwen-code-core/providers/all-providers.js';
+import { resolveMetadataKey } from '@qwen-code/qwen-code-core/providers/provider-config.js';
 import {
-  findProviderByCredentials,
-  resolveMetadataKey,
   shortenPath,
   tildeifyPath,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/utils/paths.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { formatVersionLabel } from '../../utils/version.js';
-import { t } from '../../i18n/index.js';
 import { C, GRADIENT, THEME_REVISION } from './theme.js';
 import { shortAsciiLogo } from '../components/AsciiArt.js';
 import { getAsciiArtWidth, getCachedStringWidth } from '../utils/textUtils.js';
@@ -290,18 +289,5 @@ export function OpenTuiBanner({ config, settings }: OpenTuiBannerProps) {
       subscriptionPlan,
     ],
   );
-  if (
-    generatorConfig?.authType !== 'qwen-subscription' ||
-    settings.merged.ui?.hideTips ||
-    config.getScreenReader()
-  )
-    return banner;
-  return (
-    <box flexDirection="column">
-      {banner}
-      <text marginLeft={2} marginRight={2} fg={C.dim}>
-        {t('Tip: Run /usage to see your plan usage.')}
-      </text>
-    </box>
-  );
+  return banner;
 }

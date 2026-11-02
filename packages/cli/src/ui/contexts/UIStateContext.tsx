@@ -52,7 +52,6 @@ export interface PendingSkillView {
 }
 
 export interface UIState {
-  subscriptionHintsDismissed: boolean;
   history: HistoryItem[];
   historyManager: UseHistoryManagerReturn;
   isThemeDialogOpen: boolean;

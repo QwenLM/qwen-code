@@ -26,6 +26,7 @@ import {
   QWEN_SUBSCRIPTION_MODEL,
   QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
 } from '../qwen/oauth-config.js';
+import { subscriptionModelModalities } from '../qwen/subscription-models.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { knownTokenLimit } from '../core/tokenLimits.js';
 import {
@@ -168,16 +169,17 @@ export function resolveModelConfig(
     ) {
       throw new Error('Qwen Subscription does not support gateway overrides.');
     }
+    const model =
+      modelProvider?.id ??
+      cli?.model ??
+      settings?.model ??
+      QWEN_SUBSCRIPTION_MODEL;
     const config: ContentGeneratorConfig = {
       authType,
-      model:
-        modelProvider?.id ??
-        cli?.model ??
-        settings?.model ??
-        QWEN_SUBSCRIPTION_MODEL,
+      model,
       baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
       apiKey: QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
-      modalities: {},
+      modalities: subscriptionModelModalities(model),
       proxy,
     };
     for (const field of [

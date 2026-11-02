@@ -2577,6 +2577,13 @@ export default {
     '推薦模型 · 無法取得服務供應商清單，顯示內建模型',
   'Sign out': '登出',
   'Signed in as {{email}}': '已登入 {{email}}',
+  'Signed in successfully · {{email}}': '登入成功 · {{email}}',
+  'Current plan: Qwen {{plan}}. Qwen Code is ready.':
+    '目前方案：Qwen {{plan}}，已可使用 Qwen Code',
+  'Model: {{model}}. Run /upgrade to upgrade your plan or /usage to view usage.':
+    '模型：{{model}}，輸入 /upgrade 升級方案，/usage 查看用量。',
+  'Common commands: /usage   /upgrade   /status   /logout':
+    '常用指令：/usage   /upgrade   /status   /logout',
   'Signed in as {{email}} (Qwen {{plan}})': '已登入 {{email}}（Qwen {{plan}}）',
   'The network request failed or timed out.': '網路請求失敗或逾時。',
   'The service returned an invalid response.': '服務回傳的資料格式無效。',

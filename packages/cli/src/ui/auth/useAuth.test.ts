@@ -642,7 +642,7 @@ it('returns to the prompt and preserves the success summary after subscription a
   expect(addItem).toHaveBeenCalledWith(
     {
       type: 'info',
-      text: '✓ Signed in as builder@example.com\n✓ Qwen Pro is active · usage is included with your plan\n  Model: qwen3.8-max · Run /usage to see your plan usage',
+      text: '✓ Signed in successfully · builder@example.com\n✓ Current plan: Qwen Pro. Qwen Code is ready.\n  Model: qwen3.8-max. Run /upgrade to upgrade your plan or /usage to view usage.\n  Common commands: /usage   /upgrade   /status   /logout',
       presentation: 'subscription-success',
     },
     expect.any(Number),
