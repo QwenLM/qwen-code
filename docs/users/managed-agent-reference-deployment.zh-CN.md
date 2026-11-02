@@ -281,8 +281,8 @@ qwen:
 重启单 Java control plane，验证既有 binding 可以加载，并确认新 binding 记录写入 `reference-v2`。新 secret 只使用 active key；旧记录继续由其已记录的 key ID 加密。服务器不会在读取时重加密旧记录，删除仍被引用的密钥会使这些记录不可读。
 
 只有在没有持久化记录再引用 `reference-v1` 之后，才能退场该密钥。
-Runtime binding 和完整 Session 模型配置都会保存密钥 ID。按字节比较这些 ID，
-避免大小写或重音差异掩盖仍被引用的密钥：
+Runtime binding、完整 Session 模型配置和扩展配置都会保存密钥 ID。
+按字节比较这些 ID，避免大小写或重音差异掩盖仍被引用的密钥：
 
 ```sql
 SELECT DISTINCT credential_key_id AS key_id
@@ -292,14 +292,17 @@ SELECT DISTINCT runtime_credential_key_id AS key_id
 FROM ma_runtime_binding WHERE runtime_credential_key_id IS NOT NULL
 UNION
 SELECT DISTINCT CAST(model_config_key_id AS BINARY) AS key_id
-FROM ma_session WHERE model_config_key_id IS NOT NULL;
+FROM ma_session WHERE model_config_key_id IS NOT NULL
+UNION
+SELECT DISTINCT CAST(encryption_key_id AS BINARY) AS key_id
+FROM ma_extension_settings WHERE encryption_key_id IS NOT NULL;
 ```
 
 查询结果列出持久化记录仍需要的 key ID：预期只剩 active ID（`reference-v2`）。只要结果中仍出现 `reference-v1`，就必须继续配置该密钥。
 
 该 key ring 是映射结构，无法通过 `QWEN_MANAGED_AGENT_*` 环境变量提供：宽松绑定会把环境变量形式静默解析为空 ring 或键名错误的 ring，且启动时不报错。`previous-credential-keys` 配置在 `config/application.yml` 中。分发产物随包提供 `config/application.example.yml`，两个启动脚本都会在该文件存在时导出 `SPRING_CONFIG_ADDITIONAL_LOCATION=file:<分发产物根目录>/config/application.yml`，因此加载位置不再取决于进程工作目录，也不会向命令的位置参数注入选项。若该变量已设置，启动脚本保留原值。只依赖环境变量的部署会以空 ring 启动，因此在未配置旧密钥的情况下轮换 `credential-key-id` 会使旧密钥写入的记录不可读。显式的 `--spring.config.additional-location` 命令行参数优先于该环境变量默认值；两者同时存在时命令行值生效，随包的 `config/application.yml` 不会被加载。
 
-`operator-recovery` 入口与服务器读取相同的 active pair 和 `previous-credential-keys` 映射。其启动脚本同样加载 `config/application.yml`；文件位于其他位置时，设置 `SPRING_CONFIG_ADDITIONAL_LOCATION=file:<绝对路径>/application.yml`。保持新密钥为 active，并保留 binding 仍引用的每把旧密钥。CSI/迁移维护入口（含 CSI Hosted 探针）仍只读取单个 credential key pair；这些入口继续以加密目标 binding 的密钥作为 active pair 启动。
+`operator-recovery` 入口与服务器读取相同的 active pair 和 `previous-credential-keys` 映射。其启动脚本同样加载 `config/application.yml`；文件位于其他位置时，设置 `SPRING_CONFIG_ADDITIONAL_LOCATION=file:<绝对路径>/application.yml`。保持新密钥为 active，并保留持久化记录仍引用的每把旧密钥。CSI/迁移维护入口（含 CSI Hosted 探针）仍只读取单个 credential key pair；这些入口继续以加密目标 binding 的密钥作为 active pair 启动。
 
 密钥环配置成功后，服务器和恢复入口会为每个 protector 实例记录一次解析后的 active ID 和 configured IDs。这些 ID 是已随密文保存的非 secret 标识；诊断通过 JSON 转义控制字符与非 ASCII 字符、保留空格和大小写，绝不包含密钥材料、密文或 token。使用轮换后的部署前，应将 configured IDs 与退场查询返回的精确 ID 对照。密钥不可用错误会同时给出 requested、active 和 configured IDs，便于定位被静默规整或拼错的映射，同时避免泄露 secret。这些诊断不能证明每条持久化记录都能解密。
 
