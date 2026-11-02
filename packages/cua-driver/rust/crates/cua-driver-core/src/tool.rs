@@ -38,6 +38,7 @@ tokio::task_local! {
     static DISPATCH_RUNTIME_SCOPE: String;
     static DISPATCH_COMPUTER_USE_NATIVE: bool;
     static DISPATCH_AX_READINESS_DEADLINE: Option<std::time::Instant>;
+    static DISPATCH_SESSION_LIFETIME: Option<Arc<crate::session::SessionDispatchGuard>>;
 }
 
 #[doc(hidden)]
@@ -50,6 +51,20 @@ pub fn current_ax_readiness_deadline() -> Option<std::time::Instant> {
         .try_with(|value| *value)
         .ok()
         .flatten()
+}
+
+#[doc(hidden)]
+pub fn retain_dispatch_lifetime() -> impl Send + 'static {
+    let session = DISPATCH_SESSION_LIFETIME
+        .try_with(Clone::clone)
+        .ok()
+        .flatten();
+    let runtime = DISPATCH_TRUSTED_INVOCATION_EVIDENCE
+        .try_with(|evidence| evidence.runtime_operation.clone())
+        .ok()
+        .flatten();
+    // Session cleanup must finish before releasing the runtime drain permit.
+    (session, runtime)
 }
 
 #[doc(hidden)]
@@ -615,14 +630,34 @@ impl Drop for RuntimeCleanup {
 /// input. Keeping the evidence separate lets the registry reject forged
 /// underscore-prefixed fields without discarding facts proved by the host
 /// transport.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct TrustedInvocationEvidence {
     session_id: Option<String>,
     transport_session_id: Option<String>,
     browser_download_mcp_host_approved: bool,
+    runtime_operation: Option<Arc<dyn Send + Sync>>,
+}
+
+impl std::fmt::Debug for TrustedInvocationEvidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrustedInvocationEvidence")
+            .field("session_id", &self.session_id)
+            .field("transport_session_id", &self.transport_session_id)
+            .field(
+                "browser_download_mcp_host_approved",
+                &self.browser_download_mcp_host_approved,
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl TrustedInvocationEvidence {
+    #[doc(hidden)]
+    pub fn with_runtime_operation(mut self, operation: impl Send + Sync + 'static) -> Self {
+        self.runtime_operation = Some(Arc::new(operation));
+        self
+    }
+
     #[doc(hidden)]
     pub fn extract_from_adapter_args(args: &mut Value) -> Self {
         let mut evidence = Self::default();
@@ -1678,7 +1713,7 @@ impl ToolRegistry {
                     ),
                 };
                 match admitted {
-                    Ok(guard) => Some(guard),
+                    Ok(guard) => Some(Arc::new(guard)),
                     Err(message) => {
                         return protected_refusal("session_ended", message);
                     }
@@ -1748,8 +1783,9 @@ impl ToolRegistry {
             })
             .flatten();
 
-        let mut result = tool.invoke(args.clone()).await;
-        drop(lifecycle_dispatch);
+        let mut result = DISPATCH_SESSION_LIFETIME
+            .scope(lifecycle_dispatch, tool.invoke(args.clone()))
+            .await;
         if self.normalized_coordinates {
             crate::coord_norm::ingest_window_size(resolved_name, &args, &result);
             crate::coord_norm::ingest_screen_size(resolved_name, &result);
