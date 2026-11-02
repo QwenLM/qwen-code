@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isProcessAlive } from './process-liveness.js';
+import { isTeardownTargetAlive } from './process-liveness.js';
 import { resolveLogRoot, sliceNewLog } from './resolve-log-root.js';
 
 const packageDir = path.resolve(
@@ -302,7 +302,7 @@ function readDaemonPids() {
 async function waitForExit(pids, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const alive = pids.filter(isProcessAlive);
+    const alive = pids.filter(isTeardownTargetAlive);
     if (alive.length === 0 || Date.now() >= deadline) return alive;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }

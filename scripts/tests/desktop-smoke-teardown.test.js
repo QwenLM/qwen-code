@@ -10,7 +10,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
-import { isProcessAlive } from '../../packages/desktop/scripts/process-liveness.js';
+import {
+  isProcessAlive,
+  isTeardownTargetAlive,
+} from '../../packages/desktop/scripts/process-liveness.js';
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -276,6 +279,28 @@ describe('process liveness', () => {
     expect(isProcessAlive(123, { kill: withKillError('ESRCH') })).toBe(false);
     expect(isProcessAlive(123, { kill: withKillError('EPERM') })).toBe(true);
     expect(isProcessAlive(123, { kill: withKillError('EACCES') })).toBe(true);
+  });
+
+  it('keeps a teardown target alive while its group outlives the leader', () => {
+    const leaderGoneGroupAlive = (pid) => {
+      if (pid < 0) return;
+      throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+    };
+    const groupGone = () => {
+      throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+    };
+
+    // The recorded pid is the group: reporting it dead on the leader alone
+    // ends the drain while the group's writer still runs.
+    expect(
+      isTeardownTargetAlive(123, {
+        platform: 'linux',
+        kill: leaderGoneGroupAlive,
+      }),
+    ).toBe(true);
+    expect(
+      isTeardownTargetAlive(123, { platform: 'linux', kill: groupGone }),
+    ).toBe(false);
   });
 });
 
