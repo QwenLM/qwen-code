@@ -363,9 +363,12 @@ authority to certify the round.
    '
    ```
 
-   The scan names credential-shaped ignored files (nested ones included) and
-   credential-bearing remote URLs, leaves installed dependencies and build
-   output alone, and refuses a nested git repository outright: git does not
+   The scan names credential-shaped ignored files (nested ones included, but
+   not public keys) and credential-bearing URLs in `remote.*.url` or
+   `url.*.insteadOf` (any userinfo on http(s), including a token used as the
+   username). It leaves installed dependencies and build output alone — a
+   vendored git dependency under `node_modules`/`dist` is excluded, not
+   refused — and refuses a nested git repository outright: git does not
    descend into it, so a credential file inside one would otherwise pass
    silently. The abort is structural (`|| exit 1`), not a side effect of
    `set -e`. Exit 4 means this is not a boundary: stop and run nothing else.

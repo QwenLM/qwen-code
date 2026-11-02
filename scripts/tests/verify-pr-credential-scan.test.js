@@ -78,6 +78,7 @@ describe('credential basename matching', () => {
       'keymap.ts',
       'envelope.ts',
       'environment.md',
+      'id_rsa.pub',
     ]) {
       expect(isCredentialShaped(path), path).toBe(false);
     }
@@ -112,6 +113,8 @@ describe('scanIgnoredCredentials', () => {
         'secrets/id.key',
         'auth.p12',
         'id_rsa',
+        'id_rsa.pub',
+        'backup.env~',
         'secrets/credentials.json',
         '.git-credentials',
         'gha-creds-123.json',
@@ -121,6 +124,7 @@ describe('scanIgnoredCredentials', () => {
       [
         '.env*',
         '*.env',
+        '*.env~',
         '*.pem',
         '*.key',
         '*.p12',
@@ -139,6 +143,7 @@ describe('scanIgnoredCredentials', () => {
       '.netrc',
       '.npmrc',
       'auth.p12',
+      'backup.env~',
       'gha-creds-123.json',
       'id_rsa',
       'secrets/credentials.json',
@@ -167,6 +172,64 @@ describe('scanIgnoredCredentials', () => {
     const result = run(dir);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('credential-bearing remote URL');
+  });
+
+  it('refuses a token used as the URL username and insteadOf credentials', () => {
+    const dir = makeRepo(['src/app.ts'], []);
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--local',
+        'remote.origin.url',
+        'https://ghp_FAKEPAT@github.com/o/r.git',
+      ],
+      { cwd: dir, env: gitEnv },
+    );
+    expect(() => scanIgnoredCredentials(dir)).toThrow(
+      /credential-bearing remote URL/,
+    );
+    const dir2 = makeRepo(['src/app.ts'], []);
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--local',
+        'url.https://x:ghp_FAKEPAT@github.com/.insteadOf',
+        'https://github.com/',
+      ],
+      { cwd: dir2, env: gitEnv },
+    );
+    expect(() => scanIgnoredCredentials(dir2)).toThrow(
+      /credential-bearing remote URL/,
+    );
+  });
+
+  it('keeps ssh URLs and public keys out of the refusal', () => {
+    const dir = makeRepo(['id_rsa.pub'], ['id_rsa*']);
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--local',
+        'remote.origin.url',
+        'ssh://git@github.com/o/r.git',
+      ],
+      { cwd: dir, env: gitEnv },
+    );
+    expect(scanIgnoredCredentials(dir)).toEqual([]);
+  });
+
+  it('does not refuse a vendored real git repository under node_modules', () => {
+    const dir = makeRepo(['node_modules/pkg/index.js'], ['node_modules/']);
+    const nested = join(dir, 'node_modules', 'pkg');
+    execFileSync('git', ['init', '-q', '.'], { cwd: nested, env: gitEnv });
+    execFileSync('git', ['add', '.'], { cwd: nested, env: gitEnv });
+    execFileSync('git', ['commit', '-q', '-m', 'dep'], {
+      cwd: nested,
+      env: gitEnv,
+    });
+    expect(scanIgnoredCredentials(dir)).toEqual([]);
   });
 
   it('does not refuse an installed tree or build output at any depth', () => {

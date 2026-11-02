@@ -25,6 +25,7 @@ import {
   detectCredentialSignals,
   detectIsolation,
   gitStatusArgs,
+  localFilterOverrides,
   parseArgs,
   parseRepo,
   validateContext,
@@ -237,14 +238,44 @@ describe('git hardening', () => {
       '-c',
       'credential.helper=',
     ]);
-    expect(gitStatusArgs('/clone')).toEqual([
+    const { dir } = makeRepo();
+    expect(localFilterOverrides(dir)).toEqual([]);
+    expect(gitStatusArgs(dir)).toEqual([
       ...GIT_HARDENING,
       '-C',
-      '/clone',
+      dir,
       'status',
       '--porcelain',
       '--untracked-files=normal',
     ]);
+  });
+
+  it('empties a planted clean filter before reading status', () => {
+    const { dir } = makeRepo();
+    const marker = join(dir, 'filter-fired');
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--local',
+        'filter.pwn.clean',
+        `sh -c 'echo fired > ${marker}'`,
+      ],
+      { cwd: dir, env: gitEnv },
+    );
+    mkdirSync(join(dir, '.git', 'info'), { recursive: true });
+    writeFileSync(join(dir, '.git', 'info', 'attributes'), '* filter=pwn\n');
+    writeFileSync(join(dir, 'base.txt'), 'changed\n');
+    // Positive control: without the filter overrides the planted filter runs
+    // on the host during an ordinary status.
+    spawnSync('git', [...GIT_HARDENING, '-C', dir, 'status', '--porcelain'], {
+      encoding: 'utf8',
+    });
+    expect(existsSync(marker)).toBe(true);
+    rmSync(marker);
+    expect(localFilterOverrides(dir)).toEqual(['-c', 'filter.pwn.clean=']);
+    spawnSync('git', gitStatusArgs(dir), { encoding: 'utf8' });
+    expect(existsSync(marker)).toBe(false);
   });
 });
 

@@ -106,15 +106,20 @@ the real key.
   stripped, pre-header disconnect abort, paused-downstream survival,
   slow-but-healthy streams, upstream reset survival, IPv6 listen formatting,
   and the CLI's JSON coordinates.
-- Credential scan: a nested ignored `.env`, `.env~`, `*.pem`, `*.key`,
-  `*.p12`, `id_rsa*`, `credentials*`, `.git-credentials`, `.npmrc`,
-  `.netrc` or `gha-creds-*.json` is refused, as is a remote URL carrying a
-  credential; installed `node_modules`/`dist` are ignored at any depth,
-  including inside a workspace package, and their contents are a documented
-  exclusion; enumeration is path-limited so a large ignored dependency tree
-  is never buffered; a nested git repository is refused because git does not
-  descend into it; a missing `--ignored` mode or a dropped pattern turns its
-  test red.
+- Credential scan: a nested ignored `.env`, `.env~`, `backup.env~`, `*.pem`,
+  `*.key`, `*.p12`, `id_rsa*`, `credentials*`, `.git-credentials`, `.npmrc`,
+  `.netrc` or `gha-creds-*.json` is refused (a `.pub` public key is not), as
+  is any http(s) userinfo in `remote.*.url` or `url.*.insteadOf`, including a
+  token used as the username; installed `node_modules`/`dist` are ignored at
+  any depth, including inside a workspace package, and a vendored git
+  repository under them is excluded rather than refused; enumeration is
+  path-limited so a large ignored dependency tree is never buffered; a nested
+  project git repository is refused because git does not descend into it; a
+  missing `--ignored` mode or a dropped pattern turns its test red.
+- Host git hardening: prepare disables fsmonitor, hooks and credential
+  helpers and empties every locally defined clean/smudge/process filter
+  before reading the PR-controlled tree; a planted-filter fixture proves the
+  override, with a positive control that fires without it.
 - Checker: `--context` overrides the writable artifact copy, refuses an
   unusable snapshot instead of falling back (with a usable writable copy
   seeded), and keeps its existing exit codes.

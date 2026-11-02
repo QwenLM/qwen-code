@@ -737,6 +737,8 @@ describe('local container recipe pins', () => {
 
   it('refuses a nested repository in the scan description', () => {
     expect(skill).toMatch(/nested\s+git repository outright/);
+    expect(skill).toContain('vendored git dependency');
+    expect(skill).toContain('not public keys');
   });
 
   it('snapshots the previous report and pins both checker call sites', () => {

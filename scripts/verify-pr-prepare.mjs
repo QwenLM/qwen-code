@@ -273,9 +273,10 @@ function run(command, args) {
 }
 
 // The tree under inspection is PR-controlled and can persist hostile git
-// config in .git/config: fsmonitor, hooks and clean filters all execute on an
-// ordinary `git status`. On the host these run as the maintainer, outside the
-// boundary, so every git command disables all three before reading the tree.
+// config in .git/config: fsmonitor, hooks and clean/smudge/process filters all
+// execute on an ordinary `git status`. On the host these run as the maintainer,
+// outside the boundary, so every git command disables the fixed vectors and
+// empties every locally defined filter before reading the tree.
 export const GIT_HARDENING = [
   '-c',
   'core.fsmonitor=false',
@@ -285,9 +286,36 @@ export const GIT_HARDENING = [
   'credential.helper=',
 ];
 
+/**
+ * Empty `-c` overrides for every locally defined filter command. The filter
+ * name is attacker-chosen, so the override set has to be enumerated from the
+ * tree's own config instead of hardcoded.
+ */
+export function localFilterOverrides(root) {
+  const result = run('git', [
+    ...(root ? ['-C', root] : []),
+    'config',
+    '--local',
+    '--get-regexp',
+    '^filter\\..*\\.(clean|smudge|process)$',
+  ]);
+  if (result.status === 1) return [];
+  if (result.status !== 0) {
+    throw new Error('could not enumerate local git filters');
+  }
+  const overrides = [];
+  for (const line of result.stdout.split('\n')) {
+    if (!line) continue;
+    const key = line.split(' ')[0];
+    overrides.push('-c', `${key}=`);
+  }
+  return overrides;
+}
+
 export function gitStatusArgs(root) {
   return [
     ...GIT_HARDENING,
+    ...localFilterOverrides(root),
     '-C',
     root,
     'status',
@@ -297,7 +325,7 @@ export function gitStatusArgs(root) {
 }
 
 function runGit(args) {
-  return run('git', [...GIT_HARDENING, ...args]);
+  return run('git', [...GIT_HARDENING, ...localFilterOverrides(), ...args]);
 }
 
 function report(lines) {
@@ -324,7 +352,12 @@ function main(argv) {
   const { owner, name } = parseRepo(options.repo);
   const slug = `${owner}/${name}`;
 
-  const toplevel = runGit(['rev-parse', '--show-toplevel']);
+  let toplevel;
+  try {
+    toplevel = runGit(['rev-parse', '--show-toplevel']);
+  } catch {
+    return fail(3, 'not inside a git worktree — run this from the clone');
+  }
   if (toplevel.status !== 0) {
     return fail(3, 'not inside a git worktree — run this from the clone');
   }

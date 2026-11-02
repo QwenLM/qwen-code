@@ -73,9 +73,14 @@ const NESTED_REPO_PATHSPECS = [
   ':(exclude,glob)**/dist/**',
 ];
 
+const EXCLUDED_SEGMENTS = new Set(['node_modules', 'dist']);
+
 /** True for a path whose basename is credential-shaped. */
 export function isCredentialShaped(path) {
-  return CREDENTIAL_BASENAME.test(basename(path));
+  const name = basename(path);
+  // A public key is not a credential; refusing id_rsa.pub would be noise.
+  if (name.endsWith('.pub')) return false;
+  return CREDENTIAL_BASENAME.test(name);
 }
 
 export function gitScanArgs(root) {
@@ -114,13 +119,22 @@ export function nestedGitRepos(root, { maxBuffer = 8 * 1024 * 1024 } = {}) {
       `could not list nested repositories: ${(result.stderr || '').trim() || 'git failed'}`,
     );
   }
-  return result.stdout.split('\0').filter(Boolean).sort();
+  // Git reports a real nested repository as its directory entry, which the
+  // exclude pathspecs cannot match; drop installed/build segments here so a
+  // vendored git dependency does not refuse the whole tree.
+  return result.stdout
+    .split('\0')
+    .filter(Boolean)
+    .filter((path) => !path.split('/').some((s) => EXCLUDED_SEGMENTS.has(s)))
+    .sort();
 }
 
 /**
- * Returns local remote names whose URL embeds a credential. A clone made with
- * `https://x-access-token:<pat>@…` keeps the PAT in `.git/config`, where no
- * ignored-file listing reaches it and PR code can read it with `git config`.
+ * Returns local config entries whose URL embeds a credential. Both
+ * `remote.*.url` and `url.*.insteadOf` are read, and any userinfo on an
+ * http(s) URL counts — a token used as the username (`https://<pat>@…`) is as
+ * readable by PR code as `user:pass@`. `ssh://git@…` stays benign: SSH keys
+ * are not in the URL.
  */
 export function credentialBearingRemotes(
   root,
@@ -128,7 +142,14 @@ export function credentialBearingRemotes(
 ) {
   const result = spawnSync(
     'git',
-    ['-C', root, 'config', '--local', '--get-regexp', '^remote\\..*\\.url$'],
+    [
+      '-C',
+      root,
+      'config',
+      '--local',
+      '--get-regexp',
+      '^(remote\\..*\\.url|url\\..*\\.insteadof)$',
+    ],
     { encoding: 'utf8', maxBuffer },
   );
   // Exit 1 means the pattern matched nothing; anything else is a real failure.
@@ -138,11 +159,17 @@ export function credentialBearingRemotes(
       `could not read local remotes: ${(result.stderr || '').trim() || 'git failed'}`,
     );
   }
+  const hasUserinfo = (value) => /^https?:\/\/[^/@\s]+@/i.test(value);
   const hits = [];
   for (const line of result.stdout.split('\n')) {
     if (!line) continue;
-    const [key, ...rest] = line.split(' ');
-    if (/\/\/[^/@\s]+:[^/@\s]+@/.test(rest.join(' '))) hits.push(key);
+    const space = line.indexOf(' ');
+    const key = space === -1 ? line : line.slice(0, space);
+    const value = space === -1 ? '' : line.slice(space + 1);
+    const instead = /^url\.(.*)\.insteadof$/.exec(key);
+    if (hasUserinfo(value) || (instead && hasUserinfo(instead[1]))) {
+      hits.push(key);
+    }
   }
   return hits;
 }

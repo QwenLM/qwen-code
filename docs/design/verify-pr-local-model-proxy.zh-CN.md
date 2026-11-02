@@ -35,7 +35,8 @@ CI 车道保留内联代理：那份副本运行在 base-pinned workflow 的 roo
 ## 验收
 
 - 代理：bearer 拒绝、精确路径白名单、base path 前缀、真实 key 注入、chunked 请求体下 hop-by-hop 剥离（固定集合与 `Connection` 点名的头）、gzip 上游响应（头被剥离）、响应头前断连中止、下游暂停存活、慢但健康的流、上游重置存活、IPv6 监听格式化，以及 CLI 的 JSON 坐标。
-- 凭据扫描：嵌套 ignored 的 `.env`、`.env~`、`*.pem`、`*.key`、`*.p12`、`id_rsa*`、`credentials*`、`.git-credentials`、`.npmrc`、`.netrc`、`gha-creds-*.json` 被拒绝，带凭据的 remote URL 同样被拒绝；`node_modules`/`dist` 在任意深度（含 workspace 包内）被忽略，其内容属文档化取舍；枚举由 pathspec 限制，不会先缓冲整棵依赖树；嵌套 git 仓库被直接拒绝（git 不会进入其中）；去掉 `--ignored` 模式或删掉某条模式会让测试变红。
+- 凭据扫描：嵌套 ignored 的 `.env`、`.env~`、`backup.env~`、`*.pem`、`*.key`、`*.p12`、`id_rsa*`、`credentials*`、`.git-credentials`、`.npmrc`、`.netrc`、`gha-creds-*.json` 被拒绝（`.pub` 公钥不算凭据）；`remote.*.url` 与 `url.*.insteadOf` 中 http(s) 的任意 userinfo（含把 token 当用户名）都被拒绝；`node_modules`/`dist` 在任意深度（含 workspace 包内）被忽略，其下的 vendored git 仓库被排除而非拒绝；枚举由 pathspec 限制，不会先缓冲整棵依赖树；嵌套的项目 git 仓库被直接拒绝（git 不会进入其中）；去掉 `--ignored` 模式或删掉某条模式会让测试变红。
+- 宿主机 git 硬化：prepare 禁用 fsmonitor、hooks 与 credential helper，并在读取 PR 可控树之前把本地定义的 clean/smudge/process filter 全部置空；植入 filter 的夹具证明覆盖生效，并带一个不覆盖就会触发的正对照。
 - 检查器：`--context` 覆盖可写产物副本、不可用快照时拒绝而不是回退（产物副本先种一个合法 head），并保持既有退出码。
 - 配方：每个脚本都点名可信 checkout（含 prepare、扫描、门禁、守卫与检查器）、base 提交的 `.qwen` 只读挂载、两个凭据都来自文件而非命令行（stdin 非 TTY 时 key 从 `REVIEW_OPENAI_KEY_FILE` 读取，代理拿到副本后立即 unset）、启动容器前等待代理坐标与 nonce、token 在 `docker run` 那一步重新取得、宣誓在轮次 shell 但不在 `docker run` 行；任一被还原都会让配方 pin 变红。
 - 变异证据：移除上述任一守卫，对应 pin 必须变红。
