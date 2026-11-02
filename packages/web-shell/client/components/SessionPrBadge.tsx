@@ -22,9 +22,11 @@ interface SessionPrBadgeProps {
 }
 
 /**
- * The bound PRs the badge can open. Non-http(s) bindings are filtered out as
- * a defense-in-depth measure on top of the daemon-side validators; callers
- * that lay out around the badge use this to know whether it renders.
+ * The bound PRs the badge can open, in the order given. Bindings whose URL
+ * the external opener refuses are filtered out as a defense-in-depth measure
+ * on top of the daemon-side validators. Callers that lay out around the badge
+ * use this to know whether it renders, and the session details tooltip lists
+ * the same set.
  */
 export function openableSessionPrs(
   prs: DaemonSessionPrInfo[],

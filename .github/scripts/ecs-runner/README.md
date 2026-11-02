@@ -116,6 +116,42 @@ same runner registration retries removing stale `qwen-review-scratch.*`
 directories from `RUNNER_TEMP`; residue on an idle registration still requires
 manual cleanup. Build-cache reclamation does not initialize unused data disks.
 
+## Font baseline
+
+The web-shell smoke suite asserts exact text layout — for example that the
+token-usage header wraps at the 320 px panel minimum — so its verdict depends
+on the host's default `sans-serif`. The x64 ECS pool images ship
+`fonts-dejavu-core`, and fontconfig resolves Latin text to DejaVu Sans. Fresh
+ARM64 pool images (Ubuntu 26.04 minimal) do not: fontconfig falls back to
+WenQuanYi Zen Hei for Latin as well as CJK, the same strings measure about
+26 px narrower, and the wrap never happens (#15383).
+
+Provision a host once with:
+
+```bash
+sudo .github/scripts/ecs-runner/install-qwen-font-baseline.sh
+```
+
+The installer is idempotent: on an already-provisioned host it installs
+nothing and only re-verifies. No runner restart is needed — each job's
+Chromium reads fontconfig when it starts.
+
+Verify at any time:
+
+```bash
+# L0: the family every `sans-serif` request resolves to
+bash .github/scripts/ecs-runner/check-font-baseline.sh
+
+# L0 plus L1: text advance widths in the host's Playwright Chromium
+bash .github/scripts/ecs-runner/check-font-baseline.sh --with-metrics
+```
+
+The web-shell smoke lane runs the L0 half as `Check host font baseline
+(self-hosted)` before installing dependencies, so a drifted host fails in
+seconds with an actionable message instead of failing two layout assertions
+26 minutes into the suite. L1 stays a manual/host-provisioning check because
+it needs a Chromium that the lane has not installed yet at that point.
+
 ## Regression check
 
 ```bash
@@ -123,4 +159,6 @@ node --test .github/scripts/ecs-runner/*.test.mjs
 ```
 
 The check runs the cleanup script with mocked host commands and temporary
-lock files; it does not contact Docker or remove real containers.
+lock files; it does not contact Docker or remove real containers. The font
+suite stubs `fc-match`, `apt-get`, `dpkg-query` and Chromium the same way, so
+it neither installs packages nor starts a browser.

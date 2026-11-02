@@ -193,6 +193,26 @@ export interface DaemonWorkspaceUpdate {
   displayName: string | null;
 }
 
+export type DaemonGitCloneJobStatus =
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled';
+
+export interface DaemonGitCloneJob {
+  jobId: string;
+  status: DaemonGitCloneJobStatus;
+  startedAt: number;
+  finishedAt?: number;
+  /** Latest reported completion percentage, when the clone reports one. */
+  percent?: number;
+  /** Latest sanitized progress or failure line. */
+  message?: string;
+  /** Canonical clone directory, present when `status` is `succeeded`. */
+  cwd?: string;
+  error?: { code: string; message: string };
+}
+
 export interface DaemonWorkspaceRemovalActivity {
   sessions: number;
   activePrompts: number;
@@ -1994,6 +2014,7 @@ export interface DaemonSessionLiveState {
   hasRunningBackgroundTasks?: boolean;
   isWaitingForPermission: boolean;
   isWaitingForUserQuestion: boolean;
+  hasTurnError?: boolean;
   /**
    * Daemon-observed activity watermark: the newest terminal of a prompt that
    * reached the running state in the current bridge, as an ISO timestamp.
@@ -2008,6 +2029,32 @@ export interface DaemonWorkspaceSessionLiveState {
   v: 1;
   catalogVersion: DaemonSessionCatalogVersion;
   sessions: DaemonSessionLiveState[];
+}
+
+export interface DaemonSessionLiveStateBatchRequest {
+  /** 1–20 registered workspace ids or absolute cwd paths. */
+  workspaces: string[];
+}
+
+export interface DaemonSessionLiveStateBatchSnapshot
+  extends DaemonWorkspaceSessionLiveState {
+  /** Original selector from the request. */
+  workspace: string;
+  workspaceId: string;
+  cwd: string;
+}
+
+export interface DaemonSessionLiveStateBatchError {
+  workspace: string;
+  workspaceId?: string;
+  cwd?: string;
+  error: { code: string; message: string; status: number };
+}
+
+export interface DaemonSessionLiveStateBatchResult {
+  workspaces: Array<
+    DaemonSessionLiveStateBatchSnapshot | DaemonSessionLiveStateBatchError
+  >;
 }
 
 export interface DaemonWorkspaceSessionInfo {
@@ -2388,6 +2435,20 @@ export interface DaemonMcpBudgetStatusCell extends DaemonStatusCell {
   refusedCount: number;
 }
 
+/** Extra workspace directories persisted at workspace scope. */
+export interface DaemonWorkspaceDirectories {
+  v: 1;
+  primaryDirectory: string;
+  directories: string[];
+}
+
+/** Result of adding or removing one extra workspace directory. */
+export interface DaemonWorkspaceDirectoriesMutation
+  extends DaemonWorkspaceDirectories {
+  changed: boolean;
+  warnings: string[];
+}
+
 export interface DaemonWorkspaceMcpStatus {
   v: 1;
   workspaceCwd: string;
@@ -2534,6 +2595,13 @@ export interface DaemonWorkspaceSkillsStatus {
   runtimeEpoch?: number;
   skills: DaemonWorkspaceSkillStatus[];
   errors?: DaemonStatusCell[];
+  /** Daemon observation metadata; omitted by direct runtime/config reads. */
+  snapshot?: {
+    observedAt: number;
+    ageMs: number;
+    stale: boolean;
+    refreshing: boolean;
+  };
 }
 
 /** Sanitized Skill and MCP snapshots built from one live session's Config. */
@@ -3174,6 +3242,8 @@ export interface DaemonContextCategoryBreakdown {
   systemPrompt: number;
   builtinTools: number;
   mcpTools: number;
+  /** Instructions are separate when present; older producers combine them with memory. */
+  instructionFiles?: number;
   memoryFiles: number;
   skills: number;
   /** Startup prelude outside the skill listing. Absent from older daemons. */
@@ -3201,6 +3271,13 @@ export interface DaemonContextToolDetail {
 export interface DaemonContextMemoryDetail {
   path: string;
   tokens: number;
+  /**
+   * Absolute on-disk path when the row maps to a file the context preview
+   * can open: inside the session workspace, or a global memory file. Absent
+   * for synthetic aggregates and instruction files outside that readable
+   * scope (parent-directory or extension files). Absent from older daemons.
+   */
+  absolutePath?: string;
 }
 
 export interface DaemonContextSkillDetail {
@@ -3217,6 +3294,7 @@ export interface DaemonSessionContextUsage {
   breakdown: DaemonContextCategoryBreakdown;
   builtinTools: DaemonContextToolDetail[];
   mcpTools: DaemonContextToolDetail[];
+  instructionFiles?: DaemonContextMemoryDetail[];
   memoryFiles: DaemonContextMemoryDetail[];
   skills: DaemonContextSkillDetail[];
   isEstimated?: boolean;
@@ -3227,6 +3305,14 @@ export interface DaemonSessionContextUsageStatus {
   v: 1;
   sessionId: string;
   workspaceCwd: string;
+  /**
+   * Stable workspace root the session was admitted under. Unlike
+   * `workspaceCwd` (the live target dir, which moves when a session enters a
+   * worktree or `cd`s into a subdirectory), this stays at the registered
+   * workspace root, so a client can resolve the owning workspace for file
+   * reads. Absent from older daemons.
+   */
+  workspaceRoot?: string;
   usage: DaemonSessionContextUsage;
   formattedText: string;
 }
@@ -3702,11 +3788,33 @@ export interface DaemonSessionStatsModelMetrics {
     totalTtftMs: number;
     /**
      * Time from the first to the last visible output, summed over requests
-     * whose output arrived in more than one chunk.
+     * whose window is at least 100 ms; shorter bursts cannot measure a rate.
      */
     totalGenerationDurationMs: number;
     /** Output tokens of the requests in `totalGenerationDurationMs`. */
     totalThroughputOutputTokens: number;
+  };
+  /**
+   * Most recent timed, non-internal responses (oldest first, at most 200).
+   * Absent until a streamed response records its timing, and from older
+   * daemons.
+   */
+  timingSamples?: Array<{
+    /** Event time, epoch ms. */
+    at: number;
+    ttftMs: number;
+    /** Generation window; below 100 ms it measures no output rate. */
+    generationMs: number;
+    outputTokens: number;
+    /** Subagent that issued the request; absent for the main conversation. */
+    source?: string;
+  }>;
+  /** Failed API calls; absent until the first failure, and from older daemons. */
+  failures?: {
+    /** Count per HTTP status code, else error type, else `unknown`. */
+    byKind: Record<string, number>;
+    /** Most recent failures, oldest first, at most 50. */
+    recent: Array<{ at: number; kind: string; source?: string }>;
   };
 }
 
@@ -3887,6 +3995,7 @@ export type ReasoningSelection = (typeof DAEMON_REASONING_SELECTIONS)[number];
 
 export interface DaemonSessionConfigOptionResult {
   configOptions: unknown[];
+  /** For workflow_mode, confirms session persistence; reasoning_effort retains settings persistence semantics. */
   persisted: boolean;
 }
 
@@ -4504,6 +4613,10 @@ export interface DaemonSessionRecapResult {
   sessionId: string;
   recap: string | null;
 }
+
+export type DaemonSessionBtwStreamEvent =
+  | { v: 1; type: 'answer' | 'done'; requestId: string; answer: string }
+  | { v: 1; type: 'error'; requestId: string; code: string; message: string };
 
 export type DaemonSessionGenerationEvent =
   | {
@@ -5373,6 +5486,7 @@ export interface DaemonDeleteMessageGroupsResult {
 
 export interface DaemonRewindSnapshotInfo {
   promptId: string;
+  daemonPromptId?: string;
   turnIndex: number;
   timestamp: string;
   diffStats: { filesChanged: number; insertions: number; deletions: number };

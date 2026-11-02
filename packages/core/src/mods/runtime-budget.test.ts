@@ -94,6 +94,10 @@ describe('ModRuntime root budget protocol', () => {
         type: 'result',
         json: JSON.stringify({
           tools: true,
+          turnStart: false,
+          promptSubmit: [],
+          turnComplete: [],
+          render: [],
           commands: [{ plugin: 'mod', name: 'hello', description: 'Hello' }],
         }),
       },

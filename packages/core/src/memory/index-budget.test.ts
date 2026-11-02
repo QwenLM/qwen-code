@@ -95,6 +95,17 @@ describe('trimIndexToBudgetDetailed', () => {
     expect(result.dropped).toEqual([middle]);
   });
 
+  it('preserves native entries ahead of imports and reports the dropped imports', () => {
+    const native = 'n'.repeat(24_600);
+    const imports = ['a', 'b', 'c', 'd'].map((value) => value.repeat(150));
+    const lines = [native, ...imports];
+    const result = trimIndexToBudgetDetailed(lines, 1);
+
+    expect(result.content).toBe([native, ...imports.slice(0, 2)].join('\n'));
+    expect(result.dropped).toEqual(imports.slice(2));
+    expect(trimIndexToBudget(lines, 1)).toBe(result.content);
+  });
+
   it('leaves trimIndexToBudget as the content-only projection', () => {
     const lines = Array.from(
       { length: MAX_INDEX_LINES + 1 },

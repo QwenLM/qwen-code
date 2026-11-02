@@ -1557,8 +1557,13 @@ describe('runCleanup', () => {
         mocks.rmSync.mockImplementation(() => {
           throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
         });
+        // Liveness is PINNED here, not assumed: this case was the only
+        // orphan fixture that trusted its hardcoded pid to be absent from
+        // the host's process table, so a runner that happened to have
+        // 626262 resident made the sweep skip the orphan as alive and fail
+        // as if the unlink guard — the thing under test — were broken.
         try {
-          expect(() => runCleanup('local')).not.toThrow();
+          expect(() => withDeadPids(() => runCleanup('local'))).not.toThrow();
           expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
             `Reaped orphaned capture server: ${orphan}`,
           );

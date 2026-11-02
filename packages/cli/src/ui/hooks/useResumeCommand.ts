@@ -5,6 +5,7 @@
  */
 
 import { useState, useCallback } from 'react';
+import type { WorkflowModeSnapshot } from '@qwen-code/qwen-code-core/core/workflow-mode.js';
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import {
   SessionService,
@@ -154,12 +155,14 @@ export function useResumeCommand(
       // the user is on, and rolling back against that stale id would land
       // on a session the UI never shows (#9844).
       const oldSessionId = config.getSessionId();
+      let oldWorkflowMode: WorkflowModeSnapshot | undefined;
       let coreSwapped = false;
       let uiSwapped = false;
       let toolsInvalidated = false;
       let recoveredBackgroundAgentsNotice: string | null = null;
 
       try {
+        oldWorkflowMode = await config.captureWorkflowModeState?.();
         const cwd = config.getTargetDir();
         const sessionService = new SessionService(cwd);
         sessionService.assertLegacySessionExecution(sessionId);
@@ -296,6 +299,8 @@ export function useResumeCommand(
             }
             getInteractiveModSession(config)?.invalidateTools();
             config.startNewSession(oldSessionId, prevSessionData);
+            if (oldWorkflowMode)
+              config.restoreWorkflowModeState(oldWorkflowMode);
             // Re-hydrate the client against the restored session, mirroring
             // /branch's rollback: without it the client's chat stays on the
             // abandoned session's replayed history, and the abort below

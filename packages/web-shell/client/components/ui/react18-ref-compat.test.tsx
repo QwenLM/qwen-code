@@ -142,27 +142,42 @@ describe('React 18 ref compatibility', () => {
     container.remove();
   });
 
-  it('forwards a TooltipContent ref to its DOM element', () => {
-    const ref = React.createRef<HTMLDivElement>();
-    const container = document.createElement('div');
-    document.body.appendChild(container);
-    const root = createRoot(container);
+  it.each([undefined, 'black'] as const)(
+    'forwards a TooltipContent ref with variant=%s',
+    (variant) => {
+      const ref = React.createRef<HTMLDivElement>();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
 
-    act(() =>
-      root.render(
-        <TooltipProvider>
-          <Tooltip open>
-            <TooltipTrigger>Trigger</TooltipTrigger>
-            <TooltipContent ref={ref}>Content</TooltipContent>
-          </Tooltip>
-        </TooltipProvider>,
-      ),
-    );
-    expect(ref.current).toBeInstanceOf(HTMLDivElement);
+      act(() =>
+        root.render(
+          <TooltipProvider>
+            <Tooltip open>
+              <TooltipTrigger>Trigger</TooltipTrigger>
+              <TooltipContent ref={ref} variant={variant}>
+                Content
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>,
+        ),
+      );
+      expect(ref.current).toBeInstanceOf(HTMLDivElement);
+      expect(ref.current?.hasAttribute('variant')).toBe(false);
+      expect(ref.current?.classList.contains('[--popover:#000]')).toBe(
+        variant === 'black',
+      );
+      expect(ref.current?.classList.contains('ring-border')).toBe(
+        variant === 'black',
+      );
+      expect(
+        ref.current?.querySelectorAll('[data-slot="tooltip-arrow"] path'),
+      ).toHaveLength(2);
 
-    act(() => root.unmount());
-    container.remove();
-  });
+      act(() => root.unmount());
+      container.remove();
+    },
+  );
 
   it('forwards slotted PopoverAnchor and portaled content refs to their DOM elements', () => {
     const anchorRef =
