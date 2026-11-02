@@ -30,9 +30,9 @@ class ManagedSchemaCatalogTest {
 
     @Test
     void acceptsNumericBooleanCaseWithoutAcceptingConstraintDrift() throws Exception {
-        String body = "\n    CONSTRAINT ck_probe CHECK (CASE resource_gc_completed"
+        String body = "\n    CONSTRAINT ck_probe CHECK (CASE is_resource_gc_completed"
                 + " WHEN FALSE THEN 1 WHEN TRUE THEN 1 ELSE 0 END = 1)\n";
-        String numeric = "CASE resource_gc_completed WHEN 0 THEN 1 WHEN 1 THEN 1 ELSE 0 END = 1";
+        String numeric = "CASE is_resource_gc_completed WHEN 0 THEN 1 WHEN 1 THEN 1 ELSE 0 END = 1";
         try (var data = fixture(false); var update = data.prepareStatement(
                 "UPDATE catalog_fixture.check_constraints SET check_clause=?")) {
             Connection connection = mariaDb(data, "MySQL", 1, 1);
@@ -60,15 +60,15 @@ class ManagedSchemaCatalogTest {
     void acceptsMariaDbNumericBooleansInPlanChecksWithoutAcceptingDrift() throws Exception {
         // MariaDB stores a bare FALSE as 0 and drops the grouping parentheses
         // it can infer from precedence; both V10 plan checks hit this shape.
-        String sessionBody = "\n    CONSTRAINT ck_probe CHECK (plan_enabled = FALSE"
+        String sessionBody = "\n    CONSTRAINT ck_probe CHECK (is_plan_enabled = FALSE"
                 + " OR (selected_approval_mode IS NOT NULL AND approval_revision >= 1))\n";
-        String sessionStored = "`plan_enabled` = 0 or `selected_approval_mode` is not null"
+        String sessionStored = "`is_plan_enabled` = 0 or `selected_approval_mode` is not null"
                 + " and `approval_revision` >= 1";
-        String turnBody = "\n    CONSTRAINT ck_probe CHECK (plan_enabled IS NULL"
+        String turnBody = "\n    CONSTRAINT ck_probe CHECK (is_plan_enabled IS NULL"
                 + " OR (approval_mode IS NOT NULL AND approval_revision IS NOT NULL"
-                + " AND (plan_enabled = FALSE OR approval_revision >= 1)))\n";
-        String turnStored = "`plan_enabled` is null or `approval_mode` is not null"
-                + " and `approval_revision` is not null and (`plan_enabled` = 0"
+                + " AND (is_plan_enabled = FALSE OR approval_revision >= 1)))\n";
+        String turnStored = "`is_plan_enabled` is null or `approval_mode` is not null"
+                + " and `approval_revision` is not null and (`is_plan_enabled` = 0"
                 + " or `approval_revision` >= 1)";
         try (var data = fixture(false); var update = data.prepareStatement(
                 "UPDATE catalog_fixture.check_constraints SET check_clause=?")) {
@@ -81,9 +81,9 @@ class ManagedSchemaCatalogTest {
             ManagedSchemaCatalog.validateChecks(connection, "ma_operation", turnBody);
             String[][] drift = {
                     {sessionBody, sessionStored.replace(">= 1", ">= 2")},
-                    {sessionBody, sessionStored.replace("`plan_enabled` = 0", "`plan_enabled` = 1")},
+                    {sessionBody, sessionStored.replace("`is_plan_enabled` = 0", "`is_plan_enabled` = 1")},
                     {turnBody, turnStored.replace(" is null or", " is not null or")},
-                    {turnBody, turnStored.replace("`plan_enabled` = 0", "`plan_enabled` = 1")}};
+                    {turnBody, turnStored.replace("`is_plan_enabled` = 0", "`is_plan_enabled` = 1")}};
             for (String[] arm : drift) {
                 update.setString(1, arm[1]);
                 update.executeUpdate();
@@ -140,7 +140,7 @@ class ManagedSchemaCatalogTest {
 
     @Test
     void acceptsNumericGeneratedBooleansWithoutAcceptingExpressionDrift() throws Exception {
-        String body = "\n    csi_guard BOOLEAN GENERATED ALWAYS AS (COALESCE("
+        String body = "\n    is_csi_guard BOOLEAN GENERATED ALWAYS AS (COALESCE("
                 + "tool_profile = 'csi-files-retirement/1' OR runtime_request_key IS NOT NULL, FALSE))\n";
         String numeric = "coalesce(`tool_profile` = 'csi-files-retirement/1'"
                 + " or `runtime_request_key` is not null,0)";
@@ -214,7 +214,7 @@ class ManagedSchemaCatalogTest {
             statement.execute("CREATE TABLE catalog_fixture.columns"
                     + " (column_name VARCHAR, generation_expression VARCHAR, table_schema VARCHAR, table_name VARCHAR)");
             statement.execute("INSERT INTO catalog_fixture.columns"
-                    + " VALUES ('csi_guard',NULL,'PUBLIC','MA_SESSION')");
+                    + " VALUES ('is_csi_guard',NULL,'PUBLIC','MA_SESSION')");
             statement.execute("CREATE TABLE catalog_fixture.table_constraints"
                     + " (constraint_name VARCHAR, constraint_schema VARCHAR, table_schema VARCHAR,"
                     + " table_name VARCHAR, constraint_type VARCHAR"

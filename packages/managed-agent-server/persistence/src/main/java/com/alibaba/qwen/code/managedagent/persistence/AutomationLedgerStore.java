@@ -76,7 +76,7 @@ public class AutomationLedgerStore
                     result.getString("session_mode"),
                     result.getString("overlap"), result.getString("catch_up"),
                     (Long) result.getObject("catch_up_limit"),
-                    result.getBoolean("enabled"), result.getString("state"),
+                    result.getBoolean("is_enabled"), result.getString("state"),
                     result.getString("blocked_reason"),
                     result.getLong("armed_at"),
                     result.getObject("watermark_slot", Long.class),
@@ -252,7 +252,7 @@ public class AutomationLedgerStore
                             + " workspace_id, actor_id, record_revision,"
                             + " definition_revision, definition_digest, goal,"
                             + " cron, timezone, session_mode, overlap, catch_up,"
-                            + " catch_up_limit, enabled, state, blocked_reason,"
+                            + " catch_up_limit, is_enabled, state, blocked_reason,"
                             + " armed_at, watermark_slot, lease_owner,"
                             + " lease_until, fence, gmt_create, gmt_modified,"
                             + " gate)"
@@ -286,7 +286,7 @@ public class AutomationLedgerStore
                         + " record_revision = ?, definition_revision = ?,"
                         + " definition_digest = ?, goal = ?, cron = ?,"
                         + " timezone = ?, session_mode = ?, overlap = ?,"
-                        + " catch_up = ?, catch_up_limit = ?, enabled = ?,"
+                        + " catch_up = ?, catch_up_limit = ?, is_enabled = ?,"
                         + " state = ?, blocked_reason = NULL, armed_at = ?,"
                         + " gmt_modified = ?, gate = ?, gate_last_outcome = ?,"
                         + " gate_last_at = ?, gate_quiet_since_delivery = ?,"
@@ -388,7 +388,7 @@ public class AutomationLedgerStore
     /** Live, enabled, unblocked definitions whose lease is free or expired. */
     public List<ScheduleRow> findArmed(long now, int limit) {
         return jdbc.query("SELECT " + ManagedSchemaProjection.SCHEDULE.columns() + " FROM ma_schedule"
-                        + " WHERE state = ? AND enabled = TRUE"
+                        + " WHERE state = ? AND is_enabled = TRUE"
                         + " AND blocked_reason IS NULL"
                         + " AND (lease_until IS NULL OR lease_until < ?)"
                         + " ORDER BY gmt_modified, schedule_id LIMIT ?", SCHEDULE,
@@ -479,7 +479,7 @@ public class AutomationLedgerStore
     /**
      * Records one occurrence decision under the writer's lease unless one exists: the row is
      * selected from the definition row the owner holds, so a writer whose lease another claim has
-     * taken inserts nothing, and the primary key keeps the first decision of a slot. Answers the row
+     * taken inserts nothing, and the unique business key keeps the first decision of a slot. Answers the row
      * now held — the one written, or the earlier decision — or empty when another claim has taken
      * the lease and no decision exists.
      */
@@ -730,7 +730,7 @@ public class AutomationLedgerStore
     }
 
     /**
-     * Claims (tenant, key) for one request before any side effect: the primary key arbitrates, so
+     * Claims (tenant, key) for one request before any side effect: the unique business key arbitrates, so
      * only one concurrent or retried caller owns the identity; the row's empty result marks it
      * unanswered. A claim whose requester dies mid-flight stays durable, which is what lets a
      * different request under the same key conflict instead of repeating the side effect.

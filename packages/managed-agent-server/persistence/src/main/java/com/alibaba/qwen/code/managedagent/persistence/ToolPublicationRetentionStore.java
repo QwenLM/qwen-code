@@ -115,11 +115,11 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                     boundedParameters(jdbc, timeoutSeconds, tenant, session, hash(tenant), hash(session),
                             com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), time, time));
             return jdbc.query(
-                    "SELECT tenant_id, session_id, csi_guard FROM ma_session WHERE tenant_id = ? AND"
+                    "SELECT tenant_id, session_id, is_csi_guard FROM ma_session WHERE tenant_id = ? AND"
                             + " session_id = ? FOR UPDATE",
                     boundedParameters(jdbc, timeoutSeconds, tenant, session),
                     (row, index) -> {
-                        boolean guarded = row.getBoolean("csi_guard");
+                        boolean guarded = row.getBoolean("is_csi_guard");
                         if (legacyMutation) {
                             ManagedLegacySessionGuard.requireLegacyMutation(guarded);
                         }
@@ -225,7 +225,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         }
         jdbc.update(
                 "UPDATE ma_session SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", retirement_operation_id = ?, retirement_generation ="
-                        + " retirement_generation + 1, retired_at = ?, recovery_protected = ? WHERE"
+                        + " retirement_generation + 1, retired_at = ?, is_recovery_protected = ? WHERE"
                         + " tenant_key = ? AND session_key = ? AND retired_at IS NULL",
                 operation,
                 time,
@@ -292,7 +292,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                     String publication = (String) row.get("publication_id");
                     lockRetainedPublication(scope, publication);
                     jdbc.update(
-                            "UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", quarantined = TRUE WHERE scope_key = ?"
+                            "UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", is_quarantined = TRUE WHERE scope_key = ?"
                                     + " AND publication_id = ?",
                             scope,
                             publication);
@@ -668,7 +668,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                 .query(
                         "SELECT scope_key, publication_id, tenant_id, session_id,"
                             + " capture_used_bytes, producer_used_bytes, admission_used_bytes,"
-                            + " write_evidence, quarantined, accepted_complete, producer_phase FROM"
+                            + " is_write_evidence, is_quarantined, is_accepted_complete, producer_phase FROM"
                             + " ma_output_capture WHERE retention_state = 'RETIRING' ORDER BY"
                             + " scope_key, publication_id LIMIT 100",
                         (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow))
@@ -686,7 +686,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                 + number(row, "admission_used_bytes");
         var roots =
                 jdbc.query(
-                        "SELECT retired_at, recovery_protected FROM ma_session WHERE tenant_key = ?"
+                        "SELECT retired_at, is_recovery_protected FROM ma_session WHERE tenant_key = ?"
                                 + " AND session_key = ? AND retired_at IS NOT NULL",
                         (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                         hash(tenant),
@@ -694,16 +694,16 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         String blocker;
         if (roots.isEmpty()) {
             blocker = "session_not_retired";
-        } else if (flag(roots.getFirst(), "recovery_protected")) {
+        } else if (flag(roots.getFirst(), "is_recovery_protected")) {
             blocker = "recovery_protected";
         } else if (number(roots.getFirst(), "retired_at") > now(jdbc) - grace.toMillis()) {
             blocker = "grace_period";
-        } else if (!flag(row, "write_evidence")) {
+        } else if (!flag(row, "is_write_evidence")) {
             blocker = "legacy_write_evidence_missing";
-        } else if (flag(row, "quarantined")) {
+        } else if (flag(row, "is_quarantined")) {
             blocker = "quarantined";
         } else if (!"REFERENCED".equals(row.get("producer_phase"))
-                || !flag(row, "accepted_complete")) {
+                || !flag(row, "is_accepted_complete")) {
             blocker = "not_accepted_complete";
         } else if (count(
                         "SELECT COUNT(*) FROM ma_read_lease WHERE tenant_key = ? AND session_key ="

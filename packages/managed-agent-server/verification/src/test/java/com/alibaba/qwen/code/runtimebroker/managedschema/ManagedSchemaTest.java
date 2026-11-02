@@ -22,6 +22,56 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ManagedSchemaTest {
     @Test
+    void generatesRowIdentitiesWithoutWeakeningBusinessUniqueness() throws Exception {
+        DataSource source = initialized();
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            for (String table : ManagedSchemaContract.TABLES) {
+                try (var columns = connection.getMetaData().getColumns(null, null, table, "id")) {
+                    assertTrue(columns.next(), table);
+                    assertEquals("YES", columns.getString("IS_AUTOINCREMENT"), table);
+                }
+                try (var keys = connection.getMetaData().getPrimaryKeys(null, null, table)) {
+                    assertTrue(keys.next(), table);
+                    assertEquals("id", keys.getString("COLUMN_NAME"), table);
+                    assertTrue(!keys.next(), table);
+                }
+                try (var keys = connection.getMetaData().getImportedKeys(null, null, table)) {
+                    assertTrue(!keys.next(), table);
+                }
+            }
+            statement.execute("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
+                    + " VALUES ('tenant','session','qwen-code',1,1)");
+            assertThrows(SQLException.class, () -> statement.execute(
+                    "INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
+                            + " VALUES ('tenant','session','qwen-code',1,1)"));
+            assertThrows(SQLException.class,
+                    () -> statement.execute("UPDATE ma_session SET is_recovery_protected=2"));
+            statement.execute("UPDATE ma_session SET is_recovery_protected=1");
+            try (var row = statement.executeQuery("SELECT id,is_recovery_protected FROM ma_session")) {
+                assertTrue(row.next());
+                assertTrue(row.getLong(1) > 0);
+                assertTrue(row.getBoolean(2));
+            }
+        }
+        ManagedSchema.validate(source);
+    }
+
+    @Test
+    void rejectsMissingIdentityGenerationAndUnexpectedForeignKeys() throws Exception {
+        DataSource source = initialized();
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE ma_read_lease ALTER COLUMN id DROP IDENTITY");
+        }
+        assertThrows(IllegalStateException.class, () -> ManagedSchema.validate(source));
+        DataSource foreignKey = initialized();
+        try (var connection = foreignKey.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE ma_resource_ref ADD CONSTRAINT fk_unexpected"
+                    + " FOREIGN KEY (resource_key) REFERENCES ma_resource(resource_key)");
+        }
+        assertThrows(IllegalStateException.class, () -> ManagedSchema.validate(foreignKey));
+    }
+
+    @Test
     void preservesSessionAndTurnModelsAcrossRestart() throws Exception {
         DataSource source = source();
         ManagedSchema.initialize(source);
@@ -134,14 +184,14 @@ class ManagedSchemaTest {
                     "BOOLEAN GENERATED ALWAYS AS (last_sequence >= covered_sequence)")) {
                 String table = "ma_generated_drift_" + variant++;
                 statement.execute("CREATE TABLE " + table
-                        + " (last_sequence BIGINT, covered_sequence BIGINT, projection_pending "
+                        + " (last_sequence BIGINT, covered_sequence BIGINT, is_projection_pending "
                         + declaration + ")");
                 var error = assertThrows(SQLException.class,
                         () -> ManagedSchemaCatalog.validateGeneratedColumns(connection, table,
-                                "    projection_pending BOOLEAN GENERATED ALWAYS AS"
+                                "    is_projection_pending BOOLEAN GENERATED ALWAYS AS"
                                         + " (last_sequence > covered_sequence)"));
                 assertTrue(error.getMessage().contains(
-                        "Managed schema generated column differs: " + table + ".projection_pending"));
+                        "Managed schema generated column differs: " + table + ".is_projection_pending"));
             }
         }
     }
@@ -191,7 +241,7 @@ class ManagedSchemaTest {
         DataSource source = initialized();
         try (var connection = source.getConnection();
                 var statement = connection.createStatement()) {
-            statement.execute("DROP INDEX ix_ma_read_session");
+            statement.execute("DROP INDEX idx_ma_read_session");
             statement.execute("ALTER TABLE ma_read_lease DROP COLUMN expires_at");
         }
         assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
@@ -208,10 +258,10 @@ class ManagedSchemaTest {
     void requiresIndexedPhysicalStorageScopesWithoutRepairingDrift() throws Exception {
         for (String index :
                 Set.of(
-                        "ix_ma_runtime_storage_alias_state",
-                        "ix_ma_session_storage_scope",
-                        "ix_ma_head_workspace",
-                        "ix_ma_storage_owner_binding")) {
+                        "idx_ma_runtime_storage_alias_state",
+                        "idx_ma_session_storage_scope",
+                        "idx_ma_head_workspace",
+                        "idx_ma_storage_owner_binding")) {
             DataSource source = initialized();
             try (var connection = source.getConnection();
                     var statement = connection.createStatement()) {
@@ -454,7 +504,7 @@ class ManagedSchemaTest {
     }
 
     @Test
-    void hookOnceAndResourceReferencesAreDatabaseConstraints() throws Exception {
+    void hookOnceRemainsUniqueWithoutDatabaseForeignKeys() throws Exception {
         DataSource source = initialized();
         try (var connection = source.getConnection();
                 var statement = connection.createStatement()) {
@@ -471,14 +521,12 @@ class ManagedSchemaTest {
                             statement.execute(
                                     prefix
                                             + "('scope','record2','tenant','workspace','session','hook','record2',1,0,'body','once')"));
-            assertThrows(
-                    SQLException.class,
-                    () ->
-                            statement.execute(
-                                    "INSERT INTO ma_resource_ref"
-                                        + " (session_scope_key,owner_kind,owner_key,owner_revision,resource_key,tenant_id,session_id,gmt_create)"
-                                        + " VALUES"
-                                        + " ('scope','JOURNAL','scope',1,'missing','tenant','session'," + ManagedSchemaTime.SQL_NOW + ")"));
+            statement.execute(
+                    "INSERT INTO ma_resource_ref"
+                        + " (session_scope_key,owner_kind,owner_key,owner_revision,resource_key,tenant_id,session_id,gmt_create)"
+                        + " VALUES"
+                        + " ('scope','JOURNAL','scope',1,'missing','tenant','session'," + ManagedSchemaTime.SQL_NOW + ")");
+            ManagedSchema.validate(source);
         }
     }
 
