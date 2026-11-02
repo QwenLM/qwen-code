@@ -4831,6 +4831,7 @@ describe('Session', () => {
     it.each([
       ['the Stop hook reached its cap', 'cap'],
       ['the guard gave way to a queued prompt', 'queued'],
+      ['the guard gave way to a queued prompt in plan mode', 'plan-queued'],
       ['the guard was exhausted', 'exhausted'],
     ] as const)(
       'does not start the Goal a turn proposed once %s',
@@ -4868,8 +4869,13 @@ describe('Session', () => {
                 policy!.onStopHookCap?.();
                 return;
               }
-              if (way === 'queued') {
+              if (way === 'queued' || way === 'plan-queued') {
                 internals.todoStopGuardQueuedPromptPriority = true;
+              }
+              if (way === 'plan-queued') {
+                vi.mocked(mockConfig.getApprovalMode).mockReturnValue(
+                  ApprovalMode.PLAN,
+                );
               }
               expect(await policy!.continueAt({ promptId, signal })).toBe(
                 undefined,

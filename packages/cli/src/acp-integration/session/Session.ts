@@ -10104,15 +10104,17 @@ export class Session implements SessionContext {
     return {
       continueAt: async ({ signal }) => {
         await beforeDecision();
-        if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
+        const planMode = this.config.getApprovalMode() === ApprovalMode.PLAN;
+        if (planMode) {
           this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
-          return undefined;
         }
-        // Input already shown as delivered is answered first.
+        // Input already shown as delivered is answered first. Plan mode
+        // yields to it too, so a Goal proposal still stays unsettled.
         if (this.todoStopGuardQueuedPromptPriority || (await tookInput())) {
           onYield();
           return undefined;
         }
+        if (planMode) return undefined;
         const decision = this.todoStopGuard.decide(
           this.todoStopGuard.needsStopInspection
             ? this.#hasRelevantTodoStopGuardBackgroundInput()

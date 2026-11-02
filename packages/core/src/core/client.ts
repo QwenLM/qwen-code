@@ -1113,6 +1113,16 @@ export class LlmClient {
    * Host-supported sessions settle after classifying their own protective
    * exits, so core must leave their single-take proposal latch untouched.
    */
+  /**
+   * Drops the turn's parked Goal proposal when the send ends abnormally. A
+   * host that settles proposals itself takes it when its turn ends, so it can
+   * still report that the Goal did not start.
+   */
+  private dropUnsettledGoalProposal(promptId: string): void {
+    if (this.config.getGoalProposalHostSupported?.()) return;
+    this.config.takePendingGoalProposal?.(promptId);
+  }
+
   private async settlePendingGoalProposal(
     turnEnded: boolean,
     signal: AbortSignal,
@@ -4319,7 +4329,9 @@ export class LlmClient {
           // A blocked send never reaches the history push: settle the
           // attached carrier by unconditional restore, never by the push
           // counter (a concurrent push inside the hook window above would
-          // otherwise masquerade as this send's acceptance).
+          // otherwise masquerade as this send's acceptance). A blocked Retry
+          // puts back the attempt it stripped above.
+          restoreStrippedRetryEntries();
           settleSteerInput(attachedSteerInput);
           return new Turn(this.getChat(), prompt_id);
         }
@@ -4372,7 +4384,7 @@ export class LlmClient {
         signal.aborted ? undefined : userPromptSubmitFailureMessage,
         signal.aborted ? undefined : getErrorType(error),
       );
-      this.config.takePendingGoalProposal?.(prompt_id);
+      this.dropUnsettledGoalProposal(prompt_id);
       for (const goalEvent of await finalizeInterruptedGoalTurn(
         undefined,
         getErrorMessage(error),
@@ -4384,9 +4396,8 @@ export class LlmClient {
       // never pushed: settle the attached carrier here by unconditional
       // restore instead of leaving it to caller-side failure handling.
       // Symmetric with the Goal-admission catch below: re-add any Retry
-      // orphan entries popped above (a no-op today — hooks never fire for
-      // Retry, the only type that populates the entries — but keeps this
-      // exit safe under future hook-scope changes).
+      // orphan entries popped above (a Retry reaches this try when the host
+      // admitted its prompt).
       restoreStrippedRetryEntries();
       settleSteerInput(attachedSteerInput);
       throw error;
@@ -4452,7 +4463,7 @@ export class LlmClient {
         signal.aborted ? undefined : 'Goal turn admission failed',
         signal.aborted ? undefined : getErrorType(error),
       );
-      this.config.takePendingGoalProposal?.(prompt_id);
+      this.dropUnsettledGoalProposal(prompt_id);
       for (const goalEvent of await finalizeInterruptedGoalTurn(
         undefined,
         getErrorMessage(error),
@@ -6328,7 +6339,7 @@ export class LlmClient {
         // Only a natural end can hand a hook-forced turn's tool calls back to
         // the caller for a ToolResult re-entry; any other exit ends it.
         this.clearStopHookChain(prompt_id);
-        this.config.takePendingGoalProposal?.(prompt_id);
+        this.dropUnsettledGoalProposal(prompt_id);
         this.cancelPendingMemoryPrefetch(
           signal?.aborted ? 'abort' : 'no_safe_delivery_point',
         );

@@ -13731,6 +13731,41 @@ Other open files:
           expect(mockTurnRunFn).toHaveBeenCalledOnce();
         });
 
+        it('puts back the attempt a Retry stripped when its admission is blocked', async () => {
+          promptSubmitBus({
+            output: { decision: 'block', reason: 'not this one' },
+          });
+          const attempt: Content = {
+            role: 'user',
+            parts: [{ text: 'try again' }],
+          };
+          vi.spyOn(
+            client,
+            'stripOrphanedUserEntriesFromHistory',
+          ).mockReturnValue([attempt]);
+          const addHistory = vi
+            .spyOn(client.getChat(), 'addHistory')
+            .mockImplementation(() => {});
+          const admission = await client.admitUserPrompt(
+            'try again',
+            'prompt-retry-blocked',
+          );
+
+          const events = await admittedSend(
+            admission,
+            'prompt-retry-blocked',
+            SendMessageType.Retry,
+          );
+
+          expect(events).toContainEqual(
+            expect.objectContaining({
+              type: LlmEventType.UserPromptSubmitBlocked,
+            }),
+          );
+          expect(addHistory).toHaveBeenCalledWith(attempt);
+          expect(mockTurnRunFn).not.toHaveBeenCalled();
+        });
+
         it('rejects an admission on a send that is not a UserQuery or a Retry', async () => {
           promptSubmitBus({ output: undefined });
           const admission = await client.admitUserPrompt(
