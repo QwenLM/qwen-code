@@ -284,6 +284,15 @@ function hostContinuationOptions(
     ...(options?.interactionSpanByHost && { interactionSpanByHost: true }),
     ...(options?.toolLoopGuardsByHost && { toolLoopGuardsByHost: true }),
     ...(options?.stopPolicies && { stopPolicies: options.stopPolicies }),
+    // A Goal turn's continuation runs under the same permit.
+    ...(options?.goalPermit && {
+      goalPermit: options.goalPermit,
+      goalTurnKey: options.goalTurnKey,
+      goalSignal: options.goalSignal,
+      goalOrigin: options.goalOrigin,
+      getInterruptedGoalPauseReason: options.getInterruptedGoalPauseReason,
+      getQueuedGoalTurnKey: options.getQueuedGoalTurnKey,
+    }),
   };
 }
 
@@ -332,7 +341,8 @@ export interface SendMessageOptions {
    * work chain and took its file-history snapshot, as ACP does when it admits
    * a prompt, so the client does none of them. On a Retry, the host started
    * the todo work chain and keeps the attempt's recorded user message, so the
-   * client neither starts the chain nor records the message again.
+   * client neither starts the chain nor records the message again. On a Goal
+   * turn, the host recorded the runtime continuation's message.
    */
   userTurnRecordedByHost?: boolean;
   /**
@@ -4676,9 +4686,11 @@ export class LlmClient {
     let messageDisplay: MessageDisplayDispatcher | null = null;
     try {
       if (messageType === SendMessageType.Goal) {
-        this.config
-          .getChatRecordingService()
-          ?.recordGoalRuntimeMessage(request, goalPermit!);
+        if (!options?.userTurnRecordedByHost) {
+          this.config
+            .getChatRecordingService()
+            ?.recordGoalRuntimeMessage(request, goalPermit!);
+        }
       } else if (
         messageType === SendMessageType.UserQuery ||
         messageType === SendMessageType.Cron

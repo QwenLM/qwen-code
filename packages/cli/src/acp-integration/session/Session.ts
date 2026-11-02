@@ -31,6 +31,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import {
   SendMessageType,
+  type SendMessageOptions,
   type StopPolicy,
   type UserPromptAdmission,
 } from '@qwen-code/qwen-code-core/core/client.js';
@@ -575,6 +576,8 @@ const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
 // to send now reaches the model; the turn itself goes on (see
 // `#openResponseInterrupt`).
 const MID_TURN_INPUT_ABORT_REASON = 'qwen:mid-turn-input';
+/** The failure a Goal turn stopped by loop protection pauses with. */
+const GOAL_LOOP_STOP_FAILURE = 'loop detected';
 const GOAL_HELD_RECOVERY_COMMANDS =
   'Run:\n/goal pause\nThen, when ready:\n/goal resume';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
@@ -799,6 +802,8 @@ interface AcpGoalTurn extends GoalContinuationTurn {
   origin: 'runtime' | 'user';
   modelStarted: boolean;
   endingToolCallId?: string;
+  /** On the shared loop, loop protection stopped the turn: it pauses. */
+  loopStopped?: boolean;
 }
 
 function sameGoalPermit(
@@ -3471,10 +3476,10 @@ export class Session implements SessionContext {
             : turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
               ? GOAL_PAUSE_REASON_SESSION_DISPOSED
               : failureMessage !== undefined
-                ? this.config.getManagedSessionBlock?.()
-                  ? GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED
-                  : goalPauseReasonForFailure(failureMessage)
-                : undefined;
+                ? this.#goalFailurePauseReason(failureMessage)
+                : turn.loopStopped
+                  ? this.#goalFailurePauseReason(GOAL_LOOP_STOP_FAILURE)
+                  : undefined;
       // Same latched-write-failure hazard as the flush above, one step later:
       // `pause` and `finishTurn` both persist through
       // `appendRecordStrict`, which re-throws the latched failure forever.
@@ -3538,6 +3543,37 @@ export class Session implements SessionContext {
         }`,
       );
     }
+  }
+
+  /** The reason a Goal turn that failed pauses with. */
+  #goalFailurePauseReason(failure: string): string {
+    return this.config.getManagedSessionBlock?.()
+      ? GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED
+      : goalPauseReasonForFailure(failure);
+  }
+
+  /**
+   * The send options that run a Goal turn's model round on the shared loop
+   * under its permit. The round's own signal is the Goal signal, so the
+   * client leaves a cancelled or cut-short round to `#settleGoalTurn`, and
+   * pauses a Goal itself only when the round fails, loops or hits a cap.
+   */
+  #sharedGoalRoundOptions(
+    turn: AcpGoalTurn,
+    roundSignal: AbortSignal,
+  ): Partial<SendMessageOptions> {
+    return {
+      goalPermit: turn.permit,
+      goalTurnKey: turn.turnKey,
+      goalSignal: roundSignal,
+      goalOrigin: turn.origin,
+      getInterruptedGoalPauseReason: (interruption) =>
+        interruption?.cause === 'stop-hook-cap'
+          ? GOAL_PAUSE_REASON_STOP_HOOK_CAP
+          : this.#goalFailurePauseReason(
+              interruption?.failure ?? 'the turn was interrupted',
+            ),
+    };
   }
 
   /**
@@ -7330,10 +7366,11 @@ export class Session implements SessionContext {
             // that class excluded until its producers distinguish them; see
             // docs/design/daemon-user-prompt-submit-provenance.md.
             const isUserSubmissionTurn = isFreshUserTurn && !channelTurn;
-            // `experimental.unifiedAgentLoop`: a prompt outside a Goal turn
-            // sends its model rounds through `LlmClient` on the shared agent
-            // loop's round: a fresh prompt, a channel's included, as a
-            // UserQuery, and a retry, a continue or a restore as a Retry.
+            // `experimental.unifiedAgentLoop`: a prompt sends its model rounds
+            // through `LlmClient` on the shared agent loop's round: a fresh
+            // prompt, a channel's or a Goal turn's included, as a UserQuery,
+            // a retry, a continue or a restore as a Retry, and a Goal
+            // runtime continuation as a Goal round under its permit.
             // `LlmClient` then does the steps the current path does here
             // itself: UserPromptSubmit on the admitted verdict, memory recall,
             // system reminders and workflow intent for a UserQuery, then the
@@ -7342,19 +7379,32 @@ export class Session implements SessionContext {
             // and Agent Host sessions also keep ACP's tool executor and guards
             // instead of the shared tool batch.
             const sharedModelRound =
-              this.config.isUnifiedAgentLoopEnabled?.() === true && !goalTurn;
+              this.config.isUnifiedAgentLoopEnabled?.() === true;
             // A retry, a continue or a restore re-enters a turn: its first
             // round is a Retry.
-            const firstRoundType = isFreshUserTurn
-              ? SendMessageType.UserQuery
-              : SendMessageType.Retry;
+            const firstRoundType = isRuntimeContinuation
+              ? SendMessageType.Goal
+              : isFreshUserTurn
+                ? SendMessageType.UserQuery
+                : SendMessageType.Retry;
+            // Loop protection that ends a Goal turn on the shared loop pauses
+            // the Goal, as the client does when its own guard stops a round.
+            const pauseGoalForLoopStop = () => {
+              if (sharedModelRound && goalTurn) goalTurn.loopStopped = true;
+            };
             // Its tool batches run on the shared loop's batch, and the
             // client then runs its own tool-call guards.
             const sharedToolBatch =
               sharedModelRound && this.#runsToolsOnSharedBatch();
             let promptAdmission: UserPromptAdmission | undefined;
-            // A continue or a restore runs no UserPromptSubmit hook.
-            if (sharedModelRound && !isContinue && !isRestoreAskUserQuestion) {
+            // A continue, a restore or a runtime continuation runs no
+            // UserPromptSubmit hook.
+            if (
+              sharedModelRound &&
+              !isContinue &&
+              !isRestoreAskUserQuestion &&
+              !isRuntimeContinuation
+            ) {
               promptAdmission = await this.config
                 .getLlmClient()
                 .admitUserPrompt(promptText, promptId, {
@@ -8102,6 +8152,17 @@ export class Session implements SessionContext {
                   responseInterrupt.begin();
                   // Whether the round's request reached history, on every exit.
                   let pushed = false;
+                  // A Goal turn's model started once its request went out,
+                  // before the client can finish the turn at its stop point.
+                  const markGoalModelStarted = () => {
+                    if (!goalTurn || goalTurn.modelStarted || requestUnsent()) {
+                      return;
+                    }
+                    goalTurn.modelStarted = true;
+                    if (goalTurn.origin === 'runtime') {
+                      this.#markGoalTurnDelivered(goalTurn.turnKey);
+                    }
+                  };
                   try {
                     ({ stop: roundStop } = await runModelRound(
                       this.config.getLlmClient(),
@@ -8140,11 +8201,21 @@ export class Session implements SessionContext {
                             }),
                             ...(promptAdmission && { promptAdmission }),
                           }),
+                          // The session recorded the continuation's message.
+                          ...(roundType === SendMessageType.Goal && {
+                            userTurnRecordedByHost: true,
+                          }),
+                          ...(goalTurn &&
+                            this.#sharedGoalRoundOptions(
+                              goalTurn,
+                              responseInterrupt.signal,
+                            )),
                         },
                       },
                       responseInterrupt.signal,
                       {
                         onModelEvent: async (event) => {
+                          markGoalModelStarted();
                           if (pendingSend.signal.aborted) return;
                           const pushCount =
                             this.#getCurrentChat().getUserContentPushCount?.();
@@ -8338,6 +8409,7 @@ export class Session implements SessionContext {
                       );
                     }
                   } finally {
+                    markGoalModelStarted();
                     pushed =
                       (this.#getCurrentChat().getUserContentPushCount?.() ??
                         0) > pushCountBefore;
@@ -8439,6 +8511,7 @@ export class Session implements SessionContext {
                     if (roundStop === 'max_session_turns') {
                       return { stopReason: 'max_turn_requests' };
                     }
+                    pauseGoalForLoopStop();
                     if (rejectOnLoopDetected) {
                       throw createLoopDetectedTurnError({
                         loopType: loopStop?.loopType,
@@ -8766,6 +8839,7 @@ export class Session implements SessionContext {
                     );
                   nextMessage = nextAfterTools.message;
                   if (nextAfterTools.stoppedByRepeatedToolFailure) {
+                    pauseGoalForLoopStop();
                     return {
                       stopReason: rejectOnLoopDetected
                         ? cancelledOrThrowLoopDetected(
@@ -8776,6 +8850,7 @@ export class Session implements SessionContext {
                     };
                   }
                   if (toolRun.loopDetected) {
+                    pauseGoalForLoopStop();
                     this.todoStopGuard.suspend();
                     await this.#preserveStoppedToolRun(
                       toolRun,

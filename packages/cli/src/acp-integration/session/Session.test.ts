@@ -37455,6 +37455,257 @@ describe('Session', () => {
         expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
       });
 
+      describe('on the shared agent loop round', () => {
+        const activeGoalSnapshot = (activity: 'idle' | 'running') => ({
+          v: 2,
+          activity,
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+
+        let admitUserPrompt = vi.fn();
+
+        /** Runs each round on the mocked client; a round pushes its request unless told not to. */
+        function sharedRounds(
+          events: (index: number) => unknown[] = () => [],
+          pushes = true,
+        ) {
+          const sends: Array<
+            [Part[], AbortSignal, string, Record<string, unknown>]
+          > = [];
+          let pushCount = 0;
+          mockConfig.isUnifiedAgentLoopEnabled = vi.fn().mockReturnValue(true);
+          Object.assign(mockChat, {
+            getUserContentPushCount: vi.fn(() => pushCount),
+          });
+          admitUserPrompt = vi.fn().mockResolvedValue({ blocked: false });
+          Object.assign(mockLlmClient, {
+            admitUserPrompt,
+            sendMessageStream: vi.fn(
+              (
+                parts: Part[],
+                signal: AbortSignal,
+                promptId: string,
+                options: Record<string, unknown>,
+              ) => {
+                sends.push([parts, signal, promptId, options]);
+                const index = sends.length - 1;
+                return (async function* () {
+                  if (pushes) pushCount++;
+                  for (const event of events(index)) {
+                    if (event instanceof Error) throw event;
+                    yield event;
+                  }
+                })();
+              },
+            ),
+          });
+          mockChat.sendMessageStream = vi.fn();
+          return sends;
+        }
+
+        it('runs a runtime continuation as a Goal round under its permit', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-shared',
+          };
+          const turnKey = 'goal-runtime:turn-shared';
+          mockGoalRuntime.getSnapshot.mockReturnValue(
+            activeGoalSnapshot('running'),
+          );
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+          const sends = sharedRounds(() => [
+            { type: core.LlmEventType.Content, value: 'checked' },
+          ]);
+
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'check weather',
+          });
+
+          await vi.waitFor(() => {
+            expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+          });
+          expect(sends).toHaveLength(1);
+          expect(sends[0][0]).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'Continue working on the active Goal.',
+                ),
+              }),
+            ]),
+          );
+          expect(sends[0][3]).toMatchObject({
+            type: core.SendMessageType.Goal,
+            goalPermit: permit,
+            goalTurnKey: turnKey,
+            goalOrigin: 'runtime',
+            userTurnRecordedByHost: true,
+          });
+          // The round's own signal: a cut or a cancel is left to the session.
+          expect(sends[0][3]['goalSignal']).toBe(sends[0][1]);
+          expect(admitUserPrompt).not.toHaveBeenCalled();
+          expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+          expect(
+            mockChatRecordingService.recordGoalRuntimeMessage,
+          ).toHaveBeenCalledExactlyOnceWith(expect.any(Array), permit);
+          expect(mockGoalRuntime.markTurnDelivered).toHaveBeenCalledWith(
+            turnKey,
+          );
+          expect(mockGoalRuntime.releaseTurn).not.toHaveBeenCalled();
+        });
+
+        it('runs a user prompt in a Goal turn as a UserQuery under its permit', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'user-turn-shared',
+          };
+          mockGoalRuntime.getSnapshot.mockReturnValue(
+            activeGoalSnapshot('idle'),
+          );
+          mockGoalRuntime.beginTurn.mockReturnValue(permit);
+          mockGoalRuntime.permitForTurn.mockReturnValue(permit);
+          const sends = sharedRounds();
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          expect(admitUserPrompt).toHaveBeenCalledOnce();
+          expect(sends).toHaveLength(1);
+          expect(sends[0][3]).toMatchObject({
+            type: core.SendMessageType.UserQuery,
+            goalPermit: permit,
+            goalTurnKey: expect.stringMatching(/^goal-user:/),
+            goalOrigin: 'user',
+            userTurnRecordedByHost: true,
+          });
+          expect(
+            mockChatRecordingService.recordUserMessage,
+          ).toHaveBeenCalledWith(
+            'hello',
+            permit,
+            undefined,
+            expect.stringContaining('test-session-id########'),
+            undefined,
+          );
+          expect(mockGoalRuntime.markTurnDelivered).not.toHaveBeenCalled();
+          expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+        });
+
+        it('names the pause the client takes when a Goal round fails or hits the Stop hook cap', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'user-turn-reasons',
+          };
+          mockGoalRuntime.getSnapshot.mockReturnValue(
+            activeGoalSnapshot('idle'),
+          );
+          mockGoalRuntime.beginTurn.mockReturnValue(permit);
+          mockGoalRuntime.permitForTurn.mockReturnValue(permit);
+          const sends = sharedRounds();
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          const reason = sends[0][3][
+            'getInterruptedGoalPauseReason'
+          ] as (interruption?: {
+            failure?: string;
+            cause?: 'stop-hook-cap';
+          }) => string;
+          expect(reason({ cause: 'stop-hook-cap' })).toBe(
+            core.GOAL_PAUSE_REASON_STOP_HOOK_CAP,
+          );
+          expect(reason({ failure: 'upstream 500' })).toBe(
+            core.goalPauseReasonForFailure('upstream 500'),
+          );
+          mockConfig.getManagedSessionBlock = vi
+            .fn()
+            .mockReturnValue({ reason: 'blocked' });
+          expect(reason({ failure: 'upstream 500' })).toBe(
+            core.GOAL_PAUSE_REASON_MANAGED_SESSION_BLOCKED,
+          );
+        });
+
+        it('pauses the Goal when loop protection ends its turn', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-loop',
+          };
+          const turnKey = 'goal-runtime:turn-loop';
+          mockGoalRuntime.getSnapshot.mockReturnValue(
+            activeGoalSnapshot('running'),
+          );
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+          sharedRounds(() => [{ type: core.LlmEventType.LoopDetected }]);
+
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'check weather',
+          });
+
+          await vi.waitFor(() => {
+            expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+              action: 'pause',
+              expectedGoalId: 'goal-1',
+              expectedRevision: 1,
+              reason: core.goalPauseReasonForFailure('loop detected'),
+            });
+          });
+          expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+        });
+
+        it('hands back a runtime continuation whose request never went out', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-unsent',
+          };
+          const turnKey = 'goal-runtime:turn-unsent';
+          mockGoalRuntime.getSnapshot.mockReturnValue(
+            activeGoalSnapshot('running'),
+          );
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+          sharedRounds(() => [new Error('request setup failed')], false);
+
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'check weather',
+          });
+
+          await vi.waitFor(() => {
+            expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(turnKey);
+          });
+          expect(mockGoalRuntime.markTurnDelivered).not.toHaveBeenCalled();
+          expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+        });
+      });
+
       describe('in a blocked Managed session', () => {
         const permit: core.GoalTurnPermit = {
           goalId: 'goal-1',
