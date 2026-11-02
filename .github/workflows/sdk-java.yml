@@ -1407,10 +1407,11 @@ jobs:
     # The packaged-stack failover arms, apart from the Hosted MySQL job so
     # that a failing integration test there no longer skips them: they need
     # only the bundled CLI, the server jar and a runner-private mysqld, not
-    # its MySQL service or cgroup root. Each arm also runs when an earlier
-    # one failed. Ceilings: 27 arms × 10 = 270 plus ~13 minutes for the
-    # uncapped setup steps (Checkout.. Install MySQL binaries): 283 + 2.
-    timeout-minutes: 285
+    # its MySQL service. The rewritten-command arm delegates its own cgroup
+    # root below. Each arm also runs when an earlier one failed. Ceilings:
+    # 28 arms × 10 = 280 plus ~13 minutes for the uncapped setup steps
+    # (Checkout.. Install MySQL binaries): 293 + 2.
+    timeout-minutes: 295
     env:
       QWEN_E2E_REGISTER_STORAGE: '1'
     steps:
@@ -1559,6 +1560,31 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-approval-sibling-approval
+      # The rewritten-command arm executes real package Hooks and shell steps.
+      # Delegate and smoke-test a cgroup root exactly as the Hosted process
+      # gates do; the arm's own shell enters it before starting Spring.
+      - name: 'Delegate a cgroup v2 root for rewritten-command recovery'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        run: |-
+          sudo mkdir -p /sys/fs/cgroup/a3-command-rewrite
+          sudo chown -R "$(id -u):$(id -g)" /sys/fs/cgroup/a3-command-rewrite
+          test -f /sys/fs/cgroup/a3-command-rewrite/cgroup.kill
+          echo $$ | sudo tee /sys/fs/cgroup/a3-command-rewrite/cgroup.procs
+          mkdir /sys/fs/cgroup/a3-command-rewrite/smoke
+          sleep 600 </dev/null >/dev/null 2>&1 & smoke=$!
+          echo "$smoke" > /sys/fs/cgroup/a3-command-rewrite/smoke/cgroup.procs
+          grep -q "^$smoke\$" /sys/fs/cgroup/a3-command-rewrite/smoke/cgroup.procs
+          echo 1 > /sys/fs/cgroup/a3-command-rewrite/smoke/cgroup.kill
+          wait "$smoke" || true
+          rmdir /sys/fs/cgroup/a3-command-rewrite/smoke
+      - name: 'Run rewritten-command Hook recovery E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        env:
+          QWEN_E2E_EXTENSION_CGROUP_ROOT: '/sys/fs/cgroup/a3-command-rewrite'
+        run: >-
+          echo $$ | sudo tee /sys/fs/cgroup/a3-command-rewrite/cgroup.procs &&
+          npm run test:e2e:managed-harness-restart-approval-command-rewrite
       - name: 'Run after-earlier-tools crash E2E'
         if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10

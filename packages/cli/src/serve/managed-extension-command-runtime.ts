@@ -71,6 +71,7 @@ export interface ManagedExtensionCommandDependencies {
     toolName: string,
     input: Record<string, unknown>,
   ) => Promise<ManagedToolResultPayload>;
+  readonly acknowledge: (reference: ManagedToolReference) => void;
   readonly cancel: (reference: ManagedToolReference) => unknown;
 }
 
@@ -210,6 +211,9 @@ export class ManagedExtensionCommandRuntime {
             },
             { mode: 0o600, forceMode: true, noFollow: true },
           );
+          // The durable receipt now owns the outcome, so the native journal
+          // entry can be released before Runtime retirement checks it.
+          this.dependencies.acknowledge(reference);
         } catch (error) {
           if (started || error instanceof ManagedMcpToolUnknownError) return;
           await atomicWriteJSON(
@@ -227,6 +231,7 @@ export class ManagedExtensionCommandRuntime {
             },
             { mode: 0o600, forceMode: true, noFollow: true },
           );
+          this.dependencies.acknowledge(reference);
         }
       })
       .finally(() => this.running.delete(key));

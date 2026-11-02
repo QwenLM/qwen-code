@@ -348,7 +348,7 @@ export function parseHostedHookPin(value: unknown): ManagedHookCatalogPin {
 }
 
 export class HostedHookSession {
-  readonly broker: HostedWorkspaceBroker;
+  broker: HostedWorkspaceBroker;
   private ownsBroker: boolean;
   private acquired = false;
   private acquiring?: Promise<void>;
@@ -639,9 +639,10 @@ export class HostedHookSession {
     return this.acquired || this.broker.acquired;
   }
 
-  delegateBrokerToMcp(): void {
+  delegateBrokerToMcp(broker?: HostedWorkspaceBroker): void {
     if (this.mountWorkUnproven()) throw new HostedHookRecoveryRequiredError();
-    this.ownsBroker = false;
+    this.broker = broker ?? this.broker;
+    this.ownsBroker = broker === undefined ? false : this.ownsBroker;
   }
 
   /**

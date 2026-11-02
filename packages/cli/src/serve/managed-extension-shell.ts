@@ -37,9 +37,15 @@ export async function runManagedExtensionShell(
     cwd: input.cwd,
     env: input.environment,
   });
-  const streamsClosed = new Promise<void>((resolve) =>
-    child.once('close', () => resolve()),
-  );
+  const streamsClosed = new Promise<void>((resolve) => {
+    if (
+      (child.exitCode !== null || child.signalCode !== null) &&
+      child.stdout?.destroyed === true &&
+      child.stderr?.destroyed === true
+    )
+      resolve();
+    else child.once('close', () => resolve());
+  });
   if (child.pid) input.capture?.setStarted(child.pid);
   child.stdin?.end();
   const chunks: Buffer[] = [];

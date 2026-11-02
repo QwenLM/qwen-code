@@ -499,6 +499,31 @@ class ManagedActionStoreTest {
         }
     }
 
+    @Test
+    void projectsAndFindsCommandStepApproval() throws Exception {
+        String id = "command_approval_" + "b".repeat(48);
+        ObjectNode options = planExitOptions();
+        options.put("requestId", id).put("toolName", "run_shell_command");
+        ObjectNode inputRef = storeBody("command-input", "managed-extension-command-input",
+                JSON.createObjectNode().put("command", "printf rewritten").put("timeout", 120000));
+        options.set("inputRef", inputRef);
+        ObjectNode continuation = (ObjectNode) JSON.readTree(jdbc.queryForObject(
+                "SELECT inline_bytes FROM ma_resource WHERE resource_key=?",
+                byte[].class, ManagedSchemaKeys.key(scope, "continuation")));
+        continuation.put("actionId", id);
+        ObjectNode call = (ObjectNode) continuation.withArray("calls").get(0);
+        call.put("actionId", id);
+        ((ObjectNode) call.path("call")).put("name", "skill");
+        ObjectNode step = continuation.putObject("commandStep").put("toolStageId", "command-stage")
+                .put("toolName", "shell").put("configRevision", 1);
+        step.set("inputRef", inputRef);
+        options.set("continuationRef", storeBody("command-continuation", "hosted-approval-continuation", continuation));
+
+        project("requested", null, 1, options);
+
+        assertThat(actions.find(TENANT, SESSION, id).orElseThrow().options()).isEqualTo(options);
+    }
+
     private OperationAdmission admitAs(String actor, String key, String digest, JsonNode body, long now) {
         return transactions.execute(status -> actions.admit(TENANT, SESSION, actor,
                 actor == null ? "anonymous" : actor + "-digest", key, digest, ACTION, body, now));
@@ -582,7 +607,8 @@ class ManagedActionStoreTest {
         ObjectNode envelope = JSON.createObjectNode().put("v", 1).put("sequence", sequence).put("eventId", "action:" + sequence)
                 .put("kind", "action.changed").put("occurredAt", sequence);
         envelope.putObject("sessionKey").put("tenantId", TENANT).put("workspaceId", "workspace").put("sessionId", SESSION);
-        ObjectNode payload = envelope.putObject("payload").put("requestId", ACTION).put("kind", "permission").put("source", "tool_call")
+        ObjectNode payload = envelope.putObject("payload").put("requestId", options.path("requestId").asText())
+                .put("kind", "permission").put("source", "tool_call")
                 .put("inputRevision", 1).put("state", state);
         payload.set("optionsRef", optionsRef);
         if (decision == null) {

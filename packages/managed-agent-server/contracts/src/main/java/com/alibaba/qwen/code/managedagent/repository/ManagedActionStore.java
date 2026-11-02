@@ -13,6 +13,8 @@ import java.util.Map;
 import java.util.Optional;
 
 public interface ManagedActionStore {
+    String ACTION_ID_PATTERN = "(?:tool_approval_[0-9a-f]{32}|command_approval_[0-9a-f]{48})";
+
     public record Action(
             String id,
             String state,

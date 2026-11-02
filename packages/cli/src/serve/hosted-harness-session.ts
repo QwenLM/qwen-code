@@ -2793,7 +2793,10 @@ async function verifyWorkspaceRestore(
       event.kind === 'domain.committed' &&
       ![
         'session_metadata',
-        ...(session.mcp ? ['config_install'] : []),
+        ...(session.mcp || session.extensions?.enabled
+          ? ['config_install']
+          : []),
+        ...(session.extensions?.enabled ? ['tool_stage'] : []),
         'hook_registration',
         'hook_execution',
         'file_history',
@@ -6256,6 +6259,16 @@ export function registerHostedHarnessSessionRoutes(
           effectiveHookCatalog,
           session.mcp?.broker,
           () => session.lifecycleProtocolVersion === 2,
+          extensionBundle
+            ? `extensions-components-${createHash('sha256')
+                .update(
+                  JSON.stringify([
+                    session.managed.authority.sessionHeader.sessionKey,
+                    extensionBundle.configRevision,
+                  ]),
+                )
+                .digest('hex')}`
+            : undefined,
         );
       if (extensionBundle && extensionManagement)
         selectExtensionCatalog(
@@ -6900,6 +6913,10 @@ export function registerHostedHarnessSessionRoutes(
       // A bare load of a parked Session keeps refusing with 409 so it never
       // drives a Runtime by accident.
       const unsettled = unsettledPromptId(session);
+      const pendingCommandApproval =
+        session.extensions?.enabled && unsettled
+          ? await findHostedApprovalContinuation(managed, unsettled)
+          : undefined;
       // Cold loads stay inert: only an explicit takeover request may touch
       // the Broker or settle anything. A bare load of a parked Session keeps
       // refusing with 409 so it never drives a Runtime by accident.
@@ -6911,7 +6928,12 @@ export function registerHostedHarnessSessionRoutes(
       // committed, any other as never run — or the gate would refuse this
       // Session on every load. A failed answer leaves the gate's retriable
       // refusal.
-      if (session.hooks && !lifecycle && unsettled !== undefined) {
+      if (
+        session.hooks &&
+        !lifecycle &&
+        unsettled !== undefined &&
+        !pendingCommandApproval?.plan.commandStep
+      ) {
         try {
           await answerResumedTurnCalls({
             session: managed,
@@ -7126,10 +7148,10 @@ export function registerHostedHarnessSessionRoutes(
       }
       let resumeApproval: RestoredHostedApprovalContinuation | undefined;
       if (
-        takeover &&
         unsettled &&
         session.toolProfile &&
-        ((!session.hooks && !session.mcp) || session.extensions?.enabled) &&
+        ((takeover && !session.hooks && !session.mcp) ||
+          session.extensions?.enabled) &&
         brokerOptions
       ) {
         const verdict = await managed.authority.harnessRunAuthorization();
@@ -7139,10 +7161,9 @@ export function registerHostedHarnessSessionRoutes(
             verdict.checkpoint.continuation.phase,
           )
         ) {
-          resumeApproval = await findHostedApprovalContinuation(
-            managed,
-            unsettled,
-          );
+          resumeApproval =
+            pendingCommandApproval ??
+            (await findHostedApprovalContinuation(managed, unsettled));
           if (resumeApproval) {
             const user = (await managed.sink.project()).find(
               (item) =>
@@ -7454,7 +7475,7 @@ export function registerHostedHarnessSessionRoutes(
         // before the Harness died — core's orphan repair would otherwise
         // have the model retry it — and as never run otherwise, so the
         // round the resume needs is whole.
-        if (promptId)
+        if (promptId && !resumeApproval?.plan.commandStep)
           await answerResumedTurnCalls({
             session: managed,
             sessionId,
@@ -8966,15 +8987,12 @@ export function registerHostedHarnessSessionRoutes(
       throw new Error('Hosted extension management is unavailable.');
     if (session.extensions) return session.extensions;
     const head = session.managed.authority.domainRecord('config_install');
-    const unified =
+    const config =
       head &&
-      isManagedExtensionConfig(
-        JSON.parse(
-          (await session.managed.resources.read(head.recordRef)).toString(
-            'utf8',
-          ),
-        ),
+      JSON.parse(
+        (await session.managed.resources.read(head.recordRef)).toString('utf8'),
       );
+    const unified = config && isManagedExtensionConfig(config);
     const legacy = unified ? [] : await readHostedMcpSettings(session.managed);
     const baseMcp = session.definition?.['mcpServers'];
     const options = {
@@ -9058,6 +9076,19 @@ export function registerHostedHarnessSessionRoutes(
             if (session.hooks?.broker === broker)
               session.hooks.delegateBrokerToMcp();
           }
+          const extensionBroker =
+            session.mcp?.broker ??
+            new HostedWorkspaceBroker(
+              options,
+              session.managed.authority.sessionHeader.sessionKey,
+              ownerId,
+            );
+          if (
+            session.hooks &&
+            session.hooks.broker.runtimeSessionId !==
+              extensionBroker.runtimeSessionId
+          )
+            session.hooks.delegateBrokerToMcp(extensionBroker);
           if (bundle.hookCatalog && !session.hooks) {
             session.hooks = new HostedHookSession(
               options,

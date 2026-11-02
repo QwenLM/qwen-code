@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { promises as fs } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
 import { expect, it, vi } from 'vitest';
@@ -11,6 +13,35 @@ import { ManagedRuntimeLedger } from './managed-runtime-ledger.js';
 import { ManagedExtensionProcessOwners } from './managed-extension-process.js';
 import { runManagedExtensionShell } from './managed-extension-shell.js';
 import { ManagedExtensionExecutionUnknownError } from './managed-extension-error.js';
+
+it('does not wait for a close emitted before the owner start returns', async () => {
+  const child = spawn(process.execPath, ['--eval', ''], {
+    stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
+  });
+  await once(child, 'close');
+  const owners = {
+    start: vi.fn(async () => ({ ownerId: 'extension-closed', child })),
+    stop: vi.fn(async () => ({
+      ownerId: 'extension-closed',
+      sessionId: 'root',
+      configRevision: 1,
+      mode: 'developer-process-group' as const,
+      scope: 'process_group' as const,
+      state: 'stopped' as const,
+    })),
+  } as unknown as ManagedExtensionProcessOwners;
+  await expect(
+    runManagedExtensionShell(owners, {
+      sessionId: 'root',
+      configRevision: 1,
+      command: 'printf already-closed',
+      cwd: process.cwd(),
+      environment: {},
+      signal: new AbortController().signal,
+    }),
+  ).resolves.toMatchObject({ llmContent: '' });
+  expect(owners.start).toHaveBeenCalledTimes(1);
+});
 
 it.skipIf(process.platform !== 'darwin')(
   'runs with exact private environment and seals capture after registered group stop',

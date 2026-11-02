@@ -7706,6 +7706,32 @@ describe('collectNestedResourceRefs', () => {
     }
   });
 
+  it('closes over extension package contributions and their parts', () => {
+    const partRef = closureRef('managed-extension-contributions-part', 'part');
+    const contributionsRef = closureRef(
+      'managed-extension-contributions',
+      'manifest',
+    );
+    expect(
+      collectNestedResourceRefs(
+        contributionsRef,
+        Buffer.from(JSON.stringify({ parts: [partRef] })),
+      ),
+    ).toEqual([partRef]);
+
+    const bundleRef = closureRef('managed-extension-config-bundle', 'bundle');
+    expect(
+      collectNestedResourceRefs(
+        bundleRef,
+        Buffer.from(
+          JSON.stringify({
+            packages: [{ contributionsRef }],
+          }),
+        ),
+      ),
+    ).toEqual([contributionsRef]);
+  });
+
   it('refuses a malformed file history record instead of collapsing its closure', () => {
     const ref = closureRef('managed-file_history', 'malformed');
     expect(() =>

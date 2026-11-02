@@ -73,6 +73,7 @@ function dependencies(): ManagedExtensionCommandDependencies {
         responseParts: [{ text: 'hello' }],
       }),
     ),
+    acknowledge: vi.fn(),
     cancel: vi.fn(),
   };
 }
@@ -107,6 +108,39 @@ describe('Managed extension command durable execution', () => {
         input: { command: 'touch other' },
       }),
     ).rejects.toThrow('identity');
+  });
+
+  it('acknowledges the native invocation only after its durable receipt settles', async () => {
+    const deps = dependencies();
+    let finish!: (value: ManagedToolResultPayload) => void;
+    vi.mocked(deps.execute).mockImplementation(
+      async () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const runtime = new ManagedExtensionCommandRuntime(deps);
+    const command = operation();
+    await runtime.control('runtime-session', command);
+    await vi.waitFor(() => expect(deps.execute).toHaveBeenCalledTimes(1));
+    expect(deps.acknowledge).not.toHaveBeenCalled();
+    finish({ executionStatus: 'success', responseParts: [{ text: 'hello' }] });
+    await vi.waitFor(async () =>
+      expect(
+        await runtime.control('runtime-session', {
+          ...command,
+          action: 'status',
+        }),
+      ).toMatchObject({ state: 'settled' }),
+    );
+    expect(deps.acknowledge).toHaveBeenCalledTimes(1);
+    expect(deps.acknowledge).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'runtime-session',
+        callId: command.operationId,
+        promptId: `extension-command:${command.operationId}`,
+      }),
+    );
   });
 
   it('holds a surviving intent on restart and refuses to redispatch it', async () => {

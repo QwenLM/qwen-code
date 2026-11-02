@@ -14,7 +14,7 @@ import java.util.UUID;
 
 final class ActionJournal {
     private static final ObjectMapper JSON = new ObjectMapper();
-    final String id = "tool_approval_" + UUID.randomUUID().toString().replace("-", "");
+    String id = "tool_approval_" + UUID.randomUUID().toString().replace("-", "");
     final ObjectNode options;
     private final ExtensionRecordJournal journal;
     private byte[] input;

@@ -723,6 +723,70 @@ public class ManagedExtensionRecordStore
                         + " tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?, "
                         + ManagedSchemaTime.SQL_NOW + ")", scope, key, revision,
                 ManagedSchemaKeys.key(scope, resource.resourceId()), tenantId, workspaceId, sessionId, resource.resourceId());
+        if (ManagedConfigInstall.isPackageConfig(settings)) {
+            // A sealed writer cannot rely on its old journal to retain the
+            // recovery resources named by the active package configuration.
+            retainPackageConfiguration(scope, key, revision, tenantId, workspaceId,
+                    sessionId, settings, resources, new HashSet<>(Set.of(resource.resourceId())));
+        }
+    }
+
+    private void retainPackageConfiguration(String scope, String key, long revision,
+            String tenantId, String workspaceId, String sessionId, JsonNode settings,
+            Function<String, StoredResource> resources, Set<String> retained) {
+        for (String field : List.of("previousBundleRef", "restoresBundleRef", "bundleRef",
+                "rootSnapshotRef", "previousRecordRef")) {
+            retainPackageReference(scope, key, revision, tenantId, workspaceId, sessionId,
+                    settings.get(field), resources, retained);
+        }
+        for (String field : List.of("stageAckRefs", "enableAckRefs")) {
+            for (JsonNode ref : settings.path(field)) {
+                retainPackageReference(scope, key, revision, tenantId, workspaceId, sessionId,
+                        ref, resources, retained);
+            }
+        }
+    }
+
+    private void retainPackageReference(String scope, String key, long revision,
+            String tenantId, String workspaceId, String sessionId, JsonNode ref,
+            Function<String, StoredResource> resources, Set<String> retained) {
+        if (ref == null || ref.isNull() || !retained.add(ref.path("resourceId").asText())) {
+            return;
+        }
+        String resourceId = ref.path("resourceId").asText();
+        if (jdbc.queryForList("SELECT 1 FROM ma_resource WHERE session_scope_key = ? AND resource_id = ?",
+                scope, resourceId).isEmpty()) {
+            return;
+        }
+        StoredResource resource = resources.apply(resourceId);
+        requireReference(resource, ref);
+        referenceProjectionResource(scope, key, revision, tenantId, workspaceId, sessionId,
+                resource.resourceId());
+        if (!Set.of("managed-config_install", "managed-extension-config-bundle",
+                "managed-extension-contributions", "managed-extension-root",
+                "managed-extension-stage-ack", "managed-extension-enable-ack").contains(resource.kind())) {
+            return;
+        }
+        JsonNode body = readBody(resource);
+        if ("managed-config_install".equals(resource.kind())) {
+            retainPackageConfiguration(scope, key, revision, tenantId, workspaceId,
+                    sessionId, body, resources, retained);
+        } else if ("managed-extension-config-bundle".equals(resource.kind())) {
+            for (JsonNode entry : body.path("packages")) {
+                retainPackageReference(scope, key, revision, tenantId, workspaceId,
+                        sessionId, entry.get("contributionsRef"), resources, retained);
+            }
+        } else if ("managed-extension-contributions".equals(resource.kind())) {
+            for (JsonNode part : body.path("parts")) {
+                retainPackageReference(scope, key, revision, tenantId, workspaceId,
+                        sessionId, part, resources, retained);
+            }
+        } else {
+            retainPackageReference(scope, key, revision, tenantId, workspaceId, sessionId,
+                    body.get("rootSnapshotRef"), resources, retained);
+            retainPackageReference(scope, key, revision, tenantId, workspaceId, sessionId,
+                    body.get("bundleRef"), resources, retained);
+        }
     }
 
     private static void requireConfigurationBinding(JsonNode settings, String[] lines) {

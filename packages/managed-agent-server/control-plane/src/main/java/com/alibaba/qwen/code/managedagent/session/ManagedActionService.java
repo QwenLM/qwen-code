@@ -125,7 +125,8 @@ public class ManagedActionService {
                 }
                 String[] parts = decoded.substring(scope.length()).split(":", -1);
                 if (parts.length != 3 || !parts[0].matches("0|[1-9][0-9]{0,18}")
-                        || !parts[1].matches("[0-9a-f-]{36}") || !parts[2].matches("tool_approval_[0-9a-f]{32}")) {
+                        || !parts[1].matches("[0-9a-f-]{36}")
+                        || !parts[2].matches(ManagedActionStore.ACTION_ID_PATTERN)) {
                     throw new IllegalArgumentException();
                 }
                 before = Long.parseLong(parts[0]);
@@ -277,7 +278,7 @@ public class ManagedActionService {
                 }
                 String decoded =
                         new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8);
-                if (!decoded.matches("(0|[1-9][0-9]{0,18}):tool_approval_[0-9a-f]{32}")) {
+                if (!decoded.matches("(0|[1-9][0-9]{0,18}):" + ManagedActionStore.ACTION_ID_PATTERN)) {
                     throw new IllegalArgumentException();
                 }
                 String[] parts = decoded.split(":", 2);

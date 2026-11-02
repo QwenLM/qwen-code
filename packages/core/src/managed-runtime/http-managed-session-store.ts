@@ -3321,6 +3321,8 @@ export function collectNestedResourceRefs(
   }
   if (
     EXTENSION_RECORD_KINDS.has(ref.kind) ||
+    ref.kind === 'managed-extension-config-bundle' ||
+    ref.kind === 'managed-extension-contributions' ||
     ref.kind === 'managed-definition' ||
     ref.kind === 'managed-action-options' ||
     ref.kind === 'managed-hook-plan' ||
@@ -3373,6 +3375,8 @@ function isReferenceContainer(kind: string): boolean {
     EXTENSION_RECORD_KINDS.has(kind) ||
     HOSTED_RECOVERY_RESOURCE_KINDS.has(kind) ||
     [
+      'managed-extension-config-bundle',
+      'managed-extension-contributions',
       'managed-definition',
       'managed-checkpoint',
       CHECKPOINT_HISTORY_KIND,

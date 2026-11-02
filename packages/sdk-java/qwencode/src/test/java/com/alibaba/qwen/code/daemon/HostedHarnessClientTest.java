@@ -1917,6 +1917,24 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void commandActionResolutionUsesCommandApprovalId() {
+        String action = "command_approval_" + "b".repeat(48);
+        AtomicReference<String> payload = new AtomicReference<>();
+        server.createContext("/session", exchange -> sendSessionJson(exchange, 200, sessionJson()));
+        server.createContext("/session/" + SESSION_ID + "/actions/" + action + "/resolve", exchange -> {
+            payload.set(readBody(exchange));
+            sendSessionJson(exchange, 200, "{\"requestId\":\"" + action + "\",\"state\":\"decided\",\"optionId\":\"allow\"}");
+        });
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = client.createSession(CreateHarnessSession.builder()
+                    .harnessSessionId(SESSION_ID).build());
+            client.resolveAction(session, action, "allow", 1, "hosted-tool-approval/1");
+            assertEquals(Map.of("optionId", "allow", "inputRevision", 1, "policyRevision", "hosted-tool-approval/1"),
+                    JsonSupport.parseObject(payload.get(), "Command action response"));
+        }
+    }
+
+    @Test
     void rejectsAKnownOutcomeWithoutStatus() {
         // F1: a "known" outcome without its status must fail at the
         // constructor instead of NPE-ing later in isContinuationReady().

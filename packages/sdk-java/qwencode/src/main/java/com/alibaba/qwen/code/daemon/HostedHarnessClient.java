@@ -389,7 +389,8 @@ public final class HostedHarnessClient implements AutoCloseable {
             long inputRevision,
             String policyRevision) {
         HarnessSessionRef ref = requireSessionRef(session);
-        if (actionId == null || !actionId.matches("tool_approval_[0-9a-f]{32}")) {
+        if (actionId == null
+                || !actionId.matches("(?:tool_approval_[0-9a-f]{32}|command_approval_[0-9a-f]{48})")) {
             throw new IllegalArgumentException("Invalid actionId");
         }
         HttpSupport.Response response =
