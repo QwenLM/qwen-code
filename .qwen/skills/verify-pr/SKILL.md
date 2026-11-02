@@ -264,16 +264,23 @@ certify the round.
      node <trusted-clone>/scripts/verify-pr-model-proxy.mjs \
        --listen <bridge-ip> > ~/.cache/qwen-verify/pr<n>/proxy.json 2>&1 &
    echo $! > ~/.cache/qwen-verify/pr<n>/proxy.pid
+   for _ in $(seq 1 100); do
+     node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); if (!j.token) process.exit(1)' ~/.cache/qwen-verify/pr<n>/proxy.json 2>/dev/null && break
+     sleep 0.1
+   done
    chmod 600 ~/.cache/qwen-verify/pr<n>/proxy.json
    export QWEN_VERIFY_PROXY_TOKEN="$(node -e 'const fs=require("node:fs"); console.log(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).token)' ~/.cache/qwen-verify/pr<n>/proxy.json)"
+   test -n "$QWEN_VERIFY_PROXY_TOKEN" || { echo "proxy did not become ready"; exit 1; }
    ```
 
    Bind the Docker bridge address, not `127.0.0.1` — a container cannot reach
    the host's loopback. The bearer check stays mandatory: the port is visible
    to every container on the bridge. Keep the proxy running for the whole
-   round and stop it at the end — it holds the real key. The per-run token is
-   read from the file into the environment, never typed; Docker copies it with
-   the bare `-e` below.
+   round and stop it at the end — it holds the real key. The background
+   process truncates `proxy.json` before it prints, so the loop waits for a
+   complete line with a token, and the `test -n` catches a read that `export`
+   would otherwise hide. The token is read from the file into the environment,
+   never typed; Docker copies it with the bare `-e` below.
 
 3. **Start the boundary as a named, detached container** so every later step
    can be issued without a TTY:

@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  gitScanArgs,
   isCredentialShaped,
   scanIgnoredCredentials,
 } from '../../scripts/verify-pr-credential-scan.mjs';
@@ -78,6 +79,17 @@ describe('credential basename matching', () => {
   });
 });
 
+describe('gitScanArgs', () => {
+  it('enumerates with depth-aware credential pathspecs', () => {
+    const args = gitScanArgs('/repo');
+    expect(args).toContain(':(glob)**/.env');
+    expect(args).toContain(':(glob)**/*.pem');
+    // Excludes apply at workspace depth, not only the repository root.
+    expect(args).toContain(':(exclude,glob)**/node_modules/**');
+    expect(args).toContain(':(exclude,glob)**/dist/**');
+  });
+});
+
 describe('scanIgnoredCredentials', () => {
   it('reports nested and top-level ignored credential files', () => {
     const dir = makeRepo(
@@ -102,12 +114,34 @@ describe('scanIgnoredCredentials', () => {
     ]);
   });
 
-  it('does not refuse an installed tree or build output', () => {
+  it('does not refuse an installed tree or build output at any depth', () => {
     const dir = makeRepo(
-      ['node_modules/pkg/credentials.json', 'dist/app.pem', 'src/app.ts'],
+      [
+        'node_modules/pkg/credentials.json',
+        'dist/app.pem',
+        'packages/foo/node_modules/pkg/credentials.json',
+        'packages/foo/dist/credentials.js',
+        'packages/foo/dist/app.pem',
+        'src/app.ts',
+      ],
       ['node_modules/', 'dist/', '*.pem', 'credentials*'],
     );
     expect(scanIgnoredCredentials(dir)).toEqual([]);
+  });
+
+  it('limits enumeration with pathspecs instead of buffering the tree', () => {
+    const files = Array.from(
+      { length: 3000 },
+      (_, index) =>
+        `packages/foo/node_modules/pkg/dependency-with-a-long-name-${index}.js`,
+    );
+    files.push('vault/.env');
+    const dir = makeRepo(files, ['node_modules/', 'vault/']);
+    // A 64 KiB ceiling is far below the dependency listing: only the
+    // pathspec-restricted output (the nested .env) fits without ENOBUFS.
+    expect(scanIgnoredCredentials(dir, { maxBuffer: 64 * 1024 })).toEqual([
+      'vault/.env',
+    ]);
   });
 
   it('stays silent on a clean tree', () => {

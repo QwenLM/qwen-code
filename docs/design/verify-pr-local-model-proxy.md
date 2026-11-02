@@ -96,15 +96,18 @@ the real key.
   slow-but-healthy streams, upstream reset survival, IPv6 listen formatting,
   and the CLI's JSON coordinates.
 - Credential scan: a nested ignored `.env`, `*.pem`, `credentials*`, `.npmrc`
-  or `.netrc` is refused; an installed `node_modules` tree and `dist/` are
-  not; a missing `--ignored` mode or a dropped pattern turns its test red.
+  or `.netrc` is refused; installed `node_modules`/`dist` are ignored at any
+  depth, including inside a workspace package; enumeration is path-limited so
+  a large ignored dependency tree is never buffered; a missing `--ignored`
+  mode or a dropped pattern turns its test red.
 - Checker: `--context` overrides the writable artifact copy, refuses an
   unusable snapshot instead of falling back (with a usable writable copy
   seeded), and keeps its existing exit codes.
 - Recipe: every script names the trusted checkout, the base commit's `.qwen`
   is mounted read-only, both credentials come from files rather than command
-  lines, and the attestation is on the round's shell but not the `docker run`
-  line; reverting any of those turns a recipe pin red.
+  lines, the proxy's coordinates are awaited before the token is exported, and
+  the attestation is on the round's shell but not the `docker run` line;
+  reverting any of those turns a recipe pin red.
 - Mutation evidence: removing each of those guards turns its pin red.
 - A real Docker smoke covers the gate passing with `QWEN_VERIFY_PROXY_TOKEN`,
   the gate refusing `OPENAI_API_KEY`, and a container request reaching a mock

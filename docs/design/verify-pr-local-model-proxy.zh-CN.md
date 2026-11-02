@@ -35,8 +35,8 @@ CI 车道保留内联代理：那份副本运行在 base-pinned workflow 的 roo
 ## 验收
 
 - 代理：bearer 拒绝、精确路径白名单、base path 前缀、真实 key 注入、chunked 请求体下 hop-by-hop 剥离（固定集合与 `Connection` 点名的头）、gzip 上游响应（头被剥离）、响应头前断连中止、下游暂停存活、慢但健康的流、上游重置存活、IPv6 监听格式化，以及 CLI 的 JSON 坐标。
-- 凭据扫描：嵌套 ignored 的 `.env`、`*.pem`、`credentials*`、`.npmrc`、`.netrc` 被拒绝；已安装的 `node_modules` 与 `dist/` 不被误拒；去掉 `--ignored` 模式或删掉某条模式会让测试变红。
+- 凭据扫描：嵌套 ignored 的 `.env`、`*.pem`、`credentials*`、`.npmrc`、`.netrc` 被拒绝；`node_modules`/`dist` 在任意深度（含 workspace 包内）被忽略；枚举由 pathspec 限制，不会先缓冲整棵依赖树；去掉 `--ignored` 模式或删掉某条模式会让测试变红。
 - 检查器：`--context` 覆盖可写产物副本、不可用快照时拒绝而不是回退（产物副本先种一个合法 head），并保持既有退出码。
-- 配方：每个脚本都点名可信 checkout、base 提交的 `.qwen` 只读挂载、两个凭据都来自文件而非命令行、宣誓在轮次 shell 但不在 `docker run` 行；任一被还原都会让配方 pin 变红。
+- 配方：每个脚本都点名可信 checkout、base 提交的 `.qwen` 只读挂载、两个凭据都来自文件而非命令行、导出 token 前等待代理坐标就绪、宣誓在轮次 shell 但不在 `docker run` 行；任一被还原都会让配方 pin 变红。
 - 变异证据：移除上述任一守卫，对应 pin 必须变红。
 - 真实 Docker 冒烟：`QWEN_VERIFY_PROXY_TOKEN` 时门禁通过、`OPENAI_API_KEY` 时门禁拒绝、容器请求到达 mock 上游且真实 key 已注入。

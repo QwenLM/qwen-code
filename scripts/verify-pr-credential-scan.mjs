@@ -16,9 +16,12 @@
  * pathspec set used to refuse every installed tree) and matches the basenames
  * a provider key or certificate typically uses.
  *
- * Installed dependencies and build output are excluded: `node_modules` alone
- * ships hundreds of `credentials*` files, and refusing a built tree would make
- * the recipe's own tree-build route unusable. A credential file placed in the
+ * Installed dependencies and build output are excluded at any depth: a
+ * workspace package's own `node_modules` and `dist` are as irrelevant as the
+ * root ones, and `node_modules` alone ships hundreds of `credentials*` files.
+ * The pathspecs both restrict enumeration to credential-shaped names and
+ * exclude those directories, so an installed tree's multi-megabyte ignored
+ * listing never reaches the output buffer. A credential file placed in the
  * project (including a nested ignored directory) is still reported.
  *
  * Usage:
@@ -31,21 +34,52 @@ import { spawnSync } from 'node:child_process';
 import { basename } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
 
-const EXCLUDED_DIRS = ['node_modules/', 'dist/', '.git/'];
+const EXCLUDED_SEGMENTS = new Set(['node_modules', 'dist', '.git']);
 
 const CREDENTIAL_BASENAME =
   /^(?:\.env(?:\..*)?|.*\.env|.*\.pem|.*\.key|credentials.*|\.npmrc|\.netrc)$/;
+
+// Git applies these pathspecs while enumerating, before any output is
+// buffered: a full ignored listing of an installed checkout is several MB and
+// used to overflow spawnSync's buffer before the JS filter could run.
+const CREDENTIAL_PATHSPECS = [
+  ':(glob)**/.env',
+  ':(glob)**/.env.*',
+  ':(glob)**/*.env',
+  ':(glob)**/*.pem',
+  ':(glob)**/*.key',
+  ':(glob)**/credentials*',
+  ':(glob)**/.npmrc',
+  ':(glob)**/.netrc',
+  ':(exclude,glob)**/node_modules/**',
+  ':(exclude,glob)**/dist/**',
+];
 
 /** True for a path whose basename is credential-shaped. */
 export function isCredentialShaped(path) {
   return CREDENTIAL_BASENAME.test(basename(path));
 }
 
-/** True for an ignored path under an installed/build directory. */
+/**
+ * True for a path under an installed/build directory at any depth, including
+ * a workspace package's own `node_modules` and `dist`.
+ */
 export function isExcluded(path) {
-  return EXCLUDED_DIRS.some(
-    (dir) => path === dir.slice(0, -1) || path.startsWith(dir),
-  );
+  return path.split('/').some((segment) => EXCLUDED_SEGMENTS.has(segment));
+}
+
+export function gitScanArgs(root) {
+  return [
+    '-C',
+    root,
+    'ls-files',
+    '--others',
+    '--ignored',
+    '--exclude-standard',
+    '-z',
+    '--',
+    ...CREDENTIAL_PATHSPECS,
+  ];
 }
 
 /**
@@ -53,20 +87,14 @@ export function isExcluded(path) {
  * array is the clean state; a git failure is thrown so the caller can refuse
  * rather than treat it as clean.
  */
-export function scanIgnoredCredentials(root) {
-  const result = spawnSync(
-    'git',
-    [
-      '-C',
-      root,
-      'ls-files',
-      '--others',
-      '--ignored',
-      '--exclude-standard',
-      '-z',
-    ],
-    { encoding: 'utf8' },
-  );
+export function scanIgnoredCredentials(
+  root,
+  { maxBuffer = 8 * 1024 * 1024 } = {},
+) {
+  const result = spawnSync('git', gitScanArgs(root), {
+    encoding: 'utf8',
+    maxBuffer,
+  });
   if (result.status !== 0) {
     throw new Error(
       `could not list ignored files: ${(result.stderr || '').trim() || 'git failed'}`,

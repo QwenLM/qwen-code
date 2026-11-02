@@ -52,6 +52,15 @@ function listen(server) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+async function waitFor(predicate, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await sleep(5);
+  }
+  throw new Error('condition not met before timeout');
+}
+
 /**
  * A local upstream stand-in: records the request and the sequence it took to
  * answer (or to be aborted). No outbound network is involved.
@@ -307,20 +316,20 @@ describe('verify-pr-model-proxy', () => {
     const upstream = await startUpstream({ delayMs: 100 });
     const proxy = await startProxy(upstream);
     const { port } = new URL(proxy);
-    await new Promise((resolve) => {
-      const req = http.request({
-        host: '127.0.0.1',
-        port,
-        path: '/chat/completions',
-        method: 'POST',
-        headers: { authorization: `Bearer ${TOKEN}` },
-      });
-      req.on('error', () => resolve());
-      req.end('{}', () => {
-        req.destroy();
-        resolve();
-      });
+    const req = http.request({
+      host: '127.0.0.1',
+      port,
+      path: '/chat/completions',
+      method: 'POST',
+      headers: { authorization: `Bearer ${TOKEN}` },
     });
+    req.on('error', () => {});
+    req.end('{}');
+    // The end callback does not prove the proxy's upstream request exists yet;
+    // wait for the mock to record it, then disconnect while headers are still
+    // delayed so the pre-header abort is what the test exercises.
+    await waitFor(() => upstream.requests.length === 1);
+    req.destroy();
     await sleep(400);
     expect(upstream.requests).toHaveLength(1);
     // The upstream must never answer a client that is already gone: with the
@@ -585,6 +594,10 @@ describe('local container recipe pins', () => {
     expect(skill).not.toContain('REVIEW_OPENAI_API_KEY=<real-key>');
     expect(skill).toContain('QWEN_VERIFY_PROXY_TOKEN="$(node -e');
     expect(skill).toContain('chmod 600');
+    // The background process truncates proxy.json before printing; the loop
+    // and the non-empty check keep an empty read from reaching Docker.
+    expect(skill).toContain('for _ in $(seq 1 100); do');
+    expect(skill).toContain('test -n "$QWEN_VERIFY_PROXY_TOKEN"');
     expect(skill).toMatch(/-e QWEN_VERIFY_PROXY_TOKEN[ \t]*\\?\n/);
     expect(skill).not.toContain('-e QWEN_VERIFY_PROXY_TOKEN=<token>');
   });
