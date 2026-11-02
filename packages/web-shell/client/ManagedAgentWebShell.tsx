@@ -195,7 +195,7 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
                   <CompactModeContext.Provider value={false}>
                     <div
                       ref={setPortalRoot}
-                      className={`${shellStyles.app} ${theme === WebShellThemeId.Dark ? `${shellStyles.themeDark} dark` : shellStyles.themeLight} ${className ?? ''}`}
+                      className={`${shellStyles.app} ${shellStyles.managedHome} ${theme === WebShellThemeId.Dark ? `${shellStyles.themeDark} dark` : shellStyles.themeLight} ${className ?? ''}`}
                       style={style}
                       data-web-shell-root
                       data-web-shell-shadcn

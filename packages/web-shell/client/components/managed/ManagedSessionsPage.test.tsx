@@ -4025,6 +4025,38 @@ describe('ManagedSessionsPage', () => {
     },
   );
 
+  it('marks the managed home conversation as empty only without messages or failure', async () => {
+    mocks.client.getTranscript.mockResolvedValue({
+      events: [],
+      lastEventId: 0,
+    });
+    await render('s1', 'en', provider, undefined, true, {
+      hostSessionOnly: true,
+    });
+    expect(
+      container
+        .querySelector('[data-managed-home]')
+        ?.getAttribute('data-managed-empty'),
+    ).toBe('true');
+
+    await act(async () => root.unmount());
+    container.remove();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      id === 's1' ? { ...summary(id), failure: 'runtime lost' } : summary(id),
+    );
+    await render('s1', 'en', provider, undefined, true, {
+      hostSessionOnly: true,
+    });
+    expect(
+      container
+        .querySelector('[data-managed-home]')
+        ?.getAttribute('data-managed-empty'),
+    ).toBeNull();
+  });
+
   it('renders Chinese Managed labels and states without English fallback overriding them', async () => {
     await render('s1', 'zh-CN');
     expect(container.querySelector('nav')?.getAttribute('aria-label')).toBe(
