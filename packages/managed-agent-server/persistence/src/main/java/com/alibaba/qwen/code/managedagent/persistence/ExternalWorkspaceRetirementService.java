@@ -235,8 +235,12 @@ public final class ExternalWorkspaceRetirementService {
             // decided 仍可能持有 continuation；首版只接受没有审批或已明确失效/取消的审批。
             empty("SELECT record_id FROM ma_session_record WHERE tenant_id = ? AND session_id = ? AND record_kind = 'ACTION'"
                     + " AND (state IS NULL OR state NOT IN ('expired','cancelled')) LIMIT 1 FOR UPDATE", request.tenantId(), session);
+            // FAILED/CANCELLED operations deliberately retain BLOCKED delivery so
+            // the relay never redispatches them. That delivery marker does not make
+            // a terminal operation an unfinished effect; only nonterminal states
+            // fence retirement of the lost Worker.
             empty("SELECT operation_id FROM ma_operation WHERE tenant_id = ? AND session_id = ?"
-                    + " AND (state NOT IN ('COMPLETED','FAILED','CANCELLED') OR (delivery_state IS NOT NULL AND delivery_state NOT IN ('COMPLETED','CONFIRMED'))) LIMIT 1 FOR UPDATE",
+                    + " AND state NOT IN ('COMPLETED','FAILED','CANCELLED') LIMIT 1 FOR UPDATE",
                     request.tenantId(), session);
         }
         // 孤立 head 不能当作没有成员；常规 Hosted 写入在同一 placement guard 后串行提交。
