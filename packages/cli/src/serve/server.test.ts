@@ -18052,7 +18052,7 @@ describe('createServeApp', () => {
       }
     });
 
-    it('400s unknown explicit cwd before touching the bridge', async () => {
+    it('404s unknown explicit cwd before touching the bridge', async () => {
       const missingCwd = path.join(
         os.tmpdir(),
         `qwen-missing-workspace-${Date.now()}`,
@@ -18065,14 +18065,76 @@ describe('createServeApp', () => {
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({ cwd: missingCwd });
 
-        expect(res.status).toBe(400);
-        expect(res.body.code).toBe('workspace_mismatch');
+        // An explicit cwd with no registry entry is a PERMANENT absence
+        // (404 workspace_not_found), distinct from the reversible
+        // non-active states (400 workspace_mismatch). The channel wake path
+        // keys its Gone classification on this 404.
+        expect(res.status).toBe(404);
+        expect(res.body.code).toBe('workspace_not_found');
         expect(res.body.boundWorkspace).toBe(process.cwd());
         expect(res.body.requestedWorkspace).toBe(missingCwd);
         expect(bridge.loadCalls).toHaveLength(0);
         expect(bridge.resumeCalls).toHaveLength(0);
       }
     });
+
+    it.each(['draining', 'transitioning', 'blocked'] as const)(
+      '400s workspace_mismatch (not 404) for a %s workspace on load and resume',
+      async (state) => {
+        // G14: an entry that EXISTS but is reversibly non-active must stay
+        // out of the permanent-absence (404 workspace_not_found) branch.
+        // Only a cwd with NO registry entry is a gone workspace; draining /
+        // transitioning / blocked still have an entry and answer 400
+        // workspace_mismatch, so the channel wake path must not classify
+        // them as Gone.
+        for (const action of ['load', 'resume'] as const) {
+          const primaryBridge = fakeBridge();
+          const secondaryBridge = fakeBridge();
+          const secondary = makeWorkspaceRuntimeForTest({
+            workspaceId: 'ws-secondary',
+            workspaceCwd: WS_DIFFERENT,
+            primary: false,
+            bridge: secondaryBridge,
+          });
+          const registry = createWorkspaceRegistry([
+            makeWorkspaceRuntimeForTest({
+              workspaceId: 'ws-primary',
+              workspaceCwd: WS_BOUND,
+              primary: true,
+              bridge: primaryBridge,
+            }),
+            secondary,
+          ]);
+          const app = createServeApp(
+            { ...baseOpts, workspace: WS_BOUND },
+            undefined,
+            { bridge: primaryBridge, workspaceRegistry: registry },
+          );
+          const entry = registry.getEntryByWorkspaceCwd(WS_DIFFERENT);
+          expect(entry).toBeDefined();
+          if (state === 'draining') {
+            expect(registry.beginDrain(secondary)).toBe(true);
+          } else if (state === 'transitioning') {
+            expect(registry.beginReplacement(entry!, 'rev-2')).toBe(true);
+          } else {
+            registry.blockReplacement(entry!, 'apply failed');
+          }
+          expect(entry!.state).toBe(state);
+
+          const res = await request(app)
+            .post(`/session/reversible-${state}/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({ cwd: WS_DIFFERENT });
+
+          expect(res.status).toBe(400);
+          expect(res.body.code).toBe('workspace_mismatch');
+          expect(primaryBridge.loadCalls).toHaveLength(0);
+          expect(primaryBridge.resumeCalls).toHaveLength(0);
+          expect(secondaryBridge.loadCalls).toHaveLength(0);
+          expect(secondaryBridge.resumeCalls).toHaveLength(0);
+        }
+      },
+    );
 
     it('400s a non-string cwd before touching the bridge', async () => {
       // Mirrors the `POST /session` malformed-`cwd`-shape test: a
@@ -18247,7 +18309,11 @@ describe('createServeApp', () => {
       }
     });
 
-    it('400 workspace_mismatch before touching the bridge for non-primary cwd', async () => {
+    it('404s workspace_not_found before touching the bridge for an unregistered non-primary cwd', async () => {
+      // The single-workspace daemon has no registry entry for WS_DIFFERENT,
+      // so an explicit cwd naming it is a PERMANENT absence (404
+      // workspace_not_found), not the reversible workspace_mismatch (400).
+      // The resolver must reject before the bridge is ever consulted.
       const bridge = fakeBridge({
         loadImpl: async () => {
           throw new WorkspaceMismatchError(WS_BOUND, WS_DIFFERENT);
@@ -18263,9 +18329,9 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ cwd: WS_DIFFERENT });
 
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(404);
       expect(res.body).toMatchObject({
-        code: 'workspace_mismatch',
+        code: 'workspace_not_found',
         boundWorkspace: WS_BOUND,
         requestedWorkspace: WS_DIFFERENT,
       });
@@ -20872,6 +20938,164 @@ describe('createServeApp', () => {
             CHANNEL_PROMPT_META_KEY,
           );
         }
+      } finally {
+        revokeChannelWorkerPromptAuthorization(token);
+      }
+    });
+
+    it('admits a channel worker token registered for a different workspace', async () => {
+      // G3: bound delivery is cross-workspace, so the prompt route uses the
+      // process-level relay check (token registered for ANY workspace) gated
+      // on the target runtime's trust — not the old home===target equality.
+      // A token whose home is a foreign workspace must still classify a
+      // prompt delivered into the primary workspace; a forged token must not.
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const token = 'channel-worker-cross-workspace-token';
+      registerChannelWorkerPromptAuthorization(token, '/work/foreign-home');
+      try {
+        const forged = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'hi' }],
+            _meta: {
+              [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: 'forged',
+              [CHANNEL_PROMPT_META_KEY]: true,
+            },
+          });
+        const trusted = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'hi' }],
+            _meta: {
+              [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: token,
+              [CHANNEL_PROMPT_META_KEY]: true,
+            },
+          });
+
+        expect(forged.status).toBe(202);
+        expect(trusted.status).toBe(202);
+        expect(bridge.promptCalls[0]?.context?.channelPrompt).toBeUndefined();
+        expect(bridge.promptCalls[1]?.context?.channelPrompt).toBe(true);
+      } finally {
+        revokeChannelWorkerPromptAuthorization(token);
+      }
+    });
+
+    it('classifies a channel prompt delivered into a different trusted workspace', async () => {
+      // G3 end-to-end: the worker's home is the primary workspace, but the
+      // bound session lives in a secondary trusted workspace. The relay
+      // credential must survive the cross-workspace hop and classify the
+      // turn on the owning (secondary) bridge, not the home bridge.
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge({
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: WS_DIFFERENT,
+          createdAt: '2026-05-17T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        }),
+      });
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-secondary',
+          workspaceCwd: WS_DIFFERENT,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge: primaryBridge, workspaceRegistry: registry },
+      );
+      const token = 'channel-worker-cross-workspace-delivery-token';
+      registerChannelWorkerPromptAuthorization(token, WS_BOUND);
+      try {
+        const res = await request(app)
+          .post('/session/session-cross-ws/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'hi' }],
+            _meta: {
+              [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: token,
+              [CHANNEL_PROMPT_META_KEY]: true,
+            },
+          });
+
+        expect(res.status).toBe(202);
+        expect(primaryBridge.promptCalls).toHaveLength(0);
+        expect(secondaryBridge.promptCalls).toHaveLength(1);
+        expect(secondaryBridge.promptCalls[0]?.context?.channelPrompt).toBe(
+          true,
+        );
+      } finally {
+        revokeChannelWorkerPromptAuthorization(token);
+      }
+    });
+
+    it('does not classify a channel prompt for an untrusted non-primary workspace', async () => {
+      // G3 negative: the relay check is gated on runtime.primary ||
+      // runtime.trusted. An untrusted non-primary owner is rejected at the
+      // routing trust gate before classification, so a registered token
+      // never yields channelPrompt there.
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge({
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: WS_DIFFERENT,
+          createdAt: '2026-05-17T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        }),
+      });
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-secondary',
+          workspaceCwd: WS_DIFFERENT,
+          primary: false,
+          trusted: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge: primaryBridge, workspaceRegistry: registry },
+      );
+      const token = 'channel-worker-untrusted-target-token';
+      registerChannelWorkerPromptAuthorization(token, WS_BOUND);
+      try {
+        const res = await request(app)
+          .post('/session/session-untrusted/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'hi' }],
+            _meta: {
+              [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: token,
+              [CHANNEL_PROMPT_META_KEY]: true,
+            },
+          });
+
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('untrusted_workspace');
+        expect(primaryBridge.promptCalls).toHaveLength(0);
+        expect(secondaryBridge.promptCalls).toHaveLength(0);
       } finally {
         revokeChannelWorkerPromptAuthorization(token);
       }

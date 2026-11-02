@@ -449,9 +449,13 @@ export function createBoundSessionsAccessor(
             if (cwd === undefined && snapshot.partial) {
               // Cold cache meets an incomplete enumeration: absence from a
               // partial snapshot is not evidence of deletion. Defer to the
-              // adapter's retry instead of the public gone-session fallback.
-              throw new Error(
-                `Bound session ${sessionId} absent from a partial bindings snapshot; deferring delivery`,
+              // adapter's backpressure retry instead of the public
+              // gone-session fallback — and instead of the failure budget,
+              // which a generic Error would consume (the message promises
+              // deferral; the class must match).
+              throw new BoundSessionUnavailableError(
+                sessionId,
+                'absent from a partial bindings snapshot; deferring delivery',
               );
             }
           }
@@ -485,9 +489,22 @@ export function createBoundSessionsAccessor(
             code?: unknown;
           };
           if (
-            body.code === 'restore_in_progress' ||
-            body.code === 'session_busy'
+            body.code === 'session_archived' ||
+            body.code === 'worktree_session_superseded'
           ) {
+            // Permanent states: an archived or superseded session is never
+            // restored (same classification as the wake path). Fall back to
+            // the channel path rather than burning the failure budget.
+            throw new BoundSessionGoneError(sessionId);
+          }
+          if (
+            body.code === 'restore_in_progress' ||
+            body.code === 'session_busy' ||
+            body.code === 'worktree_reset_active'
+          ) {
+            // Reversible barriers: a restore in flight, a busy session, or
+            // an armed worktree-reset prompt barrier (the reset flow tells
+            // channel-worker callers to retry). Defer, don't burn the budget.
             throw new BoundSessionUnavailableError(
               sessionId,
               `HTTP 409 (${String(body.code)})`,
@@ -903,9 +920,15 @@ export async function runChannelDaemonWorker(
           // A missing session (404) is gone. An archived session is not
           // restorable either (409 session_archived) and is excluded from
           // the candidate set by contract, so it takes the same fallback.
+          // A superseded session (409 worktree_session_superseded) is never
+          // restored again — the worktree reset severed it permanently — so
+          // it is gone too, not retry-later backpressure that would defer
+          // ~4h and dead-letter without ever falling back.
           if (
             status === 404 ||
-            (status === 409 && code === 'session_archived')
+            (status === 409 &&
+              (code === 'session_archived' ||
+                code === 'worktree_session_superseded'))
           ) {
             throw new BoundSessionGoneError(sessionId);
           }

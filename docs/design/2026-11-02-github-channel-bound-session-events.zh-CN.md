@@ -43,9 +43,9 @@ GET /sessions/pr-bindings
 → { "bindings": [ { sessionId, workspaceCwd, sourceType, updatedAt, prs: [{number, url, state?}] } ], "partial": false }
 ```
 
-- 所有权类别：**进程级**（与 `POST /sessions/backfill-prs` 同类）。遍历 registry 的 workspace 条目（`listAllEntries()`），对每个 active 的受信 runtime 经 live-merged 会话列表路径（`listWorkspaceSessionsForResponse`，它会用 PR sidecar 补全会话摘要）枚举 active 会话，分页有上限。Untrusted workspace 跳过。
+- 所有权类别：**进程级**（与 `POST /sessions/backfill-prs` 同类）。遍历 registry 的 workspace 条目（`listAllEntries()`），对每个 active 的受信 runtime 经 live-merged 会话列表路径（`listWorkspaceSessionsForResponse`，它会用 PR sidecar 补全会话摘要）枚举 active 会话，分页有上限。Untrusted 非 primary workspace 跳过（它们无法创建或恢复会话，缺席是合法的）；untrusted PRIMARY 跳过但置 `partial`，因为会话创建/恢复对 primary 豁免信任门，它仍在服务绑定会话。
 - 排除归档会话。携带 `sourceType` 以便调用方排除 channel 自有会话。`prs` 条目投影为 `{number, url, state?}`。
-- **`partial`** 在答案不完整时为 true：某个 workspace 列表失败、某个受信 workspace 非 active（draining / transitioning / blocked——它仍在服务会话但无法被枚举）、live-merge 降级成功（`liveMergeFailed`）、某页报告截断、页数上限耗尽、或扫描需要多页。最后一条之所以重要，是因为活动序分页不是快照隔离的：某个 live 会话的活动在两次翻页之间前进，就可能被每一页都跳过而扫描仍然「干净」结束，因此任何多页答案都是非权威的。调用方绝不能把 partial 答案中缺失的条目当作权威性的「不存在」（适配器把 partial 答案并入已知绑定，并跳过监视状态剪枝）。
+- **`partial`** 在答案不完整时为 true：某个 workspace 列表失败、某个受信 workspace 非 active（draining / transitioning / blocked——它仍在服务会话但无法被枚举）、untrusted primary workspace（仍在服务绑定会话，被跳过）、live-merge 降级成功（`liveMergeFailed`）、某页报告截断、页数上限耗尽、或扫描需要多页。最后一条之所以重要，是因为活动序分页不是快照隔离的：某个 live 会话的活动在两次翻页之间前进，就可能被每一页都跳过而扫描仍然「干净」结束，因此任何多页答案都是非权威的。调用方绝不能把 partial 答案中缺失的条目当作权威性的「不存在」（适配器把 partial 答案并入已知绑定，并跳过监视状态剪枝）。单个 workspace 扫描失败会打 stderr 日志（workspace + 原因），持续 partial 因此有诊断面。
 - 与其他会话路由一样鉴权（`--require-auth` 时 bearer）。不新增写入面。
 - 该路由是扫描而非索引：以 sidecar 体系的规模（每 workspace 几十个会话），每次轮询扫一遍可以接受；适配器将结果缓存一个轮询周期。
 
@@ -60,9 +60,9 @@ boundSessions?: {
 };
 ```
 
-- daemon channel worker（`packages/cli/src/commands/channel/daemon-worker.ts`）用它已持有的 SDK client 实现：`listPrBindings` 调新路由，并从每次完整答案重建 session→cwd 缓存（离开绑定的会话随之掉出）；畸形的 HTTP-200 响应体（`bindings` 非数组）抛错而非返回权威空快照，把失败导入适配器的 fail-closed 刷新处理。`deliverPrompt` 以 text content block 投递 prompt，进入 FIFO 队列即算投递成功——worker 不等待目标会话的回合结束。POST 携带与 bridge 相同的 channel 回合分类（`_meta` channel-prompt 标记加 worker 授权，admission 一并校验），因此中继不会被当作交互式用户 prompt（loop-detected 拒绝、对中继文本做 live PR 绑定回填）。每个响应体都被消费或取消，每次 body 读取都有 abort signal 兜底：未读的 undici body 会把连接占到 GC，而停滞的 mid-body 读取否则会挂死整个轮询循环。
-- **休眠唤醒**：绑定路由列出的是持久化的 active 会话，但 prompt 路由只服务 live 会话；daemon 重启后绑定会话处于休眠态，prompt 会 404。访问器遇 404 时经 channel bridge 同款 resume 路径恢复该会话（workspace cwd 取自缓存的绑定，未知时先刷新一次），再重试一次 prompt。恢复会铸造一个 client 注册；访问器在重试的 prompt 落定后显式释放它（detach）——非空注册会挡住 daemon 的 prompt-settled idle close，不 detach 就会把会话钉在 live 态直到 TTL reaper。若 cwd 未知且刷新返回的 partial 快照漏列了该会话，访问器以瞬时错误推迟而非把 404 判为消失：不完整枚举中的缺席不是删除的证据。
-- **唤醒错误分类**：404 恢复失败（会话记录真正不存在，或 workspace 本身未注册——restore 路由对永久性缺席返回可区分的 `workspace_not_found` 404，可逆的 draining/transitioning 状态仍返回 `workspace_mismatch` / `workspace_runtime_unavailable`）与归档会话（409 `session_archived`，按契约排除在候选集外）成为 `BoundSessionGoneError`。队满、workspace/会话暂不可用（503、恢复冲突、会话数上限）与绑定刷新失败作为背压或瞬时错误传播，让适配器推迟或重试，而不是降级成公开 channel 投递。
+- daemon channel worker（`packages/cli/src/commands/channel/daemon-worker.ts`）用它已持有的 SDK client 实现：`listPrBindings` 调新路由，并从每次完整答案重建 session→cwd 缓存（离开绑定的会话随之掉出）；畸形的 HTTP-200 响应体（`bindings` 非数组）抛错而非返回权威空快照，把失败导入适配器的 fail-closed 刷新处理。`deliverPrompt` 以 text content block 投递 prompt，进入 FIFO 队列即算投递成功——worker 不等待目标会话的回合结束。POST 携带与 bridge 相同的 channel 回合分类（`_meta` channel-prompt 标记加 worker 授权，admission 一并校验），因此中继不会被当作交互式用户 prompt（loop-detected 拒绝、对中继文本做 live PR 绑定回填）。worker 授权是**进程级中继凭据**：admission 对 daemon 服务绑定的任意 workspace（primary 或受信）接受已注册的 worker token，而非仅限 worker 的本 workspace，因为绑定投递本就跨 workspace（关键决策 3）；伪造或未注册的 token 仍在路由处与 bridge admission 剥离处两次被丢弃。每个响应体都被消费或取消，每次 body 读取都有 abort signal 兜底：未读的 undici body 会把连接占到 GC，而停滞的 mid-body 读取否则会挂死整个轮询循环。
+- **休眠唤醒**：绑定路由列出的是持久化的 active 会话，但 prompt 路由只服务 live 会话；daemon 重启后绑定会话处于休眠态，prompt 会 404。访问器遇 404 时经 channel bridge 同款 resume 路径恢复该会话（workspace cwd 取自缓存的绑定，未知时先刷新一次），再重试一次 prompt。恢复会铸造一个 client 注册；访问器在重试的 prompt 落定后显式释放它（detach）——非空注册会挡住 daemon 的 prompt-settled idle close，不 detach 就会把会话钉在 live 态直到 TTL reaper。若 cwd 未知且刷新返回的 partial 快照漏列了该会话，访问器以背压错误（`BoundSessionUnavailableError`）推迟，而非把 404 判为消失或消耗失败预算：不完整枚举中的缺席不是删除的证据。
+- **唤醒错误分类**：404 恢复失败（会话记录真正不存在，或 workspace 本身未注册——restore 路由对永久性缺席返回可区分的 `workspace_not_found` 404，可逆的 draining/transitioning 状态仍返回 `workspace_mismatch` / `workspace_runtime_unavailable`）、归档会话（409 `session_archived`，按契约排除在候选集外）与被取代会话（409 `worktree_session_superseded`——worktree reset 永久切断它，绝不再恢复）成为 `BoundSessionGoneError`，让适配器重解析或回退，而不是把永久态推迟到死信。队满、workspace/会话暂不可用（503、恢复冲突、会话数上限、已武装的 worktree-reset prompt 屏障 409 `worktree_reset_active`——reset 流程明确要求 channel-worker 调用方重试）与绑定刷新失败作为背压或瞬时错误传播，让适配器推迟或重试，而不是降级成公开 channel 投递。直接 prompt 路径对这些 409 码的分类与 wake 一致（archived/superseded → gone；reset 屏障/restore-in-progress/busy → 背压）。
 - `deliverPrompt` 把消失、队满（`BoundSessionQueueFullError`）与暂不可用（`BoundSessionUnavailableError`）作为可区分的错误抛出，供适配器回退、推迟或重试。
 - 该选项缺失时（standalone 模式、测试），适配器行为与今天完全一致。
 
@@ -90,7 +90,7 @@ boundSessions?: {
 - 排除 `sourceType === 'channel'` 的会话——channel 会话走正常 channel 路径，以保留其公开回复契约。
 - 多个候选：取最近更新的会话（`updatedAt` 降序；live 摘要缺 `updatedAt` 时路由回退到 `createdAt`，新建的 live 会话因此不会被过期的持久化会话压过）。确定性选择，不广播。
 - 刷新失败保留旧映射（过期候选在投递时失败并回退）；该轮询跳过监视回合，瞬态失败因此无法剪掉持久化基线。`partial` 快照会并入旧映射与绑定列表——不完整答案漏列的已知绑定被保留，私密投递绝不会因扫描失败降级成公开路径——并禁用监视状态剪枝。保留以会话为粒度而非 PR 键：已列出会话的 PR 集是权威的（路由返回每个已列出会话完整的 sidecar 投影），因此保留绝不会复活该会话刚解绑的 PR；被保留的候选按更新时间竞争，因此只列出较旧会话的 partial 答案不会挤掉更新的已知会话。访问器在 partial 答案下同样保留 session→cwd 唤醒缓存。
-- **冷启动**：首个完整快照成功之前，评论车道推迟（游标不前进）。对着冷启动的空映射认领投递会把事件永久冻结到公开 channel 路径，即使扫描随后恢复；车道推迟期间持久化任务仍正常恢复。
+- **冷启动**：首个快照成功之前（完整或 partial——映射同样由 partial 答案填充），评论车道推迟（游标不前进）。对着冷启动的空映射认领投递会把事件永久冻结到公开 channel 路径，即使扫描随后恢复；车道推迟期间持久化任务仍正常恢复。门在任意成功快照（`boundSnapshotSeen`）即开启，而非仅完整快照：永久 partial（多页扫描或长期非 active 的 workspace）否则会把车道永久停摆。重新校验与监视剪枝仍要求完整快照（`boundSnapshotTrusted`）。
 
 #### 评论投递拦截
 
@@ -106,15 +106,15 @@ boundSessions?: {
 
 `prWatchEvents` 非空时，`pollOnce` 先对持久化 pending 事件做 reconciliation，再在绑定刷新之后、通用 inbound 恢复与通知处理之前运行监视检测回合：
 
-1. **监视集合**：来自同一次绑定拉取的绑定 PR，过滤为主机匹配 channel 的 GitHub 主机，活跃轮询上限 30 个（按绑定更新时间取最新）。被独立刷新记为 `merged`/`closed` 的绑定仍保留轮询，直到本轮询自己观测到终态迁移（`prState: 'closed'`），刷新抢跑因此不会漏掉 `state_change`。观测到终态后，终态标记在绑定仍列出该 PR 期间保留但不再轮询——剪掉它会让下一轮询把已关闭 PR 当作首次观测重新加入（查询振荡）。绑定保留与活跃轮询是两件事。无绑定 PR → 零 API 调用。持久化条目按完整候选集剪枝（而非截断后的监视集，轮转出上限的 PR 因此保留基线），仅在快照完整时剪枝——partial 快照绝不剪枝——且条目仍持有未投递 pending 事件时绝不删除。
-2. **每 PR**：每次轮询调 `pulls.get`（head SHA、`mergeable`、`mergeable_state`、`state`、`updated_at`）。Check runs（`checks.listForRef`）与组合提交状态（`repos.getCombinedStatusForRef`）仅在订阅了 `ci_failure` 且以下情况拉取：head SHA 较上次轮询变化、上次 CI 聚合为 pending/in_progress、尚无 CI 观测、PR 的 `updated_at` 前进、聚合为 `none` 且处于 head 首次观测后的 10 分钟宽限窗口内（check 异步注册）、或上次 CI 拉取已超过 10 分钟复查间隔。周期复查是承重的：GitHub 不会因 check 活动 bump PR 的 `updated_at`（已对活体 API 核实），因此已 settled 的 head 复跑变红——或手动 `workflow_dispatch` 晚到的 CI——否则会被永久漏掉。稳态成本为每 PR 每轮询一次调用加有界的周期复查。监视 API 调用遇限流快速失败（不做阻塞 cooldown sleep），因此被限流的监视回合不会钉死跑在其后的通知车道。
+1. **监视集合**：来自同一次绑定拉取的绑定 PR，过滤为主机匹配 channel 的 GitHub 主机，活跃轮询上限 30 个（按绑定更新时间取最新）。绑定 PR 超过 30 个时，溢出打 stderr 日志（数量 + 被排除的键），最旧绑定被确定性排除因此被显式呈现，绝不静默。被独立刷新记为 `merged`/`closed` 的绑定仍保留轮询，直到本轮询自己观测到终态迁移（`prState: 'closed'`），刷新抢跑因此不会漏掉 `state_change`。观测到终态后，终态标记在绑定仍列出该 PR 期间保留但不再轮询——剪掉它会让下一轮询把已关闭 PR 当作首次观测重新加入（查询振荡）。绑定保留与活跃轮询是两件事。无绑定 PR → 零 API 调用。持久化条目按完整候选集剪枝（而非截断后的监视集，轮转出上限的 PR 因此保留基线），仅在快照完整时剪枝——partial 快照绝不剪枝——且条目仍持有未投递 pending 事件时绝不删除。
+2. **每 PR**：每次轮询调 `pulls.get`（head SHA、`mergeable`、`mergeable_state`、`state`、`updated_at`）。Check runs（`checks.listForRef`）与组合提交状态（`repos.getCombinedStatusForRef`）仅在订阅了 `ci_failure` 且以下情况拉取：head SHA 较上次轮询变化、上次 CI 聚合为 pending/in_progress、尚无 CI 观测、PR 的 `updated_at` 前进、聚合为 `none` 且处于 head 首次观测后的 10 分钟宽限窗口内（check 异步注册）、或上次 CI 拉取已超过 10 分钟复查间隔。周期复查是承重的：GitHub 不会因 check 活动 bump PR 的 `updated_at`（已对活体 API 核实），因此已 settled 的 head 复跑变红——或手动 `workflow_dispatch` 晚到的 CI——否则会被永久漏掉。稳态成本为每 PR 每轮询一次调用加有界的周期复查。监视 API 调用遇限流快速失败——主限流（remaining 耗尽）与二级/滥用限流（带 `retry-after` 头）都算——不做阻塞 cooldown sleep，因此被限流的监视回合不会钉死跑在其后的通知车道（快速失败谓词是监视局部的；发布车道保留自己的重试语义）。
 3. **迁移检测**：对照持久化监视状态（`channelFilePath('github-pr-watch.json')`，完整快照时按完整候选集剪枝——见第 1 条）：
-   - `ci_failure`：聚合转为失败（任一已完成 check run 结论为 `failure`/`timed_out`/`action_required`/`startup_failure`，或非空组合状态报告 `failure`/`error`）。空组合状态（`total_count: 0`，GitHub 对无 legacy status 的 SHA 返回 `state: "pending"`）绝不算活跃 CI。经持久化 `fired` 环每个 head SHA 只触发一次，即使聚合回绿后再次转红；新 head 再失败会再触发。事件摘要点名失败的 check（至多 5 个），会话无需再查即可行动。
+   - `ci_failure`：聚合转为失败（任一已完成 check run 结论为 `failure`/`timed_out`/`action_required`/`startup_failure`，或非空组合状态报告 `failure`/`error`）。空组合状态（`total_count: 0`，GitHub 对无 legacy status 的 SHA 返回 `state: "pending"`）绝不算活跃 CI。经持久化 `fired` 环每个 head SHA 只触发一次，即使聚合回绿后再次转红；新 head 再失败会再触发。每条目 `ciFiredSha` 钉作为环的后盾：有上限的环在长寿命 head 上经过 64 个非 ci episode 后可能逐出 `ci_failure:<sha>` 键，钉即使在该逐出后仍保住「每 head 一次」的保证（head 变化时重置）。事件摘要点名失败的 check（至多 5 个），会话无需再查即可行动。
    - `merge_conflict`：`mergeable_state` 进入 `dirty`。边沿触发；`dirty → clean → dirty` 会再次触发。`mergeable === null`（GitHub 仍在计算）绝不覆盖最后已知状态。
    - `head_change`：head SHA 与上次观测不同（首次观测静默初始化）。force-push 回到近期 SHA 是新迁移，会再次触发。
    - `state_change`：PR `state` 离开 `open`（merged 或 closed）。首次观测静默初始化；close → reopen → close 会再次触发。
    - **去重键身份**：`ci_failure` 以 head SHA 为键（每 head 一次）。其余三类以每条目单调递增的 episode 计数为键（`watch:<type>:<seq>`）——标识迁移实例而非状态值——因此上述合法复发绝不会被 fired 环压制。计数与基线一同持久化。
-4. **持久化事件队列**：检测到的事件追加进 `pending` 队列，与新基线同一次写入持久化，检测与认领之间崩溃不会丢事件。reconciliation 回合在通用 inbound 恢复之前、独立于 live 监视回合排空所有 pending 条目（不调 GitHub API）：失败或被限流的 API 回合不能饿死已检测事件，恢复也不会先投递并移除一个随后排空会重复认领的任务（认领与 pending→fired 落盘之间崩溃会留下两条记录）。随后逐事件排空：对照最新完整快照重新校验收件人 → 认领 inbound task（持久化——复发键命中的终态 failed/cancelled 记录会被替换，绝不静默复用）→ 把 key 从 `pending` 移入有上限的 `fired` 环（持久化）→ 执行任务。任何点崩溃都留下 pending 事件或已认领任务；`fired` 环是持久化的「每迁移一次」记录（仅靠任务级去重，聚合抖动会在已完成任务被移除后重放同一 head）。认领失败则事件留队下轮重试。事件任务使用 `source.messageId = watch:<eventType>:<headSha|seq>`，与评论一样私密投递——但没有公开回退（见评论投递拦截）。
+4. **持久化事件队列**：检测到的事件追加进 `pending` 队列，与新基线同一次写入持久化，检测与认领之间崩溃不会丢事件。reconciliation 回合在通用 inbound 恢复之前、独立于 live 监视回合排空所有 pending 条目（不调 GitHub API）：失败或被限流的 API 回合不能饿死已检测事件，恢复也不会先投递并移除一个随后排空会重复认领的任务（认领与 pending→fired 落盘之间崩溃会留下两条记录）。随后逐事件排空：对照最新完整快照重新校验收件人 → 认领 inbound task（持久化——复发的 WATCH 键命中的终态 failed/cancelled 记录会被替换，绝不静默复用；评论/事件/issue-body 键是永不复发的稳定标识，其终态记录保持永久去重屏障——替换它们会在崩溃使游标滞后于取消时复活已取消的评论）→ 把 key 从 `pending` 移入有上限的 `fired` 环（持久化）→ 执行任务。任何点崩溃都留下 pending 事件或已认领任务；`fired` 环是持久化的「每迁移一次」记录（仅靠任务级去重，聚合抖动会在已完成任务被移除后重放同一 head）。认领失败则事件留队下轮重试。认领成功之后 pending→fired 落盘失败则回滚认领（移除任务、恢复 pending 事件）下轮重试，watch 文件不可写 / 任务文件可写的分歧因此不会在重启后二次投递同一迁移。事件任务使用 `source.messageId = watch:<eventType>:<headSha|seq>`，与评论一样私密投递——但没有公开回退（见评论投递拦截）。
 5. **绑定状态维护**仍由既有 5 分钟刷新定时器负责；适配器不 PATCH metadata。定时器记为 `merged`/`closed` 且监视已观测到终态迁移后，该 PR 离开活跃轮询；其终态标记保留到绑定本身消失。
 6. **持久化失败语义**：瞬态读错误（EACCES/EMFILE/EIO）fail-CLOSED——跳过监视回合且不保存，直到状态重新加载成功，降级的内存态因此绝不能覆盖完好的文件。只有 ENOENT（首次启动）与持久 JSON 损坏才从空状态起步。失败的原子写清理其 UUID 命名的 tmp 文件，持续磁盘压力因此不会累积孤儿。状态文件与目录权限为 0600/0700（它们持久化私密评论信封）。
 
@@ -152,7 +152,7 @@ boundSessions?: {
 - **不可信内容进入交互式会话。** 事件 payload 在注入 prompt 中标记为不可信（与 webhook 任务同一契约）。评论 sender gate 照常生效。状态事件没有人类发送者；它们存在仅因为操作者 opt-in，且私有-only（无公开回退）。目标会话自己的审批模式约束其动作。
 - **队列压力。** 事件突发可能填满目标会话的 5 槽 prompt 队列；队满与暂不可用条件按背压处理（不消耗重试预算），投递在后续轮询重试。推迟视界有界（`MAX_BOUND_DEFERRALS`，约 4 小时）；超出视界——或非背压失败耗尽 3 次上限——事件退役到私有死信日志并打 stderr 告警。纯 bound 背压不持有共享通知游标；其他可恢复任务仍然持有它。bound 事件绝不静默消费：要么投递、要么推迟、要么死信。
 - **速率限制。** 监视上限、条件化 check 拉取与有界周期复查把稳态压在 5 000 次/小时的 token 预算之内（大 CI 突发可能超出；见 API 预算）。监视 API 调用遇限流快速失败——监视回合记日志跳过、通知不受影响，而不是在通知车道之前睡完重置窗口。
-- **过期绑定。** 休眠的绑定会话由访问器唤醒（第 2 层），daemon 重启不会把事件改道公开 channel 投递；冷启动门在完整快照确立绑定集之前推迟评论车道。会话真正已删除的绑定唤醒失败 → 评论事件回退 channel 路径，watch 事件记日志退役；下一轮询的绑定拉取自愈映射。
+- **过期绑定。** 休眠的绑定会话由访问器唤醒（第 2 层），daemon 重启不会把事件改道公开 channel 投递；冷启动门在首个成功快照（完整或 partial）填充绑定映射之前推迟评论车道。会话真正已删除的绑定唤醒失败 → 评论事件回退 channel 路径，watch 事件记日志退役；下一轮询的绑定拉取自愈映射。
 - **已关闭的会话。** `DELETE /session/:id` 只关闭会话、不删除记录；记录仍可 resume 且绑定仍在，因此这类会话仍会被唤醒投递（E2E 已实证）。只有删除记录（`POST /sessions/delete`）或归档才会把会话移出候选集（归档会话的 restore 返回 409 `session_archived`，投递分类为 gone）。关闭是资源动作，不是退订；绑定本身表达跟随意图。
 - **扫描成本。** 路由每次调用扫 sidecar；当前规模下是毫秒级。多页扫描标记 partial（活动序分页非快照隔离），使调用方保留已知绑定而非剪枝——这是刻意的保守取舍。若规模增长，快照一致枚举或用 `session_metadata_updated` 失效的内存索引是后续工作，不属于本改动。
 

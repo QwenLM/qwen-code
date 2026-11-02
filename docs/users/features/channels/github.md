@@ -168,10 +168,11 @@ so the session that follows the PR handles the event with its existing context.
   **Watch events (below) are private-only**: with no bound target they are
   logged and retired, never published as PR comments.
 - A full prompt queue or a temporarily unavailable session defers the event
-  without consuming the retry budget; the deferral is bounded (~4 hours), and
-  events that exhaust it are retired to a private dead-letter log
-  (`github-bound-deadletter.jsonl` in the channel state directory) with a
-  stderr alert rather than silently dropped.
+  without consuming the retry budget; the deferral is bounded (240 consecutive
+  deferrals — ~4 hours at the default 60s poll, and proportionally longer with
+  a larger `pollInterval`), and events that exhaust it are retired to a private
+  dead-letter log (`github-bound-deadletter.jsonl` in the channel state
+  directory) with a stderr alert rather than silently dropped.
 - This feature requires a daemon-managed channel; standalone
   `qwen channel start` ignores the setting with a warning.
 

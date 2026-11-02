@@ -360,6 +360,14 @@ interface PrWatchEntry {
    * the aggregate flaps back and forth on the same head.
    */
   fired?: string[];
+  /**
+   * Head SHA whose ci_failure already fired. The fired ring is capped, so
+   * 64 non-ci episodes on a long-lived head can evict the ci_failure:<sha>
+   * key; this pin keeps ci_failure once-per-head even after that eviction
+   * (a flapping aggregate must not re-fire on the same head). Reset when the
+   * head changes.
+   */
+  ciFiredSha?: string;
 }
 
 interface PendingWatchEvent {
@@ -659,6 +667,28 @@ function isDefiniteNoWriteGithubError(err: unknown): boolean {
   );
 }
 
+/**
+ * Watch-pass fail-fast predicate. Unlike the shared no-write predicate
+ * (primary limit only), the watch must also bail on SECONDARY/abuse limits
+ * (403/429 carrying retry-after, remaining>0): githubApi would otherwise
+ * block-sleep the retry-after per call, and with up to MAX_WATCHED_PRS PRs
+ * stacking sleeps the watch pass would pin the notification lane for
+ * minutes. The watch is best-effort detection — a rate-limited pass is
+ * skipped and retried next poll, never slept through. Kept watch-local so
+ * the publication lane's retry semantics are unchanged.
+ */
+function isWatchRateLimitError(err: unknown): boolean {
+  if (isDefiniteNoWriteGithubError(err)) return true;
+  const e = err as {
+    status?: number;
+    response?: { headers?: Record<string, string | number> };
+  };
+  return (
+    (e.status === 403 || e.status === 429) &&
+    e.response?.headers?.['retry-after'] !== undefined
+  );
+}
+
 function parseTriggerKind(metadata: string | undefined): string | undefined {
   return metadata?.match(/^Trigger: ([\w-]+)\./m)?.[1];
 }
@@ -724,12 +754,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private lastBindingsPartial = false;
   private boundRefreshFailed = false;
   /**
-   * False until the first COMPLETE binding snapshot succeeds. While false,
-   * the comment lane is deferred: claiming delivery against a cold empty map
-   * would permanently freeze events onto the public channel path even after
-   * the scan recovers.
+   * False until the first COMPLETE binding snapshot succeeds. Re-validation
+   * and watch pruning require an authoritative enumeration, so they stay
+   * gated on this (a partial answer is not an absence).
    */
   private boundSnapshotTrusted = false;
+  /**
+   * False until ANY binding snapshot succeeds (complete or partial). The
+   * cold-start comment-lane gate uses this, not boundSnapshotTrusted: the
+   * map is populated from partial snapshots too, so once one succeeds the
+   * empty-map risk is gone. Gating on complete-only would stall the lane
+   * forever under a permanent partial (multi-page scan / non-active
+   * workspace).
+   */
+  private boundSnapshotSeen = false;
   private prWatchState: PrWatchStateFile = { version: 1, entries: {} };
   private prWatchStateLoaded = false;
   private inboundRecoveryPending = true;
@@ -1456,8 +1494,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // pending->fired save leaves both records on disk, and if recovery ran
     // first it would deliver and remove the task, then a later drain would
     // claim and deliver the same transition again. Draining needs no GitHub
-    // calls, so a failing or rate-limited watch pass cannot starve it.
-    if (this.prWatchEvents.size > 0 && !this.boundRefreshFailed) {
+    // calls, so a failing or rate-limited binding fetch must not starve it —
+    // drain's own re-validation fails closed (keeps the frozen target) when
+    // the snapshot is partial or the refresh failed.
+    if (this.prWatchEvents.size > 0) {
       try {
         await this.reconcilePendingWatch();
       } catch (err) {
@@ -1497,11 +1537,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.inboundRecoveryPending = true;
     }
 
-    // Cold start: until a complete snapshot establishes the binding set,
-    // claiming delivery against an empty map would permanently freeze
-    // events onto the public channel path. Defer the comment lane (cursor
-    // does not advance) instead; persisted tasks still recover above.
-    if (this.deliverToBoundSessions && !this.boundSnapshotTrusted) {
+    // Cold start: until the first binding snapshot populates the map,
+    // claiming delivery against an empty map would permanently freeze events
+    // onto the public channel path. Any successful snapshot (even partial)
+    // populates the map, so gate on boundSnapshotSeen — complete-only would
+    // stall the lane forever under a permanent partial (multi-page scan /
+    // non-active workspace). Defer the comment lane (cursor does not advance)
+    // instead; persisted tasks still recover above.
+    if (this.deliverToBoundSessions && !this.boundSnapshotSeen) {
       return;
     }
 
@@ -2001,7 +2044,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         existing.state === 'cancelled' ||
         (existing.state === 'failed' &&
           (existing.attempts ?? 0) >= MAX_INBOUND_TASK_ATTEMPTS);
-      if (!terminal) {
+      // Only watch episode keys legitimately recur. Comment/event/issue-body
+      // keys are stable identifiers that never re-fire: a terminal record
+      // there is a permanent dedupe barrier. Replacing it would revive a
+      // cancelled comment (public reply to a silenced comment) or duplicate
+      // a failed one after a crash leaves the cursor behind the cancel.
+      const recurrible =
+        existing.source.messageId?.startsWith('watch:') === true;
+      if (!terminal || !recurrible) {
         this.applyTaskDedupe(existing);
         return existing;
       }
@@ -2035,6 +2085,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const envelope = task.envelope;
     if (!envelope) return true;
     const bound = task.delivery?.kind === 'bound-session';
+    const isWatch = envelope.messageId?.startsWith('watch:') === true;
     const attempts = (task.attempts ?? 0) + 1;
     this.activeInboundTaskIdsByMessage.set(
       this.inboundMessageKey(envelope.chatId, envelope.messageId),
@@ -2044,11 +2095,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // increment. The backpressure rollback is a second write, and a crash
     // between the two would leak one budget per cycle until the event is
     // silently dropped. Recovery charges the interrupted attempt instead,
-    // which keeps crash loops terminating.
-    this.transitionInboundTask(task.id, 'running', bound ? {} : { attempts });
+    // which keeps crash loops terminating. Watch events are bound-path too
+    // (private-only), so they share the no-charge running transition.
+    this.transitionInboundTask(
+      task.id,
+      'running',
+      bound || isWatch ? {} : { attempts },
+    );
     let cancelled = false;
     try {
-      if (bound) {
+      // Watch events are private-only: route them by envelope identity, not
+      // by the current delivery. A watch task whose delivery was cleared (a
+      // gone session, or a crash/removal failure that left it running with no
+      // target) must never fall through to the public channel path —
+      // deliverToBoundSession retires a targetless watch event privately.
+      if (bound || isWatch) {
         await this.deliverToBoundSession(task, envelope);
       } else {
         await this.handleInbound(envelope);
@@ -2265,6 +2326,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       reason,
       text: task.envelope?.text,
     };
+    let written = false;
     try {
       const path = this.channelFilePath('github-bound-deadletter.jsonl');
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -2272,14 +2334,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         encoding: 'utf-8',
         mode: 0o600,
       });
+      written = true;
     } catch (err) {
+      // The dead-letter is the private path's only exhaustion surface. If the
+      // write fails (disk pressure), surface the full payload here so the
+      // event stays recoverable from the log, and do not claim it was retired.
       process.stderr.write(
-        `[Channel:${this.name}] failed to write bound dead-letter: ${err}\n`,
+        `[Channel:${this.name}] failed to write bound dead-letter (${task.source.messageId}): ${err}; payload: ${JSON.stringify(record)}\n`,
       );
     }
-    process.stderr.write(
-      `[Channel:${this.name}] bound event retired to dead-letter (${task.source.messageId}): ${reason}\n`,
-    );
+    if (written) {
+      process.stderr.write(
+        `[Channel:${this.name}] bound event retired to dead-letter (${task.source.messageId}): ${reason}\n`,
+      );
+    }
     this.removeInboundTask(task.id);
   }
 
@@ -2343,7 +2411,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     updates: Partial<
       Pick<
         InboundTaskRecord,
-        'envelope' | 'error' | 'attempts' | 'errorCommentPosted' | 'delivery'
+        | 'envelope'
+        | 'error'
+        | 'attempts'
+        | 'errorCommentPosted'
+        | 'delivery'
+        | 'deliveredAt'
+        | 'deferCount'
+        | 'backpressure'
       >
     > = {},
   ): void {
@@ -2651,6 +2726,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const snapshot = await boundSessions.listPrBindings();
       this.lastBindingsPartial = snapshot.partial;
       this.boundRefreshFailed = false;
+      this.boundSnapshotSeen = true;
       if (!snapshot.partial) this.boundSnapshotTrusted = true;
       const map = new Map<string, PrBindingSummary>();
       for (const summary of snapshot.bindings) {
@@ -2800,6 +2876,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.transitionInboundTask(task.id, 'running', { delivery: current });
         task.delivery = current;
         delivery = current;
+      } else if (!current && isWatch) {
+        // Symmetry with drainPendingWatch: on a complete snapshot with no
+        // candidate left, a watch event is private-only — retire it rather
+        // than deliver to a session that no longer follows the PR. (Comment
+        // events keep the frozen target here; their public fallback contract
+        // is handled by the gone-session path below.)
+        process.stderr.write(
+          `[Channel:${this.name}] watch event ${envelope.messageId} has no bound candidate left; retiring without public fallback\n`,
+        );
+        this.transitionInboundTask(task.id, 'running', { delivery: undefined });
+        task.delivery = undefined;
+        return;
       }
     }
     // The channel path runs the group/sender/pairing gates inside
@@ -3021,6 +3109,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const watched = [...active.entries()]
       .sort((a, b) => b[1].updatedAt.localeCompare(a[1].updatedAt))
       .slice(0, MAX_WATCHED_PRS);
+    if (active.size > MAX_WATCHED_PRS) {
+      // The cap deterministically excludes the oldest bindings every poll.
+      // Surface it (dead-letter principle: surfaced, never silently
+      // consumed) so an operator knows some bound PRs are never watched.
+      const watchedKeys = new Set(watched.map(([key]) => key));
+      const excluded = [...active.keys()].filter(
+        (key) => !watchedKeys.has(key),
+      );
+      process.stderr.write(
+        `[Channel:${this.name}] PR watch cap exceeded: watching ${MAX_WATCHED_PRS}/${active.size} bound PRs (most recent); not watched: ${excluded.join(', ')}\n`,
+      );
+    }
     for (const [key, candidate] of watched) {
       try {
         await this.watchOnePr(key, candidate.chatId, candidate.number);
@@ -3055,7 +3155,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }),
       `pulls.get(watch ${key})`,
       3,
-      (err) => !isDefiniteNoWriteGithubError(err),
+      (err) => !isWatchRateLimitError(err),
     );
     const entry = this.prWatchState.entries[key] ?? {};
     const firstObservation =
@@ -3181,6 +3281,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       ...(entry.seq !== undefined ? { seq: entry.seq } : {}),
       ...(entry.pending !== undefined ? { pending: entry.pending } : {}),
       ...(entry.fired !== undefined ? { fired: entry.fired } : {}),
+      ...(!headChanged && entry.ciFiredSha !== undefined
+        ? { ciFiredSha: entry.ciFiredSha }
+        : {}),
     };
 
     for (const event of events) {
@@ -3203,6 +3306,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // tasks are removed on success, so task-level dedupe alone would let
       // a flapping aggregate re-fire the same head after a restart.
       if (next.fired?.includes(dedupeKey)) continue;
+      // The fired ring is capped: 64 non-ci episodes on a long-lived head
+      // can evict the ci_failure:<sha> key. The ciFiredSha pin keeps
+      // ci_failure once-per-head even after that eviction (a flapping
+      // aggregate must not re-fire on the same head).
+      if (
+        event.type === 'ci_failure' &&
+        headSha !== undefined &&
+        next.ciFiredSha === headSha
+      ) {
+        continue;
+      }
       if (next.pending?.some((p) => p.key === dedupeKey)) continue;
       const envelope: Envelope = {
         channelName: this.name,
@@ -3223,6 +3337,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         envelope,
         delivery: this.resolveBoundDelivery(chatId, number),
       });
+      if (event.type === 'ci_failure' && headSha !== undefined) {
+        next.ciFiredSha = headSha;
+      }
     }
 
     this.prWatchState.entries[key] = next;
@@ -3293,12 +3410,33 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         );
         return;
       }
+      const firedBefore = entry.fired;
+      const pendingBefore = entry.pending;
       entry.fired = [...(entry.fired ?? []), pending.key].slice(
         -MAX_FIRED_KEYS,
       );
       entry.pending = entry.pending.slice(1);
       this.prWatchState.entries[key] = entry;
-      this.savePrWatchState();
+      try {
+        this.savePrWatchState();
+      } catch (err) {
+        // The claim is durable but the pending->fired save failed (watch
+        // file unwritable while the task file is writable). Roll the claim
+        // back so the event stays queued: otherwise same-poll recovery would
+        // deliver and remove the task while the on-disk pending survives,
+        // and a restart would re-claim and deliver the same transition twice.
+        entry.fired = firedBefore;
+        entry.pending = pendingBefore;
+        this.prWatchState.entries[key] = entry;
+        this.removeInboundTask(task.id);
+        process.stderr.write(
+          `[Channel:${this.name}] failed to persist watch fire for ${pending.key}, rolled back claim, will retry: ${sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            200,
+          )}\n`,
+        );
+        return;
+      }
       await this.runInboundTask(task);
     }
   }
@@ -3318,7 +3456,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }),
       `checks.listForRef(${sha})`,
       3,
-      (err) => !isDefiniteNoWriteGithubError(err),
+      (err) => !isWatchRateLimitError(err),
     )) as Array<{
       name?: string | null;
       status?: string | null;
@@ -3339,7 +3477,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         run.conclusion === 'action_required' ||
         // A workflow that fails at startup (e.g. a broken workflow file)
         // never runs a single job; missing it would certify a broken CI as
-        // 'none' or even 'success'. Mirrors core's FAILING_CHECK_RUN_CONCLUSIONS.
+        // 'none' or even 'success'. A deliberate SUBSET of core's
+        // FAILING_CHECK_RUN_CONCLUSIONS: core also counts cancelled/stale,
+        // which the design excludes as concurrency-cancel noise (a
+        // superseded run's cancellation is not a CI failure of this head).
         run.conclusion === 'startup_failure'
       ) {
         sawFailure = true;
@@ -3363,7 +3504,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }),
       `combinedStatus(${sha})`,
       3,
-      (err) => !isDefiniteNoWriteGithubError(err),
+      (err) => !isWatchRateLimitError(err),
     );
     // GitHub returns {state:"pending", total_count:0, statuses:[]} for a
     // SHA with no legacy commit statuses; an empty combined status must not

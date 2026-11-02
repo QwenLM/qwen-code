@@ -16,14 +16,35 @@ import type {
 import { createWorkspaceGenerationGuard } from '../workspace-registry.js';
 import { registerSessionPrBindingsRoutes } from './session-pr-bindings.js';
 
+const sessionListMocks = vi.hoisted(() => ({
+  listForResponse: vi.fn<
+    (
+      bridge: unknown,
+      workspaceCwd: string,
+      options?: { archiveState?: string; size?: number; cursor?: string },
+      readOptions?: {
+        mergeLive?: boolean;
+        paginateMerged?: boolean;
+        runtimeBaseDir?: string;
+      },
+    ) => Promise<ListWorkspaceSessionsResult>
+  >(),
+}));
+vi.mock('../server/session-list.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../server/session-list.js')>()),
+  listWorkspaceSessionsForResponse: sessionListMocks.listForResponse,
+}));
+
 function makeRuntime(
   overrides: Partial<{
     trusted: boolean;
+    primary: boolean;
     workspaceCwd: string;
   }> = {},
 ): WorkspaceRuntime {
   return {
     trusted: true,
+    primary: false,
     workspaceCwd: '/ws/a',
     sessionRuntimeBaseDir: '/tmp/runtime-a',
     bridge: {},
@@ -83,7 +104,8 @@ function appHarness(opts: {
       res.status(500).json({ error: String(err), route: meta.route });
     },
   );
-  const listSessions = opts.listSessions ?? vi.fn(async () => page([]));
+  // No seam injected means the route uses the real session list path
+  // (module-mocked above); the real-path test relies on that fallback.
   registerSessionPrBindingsRoutes(app, {
     workspaceRegistry: {
       listAllEntries: () => {
@@ -92,9 +114,9 @@ function appHarness(opts: {
       },
     } as never,
     sendBridgeError: sendBridgeError as never,
-    listSessions,
+    listSessions: opts.listSessions,
   });
-  return { app, listSessions, sendBridgeError };
+  return { app, listSessions: opts.listSessions, sendBridgeError };
 }
 
 const BOUND_SESSION = {
@@ -542,5 +564,139 @@ describe('GET /sessions/pr-bindings', () => {
         state: 'closed',
       },
     ]);
+  });
+
+  it('flags partial when skipping an untrusted primary workspace', async () => {
+    const listSessions = vi.fn(async () => page([BOUND_SESSION]));
+    const h = appHarness({
+      entries: [makeEntry(makeRuntime({ trusted: false, primary: true }))],
+      listSessions,
+    });
+
+    const res = await request(h.app).get('/sessions/pr-bindings');
+
+    expect(res.status).toBe(200);
+    // Session creation/restore exempts primary from the trust gate, so an
+    // untrusted primary still serves bound sessions: skipping it must not
+    // hand callers an authoritative absence.
+    expect(res.body).toEqual({ bindings: [], partial: true });
+    expect(listSessions).not.toHaveBeenCalled();
+  });
+
+  it('skips an untrusted non-primary workspace without forcing partial', async () => {
+    const listSessions = vi.fn(async () => page([BOUND_SESSION]));
+    const h = appHarness({
+      entries: [makeEntry(makeRuntime({ trusted: false, primary: false }))],
+      listSessions,
+    });
+
+    const res = await request(h.app).get('/sessions/pr-bindings');
+
+    expect(res.status).toBe(200);
+    // Non-primary untrusted workspaces cannot create or restore sessions,
+    // so their absence is legitimate and the answer stays authoritative.
+    expect(res.body).toEqual({ bindings: [], partial: false });
+    expect(listSessions).not.toHaveBeenCalled();
+  });
+
+  it('scans active sessions with the real list path options', async () => {
+    sessionListMocks.listForResponse
+      .mockReset()
+      .mockResolvedValueOnce({ sessions: [], nextCursor: 'cursor-2' })
+      .mockResolvedValueOnce({ sessions: [] });
+    // No listSessions seam: exercise the real listActiveSessionsPage path.
+    const h = appHarness({ entries: [makeEntry(makeRuntime())] });
+
+    const res = await request(h.app).get('/sessions/pr-bindings');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ bindings: [], partial: true });
+    expect(sessionListMocks.listForResponse).toHaveBeenCalledTimes(2);
+    const firstCall = sessionListMocks.listForResponse.mock.calls[0];
+    expect(firstCall[1]).toBe('/ws/a');
+    // The reverse lookup must only ever see active sessions, at the full
+    // page size the scan budget assumes.
+    expect(firstCall[2]).toEqual({ archiveState: 'active', size: 100 });
+    expect(firstCall[3]).toEqual({
+      mergeLive: true,
+      paginateMerged: true,
+      runtimeBaseDir: '/tmp/runtime-a',
+    });
+    expect(sessionListMocks.listForResponse.mock.calls[1][2]).toEqual({
+      archiveState: 'active',
+      size: 100,
+      cursor: 'cursor-2',
+    });
+  });
+
+  it('includes the cap-hit page bindings when the page cap is exhausted', async () => {
+    let pages = 0;
+    const listSessions = vi.fn(async () => {
+      pages += 1;
+      return page(
+        [{ ...BOUND_SESSION, sessionId: `session-${pages}` }],
+        `cursor-${pages + 1}`,
+      );
+    });
+    const h = appHarness({ entries: [makeEntry(makeRuntime())], listSessions });
+
+    const res = await request(h.app).get('/sessions/pr-bindings');
+
+    expect(res.status).toBe(200);
+    expect(listSessions).toHaveBeenCalledTimes(50);
+    expect(res.body.partial).toBe(true);
+    const ids = res.body.bindings.map(
+      (b: { sessionId: string }) => b.sessionId,
+    );
+    expect(ids).toHaveLength(50);
+    // The cap-hit (50th) page is fetched and projected before the loop
+    // breaks; dropping its data would silently lose the newest bindings.
+    expect(ids[0]).toBe('session-1');
+    expect(ids[49]).toBe('session-50');
+  });
+
+  it('treats a complete empty scan as an authoritative absence', async () => {
+    const h = appHarness({
+      entries: [makeEntry(makeRuntime())],
+      listSessions: async () => page([]),
+    });
+
+    const res = await request(h.app).get('/sessions/pr-bindings');
+
+    expect(res.status).toBe(200);
+    // A complete scan that found nothing is the one authoritative empty
+    // answer: callers may prune watch state on it (adapter cold start).
+    expect(res.body).toEqual({ bindings: [], partial: false });
+  });
+
+  it('logs the failing workspace cwd to stderr and flags partial', async () => {
+    const stderrWrites: string[] = [];
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    try {
+      const h = appHarness({
+        entries: [makeEntry(makeRuntime({ workspaceCwd: '/ws/broken' }))],
+        listSessions: async () => {
+          throw new Error('disk on fire');
+        },
+      });
+
+      const res = await request(h.app).get('/sessions/pr-bindings');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ bindings: [], partial: true });
+      // A persistent partial must name its source, or the channel stalls
+      // with zero log lines pointing at the unreadable workspace.
+      const logged = stderrWrites.join('');
+      expect(logged).toContain('PR bindings scan failed for workspace');
+      expect(logged).toContain('/ws/broken');
+      expect(logged).toContain('disk on fire');
+    } finally {
+      stderr.mockRestore();
+    }
   });
 });

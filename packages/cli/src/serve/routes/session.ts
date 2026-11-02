@@ -283,7 +283,7 @@ import {
 import type { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
 import {
   CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY,
-  isChannelWorkerPromptAuthorized,
+  isChannelWorkerPromptToken,
 } from '../channel-worker-prompt-authorization.js';
 import {
   createRequestedSessionIdAdmission,
@@ -8551,10 +8551,14 @@ export function registerSessionRoutes(
             delete forwardedBody['_meta'];
           }
         }
-        const channelWorkerAuthorized = isChannelWorkerPromptAuthorized(
-          promptAuthorization,
-          runtime.workspaceCwd,
-        );
+        // Bound delivery is cross-workspace: the worker token is a
+        // process-level relay credential, admitted for any workspace the
+        // daemon serves bindings for (primary or trusted — the same trust
+        // model the bindings route enumerates). A forged token is still
+        // dropped here and again at the bridge admission strip.
+        const channelWorkerAuthorized =
+          isChannelWorkerPromptToken(promptAuthorization) &&
+          (runtime.primary || runtime.trusted);
         const trustedPromptDisplayText =
           typeof promptDisplayText === 'string' && channelWorkerAuthorized
             ? promptDisplayText

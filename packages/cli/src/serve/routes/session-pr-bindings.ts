@@ -5,6 +5,7 @@
  */
 
 import type { Application } from 'express';
+import { sanitizeLogText } from '@qwen-code/channel-base';
 import type { SendBridgeError } from '../server/error-response.js';
 import {
   listWorkspaceSessionsForResponse,
@@ -98,7 +99,17 @@ export function registerSessionPrBindingsRoutes(
           partial = true;
           continue;
         }
-        if (!runtime.trusted) continue;
+        if (!runtime.trusted) {
+          // Session creation/restore exempts primary from the trust gate, so
+          // an untrusted PRIMARY still serves bound sessions. Skipping it
+          // without flagging partial would hand callers an authoritative
+          // absence over bindings that still exist, degrading private
+          // delivery to public (and pruning watch state on a trusted→
+          // untrusted flip). Non-primary untrusted workspaces cannot create
+          // or restore sessions, so their absence is legitimate.
+          if (runtime.primary) partial = true;
+          continue;
+        }
         let cursor: string | undefined;
         try {
           let pages = 0;
@@ -139,9 +150,17 @@ export function registerSessionPrBindingsRoutes(
             if (pages >= MAX_PAGES) break;
             cursor = result.nextCursor;
           }
-        } catch {
+        } catch (err) {
           // One unreadable workspace must not hide the others' bindings;
-          // the partial flag tells callers the answer is incomplete.
+          // the partial flag tells callers the answer is incomplete. Name
+          // the workspace and cause: a persistent partial otherwise stalls
+          // the channel with zero log lines pointing at the source.
+          process.stderr.write(
+            `[serve] PR bindings scan failed for workspace ${runtime.workspaceCwd}, answer partial: ${sanitizeLogText(
+              err instanceof Error ? err.message : String(err),
+              200,
+            )}\n`,
+          );
           partial = true;
           continue;
         }
