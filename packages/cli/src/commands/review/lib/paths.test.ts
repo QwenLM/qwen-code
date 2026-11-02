@@ -951,6 +951,12 @@ describe('ensureReviewTmpDir — the guarded set is pinned, not documented', () 
           'writes beside the --worktree fetch-pr created under the guard, ' +
           'so it is never a round first writer',
       ],
+      [
+        'commands/review/save-artifact.ts',
+        'names the plan report fetch-pr wrote, to READ the PR identity for ' +
+          'the verify handoff; its own writes go to .qwen/reviews and the ' +
+          'host-trusted event directory, never the scratch tree',
+      ],
     ]);
     const root = join(dirname(fileURLToPath(import.meta.url)), '../../..');
     const walk = (rel: string): string[] =>
