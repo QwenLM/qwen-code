@@ -1322,6 +1322,49 @@ describe('Repository-only channel access config', () => {
     });
   });
 
+  it('treats aliases that differ only in key or allowlist order as identical', () => {
+    // Neither ordering carries meaning, so reporting a conflict here would
+    // block an unrelated save with a message that does not match the reason.
+    const orderings: Array<[Record<string, unknown>, Record<string, unknown>]> =
+      [
+        [
+          { senders: 'allowlist', requireMention: true },
+          { requireMention: true, senders: 'allowlist' },
+        ],
+        [
+          { senders: 'allowlist', allowedUsers: ['alice', 'bob'] },
+          { senders: 'allowlist', allowedUsers: ['bob', 'alice'] },
+        ],
+      ];
+    for (const [first, second] of orderings) {
+      const instance: DaemonChannelInstanceSnapshot = {
+        name: 'release-bot',
+        config: {
+          type: 'github',
+          groupPolicy: 'allowlist',
+          groups: { 'QwenLM/qwen-code': first, 'qwenlm/qwen-code': second },
+        },
+        secrets: { token: { present: true, source: 'literal' } },
+        startsWithServe: false,
+        runtime: { state: 'stopped' },
+      };
+      const draft = createChannelEditorDraft(GITHUB, instance);
+
+      expect(validateChannelEditorDraft(GITHUB, draft, [], instance)).toEqual(
+        {},
+      );
+      const request = buildChannelUpsertRequest(
+        GITHUB,
+        draft,
+        'rev-2',
+        instance,
+      );
+      expect(Object.keys(request.config['groups'] as object)).toEqual([
+        'qwenlm/qwen-code',
+      ]);
+    }
+  });
+
   it('keeps per-repository settings when the allowlist case changes', () => {
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'release-bot',

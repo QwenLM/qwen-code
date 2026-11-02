@@ -370,13 +370,34 @@ function hasConflictingRepositoryAliases(
   for (const [groupId, group] of Object.entries(groups)) {
     if (groupId === '*') continue;
     const key = groupId.toLowerCase();
-    const shape = JSON.stringify(group ?? null);
+    const shape = canonicalGroupShape(group);
     shapes.set(key, (shapes.get(key) ?? new Set<string>()).add(shape));
   }
   for (const variants of shapes.values()) {
     if (variants.size > 1) return true;
   }
   return false;
+}
+
+/**
+ * Compare group settings by meaning, not by JSON text: key order carries no
+ * meaning, and the only list a group holds is an allowlist, whose order does
+ * not matter either. Comparing the raw text would report two identical
+ * entries written in a different order as a conflict and block an unrelated
+ * save.
+ */
+function canonicalGroupShape(value: unknown): string {
+  if (Array.isArray(value)) {
+    return JSON.stringify(value.map(canonicalGroupShape).sort());
+  }
+  if (isRecord(value)) {
+    return JSON.stringify(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, canonicalGroupShape(value[key])]),
+    );
+  }
+  return JSON.stringify(value ?? null);
 }
 
 function assignField(
