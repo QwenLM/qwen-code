@@ -59,6 +59,7 @@ class WorkspaceCsiNativeActivationGateTest {
     private static final ObjectMapper JSON = new ObjectMapper()
             .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
     private JdbcTemplate jdbc;
+    private StoreLockTrace trace;
     private TransactionTemplate transaction;
     private JdbcRuntimeBindingRepository bindings;
     private JdbcRuntimeSessionRepository sessions;
@@ -78,7 +79,8 @@ class WorkspaceCsiNativeActivationGateTest {
 
     @BeforeEach
     void setUp(TestInfo info) throws Exception {
-        var source = dataSource();
+        var source = new StoreLockTrace(dataSource());
+        trace = source;
         Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
         jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
@@ -129,6 +131,23 @@ class WorkspaceCsiNativeActivationGateTest {
     protected DataSource dataSource() {
         return new DriverManagerDataSource("jdbc:h2:mem:csi-native-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
+    }
+
+    @Test
+    void csiCommitAndReplayEachKeepOneRootAndOneHeadPerTransaction() throws Exception {
+        trace.clear();
+        ready();
+        trace.assertRootBeforeHead("tenant", sessionId);
+        var heads = trace.successful("tenant", sessionId).stream().filter(StoreLockTrace.Event::mappedHead).toList();
+        assertThat(heads).hasSize(2);
+        assertThat(heads.stream().map(event -> event.connection() + ":" + event.transaction()).distinct()).hasSize(2);
+        trace.clear();
+        assertThat(commit(1).replayed()).isTrue();
+        trace.assertRootBeforeHead("tenant", sessionId);
+        trace.assertOneTransaction("tenant", sessionId);
+        assertThat(trace.successful("tenant", sessionId).stream().filter(StoreLockTrace.Event::mappedHead)).hasSize(1);
+        assertThat(trace.successful("tenant", sessionId).stream().filter(event -> event.sql()
+                .startsWith("select tenant_id, session_id, csi_guard from ma_session "))).hasSize(1);
     }
 
     @Test
