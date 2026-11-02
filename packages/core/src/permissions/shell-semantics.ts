@@ -2506,9 +2506,7 @@ function openerLinePipesToShell(line: string): boolean {
   if (quoted && pos < line.length && line[pos] === quote) pos++;
 
   const rest = line.slice(pos);
-  const tokens = rest
-    .split(/\s+/)
-    .filter((t) => t.length > 0);
+  const tokens = rest.split(/\s+/).filter((t) => t.length > 0);
 
   for (let i = 0; i < tokens.length; i++) {
     if (tokens[i] !== '|') continue;
@@ -2562,8 +2560,7 @@ function extractShellFedHeredocBodies(command: string): string[] {
     const meaningful = skipAmendPrefixes(openerTokens);
     const consumer = amendExecutableBasename(meaningful[0] ?? '');
     const shellFed =
-      SHELLS_READING_STDIN.has(consumer) ||
-      openerLinePipesToShell(line);
+      SHELLS_READING_STDIN.has(consumer) || openerLinePipesToShell(line);
     active = {
       delimiter: delimiters[0]!,
       shellFed,
