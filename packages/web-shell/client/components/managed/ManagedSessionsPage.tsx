@@ -1728,8 +1728,8 @@ function ManagedSessionsContent({
                 environmentOpen={taskPanelOpen}
                 environmentAvailable={Boolean(
                   provider.tasks &&
-                  (summary.capabilities.tasks ||
-                    taskCancel.pendingTaskIds.length),
+                    (summary.capabilities.tasks ||
+                      taskCancel.pendingTaskIds.length),
                 )}
                 onToggleEnvironment={() =>
                   setTaskPanelSession(taskPanelOpen ? undefined : sessionId)
@@ -2376,9 +2376,9 @@ function ManagedSessionsContent({
                   approvalChange.blocked ||
                   Boolean(
                     sessionId &&
-                    (!summary?.capabilities.canSend ||
-                      recovery.value?.nextTurnAllowed === false) &&
-                    !userMessages.supported,
+                      (!summary?.capabilities.canSend ||
+                        recovery.value?.nextTurnAllowed === false) &&
+                      !userMessages.supported,
                   )
                 }
                 placeholderText={t(
