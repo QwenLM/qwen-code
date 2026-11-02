@@ -542,6 +542,16 @@ describe('ci.yml lint HOME isolation', () => {
       !JSON.stringify(gate).includes('secrets.'),
       'the no-AK PR-code step must not reference any secrets.* context',
     );
+    // The value whitelist above only iterates PRESENT keys, so a deleted
+    // scrub key escapes it (verified by mutation: dropping
+    // ANTHROPIC_AUTH_TOKEN left both suites green). Pin a floor on the
+    // known-dangerous set — the SDK back-fills this one from env.
+    assert.equal(
+      gate.env?.ANTHROPIC_AUTH_TOKEN,
+      '',
+      'ANTHROPIC_AUTH_TOKEN must be present and empty (SDK auth-resolver ' +
+        'back-fill; deleting the scrub key escapes the value whitelist)',
+    );
 
     // Reclamation: the run-unique home must be removed at the end so it
     // does not accumulate in RUNNER_TEMP on this persistent pool.

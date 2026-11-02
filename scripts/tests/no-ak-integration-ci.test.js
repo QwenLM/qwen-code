@@ -613,6 +613,7 @@ describe('no-AK integration CI wiring', () => {
     for (const key of [
       'API_KEY',
       'ANTHROPIC_API_KEY',
+      'ANTHROPIC_AUTH_TOKEN',
       'ANTHROPIC_BASE_URL',
       'ANTHROPIC_MODEL',
       'BAILIAN_CODING_PLAN_API_KEY',
