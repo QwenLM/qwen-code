@@ -7467,6 +7467,14 @@ describe('review model canary routing', () => {
     expect(step.env.REVIEW_MODEL_CANARY_PERCENT).toBe(
       '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY_PERCENT }}',
     );
+    // The canary cohort's optional endpoint pair: the URL is a variable,
+    // the key is a secret, and neither is pinned into the script.
+    expect(step.env.REVIEW_BASE_URL_CANARY).toBe(
+      '${{ vars.QWEN_PR_REVIEW_BASE_URL_CANARY }}',
+    );
+    expect(step.env.REVIEW_API_KEY_CANARY).toBe(
+      '${{ secrets.REVIEW_OPENAI_API_KEY_CANARY }}',
+    );
     // The env no longer carries the model itself: a literal there would make
     // every split a workflow edit, which is the thing a rollout must not need.
     expect(step.env.OPENAI_MODEL).toBeUndefined();
@@ -7546,8 +7554,9 @@ describe('review model canary routing', () => {
   // the four the workflow actually passes: transposing the default and canary
   // arguments inverts the rollout, and swapping PR_NUMBER for a per-run value
   // loses the bucket entirely — both with every row above still green. Slice
-  // the real block (helper, router, trim, call site, notice, MODEL_ARGS) and
-  // execute it with the values the step's `env:` supplies.
+  // the real block (helper, router, trim, call site, endpoint override,
+  // notice, MODEL_ARGS) and execute it with the values the step's `env:`
+  // supplies.
   it('routes and reports at the real call site, not a paraphrase of it', () => {
     const start = run.indexOf('canary_percent_effective() {');
     const notice = run.indexOf('echo "::notice title=Review model::');
@@ -7586,11 +7595,11 @@ describe('review model canary routing', () => {
     // notice's model field is anchored — a bare 'canary' check is satisfied
     // by the percent suffix even when the model field is wrong.
     expect(serve('canary-model', '10', '12309')).toBe(
-      '::notice title=Review model::canary-model (PR #12309, canary 10%)\n' +
+      '::notice title=Review model::canary-model (PR #12309, canary 10%, cohort canary)\n' +
         'canary-model|--model canary-model',
     );
     expect(serve('canary-model', '10', '12310')).toBe(
-      '::notice title=Review model::default-model (PR #12310, canary 10%)\n' +
+      '::notice title=Review model::default-model (PR #12310, canary 10%, cohort default)\n' +
         'default-model|--model default-model',
     );
 
@@ -7600,7 +7609,7 @@ describe('review model canary routing', () => {
     // nothing about `canary 10 %` looks malformed.
     for (const percent of ['250', '10 ']) {
       expect(serve('canary-model', percent, '12309')).toBe(
-        `::notice title=Review model::default-model (PR #12309, canary 0%)\n` +
+        `::notice title=Review model::default-model (PR #12309, canary 0%, cohort default)\n` +
           'default-model|--model default-model',
       );
     }
@@ -7609,12 +7618,133 @@ describe('review model canary routing', () => {
     // rejects it and that failure is terminal for the whole cohort. Trimming
     // still leaves whitespace-only meaning "no split", not an invented one.
     expect(serve(' canary-model ', '100', '12345')).toBe(
-      '::notice title=Review model::canary-model (PR #12345, canary 100%)\n' +
+      '::notice title=Review model::canary-model (PR #12345, canary 100%, cohort canary)\n' +
         'canary-model|--model canary-model',
     );
     expect(serve('   ', '100', '12345')).toBe(
-      '::notice title=Review model::default-model (PR #12345, canary 100%)\n' +
+      '::notice title=Review model::default-model (PR #12345, canary 100%, cohort default)\n' +
         'default-model|--model default-model',
+    );
+  });
+
+  // The endpoint override lives inside the same sliced block, so the real
+  // call site is exercised again — with the base endpoint env present this
+  // time, plus per-row canary URL/key. The override must never leak the
+  // default key to another provider, and must never touch the default
+  // cohort's endpoint.
+  it('moves the endpoint only for the canary cohort, and only with its own key', () => {
+    const start = run.indexOf('canary_percent_effective() {');
+    const notice = run.indexOf('echo "::notice title=Review model::');
+    const args = run.indexOf('MODEL_ARGS=()', notice);
+    const end = run.indexOf('\nfi', args) + '\nfi'.length;
+    const block = run.slice(start, end);
+
+    const serve = (canary, percent, pr, canaryUrl, canaryKey, dflt) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -euo pipefail\n${block}\nprintf '%s' "$OPENAI_MODEL|$REVIEW_COHORT|$OPENAI_BASE_URL|$OPENAI_API_KEY"`,
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            REVIEW_MODEL_DEFAULT: dflt ?? 'default-model',
+            REVIEW_MODEL_CANARY: canary,
+            REVIEW_MODEL_CANARY_PERCENT: percent,
+            PR_NUMBER: pr,
+            OPENAI_BASE_URL: 'https://default.example.com/v1',
+            OPENAI_API_KEY: 'default-key',
+            ...(canaryUrl === undefined
+              ? {}
+              : { REVIEW_BASE_URL_CANARY: canaryUrl }),
+            ...(canaryKey === undefined
+              ? {}
+              : { REVIEW_API_KEY_CANARY: canaryKey }),
+          },
+        },
+      );
+
+    // Full pair configured: the canary cohort moves model, URL and key
+    // together. 12309 % 100 = 9 is inside the 10% split.
+    expect(
+      serve(
+        'canary-model',
+        '10',
+        '12309',
+        'https://canary.example.com/v1',
+        'canary-key',
+      ),
+    ).toBe(
+      '::notice title=Review model::canary-model (PR #12309, canary 10%, cohort canary)\n' +
+        'canary-model|canary|https://canary.example.com/v1|canary-key',
+    );
+
+    // A canary URL without its own key must not receive the default key:
+    // the cohort degrades to the default model and endpoint, with a warning.
+    const noKey = serve(
+      'canary-model',
+      '10',
+      '12309',
+      'https://canary.example.com/v1',
+      undefined,
+    );
+    expect(noKey).toContain('::warning::');
+    expect(noKey).toContain('falling back to the default cohort');
+    expect(noKey).toContain(
+      'default-model|default|https://default.example.com/v1|default-key',
+    );
+
+    // A key without a URL is inert: the model split still applies, the
+    // endpoint stays with the default gateway.
+    expect(serve('canary-model', '10', '12309', undefined, 'canary-key')).toBe(
+      '::notice title=Review model::canary-model (PR #12309, canary 10%, cohort canary)\n' +
+        'canary-model|canary|https://default.example.com/v1|default-key',
+    );
+
+    // The default cohort never touches the canary endpoint, even when the
+    // pair is fully configured. 12310 % 100 = 10 is outside the 10% split.
+    expect(
+      serve(
+        'canary-model',
+        '10',
+        '12310',
+        'https://canary.example.com/v1',
+        'canary-key',
+      ),
+    ).toBe(
+      '::notice title=Review model::default-model (PR #12310, canary 10%, cohort default)\n' +
+        'default-model|default|https://default.example.com/v1|default-key',
+    );
+
+    // Degenerate config (canary model == default model): buckets are
+    // indistinguishable, so the endpoint override stays off for everyone.
+    expect(
+      serve(
+        'same-model',
+        '100',
+        '12309',
+        'https://canary.example.com/v1',
+        'canary-key',
+        'same-model',
+      ),
+    ).toBe(
+      '::notice title=Review model::same-model (PR #12309, canary 100%, cohort default)\n' +
+        'same-model|default|https://default.example.com/v1|default-key',
+    );
+
+    // An unparseable canary URL degrades like a missing key.
+    const badUrl = serve(
+      'canary-model',
+      '10',
+      '12309',
+      'not a url',
+      'canary-key',
+    );
+    expect(badUrl).toContain('::warning::');
+    expect(badUrl).toContain(
+      'default-model|default|https://default.example.com/v1|default-key',
     );
   });
 });

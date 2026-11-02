@@ -119,11 +119,6 @@ final class JournalWriterLifecycle {
                 head.activationHeadRevision());
     }
 
-    WriterGrant acquireWriter(String tenantId, String sessionId,
-            String writerToken, AcquireWriterRequest request) {
-        return acquireWriter(tenantId, sessionId, writerToken, request, null);
-    }
-
     WriterGrant acquireWriter(String tenantId, String sessionId, String writerToken,
             AcquireWriterRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
@@ -295,11 +290,6 @@ final class JournalWriterLifecycle {
                 head.lastCommitDigest(), head.activationEpoch(), false);
     }
 
-    WriterGrant renewWriter(String tenantId, String sessionId,
-            String writerToken, RenewWriterRequest request) {
-        return renewWriter(tenantId, sessionId, writerToken, request, null);
-    }
-
     WriterGrant renewWriter(String tenantId, String sessionId, String writerToken,
             RenewWriterRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
@@ -375,11 +365,6 @@ final class JournalWriterLifecycle {
                     com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedStorageVersions.SUPPORTED, true, lease);
         }
         return grant(head, leaseUntil, false);
-    }
-
-    SealReceipt sealWriter(String tenantId, String sessionId,
-            String writerToken, SealWriterRequest request) {
-        return sealWriter(tenantId, sessionId, writerToken, request, null);
     }
 
     SealReceipt sealWriter(String tenantId, String sessionId, String writerToken,

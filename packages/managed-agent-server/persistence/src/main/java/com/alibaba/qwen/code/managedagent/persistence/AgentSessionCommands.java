@@ -62,14 +62,7 @@ final class AgentSessionCommands {
         return kind == SessionMutationKind.RENAME && workspaceFilesEnabled;
     }
 
-    Admission insertTurnCommand(String tenantId, String operation,
-            String idempotencyKey, String requestDigest, String sessionId,
-            List<Map<String, Object>> input, String payloadDigest) {
-        return insertTurnCommand(tenantId, operation, idempotencyKey,
-                requestDigest, sessionId, input, payloadDigest, null);
-    }
-
-    // The actor-carrying variant records the caller on the command
+    // Input admission records the supplied caller on the command
     // receipt, so the receipt's replay answers the actor who recorded it —
     // an OPERATOR's own retry of his own key — and not only the creator.
     Admission insertTurnCommand(String tenantId, String operation,
@@ -166,14 +159,7 @@ final class AgentSessionCommands {
         return new Admission(sessionId, turnId, false, true, operationId);
     }
 
-    Admission insertCancelCommand(String tenantId, String operation,
-            String idempotencyKey, String requestDigest, String sessionId,
-            String turnId) {
-        return insertCancelCommand(tenantId, operation, idempotencyKey,
-                requestDigest, sessionId, turnId, null);
-    }
-
-    // The actor-carrying twin of insertTurnCommand's overload.
+    // Cancellation receipts preserve the caller just as input receipts do.
     Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String actorId) {
@@ -226,12 +212,6 @@ final class AgentSessionCommands {
         }
         return new Admission(sessionId, turnId, false, commandEffect,
                 operationId);
-    }
-
-    SessionMutationCommand beginSessionRename(String tenantId, String key,
-            String digest, String sessionId, String title) {
-        return beginSessionRename(tenantId, key, digest, sessionId, title,
-                null);
     }
 
     SessionMutationCommand beginSessionRename(String tenantId, String key,
@@ -589,14 +569,7 @@ final class AgentSessionCommands {
                 "rename:" + revision);
     }
 
-    SessionMutationCommand beginSessionMutation(String tenantId,
-            String operation, String idempotencyKey, String requestDigest,
-            String sessionId, SessionMutationKind kind) {
-        return beginSessionMutation(tenantId, operation, idempotencyKey,
-                requestDigest, sessionId, kind, null);
-    }
-
-    // The actor-carrying twin of insertTurnCommand's overload.
+    // Mutation receipts preserve the caller just as input receipts do.
     SessionMutationCommand beginSessionMutation(String tenantId,
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind, String actorId) {

@@ -481,13 +481,6 @@ final class AgentTurnExecution {
      */
     void retractHarnessTurnOutput(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,
-            long fromSourceId, long retractionSourceId) {
-        retractHarnessTurnOutput(tenantId, sessionId, turnId, owner, eventEpoch,
-                fromSourceId, retractionSourceId, null, null, null);
-    }
-
-    void retractHarnessTurnOutput(String tenantId, String sessionId,
-            String turnId, String owner, String eventEpoch,
             long fromSourceId, long retractionSourceId, String sourceBootId,
             String sourceEventEpoch, Long throughSourceId) {
         storeRows.requireLegacyMutation(tenantId, sessionId);
