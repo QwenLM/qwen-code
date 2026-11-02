@@ -29,6 +29,9 @@ const shell = renderManagedAgentWebShell(container, {
 在包内执行 `npx vite build --config vite.lib.config.ts --mode managed-host`，输出
 `dist/managed-host/index.js` 及相对 chunks，已 bundle React/React DOM 和运行时依赖，
 复用原有 scoped CSS 自动注入，无需单独 CSS 或 import map。需提供整个输出目录。
+该入口仅随源码提供：没有接入 `build`、`exports` 和 `files`，不随 npm 包发布（
+`dist/types/managed-host.d.ts` 也在发布产物之外），需要时按上述命令自行构建。
+由于样式表按 document 复用，同一个 shadow root 只挂一个 shell。
 自定义 provider 的 `storageKey` 必须包含租户/账号身份；切换身份时更换 provider 与
 storageKey，旧 scope 沿用的 ID 会先丢弃，再由宿主显式给出新选择。详见
 [宿主接入设计](../../docs/design/2026-10-29-managed-host-webshell.zh-CN.md)。
