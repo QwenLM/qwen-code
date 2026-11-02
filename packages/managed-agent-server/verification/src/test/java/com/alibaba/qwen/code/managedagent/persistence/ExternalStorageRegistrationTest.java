@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration.ExternalStorageIdentity;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration.StorageAlias;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
@@ -346,10 +347,12 @@ public class ExternalStorageRegistrationTest {
         var sessions = new ManagedAgentStore(jdbc, json, java.time.Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties,
                 new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var selection = new com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection("workspace", ".");
-        String id = transactions.execute(ignored -> sessions.insertWorkspaceSessionCommand("tenant", "actor", "create", "digest", "qwen-code",
-                null, null, List.of(), null, selection).sessionId());
-        assertThatThrownBy(() -> transactions.execute(ignored -> sessions.insertWorkspaceSessionCommand("tenant", "foreign", "foreign-create", "digest", "qwen-code",
-                null, null, List.of(), null, selection))).isInstanceOf(RuntimeException.class);
+        String id = transactions.execute(ignored -> sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId("tenant").actorId("actor").idempotencyKey("create")
+                .requestDigest("digest").agentId("qwen-code").selection(selection).build()).sessionId());
+        assertThatThrownBy(() -> transactions.execute(ignored -> sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId("tenant").actorId("foreign").idempotencyKey("foreign-create")
+                .requestDigest("digest").agentId("qwen-code").selection(selection).build()))).isInstanceOf(RuntimeException.class);
         var saved = sessions.requireSession("tenant", id);
         assertThat(saved.toolProfile()).isEqualTo(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES);
         var scope = new com.alibaba.qwen.code.runtimebroker.RuntimeScope("tenant", "workspace", "1", "/worker/workspace",
