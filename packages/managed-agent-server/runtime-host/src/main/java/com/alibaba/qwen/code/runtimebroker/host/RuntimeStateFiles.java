@@ -43,5 +43,4 @@ public final class RuntimeStateFiles {
             throw new IOException("Recovery entry is not private to its owner");
         }
     }
-
 }

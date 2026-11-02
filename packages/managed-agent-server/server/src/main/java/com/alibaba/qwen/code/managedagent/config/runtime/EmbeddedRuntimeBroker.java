@@ -43,6 +43,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletionStage;
@@ -512,14 +513,15 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private static String resolveWorkspaceCwd(
             ManagedAgentProperties.RuntimeBroker broker) {
         if ("kubernetes".equals(broker.getProvisioner()) || "kubernetes-workspace".equals(broker.getProvisioner())) {
-            Path configured = Path.of(broker.getWorkspaceCwd());
-            if (!configured.isAbsolute()
-                    || !configured.normalize().toString().equals(
-                            broker.getWorkspaceCwd())) {
+            // This is a Pod path, independent of the server host filesystem.
+            String configured = broker.getWorkspaceCwd();
+            if (configured == null || !configured.startsWith("/") || configured.indexOf('\0') >= 0
+                    || !configured.equals("/") && Arrays.stream(configured.substring(1).split("/", -1))
+                            .anyMatch(part -> part.isEmpty() || part.equals(".") || part.equals(".."))) {
                 throw new IllegalStateException("Kubernetes Runtime Broker"
                         + " workspace cwd must be an absolute normalized path");
             }
-            return broker.getWorkspaceCwd();
+            return configured;
         }
         if (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(broker.getProvisioner())) {
             return broker.getWorkspaceCwd();

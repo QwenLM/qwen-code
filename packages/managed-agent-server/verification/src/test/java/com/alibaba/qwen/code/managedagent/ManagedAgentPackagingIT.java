@@ -32,7 +32,7 @@ class ManagedAgentPackagingIT {
             try (var executable = new ZipFile(Path.of(prefix + "-" + classifier + ".jar").toFile())) {
                 assertThat(executable.getEntry("BOOT-INF/classes/application.yml")).as(classifier).isNotNull();
                 assertThat(executable.getEntry("BOOT-INF/classes/application-managed-local.yml")).as(classifier).isNotNull();
-                assertThat(executable.getEntry("BOOT-INF/classes/META-INF/spring-configuration-metadata.json")).as(classifier).isNotNull();
+                assertThat(executable.getEntry("META-INF/spring-configuration-metadata.json")).as(classifier).isNotNull();
                 assertThat(executable.stream().map(entry -> entry.getName()))
                         .as(classifier + " runtime libraries")
                         .noneMatch(name -> name.startsWith("BOOT-INF/lib/lombok-"));

@@ -175,5 +175,4 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
                 : new Check(name, Status.FAIL, path + " is not readable",
                         "install the Qwen Code CLI or fix its path");
     }
-
 }

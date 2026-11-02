@@ -29,7 +29,7 @@ class StaticRuntimeProviderFactoryTest {
             assertThat(provider.kind()).isEqualTo("static");
             assertThat(request.requiresDurableIdentity()).isFalse();
             assertThat(provider.supportsDrainedStop()).isFalse();
-            assertThat(lease.getEndpoint()).isEqualTo(URI.create("http://127.0.0.1:41270"));
+            assertThat(lease.getEndpoint()).isEqualTo(URI.create("http://127.0.0.1:41270/"));
             assertThat(lease.getToken()).isEqualTo("static-token");
             assertThat(lease.getRuntimeInstanceId()).isEqualTo("original-runtime");
             assertThat(lease.getLeaseId()).isEqualTo("original-lease");
