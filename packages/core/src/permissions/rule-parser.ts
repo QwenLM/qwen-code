@@ -578,12 +578,21 @@ export function parseRule(raw: string): PermissionRule {
  * default runs, so the same reason `tools.eager` reports its unusable entries
  * applies here.
  *
- * The raw rule is printed through `stripAnsiAndControl`: it arrives from
- * settings files and from tool calls, so it is untrusted text headed for the
- * operator's terminal.
+ * The raw rule is printed through `stripAnsiAndControl` and then the Unicode
+ * format characters that reorder a rendered row: it arrives from settings
+ * files and from tool calls, so it is untrusted text headed for the
+ * operator's terminal. `stripAnsiAndControl` covers C0/C1 and the ANSI
+ * sequences; the bidi overrides are the separate pass the rest of the code
+ * base already treats as required for terminal output, and this message is
+ * the one place an operator reads a rule that protects nothing.
  */
+
+// U+061C, U+200E/U+200F, the explicit embeddings and overrides (U+202A-U+202E)
+// and the isolates (U+2066-U+2069). Same set managed-automation-operations
+// strips before framing a run for a terminal.
+const BIDI_MARKS = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 export function warnDroppedPermissionRule(raw: string, kind?: string): void {
-  const printable = stripAnsiAndControl(raw);
+  const printable = stripAnsiAndControl(raw).replace(BIDI_MARKS, "");
   const message =
     `[permissions] ignoring malformed ${kind ? `${kind} ` : ''}rule ` +
     `(unbalanced parentheses): ${printable} — it matches nothing, so it ` +

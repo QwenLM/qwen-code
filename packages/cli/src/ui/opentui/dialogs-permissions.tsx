@@ -801,9 +801,11 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
           <box height={1} />
           <box marginLeft={2} flexDirection="column">
             <text fg={C.text} attributes={1}>
-              {deleteTarget.raw}
+              {sanitizeTerminalLine(deleteTarget.raw)}
             </text>
-            <text fg={C.dim}>{describePermissionRule(deleteTarget.raw)}</text>
+            <text fg={C.dim}>
+              {sanitizeTerminalLine(describePermissionRule(deleteTarget.raw))}
+            </text>
             <text fg={C.dim}>{permissionScopeLabel(deleteTarget.scope)}</text>
           </box>
           <box height={1} />

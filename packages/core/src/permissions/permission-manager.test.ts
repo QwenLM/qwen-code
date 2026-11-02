@@ -2854,6 +2854,30 @@ describe('PermissionManager', () => {
       }
     });
 
+    // `stripAnsiAndControl` covers C0/C1 but not the Unicode format
+    // characters that reorder a row. A deny rule carrying a trailing RLO is
+    // malformed, so this warning fires for exactly the rule the operator most
+    // needs to read straight, and with the override intact the printed tail
+    // renders reversed (#15775).
+    it('strips bidi overrides before printing', () => {
+      const rlo = String.fromCharCode(0x202e);
+      const lri = String.fromCharCode(0x2066);
+      const rawWithBidi = `Bash(rm -rf /${rlo})(${lri}`;
+      const manager = makePm();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        parseRules([rawWithBidi]);
+        manager.addSessionDenyRule(rawWithBidi);
+        for (const [message] of warn.mock.calls) {
+          expect(message).not.toContain(rlo);
+          expect(message).not.toContain(lri);
+          expect(message).toContain('Bash(rm -rf /');
+        }
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
     // The raw rule reaches the operator's terminal through this warning, and
     // it arrives from settings files and from tool calls, so escapes in it
     // must not survive into the message.
