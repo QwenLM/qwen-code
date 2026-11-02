@@ -704,7 +704,7 @@ describe('extractShellOperationsAcrossCommand', () => {
       [write('/repo/-some-dir/settings.local.json')],
     ],
     [
-      'ignores redirects attached to cd when resolving static cwd',
+      'resolves the static cwd even when the cd segment carries a >/dev/null redirect',
       "cd .qwen >/dev/null && echo '{}' > settings.json",
       [write(REPO_SETTINGS)],
     ],
