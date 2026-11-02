@@ -2315,14 +2315,22 @@ jobs:
     # gate, classified here because depending on `test` for its output would
     # serialize this job behind the hour-long unit run.
     if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
-    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    # Reads lint_runner, NOT ubuntu_runner: like lint_and_static, this lane
+    # executes PR code on the pool for every pull request — accepted under the
+    # same 2026-10-31 decision, and it carries NO secrets by construction
+    # (every model key is emptied at the integration step; the job's only
+    # token is the read-only checkout grant). Its PR-code step already pins a
+    # step-level runner.temp HOME with the key scrub, so the pool exposure is
+    # the class already accepted for lint. test and integration_cli keep the
+    # association-gated ubuntu_runner.
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.lint_runner || ''["ubuntu-latest"]'') }}'
     # Dependency installation alone can exceed 30 minutes on a contended shared
     # ECS host, before the separately bounded 20-minute integration step starts.
-    # Same self-hosted scoping as `test` (this lane keeps the association-gated
-    # ubuntu_runner, unlike lint_and_static): hosted fallback routing
-    # keeps the pre-contention ceiling, and the ARM64 fleet — which carries
-    # no `ecs-qwen` label — gets the contended-pool allowance it runs under.
-    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''60'' || ''30'') }}'
+    # Same self-hosted scoping as lint_and_static (60/30 like its 90/45):
+    # hosted fallback routing keeps the pre-contention ceiling, and the ARM64
+    # fleet — which carries no `ecs-qwen` label — gets the contended-pool
+    # allowance it runs under.
+    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.lint_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''60'' || ''30'') }}'
     permissions:
       contents: 'read'
     steps:
@@ -2505,10 +2513,15 @@ jobs:
       - name: 'Run required no-AK integration gate'
         if: "${{ steps.ci_profile.outputs.ci_profile == 'full' }}"
         timeout-minutes: 20
+        # Step-level env is legal for the runner context (unlike job-level),
+        # and RUNNER_TEMP survives across jobs on this pool — so the path is
+        # run-unique and cleared before use (the R2-1 lesson from the lint
+        # lane's isolation: a fixed name hands a fork's writes to the next
+        # job on the registration).
         env:
-          HOME: '${{ runner.temp }}/qwen-no-ak-home'
-          USERPROFILE: '${{ runner.temp }}/qwen-no-ak-home'
-          QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home/.qwen'
+          HOME: '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}'
+          USERPROFILE: '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}'
+          QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}/.qwen'
           API_KEY: ''
           ANTHROPIC_API_KEY: ''
           ANTHROPIC_BASE_URL: ''
@@ -2538,6 +2551,7 @@ jobs:
           QWENCLOUD_TOKEN_PLAN_API_KEY: ''
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
+          rm -rf -- "${HOME}"
           mkdir -p "${HOME}" "${QWEN_HOME}"
           npm run typecheck:integration
           npm run test:integration:no-ak:sandbox:none

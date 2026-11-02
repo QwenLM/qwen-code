@@ -13,16 +13,23 @@
 `classify_pr` 的 `pick_runner` 现在发布两套路由，而不是一套，且两者都从同一份
 解析好的 fleet 标签赋值：
 
-| 输出            | 接纳对象                                                                                    | 读取方                                                                |
-| --------------- | ------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| `ubuntu_runner` | 同仓库 head、`OWNER` / `MEMBER` / `COLLABORATOR` 作者、`merge_group`、`push`，其余走 hosted | `test`、`integration_no_ak`、`integration_cli`、`web_shell_e2e_smoke` |
-| `lint_runner`   | 每一个 `pull_request`，未受信 fork 也算；其余情况与 `ubuntu_runner` 相同                    | `lint_and_static`                                                     |
+| 输出            | 接纳对象                                                                                    | 读取方                                                    |
+| --------------- | ------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| `ubuntu_runner` | 同仓库 head、`OWNER` / `MEMBER` / `COLLABORATOR` 作者、`merge_group`、`push`，其余走 hosted | `test`、`integration_cli`、`web_shell_e2e_smoke`          |
+| `lint_runner`   | 每一个 `pull_request`，未受信 fork 也算；其余情况与 `ubuntu_runner` 相同                    | `lint_and_static`、`integration_no_ak`（2026-11-02 加入） |
 
 `classify_pr` 自身的 runner 对其接纳的所有事件一律走 ECS（kill-switch 除外）。
 门禁 job 只执行可信 base-SHA 的代码、拿只读 token——暴露面严格小于 lint
 车道；而把它对不可信 fork 留在 hosted，会让整条 fork CI 链（classify 是所有
 Linux 车道的 `needs` 前置）排在稀缺的 hosted 池后面。association 门禁保留在
-它真正约束重 PR 代码执行的地方：`ubuntu_runner`（test 与集成车道读取）。
+它真正约束重 PR 代码执行的地方：`ubuntu_runner`（test 车道与仅 merge-queue
+的 CLI 集成车道读取）。
+
+2026-11-02：`integration_no_ak` 加入 `lint_runner`。与 lint 同信任类——它的
+集成步骤执行 PR 代码——但按构造零密钥：该步骤清空所有模型 key，job 唯一的
+token 是只读检出授权。该步骤本就钉着 step 级 `runner.temp` HOME 并做 key
+清洗；该 HOME 现在改为 run 唯一且先清后建（R2-1 的教训），路由电池同时钉住
+车道集合与零密钥 env 契约。
 
 回退优先级：`MAINTAINER_ECS_RUNNER_DISABLED=true` 覆盖一切，包括手动调度。
 `LINUX_RUNNER_FLEET=hosted` 把 pull request、merge group 和 push 强制到 hosted，
@@ -90,7 +97,8 @@ ownership" 步骤正是因为容器化 job 在这些主机上留下 root 属主�
 - **association 门禁是吞吐策略，不是可强制的信任边界。** `pull_request` 运行
   执行的是 PR 自己的 workflow 文件，任何 fork 都能在开 PR 的同一个 diff 里把
   任何车道（包括 `test`）放到池上（ci.yml 的 `test_windows` 注释记录了同一
-  事实）。GitHub 的首次贡献者 workflow 审批是外层门。本决定的单车道范围描述
+  事实）。GitHub 的首次贡献者 workflow 审批是外层门。本决定的车道范围（Lint &
+  Static 与 no-AK 集成）描述
   的是默认路由，不是一道围栏。
 - **云 metadata。** 若池实例绑定了 RAM 角色，任何 job 进程都可访问 metadata
   端点。建议 fleet 侧开启加固模式，与本 workflow 变更独立。
@@ -111,7 +119,7 @@ smoke 60、no-AK 集成 30。
 每个 full-profile PR）钉住：门禁 job 在全 association 矩阵下无条件走 ECS
 （kill-switch 可退回、association 子句不得回潮）、生产者绑定
 （`classify_pr.outputs.lint_runner` ← `pick_runner`）、真实选择器 shell 在全
-association/事件矩阵下的行为、`lint_runner` 的单车道范围（超集必须更新本记录）、
+association/事件矩阵下的行为、`lint_runner` 的两车道范围（超集必须更新本记录）、
 首步发布的 run 唯一 HOME（先清后建、共享可校验缓存）、清理步骤先于收集器、
 以及两个输出在未建模的 fleet 值下仍走同一份标签。
 `scripts/tests/ci-platform-lanes.test.js` 钉住

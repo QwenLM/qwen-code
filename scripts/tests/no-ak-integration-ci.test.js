@@ -439,8 +439,10 @@ describe('no-AK integration CI wiring', () => {
       "    name: 'Integration Tests (no-AK, No Sandbox)'",
     );
     expect(gateJob).toContain("    needs: 'classify_pr'");
-    // Same runner routing as the Ubuntu gate, never a hard-coded pool.
-    expect(gateJob).toContain('needs.classify_pr.outputs.ubuntu_runner');
+    // Same trust class as lint (PR code on the pool, zero secrets by
+    // construction — 2026-11-02 extension of the 2026-10-31 decision),
+    // never a hard-coded pool.
+    expect(gateJob).toContain('needs.classify_pr.outputs.lint_runner');
     const jobIf = gateJob
       .split('\n')
       .find((line) => line.startsWith('    if:'));
@@ -592,16 +594,20 @@ describe('no-AK integration CI wiring', () => {
     expect(gateStep.indexOf(integrationTypecheckCommand)).toBeLessThan(
       gateStep.indexOf(`npm run ${NO_AK_SCRIPT}`),
     );
+    // RUNNER_TEMP survives across jobs on the shared pool, so the gate's
+    // HOME must be run-unique (2026-11-02, the R2-1 lesson from the lint
+    // lane): a fixed name hands a fork's writes to the next job.
     expect(gateStep).toContain(
-      "QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home/.qwen'",
+      "QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}/.qwen'",
     );
     expect(gateStep).toContain('timeout-minutes: 20');
     expect(gateStep).toContain(
-      "\n          HOME: '${{ runner.temp }}/qwen-no-ak-home'",
+      "\n          HOME: '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}'",
     );
     expect(gateStep).toContain(
-      "\n          USERPROFILE: '${{ runner.temp }}/qwen-no-ak-home'",
+      "\n          USERPROFILE: '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}'",
     );
+    expect(gateStep).toContain('\n          rm -rf -- "${HOME}"');
     for (const key of [
       'API_KEY',
       'ANTHROPIC_API_KEY',

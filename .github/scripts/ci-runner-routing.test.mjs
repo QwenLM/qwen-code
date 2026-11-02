@@ -456,17 +456,60 @@ describe('ci.yml lint HOME isolation', () => {
     /outputs\.lint_runner/.test(String(job['runs-on'] ?? '')),
   );
 
-  it('scopes the ungated routing to the single recorded lane', () => {
-    // The decision record scopes the boundary change to Lint & Static alone;
-    // a superset must force a deliberate record update, not pass silently.
+  it('scopes the ungated routing to the recorded lanes', () => {
+    // The decision record scopes the boundary change to Lint & Static and
+    // (2026-11-02, same trust class — PR code on the pool, zero secrets by
+    // construction) the no-AK integration lane; a superset must force a
+    // deliberate record update, not pass silently.
     assert.deepEqual(
       ungated.map(([id]) => id),
-      ['lint_and_static'],
+      ['lint_and_static', 'integration_no_ak'],
+    );
+  });
+
+  it('integration_no_ak isolates its PR-code step HOME run-uniquely', () => {
+    // no_ak's PR-code step (the integration gate) pins a step-level env HOME
+    // — legal for the runner context, unlike job env — with every model key
+    // emptied. RUNNER_TEMP survives across jobs on this pool, so the path
+    // must be run-unique and cleared before use (the R2-1 lesson), or a
+    // fork's writes land where the next job on the registration reads.
+    const gate = ciDoc.jobs.integration_no_ak.steps?.find(
+      (s) => s.name === 'Run required no-AK integration gate',
+    );
+    assert.ok(gate, 'integration gate step missing');
+    const home = String(gate.env?.HOME ?? '');
+    assert.ok(
+      home.includes('qwen-no-ak-home-${{ github.run_id }}'),
+      `no_ak HOME must be run-unique, got: ${home}`,
+    );
+    assert.equal(gate.env?.USERPROFILE, home);
+    assert.ok(String(gate.env?.QWEN_HOME).startsWith(`${home}/`));
+    // Zero-secrets contract: every model key emptied at the step that runs
+    // PR code — widening this env to a real secret must turn this red.
+    for (const key of Object.keys(gate.env ?? {})) {
+      if (/API_KEY|TOKEN|AUTH/.test(key)) {
+        assert.equal(
+          gate.env[key],
+          '',
+          `${key} must stay empty in the no-AK PR-code step`,
+        );
+      }
+    }
+    assert.ok(
+      String(gate.run).includes('rm -rf') &&
+        String(gate.run).indexOf('rm -rf') < String(gate.run).indexOf('mkdir'),
+      'must clear the HOME before creating it',
     );
   });
 
   it('publishes a run-unique HOME from the first step, not job env', () => {
-    for (const [id, job] of ungated) {
+    // lint's shape: the whole job is PR code, so the first step publishes
+    // HOME/USERPROFILE via GITHUB_ENV for every later step. no_ak has its own
+    // shape (previous test): only the integration gate step runs PR code and
+    // pins its env there.
+    for (const [id, job] of ungated.filter(
+      ([id]) => id === 'lint_and_static',
+    )) {
       // jobs.<job_id>.env cannot read the runner context — GitHub rejects the
       // whole workflow file (actionlint 1.7.12 witnesses it).
       assert.equal(job.env?.HOME, undefined, `${id} job-level HOME`);
@@ -510,7 +553,11 @@ describe('ci.yml lint HOME isolation', () => {
   });
 
   it('reclaims the isolated HOME before the failure collector', () => {
-    for (const [id, job] of ungated) {
+    // lint's shape (no_ak has no collector and reclaims nothing: its HOME
+    // is run-unique, so the next job cannot read it anyway).
+    for (const [id, job] of ungated.filter(
+      ([id]) => id === 'lint_and_static',
+    )) {
       const steps = job.steps ?? [];
       const names = steps.map((s) => s.name);
       const clean = steps.find((s) => s.name === 'Clean isolated HOME');

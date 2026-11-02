@@ -14,10 +14,10 @@ remains the reference for the pool's shared-HOME property.
 `classify_pr`'s `pick_runner` publishes two routings instead of one, both
 assigned from a single resolved fleet ladder:
 
-| Output          | Admits                                                                                            | Read by                                                               |
-| --------------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| `ubuntu_runner` | same-repo heads, `OWNER` / `MEMBER` / `COLLABORATOR` authors, `merge_group`, `push` — else hosted | `test`, `integration_no_ak`, `integration_cli`, `web_shell_e2e_smoke` |
-| `lint_runner`   | every `pull_request`, untrusted forks included; otherwise identical to `ubuntu_runner`            | `lint_and_static`                                                     |
+| Output          | Admits                                                                                            | Read by                                             |
+| --------------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| `ubuntu_runner` | same-repo heads, `OWNER` / `MEMBER` / `COLLABORATOR` authors, `merge_group`, `push` — else hosted | `test`, `integration_cli`, `web_shell_e2e_smoke`    |
+| `lint_runner`   | every `pull_request`, untrusted forks included; otherwise identical to `ubuntu_runner`            | `lint_and_static`, `integration_no_ak` (2026-11-02) |
 
 `classify_pr`'s OWN runner is unconditional ECS (kill-switch excepted) for
 every event it accepts. The gate executes only trusted base-SHA code with a
@@ -25,7 +25,16 @@ read-only token — strictly less exposure than the lint lane — and keeping it
 on hosted for untrusted forks queued the entire fork CI chain (classify is
 the `needs` prerequisite of every Linux lane) behind the scarce hosted pool.
 The association gate survives where it bounds heavy PR-code execution:
-`ubuntu_runner`, read by the test and integration lanes.
+`ubuntu_runner`, read by the test lane and the merge-queue-only CLI
+integration lane.
+
+2026-11-02: `integration_no_ak` joined `lint_runner`. Same trust class as
+lint — its integration step executes PR code — but zero secrets by
+construction: every model key is emptied at that step and the job's only
+token is the read-only checkout grant. The step already pinned a
+step-level `runner.temp` HOME with the key scrub; that HOME is now
+run-unique and cleared before use (the R2-1 lesson), and the routing
+battery pins both the lane set and the zero-secrets env contract.
 
 Fallback priority: `MAINTAINER_ECS_RUNNER_DISABLED=true` overrides everything,
 including manual dispatch. `LINUX_RUNNER_FLEET=hosted` forces pull requests,
@@ -135,7 +144,7 @@ every full-profile PR) pins: the gate's unconditional ECS routing across the
 full association matrix (kill-switch reverting it, no association clause
 creeping back), the producer binding
 (`classify_pr.outputs.lint_runner` ← `pick_runner`), the full association /
-event matrix against the real selector shell, the single-lane scope of
+event matrix against the real selector shell, the recorded two-lane scope of
 `lint_runner` (a superset must update this record), the run-unique HOME
 published from the first step with clear-before-create and shared verified
 caches, the cleanup step preceding the collector, and both outputs agreeing
