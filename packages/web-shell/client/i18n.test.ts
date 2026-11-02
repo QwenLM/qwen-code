@@ -61,7 +61,6 @@ describe('web-shell i18n catalog', () => {
         'waitingGame.backToHeatmap',
         'waitingGame.heatmap',
         'waitingGame.tokens',
-        'waitingGame.noActivity',
         'waitingGame.jumpToMessage',
         'waitingGame.tokenTotal',
         'waitingGame.tokenInput',

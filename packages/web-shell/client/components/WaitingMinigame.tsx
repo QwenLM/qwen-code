@@ -15,7 +15,7 @@ import {
 import { Gamepad2Icon } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { isCoarsePointerDevice } from '../hooks/useIsTouchComposer';
-import { formatTokenCount } from '../utils/formatTokenCount';
+import { formatContextTokens } from '../utils/formatTokenCount';
 import {
   WAITING_ACTIVITY_CELLS,
   WAITING_ACTIVITY_DAYS,
@@ -741,6 +741,21 @@ export function WaitingMinigame({
     restartActiveGame,
   ]);
 
+  const locale =
+    language === 'zh-CN' ? 'zh-CN' : language === 'ru' ? 'ru-RU' : 'en';
+  const { formatDay, formatMonth } = useMemo(() => {
+    const dayFormatter = new Intl.DateTimeFormat(locale, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
+    const monthFormatter = new Intl.DateTimeFormat(locale, { month: 'short' });
+    return {
+      formatDay: (value: number) => dayFormatter.format(new Date(value)),
+      formatMonth: (value: number) => monthFormatter.format(new Date(value)),
+    };
+  }, [locale]);
+
   if (!open || coarsePointer) return null;
 
   const days = activity;
@@ -750,16 +765,6 @@ export function WaitingMinigame({
   );
   const tetrisGrid = waitingMinigameRenderGrid(game);
   const snakeGrid = waitingSnakeRenderGrid(snake);
-  const locale =
-    language === 'zh-CN' ? 'zh-CN' : language === 'ru' ? 'ru-RU' : 'en';
-  const formatDay = (value: number) =>
-    new Intl.DateTimeFormat(locale, {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-    }).format(new Date(value));
-  const formatMonth = (value: number) =>
-    new Intl.DateTimeFormat(locale, { month: 'short' }).format(new Date(value));
   const dayLabel = (day: WaitingActivityDay) =>
     t('waitingGame.heatmapTooltip', {
       time: formatDay(day.startAt),
@@ -1075,25 +1080,25 @@ export function WaitingMinigame({
                   <div className={styles.tokenMetric}>
                     <span>{t('waitingGame.tokenTotal')}</span>
                     <strong title={String(totalTokens)}>
-                      {formatTokenCount(totalTokens)}
+                      {formatContextTokens(totalTokens)}
                     </strong>
                   </div>
                   <div className={styles.tokenMetric}>
                     <span>{t('waitingGame.tokenInput')}</span>
                     <strong title={String(tokenUsage.input)}>
-                      {formatTokenCount(tokenUsage.input)}
+                      {formatContextTokens(tokenUsage.input)}
                     </strong>
                   </div>
                   <div className={styles.tokenMetric}>
                     <span>{t('waitingGame.tokenOutput')}</span>
                     <strong title={String(tokenUsage.output)}>
-                      {formatTokenCount(tokenUsage.output)}
+                      {formatContextTokens(tokenUsage.output)}
                     </strong>
                   </div>
                   <div className={styles.tokenMetric}>
                     <span>{t('waitingGame.tokenCached')}</span>
                     <strong title={String(tokenUsage.cached)}>
-                      {formatTokenCount(tokenUsage.cached)}
+                      {formatContextTokens(tokenUsage.cached)}
                     </strong>
                   </div>
                 </div>
@@ -1107,8 +1112,8 @@ export function WaitingMinigame({
                   <div className={styles.contextHead}>
                     <span>{t('waitingGame.tokenContext')}</span>
                     <span>
-                      {formatTokenCount(tokenUsage.context ?? 0)} /{' '}
-                      {formatTokenCount(tokenUsage.contextLimit ?? 0)}
+                      {formatContextTokens(tokenUsage.context ?? 0)} /{' '}
+                      {formatContextTokens(tokenUsage.contextLimit ?? 0)}
                     </span>
                   </div>
                   <div className={styles.contextTrack}>

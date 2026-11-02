@@ -256,3 +256,34 @@ test('renders the waiting card in dark theme and Chinese', async ({
     path: testInfo.outputPath('waiting-minigame-dark-zh-card.png'),
   });
 });
+
+test('keeps calendar days clickable next to the game entry with reduced motion', async ({
+  page,
+}, testInfo) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.addInitScript(() => {
+    window.localStorage.setItem('qwen-code-web-shell-waiting-games', '1');
+  });
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+  await forceRandom(page, 0);
+  await startWaitingCard(page, daemon, 'Reduced motion');
+  const game = page.locator('[data-component="waiting-minigame"]');
+
+  const start = game.locator('[data-component="waiting-minigame-start"]');
+  await expect(start).toBeVisible({ timeout: 8_000 });
+
+  // The entry's forgiving hit area must not cover the calendar.
+  const populated = game
+    .locator('[data-level]:not([data-empty="true"])')
+    .first();
+  await populated.hover();
+  await expect(game.locator('[role="tooltip"]')).toBeVisible();
+  await populated.click();
+  await expect(
+    game.locator('[role="img"][aria-label="Qwen Code"]'),
+  ).toHaveCount(0);
+  await expect(game.locator('[data-state]')).toHaveCount(0);
+  await expect(start).toBeVisible();
+});

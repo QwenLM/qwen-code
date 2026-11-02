@@ -3796,7 +3796,6 @@ const EN: Messages = {
   'waitingGame.heatmapTooltip': (v) =>
     `${v?.time ?? ''} · ${v?.count ?? 0} Q&A`,
   'waitingGame.jumpToMessage': 'Click to locate',
-  'waitingGame.noActivity': 'No Q&A activity yet',
   'waitingGame.tokenTotal': 'Total tokens',
   'waitingGame.tokenInput': 'Input',
   'waitingGame.tokenOutput': 'Output',
@@ -8195,7 +8194,6 @@ const ZH: Messages = {
   'waitingGame.heatmapTooltip': (v) =>
     `${v?.time ?? ''} · ${v?.count ?? 0} 条问答`,
   'waitingGame.jumpToMessage': '点击定位',
-  'waitingGame.noActivity': '暂无问答活动',
   'waitingGame.tokenTotal': '总 Token',
   'waitingGame.tokenInput': '输入',
   'waitingGame.tokenOutput': '输出',
