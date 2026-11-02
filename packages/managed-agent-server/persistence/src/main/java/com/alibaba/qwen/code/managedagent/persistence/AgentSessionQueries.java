@@ -163,7 +163,7 @@ final class AgentSessionQueries {
                                             row.getString("session_id"),
                                             row.getString("parent_session_id"),
                                             row.getString("workspace_id"),
-                                            (Long) row.getObject("workspace_generation"),
+                                            row.getObject("workspace_generation", Long.class),
                                             row.getString("workspace_storage_id"),
                                             row.getBoolean("creator_can_execute")),
                             arguments.toArray());

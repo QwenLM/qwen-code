@@ -75,7 +75,7 @@ public class AutomationLedgerStore
                     result.getString("timezone"),
                     result.getString("session_mode"),
                     result.getString("overlap"), result.getString("catch_up"),
-                    (Long) result.getObject("catch_up_limit"),
+                    result.getObject("catch_up_limit", Long.class),
                     result.getBoolean("is_enabled"), result.getString("state"),
                     result.getString("blocked_reason"),
                     result.getLong("armed_at"),

@@ -73,6 +73,31 @@ public class ManagedSchemaSessionStoreTest {
     }
 
     @Test
+    void executionFactsReadNullableUnsignedWorkspaceGenerations() {
+        assertThat(store.sessionsWithExecutionRegistryFacts(tenant, List.of(session))).isEmpty();
+        byte[] actor = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, "actor");
+        jdbc.update(
+                "INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
+                        + " display_name, config_ref, policy_ref, state) VALUES"
+                        + " (?, 'workspace', 7, 'storage', 'Workspace', 'config', 'policy', 'ACTIVE')",
+                tenant);
+        jdbc.update(
+                "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES"
+                        + " (?, 'workspace', ?, 'OPERATOR')",
+                tenant, actor);
+        jdbc.update(
+                "UPDATE ma_session SET workspace_id = 'workspace', workspace_generation = 7,"
+                        + " workspace_storage_id = 'storage', cwd_relative = '',"
+                        + " context_config_ref = 'context', context_revision = 1,"
+                        + " workspace_config_ref = 'config', workspace_policy_ref = 'policy',"
+                        + " creator_actor_key = ? WHERE tenant_id = ? AND session_id = ?",
+                actor, tenant, session);
+        assertThat(store.sessionsWithExecutionRegistryFacts(tenant, List.of(session))).containsExactly(session);
+        jdbc.update("UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ?", tenant);
+        assertThat(store.sessionsWithExecutionRegistryFacts(tenant, List.of(session))).isEmpty();
+    }
+
+    @Test
     void publicAndPrivateSessionScopesRemainDistinctAndByteExact() {
         assertThat(store.findSession(tenant, session)).isPresent();
         assertThat(store.findSession(tenant.toUpperCase(), session)).isEmpty();

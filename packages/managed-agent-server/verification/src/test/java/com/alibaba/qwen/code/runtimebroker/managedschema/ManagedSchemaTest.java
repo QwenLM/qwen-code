@@ -11,8 +11,11 @@ import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.SQLException;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -22,9 +25,51 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ManagedSchemaTest {
+    // Pin the original business identities independently of the mutable DDL.
+    private static final Map<String, List<String>> BUSINESS_KEYS = Map.ofEntries(
+            Map.entry("ma_session", List.of("tenant_id", "session_id")),
+            Map.entry("ma_user_message_queue", List.of("tenant_id", "session_id")),
+            Map.entry("ma_user_message", List.of("tenant_id", "session_id", "message_id")),
+            Map.entry("ma_user_message_command", List.of("tenant_id", "session_id", "command_key")),
+            Map.entry("ma_turn", List.of("tenant_id", "session_id", "turn_id")),
+            Map.entry("ma_session_head", List.of("tenant_key", "harness_key")),
+            Map.entry("ma_session_journal_tx", List.of("tenant_id", "session_id", "journal_revision")),
+            Map.entry("ma_event_stream", List.of("tenant_id", "session_id", "stream_kind", "stream_id")),
+            Map.entry("ma_public_event", List.of("tenant_id", "session_id", "stream_kind", "stream_id", "sequence_id")),
+            Map.entry("ma_message", List.of("tenant_id", "session_id", "item_id")),
+            Map.entry("ma_session_record", List.of("session_scope_key", "record_key")),
+            Map.entry("ma_agent_definition", List.of("tenant_id", "agent_id", "revision")),
+            Map.entry("ma_resource", List.of("resource_key")),
+            Map.entry("ma_resource_ref", List.of("session_scope_key", "owner_kind", "owner_key", "owner_revision", "resource_key")),
+            Map.entry("ma_output_capture", List.of("scope_key", "publication_id")),
+            Map.entry("ma_artifact", List.of("artifact_id")),
+            Map.entry("ma_request_receipt", List.of("receipt_key")),
+            Map.entry("ma_operation", List.of("operation_key")),
+            Map.entry("ma_operation_work", List.of("operation_key", "work_kind", "target_key")),
+            Map.entry("ma_workspace", List.of("tenant_id", "workspace_id")),
+            Map.entry("ma_workspace_access", List.of("tenant_id", "workspace_id", "actor_id")),
+            Map.entry("ma_extension_package", List.of("package_key")),
+            Map.entry("ma_extension_settings", List.of("settings_key")),
+            Map.entry("ma_extension_operation", List.of("operation_key")),
+            Map.entry("ma_storage", List.of("alias_key")),
+            Map.entry("ma_runtime_slot", List.of("request_key")),
+            Map.entry("ma_runtime_binding", List.of("binding_id")),
+            Map.entry("ma_runtime_session", List.of("scope_key", "runtime_session_id")),
+            Map.entry("ma_tool_execution", List.of("execution_call_id_hash")),
+            Map.entry("ma_storage_owner", List.of("storage_key")),
+            Map.entry("ma_tenant_guard", List.of("tenant_key", "guard_domain")),
+            Map.entry("ma_read_lease", List.of("lease_id")),
+            Map.entry("ma_channel_instance", List.of("tenant_id", "channel_id")),
+            Map.entry("ma_channel_binding", List.of("tenant_id", "channel_id", "route_id")),
+            Map.entry("ma_delivery", List.of("delivery_key")),
+            Map.entry("ma_schedule", List.of("tenant_id", "schedule_id")),
+            Map.entry("ma_schedule_occurrence", List.of("tenant_id", "schedule_id", "occurrence_key")),
+            Map.entry("ma_session_worktree", List.of("tenant_id", "session_id")));
+
     @Test
     void generatesRowIdentitiesWithoutWeakeningBusinessUniqueness() throws Exception {
         DataSource source = initialized();
+        assertEquals(ManagedSchemaContract.TABLES, BUSINESS_KEYS.keySet());
         try (var connection = source.getConnection(); var statement = connection.createStatement()) {
             for (String table : ManagedSchemaContract.TABLES) {
                 try (var columns = connection.getMetaData().getColumns(null, null, table, "id")) {
@@ -39,6 +84,19 @@ class ManagedSchemaTest {
                 try (var keys = connection.getMetaData().getImportedKeys(null, null, table)) {
                     assertTrue(!keys.next(), table);
                 }
+                Map<String, Map<Integer, String>> uniqueKeys = new HashMap<>();
+                try (var keys = connection.getMetaData().getIndexInfo(null, null, table, true, false)) {
+                    while (keys.next()) {
+                        String column = keys.getString("COLUMN_NAME");
+                        if (column != null) {
+                            uniqueKeys.computeIfAbsent(keys.getString("INDEX_NAME"), ignored -> new TreeMap<>())
+                                    .put(keys.getInt("ORDINAL_POSITION"), column);
+                        }
+                    }
+                }
+                assertTrue(uniqueKeys.values().stream()
+                        .anyMatch(columns -> List.copyOf(columns.values()).equals(BUSINESS_KEYS.get(table))),
+                        table + " business key " + BUSINESS_KEYS.get(table));
             }
             for (var key : Map.of(
                     "ma_runtime_slot", "request_key",

@@ -348,6 +348,25 @@ public class ManagedSchemaBusinessStoreTest {
     }
 
     @Test
+    void scheduleReadsPreserveBoundedAndAbsentCatchUpLimits() {
+        AutomationLedgerStore automation = new AutomationLedgerStore(jdbc);
+        for (String policy : List.of("bounded", "none")) {
+            Long limit = policy.equals("bounded") ? 7L : null;
+            jdbc.update(
+                    "INSERT INTO ma_schedule (tenant_id, schedule_id, session_id, workspace_id,"
+                            + " actor_id, record_revision, definition_revision, definition_digest,"
+                            + " goal, cron, timezone, session_mode, overlap, catch_up, catch_up_limit,"
+                            + " is_enabled, state, armed_at, gmt_create, gmt_modified) VALUES"
+                            + " (?, ?, ?, 'workspace', 'actor', 1, 1, ?, 'goal', '0 * * * *', 'UTC',"
+                            + " 'new_session', 'skip', ?, ?, TRUE, 'armed', 0, 0, 0)",
+                    tenant, "schedule-" + policy, session, "a".repeat(64), policy, limit);
+            var schedule = automation.findSchedule(tenant, "schedule-" + policy).orElseThrow();
+            assertThat(schedule.catchUp()).isEqualTo(policy);
+            assertThat(schedule.catchUpLimit()).isEqualTo(limit);
+        }
+    }
+
+    @Test
     void schedulePagesUseCurrentRootPermissionsThroughoutTheChildWorkspaceChain() {
         byte[] actor = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, "operator");
         String parent = null;
