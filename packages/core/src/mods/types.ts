@@ -105,6 +105,24 @@ export interface ModTurnStart {
   isTextTruncated?: true;
 }
 
+/** Where a submitted prompt came from, in Claude Code's `PromptOrigin`. */
+export type ModPromptOrigin = { kind: 'composer' } | { kind: 'sdk' };
+
+export interface ModPromptSubmit {
+  text: string;
+  wait: boolean;
+  origin: ModPromptOrigin;
+}
+
+/**
+ * How a submitted prompt fared: what arrived beneath the hooks, or why it
+ * did not enter. `byHook` tells a hook's own drop from one that answered
+ * without passing the prompt on.
+ */
+export type ModPromptSubmitted =
+  | { text: string; context?: string[] }
+  | { drop: string; byHook: boolean };
+
 export interface ModTurnComplete {
   answer: string;
   durationMs: number;
@@ -125,6 +143,8 @@ export type ModRequest =
       version: string;
       /** The render sites this host draws; `ui.render` runs only where one is offered. */
       sites?: readonly ModRenderSite[];
+      /** Whether the host raises `prompt.submit`; its hooks are skipped otherwise. */
+      prompts?: boolean;
     }
   | {
       type: 'command';
@@ -144,6 +164,7 @@ export type ModRequest =
     }
   | { type: 'end'; sessionId: string; reason: 'clear' | 'resume' | 'other' }
   | { type: 'turn-start'; input: ModTurnStart }
+  | { type: 'prompt-submit'; input: ModPromptSubmit }
   | { type: 'turn-complete'; input: ModTurnComplete }
   | { type: 'render'; input: ModRenderInput }
   | { type: 'turn-abort-result'; id: number; error?: string };

@@ -212,7 +212,7 @@ import { logApiRetry } from '../telemetry/loggers.js';
 import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
 import {
   createUserPromptSubmitContextPart,
-  hasUserPromptSubmitContext,
+  deliveredUserPromptSubmitContexts,
 } from '../hooks/user-prompt-submit-context.js';
 import {
   TrustedUserAnswers,
@@ -319,6 +319,12 @@ export interface SendMessageOptions {
    * Retry with the prompt id it was issued for; any other use throws.
    */
   promptAdmission?: UserPromptAdmission;
+  /**
+   * What the Mods' `prompt.submit` hooks attached for the model to read
+   * beside this UserQuery's prompt. It joins UserPromptSubmit's context in
+   * the hidden block the person never sees, ahead of it.
+   */
+  promptContext?: readonly string[];
   /** A UserQuery running beside an active turn, without replacing its state. */
   isConcurrentSideQuery?: boolean;
   /**
@@ -4229,6 +4235,8 @@ export class LlmClient {
     let userPromptRecordPayload: UserPromptRecordPayload | undefined;
     /** Hook context appended to this turn's request, if any. */
     let appendedHookContext: string | undefined;
+    /** The separate contexts `appendedHookContext` joins. */
+    let appendedHookContexts: readonly string[] | undefined;
     /** Hook context suppressed as already delivered; compression may need it back. */
     let suppressedHookContext: string | undefined;
     let hooksEnabled: boolean;
@@ -4244,6 +4252,14 @@ export class LlmClient {
           ? options.submittedPrompt
           : undefined;
       let verdict: (UserPromptSubmitDecision & { prompt: string }) | undefined;
+      const promptContext =
+        messageType === SendMessageType.UserQuery
+          ? options?.promptContext?.filter((text) => text.trim())
+          : undefined;
+      if (options?.promptContext) {
+        // Spent here, as the admission below is.
+        options = { ...options, promptContext: undefined };
+      }
       if (options?.promptAdmission) {
         const { promptAdmission } = options;
         // Spent here: the continuation sends below re-spread `options`.
@@ -4281,8 +4297,8 @@ export class LlmClient {
         };
       }
 
-      if (verdict) {
-        if (verdict.blockReason !== undefined) {
+      if (verdict || promptContext?.length) {
+        if (verdict?.blockReason !== undefined) {
           if (goalPermit) {
             userPromptSubmitFailureMessage = 'Goal turn finalization failed';
             const runtime = await loadGoalRuntime(true);
@@ -4341,39 +4357,66 @@ export class LlmClient {
         // distinguishable from user-authored text in model history, resume,
         // and offline transcript analysis. `getAdditionalContext()` escapes
         // `<`/`>`, so hook output cannot forge the closing tag.
-        // An unchanged payload is already in history from an earlier turn, so
-        // re-appending it would duplicate it once per turn for the rest of the
-        // session; the earlier copy still carries the same text. History is
-        // scanned newest-first over the raw entries, so the check stays off
-        // the deep-cloning accessor on this per-turn path.
+        // A context already in history from an earlier turn is not sent
+        // again, or it would repeat once per turn for the rest of the
+        // session; the earlier copy still carries the same text. Each context
+        // counts on its own, the Mods' contexts and UserPromptSubmit's, so a
+        // Mod whose context changes every turn does not make an unchanged
+        // UserPromptSubmit context repeat. History is scanned newest-first
+        // over the raw entries, so the check stays off the deep-cloning
+        // accessor on this per-turn path.
         // A request with no parts of its own keeps the block, which is then
         // all that keeps it non-empty (`toParts` rejects an empty array).
-        const additionalContext = verdict.additionalContext;
-        if (additionalContext) {
+        // The Mods' context comes first, as their hooks run above the
+        // settings hooks, and is escaped the same way.
+        const contexts = [
+          ...new Set([
+            ...(promptContext ?? []).map((text) =>
+              text.replace(/</g, '&lt;').replace(/>/g, '&gt;'),
+            ),
+            ...(verdict?.additionalContext ? [verdict.additionalContext] : []),
+          ]),
+        ];
+        if (contexts.length > 0) {
           const requestArray = Array.isArray(request) ? request : [request];
-          const alreadyDelivered =
-            requestArray.length > 0 &&
-            Boolean(
-              this.getChat().findLastHistoryEntry((entry) =>
-                hasUserPromptSubmitContext(entry, additionalContext),
-              ),
-            );
-          if (!alreadyDelivered) {
+          const undelivered = new Set(contexts);
+          if (requestArray.length > 0) {
+            this.getChat().findLastHistoryEntry((entry) => {
+              for (const context of deliveredUserPromptSubmitContexts(entry)) {
+                undelivered.delete(context);
+              }
+              return undelivered.size === 0;
+            });
+          }
+          const pending = contexts.filter((context) =>
+            undelivered.has(context),
+          );
+          const delivered = contexts.filter(
+            (context) => !undelivered.has(context),
+          );
+          const additionalContext = pending.join('\n\n');
+          if (pending.length > 0) {
             request = [
               ...requestArray,
-              createUserPromptSubmitContextPart(additionalContext),
+              createUserPromptSubmitContextPart(additionalContext, pending),
             ];
             appendedHookContext = additionalContext;
-          } else {
-            suppressedHookContext = additionalContext;
+            appendedHookContexts = pending;
+          }
+          if (delivered.length > 0) {
+            suppressedHookContext = delivered.join('\n\n');
           }
           if (messageType === SendMessageType.UserQuery) {
             // A suppressed turn appends nothing, so it records no
             // hookContext, but the user-authored projection still belongs in
             // the transcript.
             userPromptRecordPayload = {
-              displayText: submittedPrompt ?? verdict.prompt,
-              hookContext: alreadyDelivered ? '' : additionalContext,
+              displayText:
+                submittedPrompt ??
+                verdict?.prompt ??
+                preHookUserPromptText ??
+                '',
+              hookContext: additionalContext,
             };
           }
         }
@@ -4964,7 +5007,10 @@ export class LlmClient {
         // that history carries the same provenance resume restores from the
         // recorded payload.
         requestToSend[requestToSend.length - 1] =
-          createUserPromptSubmitContextPart(appendedHookContext);
+          createUserPromptSubmitContextPart(
+            appendedHookContext,
+            appendedHookContexts,
+          );
       }
       if (ideContextText) {
         const firstText = requestToSend.find(
