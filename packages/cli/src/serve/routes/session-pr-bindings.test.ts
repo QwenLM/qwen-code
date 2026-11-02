@@ -221,6 +221,19 @@ describe('GET /sessions/pr-bindings', () => {
     expect(res.body.partial).toBe(true);
   });
 
+  it('flags partial on a live-merge degraded success', async () => {
+    const listSessions = vi.fn(async () => ({
+      sessions: [],
+      liveMergeFailed: true,
+    }));
+    const h = appHarness({ runtimes: [makeRuntime()], listSessions });
+
+    const res = await request(h.app).get('/sessions/pr-bindings');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ bindings: [], partial: true });
+  });
+
   it('routes registry failures through sendBridgeError', async () => {
     const h = appHarness({
       runtimes: [],

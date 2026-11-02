@@ -94,7 +94,9 @@ export function registerSessionPrBindingsRoutes(
           let pages = 0;
           for (;;) {
             const result = await listPage(runtime, cursor);
-            if (result.truncated) partial = true;
+            // A degraded success (live-merge failure) is as incomplete as a
+            // truncated scan: callers must not treat it as authoritative.
+            if (result.truncated || result.liveMergeFailed) partial = true;
             for (const session of result.sessions) {
               const prs = session.prs;
               if (!prs || prs.length === 0) continue;

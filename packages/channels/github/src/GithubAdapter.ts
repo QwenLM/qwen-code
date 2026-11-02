@@ -317,7 +317,27 @@ interface PrWatchEntry {
   prUpdatedAt?: string;
   /** When the current head was first observed; bounds the 'none' grace. */
   headObservedAt?: number;
+  /**
+   * Detected events durably queued for delivery. Persisted together with
+   * the baseline so a crash between detection and claim loses nothing.
+   */
+  pending?: PendingWatchEvent[];
+  /**
+   * Dedupe keys already claimed for delivery (capped ring). Survives task
+   * completion and restarts, so a transition fires at most once even when
+   * the aggregate flaps back and forth on the same head.
+   */
+  fired?: string[];
 }
+
+interface PendingWatchEvent {
+  key: string;
+  issueNumber: number;
+  envelope: Envelope;
+  delivery?: InboundTaskRecord['delivery'];
+}
+
+const MAX_FIRED_KEYS = 64;
 
 interface PrWatchStateFile {
   version: 1;
@@ -1367,6 +1387,24 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   protected async pollOnce(): Promise<void> {
     this.inboundPersistenceBlocked = false;
+
+    if (this.deliverToBoundSessions) {
+      await this.refreshBoundSessions();
+    }
+
+    // The watch pass runs before generic recovery: it drains pending watch
+    // events and claims their tasks first, so recovery cannot complete and
+    // remove a watch task that the watch pass would then re-claim.
+    if (this.prWatchEvents.size > 0 && !this.boundRefreshFailed) {
+      try {
+        await this.runPrStateWatch();
+      } catch (err) {
+        process.stderr.write(
+          `[Channel:${this.name}] PR state watch failed, will retry next poll: ${err}\n`,
+        );
+      }
+    }
+
     if (this.inboundRecoveryPending) {
       try {
         await this.recoverInboundTasks();
@@ -1377,10 +1415,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       } finally {
         this.inboundRecoveryPending = false;
       }
-    }
-
-    if (this.deliverToBoundSessions) {
-      await this.refreshBoundSessions();
     }
 
     this.cursor.metaFloor ??= this.cursor.lastProcessedAt;
@@ -1480,15 +1514,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           `[Channel:${this.name}] API error processing ${threadId}, skipping: ${err}\n`,
         );
         continue;
-      }
-    }
-    if (this.prWatchEvents.size > 0 && !this.boundRefreshFailed) {
-      try {
-        await this.runPrStateWatch();
-      } catch (err) {
-        process.stderr.write(
-          `[Channel:${this.name}] PR state watch failed, will retry next poll: ${err}\n`,
-        );
       }
     }
     if (this.hasRecoverableInboundTasks()) {
@@ -2393,7 +2418,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     if (!boundSessions) return;
     try {
       const snapshot = await boundSessions.listPrBindings();
-      this.lastBindings = snapshot.bindings;
       this.lastBindingsPartial = snapshot.partial;
       this.boundRefreshFailed = false;
       const map = new Map<string, PrBindingSummary>();
@@ -2413,6 +2437,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             map.set(key, summary);
           }
         }
+      }
+      if (snapshot.partial) {
+        // An incomplete enumeration is not an absence: keep every known
+        // binding the partial answer failed to list, so private delivery
+        // never degrades to the public channel path on a scan failure.
+        for (const [key, summary] of this.boundSessionByPr) {
+          if (!map.has(key)) map.set(key, summary);
+        }
+        const seen = new Set(snapshot.bindings.map((b) => b.sessionId));
+        this.lastBindings = [
+          ...snapshot.bindings,
+          ...this.lastBindings.filter((b) => !seen.has(b.sessionId)),
+        ];
+      } else {
+        this.lastBindings = snapshot.bindings;
       }
       this.boundSessionByPr = map;
     } catch (err) {
@@ -2583,10 +2622,19 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     for (const summary of this.lastBindings) {
       if (summary.sourceType === 'channel') continue;
       for (const pr of summary.prs) {
-        if (pr.state === 'merged' || pr.state === 'closed') continue;
         const identity = this.parsePrBindingUrl(pr.url);
         if (!identity || identity.number !== pr.number) continue;
         const key = this.prBindingKey(identity.chatId, identity.number);
+        // The independent binding refresh can record merged/closed before
+        // this poll observes the transition. Keep such PRs watched until
+        // the terminal transition has actually been observed (prState
+        // 'closed'), so state_change is never skipped.
+        if (
+          (pr.state === 'merged' || pr.state === 'closed') &&
+          this.prWatchState.entries[key]?.prState === 'closed'
+        ) {
+          continue;
+        }
         const updatedAt = summary.updatedAt ?? '';
         const existing = candidates.get(key);
         if (!existing || updatedAt > existing.updatedAt) {
@@ -2641,6 +2689,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       `pulls.get(watch ${key})`,
     );
     const entry = this.prWatchState.entries[key] ?? {};
+    // Drain events a previous poll queued but crashed before delivering;
+    // the claim dedupes against any task recovery may already hold.
+    if (entry.pending?.length) {
+      this.prWatchState.entries[key] = entry;
+      await this.drainPendingWatch(key, entry);
+    }
     const firstObservation =
       entry.headSha === undefined && entry.prState === undefined;
     const headSha = pr.head?.sha;
@@ -2748,31 +2802,89 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         : entry.headObservedAt !== undefined
           ? { headObservedAt: entry.headObservedAt }
           : {}),
+      ...(entry.pending !== undefined ? { pending: entry.pending } : {}),
+      ...(entry.fired !== undefined ? { fired: entry.fired } : {}),
     };
-    this.prWatchState.entries[key] = next;
-    // State before dispatch: a crash after this point must not re-fire the
-    // same transition; the claimed inbound task owns retries.
-    this.savePrWatchState();
 
     for (const event of events) {
-      const dedupeKey =
+      const dedupeKey = `watch:${event.type}:${
         event.type === 'ci_failure' || event.type === 'head_change'
           ? (headSha ?? 'unknown')
-          : (prState ?? 'unknown');
+          : (prState ?? 'unknown')
+      }`;
+      // The fired ring is the durable once-per-transition record: inbound
+      // tasks are removed on success, so task-level dedupe alone would let
+      // a flapping aggregate re-fire the same head after a restart.
+      if (next.fired?.includes(dedupeKey)) continue;
+      if (next.pending?.some((p) => p.key === dedupeKey)) continue;
       const envelope: Envelope = {
         channelName: this.name,
         senderId: 'github',
         senderName: 'GitHub',
         chatId,
         threadId: `pr:${number}`,
-        messageId: `watch:${event.type}:${dedupeKey}`,
+        messageId: dedupeKey,
         text: event.summary,
         isGroup: true,
         isMentioned: true,
         isReplyToBot: false,
         metadata: `${this.buildMetadata(chatId, `pr:${number}`, pr.title ?? '')}\nEvent: ${event.type}.`,
       };
-      await this.dispatchEnvelope(envelope, number);
+      (next.pending ??= []).push({
+        key: dedupeKey,
+        issueNumber: number,
+        envelope,
+        delivery: this.resolveBoundDelivery(chatId, number),
+      });
+    }
+
+    this.prWatchState.entries[key] = next;
+    // Baseline and pending queue commit in one write: a crash from here on
+    // either finds the pending event (drained next poll) or the claimed
+    // task (recovery), never a consumed transition with nothing to retry.
+    this.savePrWatchState();
+    await this.drainPendingWatch(key, next);
+  }
+
+  /**
+   * Deliver queued watch events. Order per event: claim the inbound task
+   * (durable), move the key from pending to fired (durable), then run the
+   * task. A crash at any point leaves either a pending event or a claimed
+   * task for the next poll / recovery, and the fired ring prevents a second
+   * delivery of the same transition.
+   */
+  private async drainPendingWatch(
+    key: string,
+    entry: PrWatchEntry,
+  ): Promise<void> {
+    while (entry.pending && entry.pending.length > 0) {
+      const pending = entry.pending[0]!;
+      let task: InboundTaskRecord;
+      try {
+        task = this.claimInboundTask(
+          pending.envelope,
+          pending.issueNumber,
+          {},
+          pending.delivery,
+        );
+      } catch (err) {
+        // Claim persistence failed: keep the event queued and retry on the
+        // next poll instead of consuming the transition.
+        process.stderr.write(
+          `[Channel:${this.name}] failed to claim watch event ${pending.key}, will retry: ${sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            200,
+          )}\n`,
+        );
+        return;
+      }
+      entry.fired = [...(entry.fired ?? []), pending.key].slice(
+        -MAX_FIRED_KEYS,
+      );
+      entry.pending = entry.pending.slice(1);
+      this.prWatchState.entries[key] = entry;
+      this.savePrWatchState();
+      await this.runInboundTask(task);
     }
   }
 
@@ -2830,12 +2942,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }),
       `combinedStatus(${sha})`,
     );
-    if (combined.state === 'failure' || combined.state === 'error') {
-      sawFailure = true;
-    } else if (combined.state === 'pending') {
-      sawPending = true;
-    } else if (combined.total_count > 0) {
-      sawSuccess = true;
+    // GitHub returns {state:"pending", total_count:0, statuses:[]} for a
+    // SHA with no legacy commit statuses; an empty combined status must not
+    // count as active CI (it would keep every poll re-fetching forever).
+    if (combined.total_count > 0) {
+      if (combined.state === 'failure' || combined.state === 'error') {
+        sawFailure = true;
+      } else if (combined.state === 'pending') {
+        sawPending = true;
+      } else {
+        sawSuccess = true;
+      }
     }
     const aggregate: CiAggregate = sawFailure
       ? 'failure'

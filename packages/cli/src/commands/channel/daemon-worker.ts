@@ -337,9 +337,11 @@ export function createBoundSessionsAccessor(
     const partial = body.partial === true;
     if (!Array.isArray(body.bindings)) return { bindings: [], partial };
     const summaries: PrBindingSummary[] = [];
-    // Rebuild (not accumulate): sessions that left the bindings must drop
-    // out of the wake cache instead of pinning stale cwds forever.
-    cwdBySession.clear();
+    // Rebuild (not accumulate) on complete answers so sessions that left
+    // the bindings drop out of the wake cache. On a partial answer keep
+    // the known cwds: an incomplete enumeration must not turn a queued
+    // dormant delivery into a gone-session public fallback.
+    if (!partial) cwdBySession.clear();
     for (const entry of body.bindings) {
       if (entry === null || typeof entry !== 'object') continue;
       const record = entry as Record<string, unknown>;

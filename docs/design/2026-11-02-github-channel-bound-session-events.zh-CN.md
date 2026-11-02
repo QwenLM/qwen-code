@@ -45,7 +45,7 @@ GET /sessions/pr-bindings
 
 - 所有权类别：**进程级**（与 `POST /sessions/backfill-prs` 同类）。遍历 registry 中的 trusted workspace runtime，经 live-merged 会话列表路径（`listWorkspaceSessionsForResponse`，它会用 PR sidecar 补全会话摘要）枚举 active 会话，分页有上限。Untrusted workspace 跳过。
 - 排除归档会话。携带 `sourceType`/`sourceId` 以便调用方排除 channel 自有会话。`prs` 条目投影为 `{number, url, state?}`。
-- **`partial`** 在答案不完整时为 true：某个 workspace 列表失败、某页报告截断、或页数上限耗尽仍有游标。调用方绝不能把 partial 答案中缺失的条目当作权威性的「不存在」（适配器在 partial 快照下跳过监视状态剪枝）。
+- **`partial`** 在答案不完整时为 true：某个 workspace 列表失败、live-merge 降级成功（`liveMergeFailed`）、某页报告截断、或页数上限耗尽仍有游标。调用方绝不能把 partial 答案中缺失的条目当作权威性的「不存在」（适配器把 partial 答案并入已知绑定，并跳过监视状态剪枝）。
 - 与其他会话路由一样鉴权（`--require-auth` 时 bearer）。不新增写入面。
 - 该路由是扫描而非索引：以 sidecar 体系的规模（每 workspace 几十个会话），每次轮询扫一遍可以接受；适配器将结果缓存一个轮询周期。
 
@@ -86,10 +86,10 @@ boundSessions?: {
 开启 `deliverToBoundSessions` 时，适配器在每次轮询开始拉取 `GET /sessions/pr-bindings`，构建 `owner/repo#number → session` 映射。键的两侧都对 repo 路径小写归一：GitHub URL 大小写不敏感（core 的 `canonicalSessionPrUrl` 即小写化），绑定 URL 可能带任意大小写，而通知 subject URL 带规范大小写。绑定 URL 解析容忍尾部 tab 段（`/files`、`/commits`、`/checks`），因为绑定路由接受任何命名该 PR 的 http(s) URL。
 
 - 只保留 PR URL 主机与 channel 的 GitHub 主机一致的绑定（Aone 等其他 provider 的绑定忽略）。
-- 监视集合只保留记录 `state` 非 `merged`/`closed` 的条目；评论事件的投递候选接受任意记录状态（刚合入的 PR 上的评论仍应投递，绑定状态由刷新定时器追平）。
+- 监视集合只保留记录 `state` 非 `merged`/`closed` 的条目，但终态迁移尚未被观测到的除外（见 PR 状态监视）；评论事件的投递候选接受任意记录状态（刚合入的 PR 上的评论仍应投递，绑定状态由刷新定时器追平）。
 - 排除 `sourceType === 'channel'` 的会话——channel 会话走正常 channel 路径，以保留其公开回复契约。
 - 多个候选：取最近更新的会话（`updatedAt` 降序；live 摘要缺 `updatedAt` 时路由回退到 `createdAt`，新建的 live 会话因此不会被过期的持久化会话压过）。确定性选择，不广播。
-- 刷新失败保留旧映射（过期候选在投递时失败并回退）；该轮询跳过监视回合，瞬态失败因此无法剪掉持久化基线。`partial` 快照保留映射但禁用监视状态剪枝。
+- 刷新失败保留旧映射（过期候选在投递时失败并回退）；该轮询跳过监视回合，瞬态失败因此无法剪掉持久化基线。`partial` 快照会并入旧映射与绑定列表——不完整答案漏列的已知绑定被保留，私密投递绝不会因扫描失败降级成公开路径——并禁用监视状态剪枝。访问器在 partial 答案下同样保留 session→cwd 唤醒缓存。
 
 #### 评论投递拦截
 
@@ -103,17 +103,17 @@ boundSessions?: {
 
 #### PR 状态监视
 
-`prWatchEvents` 非空时，`pollOnce` 在通知处理之后运行监视回合：
+`prWatchEvents` 非空时，`pollOnce` 在绑定刷新之后、通用 inbound 恢复与通知处理之前运行监视回合：
 
-1. **监视集合**：来自同一次绑定拉取的绑定 PR，过滤为记录状态 open 且主机匹配 channel 的 GitHub 主机，上限 30 个（按绑定更新时间取最新）。无绑定 PR → 零 API 调用。持久化条目按完整候选集剪枝（而非截断后的监视集，轮转出上限的 PR 因此保留基线），且仅在快照完整时剪枝——partial 快照绝不剪枝。
+1. **监视集合**：来自同一次绑定拉取的绑定 PR，过滤为主机匹配 channel 的 GitHub 主机，上限 30 个（按绑定更新时间取最新）。被独立刷新记为 `merged`/`closed` 的绑定仍保留监视，直到本轮询自己观测到终态迁移（`prState: 'closed'`），刷新抢跑因此不会漏掉 `state_change`。无绑定 PR → 零 API 调用。持久化条目按完整候选集剪枝（而非截断后的监视集，轮转出上限的 PR 因此保留基线），且仅在快照完整时剪枝——partial 快照绝不剪枝。
 2. **每 PR**：每次轮询调 `pulls.get`（head SHA、`mergeable`、`mergeable_state`、`state`、`updated_at`）。Check runs（`checks.listForRef`）与组合提交状态（`repos.getCombinedStatusForRef`）仅在以下情况拉取：head SHA 较上次轮询变化、上次 CI 聚合为 pending/in_progress、尚无 CI 观测、PR 的 `updated_at` 前进（任何线程活动——包括 check 复跑——都会 bump 它，因此已绿 head 后来变红仍能被捕获）、或聚合为 `none` 且处于 head 首次观测后的 10 分钟宽限窗口内（check 异步注册；窗口外 `none` 表示仓库无 CI，视为已 settled）。稳态成本为每 PR 每轮询一次调用。
 3. **迁移检测**：对照持久化监视状态（`channelFilePath('github-pr-watch.json')`，按监视集合裁剪）：
-   - `ci_failure`：聚合转为失败（任一已完成 check run 结论为 `failure`/`timed_out`/`action_required`，或组合状态为 `failure`/`error`）。每个 head SHA 触发一次；新 head 再失败会再触发。事件摘要点名失败的 check（至多 5 个），会话无需再查即可行动。
+   - `ci_failure`：聚合转为失败（任一已完成 check run 结论为 `failure`/`timed_out`/`action_required`，或非空组合状态报告 `failure`/`error`）。空组合状态（`total_count: 0`，GitHub 对无 legacy status 的 SHA 返回 `state: "pending"`）绝不算活跃 CI。经持久化 `fired` 环每个 head SHA 只触发一次，即使聚合回绿后再次转红；新 head 再失败会再触发。事件摘要点名失败的 check（至多 5 个），会话无需再查即可行动。
    - `merge_conflict`：`mergeable_state` 进入 `dirty`。边沿触发；`dirty → clean → dirty` 会再次触发。`mergeable === null`（GitHub 仍在计算）绝不覆盖最后已知状态。
    - `head_change`：head SHA 与上次观测不同（首次观测静默初始化）。
    - `state_change`：PR `state` 离开 `open`（merged 或 closed）。首次观测静默初始化。
-4. **先写状态再投递**：新监视状态在认领事件任务之前持久化，崩溃不会重放同一迁移；认领的 inbound task（`delivery` 在认领时解析）负责重试。事件任务使用 `source.messageId = watch:<eventType>:<headSha|state>`，走与评论相同的「绑定会话或回退」投递。
-5. **绑定状态维护**仍由既有 5 分钟刷新定时器负责；适配器不 PATCH metadata。定时器记录 `merged`/`closed` 后，该 PR 离开监视集合。
+4. **持久化事件队列**：检测到的事件追加进 `pending` 队列，与新基线同一次写入持久化，检测与认领之间崩溃不会丢事件。随后逐事件排空：认领 inbound task（持久化）→ 把 key 从 `pending` 移入有上限的 `fired` 环（持久化）→ 执行任务。任何点崩溃都留下 pending 事件或已认领任务，交给下一轮询/恢复；`fired` 环是持久化的「每迁移一次」记录（仅靠任务级去重，聚合抖动会在已完成任务被移除后重放同一 head）。认领失败则事件留队下轮重试。监视回合跑在通用 inbound 恢复之前，恢复因此不会先完成并移除一个监视任务、导致监视回合重复认领。事件任务使用 `source.messageId = watch:<eventType>:<headSha|state>`，走与评论相同的「绑定会话或回退」投递。
+5. **绑定状态维护**仍由既有 5 分钟刷新定时器负责；适配器不 PATCH metadata。定时器记为 `merged`/`closed` 且监视已观测到终态迁移后，该 PR 才离开监视集合。
 
 #### API 预算
 

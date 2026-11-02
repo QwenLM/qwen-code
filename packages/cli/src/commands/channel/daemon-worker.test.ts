@@ -4415,6 +4415,36 @@ describe('createBoundSessionsAccessor', () => {
     expect(wake).not.toHaveBeenCalled();
   });
 
+  it('keeps known cwds on a partial answer so dormant deliveries still wake', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          bindings: [
+            {
+              sessionId: 'session-1',
+              workspaceCwd: '/ws/a',
+              prs: [{ number: 1, url: 'https://github.com/o/r/pull/1' }],
+            },
+          ],
+          partial: false,
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { bindings: [], partial: true }))
+      .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+      .mockResolvedValueOnce(jsonResponse(202, { promptId: 'p-1' }));
+    const wake = vi.fn().mockResolvedValue(undefined);
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest), wake);
+    await accessor.listPrBindings();
+    await accessor.listPrBindings();
+
+    // The partial answer must not erase the cwd needed to wake the
+    // dormant session; the delivery retries through the wake path.
+    await accessor.deliverPrompt('session-1', 'x');
+
+    expect(wake).toHaveBeenCalledWith('session-1', '/ws/a');
+  });
+
   it('throws when the bindings route fails', async () => {
     const requestRest = vi
       .fn()
