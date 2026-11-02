@@ -1905,6 +1905,11 @@
   color: inherit;
 }
 
+/* Workflow mode saved on but not currently able to take effect. */
+.workflowChip[data-unavailable] {
+  color: var(--warning-color);
+}
+
 /* No dimming: like every other .toolBtn, including the permission button
    beside it, the chip keeps its appearance while mode controls are busy. That
    state is brief, and dimming one control of the pair would flicker. */
