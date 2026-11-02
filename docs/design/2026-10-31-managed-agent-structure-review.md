@@ -270,18 +270,18 @@ cross-cutting "how the system works today" tour.
   [workflow extraction](2026-11-01-runtime-execution-workflows.md) now adds a
   deterministic blocked-stamp regression at the reconciler boundary; its
   verification evidence is recorded with that increment.
-- Reconciliation, recovery scanning and cancellation are **not** clean
-  standalone seams (investigated 2026-10-31). Their prerequisite is the
+- Reconciliation, recovery scanning and cancellation were **not** clean
+  standalone seams (investigated 2026-10-31). Their prerequisite was the
   [Runtime Binding Registry](2026-10-31-runtime-binding-registry.md) first
   slice: it owns `liveBindings`, `bindingOperations`, `sessions`, local
   Session contexts and Binding validation/invalidation helpers. The source
-  audit corrects the original three-map sketch: `bindingOperations` must
+  audit corrected the original three-map sketch: `bindingOperations` had to
   move with Binding lifecycle operations, whereas execution-keyed
-  `reconciliations` stays with `ExecutionObservationCooldown` and moves in
+  `reconciliations` stayed with `ExecutionObservationCooldown` and moved in
   the later reconciliation slice. In the Registry slice the service retained
   provisioning, drain, recovery, execution settlement, renewal and scheduler
   lifecycle. This
-  establishes a concrete owner without injecting service callbacks. The M6
+  established a concrete owner without injecting service callbacks. The M6
   stamp-before-slot-removal coverage gap is addressed by the blocked-stamp
   regression in the [execution workflow extraction](2026-11-01-runtime-execution-workflows.md),
   which implements reconciliation, takeover scans and cancellation after

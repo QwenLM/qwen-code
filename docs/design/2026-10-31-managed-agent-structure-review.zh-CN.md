@@ -228,14 +228,14 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
   固定 `lookupOnce` 先 stamp 后释放在途槽位的顺序。
   [流程抽取](2026-11-01-runtime-execution-workflows.zh-CN.md) 现已在对账器边界
   增加确定性阻塞 stamp 回归；其验证证据随该增量记录。
-- 对账、恢复扫描与取消**不是**干净的独立边界（2026-10-31 调研）。前置条件是
+- 对账、恢复扫描与取消当时**不是**干净的独立边界（2026-10-31 调研）。前置条件是
   [Runtime Binding Registry](2026-10-31-runtime-binding-registry.zh-CN.md)
   首片：它持有 `liveBindings`、`bindingOperations`、`sessions`、本地
   Session context 及 Binding 校验/失效 helper。源码审计修正了最初三张 map
   的草案：`bindingOperations` 必须随 Binding 生命周期操作迁移；按 execution
-  ID 索引的 `reconciliations` 则继续与 `ExecutionObservationCooldown` 放在
-  一起，在后续对账切片迁移。Registry 首片中，服务仍保留供应、排空、恢复、
-  execution 结算、续租和 scheduler 生命周期。这样无需注入 service 回调即可建立具体持有者。
+  ID 索引的 `reconciliations` 则先与 `ExecutionObservationCooldown` 放在
+  一起，已在后续对账切片迁出。Registry 首片中，服务仍保留供应、排空、恢复、
+  execution 结算、续租和 scheduler 生命周期。这样无需注入 service 回调就建立了具体持有者。
   M6 先 stamp 后移除槽位的覆盖缺口由[执行流程抽取](2026-11-01-runtime-execution-workflows.zh-CN.md)
   中阻塞 stamp 的回归处理；该切片在 Registry 后实现对账、接管扫描和取消。
   Registry 首片本身不宣称具备该覆盖。并发、清理与验收要求见所链接的双语
