@@ -651,7 +651,7 @@ The hook receives:
 
 | Field     | Value                                                                                 |
 | --------- | ------------------------------------------------------------------------------------- |
-| `text`    | the prompt as submitted                                                               |
+| `text`    | the prompt as submitted; for a stream-json message, its text blocks                   |
 | `context` | absent; each hook that attaches context passes the list on with its own entries added |
 | `wait`    | `false`                                                                               |
 | `origin`  | `{kind: 'sdk'}`                                                                       |
@@ -660,6 +660,8 @@ The hook receives:
 arrives beneath the hooks: `next(e)` resolves to `{text, context?, origin}`, and
 what a hook answers after its `next` resolved changes nothing. The rewritten text
 is what the model reads, what `turn.start` hears and what the transcript keeps.
+In a stream-json message with blocks other than text, the rewrite replaces its
+text blocks and the other blocks follow it.
 The context goes to the model after the prompt, in the block that holds
 UserPromptSubmit's context, ahead of it, and is never shown as part of the
 prompt.

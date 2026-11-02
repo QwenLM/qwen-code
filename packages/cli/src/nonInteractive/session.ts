@@ -544,6 +544,7 @@ class Session {
 
   private async processUserMessage(userMessage: CLIUserMessage): Promise<void> {
     const input = extractUserMessageText(userMessage);
+    const promptParts = splitUserMessageBlocks(userMessage);
     const humanInput = readHumanInputFromSdkMessage(userMessage);
     if (!input) {
       debugLogger.debug('[Session] No text content in user message');
@@ -559,6 +560,7 @@ class Session {
     try {
       await runNonInteractive(this.config, this.settings, input, promptId, {
         ...(humanInput ? { humanInput } : {}),
+        ...(promptParts ? { promptParts } : {}),
         modSession: this.modSession,
         abortController: turnAbortController,
         adapter: this.outputAdapter,
@@ -1107,6 +1109,28 @@ class Session {
       this.cleanupSignalHandlers();
     }
   }
+}
+
+/**
+ * The text blocks and the other blocks of a message that has both kinds, the
+ * other blocks serialized as `extractUserMessageText` does.
+ */
+function splitUserMessageBlocks(
+  message: CLIUserMessage,
+): { text: string; blocks: string[] } | undefined {
+  const content = message.message.content;
+  if (!Array.isArray(content)) return undefined;
+  const text: string[] = [];
+  const blocks: string[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue;
+    if ('type' in block && block.type === 'text' && 'text' in block) {
+      if (typeof block.text === 'string' && block.text) text.push(block.text);
+    } else {
+      blocks.push(JSON.stringify(block));
+    }
+  }
+  return blocks.length ? { text: text.join('\n'), blocks } : undefined;
 }
 
 function extractUserMessageText(message: CLIUserMessage): string | null {

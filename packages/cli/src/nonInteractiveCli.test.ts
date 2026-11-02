@@ -6824,6 +6824,47 @@ describe('runNonInteractive', () => {
       expect(order.slice(0, 2)).toEqual(['submit', 'start']);
     });
 
+    it('lets the hooks hear and rewrite only the text of a message with other blocks', async () => {
+      setupMetricsMock();
+      const { startTurn, submitPrompt } = installModTurn();
+      submitPrompt.mockImplementation(async (text) => ({
+        text: text.toUpperCase(),
+      }));
+      admitting(() =>
+        createStreamFromEvents([
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: undefined },
+          },
+        ]),
+      );
+      const image = '{"type":"image"}';
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        `Fix it\n${image}`,
+        'blocks',
+        {
+          humanInput: { text: 'Fix it' },
+          promptParts: { text: 'Fix it', blocks: [image] },
+        },
+      );
+
+      expect(submitPrompt).toHaveBeenCalledExactlyOnceWith(
+        'Fix it',
+        expect.any(AbortSignal),
+      );
+      const [request, , , options] =
+        mockLlmClient.sendMessageStream.mock.calls[0];
+      expect(request).toEqual([{ text: `FIX IT\n${image}` }]);
+      expect(options).toMatchObject({
+        submittedPrompt: `FIX IT\n${image}`,
+        humanInput: { text: 'FIX IT' },
+      });
+      expect(startTurn.mock.calls[0][0]).toBe('FIX IT');
+    });
+
     it.each([OutputFormat.JSON, OutputFormat.TEXT])(
       'ends a run whose prompt a hook dropped with a result in %s',
       async (format) => {

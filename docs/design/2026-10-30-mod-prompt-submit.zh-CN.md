@@ -41,7 +41,7 @@ Qwen Code 在加载时跳过 `prompt.submit` hook，并提示 `Hooks for unsuppo
 
 | 字段      | 值                                                           |
 | --------- | ------------------------------------------------------------ |
-| `text`    | 提交的提示，粘贴内容已展开                                   |
+| `text`    | 提交的提示，粘贴内容已展开；stream-json 消息只取其文本块     |
 | `context` | 宿主触发时不带                                               |
 | `wait`    | `false`                                                      |
 | `origin`  | headless 为 `{ kind: 'sdk' }`；终端为 `{ kind: 'composer' }` |
@@ -51,7 +51,7 @@ hook 可以把改过的 `text` 和 `context` 传给 `next`；`origin`、`wait`�
 
 ### 3. 最终提交什么
 
-和 Claude Code 一样，提交的是穿过所有 hook 到达链底的提示：worker 记录到达链底的 `text` 和 `context`。`next(e)` 解析为它们，外加 origin。hook 在 `next` 返回之后再给出的答复不起作用。
+和 Claude Code 一样，提交的是穿过所有 hook 到达链底的提示：worker 记录到达链底的 `text` 和 `context`。`next(e)` 解析为它们，外加 origin。hook 在 `next` 返回之后再给出的答复不起作用，这时只检查它是不是 drop。
 
 链的结果有三种：
 
@@ -63,7 +63,7 @@ hook 可以把改过的 `text` 和 `context` 传给 `next`；`origin`、`wait`�
 
 ### 4. 改写与上下文
 
-改写后的文本在宿主保存提示的每一处都替换掉原文：发给模型的文本、`@` 处理读取的文本、`turn.start` 的文本、transcript 记录及其显示文本。
+改写后的文本在宿主保存提示的每一处都替换掉原文：发给模型的文本、`@` 处理读取的文本、`turn.start` 的文本、transcript 记录及其显示文本。stream-json 消息若还带有非文本块，这些块会序列化后随文本发给模型；hook 只听到其中的文本块，改写替换的也是文本块，其他块接在改写后的文本之后。
 
 上下文并入 core 已有的隐藏块，即追加在提示之后、存放 UserPromptSubmit `additionalContext` 的那一块，排在后者之前，转义方式相同。client 通过新的发送选项 `promptContext` 接收它，只有该提示自己的 UserQuery 会用掉它。transcript 把这一块记作 hook 上下文，因此恢复会话时它仍然隐藏，压缩时也和 UserPromptSubmit 的上下文一样保留。
 

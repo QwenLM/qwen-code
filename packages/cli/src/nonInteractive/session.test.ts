@@ -752,6 +752,40 @@ describe('runNonInteractiveStreamJson', () => {
     }
   });
 
+  it('passes the text blocks apart from the others only when a message has both', async () => {
+    const image = {
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/png', data: 'AAAA' },
+    };
+    const mixed = createUserMessage('');
+    mixed.message.content = [
+      { type: 'text', text: 'Describe' },
+      image,
+      { type: 'text', text: 'briefly' },
+    ] as CLIUserMessage['message']['content'];
+    const textOnly = createUserMessage('');
+    textOnly.message.content = [{ type: 'text', text: 'Hello' }];
+    mockInputReader.read = async function* () {
+      yield mixed;
+      await vi.waitFor(() =>
+        expect(runNonInteractiveMock).toHaveBeenCalledTimes(1),
+      );
+      yield textOnly;
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
+    const [first, second] = runNonInteractiveMock.mock.calls;
+    expect(first[2]).toBe(`Describe\n${JSON.stringify(image)}\nbriefly`);
+    expect(first[4].promptParts).toEqual({
+      text: 'Describe\nbriefly',
+      blocks: [JSON.stringify(image)],
+    });
+    expect(second[2]).toBe('Hello');
+    expect(second[4]).not.toHaveProperty('promptParts');
+  });
+
   it('seeds the promptId counter past turns the resumed transcript claims', async () => {
     // A resumed headless chain reuses the session id, so restarting the
     // counter at 1 would re-mint ids the previous run already persisted —

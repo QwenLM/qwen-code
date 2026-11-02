@@ -429,6 +429,12 @@ async function emitNonInteractiveFinalMessage(params: {
  */
 export interface RunNonInteractiveOptions {
   humanInput?: HumanPromptInput;
+  /**
+   * A structured SDK message whose `input` also carries blocks that are not
+   * text: its text blocks, which the Mods' prompt.submit hooks hear, and its
+   * other blocks as `input` serializes them, which follow a rewritten text.
+   */
+  promptParts?: { text: string; blocks: string[] };
   modSession?: ModSession;
   abortController?: AbortController;
   adapter?: JsonOutputAdapterInterface;
@@ -1188,9 +1194,10 @@ export async function runNonInteractive(
       // submitted prompt runs on the chosen model without a session switch.
       let inlineModelOverride: string | undefined;
       let promptAdmission: UserPromptAdmission | undefined;
-      // The prompt as the Mods' prompt.submit hooks passed it on, and the
-      // context they attached for the model.
+      // The prompt as the Mods' prompt.submit hooks passed it on, the text
+      // they rewrote it to, and the context they attached for the model.
       let prompt = input;
+      let rewrittenText: string | undefined;
       let promptContext: string[] | undefined;
 
       if (options.continueInterrupted) {
@@ -1408,10 +1415,12 @@ export async function runNonInteractive(
             (options.sendMessageType ?? SendMessageType.UserQuery) ===
               SendMessageType.UserQuery
           ) {
+            // The hooks hear what was typed, not the serialized blocks.
+            const heard = options.promptParts?.text ?? input;
             let submitted: Awaited<ReturnType<ModSession['submitPrompt']>>;
             try {
               submitted = await modSession.submitPrompt(
-                input,
+                heard,
                 abortController.signal,
               );
             } catch (error) {
@@ -1429,8 +1438,11 @@ export async function runNonInteractive(
               });
               return 1;
             }
-            if (submitted.text !== input) {
-              prompt = submitted.text;
+            if (submitted.text !== heard) {
+              rewrittenText = submitted.text;
+              prompt = options.promptParts
+                ? [rewrittenText, ...options.promptParts.blocks].join('\n')
+                : rewrittenText;
               // The transcript shows the prompt the model reads.
               submittedPrompt = prompt;
             }
@@ -2938,9 +2950,7 @@ export async function runNonInteractive(
                 modTurn = modSession.startTurn(
                   options.continueInterrupted
                     ? ''
-                    : prompt !== input
-                      ? prompt
-                      : (options.humanInput?.text ?? input),
+                    : (rewrittenText ?? options.humanInput?.text ?? input),
                   abortController.signal,
                   () => {
                     if (abortController.signal.aborted) return false;
@@ -2959,7 +2969,9 @@ export async function runNonInteractive(
             options.humanInput &&
             !isSlashCommand(options.humanInput.text) && {
               humanInput:
-                prompt !== input ? { text: prompt } : options.humanInput,
+                rewrittenText !== undefined
+                  ? { text: rewrittenText }
+                  : options.humanInput,
             }),
           ...(isFirstTurn &&
             sendType === SendMessageType.UserQuery &&

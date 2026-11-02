@@ -272,7 +272,7 @@ export const MOD_GUEST_FACTORY = String.raw`
         });
         const answer = await hook.handler(api(run.id, nested), frozen(input), next);
         if (run.event !== 'prompt.submit' || !last) return answer;
-        status(run.id, 'validateResult', encode(answer));
+        // What a hook answers after its next is not checked: only a drop counts.
         const below = await last;
         if (object(answer) && 'drop' in answer && (!object(below) || answer.drop !== below.drop)) {
           const error = new Error('a drop after its next(e) was answered');

@@ -1277,6 +1277,28 @@ describe('ModRuntime with the real QuickJS worker', () => {
     expect(logs.map((log) => log.text)).toEqual(['called:false']);
   });
 
+  it('takes any answer after next from a hook that only watches', async () => {
+    const runtime = await createTurns([
+      `export function register(on) {
+        on('prompt.submit', async ($, e, next) => {
+          const entered = await next(e);
+          if (e.text === 'nothing') return undefined;
+          if (e.text === 'spread') return {...e, ...entered};
+          return {text: 'x'.repeat(300000)};
+        });
+      }`,
+      `export function register(on) {
+        on('prompt.submit', ($, e, next) => next({...e, text: e.text + '!'}));
+      }`,
+    ]);
+    const texts = ['nothing', 'spread', 'large'];
+    const entered = [];
+    for (const text of texts)
+      entered.push(await runtime.submitPrompt({ ...prompt, text }, signal()));
+    expect(entered).toEqual(texts.map((text) => ({ text: text + '!' })));
+    expect(logs).toEqual([]);
+  });
+
   it('skips a hook that fails, drops after its next or changes what is pinned', async () => {
     const runtime = await createTurns([
       `export function register(on) {

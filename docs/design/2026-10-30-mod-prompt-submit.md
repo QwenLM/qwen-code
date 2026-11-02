@@ -39,19 +39,19 @@ Non-goals:
 
 ### 2. Input
 
-| Field     | Value                                                                       |
-| --------- | --------------------------------------------------------------------------- |
-| `text`    | the prompt as submitted, with pasted text expanded                          |
-| `context` | absent as the host raises it                                                |
-| `wait`    | `false`                                                                     |
-| `origin`  | `{ kind: 'sdk' }` in headless runs; `{ kind: 'composer' }` in the terminals |
-| `turnId`  | absent until a terminal raises the event for a prompt typed during a turn   |
+| Field     | Value                                                                                          |
+| --------- | ---------------------------------------------------------------------------------------------- |
+| `text`    | the prompt as submitted, with pasted text expanded; for a stream-json message, its text blocks |
+| `context` | absent as the host raises it                                                                   |
+| `wait`    | `false`                                                                                        |
+| `origin`  | `{ kind: 'sdk' }` in headless runs; `{ kind: 'composer' }` in the terminals                    |
+| `turnId`  | absent until a terminal raises the event for a prompt typed during a turn                      |
 
 A hook passes `text` and `context` on to `next`; `origin`, `wait` and `turnId` are pinned. `context` is a list of texts.
 
 ### 3. What enters
 
-The prompt that enters is the one that arrives beneath the hooks, as in Claude Code: the worker records the `text` and `context` that reach the bottom of the chain. `next(e)` resolves to them with the origin. What a hook answers after its `next` resolved changes nothing.
+The prompt that enters is the one that arrives beneath the hooks, as in Claude Code: the worker records the `text` and `context` that reach the bottom of the chain. `next(e)` resolves to them with the origin. What a hook answers after its `next` resolved changes nothing, and only a drop there is checked.
 
 The chain settles one of three ways:
 
@@ -63,7 +63,7 @@ A hook that answers a drop after calling `next` fails, as in Claude Code: its `.
 
 ### 4. Rewrite and context
 
-A rewritten text replaces the prompt everywhere the host keeps it: the text sent to the model, the text `@` processing reads, the `turn.start` text, the transcript record and its display text.
+A rewritten text replaces the prompt everywhere the host keeps it: the text sent to the model, the text `@` processing reads, the `turn.start` text, the transcript record and its display text. A stream-json message that also has blocks other than text reaches the model as text with those blocks serialized; the hooks hear only its text blocks, and a rewrite replaces them, with the other blocks after it.
 
 The context joins UserPromptSubmit's `additionalContext` in the hidden block core already appends after the prompt, ahead of it, escaped the same way. The client takes it as a new send option, `promptContext`, which only the prompt's own UserQuery spends. The transcript records the block as hook context, so resume hides it and compaction keeps it the way it keeps UserPromptSubmit's.
 
