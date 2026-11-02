@@ -167,17 +167,27 @@ it('resumes saved membership without requesting another device code', async () =
   unmount();
 });
 
-it('reopens plans for a saved Free account without requesting a device code', async () => {
-  const { result, unmount } = renderHook(() => useSubscription());
-  await flush();
-  act(() => result.current.openPlans());
-  expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
-    'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
-    'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
-  ]);
-  expect(mocks.signIn).not.toHaveBeenCalled();
-  unmount();
-});
+it.each(['free', 'FREE', 'lite', 'go', 'enterprise', 'VIP'])(
+  'opens plans only on request for a saved %s account and keeps polling',
+  async (member_type) => {
+    mocks.getUserInfo.mockResolvedValue({ ...free, member_type });
+    const { result, unmount } = renderHook(() => useSubscription());
+    await flush();
+    expect(result.current.state.status).toBe('purchase-required');
+    expect(mocks.browser).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(mocks.getUserInfo).toHaveBeenCalledTimes(2);
+    expect(mocks.browser).not.toHaveBeenCalled();
+    act(() => result.current.openPlans());
+    expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
+      'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
+    ]);
+    expect(mocks.signIn).not.toHaveBeenCalled();
+    unmount();
+  },
+);
 
 it.each([false, true])(
   'clears credentials before authorizing another account (suppressBrowserLaunch=%s)',
@@ -559,13 +569,12 @@ it('recovers a first userinfo failure using saved credentials and starts purchas
     plan: 'Free',
   });
   expect(mocks.signIn).toHaveBeenCalledTimes(1);
-  expect(mocks.browser).toHaveBeenCalledWith(
-    'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
-  );
+  expect(mocks.browser).not.toHaveBeenCalled();
   await act(async () => {
     await vi.advanceTimersByTimeAsync(120_000);
   });
   expect(result.current.canCheckAgain).toBe(true);
+  expect(mocks.browser).not.toHaveBeenCalled();
   unmount();
 });
 

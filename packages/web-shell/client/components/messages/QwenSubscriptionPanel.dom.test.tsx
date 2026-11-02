@@ -131,24 +131,35 @@ it('starts authorization directly after the native picker selection and opens th
   ]);
 });
 
-it.each(['free', 'go'])(
-  'opens plans once for saved %s membership and permits manual reopening',
-  async (member_type) => {
+it.each(
+  ['free', 'FREE', 'lite', 'go', 'enterprise', 'VIP'].flatMap((member_type) =>
+    [false, true].map((dialog) => ({ member_type, dialog })),
+  ),
+)(
+  'opens plans only on request for saved $member_type membership (dialog=$dialog)',
+  async ({ member_type, dialog }) => {
     transport.startSubscriptionLogin.mockResolvedValue({
       ...ready,
       userInfo: { ...user, member_type },
     });
-    await render();
-    expect(open.mock.calls.map(([url]) => url)).toEqual([
-      'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
-    ]);
+    await render(undefined, transport, { dialog });
+    expect(open).not.toHaveBeenCalled();
     expect(
-      [...container.querySelectorAll('button')].map(
-        (button) => button.textContent,
+      [...document.querySelectorAll('section button')].map((button) =>
+        button.getAttribute('aria-label'),
       ),
     ).toEqual(['View Plans', 'Switch Provider', 'Use another account']);
-    await click('View Plans');
-    expect(open).toHaveBeenCalledTimes(2);
+    await tick(5000);
+    expect(transport.getSubscriptionUserInfo).toHaveBeenCalledOnce();
+    expect(open).not.toHaveBeenCalled();
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>(
+          'section button[aria-label="View Plans"]',
+        )!
+        .click();
+    });
+    expect(open).toHaveBeenCalledOnce();
     expect(open).toHaveBeenLastCalledWith(
       'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
     );

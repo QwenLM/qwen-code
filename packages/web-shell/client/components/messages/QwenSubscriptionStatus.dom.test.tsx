@@ -100,7 +100,7 @@ describe('QwenSubscriptionStatus', () => {
         [...(options?.querySelectorAll('button') ?? [])].map((button) =>
           button.getAttribute('aria-label'),
         ),
-      ).toEqual(['View Plans', 'Switch Provider']);
+      ).toEqual(['View Plans', 'Switch Provider', 'Use another account']);
       expect(container.querySelectorAll('button')).toHaveLength(3);
       expect(container.textContent).not.toContain('Cancel');
       expect(container.textContent).not.toContain('Sign out');

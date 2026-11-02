@@ -47,6 +47,12 @@ export function QwenSubscriptionSidebarStatus({
             disabled: false,
           },
         ];
+    actions.push({
+      key: 'account',
+      label: english('subscription.useAnotherAccount'),
+      onClick: onUseAnotherAccount,
+      disabled: false,
+    });
     return (
       <section
         aria-label={english('subscription.title')}
@@ -88,13 +94,6 @@ export function QwenSubscriptionSidebarStatus({
               {action.label}
             </Button>
           ))}
-          <Button
-            variant="ghost"
-            className={styles.action}
-            onClick={onUseAnotherAccount}
-          >
-            {english('subscription.useAnotherAccount')}
-          </Button>
         </div>
       </section>
     );

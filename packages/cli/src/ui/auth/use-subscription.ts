@@ -205,11 +205,7 @@ export function useSubscription({
       setState(next);
       return next;
     };
-    let authorizationStarted = false;
     startPurchase.current = async () => {
-      if (!suppressBrowserLaunch && !authorizationStarted) {
-        void openBrowserSecurely(plansUrl.current).catch(() => undefined);
-      }
       const purchase = new AbortController();
       const deadline = setTimeout(() => purchase.abort(), 120_000);
       const purchaseSignal = AbortSignal.any([signal, purchase.signal]);
@@ -257,7 +253,6 @@ export function useSubscription({
         saved ??
         (await activeSession.signIn((device) => {
           signal.throwIfAborted();
-          authorizationStarted = true;
           const url = subscriptionAuthorizationUrl(device);
           setDeviceAuth({ ...device, verification_uri_complete: url });
           if (!suppressBrowserLaunch) {

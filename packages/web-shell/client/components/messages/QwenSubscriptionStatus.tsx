@@ -2,7 +2,6 @@ import { useState } from 'react';
 import { useI18n } from '../../i18n';
 import styles from './QwenSubscriptionStatus.module.css';
 import authStyles from './AuthMessage.module.css';
-import { Button } from '../ui/button';
 
 export type QwenSubscriptionState =
   | { status: 'waiting'; authorizationUrl: string }
@@ -74,6 +73,16 @@ export function QwenSubscriptionStatus({
             disabled: false,
           },
         ];
+    actions.push({
+      key: 'account',
+      label: t('subscription.useAnotherAccount'),
+      description: '',
+      onClick: onUseAnotherAccount,
+      disabled: false,
+    });
+    const activeAction = actions.some((action) => action.key === selectedAction)
+      ? selectedAction
+      : actions[0].key;
     return (
       <section
         aria-label={t('subscription.title')}
@@ -117,10 +126,8 @@ export function QwenSubscriptionStatus({
               key={action.key}
               type="button"
               aria-label={action.label}
-              data-selected={
-                state.canCheckAgain || selectedAction === action.key
-              }
-              className={`${authStyles.option} ${state.canCheckAgain || selectedAction === action.key ? authStyles.optionActive : ''} ${styles.desktopOption}`}
+              data-selected={activeAction === action.key}
+              className={`${authStyles.option} ${activeAction === action.key ? authStyles.optionActive : ''} ${styles.desktopOption}`}
               onFocus={() => setSelectedAction(action.key)}
               onMouseEnter={() => setSelectedAction(action.key)}
               onClick={action.onClick}
@@ -137,13 +144,6 @@ export function QwenSubscriptionStatus({
             </button>
           ))}
         </div>
-        <Button
-          variant="ghost"
-          className={styles.muted}
-          onClick={onUseAnotherAccount}
-        >
-          {t('subscription.useAnotherAccount')}
-        </Button>
       </section>
     );
   }

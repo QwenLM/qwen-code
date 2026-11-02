@@ -245,7 +245,6 @@ export function useSubscription(
     };
     let openedUrl = '';
     startPurchase.current = async () => {
-      if (!openedUrl) openUrl(plansUrl.current);
       const purchase = new AbortController();
       const deadline = setTimeout(() => purchase.abort(), 120_000);
       const purchaseSignal = AbortSignal.any([signal, purchase.signal]);
