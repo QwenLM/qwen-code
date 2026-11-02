@@ -44,3 +44,14 @@ export function isChannelPlatformAvailable(
 ): boolean {
   return descriptor.manageable && isSupportedChannelType(descriptor.type);
 }
+
+/**
+ * Channels whose traffic is always repository-scoped group traffic. Every
+ * envelope sets `isGroup`, so the direct-message policy never gates them, and
+ * their group IDs are repository full names (`owner/repo`).
+ */
+const REPOSITORY_ONLY_CHANNEL_TYPES = new Set(['github']);
+
+export function isRepositoryOnlyChannelType(type: unknown): boolean {
+  return typeof type === 'string' && REPOSITORY_ONLY_CHANNEL_TYPES.has(type);
+}

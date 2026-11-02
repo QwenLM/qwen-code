@@ -11,6 +11,7 @@ import type {
   DaemonChannelTypeDescriptor,
   DaemonChannelUpsertRequest,
 } from '@qwen-code/sdk/daemon';
+import { isRepositoryOnlyChannelType } from './channel-platform';
 
 export type ChannelPrivatePolicy =
   | 'disabled'
@@ -43,6 +44,7 @@ export type ChannelEditorValidationCode =
   | 'invalid'
   | 'invalidGroupId'
   | 'invalidOption'
+  | 'invalidRepoId'
   | 'number'
   | 'outOfRange'
   | 'policy';
@@ -53,6 +55,21 @@ export type ChannelEditorValidationErrors = Record<
 >;
 
 const UNSAFE_OBJECT_KEYS = ['__proto__', 'constructor', 'prototype'];
+
+/** Access fields that only gate direct messages, which repository-only channels never receive. */
+export const PRIVATE_ONLY_FIELD_KEYS = new Set([
+  'privatePolicy',
+  'allowedUsers',
+]);
+
+const REPOSITORY_FULL_NAME_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+export function toList(value: string): string[] {
+  return value
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
 
 export function hasDescriptorPrivatePolicy(
   descriptor: DaemonChannelTypeDescriptor,
@@ -190,6 +207,15 @@ export function createChannelEditorDraft(
   const configuredPolicy = instance
     ? configuredPrivatePolicy(instance)
     : 'pairing';
+  if (
+    isRepositoryOnlyChannelType(descriptor.type) &&
+    values['useLocalGh'] === true &&
+    instance?.secrets['token']?.present
+  ) {
+    // A stored token outranks local gh auth, so keeping it would silently
+    // defeat the authentication method this channel has selected.
+    secrets['token'] = { operation: 'clear' };
+  }
   return {
     name: instance?.name ?? '',
     values,
@@ -285,7 +311,11 @@ export function validateChannelEditorDraft(
       errors['token'] = 'credential';
     }
   }
-  if (!draft.privatePolicy && !hasDescriptorPrivatePolicy(descriptor)) {
+  if (
+    !isRepositoryOnlyChannelType(descriptor.type) &&
+    !draft.privatePolicy &&
+    !hasDescriptorPrivatePolicy(descriptor)
+  ) {
     errors['privatePolicy'] = 'policy';
   }
   if (
@@ -295,6 +325,15 @@ export function validateChannelEditorDraft(
     )
   ) {
     errors['allowedGroupIds'] = 'invalidGroupId';
+  }
+  if (
+    isRepositoryOnlyChannelType(descriptor.type) &&
+    String(draft.values['groupPolicy'] ?? '') === 'allowlist' &&
+    splitList(draft.allowedGroupIds).some(
+      (groupId) => !REPOSITORY_FULL_NAME_RE.test(groupId),
+    )
+  ) {
+    errors['allowedGroupIds'] = 'invalidRepoId';
   }
   return errors;
 }
@@ -356,14 +395,7 @@ function assignField(
 }
 
 function splitList(value: string): string[] {
-  return [
-    ...new Set(
-      value
-        .split(',')
-        .map((item) => item.trim())
-        .filter(Boolean),
-    ),
-  ];
+  return [...new Set(toList(value))];
 }
 
 function assignGroups(
@@ -436,9 +468,11 @@ export function buildChannelUpsertRequest(
     ...(instance?.config ?? {}),
     type: descriptor.type,
   };
+  const repositoryOnly = isRepositoryOnlyChannelType(descriptor.type);
   const secrets: Record<string, DaemonChannelSecretUpdate> = {};
   for (const field of descriptor.fields) {
     if (field.kind === 'object') continue;
+    if (repositoryOnly && PRIVATE_ONLY_FIELD_KEYS.has(field.key)) continue;
     if (field.kind === 'secret') {
       const secret = draft.secrets[field.key] ?? { operation: 'preserve' };
       secrets[field.key] =
@@ -451,7 +485,11 @@ export function buildChannelUpsertRequest(
     }
     assignField(config, field, draft.values[field.key]);
   }
-  if (!hasDescriptorPrivatePolicy(descriptor)) {
+  if (repositoryOnly) {
+    // The editor used to persist the injected "pairing" default here even
+    // though these channels never read it; drop the residue on the next save.
+    delete config['privatePolicy'];
+  } else if (!hasDescriptorPrivatePolicy(descriptor)) {
     config['privatePolicy'] = draft.privatePolicy;
   }
   if (hasDescriptorGroupPolicy(descriptor)) {

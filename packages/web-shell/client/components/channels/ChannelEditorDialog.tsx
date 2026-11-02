@@ -60,12 +60,17 @@ import {
   hasDescriptorGroupPolicy,
   hasDescriptorPrivatePolicy,
   configuredPrivatePolicy,
+  PRIVATE_ONLY_FIELD_KEYS,
+  toList,
   validateChannelEditorDraft,
   type ChannelEditorDraft,
   type ChannelEditorValidationCode,
   type ChannelGroupSenders,
 } from './channel-editor-state';
-import { PLATFORM_MARKS } from './channel-platform';
+import {
+  isRepositoryOnlyChannelType,
+  PLATFORM_MARKS,
+} from './channel-platform';
 
 const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
   dingtalk: {
@@ -124,6 +129,26 @@ const SHARED_FIELD_LABEL_KEYS: Record<string, string> = {
   multiSession: 'channels.editor.field.shared.multiSession',
   instructions: 'channels.editor.field.shared.instructions',
 };
+
+/** Per-platform placeholders that spell out the expected value shape. */
+const FIELD_PLACEHOLDER_KEYS: Record<string, string> = {
+  'github.baseUrl': 'https://ghe.example.com/api/v3',
+};
+
+const CONNECTION_FIELD_KEYS = new Set(['baseUrl', 'wsUrl']);
+const ROUTING_FIELD_KEYS = new Set([
+  'reasonFilter',
+  'messageRoutes',
+  'defaultMessageRoute',
+]);
+
+function fieldSectionKey(
+  field: DaemonChannelConfigFieldDescriptor,
+): 'credentials' | 'connection' | 'routing' {
+  if (CONNECTION_FIELD_KEYS.has(field.key)) return 'connection';
+  if (ROUTING_FIELD_KEYS.has(field.key)) return 'routing';
+  return 'credentials';
+}
 
 export interface ChannelEditorDialogProps {
   open: boolean;
@@ -324,6 +349,8 @@ export function ChannelEditorDialog({
     if (code === 'invalid') return t('channels.editor.validation.invalidName');
     if (code === 'invalidGroupId')
       return t('channels.editor.validation.invalidGroupId');
+    if (code === 'invalidRepoId')
+      return t('channels.editor.validation.invalidRepoId');
     if (code === 'invalidOption')
       return t('channels.editor.validation.invalidOption');
     if (code === 'number') return t('channels.editor.validation.number');
@@ -400,7 +427,13 @@ export function ChannelEditorDialog({
       value: '',
     };
     const error = errors[field.key];
-    const showInput = secret.operation === 'replace';
+    // The GitHub channel reads a token before local gh auth, so an editable
+    // token while local gh is selected would silently win over the switch.
+    const lockedByLocalGh =
+      field.key === 'token' &&
+      isRepositoryOnlyChannelType(descriptor.type) &&
+      draft.values['useLocalGh'] === true;
+    const showInput = secret.operation === 'replace' && !lockedByLocalGh;
     const operations = field.required
       ? (['preserve', 'replace'] as const)
       : (['preserve', 'replace', 'clear'] as const);
@@ -412,9 +445,11 @@ export function ChannelEditorDialog({
         required={field.required}
         description={fieldDescription(field)}
         hint={
-          field.envResolvable
-            ? t('channels.editor.environmentReference')
-            : undefined
+          lockedByLocalGh
+            ? t('channels.editor.field.github.token.localGhHint')
+            : field.envResolvable
+              ? t('channels.editor.environmentReference')
+              : undefined
         }
         error={error}
       >
@@ -435,6 +470,7 @@ export function ChannelEditorDialog({
                   variant={
                     secret.operation === operation ? 'secondary' : 'ghost'
                   }
+                  disabled={lockedByLocalGh}
                   aria-pressed={secret.operation === operation}
                   onClick={() =>
                     setDraft((current) => ({
@@ -505,6 +541,31 @@ export function ChannelEditorDialog({
         },
       }));
     if (field.kind === 'boolean') {
+      const isLocalGhSwitch =
+        field.key === 'useLocalGh' &&
+        isRepositoryOnlyChannelType(descriptor.type);
+      const updateSwitch = (checked: boolean) => {
+        if (!isLocalGhSwitch) {
+          update(checked);
+          return;
+        }
+        setDraft((current) => {
+          const secrets = { ...current.secrets };
+          if (checked) {
+            const hasToken =
+              instance?.secrets['token']?.present === true ||
+              Boolean(current.secrets['token']?.value?.trim());
+            // A stored token outranks local gh auth; clear it so the switch
+            // actually takes effect when the draft is saved.
+            if (hasToken) secrets['token'] = { operation: 'clear' };
+          }
+          return {
+            ...current,
+            values: { ...current.values, [field.key]: checked },
+            secrets,
+          };
+        });
+      };
       return (
         <FieldShell
           key={field.key}
@@ -518,7 +579,7 @@ export function ChannelEditorDialog({
             id={id}
             checked={value === true}
             aria-required={field.required}
-            onCheckedChange={(checked) => update(checked)}
+            onCheckedChange={updateSwitch}
           />
         </FieldShell>
       );
@@ -549,6 +610,73 @@ export function ChannelEditorDialog({
               ))}
             </SelectContent>
           </Select>
+        </FieldShell>
+      );
+    }
+    if (field.kind === 'string-list' && field.options?.length) {
+      const options = field.options;
+      const selected = toList(String(value ?? ''));
+      const known = new Set(options.map((option) => option.value));
+      // Values written by hand that the descriptor does not know stay visible
+      // and removable instead of disappearing on the next save.
+      const stored = selected.filter((entry) => !known.has(entry));
+      const toggleValue = (target: string, checked: boolean) => {
+        const next = new Set(selected);
+        if (checked) next.add(target);
+        else next.delete(target);
+        update(
+          [
+            ...options
+              .map((option) => option.value)
+              .filter((entry) => next.has(entry)),
+            ...stored.filter((entry) => next.has(entry)),
+          ].join(', '),
+        );
+      };
+      return (
+        <FieldShell
+          key={field.key}
+          id={id}
+          label={fieldLabel(field)}
+          required={field.required}
+          description={fieldDescription(field)}
+          error={error}
+        >
+          <div
+            id={id}
+            className={styles.optionGrid}
+            role="group"
+            aria-label={fieldLabel(field)}
+          >
+            {[
+              ...options,
+              ...stored.map((entry) => ({ value: entry, label: entry })),
+            ].map((option) => {
+              const isSelected = selected.includes(option.value);
+              const optionLabel = fieldOptionLabel(
+                field,
+                option.value,
+                option.label,
+              );
+              return (
+                <label
+                  key={option.value}
+                  className={styles.optionRow}
+                  data-selected={isSelected}
+                >
+                  <input
+                    type="checkbox"
+                    className={styles.optionCheckbox}
+                    checked={isSelected}
+                    onChange={(event) =>
+                      toggleValue(option.value, event.target.checked)
+                    }
+                  />
+                  <span className={styles.optionLabel}>{optionLabel}</span>
+                </label>
+              );
+            })}
+          </div>
         </FieldShell>
       );
     }
@@ -643,6 +771,9 @@ export function ChannelEditorDialog({
           id={id}
           type={field.kind === 'number' ? 'number' : 'text'}
           value={String(value ?? '')}
+          placeholder={
+            FIELD_PLACEHOLDER_KEYS[`${descriptor.type}.${field.key}`]
+          }
           aria-invalid={Boolean(error)}
           aria-required={field.required}
           onChange={(event) => update(event.target.value)}
@@ -772,12 +903,22 @@ export function ChannelEditorDialog({
               </FieldShell>
             </section>
 
-            <section className={styles.section}>
-              <h3 className={styles.sectionHeading}>
-                {t('channels.editor.section.credentials')}
-              </h3>
-              {credentialFields.map(renderField)}
-            </section>
+            {(['credentials', 'connection', 'routing'] as const).map(
+              (section) => {
+                const sectionFields = credentialFields.filter(
+                  (field) => fieldSectionKey(field) === section,
+                );
+                if (sectionFields.length === 0) return null;
+                return (
+                  <section key={section} className={styles.section}>
+                    <h3 className={styles.sectionHeading}>
+                      {t(`channels.editor.section.${section}`)}
+                    </h3>
+                    {sectionFields.map(renderField)}
+                  </section>
+                );
+              },
+            )}
 
             {sessionFields.length > 0 ? (
               <section className={styles.settingsPanel}>
@@ -851,11 +992,16 @@ export function ChannelEditorDialog({
             ) : null}
 
             {(() => {
+              const repositoryOnly = isRepositoryOnlyChannelType(
+                descriptor.type,
+              );
               const descriptorPolicy = hasDescriptorPrivatePolicy(descriptor);
-              const effectivePolicy = descriptorPolicy
-                ? String(draft.values['privatePolicy'] ?? '')
-                : draft.privatePolicy;
-              const showRadioGroup = !descriptorPolicy;
+              const effectivePolicy = repositoryOnly
+                ? ''
+                : descriptorPolicy
+                  ? String(draft.values['privatePolicy'] ?? '')
+                  : draft.privatePolicy;
+              const showRadioGroup = !descriptorPolicy && !repositoryOnly;
               const descriptorGroupPolicy =
                 hasDescriptorGroupPolicy(descriptor);
               const effectiveGroupPolicy = descriptorGroupPolicy
@@ -867,6 +1013,7 @@ export function ChannelEditorDialog({
               const visibleAccessFields = accessFields.filter(
                 (field) =>
                   field.key !== 'operators' &&
+                  !(repositoryOnly && PRIVATE_ONLY_FIELD_KEYS.has(field.key)) &&
                   (field.key !== 'allowedUsers' ||
                     effectivePolicy === 'allowlist' ||
                     effectivePolicy === 'pairing'),
@@ -951,9 +1098,15 @@ export function ChannelEditorDialog({
                   {effectiveGroupPolicy === 'allowlist' ? (
                     <FieldShell
                       id={`${formId}-allowedGroupIds`}
-                      label={t('channels.editor.field.shared.allowedGroupIds')}
+                      label={t(
+                        repositoryOnly
+                          ? 'channels.editor.field.github.allowedRepos'
+                          : 'channels.editor.field.shared.allowedGroupIds',
+                      )}
                       description={t(
-                        'channels.editor.field.shared.allowedGroupIds.description',
+                        repositoryOnly
+                          ? 'channels.editor.field.github.allowedRepos.description'
+                          : 'channels.editor.field.shared.allowedGroupIds.description',
                       )}
                       error={errors['allowedGroupIds']}
                     >
@@ -962,7 +1115,9 @@ export function ChannelEditorDialog({
                         value={draft.allowedGroupIds}
                         aria-invalid={Boolean(errors['allowedGroupIds'])}
                         placeholder={t(
-                          'channels.editor.field.shared.allowedGroupIds.placeholder',
+                          repositoryOnly
+                            ? 'channels.editor.field.github.allowedRepos.placeholder'
+                            : 'channels.editor.field.shared.allowedGroupIds.placeholder',
                         )}
                         onChange={(event) =>
                           setDraft((current) => ({
@@ -1035,9 +1190,10 @@ export function ChannelEditorDialog({
                   ) : null}
                   {operatorsField ? renderField(operatorsField) : null}
                   {showPairing ? (
-                    (instance &&
+                    instance &&
+                    ((!repositoryOnly &&
                       configuredPrivatePolicy(instance) === 'pairing') ||
-                    instance?.config.groupPolicy === 'pairing' ? (
+                      instance.config.groupPolicy === 'pairing') ? (
                       <ChannelPairingRequests
                         channelName={instance.name}
                         listRequests={listPairingRequests}

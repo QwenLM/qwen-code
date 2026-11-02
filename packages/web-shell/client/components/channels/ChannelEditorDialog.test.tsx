@@ -143,6 +143,74 @@ const GITHUB_LOCAL_GH: DaemonChannelTypeDescriptor = {
   ],
 };
 
+// Mirrors the registry-composed GitHub catalog: the plugin fields plus the
+// injected privatePolicy/allowedUsers that the adapter never reads.
+const GITHUB_CONFIGURED: DaemonChannelTypeDescriptor = {
+  type: 'github',
+  displayName: 'GitHub',
+  manageable: true,
+  fields: [
+    {
+      key: 'token',
+      label: 'Personal Access Token',
+      kind: 'secret',
+      envResolvable: true,
+    },
+    {
+      key: 'useLocalGh',
+      label: 'Use Local GitHub CLI Authentication',
+      kind: 'boolean',
+    },
+    {
+      key: 'baseUrl',
+      label: 'Base URL',
+      kind: 'string',
+      envResolvable: true,
+    },
+    {
+      key: 'groupPolicy',
+      label: 'Group Policy',
+      kind: 'enum',
+      required: true,
+      default: 'open',
+      options: [
+        { value: 'open', label: 'Open' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'disabled', label: 'Disabled' },
+      ],
+    },
+    {
+      key: 'reasonFilter',
+      label: 'Reason Filter',
+      kind: 'string-list',
+      options: [
+        { value: 'mention', label: 'mention' },
+        { value: 'review_requested', label: 'review_requested' },
+        { value: 'ci_activity', label: 'ci_activity' },
+      ],
+    },
+    {
+      key: 'privatePolicy',
+      label: 'Private Policy',
+      kind: 'enum',
+      required: true,
+      default: 'pairing',
+      options: [
+        { value: 'disabled', label: 'Disabled' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    {
+      key: 'allowedUsers',
+      label: 'Allowed Users',
+      kind: 'string-list',
+    },
+  ],
+};
+
 const EXCLUSIVE_MINIMUM: DaemonChannelTypeDescriptor = {
   type: 'example',
   displayName: 'Example',
@@ -1079,10 +1147,163 @@ describe('ChannelEditorDialog', () => {
       config: {
         type: 'github',
         useLocalGh: true,
-        privatePolicy: 'pairing',
       },
       secrets: { token: { operation: 'clear' } },
     });
+  });
+
+  it('renders the reason filter as checkboxes and saves the checked reasons', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, onSave });
+
+    const group = document.querySelector(
+      '[role="group"][aria-label="Reason Filter"]',
+    );
+    const boxes = Array.from(
+      group?.querySelectorAll<HTMLInputElement>('input[type="checkbox"]') ?? [],
+    );
+    expect(boxes.map((box) => box.closest('label')?.textContent)).toEqual([
+      'mention — the bot is @mentioned',
+      'review_requested — the bot is asked to review a pull request',
+      'ci_activity — CI and check-run results change',
+    ]);
+
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'github-bot');
+      setInputValue(inputByLabel('Personal Access Token')!, 'ghp_test');
+    });
+    for (const label of [
+      'mention — the bot is @mentioned',
+      'ci_activity — CI and check-run results change',
+    ]) {
+      await act(async () => {
+        Array.from(
+          group?.querySelectorAll<HTMLInputElement>('input[type="checkbox"]') ??
+            [],
+        )
+          .find((box) => box.closest('label')?.textContent === label)
+          ?.click();
+      });
+    }
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledWith(
+      'github-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({
+          reasonFilter: ['mention', 'ci_activity'],
+        }),
+      }),
+    );
+  });
+
+  it('keeps a hand-written reason visible instead of dropping it on save', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'open',
+        reasonFilter: ['mention', 'typo_reason'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, instance, onSave });
+
+    const unknown = Array.from(
+      document.querySelectorAll<HTMLInputElement>(
+        '[role="group"][aria-label="Reason Filter"] input[type="checkbox"]',
+      ),
+    ).find((box) => box.closest('label')?.textContent === 'typo_reason');
+    expect(unknown).toBeDefined();
+    expect(unknown!.checked).toBe(true);
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(document.body.textContent).toContain(
+      "Remove values that aren't in the allowed list.",
+    );
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it('locks the token input while local gh authentication is selected', async () => {
+    await renderDialog({ descriptor: GITHUB_CONFIGURED });
+
+    expect(inputByLabel('Personal Access Token')).not.toBeNull();
+
+    const toggle = document.querySelector<HTMLButtonElement>(
+      'button[role="switch"]',
+    );
+    await act(async () => {
+      toggle!.click();
+    });
+
+    expect(inputByLabel('Personal Access Token')).toBeNull();
+    expect(document.body.textContent).toContain(
+      'Local gh authentication is selected. The token cannot be edited here,',
+    );
+  });
+
+  it('separates connection and notification fields from credentials', async () => {
+    await renderDialog({ descriptor: GITHUB_CONFIGURED });
+
+    expect(sectionHeadingOf(fieldByLabel('Base URL'))).toBe('Connection');
+    expect(sectionHeadingOf(fieldByLabel('Reason Filter'))).toBe(
+      'Notifications and routing',
+    );
+    expect(sectionHeadingOf(inputByLabel('Personal Access Token'))).toBe(
+      'Credentials',
+    );
+    expect(inputByLabel('Base URL')?.placeholder).toBe(
+      'https://ghe.example.com/api/v3',
+    );
+  });
+
+  it('asks for repository full names when GitHub groups are allowlisted', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, onSave });
+
+    await selectOption('Group Policy', 'Allowlist');
+    const repos = inputByLabel('Allowed repositories');
+    expect(repos?.placeholder).toBe('owner/repo');
+
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'github-bot');
+      setInputValue(inputByLabel('Personal Access Token')!, 'ghp_test');
+      setInputValue(repos!, 'qwen-code');
+    });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(document.body.textContent).toContain(
+      'Enter each repository as owner/repo.',
+    );
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it('hides the direct-message policy for a repository-only channel', async () => {
+    await renderDialog({ descriptor: GITHUB_CONFIGURED });
+
+    expect(document.body.textContent).not.toContain('Direct message policy');
+    expect(document.body.textContent).not.toContain('Allowed user IDs');
   });
 
   it('does not show the allowlist alert when no users are configured', async () => {

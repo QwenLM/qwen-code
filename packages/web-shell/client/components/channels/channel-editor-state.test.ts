@@ -1009,14 +1009,19 @@ describe('Descriptor-driven privatePolicy', () => {
   });
 
   it('writes privatePolicy via descriptor fields, not the hardcoded path', () => {
-    const draft = createChannelEditorDraft(GITHUB);
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...GITHUB,
+      type: 'dws',
+      displayName: 'DWS',
+    };
+    const draft = createChannelEditorDraft(descriptor);
     draft.name = 'my-bot';
     draft.secrets.token = { operation: 'replace', value: 'ghp_test' };
     draft.values.allowedUsers = 'alice, bob';
 
-    const request = buildChannelUpsertRequest(GITHUB, draft, 'rev-1');
+    const request = buildChannelUpsertRequest(descriptor, draft, 'rev-1');
     expect(request.config).toEqual({
-      type: 'github',
+      type: 'dws',
       useLocalGh: false,
       groupPolicy: 'open',
       privatePolicy: 'allowlist',
@@ -1194,5 +1199,78 @@ describe('Descriptor-driven privatePolicy', () => {
     expect(validateChannelEditorDraft(descriptor, invalid, [])).toEqual({
       reasons: 'invalidOption',
     });
+  });
+});
+
+// The registry injects privatePolicy/allowedUsers into every manageable
+// channel, but GitHub traffic is always group traffic, so the adapter never
+// reads them and group IDs are repository full names.
+describe('Repository-only channel access config', () => {
+  it('does not persist the direct-message policy', () => {
+    const draft = createChannelEditorDraft(GITHUB);
+    draft.name = 'release-bot';
+    draft.secrets.token = { operation: 'replace', value: 'ghp_test' };
+    draft.values.allowedUsers = 'alice';
+
+    const request = buildChannelUpsertRequest(GITHUB, draft, 'rev-1');
+    expect(request.config).toEqual({
+      type: 'github',
+      useLocalGh: false,
+      groupPolicy: 'open',
+    });
+  });
+
+  it('drops a direct-message policy stored by an earlier save', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'open',
+        privatePolicy: 'pairing',
+        allowedUsers: ['alice'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITHUB, instance);
+
+    const request = buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance);
+    expect(request.config).not.toHaveProperty('privatePolicy');
+    expect(request.config).toMatchObject({ allowedUsers: ['alice'] });
+  });
+
+  it('requires owner/repo for an allowlisted repository', () => {
+    const draft = createChannelEditorDraft(GITHUB);
+    draft.name = 'release-bot';
+    draft.secrets.token = { operation: 'replace', value: 'ghp_test' };
+    draft.values.groupPolicy = 'allowlist';
+    draft.allowedGroupIds = 'qwen-code';
+
+    expect(validateChannelEditorDraft(GITHUB, draft, [])).toEqual({
+      allowedGroupIds: 'invalidRepoId',
+    });
+
+    draft.allowedGroupIds = 'QwenLM/qwen-code, acme/widgets.js';
+    expect(validateChannelEditorDraft(GITHUB, draft, [])).toEqual({});
+  });
+
+  it('drops a stored token once local gh authentication is selected', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: { type: 'github', useLocalGh: true, groupPolicy: 'open' },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+
+    const draft = createChannelEditorDraft(GITHUB, instance);
+
+    expect(draft.secrets.token).toEqual({ operation: 'clear' });
+    expect(buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance)).toEqual(
+      expect.objectContaining({
+        secrets: { token: { operation: 'clear' } },
+      }),
+    );
   });
 });

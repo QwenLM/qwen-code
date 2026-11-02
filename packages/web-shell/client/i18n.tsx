@@ -4389,6 +4389,8 @@ const EN: Messages = {
     'Update public settings or explicitly change stored credentials.',
   'channels.editor.section.identity': 'Identity',
   'channels.editor.section.credentials': 'Credentials',
+  'channels.editor.section.connection': 'Connection',
+  'channels.editor.section.routing': 'Notifications and routing',
   'channels.editor.section.session': 'Conversation management',
   'channels.editor.section.access': 'Access control',
   'channels.editor.section.access.description':
@@ -4420,6 +4422,12 @@ const EN: Messages = {
   'channels.editor.field.github.token': 'Personal Access Token',
   'channels.editor.field.github.token.description':
     'Optional classic PAT with "notifications" scope. Overrides local gh authentication',
+  'channels.editor.field.github.token.localGhHint':
+    'Local gh authentication is selected. The token cannot be edited here, and any stored token is removed on save.',
+  'channels.editor.field.github.allowedRepos': 'Allowed repositories',
+  'channels.editor.field.github.allowedRepos.description':
+    'Comma-separated repository full names, for example owner/repo.',
+  'channels.editor.field.github.allowedRepos.placeholder': 'owner/repo',
   'channels.editor.field.github.useLocalGh':
     'Use local GitHub CLI authentication',
   'channels.editor.field.github.useLocalGh.description':
@@ -4432,7 +4440,37 @@ const EN: Messages = {
     'Must be "Open", "Allowlist", or "Pairing" for notifications to flow',
   'channels.editor.field.github.reasonFilter': 'Reason Filter',
   'channels.editor.field.github.reasonFilter.description':
-    'Optional. Comma-separated notification reasons to process. Valid values: mention, review_requested, assign, author, comment, ci_activity, manual, state_change, subscribed, team_mention, security_alert, approval_requested, invitation, member_feature_requested, security_advisory_credit. Leave empty to process all.',
+    'Optional. Only notifications with a checked reason are processed. Leave every reason unchecked to process all of them.',
+  'channels.editor.field.github.reasonFilter.option.mention':
+    'mention — the bot is @mentioned',
+  'channels.editor.field.github.reasonFilter.option.review_requested':
+    'review_requested — the bot is asked to review a pull request',
+  'channels.editor.field.github.reasonFilter.option.assign':
+    'assign — an issue or pull request is assigned to the bot',
+  'channels.editor.field.github.reasonFilter.option.author':
+    'author — new activity on a thread the bot wrote',
+  'channels.editor.field.github.reasonFilter.option.comment':
+    'comment — a new comment on a subscribed thread',
+  'channels.editor.field.github.reasonFilter.option.ci_activity':
+    'ci_activity — CI and check-run results change',
+  'channels.editor.field.github.reasonFilter.option.manual':
+    'manual — subscribed or marked unread by hand',
+  'channels.editor.field.github.reasonFilter.option.state_change':
+    'state_change — an issue or pull request is closed or merged',
+  'channels.editor.field.github.reasonFilter.option.subscribed':
+    'subscribed — any update on a watched thread',
+  'channels.editor.field.github.reasonFilter.option.team_mention':
+    'team_mention — a team the bot belongs to is @mentioned',
+  'channels.editor.field.github.reasonFilter.option.security_alert':
+    'security_alert — a repository security alert',
+  'channels.editor.field.github.reasonFilter.option.approval_requested':
+    'approval_requested — a deployment or workflow approval is requested',
+  'channels.editor.field.github.reasonFilter.option.invitation':
+    'invitation — a repository or team invitation',
+  'channels.editor.field.github.reasonFilter.option.member_feature_requested':
+    'member_feature_requested — a member feature request',
+  'channels.editor.field.github.reasonFilter.option.security_advisory_credit':
+    'security_advisory_credit — a security advisory credit',
   'channels.editor.field.gitlab.token': 'Personal Access Token',
   'channels.editor.field.gitlab.token.description':
     'PAT with "read_api" + "api" scopes',
@@ -4608,6 +4646,8 @@ const EN: Messages = {
   'channels.editor.validation.invalidName': 'Choose a different instance name.',
   'channels.editor.validation.invalidGroupId':
     'Enter a group ID other than __proto__, constructor, or prototype.',
+  'channels.editor.validation.invalidRepoId':
+    'Enter each repository as owner/repo.',
   'channels.editor.validation.invalidOption':
     "Remove values that aren't in the allowed list.",
   'channels.editor.validation.number': 'Enter a valid number.',
@@ -8716,6 +8756,8 @@ const ZH: Messages = {
   'channels.editor.editDescription': '更新公开配置，或明确更改已保存的凭据。',
   'channels.editor.section.identity': '频道标识',
   'channels.editor.section.credentials': '应用凭据',
+  'channels.editor.section.connection': '连接',
+  'channels.editor.section.routing': '通知与路由',
   'channels.editor.section.session': '会话管理',
   'channels.editor.section.access': '访问控制',
   'channels.editor.section.access.description':
@@ -8747,6 +8789,12 @@ const ZH: Messages = {
   'channels.editor.field.github.token': '个人访问令牌',
   'channels.editor.field.github.token.description':
     '可选。填写具有 "notifications" 权限的经典 PAT；优先于本地 gh 认证',
+  'channels.editor.field.github.token.localGhHint':
+    '已选择本地 gh 认证：此处无法编辑令牌，保存时会移除已存的令牌。',
+  'channels.editor.field.github.allowedRepos': '允许的仓库',
+  'channels.editor.field.github.allowedRepos.description':
+    '逗号分隔的仓库全名，例如 owner/repo。',
+  'channels.editor.field.github.allowedRepos.placeholder': 'owner/repo',
   'channels.editor.field.github.useLocalGh': '使用本地 GitHub CLI 认证',
   'channels.editor.field.github.useLocalGh.description':
     '未配置令牌时，显式复用 daemon 主机上账户级的 gh 登录',
@@ -8758,7 +8806,37 @@ const ZH: Messages = {
     '必须设为 "Open"、"Allowlist" 或 "Pairing" 才能接收通知',
   'channels.editor.field.github.reasonFilter': '通知原因过滤',
   'channels.editor.field.github.reasonFilter.description':
-    '可选。逗号分隔的通知原因。有效值：mention、review_requested、assign、author、comment、ci_activity、manual、state_change、subscribed、team_mention、security_alert、approval_requested、invitation、member_feature_requested、security_advisory_credit。留空则处理全部。',
+    '可选。只处理勾选原因的通知；全部不勾选则处理所有通知。',
+  'channels.editor.field.github.reasonFilter.option.mention':
+    'mention — 有人在评论或正文中 @ 了机器人',
+  'channels.editor.field.github.reasonFilter.option.review_requested':
+    'review_requested — 机器人被请求评审 PR',
+  'channels.editor.field.github.reasonFilter.option.assign':
+    'assign — issue 或 PR 被指派给机器人',
+  'channels.editor.field.github.reasonFilter.option.author':
+    'author — 机器人发起的线程有新活动',
+  'channels.editor.field.github.reasonFilter.option.comment':
+    'comment — 已订阅线程出现新评论',
+  'channels.editor.field.github.reasonFilter.option.ci_activity':
+    'ci_activity — CI 与检查结果发生变化',
+  'channels.editor.field.github.reasonFilter.option.manual':
+    'manual — 手动订阅或标记为未读',
+  'channels.editor.field.github.reasonFilter.option.state_change':
+    'state_change — issue 或 PR 被关闭、合并',
+  'channels.editor.field.github.reasonFilter.option.subscribed':
+    'subscribed — 关注线程的任何更新',
+  'channels.editor.field.github.reasonFilter.option.team_mention':
+    'team_mention — 机器人所在团队被 @',
+  'channels.editor.field.github.reasonFilter.option.security_alert':
+    'security_alert — 仓库出现安全告警',
+  'channels.editor.field.github.reasonFilter.option.approval_requested':
+    'approval_requested — 需要审批部署或工作流',
+  'channels.editor.field.github.reasonFilter.option.invitation':
+    'invitation — 收到仓库或团队邀请',
+  'channels.editor.field.github.reasonFilter.option.member_feature_requested':
+    'member_feature_requested — 成员功能请求',
+  'channels.editor.field.github.reasonFilter.option.security_advisory_credit':
+    'security_advisory_credit — 安全公告致谢',
   'channels.editor.field.gitlab.token': '个人访问令牌',
   'channels.editor.field.gitlab.token.description':
     '需要 "read_api" + "api" 权限的 PAT',
@@ -8926,6 +9004,7 @@ const ZH: Messages = {
   'channels.editor.validation.invalidName': '请使用其他实例名称。',
   'channels.editor.validation.invalidGroupId':
     '群聊 ID 不能是 __proto__、constructor 或 prototype。',
+  'channels.editor.validation.invalidRepoId': '仓库需写成 owner/repo 形式。',
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.number': '请输入有效数字。',
   'channels.editor.validation.outOfRange': (v) =>
