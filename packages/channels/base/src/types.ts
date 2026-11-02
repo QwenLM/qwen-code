@@ -186,6 +186,53 @@ export interface SessionTarget {
   isGroup?: boolean;
 }
 
+/** One PR binding mirrored from a daemon session's PR sidecar. */
+export interface PrBindingEntry {
+  number: number;
+  url: string;
+  state?: 'open' | 'merged' | 'closed';
+}
+
+/**
+ * A daemon session with PR bindings, as returned by the daemon's
+ * `GET /sessions/pr-bindings` reverse-lookup route.
+ */
+export interface PrBindingSummary {
+  sessionId: string;
+  workspaceCwd: string;
+  sourceType?: string;
+  sourceId?: string;
+  updatedAt?: string;
+  prs: PrBindingEntry[];
+}
+
+/**
+ * Result of a PR-binding reverse lookup. `partial` means the daemon could
+ * not enumerate every binding (a workspace failed to list, or a scan cap
+ * was hit); consumers must not treat a missing entry as an authoritative
+ * absence — in particular they must not destroy state keyed by bindings.
+ */
+export interface PrBindingsSnapshot {
+  bindings: PrBindingSummary[];
+  partial: boolean;
+}
+
+/**
+ * Daemon-backed delivery into sessions the channel does not own. Provided by
+ * the daemon channel worker; absent in standalone ACP mode, where adapters
+ * must keep their normal channel-session behavior.
+ */
+export interface ChannelBoundSessions {
+  listPrBindings(): Promise<PrBindingsSnapshot>;
+  /**
+   * Inject a prompt into an existing session. Resolves once the daemon
+   * accepts the prompt into the session's queue; does not wait for the turn.
+   * Throws `BoundSessionGoneError` when the session no longer exists and
+   * `BoundSessionQueueFullError` when the session's prompt queue is full.
+   */
+  deliverPrompt(sessionId: string, prompt: string): Promise<void>;
+}
+
 export interface ObservedChannelIdentity {
   id: string;
   label: string;

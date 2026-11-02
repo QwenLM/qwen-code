@@ -80,15 +80,17 @@ Local `gh` authentication requires an HTTPS `baseUrl` so the daemon host credent
 
 ## Configuration Options
 
-| Option                    | Default                  | Description                                                                                                                                      |
-| ------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `token`                   | unset                    | Optional classic PAT with `notifications` scope; overrides local `gh` authentication                                                             |
-| `useLocalGh`              | `false`                  | Explicitly reuse the daemon host's account-wide GitHub CLI authentication                                                                        |
-| `pollInterval`            | `60000`                  | Poll interval in ms                                                                                                                              |
-| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                                                                           |
-| `groupPolicy`             | `"disabled"`             | Must be `"open"`, `"allowlist"` with the repo (`owner/repo`) listed in `groups`, or `"pairing"` with the repo approved for notifications to flow |
-| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run                                                                 |
-| `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                                                                                     |
+| Option                    | Default                  | Description                                                                                                                                         |
+| ------------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `token`                   | unset                    | Optional classic PAT with `notifications` scope; overrides local `gh` authentication                                                                |
+| `useLocalGh`              | `false`                  | Explicitly reuse the daemon host's account-wide GitHub CLI authentication                                                                           |
+| `pollInterval`            | `60000`                  | Poll interval in ms                                                                                                                                 |
+| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                                                                              |
+| `groupPolicy`             | `"disabled"`             | Must be `"open"`, `"allowlist"` with the repo (`owner/repo`) listed in `groups`, or `"pairing"` with the repo approved for notifications to flow    |
+| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run                                                                    |
+| `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                                                                                        |
+| `deliverToBoundSessions`  | `false`                  | Deliver events for PRs bound to a live session into that session as a prompt instead of a channel-owned session (daemon-managed channels only)      |
+| `prWatchEvents`           | unset                    | Optional state transitions to watch for bound PRs: `ci_failure`, `merge_conflict`, `head_change`, `state_change`. Requires `deliverToBoundSessions` |
 
 Use `reasonFilter` to drop noisy notification classes such as `ci_activity` or `state_change`. Do not use `reasonFilter: ["mention"]` as a replacement for `groups.*.requireMention`: GitHub's `mention` reason is sticky at the thread level, so real new @mentions can arrive later under `comment`, `subscribed`, `author`, or other reasons and would be skipped.
 
@@ -144,6 +146,36 @@ with private file permissions and retries it on the next channel start. The
 corresponding inbound task remains in `reply_pending` state until that delivery
 succeeds or reaches a definite terminal failure. Ambiguous delivery failures are
 not retried automatically because GitHub may have created the comment.
+
+## PR-Bound Session Delivery
+
+By default every event is handled by a channel-owned session. With
+`deliverToBoundSessions: true`, events for a PR that is bound to a live session
+(the PR bindings shown in the Web Shell sidebar, registered when a session
+creates or reviews a PR) are delivered into that session as a prompt instead,
+so the session that follows the PR handles the event with its existing context.
+
+- The injected prompt marks all GitHub content as untrusted event data. The
+  session's reply stays in the session; it is **not** published to GitHub
+  automatically, and the session may act on GitHub through its own tools.
+- Comment sender gates still apply before delivery. When several sessions are
+  bound to the same PR, the most recently updated non-archived session wins;
+  channel-owned sessions are never candidates.
+- When no bound session exists (or it cannot be restored), the event falls
+  back to the normal channel path and its public-reply contract. A bound
+  session that is dormant after a daemon restart is woken automatically for
+  the delivery, so restarts do not divert events into public replies.
+- This feature requires a daemon-managed channel; standalone
+  `qwen channel start` ignores the setting with a warning.
+
+With `prWatchEvents`, the channel additionally watches bound PRs for state
+transitions the Notifications API cannot deliver, inside its existing poll
+cycle: `ci_failure` (checks turn red on a head, once per head), `merge_conflict`
+(`mergeable_state` becomes `dirty`, edge-triggered), `head_change` (new commits
+pushed), and `state_change` (PR merged or closed). Detection is API-level and
+spends no model tokens until a transition fires; a steady-state PR costs one
+API call per poll, and at most 30 bound PRs are watched. Transitions are
+persisted before delivery, so restarts do not re-fire them.
 
 ## Known Limitations
 

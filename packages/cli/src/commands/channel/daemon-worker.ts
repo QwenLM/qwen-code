@@ -19,6 +19,8 @@ import { loadSettings } from '../../config/settings.js';
 import { resolveLanguage, resolveLanguageSetting } from '../../i18n/index.js';
 import { scrubAndReportInheritedLoaderEnv } from '../../config/shared-env-keys.js';
 import {
+  BoundSessionGoneError,
+  BoundSessionQueueFullError,
   ChannelLoopScheduler,
   ChannelLoopStore,
   DaemonChannelBridge,
@@ -29,6 +31,7 @@ import {
 import type {
   ChannelAgentBridge,
   ChannelBase,
+  ChannelBoundSessions,
   ChannelLoopRunner,
   ChannelWebhookRunOptions,
   ChannelWebhookTask,
@@ -36,6 +39,8 @@ import type {
   DaemonChannelSessionClient,
   DaemonChannelSessionFactory,
   DaemonChannelSessionFactoryRequest,
+  PrBindingsSnapshot,
+  PrBindingSummary,
 } from '@qwen-code/channel-base';
 import type { ServeFeature } from '../../serve/capabilities.js';
 import type { ServeChannelSelection } from '../../serve/types.js';
@@ -154,6 +159,7 @@ interface DaemonCapabilitiesLike {
 
 interface DaemonClientLike {
   capabilities(): Promise<DaemonCapabilitiesLike>;
+  requestRest(path: string, init?: RequestInit): Promise<Response>;
   workspaceByCwd?(cwd: string): {
     deleteSessionsData(sessionIds: string[]): Promise<{
       removed: string[];
@@ -293,6 +299,132 @@ export function createDaemonSessionFactory({
       },
       clientId,
     );
+  };
+}
+
+/**
+ * Daemon-backed delivery into PR-bound sessions the channel does not own.
+ * Acceptance into the session's prompt queue counts as delivery; the turn
+ * itself runs independently of the channel worker.
+ *
+ * `wake` restores a dormant (persisted but not live) session, which the
+ * prompt route rejects with 404. The daemon worker passes the same resume
+ * path the channel bridge uses for its own sessions, classifying a 404
+ * restore as `BoundSessionGoneError`; any other wake failure propagates as
+ * a transient delivery error so the adapter retries instead of falling
+ * back to public channel delivery.
+ */
+export function createBoundSessionsAccessor(
+  client: DaemonClientLike,
+  wake?: (sessionId: string, workspaceCwd: string) => Promise<void>,
+): ChannelBoundSessions {
+  const cwdBySession = new Map<string, string>();
+  const postPrompt = (sessionId: string, prompt: string): Promise<Response> =>
+    client.requestRest(`/session/${encodeURIComponent(sessionId)}/prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: [{ type: 'text', text: prompt }] }),
+    });
+  const listPrBindings = async (): Promise<PrBindingsSnapshot> => {
+    const res = await client.requestRest('/sessions/pr-bindings');
+    if (!res.ok) {
+      throw new Error(`GET /sessions/pr-bindings failed: HTTP ${res.status}`);
+    }
+    const body = (await res.json()) as {
+      bindings?: unknown;
+      partial?: unknown;
+    };
+    const partial = body.partial === true;
+    if (!Array.isArray(body.bindings)) return { bindings: [], partial };
+    const summaries: PrBindingSummary[] = [];
+    // Rebuild (not accumulate): sessions that left the bindings must drop
+    // out of the wake cache instead of pinning stale cwds forever.
+    cwdBySession.clear();
+    for (const entry of body.bindings) {
+      if (entry === null || typeof entry !== 'object') continue;
+      const record = entry as Record<string, unknown>;
+      const { sessionId, workspaceCwd, prs } = record;
+      if (
+        typeof sessionId !== 'string' ||
+        typeof workspaceCwd !== 'string' ||
+        !Array.isArray(prs)
+      ) {
+        continue;
+      }
+      const entries: PrBindingSummary['prs'] = [];
+      for (const pr of prs) {
+        if (pr === null || typeof pr !== 'object') continue;
+        const { number, url, state } = pr as Record<string, unknown>;
+        if (
+          typeof number !== 'number' ||
+          !Number.isSafeInteger(number) ||
+          number <= 0 ||
+          typeof url !== 'string'
+        ) {
+          continue;
+        }
+        entries.push({
+          number,
+          url,
+          ...(state === 'open' || state === 'merged' || state === 'closed'
+            ? { state }
+            : {}),
+        });
+      }
+      if (entries.length === 0) continue;
+      const { sourceType, sourceId, updatedAt } = record;
+      cwdBySession.set(sessionId, workspaceCwd);
+      summaries.push({
+        sessionId,
+        workspaceCwd,
+        ...(typeof sourceType === 'string' ? { sourceType } : {}),
+        ...(typeof sourceId === 'string' ? { sourceId } : {}),
+        ...(typeof updatedAt === 'string' ? { updatedAt } : {}),
+        prs: entries,
+      });
+    }
+    return { bindings: summaries, partial };
+  };
+  return {
+    listPrBindings,
+    deliverPrompt: async (sessionId, prompt) => {
+      let res = await postPrompt(sessionId, prompt);
+      if (res.status === 404 && wake) {
+        // Dormant session: the bindings route lists persisted active
+        // sessions, but the prompt route only serves live ones. Wake it
+        // and retry once. A refresh failure here is transient and must
+        // propagate, not degrade into a gone-session public fallback.
+        let cwd = cwdBySession.get(sessionId);
+        if (cwd === undefined) {
+          await listPrBindings();
+          cwd = cwdBySession.get(sessionId);
+        }
+        if (cwd !== undefined) {
+          // The wake callback classifies a truly deleted session as
+          // BoundSessionGoneError; every other failure (restore conflict,
+          // session limit, timeout) propagates for the adapter to retry.
+          await wake(sessionId, cwd);
+          res = await postPrompt(sessionId, prompt);
+        }
+      }
+      if (res.status === 404) {
+        throw new BoundSessionGoneError(sessionId);
+      }
+      if (res.status === 503) {
+        const body = (await res.json().catch(() => ({}))) as {
+          code?: unknown;
+        };
+        if (body.code === 'prompt_queue_full') {
+          throw new BoundSessionQueueFullError(sessionId);
+        }
+        throw new Error(
+          `POST /session/:id/prompt unavailable: HTTP 503 (${String(body.code)})`,
+        );
+      }
+      if (!res.ok) {
+        throw new Error(`POST /session/:id/prompt failed: HTTP ${res.status}`);
+      }
+    },
   };
 }
 
@@ -658,6 +790,31 @@ export async function runChannelDaemonWorker(
         SESSION_SHELL_COMMAND_FEATURE,
       ),
     });
+    const boundSessions = createBoundSessionsAccessor(
+      client,
+      async (sessionId, workspaceCwd) => {
+        // Same restore path the channel bridge uses for its own dormant
+        // sessions. The returned client is discarded: the prompt admitted
+        // right after holds the session for its turn, and the daemon's
+        // idle cleanup returns it to dormant once no prompt remains.
+        try {
+          await sdk.DaemonSessionClient.resume(
+            client,
+            sessionId,
+            { workspaceCwd, sessionScope: 'thread' },
+            `qwen-channel-worker:${process.pid}`,
+          );
+        } catch (err) {
+          // Only a missing session is gone; restore conflicts, session
+          // limits and timeouts are transient and must not trigger the
+          // adapter's public channel fallback.
+          if ((err as { status?: unknown }).status === 404) {
+            throw new BoundSessionGoneError(sessionId);
+          }
+          throw err;
+        }
+      },
+    );
     const createdRouter = new SessionRouter(
       bridgeFacade,
       daemonWorkspace,
@@ -689,6 +846,7 @@ export async function runChannelDaemonWorker(
             ...(proxy ? { proxy } : {}),
             ...(displayLanguage ? { displayLanguage } : {}),
             router: createdRouter,
+            boundSessions,
             stateDir: daemonChannelStateDir(daemonWorkspace, name),
             channelMemory: {
               readChannelMemory,

@@ -20,11 +20,15 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  BoundSessionGoneError,
+  BoundSessionQueueFullError,
   getWorkspaceScopeDirName,
   PairingStore,
   type ChannelAgentBridge,
+  type ChannelBoundSessions,
   type ChannelConfig,
   type Envelope,
+  type PrBindingSummary,
 } from '@qwen-code/channel-base';
 
 const mockExecFile = vi.hoisted(() => vi.fn());
@@ -55,6 +59,12 @@ vi.mock('@octokit/rest', () => {
       },
       pulls: {
         get: vi.fn(),
+      },
+      checks: {
+        listForRef: vi.fn(),
+      },
+      repos: {
+        getCombinedStatusForRef: vi.fn(),
       },
     },
     paginate: vi.fn(),
@@ -101,6 +111,12 @@ const mockOctokit = octokitModule.__mockOctokit as {
     };
     pulls: {
       get: ReturnType<typeof vi.fn>;
+    };
+    checks: {
+      listForRef: ReturnType<typeof vi.fn>;
+    };
+    repos: {
+      getCombinedStatusForRef: ReturnType<typeof vi.fn>;
     };
   };
   paginate: ReturnType<typeof vi.fn>;
@@ -5136,6 +5152,852 @@ describe('GithubChannel', () => {
           makeConfig({ baseUrl: 'https://github.example.com/api/v3/' }),
         ),
       ).resolves.toBe('https://github.example.com');
+    });
+  });
+});
+
+describe('GithubChannel bound-session delivery and PR state watch', () => {
+  // Tests drive pollOnce explicitly; connect()'s immediate background poll
+  // would race the per-test mock queues, so the loop is disabled here.
+  class BoundTestChannel extends TestableGithubChannel {
+    protected override startPollLoop(): void {}
+  }
+
+  let channel: TestableGithubChannel;
+  let boundSessions: {
+    listPrBindings: Mock;
+    deliverPrompt: Mock;
+  };
+  let savedQwenHome: string | undefined;
+
+  function makeBinding(
+    overrides: Partial<PrBindingSummary> = {},
+  ): PrBindingSummary {
+    return {
+      sessionId: 'bound-session',
+      workspaceCwd: '/tmp/test',
+      updatedAt: '2026-07-02T00:00:00.000Z',
+      prs: [
+        {
+          number: 42,
+          url: 'https://github.com/owner/repo/pull/42',
+          state: 'open',
+        },
+      ],
+      ...overrides,
+    };
+  }
+
+  function makePrMeta(overrides: Record<string, unknown> = {}) {
+    return {
+      title: 'Test PR',
+      state: 'open',
+      merged: false,
+      mergeable: true,
+      mergeable_state: 'clean',
+      head: { sha: 'sha-1' },
+      updated_at: '2026-07-02T09:00:00.000Z',
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    savedQwenHome = process.env.QWEN_HOME;
+    process.env.QWEN_HOME = mkdtempSync(join(tmpdir(), 'qwen-gh-bound-'));
+    vi.clearAllMocks();
+    boundSessions = {
+      listPrBindings: vi.fn().mockResolvedValue({
+        bindings: [makeBinding()],
+        partial: false,
+      }),
+      deliverPrompt: vi.fn().mockResolvedValue(undefined),
+    };
+    mockOctokit.rest.users.getAuthenticated.mockResolvedValue({
+      data: { id: 99999, login: 'test-bot' },
+    });
+    mockOctokit.rest.activity.markNotificationsAsRead.mockResolvedValue({});
+    mockOctokit.rest.issues.createComment.mockResolvedValue({});
+    mockOctokit.rest.repos.getCombinedStatusForRef.mockResolvedValue({
+      data: { state: 'success', total_count: 0 },
+    });
+  });
+
+  afterEach(() => {
+    channel?.disconnect();
+    rmSync(process.env.QWEN_HOME!, { recursive: true, force: true });
+    if (savedQwenHome === undefined) delete process.env.QWEN_HOME;
+    else process.env.QWEN_HOME = savedQwenHome;
+  });
+
+  async function initChannel(
+    configOverrides: Record<string, unknown>,
+    options?: { boundSessions?: ChannelBoundSessions },
+  ): Promise<void> {
+    channel = new BoundTestChannel(
+      'test-github',
+      makeConfig(configOverrides),
+      makeBridge(),
+      options,
+    );
+    // No paginate priming here: BoundTestChannel disables the poll loop, so
+    // connect() never polls and a leftover once-value would leak into the
+    // test's first explicit poll.
+    await channel.connect();
+    channel.disconnect();
+    (channel as unknown as { cursor: { lastProcessedAt: string } }).cursor = {
+      lastProcessedAt: '2026-07-01T00:00:00.000Z',
+    };
+    vi.clearAllMocks();
+    boundSessions.listPrBindings.mockResolvedValue({
+      bindings: [makeBinding()],
+      partial: false,
+    });
+    mockOctokit.rest.activity.markNotificationsAsRead.mockResolvedValue({});
+    mockOctokit.rest.issues.createComment.mockResolvedValue({});
+    mockOctokit.rest.repos.getCombinedStatusForRef.mockResolvedValue({
+      data: { state: 'success', total_count: 0 },
+    });
+  }
+
+  async function pollOnce(): Promise<void> {
+    await (channel as unknown as { pollOnce: () => Promise<void> }).pollOnce();
+  }
+
+  function prNotification(reason = 'mention') {
+    return makeNotification({
+      reason,
+      subject: {
+        title: 'Test PR',
+        url: 'https://api.github.com/repos/owner/repo/pulls/42',
+        type: 'PullRequest',
+      },
+    });
+  }
+
+  describe('bound-session delivery', () => {
+    it('delivers a comment event into the bound session, not the channel path', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      const [sessionId, prompt] = boundSessions.deliverPrompt.mock.calls[0] as [
+        string,
+        string,
+      ];
+      expect(sessionId).toBe('bound-session');
+      expect(prompt).toContain('please fix this');
+      expect(prompt).toContain('untrusted event data');
+      expect(prompt).toContain('https://github.com/owner/repo/pull/42');
+      expect(prompt).not.toContain('published verbatim');
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(existsSync(inboundTaskPath())).toBe(false);
+    });
+
+    it('strips the aggregate no-reply instruction for bound delivery', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([
+          makeComment({ body: 'ambient remark without mention' }),
+        ]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+      expect(prompt).toContain('ambient remark without mention');
+      expect(prompt).toContain('New comments on the PR');
+      expect(prompt).toContain('Trigger: comment');
+      expect(prompt).not.toContain('<no-reply/>');
+      expect(prompt).not.toContain('published verbatim');
+    });
+
+    it('applies the sender gate before bound delivery', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          groups: { '*': { senders: 'allowlist', allowedUsers: ['alice'] } },
+        },
+        { boundSessions },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment({ user: { login: 'mallory' } })]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+    });
+
+    it('applies the group policy before bound delivery', async () => {
+      await initChannel(
+        { deliverToBoundSessions: true, groupPolicy: 'disabled' },
+        { boundSessions },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+    });
+
+    it('matches binding URLs case-insensitively', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/OWNER/Repo/pull/42',
+                state: 'open',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+    });
+
+    it('accepts binding URLs with trailing tab segments', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42/files',
+                state: 'open',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it('rebinds to a different following session when the first is gone', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.deliverPrompt.mockRejectedValueOnce(
+        new BoundSessionGoneError('bound-session'),
+      );
+      boundSessions.listPrBindings
+        .mockResolvedValueOnce({ bindings: [makeBinding()], partial: false })
+        .mockResolvedValueOnce({
+          bindings: [makeBinding({ sessionId: 'session-b' })],
+          partial: false,
+        });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+      expect(boundSessions.deliverPrompt).toHaveBeenLastCalledWith(
+        'session-b',
+        expect.any(String),
+      );
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+    });
+
+    it('does not consume the retry budget on a full queue', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.deliverPrompt.mockRejectedValue(
+        new BoundSessionQueueFullError('bound-session'),
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+
+      // Three more polls recover and retry the same task; backpressure must
+      // not exhaust MAX_INBOUND_TASK_ATTEMPTS and silently drop the event.
+      for (let i = 0; i < 3; i++) {
+        mockOctokit.paginate.mockResolvedValueOnce([]);
+        await pollOnce();
+      }
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(4);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      const tasks = readInboundTasks();
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!['state']).toBe('failed');
+      expect(tasks[0]!['attempts']).toBe(0);
+    });
+
+    it('keeps the previous binding map when a refresh fails', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+
+      boundSessions.listPrBindings.mockRejectedValueOnce(
+        new Error('daemon busy'),
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'mention',
+            updated_at: '2026-07-02T11:00:00.000Z',
+            subject: {
+              title: 'Test PR',
+              url: 'https://api.github.com/repos/owner/repo/pulls/42',
+              type: 'PullRequest',
+            },
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({
+            id: 1002,
+            node_id: 'C_1002',
+            created_at: '2026-07-02T10:30:00.000Z',
+          }),
+        ]);
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+    });
+
+    it('keeps the channel path when no binding matches the PR', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+    });
+
+    it('excludes channel-owned sessions from delivery candidates', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({ sourceType: 'channel', sourceId: 'test-github' }),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+    });
+
+    it('ignores bindings whose URL is on another host', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            prs: [
+              {
+                number: 42,
+                url: 'https://ghe.other.com/owner/repo/pull/42',
+                state: 'open',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+    });
+
+    it('picks the most recently updated session for the same PR', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'older-session',
+            updatedAt: '2026-07-01T00:00:00.000Z',
+          }),
+          makeBinding({
+            sessionId: 'newer-session',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+          }),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledWith(
+        'newer-session',
+        expect.any(String),
+      );
+    });
+
+    it('falls back to the channel path when the bound session is gone', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.deliverPrompt.mockRejectedValueOnce(
+        new BoundSessionGoneError('bound-session'),
+      );
+      boundSessions.listPrBindings
+        .mockResolvedValueOnce({ bindings: [makeBinding()], partial: false })
+        .mockResolvedValueOnce({ bindings: [], partial: false });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(existsSync(inboundTaskPath())).toBe(false);
+    });
+
+    it('retries a full queue without posting a public error comment', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.deliverPrompt.mockRejectedValueOnce(
+        new BoundSessionQueueFullError('bound-session'),
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(existsSync(inboundTaskPath())).toBe(true);
+      const tasks = readInboundTasks();
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!['state']).toBe('failed');
+      expect(tasks[0]!['delivery']).toEqual({
+        kind: 'bound-session',
+        sessionId: 'bound-session',
+      });
+
+      // Next poll recovers the persisted task and delivers it.
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(existsSync(inboundTaskPath())).toBe(false);
+    });
+
+    it('ignores deliverToBoundSessions in standalone mode', async () => {
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await initChannel({ deliverToBoundSessions: true });
+      } finally {
+        stderr.mockRestore();
+      }
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+    });
+
+    it('rejects prWatchEvents without deliverToBoundSessions', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ prWatchEvents: ['ci_failure'] }),
+        makeBridge(),
+        { boundSessions },
+      );
+      await expect(channel.connect()).rejects.toThrow(
+        'prWatchEvents for channel test-github requires deliverToBoundSessions',
+      );
+    });
+  });
+
+  describe('PR state watch', () => {
+    const watchConfig = {
+      deliverToBoundSessions: true,
+      prWatchEvents: [
+        'ci_failure',
+        'merge_conflict',
+        'head_change',
+        'state_change',
+      ],
+    };
+
+    function mockPull(meta: Record<string, unknown>): void {
+      mockOctokit.rest.pulls.get.mockResolvedValue({ data: makePrMeta(meta) });
+    }
+
+    function mockChecks(
+      runs: Array<{
+        status: string;
+        conclusion: string | null;
+        name?: string;
+      }>,
+    ): void {
+      mockOctokit.paginate.mockResolvedValueOnce(runs);
+    }
+
+    it('initializes silently on first observation', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      mockPull({});
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+    });
+
+    it('fires ci_failure once per head and not again for the same head', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      mockPull({});
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+
+      // A check re-run on the same head bumps updated_at and turns red.
+      mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockChecks([
+        { status: 'completed', conclusion: 'failure', name: 'build' },
+      ]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+        'CI failed on head sha-1',
+      );
+      expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+        'Failed checks: build',
+      );
+
+      mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it('fires head_change and re-checks CI on a new head', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      mockPull({});
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+
+      mockPull({ head: { sha: 'sha-2' } });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'failure' }]);
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+      const prompts = boundSessions.deliverPrompt.mock.calls.map(
+        (call) => call[1] as string,
+      );
+      expect(
+        prompts.some((p) => p.includes('head moved from sha-1 to sha-2')),
+      ).toBe(true);
+      expect(prompts.some((p) => p.includes('CI failed on head sha-2'))).toBe(
+        true,
+      );
+    });
+
+    it('fires merge_conflict on the dirty edge and guards null mergeable', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      mockPull({});
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+
+      mockPull({ mergeable: false, mergeable_state: 'dirty' });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+        'Merge conflicts detected',
+      );
+
+      // GitHub still computing: must not clear the dirty observation.
+      mockPull({ mergeable: null, mergeable_state: 'unknown' });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+
+      // Still dirty: edge-triggered, no repeat.
+      mockPull({ mergeable: false, mergeable_state: 'dirty' });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it('fires state_change on merge and leaves the watch set once recorded', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      mockPull({});
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+
+      mockPull({ state: 'closed', merged: true });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+        'The PR was merged',
+      );
+
+      // Binding state caught up (refresh timer): no more pulls.get calls.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'merged',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      mockOctokit.rest.pulls.get.mockClear();
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(mockOctokit.rest.pulls.get).not.toHaveBeenCalled();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not re-fire a transition after a restart', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      mockPull({});
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+
+      mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'failure' }]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+
+      // A fresh channel instance over the same state directory. initChannel
+      // clears mock history, so any new delivery would show up as a call.
+      await initChannel(watchConfig, { boundSessions });
+      mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+
+      // A NEW transition after the restart must still fire: this is what
+      // proves the baseline was loaded from disk rather than re-initialized
+      // (a lost baseline would silently swallow it as a first observation).
+      mockPull({
+        head: { sha: 'sha-2' },
+        updated_at: '2026-07-02T11:00:00.000Z',
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'failure' }]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+      const prompts = boundSessions.deliverPrompt.mock.calls.map(
+        (call) => call[1] as string,
+      );
+      expect(
+        prompts.some((p) => p.includes('head moved from sha-1 to sha-2')),
+      ).toBe(true);
+      expect(prompts.some((p) => p.includes('CI failed on head sha-2'))).toBe(
+        true,
+      );
+    });
+
+    it('makes zero watch calls when no PR is bound', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+
+      await pollOnce();
+
+      expect(mockOctokit.rest.pulls.get).not.toHaveBeenCalled();
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+    });
+
+    it('stays silent on a first observation that is already failing', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      mockPull({ mergeable: false, mergeable_state: 'dirty' });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'failure' }]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+    });
+
+    it('re-checks a none aggregate within the grace window after a head change', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      mockPull({});
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+
+      // New head, checks not registered yet: aggregate 'none', head_change
+      // fires but CI is not settled.
+      mockPull({ head: { sha: 'sha-2' } });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockChecks([]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+        'head moved from sha-1 to sha-2',
+      );
+
+      // Same head, same updated_at: the grace window must still re-check
+      // and catch the failure that registered late.
+      mockPull({ head: { sha: 'sha-2' } });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'failure' }]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+      expect(boundSessions.deliverPrompt.mock.calls[1]![1]).toContain(
+        'CI failed on head sha-2',
+      );
+    });
+
+    it('fires ci_failure on a combined commit status of error', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      mockPull({});
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+
+      mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockChecks([]);
+      mockOctokit.rest.repos.getCombinedStatusForRef.mockResolvedValue({
+        data: { state: 'error', total_count: 1 },
+      });
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+        'CI failed on head sha-1',
+      );
+    });
+
+    it('treats timed_out and action_required checks as failures', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      mockPull({});
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+
+      mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockChecks([
+        { status: 'completed', conclusion: 'timed_out', name: 'slow-job' },
+        {
+          status: 'completed',
+          conclusion: 'action_required',
+          name: 'manual-gate',
+        },
+      ]);
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+        'Failed checks: slow-job, manual-gate',
+      );
+    });
+
+    it('keeps the watch baseline when the binding snapshot is partial', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      mockPull({});
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+
+      // Partial answer (a workspace failed to list): the baseline must
+      // survive even though the candidate set is momentarily empty.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: true,
+      });
+      mockOctokit.rest.pulls.get.mockClear();
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(mockOctokit.rest.pulls.get).not.toHaveBeenCalled();
+
+      // Bindings restored, CI turned red in the gap: the preserved baseline
+      // makes this a transition, not a silent first observation.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [makeBinding()],
+        partial: false,
+      });
+      mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'failure' }]);
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+        'CI failed on head sha-1',
+      );
+    });
+
+    it('skips the watch pass when the binding refresh fails', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      mockPull({});
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+
+      boundSessions.listPrBindings.mockRejectedValueOnce(
+        new Error('daemon starting'),
+      );
+      mockOctokit.rest.pulls.get.mockClear();
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+
+      expect(mockOctokit.rest.pulls.get).not.toHaveBeenCalled();
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
     });
   });
 });

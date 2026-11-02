@@ -1,5 +1,5 @@
 import type { ChannelPlugin } from '@qwen-code/channel-base';
-import { GithubChannel } from './GithubAdapter.js';
+import { GithubChannel, validateBoundSessionConfig } from './GithubAdapter.js';
 
 export { GithubChannel };
 
@@ -79,6 +79,27 @@ export const plugin: ChannelPlugin = {
           },
         ],
       },
+      {
+        key: 'deliverToBoundSessions',
+        label: 'Deliver To PR-Bound Sessions',
+        kind: 'boolean',
+        description:
+          'Deliver events for PRs bound to a live session into that session as a prompt, instead of a channel-owned session. Requires a daemon-managed channel.',
+        default: 'false',
+      },
+      {
+        key: 'prWatchEvents',
+        label: 'PR Watch Events',
+        kind: 'string-list',
+        description:
+          'Optional. State transitions to watch for bound PRs (requires Deliver To PR-Bound Sessions). Leave empty to disable.',
+        options: [
+          { value: 'ci_failure', label: 'ci_failure' },
+          { value: 'merge_conflict', label: 'merge_conflict' },
+          { value: 'head_change', label: 'head_change' },
+          { value: 'state_change', label: 'state_change' },
+        ],
+      },
     ],
     validateConfig: (config) => {
       const token =
@@ -86,7 +107,7 @@ export const plugin: ChannelPlugin = {
       if (!token && config['useLocalGh'] !== true) {
         return 'Channel requires a token or local GitHub CLI authentication (useLocalGh).';
       }
-      return undefined;
+      return validateBoundSessionConfig(config, 'github');
     },
   },
   createChannel: (name, config, bridge, options) =>

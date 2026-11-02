@@ -52,6 +52,10 @@ export {
   isChannelProactiveDeliveryError,
 } from './ChannelProactiveDeliveryError.js';
 export type { ChannelProactiveDeliveryDisposition } from './ChannelProactiveDeliveryError.js';
+export {
+  BoundSessionGoneError,
+  BoundSessionQueueFullError,
+} from './bound-session-delivery.js';
 export type {
   ChannelBaseOptions,
   ChannelMemoryRecallCacheStatus,
@@ -128,6 +132,7 @@ export type {
 } from './background-output-coordinator.js';
 export type {
   Attachment,
+  ChannelBoundSessions,
   ChannelConfig,
   ChannelConfigEnumFieldDescriptor,
   ChannelConfigFieldDescriptor,
@@ -165,6 +170,9 @@ export type {
   Envelope,
   GroupConfig,
   GroupPolicy,
+  PrBindingEntry,
+  PrBindingsSnapshot,
+  PrBindingSummary,
   PrivatePolicy,
   GroupSenderPolicy,
   ObservedChannelIdentity,
