@@ -2491,6 +2491,41 @@ const SHELLS_READING_STDIN = new Set([
   'ash',
 ]);
 
+function openerLinePipesToShell(line: string): boolean {
+  const heredocIdx = line.indexOf('<<');
+  if (heredocIdx === -1) return false;
+
+  let pos = heredocIdx + 2;
+  if (line[pos] === '-') pos++;
+
+  const quote = line[pos];
+  const quoted = quote === "'" || quote === '"';
+  if (quoted) pos++;
+
+  while (pos < line.length && /[A-Za-z0-9_./-]/.test(line[pos]!)) pos++;
+  if (quoted && pos < line.length && line[pos] === quote) pos++;
+
+  const rest = line.slice(pos);
+  const tokens = rest
+    .split(/\s+/)
+    .filter((t) => t.length > 0);
+
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i] !== '|') continue;
+    const afterPipe = tokens.slice(i + 1);
+    if (afterPipe.length === 0) continue;
+    const meaningful = skipAmendPrefixes(afterPipe);
+    if (
+      meaningful.length > 0 &&
+      SHELLS_READING_STDIN.has(amendExecutableBasename(meaningful[0]!))
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 /**
  * Heredoc bodies whose consumer runs them as code.
  *
@@ -2520,12 +2555,18 @@ function extractShellFedHeredocBodies(command: string): string[] {
     if (delimiters.length === 0) continue;
 
     const opener = line.slice(0, line.indexOf('<<'));
-    const consumer = amendExecutableBasename(
-      opener.trim().split(/\s+/)[0] ?? '',
-    );
+    const openerTokens = opener
+      .trim()
+      .split(/\s+/)
+      .filter((t) => t.length > 0);
+    const meaningful = skipAmendPrefixes(openerTokens);
+    const consumer = amendExecutableBasename(meaningful[0] ?? '');
+    const shellFed =
+      SHELLS_READING_STDIN.has(consumer) ||
+      openerLinePipesToShell(line);
     active = {
       delimiter: delimiters[0]!,
-      shellFed: SHELLS_READING_STDIN.has(consumer),
+      shellFed,
     };
     collected = [];
   }
