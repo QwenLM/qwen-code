@@ -1237,8 +1237,22 @@ Read-only discovery uses:
 
 - `GET /workspace/channel-types`
 - `GET /workspace/channels`
+- `GET /workspace/channels/events`
 - `GET /workspaces/:workspace/channel-types`
 - `GET /workspaces/:workspace/channels`
+- `GET /workspaces/:workspace/channels/events`
+
+`GET .../channels/events` returns the resolved workspace's Channel event
+journal as `{ "events": [...], "truncated": boolean }` with
+`Cache-Control: no-store`. Each event records what a Channel did — an inbound
+message it accepted or skipped (with the machine reason: `reason_filter`,
+`mention_required`, `duplicate`, a sender-gate rejection), a publication
+outcome, an inbound task transition, or a poll result — and never carries
+message text. Query parameters: `limit` (1-500, default 100), `type`
+(comma-separated `inbound`, `outbound`, `task`, `poll`), `channel`
+(repeat the parameter once per instance name), and `since` (ISO 8601). The route reads only
+the resolved workspace's Channel state directory, needs no operator authority,
+and reads at most one rotated file per Channel.
 
 The catalog marks the types supported by this management API with
 `manageable: true`. Instance snapshots include a revision, redacted secret

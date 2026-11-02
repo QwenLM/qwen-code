@@ -5,6 +5,7 @@ import process from 'node:process';
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import type { ChannelBaseOptions } from './ChannelBase.js';
 import { ChannelBase } from './ChannelBase.js';
+import type { ChannelEventDetail } from './channel-events.js';
 import type { ChannelConfig } from './types.js';
 import { getGlobalQwenDir } from './paths.js';
 
@@ -16,6 +17,16 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
   private abortController = new AbortController();
   private running = false;
   private consecutiveErrors = 0;
+  private pollEventDetail: ChannelEventDetail | undefined;
+
+  /**
+   * Attaches adapter-specific counters (for example how many notifications a
+   * poll returned) to the poll event the base class records when the poll
+   * settles. The value is consumed once, by the poll it belongs to.
+   */
+  protected setPollEventDetail(detail: ChannelEventDetail | undefined): void {
+    this.pollEventDetail = detail;
+  }
 
   protected abortableSleep(ms: number): Promise<void> {
     const signal = this.abortController.signal;
@@ -91,10 +102,19 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
   private async runLoop(): Promise<void> {
     const signal = this.abortController.signal;
     while (this.running && !signal.aborted) {
+      const startedAt = Date.now();
+      const detail = this.pollEventDetail;
+      this.pollEventDetail = undefined;
       try {
         await this.pollOnce();
         this.saveCursor();
         this.consecutiveErrors = 0;
+        this.recordChannelEvent({
+          type: 'poll',
+          outcome: 'ok',
+          durationMs: Date.now() - startedAt,
+          ...(detail ? { detail } : {}),
+        });
       } catch (err) {
         this.consecutiveErrors++;
         const backoff = Math.min(
@@ -104,6 +124,17 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
         process.stderr.write(
           `[Channel:${this.name}] poll error (attempt ${this.consecutiveErrors}), backing off ${backoff}ms: ${err}\n`,
         );
+        this.recordChannelEvent({
+          type: 'poll',
+          outcome: 'failed',
+          durationMs: Date.now() - startedAt,
+          error: err instanceof Error ? err.message : String(err),
+          detail: {
+            consecutiveErrors: this.consecutiveErrors,
+            backoffMs: backoff,
+          },
+        });
+        this.pollEventDetail = undefined;
         await this.abortableSleep(backoff);
         continue;
       }

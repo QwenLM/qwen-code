@@ -16,9 +16,10 @@ import type { ChannelConfig } from './types.js';
 
 const testHome = mkdtempSync(join(tmpdir(), 'poll-test-'));
 
-vi.mock('./paths.js', () => ({
-  getGlobalQwenDir: () => testHome,
-}));
+vi.mock('./paths.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./paths.js')>();
+  return { ...actual, getGlobalQwenDir: () => testHome };
+});
 
 afterAll(() => {
   rmSync(testHome, { recursive: true, force: true });

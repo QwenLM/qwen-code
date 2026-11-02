@@ -28,6 +28,10 @@ import {
   TOKEN_USAGE_MESSAGES_ZH,
 } from './components/artifacts/token-usage-messages.js';
 import {
+  CHANNEL_EVENTS_MESSAGES_EN,
+  CHANNEL_EVENTS_MESSAGES_ZH,
+} from './components/channels/channel-events-messages.js';
+import {
   createContext,
   useContext,
   useMemo,
@@ -2140,6 +2144,7 @@ const EN: Messages = {
   'sidebar.moveWorkspaceDown': 'Move down',
   'sidebar.plugins': 'Plugins',
   'sidebar.channels': 'Channels',
+  'sidebar.channelEvents': 'Channel events',
   'sidebar.sessionSource': 'Session source',
   'sidebar.archiveSessionSource': 'Archived session source',
   'sidebar.sessionSource.tasks': 'Tasks',
@@ -3657,6 +3662,7 @@ const EN: Messages = {
   'contextUsage.unknown':
     'Context usage has not been observed for this session yet.',
   ...TOKEN_USAGE_MESSAGES_EN,
+  ...CHANNEL_EVENTS_MESSAGES_EN,
   'trajectory.title': 'Trajectory',
   'trajectory.description': 'View time and tokens',
   'trajectory.empty': 'No records in this session yet.',
@@ -6658,6 +6664,7 @@ const ZH: Messages = {
   'sidebar.moveWorkspaceDown': '下移',
   'sidebar.plugins': '插件',
   'sidebar.channels': '频道',
+  'sidebar.channelEvents': '渠道事件',
   'sidebar.sessionSource': '会话来源',
   'sidebar.archiveSessionSource': '归档会话来源',
   'sidebar.sessionSource.tasks': '任务',
@@ -8045,6 +8052,7 @@ const ZH: Messages = {
   'contextUsage.unavailable': '当前会话无法读取上下文使用情况。',
   'contextUsage.unknown': '当前会话尚无已观测的上下文占用数据。',
   ...TOKEN_USAGE_MESSAGES_ZH,
+  ...CHANNEL_EVENTS_MESSAGES_ZH,
   'trajectory.title': '轨迹',
   'trajectory.description': '查看时间和 token',
   'trajectory.empty': '这个会话还没有记录。',

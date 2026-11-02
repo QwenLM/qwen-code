@@ -5,8 +5,12 @@
  */
 
 import express, { type RequestHandler } from 'express';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import request from 'supertest';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { appendChannelEvent } from '@qwen-code/channel-base';
 import type {
   ChannelManagementService,
   ChannelMutationResult,
@@ -716,5 +720,129 @@ describe('workspace Channel management routes', () => {
     expect(primaryService.upsert).not.toHaveBeenCalled();
     expect(primaryService.remove).not.toHaveBeenCalled();
     expect(primaryService.setStartup).not.toHaveBeenCalled();
+  });
+});
+
+describe('workspace Channel event journal', () => {
+  let qwenHome: string;
+  let savedQwenHome: string | undefined;
+
+  beforeEach(() => {
+    savedQwenHome = process.env['QWEN_HOME'];
+    qwenHome = mkdtempSync(join(tmpdir(), 'channel-events-route-'));
+    process.env['QWEN_HOME'] = qwenHome;
+  });
+
+  afterEach(() => {
+    rmSync(qwenHome, { recursive: true, force: true });
+    if (savedQwenHome === undefined) delete process.env['QWEN_HOME'];
+    else process.env['QWEN_HOME'] = savedQwenHome;
+  });
+
+  function append(cwd: string, index: number, channel = 'bot') {
+    const inbound = index % 2 === 0;
+    appendChannelEvent(channel, cwd, {
+      at: new Date(2026, 0, 1, 0, 0, index).toISOString(),
+      type: inbound ? 'inbound' : 'poll',
+      outcome: inbound ? 'skipped' : 'ok',
+      ...(inbound ? { reason: 'reason_filter' } : {}),
+      repository: 'owner/repo',
+      number: 42,
+    });
+  }
+
+  it('serves a workspace journal newest-last without operator auth', async () => {
+    const { app } = mount();
+    append('/work/primary', 1);
+    append('/work/primary', 2);
+    append('/work/primary', 3, 'other');
+
+    const response = await request(app).get(
+      '/workspace/channels/events?limit=2',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.body.truncated).toBe(true);
+    expect(response.body.events).toHaveLength(2);
+    expect(response.body.events.at(-1)).toMatchObject({
+      channel: 'other',
+      type: 'poll',
+      outcome: 'ok',
+    });
+  });
+
+  it('filters by type and channel', async () => {
+    const { app } = mount();
+    append('/work/primary', 1);
+    append('/work/primary', 2);
+
+    const byType = await request(app).get(
+      '/workspace/channels/events?type=inbound',
+    );
+    expect(byType.body.events).toHaveLength(1);
+    expect(byType.body.events[0].reason).toBe('reason_filter');
+
+    const byChannel = await request(app).get(
+      '/workspace/channels/events?channel=other',
+    );
+    expect(byChannel.body.events).toEqual([]);
+  });
+
+  it('takes one repeatable parameter per channel name, commas included', async () => {
+    const { app } = mount();
+    append('/work/primary', 1, 'bot');
+    append('/work/primary', 2, 'a,b');
+    append('/work/primary', 3, 'other');
+
+    const repeated = await request(app).get(
+      '/workspace/channels/events?channel=bot&channel=other',
+    );
+    expect(
+      repeated.body.events.map((event: { channel: string }) => event.channel),
+    ).toEqual(['bot', 'other']);
+
+    const commaNamed = await request(app).get(
+      '/workspace/channels/events?channel=a%2Cb',
+    );
+    expect(commaNamed.body.events).toHaveLength(1);
+    expect(commaNamed.body.events[0].channel).toBe('a,b');
+  });
+
+  it('reads only the resolved workspace scope', async () => {
+    const { app } = mount();
+    append('/work/primary', 1);
+    append('/work/secondary', 2);
+
+    const primary = await request(app).get('/workspace/channels/events');
+    const secondary = await request(app).get(
+      '/workspaces/secondary/channels/events',
+    );
+
+    expect(primary.body.events).toHaveLength(1);
+    expect(secondary.body.events).toHaveLength(1);
+    expect(primary.body.events[0].at).not.toBe(secondary.body.events[0].at);
+  });
+
+  it('does not serve an untrusted workspace journal', async () => {
+    const { app } = mount(false);
+    const response = await request(app).get(
+      '/workspaces/secondary/channels/events',
+    );
+    expect(response.status).toBe(403);
+  });
+
+  it.each([
+    ['limit=0', '`limit` must be a positive integer.'],
+    ['type=bogus', '`type` accepts only: inbound, outbound, task, poll.'],
+    ['since=yesterday', '`since` must be an ISO 8601 timestamp.'],
+  ])('rejects %s with 400', async (query, message) => {
+    const { app } = mount();
+    const response = await request(app).get(
+      `/workspace/channels/events?${query}`,
+    );
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_channel_management_request');
+    expect(response.body.error).toBe(message);
   });
 });

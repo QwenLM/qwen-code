@@ -13,6 +13,8 @@ import type {
   DaemonAuthProviderInstallResult,
   DaemonAuthStatusSnapshot,
   DaemonCapabilities,
+  DaemonChannelEvent,
+  DaemonChannelEventsSnapshot,
   DaemonChannelMutationResult,
   DaemonChannelPairingApprovalResult,
   DaemonChannelPairingApprovalsSnapshot,
@@ -483,6 +485,11 @@ export interface DaemonAutofixPrWatchList {
   unreadable?: Array<{ pr: number; error: string }>;
 }
 
+/** One entry of a Channel's event journal (`GET .../channels/events`). */
+export type DaemonChannelEventEntry = DaemonChannelEvent;
+
+export type DaemonChannelEventList = DaemonChannelEventsSnapshot;
+
 export interface DaemonWorkspacePathSuggestion {
   name: string;
   path: string;
@@ -726,6 +733,13 @@ export interface DaemonWorkspaceActions {
   /** The `/autofix-pr` watches of a workspace's clone; `workspaceId` as for
    * `listScheduledTasks`. Only to a daemon advertising `autofix_pr_watches`. */
   listAutofixPrWatches(workspaceId?: string): Promise<DaemonAutofixPrWatchList>;
+
+  /** The provider workspace's Channel event journal, newest last. A scoped
+   * workspace reads its own through its client. */
+  listChannelEvents(query?: {
+    limit?: number;
+    types?: readonly DaemonChannelEventEntry['type'][];
+  }): Promise<DaemonChannelEventList>;
 
   // Goals (session-scoped runtimes, listed workspace-wide)
   listGoals(): Promise<DaemonGoalList>;

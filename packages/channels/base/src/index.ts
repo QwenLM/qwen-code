@@ -3,6 +3,14 @@ export {
   getWorkspaceScopeDirName,
   resolvePath,
 } from './paths.js';
+export {
+  appendChannelEvent,
+  channelEventScopeDir,
+  CHANNEL_EVENT_MAX_READ,
+  CHANNEL_EVENT_TYPES,
+  readChannelEvents,
+} from './channel-events.js';
+export type { ChannelEventQuery, ChannelEventType } from './channel-events.js';
 export { PollingChannelBase } from './PollingChannelBase.js';
 export { ACP_EVENT_LOOP_STALL_RESTART_MS, AcpBridge } from './AcpBridge.js';
 export {
