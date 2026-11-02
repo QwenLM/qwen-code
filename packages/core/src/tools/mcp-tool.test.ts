@@ -2417,6 +2417,73 @@ describe('DiscoveredMCPTool', () => {
       expect(display.fallbackText).not.toContain('Warning');
     });
 
+    // The registry can swap in a tool built from an edited server config, so
+    // the replay's deadline and the warning's provenance must both come from
+    // the rediscovered tool. Reading `mcpTimeout` from the failed invocation
+    // would enforce 500 ms while the warning explains a limit of 5000 ms.
+    it('takes the App read deadline from the rediscovered tool on a reconnect replay', async () => {
+      const timeoutController = new AbortController();
+      const timeoutSpy = vi
+        .spyOn(AbortSignal, 'timeout')
+        .mockReturnValue(timeoutController.signal);
+      const initialClient: McpDirectClient = {
+        callTool: vi.fn().mockRejectedValueOnce(new Error('Connection closed')),
+      };
+      const reconnectedClient: McpDirectClient = {
+        callTool: vi.fn().mockResolvedValueOnce(textResult('Dashboard ready')),
+        readResource: vi.fn(
+          async () =>
+            new Promise<never>((_resolve, reject) => {
+              timeoutController.abort(
+                new DOMException('The operation timed out', 'TimeoutError'),
+              );
+              reject(timeoutController.signal.reason);
+            }),
+        ),
+      };
+      const rediscoveredTool = safeTool({
+        client: reconnectedClient,
+        timeout: 5_000,
+        appUri: 'ui://demo/dashboard',
+        appResourceLimits: { timeout: 5_000 },
+      });
+      const originalTool = safeTool({
+        client: initialClient,
+        timeout: 500,
+        appUri: 'ui://demo/dashboard',
+        appResourceLimits: { timeout: 500 },
+        config: {
+          isTrustedFolder: () => true,
+          getToolRegistry: () => ({
+            discoverToolsForServer: vi.fn().mockResolvedValue(undefined),
+            ensureTool: vi.fn().mockResolvedValue(rediscoveredTool),
+          }),
+        },
+      });
+
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      try {
+        const result = await originalTool
+          .build({ param: 'test' })
+          .execute(new AbortController().signal);
+
+        expect(reconnectedClient.callTool).toHaveBeenCalledTimes(1);
+        expect(timeoutSpy).toHaveBeenCalledWith(5_000);
+        expect(timeoutSpy).not.toHaveBeenCalledWith(500);
+        expect(reconnectedClient.readResource).toHaveBeenCalledWith(
+          { uri: 'ui://demo/dashboard' },
+          { timeout: 5_000, signal: expect.any(AbortSignal) },
+        );
+        expect(
+          (result.returnDisplay as { fallbackText: string }).fallbackText,
+        ).toContain(
+          `resource read timed out (limit: 5000 ms; mcpServers.${serverName}.timeout)`,
+        );
+      } finally {
+        timeoutSpy.mockRestore();
+      }
+    });
+
     it.each(['repair', 'guarded', 'cancelled'] as const)(
       'handles an App connection failure without replaying (%s)',
       async (mode) => {
