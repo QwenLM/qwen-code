@@ -29,13 +29,14 @@ export async function runManagedExtensionShell(
 ): Promise<ToolResult> {
   input.signal.throwIfAborted();
   const shell = getShellConfiguration();
-  const { child, ownerId } = await owners.start({
+  const { child, ownerId, preread, detachPreread } = await owners.start({
     sessionId: input.sessionId,
     configRevision: input.configRevision,
     executable: shell.executable,
     args: [...shell.argsPrefix, input.command],
     cwd: input.cwd,
     env: input.environment,
+    prereadOutput: true,
   });
   const streamsClosed = new Promise<void>((resolve) => {
     if (
@@ -52,23 +53,33 @@ export async function runManagedExtensionShell(
   let retained = 0;
   let exceeded = false;
   const captures = { stdout: Promise.resolve(), stderr: Promise.resolve() };
-  for (const id of ['stdout', 'stderr'] as const) {
-    child[id]?.on('data', (chunk: Buffer) => {
-      if (input.capture) {
-        child[id]?.pause();
-        captures[id] = captures[id]
-          .then(() => input.capture!.write(id, chunk))
-          .finally(() => child[id]?.resume());
-      }
-      const remaining = Math.max(0, 1024 * 1024 - retained);
-      if (chunk.length > remaining) exceeded = true;
-      if (remaining) {
-        const prefix = chunk.subarray(0, remaining);
-        chunks.push(prefix);
-        retained += prefix.length;
-      }
-    });
+  const consume = (id: 'stdout' | 'stderr', chunk: Buffer) => {
+    if (input.capture) {
+      child[id]?.pause();
+      captures[id] = captures[id]
+        .then(() => input.capture!.write(id, chunk))
+        .finally(() => child[id]?.resume());
+    }
+    const remaining = Math.max(0, 1024 * 1024 - retained);
+    if (chunk.length > remaining) exceeded = true;
+    if (remaining) {
+      const prefix = chunk.subarray(0, remaining);
+      chunks.push(prefix);
+      retained += prefix.length;
+    }
+  };
+  // start() buffered output from spawn, so a command that finished during the
+  // membership wait still has its bytes. Detach those early listeners, replay
+  // the buffered bytes through the same capture, then install the live
+  // listeners — all synchronously, so no data event can fall between them and
+  // an already-closed child cannot be certified as a successful empty result.
+  detachPreread?.();
+  if (preread) {
+    for (const chunk of preread.stdout) consume('stdout', chunk);
+    for (const chunk of preread.stderr) consume('stderr', chunk);
   }
+  for (const id of ['stdout', 'stderr'] as const)
+    child[id]?.on('data', (chunk: Buffer) => consume(id, chunk));
   let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let wake: (() => void) | undefined;

@@ -123,7 +123,13 @@ export class ManagedExtensionProcessOwners {
     readonly args: readonly string[];
     readonly env: NodeJS.ProcessEnv;
     readonly cwd: string;
-  }): Promise<{ ownerId: string; child: ChildProcess }> {
+    readonly prereadOutput?: boolean;
+  }): Promise<{
+    ownerId: string;
+    child: ChildProcess;
+    preread?: { stdout: Buffer[]; stderr: Buffer[] };
+    detachPreread?: () => void;
+  }> {
     await this.recovering;
     if (
       !input.sessionId ||
@@ -158,6 +164,26 @@ export class ManagedExtensionProcessOwners {
     );
     child.on('error', () => undefined);
     child.stdio[3]?.on('error', () => undefined);
+    // Capture output from the instant the child exists: the membership wait
+    // below (and the durable save before it) yields the event loop, so a fast
+    // command can write and exit before the caller installs its own listeners.
+    // Attaching here, synchronously after spawn, leaves no window for bytes to
+    // be drained unread; the caller detaches and replays these buffers before
+    // wiring its live capture.
+    let preread: { stdout: Buffer[]; stderr: Buffer[] } | undefined;
+    let detachPreread: (() => void) | undefined;
+    if (input.prereadOutput) {
+      const buffers = { stdout: [] as Buffer[], stderr: [] as Buffer[] };
+      const onStdout = (chunk: Buffer) => buffers.stdout.push(chunk);
+      const onStderr = (chunk: Buffer) => buffers.stderr.push(chunk);
+      child.stdout?.on('data', onStdout);
+      child.stderr?.on('data', onStderr);
+      preread = buffers;
+      detachPreread = () => {
+        child.stdout?.off('data', onStdout);
+        child.stderr?.off('data', onStderr);
+      };
+    }
     const owner = {
       ownerId,
       sessionId: input.sessionId,
@@ -202,7 +228,11 @@ export class ManagedExtensionProcessOwners {
           `${JSON.stringify({ executable: input.executable, args: input.args, env: input.env })}\n`,
         );
       }
-      return { ownerId, child };
+      return {
+        ownerId,
+        child,
+        ...(preread && detachPreread ? { preread, detachPreread } : {}),
+      };
     } catch (error) {
       // Unknown cleanup keeps the owner: nobody can reinterpret a failed
       // startup as permission to discard its process identity.
