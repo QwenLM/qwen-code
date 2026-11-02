@@ -996,6 +996,16 @@
               "type": "number",
               "minimum": 1
             },
+            "maxOutputValidationRetries": {
+              "description": "Maximum number of attempts for the model-output validation retry, which recovers the model occasionally producing output that does not match the expected format. Defaults to the built-in value. Set to 1 to retry only once, or omit for the default.",
+              "type": "number",
+              "minimum": 1
+            },
+            "outputValidationRetryDisabled": {
+              "description": "Opt out of the model-output validation retry entirely. When true, the model-output validation retry is disabled and the resulting error is surfaced to the caller. When false (default), the retry runs with an exponential backoff (2s, 4s, 8s, ...) so unattended runs recover automatically.",
+              "type": "boolean",
+              "default": false
+            },
             "enableCacheControl": {
               "description": "Enable provider prompt-cache controls.",
               "type": "boolean",
