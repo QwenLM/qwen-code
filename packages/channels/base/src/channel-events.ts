@@ -271,7 +271,7 @@ export function appendChannelEvent(
 async function readTail(
   path: string,
   maxBytes: number,
-): Promise<{ lines: string[]; bytes: number }> {
+): Promise<{ lines: string[]; bytes: number; clipped: boolean }> {
   let handle: FileHandle;
   try {
     handle = await open(path, 'r');
@@ -279,7 +279,7 @@ async function readTail(
     // A journal that has not been written yet is not a failure; anything else
     // (permissions, I/O) must not read as "this Channel did nothing".
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { lines: [], bytes: 0 };
+      return { lines: [], bytes: 0, clipped: false };
     }
     throw err;
   }
@@ -299,9 +299,15 @@ async function readTail(
       position += bytesRead;
     }
     const lines = Buffer.concat(chunks).toString('utf-8').split('\n');
-    // Starting mid-file can land inside a line; drop that partial line.
+    // Starting mid-file can land inside a line; drop that partial line. The
+    // skipped head is clipped data too: a journal grows to 1 MiB before it
+    // rotates, so a 256 KiB tail of a busy Channel omits its own older events.
     if (start > 0) lines.shift();
-    return { lines: lines.filter((line) => line.length > 0), bytes };
+    return {
+      lines: lines.filter((line) => line.length > 0),
+      bytes,
+      clipped: start > 0,
+    };
   } finally {
     await handle.close();
   }
@@ -387,15 +393,16 @@ export async function readChannelEvents(
     const candidates = await eventFiles(scopeDir, query.channels);
     clipped = clipped || candidates.clipped;
     for (const file of candidates.files) {
-      if (budget <= 0) {
+      // Spend the budget in whole tail windows: a partial window would report
+      // a clipped file anyway, and stopping here keeps the flag's meaning
+      // ("whole journals were left out") exact.
+      if (budget < CHANNEL_EVENT_READ_TAIL_BYTES) {
         clipped = true;
         break;
       }
-      const tail = await readTail(
-        file,
-        Math.min(CHANNEL_EVENT_READ_TAIL_BYTES, budget),
-      );
+      const tail = await readTail(file, CHANNEL_EVENT_READ_TAIL_BYTES);
       budget -= tail.bytes;
+      clipped = clipped || tail.clipped;
       for (const line of tail.lines) {
         let parsed: unknown;
         try {

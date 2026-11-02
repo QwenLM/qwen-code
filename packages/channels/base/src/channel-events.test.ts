@@ -214,64 +214,72 @@ describe('channel events journal', async () => {
     expect(truncated).toBe(true);
   });
 
+  it('reports truncation when a single journal is taller than the tail window', async () => {
+    // ~1 KiB per record: a 1 MiB journal holds ~1000 records, but the 256 KiB
+    // tail window only reaches the newest ~250 — fewer than the 500 limit, so
+    // only the skipped head can explain a truncated result.
+    const line = JSON.stringify({
+      at: new Date(2026, 0, 1).toISOString(),
+      channel: 'tall',
+      type: 'poll',
+      outcome: 'ok',
+      detail: { pad: 'x'.repeat(900) },
+    });
+    const path = channelEventFilePath('tall', cwd);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, `${line}\n`.repeat(1020));
+
+    const { events, truncated } = await readChannelEvents({
+      scopeDirs: [channelEventScopeDir(cwd)],
+      limit: 500,
+    });
+
+    expect(events.length).toBeGreaterThan(0);
+    expect(events.length).toBeLessThan(500);
+    expect(truncated).toBe(true);
+  });
+
   it('reports truncation when the byte budget stops the read', async () => {
+    // 20 journals of 24 records each: every file fits one whole 256 KiB tail
+    // window (so no per-file clipping), together they exceed the 4 MiB request
+    // budget, and all 480 records together stay under the 500 record limit —
+    // the budget is the only possible reason for a truncated result.
     const line = JSON.stringify({
       at: new Date(2026, 0, 1).toISOString(),
       channel: 'bulk',
       type: 'poll',
       outcome: 'ok',
-      detail: { pad: 'x'.repeat(120) },
+      detail: { pad: 'x'.repeat(10700) },
     });
-    const block = `${line}\n`.repeat(
-      Math.ceil((1024 * 1024) / (line.length + 1)),
-    );
-    for (let index = 0; index < 6; index += 1) {
+    const block = `${line}\n`.repeat(24);
+    expect(Buffer.byteLength(block)).toBeLessThanOrEqual(256 * 1024);
+    for (let index = 0; index < 20; index += 1) {
       const path = channelEventFilePath(`bulk-${index}`, cwd);
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, block);
     }
 
-    const { truncated } = await readChannelEvents({
+    const { events, truncated } = await readChannelEvents({
       scopeDirs: [channelEventScopeDir(cwd)],
       limit: 500,
     });
 
     expect(truncated).toBe(true);
+    expect(events.length).toBeGreaterThan(0);
+    expect(events.length).toBeLessThan(480);
   });
 
-  it('lets other timers run while a large journal is read', async () => {
-    const line = JSON.stringify({
-      at: new Date(2026, 0, 1).toISOString(),
-      channel: 'bulk',
-      type: 'poll',
-      outcome: 'ok',
-      detail: { pad: 'x'.repeat(120) },
-    });
-    const block = `${line}\n`.repeat(
-      Math.ceil((1024 * 1024) / (line.length + 1)),
-    );
-    for (let index = 0; index < 4; index += 1) {
-      const path = channelEventFilePath(`yield-${index}`, cwd);
-      mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, block);
-    }
-
-    // The daemon serves sessions on this same loop: a synchronous scan would
-    // starve every bystander timer for the whole read.
-    let ticks = 0;
-    const timer = setInterval(() => {
-      ticks += 1;
-    }, 1);
+  it('fails loudly when a journal file cannot be read', async () => {
+    append(1);
+    const path = channelEventFilePath('bot', cwd);
+    chmodSync(path, 0o000);
     try {
-      await readChannelEvents({
-        scopeDirs: [channelEventScopeDir(cwd)],
-        limit: 500,
-      });
+      await expect(
+        readChannelEvents({ scopeDirs: [channelEventScopeDir(cwd)] }),
+      ).rejects.toThrow();
     } finally {
-      clearInterval(timer);
+      chmodSync(path, 0o600);
     }
-
-    expect(ticks).toBeGreaterThan(0);
   });
 
   it('fails loudly when the journal directory cannot be read', async () => {

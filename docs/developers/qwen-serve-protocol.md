@@ -1253,8 +1253,9 @@ message text. Query parameters: `limit` (1-500, default 100), `type`
 (repeat the parameter once per instance name), and `since` (ISO 8601). The route reads only
 the resolved workspace's Channel state directory and needs no operator authority. Reads are
 asynchronous and bounded: the current journal plus one rotated file per Channel, 256 KiB per
-file, 4 MiB per request, 32 files per request, freshest first. `truncated` is true when either
-the record limit or those read bounds clipped the result. A workspace with no journal yet
+file, 4 MiB per request, 32 files per request, freshest first. `truncated` is true when the
+record limit or any read bound clipped the result, including a journal taller than the
+per-file tail window. A workspace with no journal yet
 returns an empty list; a scope directory that cannot be read answers 5xx rather than an empty
 list.
 

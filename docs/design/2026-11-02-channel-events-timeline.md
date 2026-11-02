@@ -151,9 +151,12 @@ request for its whole duration. The bounds are 256 KiB per journal file
 (current and `.1`), 4 MiB per request in total, 32 journal files per request,
 and 500 records returned; candidates are ordered freshest-first so the
 allowance is spent on the journals an operator is most likely looking at.
-Anything a bound clips — dropped files or an exhausted byte budget — sets
-`truncated`, so the page's completeness banner cannot claim a timeline is whole
-when Channels were left out.
+Anything a bound clips sets `truncated`: dropped files, an exhausted byte
+budget, **and a journal taller than the tail window** — a file grows to 1 MiB
+before it rotates, so a 256 KiB window omits that Channel's own older events.
+The page's completeness banner therefore cannot claim a timeline is whole when
+any of those happened. The budget is spent in whole tail windows, so its flag
+always means "whole journals were left out".
 
 A missing scope directory means "no Channel has written yet" and stays an empty
 result. Any other read failure (permissions, I/O) propagates, and the route
