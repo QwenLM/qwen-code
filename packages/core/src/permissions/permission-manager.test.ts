@@ -2854,6 +2854,29 @@ describe('PermissionManager', () => {
       }
     });
 
+    it('writes one sanitized debug record per malformed ingestion', () => {
+      const manager = makePm();
+      const esc = String.fromCharCode(27);
+      const raw = `Bash(git *${esc}[2J`;
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      debugLoggerMock.warn.mockClear();
+      try {
+        parseRules([raw]);
+        manager.addSessionAllowRule(raw);
+        manager.addSessionDenyRule(raw);
+        manager.addSessionAskRule(raw);
+        manager.addPersistentRule(raw, 'deny');
+
+        expect(debugLoggerMock.warn).toHaveBeenCalledTimes(5);
+        for (const [message] of debugLoggerMock.warn.mock.calls) {
+          expect(String(message)).toContain('[permissions]');
+          expect(String(message)).not.toContain(esc);
+        }
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
     it('escapes whitespace controls instead of dropping them', () => {
       const rawWithControls = 'Bash(evil\n>\tspoof\r!';
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});

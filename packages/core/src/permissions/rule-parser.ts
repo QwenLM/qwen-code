@@ -11,6 +11,7 @@ import { stripVTControlCharacters } from 'node:util';
 import picomatch from 'picomatch';
 import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { stripBidiControls } from '../utils/terminalSafe.js';
 import {
   generateLegacyMcpToolName,
   normalizeMcpToolName,
@@ -583,21 +584,18 @@ export function parseRule(raw: string): PermissionRule {
  * still identifies the original rule without reaching the operator's terminal.
  */
 
-// U+061C, U+200E/U+200F, the explicit embeddings and overrides (U+202A-U+202E)
-// and the isolates (U+2066-U+2069). Same set managed-automation-operations
-// strips before framing a run for a terminal.
-const BIDI_MARKS = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 export function warnDroppedPermissionRule(raw: string, kind?: string): void {
-  const printable = stripVTControlCharacters(raw)
-    .replace(BIDI_MARKS, '')
-    .replace(CONTROL_CHARS, (char) => {
+  const printable = stripBidiControls(stripVTControlCharacters(raw)).replace(
+    CONTROL_CHARS,
+    (char) => {
       if (char === '\n') return '\\n';
       if (char === '\t') return '\\t';
       if (char === '\r') return '\\r';
       return `\\x${char.charCodeAt(0).toString(16).padStart(2, '0')}`;
-    });
+    },
+  );
   const message =
     `[permissions] ignoring malformed ${kind ? `${kind} ` : ''}rule ` +
     `(unbalanced parentheses): ${printable} — it matches nothing, so it ` +

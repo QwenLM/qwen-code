@@ -14,10 +14,16 @@ import { PermissionsDialog } from './PermissionsDialog.js';
 
 const BADGE = '(invalid: not applied)';
 
-function stubConfig(rules: RuleWithSource[]): Config {
+function stubConfig(
+  rules: RuleWithSource[],
+  removePersistentRule = vi.fn(),
+): Config {
   // One manager for the whole render: the dialog reads it during render, so a
   // fresh object per call would churn the effect that pulls the rules in.
-  const manager = { listRules: () => rules };
+  const manager = {
+    listRules: () => rules,
+    removePersistentRule,
+  };
   return {
     getPermissionManager: () => manager,
     getWorkspaceContext: () => ({
@@ -28,16 +34,20 @@ function stubConfig(rules: RuleWithSource[]): Config {
 }
 
 async function renderRuleList(rules: RuleWithSource[]) {
+  const removePersistentRule = vi.fn();
   const instance = render(
     withProviders(<PermissionsDialog onExit={vi.fn()} />, {
-      config: stubConfig(rules),
+      config: stubConfig(rules, removePersistentRule),
     }),
   );
   // The rules arrive through an effect, so the first frame is still empty.
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
-  return instance;
+  return {
+    ...instance,
+    removePersistentRule,
+  };
 }
 
 const invalidRule = (raw: string): RuleWithSource => ({
@@ -63,6 +73,41 @@ describe('PermissionsDialog malformed rule rows', () => {
     const { lastFrame } = await renderRuleList([invalidRule(tooLongForOneRow)]);
 
     expect(lastFrame()).toContain(BADGE);
+  });
+
+  it('flattens carriage returns in a malformed row label', async () => {
+    const raw = 'Bash(rm -rf /\rBash(git *)';
+    const { lastFrame } = await renderRuleList([invalidRule(raw)]);
+
+    expect(lastFrame()).toContain(BADGE);
+    expect(lastFrame()).toContain('Bash(rm -rf / Bash(git *)');
+    expect(lastFrame()).not.toContain('\r');
+  });
+
+  it('sanitizes the delete-confirm rule but deletes the raw value', async () => {
+    const raw = 'Bash(docker *\rBash(git *)';
+    const { lastFrame, stdin, removePersistentRule } = await renderRuleList([
+      invalidRule(raw),
+    ]);
+
+    await act(async () => {
+      stdin.write('\u001B[B');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      stdin.write('\r');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(lastFrame()).toContain('Delete allow rule?');
+    expect(lastFrame()).toContain('Bash(docker *');
+    expect(lastFrame()).not.toContain('\r');
+
+    await act(async () => {
+      stdin.write('\r');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(removePersistentRule).toHaveBeenCalledWith(raw, 'allow');
   });
 
   it('leaves a valid rule unmarked', async () => {

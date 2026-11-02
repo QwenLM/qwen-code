@@ -1439,9 +1439,6 @@ export class PermissionManager {
       const rule = parseRule(raw);
       if (options?.trustGated) rule.trustGated = true;
       if (rule.invalid) {
-        debugLogger.warn(
-          `Ignoring malformed allow rule (unbalanced parentheses): ${rule.raw}`,
-        );
         warnDroppedPermissionRule(rule.raw, 'allow');
         return;
       }
@@ -1493,9 +1490,6 @@ export class PermissionManager {
     if (raw && raw.trim()) {
       const rule = parseRule(raw);
       if (rule.invalid) {
-        debugLogger.warn(
-          `Ignoring malformed deny rule (unbalanced parentheses): ${rule.raw}`,
-        );
         warnDroppedPermissionRule(rule.raw, 'deny');
         return;
       }
@@ -1510,9 +1504,6 @@ export class PermissionManager {
     if (raw && raw.trim()) {
       const rule = parseRule(raw);
       if (rule.invalid) {
-        debugLogger.warn(
-          `Ignoring malformed ask rule (unbalanced parentheses): ${rule.raw}`,
-        );
         warnDroppedPermissionRule(rule.raw, 'ask');
         return;
       }
@@ -1536,9 +1527,6 @@ export class PermissionManager {
   addPersistentRule(raw: string, type: RuleType): PermissionRule {
     const rule = parseRule(raw);
     if (rule.invalid) {
-      debugLogger.warn(
-        `Ignoring malformed ${type} rule (unbalanced parentheses): ${rule.raw}`,
-      );
       warnDroppedPermissionRule(rule.raw, type);
       return rule;
     }

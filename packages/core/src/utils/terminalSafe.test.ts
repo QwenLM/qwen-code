@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import {
   NOTIFICATION_LABEL_MAX_LENGTH,
   stripDisplayControlChars,
+  stripBidiControls,
   stripTerminalControlSequences,
   truncateNotificationLabel,
 } from './terminalSafe.js';
@@ -75,6 +76,20 @@ describe('stripDisplayControlChars', () => {
     const input = 'a\x00b\u202Ec\u0085d\u2068e';
     const once = stripDisplayControlChars(input);
     expect(stripDisplayControlChars(once)).toBe(once);
+  });
+});
+
+describe('stripBidiControls', () => {
+  it('strips ALM, LRM, RLM, embeddings, overrides, and isolates', () => {
+    const marks = [
+      0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066,
+      0x2067, 0x2068, 0x2069,
+    ];
+    for (const mark of marks) {
+      expect(stripBidiControls(`left${String.fromCharCode(mark)}right`)).toBe(
+        'leftright',
+      );
+    }
   });
 });
 

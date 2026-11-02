@@ -435,8 +435,8 @@ export function PermissionsDialog({
         // then reads as a rule in force, which is what the badge is here to
         // prevent.
         label: r.rule.invalid
-          ? `${t('(invalid: not applied)')} ${r.rule.raw}`
-          : r.rule.raw,
+          ? `${t('(invalid: not applied)')} ${sanitizeTerminalLine(r.rule.raw)}`
+          : sanitizeTerminalLine(r.rule.raw),
         value: r.rule.raw,
         key: `${r.type}-${r.scope}-${r.rule.raw}`,
       });
