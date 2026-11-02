@@ -4675,6 +4675,7 @@ describe('qwen-triage verify hardening round 2', () => {
       for (const env of [
         { DOWNLOAD_OUTCOME: 'failure' },
         { VERIFY_RESULT: 'cancelled' },
+        { VERIFY_RESULT: 'failure' },
         { VERDICT: 'infra-error', PREPARE_FAILURE_PHASE: 'install' },
       ]) {
         writeFileSync(summary, '');
@@ -4682,6 +4683,9 @@ describe('qwen-triage verify hardening round 2', () => {
         expect(readFileSync(summary, 'utf8')).toContain(
           'PR #7999 closed before this round published; notice not posted',
         );
+        // Only a flaky verdict is exempt; the gate's other verdicts are
+        // still notices.
+        expect(run([], { ...closed, ...env, FLAKE_VERDICT: 'pass' })).toBe('');
         expect(run([ownReport], { ...closed, ...env })).toBe('');
         const finalized = run([status(555, 1)], { ...closed, ...env });
         expect(finalized).toContain('/issues/comments/555');
@@ -4693,6 +4697,36 @@ describe('qwen-triage verify hardening round 2', () => {
       expect(
         run([], { ...closed, VERDICT: 'fail', PREPARE_FAILURE_PHASE: 'build' }),
       ).toContain('POST');
+      // A flaky demotion is a finding, not noise: on a merged PR it names
+      // tests now on main. Each body that carries one without the
+      // substantive marker posts, unless this run's own report already
+      // carries the demotion.
+      const flaky = { ...closed, FLAKE_VERDICT: 'flaky' };
+      for (const [env, headline] of [
+        [{ DOWNLOAD_OUTCOME: 'failure' }, 'result artifact unavailable'],
+        [{ VERIFY_RESULT: 'cancelled' }, 'job cancelled before the report'],
+        [{ VERIFY_RESULT: 'failure' }, 'the job then failed before the report'],
+      ]) {
+        writeFileSync(bodyOut, '');
+        expect(run([], { ...flaky, ...env })).toContain('POST');
+        expect(readFileSync(bodyOut, 'utf8')).toContain(
+          `❌ not passed — non-deterministic tests (flakiness gate); ${headline}**`,
+        );
+        expect(run([ownReport], { ...flaky, ...env })).toBe('');
+      }
+      // A round whose agent wrote no report.md gets the report body
+      // without the marker: a notice, posted only when the gate demoted it.
+      rmSync(join(art, 'report.md'));
+      try {
+        expect(run([], closed)).toBe('');
+        writeFileSync(bodyOut, '');
+        expect(run([], flaky)).toContain('POST');
+        expect(readFileSync(bodyOut, 'utf8')).toContain(
+          '❌ not passed — non-deterministic tests (flakiness gate)**',
+        );
+      } finally {
+        writeFileSync(join(art, 'report.md'), '## real report\n');
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -6589,11 +6623,11 @@ describe('qwen-triage verify publish fidelity', () => {
         'Scripted assertions: 10 passed · 0 failed · 10 total',
       );
       expect(body).toContain(
-        'Targeted gates (existing tests, not counted above): 1909 passed · 2 failed · 1 skipped across 2 suite(s)',
+        'Targeted gates (existing tests, not counted individually above): 1909 passed · 2 failed · 1 skipped across 2 suite(s)',
       );
       expect(
         body.indexOf(
-          '定向门禁（已有测试，不计入上面的断言）：1909 通过 · 2 失败 · 1 跳过，共 2 个套件',
+          '定向门禁（已有测试，不逐条计入上面的断言）：1909 通过 · 2 失败 · 1 跳过，共 2 个套件',
         ),
       ).toBeGreaterThan(body.indexOf('<details>'));
       expect(body).not.toContain('@everyone');
@@ -6616,10 +6650,10 @@ describe('qwen-triage verify publish fidelity', () => {
         gates: [{ suite: 'cli', pass: 1292, fail: 0 }],
       });
       expect(noSkip).toContain(
-        'Targeted gates (existing tests, not counted above): 1292 passed · 0 failed across 1 suite(s)',
+        'Targeted gates (existing tests, not counted individually above): 1292 passed · 0 failed across 1 suite(s)',
       );
       expect(noSkip).toContain(
-        '定向门禁（已有测试，不计入上面的断言）：1292 通过 · 0 失败，共 1 个套件',
+        '定向门禁（已有测试，不逐条计入上面的断言）：1292 通过 · 0 失败，共 1 个套件',
       );
       expect(noSkip).not.toContain('0 skipped');
       expect(noSkip).not.toContain('Gate totals do not decide the verdict');
@@ -6634,10 +6668,10 @@ describe('qwen-triage verify publish fidelity', () => {
         ],
       });
       expect(mixed).toContain(
-        'Targeted gates (existing tests, not counted above): 1909 passed · 0 failed across 2 suite(s)',
+        'Targeted gates (existing tests, not counted individually above): 1909 passed · 0 failed across 2 suite(s)',
       );
       expect(mixed).toContain(
-        '定向门禁（已有测试，不计入上面的断言）：1909 通过 · 0 失败，共 2 个套件',
+        '定向门禁（已有测试，不逐条计入上面的断言）：1909 通过 · 0 失败，共 2 个套件',
       );
       expect(mixed).not.toContain('12 skipped');
 
@@ -6648,7 +6682,7 @@ describe('qwen-triage verify publish fidelity', () => {
         gates: [{ suite: 'cli', pass: 1292, fail: 0, skipped: 0 }],
       });
       expect(zeroSkip).toContain(
-        'Targeted gates (existing tests, not counted above): 1292 passed · 0 failed · 0 skipped across 1 suite(s)',
+        'Targeted gates (existing tests, not counted individually above): 1292 passed · 0 failed · 0 skipped across 1 suite(s)',
       );
 
       // The advisory is gated on a trusted verdict: an untrusted run with

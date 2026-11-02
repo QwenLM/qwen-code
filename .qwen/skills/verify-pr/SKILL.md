@@ -417,9 +417,10 @@ rule, so run `node scripts/verify-pr-check.mjs <artifact dir>` and clear its
 errors and its verdict-shape and footer warnings before publishing (a
 missing footer is legitimate only when the model could not be resolved),
 act on a gates-size warning by recording the suites it ran under `gates`
-(with none run, say in the report what the count holds), then state the verdict word from `verdict.txt` verbatim. A published
-filename is spent: raw.githubusercontent serves a URL from cache, so
-overwriting `02-matrix.png` leaves every earlier link showing the old image.
+(with none run, say in the report what the count holds), then state the
+verdict word from `verdict.txt` verbatim. A published filename is spent:
+raw.githubusercontent serves a URL from cache, so overwriting
+`02-matrix.png` leaves every earlier link showing the old image.
 Republish as `02-matrix-v2.png`, update the body and every comment that quotes
 it, then read the file back at that ref (`gh api
 repos/<assets-repo>/contents/<path>?ref=<branch>`) to confirm its size and
