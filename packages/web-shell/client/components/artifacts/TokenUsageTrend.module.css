@@ -1,4 +1,7 @@
-.trend {
+/* `.spread` renders inside model cards, outside `.trend`, so both roots
+ * declare the shared colors. */
+.trend,
+.spread {
   --trend-ink: color-mix(in srgb, var(--foreground) 70%, var(--card));
   --trend-grid: color-mix(in srgb, var(--border) 70%, transparent);
   --trend-failure: var(--error-color);

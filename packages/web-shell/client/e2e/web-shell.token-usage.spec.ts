@@ -496,7 +496,7 @@ for (const { width, language, theme } of [
       const firstDot = trend.locator('svg circle').first();
       if (width === 390) await firstDot.tap({ force: true });
       else await firstDot.hover({ force: true });
-      const trendTip = trend.getByRole('status');
+      const trendTip = trend.getByRole('tooltip');
       await expect(trendTip).toBeVisible();
       await expect(trendTip).toContainText('qwen3.8-max-0902');
       await expect(trendTip).toContainText('tok/s');
@@ -517,6 +517,23 @@ for (const { width, language, theme } of [
       await expect(
         maxCard.getByTestId('token-usage-speed-spread'),
       ).toContainText('tok/s');
+      // The card spread sits outside the chart, so it needs its own colors.
+      const spread = maxCard.getByTestId('token-usage-speed-spread');
+      const spreadColors = await spread.evaluate((element) => {
+        const track = element.firstElementChild!;
+        return {
+          baseline: getComputedStyle(track, '::before').backgroundColor,
+          text: getComputedStyle(element.lastElementChild!).color,
+          card: getComputedStyle(element.parentElement!).color,
+        };
+      });
+      expect(spreadColors.baseline).not.toBe('rgba(0, 0, 0, 0)');
+      expect(spreadColors.text).toBe(
+        await trend
+          .locator('p')
+          .evaluate((note) => getComputedStyle(note).color),
+      );
+      expect(spreadColors.text).not.toBe(spreadColors.card);
       await expect(maxCard).toContainText(
         zh ? '失败：429 ×5 · timeout ×2' : 'Failed: 429 ×5 · timeout ×2',
       );

@@ -431,7 +431,7 @@ function TrendTooltip({
     <div
       ref={ref}
       className={styles.tooltip}
-      role="status"
+      role="tooltip"
       style={{ left, top }}
       data-share-color={series.color}
     >

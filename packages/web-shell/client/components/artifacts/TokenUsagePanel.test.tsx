@@ -1568,7 +1568,7 @@ describe('TokenUsagePanel', () => {
       Number(lastDot.getAttribute('cx')),
       Number(lastDot.getAttribute('cy')),
     );
-    const tooltip = trend.querySelector('[role="status"]');
+    const tooltip = trend.querySelector('[role="tooltip"]');
     expect(tooltip?.textContent).toMatch(/^qwen-plus::hybrid/);
     expect(tooltip?.textContent).toContain('50.0 tok/s · first token 1.0s');
     expect(tooltip?.textContent).toContain('100 output tokens in 2.0s');
@@ -1578,7 +1578,7 @@ describe('TokenUsagePanel', () => {
     )!;
     const [, fx, fy] = /^M([\d.]+),([\d.]+)/.exec(failure.getAttribute('d')!)!;
     await move(Number(fx) + 3.5, Number(fy) + 3.5);
-    expect(trend.querySelector('[role="status"]')?.textContent).toContain(
+    expect(trend.querySelector('[role="tooltip"]')?.textContent).toContain(
       'Failed · 429',
     );
 
@@ -1586,7 +1586,7 @@ describe('TokenUsagePanel', () => {
       svg.dispatchEvent(new MouseEvent('pointerleave', { bubbles: false }));
     });
     await move(-500, -500);
-    expect(trend.querySelector('[role="status"]')).toBeNull();
+    expect(trend.querySelector('[role="tooltip"]')).toBeNull();
   });
 
   it('shows per-model speed spread and failure kinds on cards', async () => {
