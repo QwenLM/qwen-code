@@ -29,12 +29,19 @@ The association gate survives where it bounds heavy PR-code execution:
 integration lane.
 
 2026-11-02: `integration_no_ak` joined `lint_runner`. Same trust class as
-lint — its integration step executes PR code — but zero secrets by
-construction: every model key is emptied at that step and the job's only
-token is the read-only checkout grant. The step already pinned a
-step-level `runner.temp` HOME with the key scrub; that HOME is now
-run-unique and cleared before use (the R2-1 lesson), and the routing
-battery pins both the lane set and the zero-secrets env contract.
+lint — the lane executes fork code from its checkout and install steps
+(lifecycle scripts plus scripts/prepare.js) — but zero secrets by
+construction: every model key is emptied at the integration gate and the
+job's only token is the read-only checkout grant. Round 2 of review caught
+the gate-scoped HOME being the wrong shape (fork code starts ~14 steps
+earlier), so the lane now mirrors lint exactly: the FIRST step publishes a
+run-unique HOME plus COREPACK_HOME inside it via GITHUB_ENV (corepack does
+not re-verify entries on cache hit — a shared home is a cross-job
+poisoning channel), XDG_CACHE_HOME stays on the shared verified tool
+cache, and an always() cleanup step reclaims the home at the end. The
+routing battery pins the lane set, the first-step isolation, the cleanup,
+and a zero-secrets env contract enforced by VALUE (every non-path key must
+be empty; no secrets.\* anywhere in the gate).
 
 Fallback priority: `MAINTAINER_ECS_RUNNER_DISABLED=true` overrides everything,
 including manual dispatch. `LINUX_RUNNER_FLEET=hosted` forces pull requests,
@@ -120,8 +127,9 @@ residual surface below stays accepted.
   boundary.** A `pull_request` run executes the PR's own workflow file, so any
   fork can put any lane — `test` included — on the pool in the same diff it
   opens (ci.yml's `test_windows` comment records the same fact). GitHub's
-  first-timer workflow approval is the outer gate. The single-lane scope of
-  this decision describes the default routing, not a fence.
+  first-timer workflow approval is the outer gate. The two-lane scope of this
+  decision (Lint & Static and the no-AK integration lane) describes the
+  default routing, not a fence.
 - **Cloud metadata.** If a pool instance binds a RAM role, any job process can
   reach the metadata endpoint. Fleet-side hardened mode is recommended,
   independent of this workflow change.
@@ -151,8 +159,10 @@ caches, the cleanup step preceding the collector, and both outputs agreeing
 on one fleet ladder for unmodeled fleet values.
 `scripts/tests/ci-platform-lanes.test.js` pins the `runs-on` literals (lint on
 `lint_runner`, test on `ubuntu_runner`) and evaluates each lane's timeout from
-its own routing output; note that suite runs after the merge queue, which is
-why the load-bearing HOME guard lives in the routing battery.
+its own routing output; note that suite runs in the test job's side lane on
+every full-profile PR, while the routing battery runs before dependency
+install in the same job — which is why the load-bearing HOME guard lives in
+the routing battery.
 
 ## Decision record and open questions
 

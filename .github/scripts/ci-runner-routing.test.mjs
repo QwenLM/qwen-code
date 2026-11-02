@@ -467,49 +467,104 @@ describe('ci.yml lint HOME isolation', () => {
     );
   });
 
-  it('integration_no_ak isolates its PR-code step HOME run-uniquely', () => {
-    // no_ak's PR-code step (the integration gate) pins a step-level env HOME
-    // — legal for the runner context, unlike job env — with every model key
-    // emptied. RUNNER_TEMP survives across jobs on this pool, so the path
-    // must be run-unique and cleared before use (the R2-1 lesson), or a
-    // fork's writes land where the next job on the registration reads.
-    const gate = ciDoc.jobs.integration_no_ak.steps?.find(
+  it('integration_no_ak isolates from its first step, zero-secrets at the gate', () => {
+    // no_ak's fork code starts at the checkout action and the install
+    // (lifecycle scripts AND scripts/prepare.js — build+bundle), not at the
+    // gate step, so the whole job needs lint's first-step isolation:
+    // GITHUB_ENV-published run-unique HOME, COREPACK_HOME inside it (corepack
+    // does not re-verify entries on cache hit — a shared home is a
+    // cross-job poisoning channel), XDG_CACHE_HOME on the shared verified
+    // tool cache. The gate keeps the model-key scrub.
+    const steps = ciDoc.jobs.integration_no_ak.steps ?? [];
+    assert.equal(
+      steps[0]?.name,
+      'Create isolated HOME',
+      'no_ak must isolate HOME from its first step',
+    );
+    const create = String(steps[0].run ?? '');
+    assert.ok(
+      create.includes('qwen-no-ak-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}'),
+      'no_ak HOME path must be run-unique',
+    );
+    assert.ok(
+      create.includes('rm -rf') &&
+        create.indexOf('rm -rf') < create.indexOf('mkdir'),
+      'must clear the HOME before creating it',
+    );
+    assert.ok(
+      create.includes('HOME=') &&
+        create.includes('USERPROFILE=') &&
+        create.includes('GITHUB_ENV'),
+      'must publish HOME/USERPROFILE via GITHUB_ENV',
+    );
+    assert.ok(
+      create.includes('COREPACK_HOME=') &&
+        create.includes('"${home}/.cache/node/corepack"'),
+      'COREPACK_HOME must stay inside the run-unique HOME',
+    );
+    assert.ok(
+      create.includes('XDG_CACHE_HOME=') &&
+        create.includes('RUNNER_TOOL_CACHE'),
+      'must share the verified linter-archive cache',
+    );
+    // Job env must stay empty of HOME (the runner context is illegal there).
+    assert.equal(ciDoc.jobs.integration_no_ak.env?.HOME, undefined);
+
+    const gate = steps.find(
       (s) => s.name === 'Run required no-AK integration gate',
     );
     assert.ok(gate, 'integration gate step missing');
-    const home = String(gate.env?.HOME ?? '');
+    const home = String(gate.env?.QWEN_HOME ?? '');
     assert.ok(
-      home.includes('qwen-no-ak-home-${{ github.run_id }}'),
-      `no_ak HOME must be run-unique, got: ${home}`,
+      home.startsWith(
+        '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}',
+      ),
+      `QWEN_HOME must derive from the run-unique home, got: ${home}`,
     );
-    assert.equal(gate.env?.USERPROFILE, home);
-    assert.ok(String(gate.env?.QWEN_HOME).startsWith(`${home}/`));
-    // Zero-secrets contract: every model key emptied at the step that runs
-    // PR code — widening this env to a real secret must turn this red.
-    for (const key of Object.keys(gate.env ?? {})) {
-      if (/API_KEY|TOKEN|AUTH/.test(key)) {
+    // Zero-secrets contract, enforced by VALUE not by name: every env key
+    // outside QWEN_HOME must be the empty string, and the step must
+    // reference no secrets.* anywhere. A name-based regex inherits the
+    // implementation's own premise about which names are credentials, so a
+    // secret under any other name (CI_BOT_PAT, *_DSN, *_BEARER) shipped
+    // green — falsifying the contract that justifies routing untrusted-fork
+    // PR code onto the shared pool.
+    const PATH_KEYS = new Set(['QWEN_HOME']);
+    for (const [key, value] of Object.entries(gate.env ?? {})) {
+      if (!PATH_KEYS.has(key)) {
         assert.equal(
-          gate.env[key],
+          value,
           '',
-          `${key} must stay empty in the no-AK PR-code step`,
+          `${key} must be empty in the no-AK PR-code step`,
         );
       }
     }
     assert.ok(
-      String(gate.run).includes('rm -rf') &&
-        String(gate.run).indexOf('rm -rf') < String(gate.run).indexOf('mkdir'),
-      'must clear the HOME before creating it',
+      !JSON.stringify(gate).includes('secrets.'),
+      'the no-AK PR-code step must not reference any secrets.* context',
+    );
+
+    // Reclamation: the run-unique home must be removed at the end so it
+    // does not accumulate in RUNNER_TEMP on this persistent pool.
+    const clean = steps.find((s) => s.name === 'Clean isolated HOME');
+    assert.ok(clean, 'no_ak cleanup step missing');
+    assert.equal(clean.if, '${{ always() }}');
+    assert.ok(
+      String(clean.run).includes('qwen-no-ak-home-') &&
+        !String(clean.run).includes('"$HOME"'),
+      'cleanup must use the constructed path, never $HOME',
+    );
+    assert.ok(
+      steps[steps.length - 1]?.name !== 'Run required no-AK integration gate',
+      'the gate must not be the last step (cleanup follows)',
     );
   });
 
   it('publishes a run-unique HOME from the first step, not job env', () => {
-    // lint's shape: the whole job is PR code, so the first step publishes
-    // HOME/USERPROFILE via GITHUB_ENV for every later step. no_ak has its own
-    // shape (previous test): only the integration gate step runs PR code and
-    // pins its env there.
-    for (const [id, job] of ungated.filter(
-      ([id]) => id === 'lint_and_static',
-    )) {
+    // Both ungated lanes now share lint's shape: fork code runs from early
+    // steps, so the first step publishes HOME/USERPROFILE via GITHUB_ENV for
+    // every later step. no_ak's specifics (gate key scrub, reclamation) are
+    // covered by its own test above.
+    for (const [id, job] of ungated) {
       // jobs.<job_id>.env cannot read the runner context — GitHub rejects the
       // whole workflow file (actionlint 1.7.12 witnesses it).
       assert.equal(job.env?.HOME, undefined, `${id} job-level HOME`);
@@ -553,24 +608,32 @@ describe('ci.yml lint HOME isolation', () => {
   });
 
   it('reclaims the isolated HOME before the failure collector', () => {
-    // lint's shape (no_ak has no collector and reclaims nothing: its HOME
-    // is run-unique, so the next job cannot read it anyway).
-    for (const [id, job] of ungated.filter(
-      ([id]) => id === 'lint_and_static',
-    )) {
+    // Both ungated lanes reclaim: no_ak's cleanup is its last step (it has
+    // no collector); lint's sits before the failure collector, which must
+    // stay last.
+    for (const [id, job] of ungated) {
       const steps = job.steps ?? [];
       const names = steps.map((s) => s.name);
       const clean = steps.find((s) => s.name === 'Clean isolated HOME');
       assert.ok(clean, `${id} cleanup step missing`);
       assert.equal(clean.if, '${{ always() }}', id);
-      assert.ok(
-        names.indexOf('Clean isolated HOME') <
-          names.indexOf('Upload disk-pressure samples'),
-        `${id} collector must stay last`,
-      );
+      const collectorIndex = names.indexOf('Upload disk-pressure samples');
+      if (collectorIndex !== -1) {
+        assert.ok(
+          names.indexOf('Clean isolated HOME') < collectorIndex,
+          `${id} collector must stay last`,
+        );
+      } else {
+        // No collector (no_ak): the cleanup itself is the last step.
+        assert.equal(
+          names[names.length - 1],
+          'Clean isolated HOME',
+          `${id} cleanup must be the final step`,
+        );
+      }
       // The constructed path, never $HOME: a failed init must not aim the
       // removal at the account's real home.
-      assert.ok(String(clean.run).includes('qwen-lint-home-'), id);
+      assert.ok(String(clean.run).includes('qwen-'), id);
       assert.ok(!String(clean.run).includes('"$HOME"'), id);
     }
   });

@@ -25,11 +25,16 @@ Linux 车道的 `needs` 前置）排在稀缺的 hosted 池后面。association 
 它真正约束重 PR 代码执行的地方：`ubuntu_runner`（test 车道与仅 merge-queue
 的 CLI 集成车道读取）。
 
-2026-11-02：`integration_no_ak` 加入 `lint_runner`。与 lint 同信任类——它的
-集成步骤执行 PR 代码——但按构造零密钥：该步骤清空所有模型 key，job 唯一的
-token 是只读检出授权。该步骤本就钉着 step 级 `runner.temp` HOME 并做 key
-清洗；该 HOME 现在改为 run 唯一且先清后建（R2-1 的教训），路由电池同时钉住
-车道集合与零密钥 env 契约。
+2026-11-02：`integration_no_ak` 加入 `lint_runner`。与 lint 同信任类——该车
+道从 checkout 与 install 步骤起就执行 fork 代码（生命周期脚本加
+scripts/prepare.js）——但按构造零密钥：集成门禁清空所有模型 key，job 唯一
+的 token 是只读检出授权。评审第 2 轮抓到"HOME 只钉在 gate 步骤"是错误形状
+（fork 代码在约 14 个步骤之前就开始执行），因此该车道现在完全镜像 lint：
+首步通过 GITHUB_ENV 发布 run 唯一的 HOME 并把 COREPACK_HOME 放在其内
+（corepack 缓存命中不重验条目——共享 home 是跨 job 投毒通道），XDG_CACHE_HOME
+留在共享的可校验 tool cache 上，末尾 always() 清理步骤回收该 HOME。路由电池
+钉住车道集合、首步隔离、清理步骤，以及按值强制（非按名）的零密钥 env 契约
+（非路径 key 必须为空、gate 不得引用任何 secrets.\*）。
 
 回退优先级：`MAINTAINER_ECS_RUNNER_DISABLED=true` 覆盖一切，包括手动调度。
 `LINUX_RUNNER_FLEET=hosted` 把 pull request、merge group 和 push 强制到 hosted，
@@ -124,7 +129,8 @@ association/事件矩阵下的行为、`lint_runner` 的两车道范围（超集
 以及两个输出在未建模的 fleet 值下仍走同一份标签。
 `scripts/tests/ci-platform-lanes.test.js` 钉住
 `runs-on` 字面量（lint 读 `lint_runner`、test 读 `ubuntu_runner`），并按各车道
-自己的路由输出求值 timeout；注意该套件在 merge queue 之后才跑，所以承重的
+自己的路由输出求值 timeout；注意该套件在 test job 的旁路 lane 上对每个
+full-profile PR 运行，而路由电池在同一 job 的依赖安装之前就跑——所以承重的
 HOME 守卫放在路由电池里。
 
 ## 决策记录与开放问题

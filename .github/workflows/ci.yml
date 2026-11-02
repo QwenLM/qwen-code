@@ -2334,6 +2334,23 @@ jobs:
     permissions:
       contents: 'read'
     steps:
+      # This lane's fork code starts at the local checkout action and the
+      # install (lifecycle scripts AND scripts/prepare.js — build+bundle),
+      # not at the gate step, so isolate HOME from the FIRST step like
+      # lint_and_static: publish a run-unique HOME via GITHUB_ENV (job env
+      # cannot read the runner context), keep the content-verified linter
+      # cache shared, and keep COREPACK_HOME inside the per-run home
+      # (corepack does not re-verify entries on cache hit — a shared home is
+      # a cross-job poisoning channel). The gate step's key scrub stays.
+      - name: 'Create isolated HOME'
+        run: |-
+          home="${RUNNER_TEMP}/qwen-no-ak-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -rf -- "$home"
+          mkdir -p "$home" "${RUNNER_TOOL_CACHE}/qwen-ci-cache"
+          printf 'HOME=%s\nUSERPROFILE=%s\n' "$home" "$home" >> "${GITHUB_ENV}"
+          printf 'XDG_CACHE_HOME=%s\n' "${RUNNER_TOOL_CACHE}/qwen-ci-cache" >> "${GITHUB_ENV}"
+          printf 'COREPACK_HOME=%s\n' "${home}/.cache/node/corepack" >> "${GITHUB_ENV}"
+
       - name: 'Restore workspace ownership'
         run: |-
           set -uo pipefail
@@ -2513,14 +2530,11 @@ jobs:
       - name: 'Run required no-AK integration gate'
         if: "${{ steps.ci_profile.outputs.ci_profile == 'full' }}"
         timeout-minutes: 20
-        # Step-level env is legal for the runner context (unlike job-level),
-        # and RUNNER_TEMP survives across jobs on this pool — so the path is
-        # run-unique and cleared before use (the R2-1 lesson from the lint
-        # lane's isolation: a fixed name hands a fork's writes to the next
-        # job on the registration).
+        # HOME/USERPROFILE come from the first step's GITHUB_ENV publication
+        # (run-unique, cleared before use). QWEN_HOME rides the same home.
+        # The key scrub below is the zero-secrets contract: pinned by the
+        # routing battery (every non-path env value must be '').
         env:
-          HOME: '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}'
-          USERPROFILE: '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}'
           QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}/.qwen'
           API_KEY: ''
           ANTHROPIC_API_KEY: ''
@@ -2551,10 +2565,15 @@ jobs:
           QWENCLOUD_TOKEN_PLAN_API_KEY: ''
           QWEN_DEFAULT_AUTH_TYPE: ''
         run: |-
-          rm -rf -- "${HOME}"
-          mkdir -p "${HOME}" "${QWEN_HOME}"
+          mkdir -p "${QWEN_HOME}"
           npm run typecheck:integration
           npm run test:integration:no-ak:sandbox:none
+
+      # Reclaim the run-unique HOME (constructed path, never $HOME) so it
+      # does not accumulate in RUNNER_TEMP on this persistent pool.
+      - name: 'Clean isolated HOME'
+        if: '${{ always() }}'
+        run: 'rm -rf -- "${RUNNER_TEMP}/qwen-no-ak-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"'
 
   integration_cli:
     name: 'Integration Tests (CLI, No Sandbox)'
