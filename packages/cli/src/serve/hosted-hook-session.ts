@@ -641,6 +641,13 @@ export class HostedHookSession {
 
   delegateBrokerToMcp(broker?: HostedWorkspaceBroker): void {
     if (this.mountWorkUnproven()) throw new HostedHookRecoveryRequiredError();
+    // A different broker carries a different mount claim. Swapping while this
+    // owner still holds the mount would orphan that claim and leave `acquired`
+    // pointing at the old broker, so the handback gate refuses until a fresh
+    // load binds the new owner. The no-argument handover keeps the same broker
+    // (MCP takes over its release), so it stays valid while the mount is held.
+    if (broker !== undefined && broker !== this.broker && this.mountHeld)
+      throw new HostedHookRecoveryRequiredError();
     this.broker = broker ?? this.broker;
     this.ownsBroker = broker === undefined ? false : this.ownsBroker;
   }
