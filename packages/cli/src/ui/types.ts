@@ -575,6 +575,13 @@ export interface ContextToolDetail {
 export interface ContextMemoryDetail {
   path: string;
   tokens: number;
+  /**
+   * Absolute on-disk path when the row maps to a file the context preview
+   * can open: inside the session workspace, or a global memory file. Absent
+   * for synthetic aggregates and for instruction files outside that readable
+   * scope (parent-directory or extension files), which stay non-interactive.
+   */
+  absolutePath?: string;
 }
 
 export interface ContextSkillDetail {

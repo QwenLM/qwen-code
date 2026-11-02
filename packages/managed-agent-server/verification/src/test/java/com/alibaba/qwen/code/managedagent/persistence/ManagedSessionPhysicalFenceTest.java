@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
@@ -319,30 +320,28 @@ class ManagedSessionPhysicalFenceTest {
                 TENANT,
                 com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(TENANT, "actor"));
         var publicStore =
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
                         jdbc,
                         new com.fasterxml.jackson.databind.ObjectMapper(),
                         java.time.Clock.systemUTC(),
                         ignored -> {},
                         new ManagedWorkspaceRegistry(jdbc),
-                        new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                        new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var selection =
                 new com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection("workspace", ".");
         var parent =
                 transactions
                         .execute(
                                 status ->
-                                        publicStore.insertWorkspaceSessionCommand(
-                                                TENANT,
-                                                "actor",
-                                                "parent",
-                                                "digest",
-                                                "qwen-code",
-                                                null,
-                                                "parent",
-                                                List.of(),
-                                                null,
-                                                selection))
+                                        publicStore.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                                                .tenantId(TENANT)
+                                                .actorId("actor")
+                                                .idempotencyKey("parent")
+                                                .requestDigest("digest")
+                                                .agentId("qwen-code")
+                                                .title("parent")
+                                                .selection(selection)
+                                                .build()))
                         .sessionId();
         var lineage = new StoreModels.SessionLineage(parent, parent, "run", 1);
         var child =
@@ -383,17 +382,15 @@ class ManagedSessionPhysicalFenceTest {
                         () ->
                                 transactions.execute(
                                         status ->
-                                                publicStore.insertWorkspaceSessionCommand(
-                                                        TENANT,
-                                                        "actor",
-                                                        "second-parent",
-                                                        "digest",
-                                                        "qwen-code",
-                                                        null,
-                                                        "parent",
-                                                        List.of(),
-                                                        null,
-                                                        selection)))
+                                                publicStore.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                                                        .tenantId(TENANT)
+                                                        .actorId("actor")
+                                                        .idempotencyKey("second-parent")
+                                                        .requestDigest("digest")
+                                                        .agentId("qwen-code")
+                                                        .title("parent")
+                                                        .selection(selection)
+                                                        .build())))
                 .hasMessageContaining("Workspace");
         assertThat(
                         jdbc.queryForObject(

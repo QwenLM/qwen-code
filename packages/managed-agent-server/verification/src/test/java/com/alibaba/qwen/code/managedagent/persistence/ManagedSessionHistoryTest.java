@@ -19,8 +19,8 @@ class ManagedSessionHistoryTest {
         try (var fixture = ConsolidatedStoreFixture.open("session_history")) {
             ManagedSchema.initialize(fixture.source());
             JdbcTemplate jdbc = new JdbcTemplate(fixture.source());
-            ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(),
-                    ignored -> {}, new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+            ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(),
+                    ignored -> {}, new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             for (int i = 1; i <= 5; i++) {
                 String id = "session-" + i;
                 jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,status,gmt_create,gmt_modified,"

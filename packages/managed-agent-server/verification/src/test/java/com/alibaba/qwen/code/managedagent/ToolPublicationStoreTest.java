@@ -136,8 +136,8 @@ class ToolPublicationStoreTest {
         projectionProperties = new ManagedAgentProperties();
         projectionProperties.getArtifacts().setEnabled(true);
         publicWorkspaces = org.mockito.Mockito.mock(ManagedWorkspaceRegistry.class);
-        publicSessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, java.time.Clock.systemUTC(), events -> {},
-                publicWorkspaces, projectionProperties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        publicSessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, java.time.Clock.systemUTC(), events -> {},
+                publicWorkspaces, projectionProperties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         publicResults = new ManagedToolResultStore(jdbc, manager, publicSessions);
         sessions.setToolResults(publicResults);
     }
@@ -3200,6 +3200,33 @@ class ToolPublicationStoreTest {
         assertThat(fixture.jdbc().queryForList("SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event"))
                 .usingRecursiveComparison()
                 .isEqualTo(events);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"tool_profile = 'csi-files-retirement/1'", "runtime_request_key = 'fixture-request'"})
+    void projectionClaimSkipsPrivateCsiSessions(String privateMarker) {
+        // csi_guard is generated from these two columns, so the seed sets one of them.
+        var fixture = apiFixture();
+        fixture.jdbc()
+                .update(
+                        "UPDATE ma_operation SET state = 'PENDING', available_at = 0 WHERE"
+                            + " operation_kind = 'TOOL_RESULT_PROJECTION'");
+        var original = fixture.jdbc().queryForMap("SELECT tool_profile, runtime_request_key FROM ma_session");
+        fixture.jdbc().update("UPDATE ma_session SET " + privateMarker);
+        var before =
+                fixture.jdbc()
+                        .queryForMap(
+                                "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION'");
+        assertThat(fixture.results().claim()).isEmpty();
+        assertThat(
+                        fixture.jdbc()
+                                .queryForMap(
+                                        "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION'"))
+                .usingRecursiveComparison()
+                .isEqualTo(before);
+        fixture.jdbc().update("UPDATE ma_session SET tool_profile = ?, runtime_request_key = ?",
+                original.get("tool_profile"), original.get("runtime_request_key"));
+        assertThat(fixture.results().claim()).isPresent();
     }
 
     @Test

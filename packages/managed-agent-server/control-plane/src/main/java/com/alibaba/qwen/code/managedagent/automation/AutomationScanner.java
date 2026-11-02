@@ -44,7 +44,7 @@ import java.util.function.Supplier;
  * definition the node works (#15667). A
  * claim whose answer was lost is re-driven by later ticks with bounded
  * backoff and, past the bound, recorded unknown — never guessed; a scanner
- * that lost its lease cannot move the ledger. See
+ * whose lease another claim has taken cannot move the ledger. See
  * docs/design/2026-10-07-managed-automation-runtime.md, decisions 5–8.
  */
 @Service
@@ -415,8 +415,8 @@ public class AutomationScanner {
 
     /**
      * What one decision learned by reconciling: the occurrence keys whose
-     * runs the pass provably unblocked, and whether the Harness told the
-     * definition — or its Session — is gone for good.
+     * runs the pass provably unblocked, and whether the definition — or its
+     * Session, as the Store confirms — is gone for good.
      */
     private record ReconcileOutcome(Set<String> resolved,
             boolean definitionEnded) {
@@ -462,7 +462,7 @@ public class AutomationScanner {
                 String code = errorCode(error);
                 if ("automation_retired".equals(code)
                         || "automation_not_found".equals(code)
-                        || "hosted_session_not_found".equals(code)) {
+                        || sessionEnded(row, code)) {
                     // The chain — or its Session — is gone for good:
                     // refresh the mirror like a fired answer does instead
                     // of recording skipped-overlap for every future slot.
@@ -503,6 +503,22 @@ public class AutomationScanner {
         }
         return countRefusal(row,
                 store.countActive(row.tenantId(), row.scheduleId()));
+    }
+
+    /**
+     * Whether a {@code hosted_session_not_found} refusal means the Session
+     * ended. It proves only that the answering Harness does not hold the
+     * Session — a pool member that drained and released it answers the same
+     * (#15795) — so the Store decides. A Session that left ACTIVE never
+     * returns to it, and admission skips every slot it would fire, so its
+     * definitions end with it. One still ACTIVE takes a transient refusal's
+     * path — the fire's bounded backoff, the reconcile's standing refusal —
+     * and its mirror stays live.
+     */
+    private boolean sessionEnded(ScheduleRow row, String code) {
+        return "hosted_session_not_found".equals(code)
+                && !"ACTIVE".equals(store.sessionStatus(row.tenantId(),
+                        row.sessionId()));
     }
 
     /** The count-based arm of the admission, priced against {@code active}. */
@@ -581,7 +597,7 @@ public class AutomationScanner {
             }
             if ("automation_retired".equals(code)
                     || "automation_not_found".equals(code)
-                    || "hosted_session_not_found".equals(code)) {
+                    || sessionEnded(row, code)) {
                 store.settleOccurrence(row.tenantId(), row.scheduleId(),
                         occurrence.occurrenceKey(),
                         AutomationLedgerStore.OUTCOME_SKIPPED,

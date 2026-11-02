@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExtensions;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
@@ -66,8 +67,8 @@ class WorkspaceRecoveryStoreTest {
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(new WorkspaceMount("tenant", "storage", root.toString())));
         guard = new WorkspaceStorageGuard(jdbc, manager, properties, path -> new StorageIdentityReader.Identity(
                 path.toRealPath().toString(), "test-host", "test-device", "test-inode", "2026-10-01T00:00:00Z"));
-        sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
+                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         for (String workspace : List.of("workspace-a", "workspace-b")) {
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                     + " storage_id, display_name, config_ref, policy_ref, state) VALUES ('tenant', ?, 1, 'storage',"
@@ -405,24 +406,38 @@ class WorkspaceRecoveryStoreTest {
                 + "\"tools\":[{\"type\":\"hosted_profile\","
                 + "\"profile\":\"hosted-workspace-files/1\"}],"
                 + "\"permission_policy\":{\"approval_mode\":\"default\"}}";
-        sessions.setManagedAgentDefinitionStore(
-                new ManagedAgentDefinitionStore(jdbc, new RequestDigests()));
+        var definitionProperties = new ManagedAgentProperties();
+        definitionProperties.getHarness().setCapabilityDigest("a".repeat(64));
+        definitionProperties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
+        definitionProperties.getRuntimeBroker().setWorkspaceMounts(List.of(new WorkspaceMount("tenant", "storage", root.toString())));
+        var definitionSessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
+                jdbc, JSON, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), definitionProperties,
+                new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(),
+                new ManagedAgentDefinitionStore(jdbc, new RequestDigests()), null);
         String pinned = new TransactionTemplate(manager).execute(status -> {
             new ManagedAgentDefinitionStore(jdbc, new RequestDigests()).create("tenant", "def",
                     "def-digest", agentId, definitionDigest, definitionJson,
                     1L);
-            return sessions.insertWorkspaceSessionCommand("tenant", "actor",
-                    UUID.randomUUID().toString(),
-                    "sha256:" + "a".repeat(64), agentId, null, null, List.of(),
-                    null, new WorkspaceSelection("workspace-b", "."))
+            return definitionSessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                    .tenantId("tenant")
+                    .actorId("actor")
+                    .idempotencyKey(UUID.randomUUID().toString())
+                    .requestDigest("sha256:" + "a".repeat(64))
+                    .agentId(agentId)
+                    .selection(new WorkspaceSelection("workspace-b", "."))
+                    .build())
                     .sessionId();
         });
         String deleted = new TransactionTemplate(manager).execute(status ->
-                sessions.insertWorkspaceSessionCommand("tenant", "actor",
-                        UUID.randomUUID().toString(),
-                        "sha256:" + "a".repeat(64), agentId, "1", null,
-                        List.of(), null,
-                        new WorkspaceSelection("workspace-b", "."))
+                definitionSessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId("tenant")
+                        .actorId("actor")
+                        .idempotencyKey(UUID.randomUUID().toString())
+                        .requestDigest("sha256:" + "a".repeat(64))
+                        .agentId(agentId)
+                        .requestedRevision("1")
+                        .selection(new WorkspaceSelection("workspace-b", "."))
+                        .build())
                         .sessionId());
         head(deleted);
         retireSession(deleted);
@@ -839,9 +854,14 @@ class WorkspaceRecoveryStoreTest {
     }
 
     private String session(String workspace) {
-        return new TransactionTemplate(manager).execute(status -> sessions.insertWorkspaceSessionCommand("tenant", "actor", UUID.randomUUID().toString(),
-                "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
-                new WorkspaceSelection(workspace, ".")).sessionId());
+        return new TransactionTemplate(manager).execute(status -> sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId("tenant")
+                .actorId("actor")
+                .idempotencyKey(UUID.randomUUID().toString())
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection(workspace, "."))
+                .build()).sessionId());
     }
 
     private void head(String session) {

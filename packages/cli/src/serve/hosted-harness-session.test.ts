@@ -457,6 +457,16 @@ const BOOT_ID = '11111111-1111-4111-8111-111111111111';
 const SESSION_ID = '22222222-2222-4222-8222-222222222222';
 const PROMPT_ID = '33333333-3333-4333-8333-333333333333';
 
+// R1-2: the finished-before-commit hold reads its switch once at module scope,
+// so a vi.stubEnv inside a case cannot arm it. Set the env before the static
+// import evaluates that read, under a dedicated Session id. The hold only fires
+// for the matching id, so every other Session in the file is unaffected.
+const crashBeforeCommitArm = vi.hoisted(() => {
+  const sessionId = '880e8400-e29b-41d4-a716-446655440004';
+  process.env['QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT'] = sessionId;
+  return { sessionId };
+});
+
 // Keep slow-host slack, but make all settle waits share the current test's
 // remaining time, including waits hidden inside helper functions.
 const MAX_SETTLE_TIMEOUT_MS = isSlowTestHost() ? 45_000 : 10_000;
@@ -1435,6 +1445,151 @@ describe('Hosted Harness no-tool session', () => {
       retryDelay: 100,
     });
   });
+
+  // Runs before the abort case below: the hold latch (crashBeforeCommitFired)
+  // is module scope and never reset, so this case must execute while it is
+  // still unset. Otherwise the spent latch, not the session-id comparison,
+  // would suppress the hold and this case could not fail for its property.
+  it('does not fire the finished-before-commit hold for a non-matching session', async () => {
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'no hold' }];
+    const promptId = randomUUID();
+    const digest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ prompt, promptId, payloadDigest: digest })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    const events = (
+      await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      })
+    ).events;
+    expect(
+      events
+        .filter(
+          (event) =>
+            event.kind === 'turn.settled' &&
+            event.payload['turnId'] === promptId,
+        )
+        .map((event) => event.payload['outcome']),
+    ).toEqual(['completed']);
+    expect(
+      events.some(
+        (event) =>
+          event.kind === 'message.committed' &&
+          event.payload['role'] === 'assistant',
+      ),
+    ).toBe(true);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  }, 60_000);
+
+  // R1-2: the finished-before-commit hold must observe the Turn's abort signal.
+  // Without the release/addEventListener wiring a leaked flag would park the
+  // Session uncancellably; these cases drive a real turn into the hold and prove
+  // the abort settles it cancelled with no assistant commit, and that a
+  // non-matching Session never holds at all.
+  it('settles the finished-before-commit hold cancelled on abort without an assistant commit', async () => {
+    const sessionId = crashBeforeCommitArm.sessionId;
+    const key = { tenantId: 'tenant', workspaceId: 'workspace', sessionId };
+    const readJournal = () =>
+      LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${sessionId}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
+    const stderr = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'hold then cancel' }];
+    const promptId = randomUUID();
+    const digest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    try {
+      await headers(supertest(server).post(`/session/${sessionId}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ prompt, promptId, payloadDigest: digest })
+        .expect(202);
+      // The model resolves and the turn parks in the pre-assistant-commit hold.
+      await vi.waitFor(
+        () =>
+          expect(
+            stderr.mock.calls.some(([line]) =>
+              String(line).includes(
+                'E2E holding finished turn before assistant commit',
+              ),
+            ),
+          ).toBe(true),
+        { timeout: settleTimeoutMs() },
+      );
+      await headers(supertest(server).post(`/session/${sessionId}/cancel`))
+        .set('X-Qwen-Client-Id', clientId)
+        .expect(204);
+      // The abort-driven release must settle the turn; if the hold never
+      // releases this wait times out rather than passing trivially.
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${sessionId}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: settleTimeoutMs() },
+      );
+      const events = (await readJournal()).events;
+      expect(
+        events
+          .filter(
+            (event) =>
+              event.kind === 'turn.settled' &&
+              event.payload['turnId'] === promptId,
+          )
+          .map((event) => event.payload['outcome']),
+      ).toEqual(['cancelled']);
+      expect(
+        events.some(
+          (event) =>
+            event.kind === 'message.committed' &&
+            event.payload['role'] === 'assistant',
+        ),
+      ).toBe(false);
+    } finally {
+      stderr.mockRestore();
+      await Promise.race([
+        headers(supertest(server).delete(`/session/${sessionId}`)),
+        new Promise((resolve) => setTimeout(resolve, 5_000)),
+      ]);
+    }
+  }, 60_000);
 
   it('refuses legacy teardown during compression even without a client id', async () => {
     const server = await app();
@@ -27512,6 +27667,169 @@ describe('Hosted Harness Runtime turn takeover', () => {
       supertest(server).delete(`/session/${SESSION_ID}`),
     );
   }, 8000);
+
+  // A6 (R1-4): the ledger-less gap block's observable outcome at the real
+  // continue route — the family error becomes a retriable recovery block,
+  // never a fabricated never-ran fold. The drift is built into the load
+  // (suppressChildAgents on a version-0 lane), not hand-passed.
+  it('blocks the ledger-less child gap on continue and still lets cancel terminate (A6)', async () => {
+    await parkAgentWaitResumeShape('orphan');
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    acquireSpy = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+      .mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    const server = await replacementApp();
+    const loaded = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: 'hosted-workspace-shell/1',
+      driveRuntimeRecovery: true,
+      // The drift the guard exists for: the replacement loads without the
+      // child lane the original admitted its children under.
+      suppressChildAgents: true,
+    });
+    expect(loaded.status).toBe(200);
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as {
+      phase: string;
+      checkpointId: string;
+      activationId: string;
+    };
+    const continued = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(continued.status).toBe(200);
+    await vi.waitFor(
+      async () => {
+        const status = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    const retried = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(retried.status).toBe(409);
+    expect(retried.body.code).toBe('hosted_turn_recovery_required');
+    const transcript = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    // The gap owes an answer; it must not receive a fabricated one.
+    expect(JSON.stringify(transcript.body)).not.toContain(
+      'interrupted before this child agent was admitted',
+    );
+    const cancelled = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/cancel`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(cancelled.status).toBe(200);
+    expect(cancelled.body.accepted).toBe(true);
+    await vi.waitFor(
+      async () => {
+        const status = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    const settledTranscript = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    const settledBody = JSON.stringify(settledTranscript.body);
+    expect(settledBody).toContain('outcome is unknown');
+    expect(settledBody).not.toContain('never ran');
+    expect(settledTranscript.body.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'turn_complete',
+          promptId: PROMPT_ID,
+          data: expect.objectContaining({ stopReason: 'cancelled' }),
+        }),
+      ]),
+    );
+    await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/cancel`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({ promptId: PROMPT_ID })
+      .expect(204);
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  }, 30_000);
+
+  // A6 (R1-2): the cancel route pre-aborts the gap fill so the cancel
+  // settles at once. Under the same drift the guard must stay exempt there
+  // — a throwing fill would wedge the cancel in a deterministic 503 loop
+  // and the Turn could never settle.
+  it('still settles the cancelled takeover when the child ledger drifted away (A6)', async () => {
+    await parkAgentWaitResumeShape('orphan');
+    const server = await replacementApp();
+    const loaded = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: 'hosted-workspace-shell/1',
+      passiveManagedRuntimeRecovery: true,
+      suppressChildAgents: true,
+    });
+    expect(loaded.status).toBe(200);
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as {
+      phase: string;
+      checkpointId: string;
+      activationId: string;
+    };
+    const cancelled = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/cancel`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(cancelled.status).toBe(200);
+    expect(cancelled.body.accepted).toBe(true);
+    const transcript = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    // Without the ledger the pre-aborted fill answers the unknown outcome
+    // — terminating, but claiming nothing about a child it cannot see.
+    const cancelledBody = JSON.stringify(transcript.body);
+    expect(cancelledBody).toContain('outcome is unknown');
+    expect(cancelledBody).not.toContain('never ran');
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  }, 20_000);
 
   it('the carried all-consumed continue adopts the takeover without claiming the mount (R2-1/R2-3)', async () => {
     await parkAgentWaitResumeShape('carried');
