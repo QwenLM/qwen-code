@@ -1759,11 +1759,8 @@ jobs:
             REVIEW_COHORT=canary
           fi
           if [ "$REVIEW_COHORT" = canary ] && [ -n "$REVIEW_BASE_URL_CANARY" ]; then
-            CANARY_HOST=''
-            if [ -n "${REVIEW_API_KEY_CANARY:-}" ]; then
-              CANARY_HOST="$(node -e 'try{console.log(new URL(process.env.REVIEW_BASE_URL_CANARY).host)}catch{process.exit(1)}' 2>/dev/null || true)"
-            fi
-            if [ -n "${REVIEW_API_KEY_CANARY:-}" ] && [ -n "$CANARY_HOST" ]; then
+            if [ -n "${REVIEW_API_KEY_CANARY:-}" ] &&
+              node -e 'try{if(!new URL(process.env.REVIEW_BASE_URL_CANARY).host)process.exit(1)}catch{process.exit(1)}' 2>/dev/null; then
               OPENAI_BASE_URL="$REVIEW_BASE_URL_CANARY"
               OPENAI_API_KEY="$REVIEW_API_KEY_CANARY"
               export OPENAI_BASE_URL OPENAI_API_KEY
