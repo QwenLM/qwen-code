@@ -57,6 +57,22 @@ describe('checkHostedGlobPattern', () => {
     ['a stray closing brace', '{x},b}'],
     ['a sequence assembled inside a group', '{1..{,9999}}'],
     ['an overlong pattern', 'x'.repeat(1025)],
+    // Both endpoints overflow Number, so the span is NaN and the bound would
+    // fail open; the bare shape dedupes, the composite one does not.
+    [
+      'a range whose endpoints overflow',
+      '{' + '9'.repeat(400) + '..' + '9'.repeat(400) + '}',
+    ],
+    [
+      'an overflowing range prefixed onto brace groups',
+      '{' +
+        '9'.repeat(309) +
+        '..' +
+        '9'.repeat(309) +
+        '}' +
+        '{a,b,c,d}'.repeat(8) +
+        '/*',
+    ],
   ])('refuses %s before expanding it', (_name, pattern) => {
     const started = Date.now();
     expect(checkHostedGlobPattern(pattern)).toBe('too-complex');
@@ -68,20 +84,27 @@ describe('checkHostedGlobPattern', () => {
     // at most the bound, or glob would search more than was checked.
     let seed = 0x2f6e2b1;
     const random = () => {
-      seed = (seed * 1103515245 + 12345) % 2 ** 31;
+      // imul, not float multiply: seed * 1103515245 passes 2^53, loses its low
+      // bits and collapses the recurrence to a ~1k-state cycle.
+      seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff;
       return seed / 2 ** 31;
     };
     const tokens = ['{', '}', ',', 'a', 'b', '1', '..', '\\', '$', '/', '3'];
     const oversized: string[] = [];
+    const generated = new Set<string>();
     for (let sample = 0; sample < 20000; sample++) {
       let pattern = '';
       const length = 1 + Math.floor(random() * 16);
       for (let index = 0; index < length; index++)
         pattern += tokens[Math.floor(random() * tokens.length)];
+      generated.add(pattern);
       if (checkHostedGlobPattern(pattern) === 'too-complex') continue;
       if (braceExpand(pattern).length > HOSTED_GLOB_MAX_ALTERNATIVES)
         oversized.push(pattern);
     }
     expect(oversized).toEqual([]);
+    // `oversized` is empty under the collapsed cycle too, so breadth is what
+    // pins the period.
+    expect(generated.size).toBeGreaterThan(15000);
   });
 });

@@ -13,14 +13,13 @@ import {
   createNextTurnReadyHarnessCheckpoint,
   encodeHarnessCheckpointV1,
   HARNESS_TURN_COMPLETE_BOUNDARY,
-  parseHarnessCheckpointV1,
-  tryParseHarnessCheckpointV1,
   type HarnessCheckpointV1,
 } from './managed-harness-checkpoint.js';
 import type { ManagedSession } from './managed-session-assembly.js';
 import type { LocalManagedSessionAuthority } from './managed-session-authority.js';
 import type { ToolErrorType } from '../tools/tool-error.js';
 import {
+  ManagedSessionRecordError,
   assertManagedSessionDurableRef,
   type ManagedSessionDurableRef,
 } from './managed-session-records.js';
@@ -34,6 +33,7 @@ import {
   convertToFunctionResponse,
 } from '../core/coreToolScheduler.js';
 import { getCachedGitBranch } from '../utils/gitUtils.js';
+import { readManagedMessageBody } from './managed-message-chunks.js';
 
 /** The tool protocol the local host dispatches over. */
 export const MANAGED_RUNTIME_TOOL_CAPABILITY_VERSION =
@@ -328,11 +328,8 @@ export class LocalManagedRuntimeOutcomes {
     // state could only guess, so the repair leaves the log untouched here.
     let checkpoint: HarnessCheckpointV1 | undefined;
     try {
-      const state = await this.session.authority.readCheckpointState();
-      if (state !== undefined) {
-        const parsed = tryParseHarnessCheckpointV1(state);
-        if (parsed.ok) checkpoint = parsed.checkpoint;
-      }
+      const parsed = await this.session.authority.readParsedCheckpointState();
+      if (parsed?.ok) checkpoint = parsed.checkpoint;
     } catch {
       return;
     }
@@ -414,8 +411,10 @@ export class LocalManagedRuntimeOutcomes {
         event.payload['contentRef'],
         'message.committed.contentRef',
       );
-      const body = await session.resources
-        .read(ref)
+      const body = await readManagedMessageBody(
+        (bodyRef) => session.resources.read(bodyRef),
+        ref,
+      )
         .then((bytes) => bytes.toString())
         .catch(() => undefined);
       if (body === undefined) continue;
@@ -589,8 +588,14 @@ export class LocalManagedRuntimeOutcomes {
   }
 
   private async latestCheckpoint(): Promise<HarnessCheckpointV1 | undefined> {
-    const state = await this.session.authority.readCheckpointState();
-    return state === undefined ? undefined : parseHarnessCheckpointV1(state);
+    const parsed = await this.session.authority.readParsedCheckpointState();
+    if (!parsed) return undefined;
+    if (!parsed.ok) {
+      throw new ManagedSessionRecordError(
+        parsed.message ?? 'Runtime checkpoint cannot be parsed.',
+      );
+    }
+    return parsed.checkpoint;
   }
 }
 
@@ -605,16 +610,17 @@ export async function unresolvedRuntimeWorkReason(
   authority: LocalManagedSessionAuthority,
 ): Promise<string | undefined> {
   if (authority.latestCheckpoint === undefined) return undefined;
-  let state: Buffer | undefined;
+  let parsed: Awaited<
+    ReturnType<LocalManagedSessionAuthority['readParsedCheckpointState']>
+  >;
   try {
-    state = await authority.readCheckpointState();
+    parsed = await authority.readParsedCheckpointState();
   } catch {
     return 'its checkpoint state cannot be read';
   }
-  if (state === undefined) {
+  if (parsed === undefined) {
     return 'its checkpoint state cannot be read';
   }
-  const parsed = tryParseHarnessCheckpointV1(state);
   if (!parsed.ok) {
     // An unparseable checkpoint is an unknowable Runtime state, which is
     // exactly the case this gate blocks for: the session opens blocked, its

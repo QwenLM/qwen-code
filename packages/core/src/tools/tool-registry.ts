@@ -480,6 +480,13 @@ export class ToolRegistry {
       );
       return;
     }
+    // Pool discovery uses a bootstrap Config; admission belongs to this owner.
+    if (
+      tool instanceof DiscoveredMCPTool &&
+      this.config.isBundledGeneratedUiServer?.(tool.serverName)
+    ) {
+      tool = tool.withSessionConfig(tool.trust, tool.alwaysLoad, this.config);
+    }
     if (tool instanceof DiscoveredMCPTool) {
       if (tool.isAppVisible) {
         this.mcpAppTools.set(
@@ -1470,6 +1477,11 @@ export class ToolRegistry {
     return (
       name !== ToolNames.PROPOSE_GOAL || this.config.isGoalProposalAvailable()
     );
+  }
+
+  /** True under `ToolMode.CodeModeOnly`, where `tool_call` is hidden and refused. */
+  isCodeModeOnly(): boolean {
+    return this.config.getToolMode?.() === ToolMode.CodeModeOnly;
   }
 
   /**

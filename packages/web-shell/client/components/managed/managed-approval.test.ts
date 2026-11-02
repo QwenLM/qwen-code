@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Message } from '../../adapters/types';
+import { isExitPlanApprovalRequest } from '../../utils/todos';
 import type { ManagedAgentPendingAction } from './managed-agent-provider';
 import { managedEventsToMessages } from './managed-session-messages';
 import {
@@ -39,6 +40,65 @@ function toolGroup(turnId: string, callId: string): Message {
 }
 
 describe('Managed approval presentation', () => {
+  it.each(['preview', 'transcript'] as const)(
+    'identifies a public plan approval from its %s for the shared plan card',
+    (source) => {
+      const plan = '# Plan\n1. Read files\n2. Make changes after approval';
+      const text = JSON.stringify({
+        toolName: 'exit_plan_mode',
+        input: { plan },
+      });
+      const messages: Message[] =
+        source === 'transcript'
+          ? [
+              {
+                id: 'managed:s1:turn-2:1',
+                role: 'tool_group',
+                tools: [
+                  {
+                    callId: 'turn-2:call-1',
+                    toolName: 'exit_plan_mode',
+                    status: 'pending',
+                    args: { plan },
+                  },
+                ],
+              } as Message,
+            ]
+          : [];
+      const request = toManagedPermissionRequest(
+        {
+          ...action,
+          toolName: 'exit_plan_mode',
+          inputPreview: { text, truncated: false, byteLength: text.length },
+        },
+        messages,
+      );
+
+      expect(request.rawInput).toEqual({ plan });
+      expect(request.content).toEqual([{ type: 'text', text: plan }]);
+      expect(isExitPlanApprovalRequest(request)).toBe(true);
+      expect(request.toolKind).toBe('switch_mode');
+    },
+  );
+
+  it('recovers a complete public plan from its durable preview after transcript refresh', () => {
+    const plan = '# Plan\n1. Read files\n2. Make changes after approval';
+    const text = JSON.stringify({
+      toolName: 'exit_plan_mode',
+      input: { plan },
+    });
+    const request = toManagedPermissionRequest(
+      {
+        ...action,
+        toolName: 'exit_plan_mode',
+        inputPreview: { text, truncated: false, byteLength: text.length },
+      },
+      [],
+    );
+    expect(request.rawInput).toEqual({ plan });
+    expect(request.options[0]?.id).toBe('allow');
+    expect(request.options[1]?.kind).toBe('reject_once');
+  });
   it('uses the exact Action preview without parsing a truncated JSON prefix', () => {
     const text = ' {"toolName":"write_file","input":{"content":"<b>😀';
     const request = toManagedPermissionRequest(
@@ -67,6 +127,41 @@ describe('Managed approval presentation', () => {
     expect(request.content).toEqual([
       { type: 'text', text: '{"command":"ls\\u202egpj"}' },
     ]);
+  });
+
+  it('renders matched transcript arguments without invisible format characters', () => {
+    // The tool.args branch wins whenever the Harness supplied input, so it is
+    // the text an approver normally reads. JSON.stringify escapes only C0, the
+    // quote and the backslash, so U+202E RIGHT-TO-LEFT OVERRIDE and U+2066
+    // LEFT-TO-RIGHT ISOLATE would otherwise reach the card verbatim and
+    // visually reorder the command being approved.
+    const args = { command: 'ls\u202egpj\u2066' };
+    const messages = [
+      {
+        id: 'managed:s1:turn-2:1',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'turn-2:call-1',
+            toolName: 'run_shell_command',
+            status: 'pending',
+            args,
+          },
+        ],
+      } as Message,
+    ];
+    const request = toManagedPermissionRequest(
+      { ...action, toolName: 'run_shell_command' },
+      messages,
+    );
+    const block = request.content[0];
+    expect(block?.type).toBe('text');
+    const text = block?.text ?? '';
+    expect(text).toBe('{\n  "command": "ls\\u202egpj\\u2066"\n}');
+    expect(text).not.toMatch(/[\u007f-\u009f\u2028\u2029\p{Cf}]/u);
+    // rawInput is data for the tool call rather than display text, so it keeps
+    // the identical unescaped object the approver authorized.
+    expect(request.rawInput).toBe(args);
   });
 
   it('prefers matched transcript arguments over the Action preview', () => {

@@ -42,6 +42,7 @@ const {
   authMock,
   floorMock,
   submitAoneMock,
+  aoneComposeUrlMock,
   composeMock,
   stdoutMock,
   stderrMock,
@@ -54,6 +55,10 @@ const {
   authMock: vi.fn(),
   floorMock: vi.fn(() => undefined),
   submitAoneMock: vi.fn(),
+  // Records only (returns the reader's own degraded value, ''): the point
+  // is to OBSERVE whether the link was re-queried, never to change what a
+  // re-query would yield.
+  aoneComposeUrlMock: vi.fn(() => ''),
   composeMock: vi.fn(),
   stdoutMock: vi.fn(),
   stderrMock: vi.fn(),
@@ -100,6 +105,16 @@ vi.mock('./lib/platform/aone.js', async (importOriginal) => {
   return {
     ...actual,
     submitAoneReview: submitAoneMock,
+    // The reader's composeUrl is NOT pure — it execs `a1 repo mr view` and
+    // degrades to '' on any failure, so a re-query for the MR link would be
+    // invisible to every assertion below (and, on the arm that DOES call it,
+    // would reach the machine's real a1). Keep the rest of the reader real
+    // and record only this one method: "was the link re-queried" becomes
+    // observable without changing what a re-query would yield.
+    aoneReader: {
+      ...actual.aoneReader,
+      composeUrl: aoneComposeUrlMock,
+    },
   };
 });
 
@@ -1661,6 +1676,14 @@ describe('submit posts an authorised Aone target through a1', () => {
     // The pre-write read happened inside submitAoneReview (mocked here);
     // submit itself made no further platform call for the link.
     expect(submitAoneMock).toHaveBeenCalledTimes(1);
+    // The "pays no re-query" half of this pin's title. The url-ABSENCE arm
+    // above cannot see a re-query on its own: the reader's composeUrl
+    // degrades to '' on failure, so a fallback that ran `a1 repo mr view`
+    // and got nothing back leaves the receipt byte-identical while still
+    // costing a blocking platform call. Scoped to the AONE reader — the
+    // GitHub post path composes its own link through githubReader, which is
+    // a different call site and not what this pin rules on.
+    expect(aoneComposeUrlMock).not.toHaveBeenCalled();
   });
 
   it('relays the receipt webUrl in the stdout JSON and the Posted line', () => {

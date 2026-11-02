@@ -194,6 +194,32 @@ cache path for a single-turn, no-tool LLM call and returns
 `{ sessionId, answer: string | null }`. The implementation enforces
 `BTW_MAX_INPUT_LENGTH`, cross-session leakage guards, and timeout handling.
 
+### Streaming BTW (`session_btw_stream` capability tag)
+
+`POST /session/:id/btw/stream` accepts `{ question, requestId, resume? }` and
+emits accumulated `answer` snapshots and terminal `done` or `error` events.
+Check this independent capability before calling; an absent flag uses the
+existing JSON BTW API. Once streaming starts, errors must not trigger a second
+JSON request. The route resolves the live session owner and its trust boundary.
+
+Disconnecting a subscriber keeps generation running. Reuse the same request ID,
+question and client identity to receive the latest retained snapshot. The SDK
+retries without `resume` until a successful HTTP response was observed, then
+uses `resume: true`; missing retained state on resume returns 410 and cannot
+start another generation. Retention is up to 60 seconds and the runtime cache
+holds at most 32 entries, evicting the earliest registered terminal entry when
+needed. Active entries are not evicted. `DELETE /session/:id/btw/stream/:requestId`
+explicitly cancels the matching generation. Neither route interrupts the main
+prompt. See the [wire contract](../qwen-serve-protocol.md#post-sessionidbtwstream)
+for input limits, deadlines and error codes.
+
+Side requests, including legacy BTW, recap and stateless generation, count as
+local work and prevent idle cleanup or required-idle close until they settle.
+This does not change each route's existing archive admission rules. Streaming
+BTW holds shared archive admission
+only during request registration, so an abandoned subscriber cannot keep that
+admission held for the generation lifetime.
+
 ### Shell Command Execution
 
 `POST /session/:id/shell` executes a shell command directly on the daemon host,
@@ -268,6 +294,13 @@ the conflict, which may flush queued records to the active transcript.
 Workspace-qualified lifecycle routes now use that HTTP `200` batch envelope
 instead of their earlier HTTP `409 session_conflict` response.
 
+When `session_archive_idle_guard` is advertised, archive also accepts
+`requireIdle: true`. The owning runtime then confirms the session is idle
+immediately before entering the close transition. Active, unknown, or
+unsupported work remains active and is returned in the batch `errors` array;
+a persisted session whose live child has already been reaped can still be
+archived.
+
 ### Context Usage (`session_context_usage` capability tag)
 
 `GET /session/:id/context-usage` returns structured context-window usage.
@@ -304,8 +337,14 @@ not as a transport error.
 ### Compacted Replay
 
 `POST /session/:id/load` now returns a `BridgeRestoredSession` that can include
-`compactedReplay?: BridgeEvent[]`, `liveJournal?: BridgeEvent[]`, and
-`lastEventId?: number`. These fields are the daemon's bounded in-memory replay
+`compactedReplay?: BridgeEvent[]`, `liveJournal?: BridgeEvent[]`,
+`lifecycleReplay?: BridgeEvent[]`, `lifecycleReplayIncomplete?: boolean`, and
+`lastEventId?: number`. The optional lifecycle supplement contains up to 1024
+metadata-only frames from the in-memory replay window when refreshing a
+persisted page, and may overlap that page. An incomplete flag reports
+unavailable, degraded, or truncated lifecycle coverage. Clients must apply
+replayed lifecycle records idempotently without treating starts as proof of
+currently running work; a false flag does not establish complete history. These fields are the daemon's bounded in-memory replay
 window for a live session, not a full transcript API. The default window cap is
 4 MiB per live session (`--compacted-replay-max-bytes`), and boot rejects
 invalid caps; the hard ceiling is 256 MiB. `compactedReplay` is produced by
@@ -345,7 +384,7 @@ resets that window, including when the channel was already live.
   timeout.
 - `BridgeOptions.sessionRestoreTimeoutMs` (default 60s) — ACP `loadSession` / `unstable_resumeSession` deadline. Defaults to 60s; an explicitly configured initialize timeout can raise it, but never lower it.
 - `BridgeOptions.channelIdleTimeoutMs` (unset or `0` reaps after runtime work drains, except that plain preheat is preserved for first use; a positive value or active keepalive delays reaping, and the longer delay wins).
-- Capability tags: `session_create`, `session_startup_config`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_info`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_generation`, `session_btw`, `session_context_usage`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_resources`, `session_status`, `non_blocking_prompt`.
+- Capability tags: `session_create`, `session_startup_config`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_info`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_generation`, `session_btw`, `session_btw_stream`, `session_context_usage`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_resources`, `session_status`, `non_blocking_prompt`.
 
 ### Stateless generation (`session_generation` capability tag)
 

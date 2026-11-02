@@ -4,6 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * @fileoverview Host side of the Agent Host protocol (v2).
+ *
+ * This daemon joins a coordinator's workspace as a runtime: it enrolls once
+ * (credential under `~/.qwen/agent-hosts/`, 0600), heartbeats every 5 s with
+ * its program probe and the leases it holds, long-polls for session turns and
+ * runs up to {@link MAX_CONCURRENT_HOST_TURNS} at once through the same
+ * adapters the coordinator uses locally. Adapter events stream back in
+ * ordered batches; permission requests wait for the person's decision, which
+ * a decisions long-poll (open only while a turn waits) brings back at once,
+ * and heartbeat and event responses bring as well; the result carries the
+ * program's native session id so the next turn resumes it. A run the person
+ * stops on the coordinator is aborted here and posts no result.
+ */
+
 import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
@@ -11,37 +26,70 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import lockfile from 'proper-lockfile';
 import { extractErrorMessage } from '@qwen-code/acp-bridge/bridge';
-import type {
-  HostRunAssignment,
-  HostRunResult,
-} from '@qwen-code/qwen-code-core';
-import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
-import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
-import { DEFAULT_RUN_LEASE_MS } from '@qwen-code/qwen-code-core/agents/workspace-agents/host-lease.js';
+import {
+  HOST_PROTOCOL_VERSION,
+  type AgentAdapterEvent,
+  type AgentAdapterTurnInput,
+  type AgentAdapterTurnResult,
+  type HostLeaseStatus,
+  type HostProgramProbe,
+  type HostTurnAssignment,
+  type HostTurnEventBatch,
+  type HostTurnResult,
+  type SessionAgentPermissionPrompt,
+} from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
 import type { WorkspaceGenerationGuard } from './workspace-registry.js';
-import { selectRejectOption } from '../external-agents/acp-subagent-executor.js';
-import { streamAgentTurn } from './workspace-agents/stream-agent-turn.js';
-import type { AgentRunStep } from './workspace-agents/agent-events.js';
 import { isLoopbackBind } from './loopback-binds.js';
-import {
-  AGENT_HOST_SESSION_SOURCE_TYPE,
-  agentThreadSessionId,
-} from '../runtime/agent-session-source.js';
+import { sessionAgentNativeSessionId } from '../runtime/agent-session-source.js';
 import {
   AGENT_HOST_CREDENTIAL_REJECTED,
   AGENT_HOST_REPLACEMENT_REQUIRED,
-  AGENT_PROGRAM_LABELS,
-  type AgentProgram,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/types.js';
+import {
+  getAdapter,
+  type QwenSessionSendBinding,
+} from './session-agents/adapters/index.js';
+import { updateSessionAgents } from '@qwen-code/qwen-code-core/agents/session-agents/binding-store.js';
+import {
+  availablePrograms,
+  getHostProgramProbe,
+} from './agent-host-programs.js';
+import {
+  hasAgentHostRelay,
+  openAgentHostRelayRun,
+  type AgentHostRelayRun,
+} from './agent-host-relay.js';
+import {
+  buildSessionSendServer,
+  HOST_TURN_LEASE_MS,
+} from './session-agents/orchestrator.js';
+import {
+  hostDecisionKey,
+  type HostAwaitedPermission,
+  type HostDecision,
+} from './agent-host-decisions.js';
 
 const HEARTBEAT_MS = 5_000;
-const LEASE_RENEW_MS = 20_000;
 const RETRY_MS = 2_000;
-const HOST_PROVIDER: AgentProgram = 'qwen';
-const HOST_PROVIDERS = [AGENT_PROGRAM_LABELS[HOST_PROVIDER]];
+/** Adapter events are batched this long before they are posted. */
+const EVENT_FLUSH_MS = 250;
+/** How long one decisions long-poll stays open (the coordinator's maximum). */
+const DECISIONS_WAIT_MS = 25_000;
+/** Bounds the coordinator's validation of a decisions poll accepts. */
+const MAX_AWAITED = 16;
+const MAX_SEEN_PER_AWAITED = 8;
+/** With no renewal for a lease term the run is gone on the coordinator. */
+const TURN_LEASE_MS = HOST_TURN_LEASE_MS;
+/** Turns this Host runs at once. */
+export const MAX_CONCURRENT_HOST_TURNS = 4;
+const MAX_BATCH_EVENTS = 500;
+/** UTF-8 bytes of text per batch; the coordinator parses at most 2 MB. */
+const MAX_BATCH_BYTES = 1_000_000;
+const MAX_RESULT_OUTPUT = 262_144;
+const MAX_RESULT_ERROR = 4_096;
 
 interface AgentHostCredential {
   schemaVersion: 1;
@@ -62,7 +110,7 @@ export interface AgentHostConnectionOptions {
   generationGuard?: WorkspaceGenerationGuard;
 }
 
-function normalizeServerUrl(value: string, allowHttp = false): string {
+export function normalizeServerUrl(value: string, allowHttp = false): string {
   const url = new URL(value);
   if (
     (url.protocol !== 'http:' && url.protocol !== 'https:') ||
@@ -208,16 +256,28 @@ async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
   });
   const result = (await response.json().catch(() => ({}))) as {
     error?: string;
+    cancelled?: unknown;
   } & T;
   if (!response.ok) {
     throw Object.assign(
       new Error(
         result.error ?? `Agent Host request failed (${response.status}).`,
       ),
-      { status: response.status },
+      {
+        status: response.status,
+        ...(result.cancelled === true ? { cancelled: true } : {}),
+      },
     );
   }
   return result;
+}
+
+/** The coordinator's 409 for a run the person stopped. */
+export function isCancellation(error: unknown): boolean {
+  return (
+    (error as { status?: number } | null | undefined)?.status === 409 &&
+    (error as { cancelled?: unknown }).cancelled === true
+  );
 }
 
 /** A 4xx the same request will get again; 408 and 429 are worth a retry. */
@@ -249,29 +309,78 @@ export function isRevocation(error: unknown): boolean {
   );
 }
 
+/** Where the credential for this (coordinator, workspace, cwd) lives. */
+function credentialFiles(
+  serverUrl: string,
+  workspaceId: string,
+  workspaceCwd: string,
+): { legacy: string; current: string } {
+  const legacy = credentialPath(serverUrl, workspaceId, workspaceCwd);
+  // Old clients delete their legacy file on revocation without checking its
+  // identity. Keep updated credentials outside that deletion path.
+  return { legacy, current: legacy.replace(/\.json$/, '.v2.json') };
+}
+
+/**
+ * True when a saved credential would let this connection resume, false when
+ * none exists, and undefined when one could not be read (malformed, EACCES,
+ * I/O): that is not evidence of revocation, so callers must not prune on it.
+ */
+export async function hasAgentHostCredential(target: {
+  serverUrl: string;
+  workspaceId: string;
+  workspaceCwd: string;
+  allowHttp?: boolean;
+}): Promise<boolean | undefined> {
+  let files: { legacy: string; current: string };
+  try {
+    files = credentialFiles(
+      normalizeServerUrl(target.serverUrl, target.allowHttp),
+      target.workspaceId,
+      target.workspaceCwd,
+    );
+  } catch {
+    // A target that does not normalize can never resume.
+    return false;
+  }
+  try {
+    return Boolean(
+      (await readCredential(files.current)) ??
+        (await readCredential(files.legacy)),
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+function hostUrl(credential: AgentHostCredential, suffix: string): string {
+  return `${credential.serverUrl}/agent-hosts/${encodeURIComponent(credential.workspaceId)}/${encodeURIComponent(credential.hostId)}/${suffix}`;
+}
+
+function hostHeaders(credential: AgentHostCredential): Record<string, string> {
+  return {
+    authorization: `AgentHost ${credential.secret}`,
+    'content-type': 'application/json',
+  };
+}
+
 async function pickup(
   credential: AgentHostCredential,
   waitMs = 25_000,
   stopSignal?: AbortSignal,
-): Promise<HostRunAssignment | undefined> {
-  const response = await fetch(
-    `${credential.serverUrl}/agent-hosts/${encodeURIComponent(credential.workspaceId)}/${encodeURIComponent(credential.hostId)}/pickup`,
-    {
-      method: 'POST',
-      headers: {
-        authorization: `AgentHost ${credential.secret}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({ waitMs }),
-      signal: stopSignal
-        ? AbortSignal.any([stopSignal, AbortSignal.timeout(waitMs + 10_000)])
-        : AbortSignal.timeout(waitMs + 10_000),
-      redirect: 'error',
-    },
-  );
+): Promise<HostTurnAssignment | undefined> {
+  const response = await fetch(hostUrl(credential, 'pickup'), {
+    method: 'POST',
+    headers: hostHeaders(credential),
+    body: JSON.stringify({ waitMs }),
+    signal: stopSignal
+      ? AbortSignal.any([stopSignal, AbortSignal.timeout(waitMs + 10_000)])
+      : AbortSignal.timeout(waitMs + 10_000),
+    redirect: 'error',
+  });
   if (response.status === 204) return undefined;
   const result = (await response.json().catch(() => ({}))) as {
-    assignment?: HostRunAssignment;
+    assignment?: HostTurnAssignment;
     error?: string;
   };
   if (!response.ok || !result.assignment) {
@@ -285,404 +394,99 @@ async function pickup(
   return result.assignment;
 }
 
-function modelPrompt(assignment: HostRunAssignment): string {
-  const instructions = assignment.agent.instructions?.trim();
-  return [
-    `You are ${assignment.agent.name}, an independent persistent workspace Agent running on a managed Host.`,
-    instructions ? `Your workspace instructions:\n${instructions}` : undefined,
-    'Work on the assigned task using read-only inspection tools. Do not call thread_* tools on this Host. End with a concise result for the parent Agent or person; the Host will post it back to the shared thread.',
-    assignment.prompt,
-  ]
-    .filter(Boolean)
-    .join('\n\n');
+/** One decisions long-poll; resolves with the decisions it brought. */
+async function pollDecisions(
+  credential: AgentHostCredential,
+  awaiting: HostAwaitedPermission[],
+  signal: AbortSignal,
+): Promise<HostDecision[]> {
+  const response = await requestJson<{ decisions?: HostDecision[] }>(
+    hostUrl(credential, 'decisions'),
+    {
+      method: 'POST',
+      headers: hostHeaders(credential),
+      body: JSON.stringify({ waitMs: DECISIONS_WAIT_MS, awaiting }),
+      signal: AbortSignal.any([
+        signal,
+        AbortSignal.timeout(DECISIONS_WAIT_MS + 10_000),
+      ]),
+    },
+  );
+  return Array.isArray(response.decisions) ? response.decisions : [];
 }
 
-async function executeAssignment(
-  options: AgentHostConnectionOptions,
-  credential: AgentHostCredential,
-  assignment: HostRunAssignment,
-  stopSignal?: AbortSignal,
-): Promise<HostRunResult> {
-  const requestedProvider =
-    assignment.agent.execution?.mode === 'managed-host'
-      ? assignment.agent.execution.provider
-      : undefined;
-  if (requestedProvider && requestedProvider !== HOST_PROVIDER) {
-    throw new Error(
-      `This Agent Host cannot run the requested ${requestedProvider} provider.`,
+/** The `session_send` MCP server command for a run, or undefined. */
+export function sessionSendServerFor(
+  relay: Pick<AgentHostRelayRun, 'url' | 'token'> | undefined,
+): AgentAdapterTurnInput['sessionSendServer'] {
+  return relay ? buildSessionSendServer(relay.url, relay.token) : undefined;
+}
+
+interface PermissionWaiter {
+  resolve(optionId: string): void;
+  reject(error: Error): void;
+}
+
+/** One assignment this Host is executing. */
+interface HostTurn {
+  assignment: HostTurnAssignment;
+  controller: AbortController;
+  /**
+   * The coordinator refused this lease, or the person stopped the run there;
+   * nothing more is sent for it.
+   */
+  lost: boolean;
+  relay?: AgentHostRelayRun;
+  renewedAt: number;
+  sequence: number;
+  pending: AgentAdapterEvent[];
+  /** Sent but unacknowledged; retried with the same sequence. */
+  inflight?: Pick<HostTurnEventBatch, 'sequence' | 'events'>;
+  sendChain: Promise<void>;
+  flushTimer?: ReturnType<typeof setTimeout>;
+  /** The current waiter per requestId; a re-armed wait replaces it. */
+  waiters: Map<string, PermissionWaiter>;
+  /** A decision no waiter took yet, per requestId (the newest wins). */
+  early: Map<string, { key: string; optionId: string }>;
+  /**
+   * Keys of the decisions each requestId's waiters already took. The
+   * coordinator resends a decision until it sees `permission_resolved`; a
+   * re-armed wait takes only a decision it has not used.
+   */
+  used: Map<string, string[]>;
+  /** requestIds the adapter reported resolved; later decisions are stale. */
+  resolved: Set<string>;
+}
+
+/** Splits off the next batch: bounded in count and in text size. */
+function takeBatch(pending: AgentAdapterEvent[]): AgentAdapterEvent[] {
+  let bytes = 0;
+  let count = 0;
+  for (const event of pending) {
+    const size = Buffer.byteLength(
+      'text' in event ? event.text : JSON.stringify(event),
     );
+    if (
+      count > 0 &&
+      (count >= MAX_BATCH_EVENTS || bytes + size > MAX_BATCH_BYTES)
+    ) {
+      break;
+    }
+    bytes += size;
+    count += 1;
   }
-  const promptId = `agent-host:${assignment.runId}:${assignment.attempt}`;
-  const execution = new AbortController();
-  const stopExecution = () => execution.abort(stopSignal?.reason);
-  if (stopSignal?.aborted) stopExecution();
-  else stopSignal?.addEventListener('abort', stopExecution, { once: true });
-  execution.signal.throwIfAborted();
-  let finished = false;
-  // Measured on this host's clock: the coordinator's may disagree. A held
-  // lease re-picked keeps its first `acquiredAt`, so the span is capped at
-  // one lease term rather than read as a longer one.
-  const leaseMs = Math.min(
-    assignment.lease.expiresAt - assignment.lease.acquiredAt,
-    DEFAULT_RUN_LEASE_MS,
-  );
-  let renewedAt = Date.now();
-  const renewLease = async () => {
-    try {
-      options.generationGuard?.assertOpen();
-      const response = await requestJson<{ lease?: { leaseId: string } }>(
-        `${credential.serverUrl}/agent-hosts/${encodeURIComponent(credential.workspaceId)}/${encodeURIComponent(credential.hostId)}/heartbeat`,
-        {
-          method: 'POST',
-          signal: AbortSignal.any([
-            execution.signal,
-            AbortSignal.timeout(10_000),
-          ]),
-          headers: {
-            authorization: `AgentHost ${credential.secret}`,
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            workspaceCwd: options.workspaceCwd,
-            providers: HOST_PROVIDERS,
-            run: {
-              threadId: assignment.threadId,
-              runId: assignment.runId,
-              leaseId: assignment.lease.leaseId,
-              attempt: assignment.attempt,
-            },
-          }),
-        },
-      );
-      if (response.lease?.leaseId !== assignment.lease.leaseId) {
-        throw Object.assign(
-          new Error(
-            'Coordinator did not confirm the run lease. Upgrade the coordinator.',
-          ),
-          { status: 409 },
-        );
-      }
-      renewedAt = Date.now();
-    } catch (error) {
-      // A timeout or a busy store leaves most of the lease; the next renewal
-      // may land. Only a lost credential or lease, or a lease that has run
-      // out, ends the run.
-      const status = (error as { status?: number }).status;
-      if (
-        !finished &&
-        (options.generationGuard?.closed ||
-          status === 401 ||
-          status === 404 ||
-          status === 409 ||
-          Date.now() - renewedAt >= leaseMs)
-      ) {
-        execution.abort(error);
-      }
-    }
-  };
-  await renewLease();
-  if (execution.signal.aborted) {
-    stopSignal?.removeEventListener('abort', stopExecution);
-  }
-  execution.signal.throwIfAborted();
-  const renew = setInterval(() => void renewLease(), LEASE_RENEW_MS);
-  const updates = new AbortController();
-  let stream: Promise<void> | undefined;
-  let progress: {
-    sequence: number;
-    stage: string;
-    detail: string;
-    outputText: string;
-    thoughtText: string;
-    steps?: AgentRunStep[];
-  } = {
-    sequence: 1,
-    stage: 'starting',
-    detail: 'Assignment accepted; starting the executor',
-    outputText: '',
-    thoughtText: '',
-  };
-  // Set once Qwen Code's session stats are available. Without it the
-  // coordinator never charged a remote run, and a tree could spend past its
-  // budget on another machine.
-  let measureTokens: (() => Promise<number | undefined>) | undefined;
-  let sending = false;
-  const flush = async () => {
-    if (sending || execution.signal.aborted) return;
-    sending = true;
-    try {
-      const tokens = await measureTokens?.();
-      execution.signal.throwIfAborted();
-      await requestJson(
-        `${credential.serverUrl}/agent-hosts/${encodeURIComponent(credential.workspaceId)}/${encodeURIComponent(credential.hostId)}/progress`,
-        {
-          method: 'POST',
-          signal: AbortSignal.any([
-            execution.signal,
-            AbortSignal.timeout(4000),
-          ]),
-          headers: {
-            authorization: `AgentHost ${credential.secret}`,
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            ...progress,
-            threadId: assignment.threadId,
-            runId: assignment.runId,
-            leaseId: assignment.lease.leaseId,
-            attempt: assignment.attempt,
-            ...(tokens !== undefined ? { tokens } : {}),
-          }),
-        },
-      );
-    } catch {
-      // Telemetry is retried by the next heartbeat, never blocks execution.
-    } finally {
-      sending = false;
-    }
-  };
-  const report = (
-    stage: string,
-    detail: string,
-    outputText = progress.outputText,
-    thoughtText = progress.thoughtText,
-    steps = progress.steps,
-  ) => {
-    // ponytail: bounded live preview; the final result retains the full answer.
-    progress = {
-      sequence: progress.sequence + 1,
-      stage,
-      detail: detail.slice(0, 1200),
-      outputText: outputText.slice(0, 262144),
-      thoughtText: thoughtText.slice(0, 65536),
-      ...(steps ? { steps } : {}),
-    };
-  };
-  const progressHeartbeat = setInterval(() => void flush(), 2000);
-  progressHeartbeat.unref?.();
-  renew.unref?.();
-  let summary: string | undefined;
-  let tokens: number | undefined;
-  const sessionId = agentThreadSessionId(
-    `${credential.hostId}:${assignment.agent.id}`,
-    assignment.threadId,
-  );
-  let sessionReady = false;
-  try {
-    void flush();
-    const sourceId = `${credential.hostId}:${assignment.agent.id}`;
-    const sessions = new SessionService(options.workspaceCwd);
-    const live = options.bridge
-      .listWorkspaceSessions(options.workspaceCwd)
-      .find((session) => session.sessionId === sessionId);
-    if (!live) {
-      const request = {
-        workspaceCwd: options.workspaceCwd,
-        sessionId,
-        sourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
-        sourceId,
-        approvalMode: ApprovalMode.PLAN,
-      };
-      if (await sessions.sessionExists(sessionId)) {
-        await options.bridge.resumeSession(request);
-      } else {
-        await options.bridge.spawnOrAttach({
-          ...request,
-          sessionScope: 'thread',
-        });
-      }
-    }
-    sessionReady = true;
-    stream = streamAgentTurn(
-      options.bridge,
-      sessionId,
-      promptId,
-      AbortSignal.any([updates.signal, execution.signal]),
-      (update) => {
-        if (update.permission) {
-          // Nobody on this host can approve, and the turn would wait on it
-          // for good.
-          const optionId = selectRejectOption(
-            update.permission.options.map((option) => ({
-              optionId: option.optionId,
-              kind: option.kind,
-            })),
-          );
-          options.bridge.respondToSessionPermission(
-            sessionId,
-            update.permission.requestId,
-            optionId
-              ? { outcome: { outcome: 'selected', optionId } }
-              : { outcome: { outcome: 'cancelled' } },
-          );
-          return;
-        }
-        report(
-          update.stage,
-          update.detail ?? '',
-          update.outputText,
-          update.thoughtText,
-          update.steps,
-        );
-      },
-    ).catch((error: unknown) => {
-      if (!updates.signal.aborted) execution.abort(error);
-    });
-    const sessionTotal = async (): Promise<number | undefined> => {
-      try {
-        const stats = await options.bridge.getSessionStatsStatus(sessionId);
-        return Object.values(stats.models).reduce(
-          (total, model) => total + (model.tokens?.total ?? 0),
-          0,
-        );
-      } catch {
-        return undefined;
-      }
-    };
-    // The session carries earlier turns on this thread; only what this
-    // attempt adds is its spend.
-    const baseline = await sessionTotal();
-    if (baseline !== undefined) {
-      measureTokens = async () => {
-        const total = await sessionTotal();
-        return total === undefined ? undefined : Math.max(0, total - baseline);
-      };
-    }
-    report('waiting', 'Qwen Code accepted the task; waiting for the model.');
-    await options.bridge.sendPrompt(
-      sessionId,
-      {
-        sessionId,
-        prompt: [{ type: 'text', text: assignment.prompt }],
-      },
-      execution.signal,
-      { promptId, modelPrompt: modelPrompt(assignment) },
-    );
-    for (;;) {
-      execution.signal.throwIfAborted();
-      const turn = await options.bridge.getSessionTurnStatus(
-        sessionId,
-        undefined,
-        promptId,
-      );
-      if (turn?.promptId === promptId) {
-        if (turn.state === 'error' || turn.state === 'cancelled') {
-          throw new Error(
-            extractErrorMessage(turn.error ?? 'Managed Agent cancelled.'),
-          );
-        }
-        if (turn.state === 'completed') {
-          summary = turn.resultText?.trim();
-          break;
-        }
-      }
-      await delay(250, undefined, { signal: execution.signal });
-    }
-    execution.signal.throwIfAborted();
-  } catch (error) {
-    throw execution.signal.aborted ? execution.signal.reason : error;
-  } finally {
-    stopSignal?.removeEventListener('abort', stopExecution);
-    finished = true;
-    clearInterval(renew);
-    clearInterval(progressHeartbeat);
-    updates.abort();
-    await stream;
-    await flush();
-    tokens = await measureTokens?.();
-    if (sessionReady) {
-      await options.bridge
-        .closeSession(sessionId, undefined, {
-          requireAgentClose: true,
-          agentCloseTimeoutMs: 10_000,
-        })
-        .catch((error: unknown) => {
-          writeStderrLine(
-            `Agent Host could not close session: ${String(error)}`,
-          );
-        });
-    }
-  }
-  if (!summary) {
-    throw new Error('Managed Agent finished without a final answer.');
-  }
+  return pending.splice(0, count);
+}
+
+/** Bounded so the coordinator's validation never refuses an answer. */
+function boundResult(result: AgentAdapterTurnResult): AgentAdapterTurnResult {
   return {
-    threadId: assignment.threadId,
-    runId: assignment.runId,
-    hostId: credential.hostId,
-    leaseId: assignment.lease.leaseId,
-    attempt: assignment.attempt,
-    status: 'completed',
-    // The coordinator refuses a summary past this bound with a 400, which
-    // this client treats as permanent; sending it bounded keeps the answer.
-    close: { kind: 'review', summary: summary.slice(0, 262_144) },
-    ...(tokens !== undefined ? { tokens } : {}),
+    ...result,
+    outputText: result.outputText.slice(0, MAX_RESULT_OUTPUT),
+    ...(result.error !== undefined
+      ? { error: result.error.slice(0, MAX_RESULT_ERROR) }
+      : {}),
   };
-}
-
-async function returnResult(
-  credential: AgentHostCredential,
-  initial: HostRunResult,
-  generationGuard?: WorkspaceGenerationGuard,
-  stopSignal?: AbortSignal,
-): Promise<void> {
-  let result = initial;
-  for (;;) {
-    generationGuard?.assertOpen();
-    stopSignal?.throwIfAborted();
-    try {
-      await requestJson(
-        `${credential.serverUrl}/agent-hosts/${encodeURIComponent(credential.workspaceId)}/${encodeURIComponent(credential.hostId)}/result`,
-        {
-          method: 'POST',
-          headers: {
-            authorization: `AgentHost ${credential.secret}`,
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify(result),
-          signal: stopSignal
-            ? AbortSignal.any([
-                stopSignal,
-                AbortSignal.timeout(DEFAULT_RUN_LEASE_MS),
-              ])
-            : AbortSignal.timeout(DEFAULT_RUN_LEASE_MS),
-        },
-      );
-      return;
-    } catch (error) {
-      stopSignal?.throwIfAborted();
-      if ((error as { status?: number }).status === 401) throw error;
-      const message = error instanceof Error ? error.message : String(error);
-      if (message === 'stale_lease' || message === 'attempt_moved_on') {
-        writeStderrLine(
-          `qwen serve: discarded managed Agent result (${message}).`,
-        );
-        return;
-      }
-      if (isPermanentRejection(error)) {
-        // Retrying would get the same answer and hold this host forever. A
-        // rejected answer becomes a failure the thread can show; a rejected
-        // failure is dropped and the lease runs out.
-        if (result.status === 'failed') {
-          writeStderrLine(
-            `qwen serve: managed Agent result rejected; giving up: ${message}`,
-          );
-          return;
-        }
-        const { close: _close, ...rest } = result;
-        result = {
-          ...rest,
-          status: 'failed',
-          error: `The coordinator rejected this result: ${message}`,
-        };
-        continue;
-      }
-      writeStderrLine(
-        `qwen serve: managed Agent result upload failed; retrying: ${message}`,
-      );
-      await delay(RETRY_MS);
-    }
-  }
 }
 
 const activeConnections = new Map<
@@ -695,14 +499,22 @@ const activeConnections = new Map<
   }
 >();
 
+function connectionKey(
+  serverUrl: string,
+  workspaceId: string,
+  workspaceCwd: string,
+): string {
+  return JSON.stringify([serverUrl, workspaceId, workspaceCwd]);
+}
+
 export async function startAgentHostConnection(
   options: AgentHostConnectionOptions,
 ): Promise<void> {
-  const key = JSON.stringify([
+  const key = connectionKey(
     normalizeServerUrl(options.serverUrl, options.allowHttp),
     options.workspaceId,
     options.workspaceCwd,
-  ]);
+  );
   const existing = activeConnections.get(key);
   if (existing) {
     if (
@@ -733,6 +545,50 @@ export async function startAgentHostConnection(
   }
 }
 
+/** True while a connection to this (coordinator, workspace, cwd) runs. */
+export function isAgentHostConnectionRunning(target: {
+  serverUrl: string;
+  workspaceId: string;
+  workspaceCwd: string;
+  allowHttp?: boolean;
+}): boolean {
+  try {
+    const existing = activeConnections.get(
+      connectionKey(
+        normalizeServerUrl(target.serverUrl, target.allowHttp),
+        target.workspaceId,
+        target.workspaceCwd,
+      ),
+    );
+    return existing !== undefined && !existing.stop.signal.aborted;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Stops a running connection (its turns are aborted and their leases lapse
+ * on the coordinator). The saved credential stays; revocation is the
+ * coordinator's call. Returns false when no such connection was running.
+ */
+export function stopAgentHostConnection(target: {
+  serverUrl: string;
+  workspaceId: string;
+  workspaceCwd: string;
+  allowHttp?: boolean;
+}): boolean {
+  const key = connectionKey(
+    normalizeServerUrl(target.serverUrl, target.allowHttp),
+    target.workspaceId,
+    target.workspaceCwd,
+  );
+  const existing = activeConnections.get(key);
+  if (!existing) return false;
+  existing.stop.abort(new Error('Agent Host connection stopped.'));
+  activeConnections.delete(key);
+  return true;
+}
+
 async function connectAgentHost(
   options: AgentHostConnectionOptions,
   stop: AbortController,
@@ -742,7 +598,6 @@ async function connectAgentHost(
     stop.signal.throwIfAborted();
   };
   assertOpen();
-  const providers = HOST_PROVIDERS;
   const serverUrl = normalizeServerUrl(options.serverUrl, options.allowHttp);
   if (
     new URL(serverUrl).protocol === 'http:' &&
@@ -752,14 +607,28 @@ async function connectAgentHost(
       'WARNING: Agent Host HTTP demo mode sends credentials, task content and results without encryption. Use only on a trusted network.',
     );
   }
-  const legacyFilePath = credentialPath(
+  let probes: HostProgramProbe[] = await getHostProgramProbe().catch(
+    (error: unknown) => {
+      writeStderrLine(
+        `qwen serve: Agent Host program probe failed: ${extractErrorMessage(error)}`,
+      );
+      return [];
+    },
+  );
+  // The qwen program is this daemon's own bridge, so it is always there; the
+  // fallback only keeps enrollment (which needs one program) from failing on
+  // a probe error.
+  const providersFor = (current: readonly HostProgramProbe[]): string[] => {
+    const ids = availablePrograms(current);
+    return ids.length > 0 ? ids : ['qwen'];
+  };
+  const files = credentialFiles(
     serverUrl,
     options.workspaceId,
     options.workspaceCwd,
   );
-  // Old clients delete their legacy file on revocation without checking its
-  // identity. Keep updated credentials outside that deletion path.
-  const filePath = legacyFilePath.replace(/\.json$/, '.v2.json');
+  const filePath = files.current;
+  const legacyFilePath = files.legacy;
   const savedCurrentCredential = await readCredential(filePath);
   let credential =
     savedCurrentCredential ?? (await readCredential(legacyFilePath));
@@ -768,27 +637,72 @@ async function connectAgentHost(
     await removeRevokedCredential(legacyFilePath, expected);
   };
   assertOpen();
+  const turns = new Map<string, HostTurn>();
+  /**
+   * `session_send` for remote `qwen` turns. The hidden session outlives a run
+   * and its MCP servers are fixed when it is (re)created, so the relay token
+   * belongs to the (chat session, agent) binding, like the coordinator's own
+   * qwen agents (see qwen-acp.ts); posts go to that binding's current turn.
+   */
+  const qwenRelayBindings = new Map<
+    string,
+    { relay: AgentHostRelayRun; runId?: string }
+  >();
+  const qwenRelayKey = (assignment: HostTurnAssignment) =>
+    `${assignment.sessionId}\0${assignment.agent.agentId}`;
+  const qwenSessionSendFor = (
+    assignment: HostTurnAssignment,
+  ): QwenSessionSendBinding => {
+    const key = qwenRelayKey(assignment);
+    const relayId = `qs-${createHash('sha256').update(key).digest('hex').slice(0, 32)}`;
+    return {
+      // A daemon that cannot offer a relay has no token to lose: report the
+      // binding current, or every turn would close and re-resume the hidden
+      // session. Only a lost token on a relay-capable daemon is stale.
+      isCurrent: () => !hasAgentHostRelay() || qwenRelayBindings.has(key),
+      rotate: () => {
+        qwenRelayBindings.get(key)?.relay.close();
+        qwenRelayBindings.delete(key);
+        const relay = openAgentHostRelayRun(relayId, (text) => {
+          const runId = qwenRelayBindings.get(key)?.runId;
+          const current = runId ? turns.get(runId) : undefined;
+          // A post outside a turn has nowhere to go: the coordinator only
+          // accepts events for a leased run.
+          if (current) pushEvent(current, { type: 'session_send', text });
+        });
+        if (!relay) return undefined;
+        qwenRelayBindings.set(key, { relay, runId: assignment.runId });
+        return sessionSendServerFor(relay);
+      },
+    };
+  };
+  interface HeartbeatResponse {
+    leases?: HostLeaseStatus[];
+    decisions?: HostDecision[];
+  }
   const sendHeartbeat = async (
     target: AgentHostCredential,
     enrollmentToken?: string,
-  ): Promise<void> => {
-    await requestJson(
-      `${serverUrl}/agent-hosts/${encodeURIComponent(target.workspaceId)}/${encodeURIComponent(target.hostId)}/heartbeat`,
-      {
-        method: 'POST',
-        signal: AbortSignal.any([stop.signal, AbortSignal.timeout(10_000)]),
-        headers: {
-          authorization: `AgentHost ${target.secret}`,
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          workspaceCwd: options.workspaceCwd,
-          providers,
-          ...(enrollmentToken ? { enrollmentToken } : {}),
-        }),
-      },
-    );
-  };
+  ): Promise<HeartbeatResponse> =>
+    requestJson<HeartbeatResponse>(hostUrl(target, 'heartbeat'), {
+      method: 'POST',
+      signal: AbortSignal.any([stop.signal, AbortSignal.timeout(10_000)]),
+      headers: hostHeaders(target),
+      body: JSON.stringify({
+        workspaceCwd: options.workspaceCwd,
+        protocol: HOST_PROTOCOL_VERSION,
+        providers: providersFor(probes),
+        programs: probes,
+        runs: [...turns.values()]
+          .filter((turn) => !turn.lost)
+          .map((turn) => ({
+            runId: turn.assignment.runId,
+            attempt: turn.assignment.attempt,
+            leaseId: turn.assignment.leaseId,
+          })),
+        ...(enrollmentToken ? { enrollmentToken } : {}),
+      }),
+    });
   if (credential && options.enrollmentToken) {
     const savedCredential = credential;
     try {
@@ -833,7 +747,7 @@ async function connectAgentHost(
         token: options.enrollmentToken,
         name: options.name?.trim() || os.hostname(),
         workspaceCwd: options.workspaceCwd,
-        providers,
+        providers: providersFor(probes),
       }),
     });
     assertOpen();
@@ -850,11 +764,521 @@ async function connectAgentHost(
   }
   const activeCredential = credential;
 
+  /* -------------------------------------------------------------------- */
+  /* Turns                                                                */
+  /* -------------------------------------------------------------------- */
+
+  /**
+   * Stops a turn this Host may no longer finish: the adapter is cancelled,
+   * then the `session_send` relay closes, and no result is posted.
+   */
+  const loseTurn = (turn: HostTurn, reason: string, cancelled = false) => {
+    if (turn.lost) return;
+    turn.lost = true;
+    const error = new Error(reason);
+    turn.controller.abort(error);
+    turn.relay?.close();
+    if (turn.flushTimer) {
+      clearTimeout(turn.flushTimer);
+      turn.flushTimer = undefined;
+    }
+    turn.pending = [];
+    for (const waiter of turn.waiters.values()) waiter.reject(error);
+    turn.waiters.clear();
+    if (cancelled) {
+      writeStderrLine(
+        `qwen serve: run ${turn.assignment.runId} was stopped on the coordinator.`,
+      );
+    }
+    refreshDecisionPoll();
+  };
+
+  const cancelTurn = (turn: HostTurn) =>
+    loseTurn(turn, 'The run was cancelled on the coordinator.', true);
+
+  /** Hands decision `key` to the current waiter of `requestId`. */
+  const takeDecision = (
+    turn: HostTurn,
+    requestId: string,
+    key: string,
+    optionId: string,
+  ): boolean => {
+    const waiter = turn.waiters.get(requestId);
+    if (!waiter) return false;
+    turn.waiters.delete(requestId);
+    turn.early.delete(requestId);
+    turn.used.set(requestId, [
+      ...(turn.used.get(requestId) ?? []).slice(1 - MAX_SEEN_PER_AWAITED),
+      key,
+    ]);
+    waiter.resolve(optionId);
+    return true;
+  };
+
+  /**
+   * Applies decisions from any response. Idempotent: a resent decision is
+   * taken once, and only by a waiter that has not used it.
+   */
+  const applyDecisions = (decisions: readonly HostDecision[] = []) => {
+    let taken = false;
+    for (const decision of decisions) {
+      const turn = turns.get(decision.runId);
+      if (
+        !turn ||
+        turn.lost ||
+        turn.assignment.attempt !== decision.attempt ||
+        turn.resolved.has(decision.requestId)
+      ) {
+        continue;
+      }
+      const key = hostDecisionKey(decision);
+      if (turn.used.get(decision.requestId)?.includes(key)) continue;
+      if (takeDecision(turn, decision.requestId, key, decision.optionId)) {
+        taken = true;
+        continue;
+      }
+      turn.early.set(decision.requestId, { key, optionId: decision.optionId });
+    }
+    if (taken) refreshDecisionPoll();
+  };
+
+  /* -------------------------------------------------------------------- */
+  /* Decisions long-poll                                                  */
+  /* -------------------------------------------------------------------- */
+
+  /** The requests this Host's turns wait on, with the keys each has used. */
+  const awaitedPermissions = (): HostAwaitedPermission[] => {
+    const awaited: HostAwaitedPermission[] = [];
+    for (const turn of turns.values()) {
+      if (turn.lost) continue;
+      for (const requestId of turn.waiters.keys()) {
+        awaited.push({
+          runId: turn.assignment.runId,
+          attempt: turn.assignment.attempt,
+          requestId,
+          seen: turn.used.get(requestId) ?? [],
+        });
+      }
+    }
+    // TODO(multi-agent): past this many open requests the rest wait for the
+    // heartbeat; 4 turns rarely hold more than one each.
+    return awaited.slice(0, MAX_AWAITED);
+  };
+
+  let decisionPoll: AbortController | undefined;
+  /**
+   * Keeps exactly one decisions long-poll open while any turn waits on a
+   * person, restarted whenever the set of waits changes so the coordinator
+   * always matches against the current ones.
+   */
+  const refreshDecisionPoll = () => {
+    decisionPoll?.abort();
+    decisionPoll = undefined;
+    if (stop.signal.aborted || awaitedPermissions().length === 0) return;
+    const controller = new AbortController();
+    decisionPoll = controller;
+    const signal = AbortSignal.any([stop.signal, controller.signal]);
+    void (async () => {
+      while (!signal.aborted) {
+        const awaiting = awaitedPermissions();
+        if (awaiting.length === 0) break;
+        try {
+          applyDecisions(
+            await pollDecisions(activeCredential, awaiting, signal),
+          );
+        } catch (error) {
+          if (signal.aborted) break;
+          if (isRevocation(error)) {
+            await discardRevokedCredential(activeCredential).catch(
+              () => undefined,
+            );
+            stop.abort(error);
+            break;
+          }
+          // A coordinator without the decisions route answers 404 for
+          // good; the heartbeat still brings decisions, so back off to it.
+          await delay(
+            isPermanentRejection(error) ? HEARTBEAT_MS : RETRY_MS,
+            undefined,
+            { signal },
+          ).catch(() => undefined);
+        }
+      }
+      if (decisionPoll === controller) decisionPoll = undefined;
+    })();
+  };
+
+  /** Posts the next batch (or retries the unacknowledged one). */
+  const sendBatch = async (turn: HostTurn): Promise<void> => {
+    if (turn.lost || stop.signal.aborted) return;
+    if (!turn.inflight) {
+      if (turn.pending.length === 0) return;
+      turn.sequence += 1;
+      turn.inflight = {
+        sequence: turn.sequence,
+        events: takeBatch(turn.pending),
+      };
+    }
+    const { assignment } = turn;
+    const batch: HostTurnEventBatch = {
+      sessionId: assignment.sessionId,
+      runId: assignment.runId,
+      attempt: assignment.attempt,
+      leaseId: assignment.leaseId,
+      ...turn.inflight,
+    };
+    try {
+      const response = await requestJson<{
+        decisions?: HostDecision[];
+      }>(hostUrl(activeCredential, 'events'), {
+        method: 'POST',
+        signal: AbortSignal.any([stop.signal, AbortSignal.timeout(10_000)]),
+        headers: hostHeaders(activeCredential),
+        body: JSON.stringify(batch),
+      });
+      turn.inflight = undefined;
+      turn.renewedAt = Date.now();
+      applyDecisions(response.decisions);
+      if (turn.pending.length > 0) scheduleFlush(turn, 0);
+    } catch (error) {
+      const status = (error as { status?: number }).status;
+      if (isCancellation(error)) {
+        cancelTurn(turn);
+        return;
+      }
+      if (status === 409 || status === 404 || isRevocation(error)) {
+        // The run moved on (re-leased, or this Host was removed).
+        loseTurn(turn, extractErrorMessage(error));
+        return;
+      }
+      if (isPermanentRejection(error)) {
+        // Resending gets the same answer (a batch too large, an event the
+        // coordinator does not accept); drop it so the run is not stuck.
+        writeStderrLine(
+          `qwen serve: coordinator refused agent events; dropped ${turn.inflight?.events.length ?? 0}: ${extractErrorMessage(error)}`,
+        );
+        turn.inflight = undefined;
+        if (turn.pending.length > 0) scheduleFlush(turn, 0);
+        return;
+      }
+      // Transient: keep the batch and retry it with the same sequence (the
+      // coordinator answers `duplicate` if the first one had landed).
+      scheduleFlush(turn, RETRY_MS);
+    }
+  };
+
+  const flush = (turn: HostTurn): Promise<void> => {
+    turn.sendChain = turn.sendChain.then(() => sendBatch(turn));
+    return turn.sendChain;
+  };
+
+  const scheduleFlush = (turn: HostTurn, delayMs = EVENT_FLUSH_MS) => {
+    if (turn.flushTimer || turn.lost) return;
+    turn.flushTimer = setTimeout(() => {
+      turn.flushTimer = undefined;
+      void flush(turn);
+    }, delayMs);
+    turn.flushTimer.unref?.();
+  };
+
+  const pushEvent = (turn: HostTurn, event: AgentAdapterEvent) => {
+    if (turn.lost) return;
+    if (event.type === 'permission_resolved') {
+      turn.resolved.add(event.requestId);
+      turn.early.delete(event.requestId);
+      // Settled elsewhere (the adapter's own cancel): retire the waiter so the
+      // decisions poll stops advertising it. A later awaitPermission for the
+      // same id registers a fresh one.
+      const waiter = turn.waiters.get(event.requestId);
+      if (waiter) {
+        turn.waiters.delete(event.requestId);
+        waiter.reject(new Error('Permission resolved elsewhere.'));
+        refreshDecisionPoll();
+      }
+    }
+    turn.pending.push(event);
+    scheduleFlush(turn);
+  };
+
+  const awaitPermission = (
+    turn: HostTurn,
+    prompt: SessionAgentPermissionPrompt,
+  ): Promise<string> => {
+    if (turn.lost) {
+      return Promise.reject(new Error('Agent Host lease lost.'));
+    }
+    const { requestId } = prompt;
+    // Waiting again on a request reported resolved makes it live again.
+    turn.resolved.delete(requestId);
+    // A re-armed wait (the adapter's bridge refused the vote) replaces the
+    // previous one; decisions go to the current waiter only.
+    const previous = turn.waiters.get(requestId);
+    turn.waiters.delete(requestId);
+    previous?.reject(new Error('Permission request re-armed.'));
+    return new Promise<string>((resolve, reject) => {
+      turn.waiters.set(requestId, { resolve, reject });
+      const early = turn.early.get(requestId);
+      if (
+        early &&
+        !turn.used.get(requestId)?.includes(early.key) &&
+        takeDecision(turn, requestId, early.key, early.optionId)
+      ) {
+        return;
+      }
+      turn.early.delete(requestId);
+      refreshDecisionPoll();
+    });
+  };
+
+  /**
+   * Drains every queued event; false if the lease or the Host went away. A
+   * coordinator that keeps failing is given one lease term, then the result
+   * goes out anyway (the heartbeat keeps the lease alive meanwhile).
+   */
+  const drain = async (turn: HostTurn): Promise<boolean> => {
+    const deadline = Date.now() + TURN_LEASE_MS;
+    if (turn.flushTimer) {
+      clearTimeout(turn.flushTimer);
+      turn.flushTimer = undefined;
+    }
+    while (!turn.lost && !stop.signal.aborted) {
+      await flush(turn);
+      if (turn.flushTimer) {
+        clearTimeout(turn.flushTimer);
+        turn.flushTimer = undefined;
+      }
+      if (!turn.inflight && turn.pending.length === 0) return true;
+      // The last batch landed and more is queued: send it right away.
+      if (!turn.inflight) continue;
+      if (Date.now() - turn.renewedAt >= TURN_LEASE_MS) return false;
+      if (Date.now() >= deadline) {
+        writeStderrLine(
+          'qwen serve: could not deliver all agent events; posting the result.',
+        );
+        return true;
+      }
+      await delay(RETRY_MS, undefined, { signal: stop.signal }).catch(
+        () => undefined,
+      );
+    }
+    return false;
+  };
+
+  const returnResult = async (turn: HostTurn, initial: HostTurnResult) => {
+    let result = initial;
+    for (;;) {
+      options.generationGuard?.assertOpen();
+      stop.signal.throwIfAborted();
+      if (turn.lost) return;
+      try {
+        await requestJson(hostUrl(activeCredential, 'result'), {
+          method: 'POST',
+          headers: hostHeaders(activeCredential),
+          body: JSON.stringify(result),
+          signal: AbortSignal.any([
+            stop.signal,
+            AbortSignal.timeout(TURN_LEASE_MS),
+          ]),
+        });
+        return;
+      } catch (error) {
+        stop.signal.throwIfAborted();
+        if (isRevocation(error)) throw error;
+        const status = (error as { status?: number }).status;
+        const message = extractErrorMessage(error);
+        if (status === 409) {
+          if (isCancellation(error)) {
+            writeStderrLine(
+              `qwen serve: run ${turn.assignment.runId} was stopped on the coordinator; result discarded.`,
+            );
+            return;
+          }
+          writeStderrLine(
+            `qwen serve: discarded agent turn result (${message}).`,
+          );
+          return;
+        }
+        if (isPermanentRejection(error)) {
+          // Retrying would get the same answer. A rejected answer becomes a
+          // failure the session can show; a rejected failure is dropped and
+          // the lease runs out.
+          if (result.result.status === 'failed') {
+            writeStderrLine(
+              `qwen serve: agent turn result rejected; giving up: ${message}`,
+            );
+            return;
+          }
+          result = {
+            ...result,
+            result: {
+              status: 'failed',
+              outputText: '',
+              error: `The coordinator rejected this result: ${message}`.slice(
+                0,
+                MAX_RESULT_ERROR,
+              ),
+              ...(result.result.nativeSessionId
+                ? { nativeSessionId: result.result.nativeSessionId }
+                : {}),
+            },
+          };
+          continue;
+        }
+        writeStderrLine(
+          `qwen serve: agent turn result upload failed; retrying: ${message}`,
+        );
+        // The heartbeat keeps renewing this run's lease meanwhile.
+        await delay(RETRY_MS, undefined, { signal: stop.signal });
+      }
+    }
+  };
+
+  const runAssignment = async (assignment: HostTurnAssignment) => {
+    const turn: HostTurn = {
+      assignment,
+      controller: new AbortController(),
+      lost: false,
+      renewedAt: Date.now(),
+      sequence: 0,
+      pending: [],
+      sendChain: Promise.resolve(),
+      waiters: new Map(),
+      early: new Map(),
+      used: new Map(),
+      resolved: new Set(),
+    };
+    turns.set(assignment.runId, turn);
+    const stopTurn = () => turn.controller.abort(stop.signal.reason);
+    if (stop.signal.aborted) stopTurn();
+    else stop.signal.addEventListener('abort', stopTurn, { once: true });
+    let relay: AgentHostRelayRun | undefined;
+    let remoteQwenBound = false;
+    let result: AgentAdapterTurnResult;
+    try {
+      // Qwen's hidden session id is planned per (agent, chat session), the
+      // same id the coordinator would use locally.
+      const nativeSessionId =
+        assignment.nativeSessionId ??
+        (assignment.program === 'qwen'
+          ? sessionAgentNativeSessionId(
+              assignment.agent.agentId,
+              assignment.sessionId,
+            )
+          : undefined);
+      // A `qwen` turn runs in a hidden `sourceType: 'agent'` session on this
+      // Host's own bridge. The ACP child authorizes that session only through
+      // a session-agents binding naming it, and the agent is not in this
+      // Host's roster, so write a binding that carries the coordinator's
+      // persona (`remotePersona`, see acpAgent session authorization).
+      if (assignment.program === 'qwen' && nativeSessionId) {
+        await markRemoteQwenTurn(
+          options.workspaceCwd,
+          assignment,
+          nativeSessionId,
+        );
+        remoteQwenBound = true;
+      }
+      // qwen: the per-binding relay above, handed to the adapter. Other
+      // programs start a process per turn, so a per-run relay fits them.
+      const qwenSessionSend =
+        assignment.program === 'qwen'
+          ? qwenSessionSendFor(assignment)
+          : undefined;
+      if (qwenSessionSend) {
+        const binding = qwenRelayBindings.get(qwenRelayKey(assignment));
+        if (binding) binding.runId = assignment.runId;
+      } else {
+        relay = openAgentHostRelayRun(assignment.runId, (text) =>
+          pushEvent(turn, { type: 'session_send', text }),
+        );
+      }
+      turn.relay = relay;
+      // Cancelled while the binding was being written: never start.
+      if (turn.lost) relay?.close();
+      turn.controller.signal.throwIfAborted();
+      const sessionSendServer = sessionSendServerFor(relay);
+      const adapter = getAdapter(assignment.program, {
+        workspaceCwd: options.workspaceCwd,
+        bridge: options.bridge,
+        agentId: assignment.agent.agentId,
+        ...(qwenSessionSend ? { sessionSend: qwenSessionSend } : {}),
+      });
+      result = await adapter.runTurn({
+        prompt: assignment.prompt,
+        ...(assignment.freshPrompt !== undefined
+          ? { freshPrompt: assignment.freshPrompt }
+          : {}),
+        ...(assignment.agent.instructions
+          ? { instructions: assignment.agent.instructions }
+          : {}),
+        ...(assignment.agent.model ? { model: assignment.agent.model } : {}),
+        ...(nativeSessionId ? { nativeSessionId } : {}),
+        cwd: options.workspaceCwd,
+        ...(sessionSendServer ? { sessionSendServer } : {}),
+        signal: turn.controller.signal,
+        onEvent: (event) => pushEvent(turn, event),
+        awaitPermission: (prompt) => awaitPermission(turn, prompt),
+      });
+    } catch (error) {
+      result = {
+        status: turn.controller.signal.aborted ? 'cancelled' : 'failed',
+        outputText: '',
+        error: extractErrorMessage(error),
+      };
+    } finally {
+      stop.signal.removeEventListener('abort', stopTurn);
+      relay?.close();
+      if (remoteQwenBound) {
+        await settleRemoteQwenTurn(options.workspaceCwd, assignment).catch(
+          (error: unknown) =>
+            writeStderrLine(
+              `qwen serve: could not settle remote agent binding for run ${assignment.runId}: ${extractErrorMessage(error)}`,
+            ),
+        );
+      }
+      for (const waiter of turn.waiters.values()) {
+        waiter.reject(new Error('Agent turn ended.'));
+      }
+      turn.waiters.clear();
+      refreshDecisionPoll();
+    }
+    try {
+      // Events (a `session_send` above all) must land before the result:
+      // once the run is finished the coordinator refuses them.
+      if (!(await drain(turn))) return;
+      await returnResult(turn, {
+        sessionId: assignment.sessionId,
+        runId: assignment.runId,
+        attempt: assignment.attempt,
+        leaseId: assignment.leaseId,
+        result: boundResult(result),
+      });
+    } finally {
+      turns.delete(assignment.runId);
+      refreshDecisionPoll();
+    }
+  };
+
+  /* -------------------------------------------------------------------- */
+  /* Heartbeat and pickup                                                  */
+  /* -------------------------------------------------------------------- */
+
   let offline = false;
   const heartbeat = async (): Promise<boolean> => {
     try {
       assertOpen();
-      await sendHeartbeat(activeCredential);
+      // Cached by the probe (60 s); a CLI installed later shows up here.
+      probes = await getHostProgramProbe().catch(() => probes);
+      const response = await sendHeartbeat(activeCredential);
+      const now = Date.now();
+      for (const lease of response.leases ?? []) {
+        const turn = turns.get(lease.runId);
+        if (!turn) continue;
+        if (lease.cancelled === true) cancelTurn(turn);
+        else if (lease.ok) turn.renewedAt = now;
+        else loseTurn(turn, 'The coordinator refused this run lease.');
+      }
+      applyDecisions(response.decisions);
       if (offline) {
         writeStderrLine(
           `qwen serve: Agent Host ${activeCredential.hostId} reconnected.`,
@@ -873,6 +1297,13 @@ async function connectAgentHost(
       }
       if (options.generationGuard?.closed) {
         stop.abort(error);
+      }
+      // A lease nobody renewed for a full term is gone on the coordinator.
+      const now = Date.now();
+      for (const turn of turns.values()) {
+        if (now - turn.renewedAt >= TURN_LEASE_MS) {
+          loseTurn(turn, 'Lost contact with the coordinator.');
+        }
       }
       if (stop.signal.aborted) return false;
       if (!offline) {
@@ -898,9 +1329,14 @@ async function connectAgentHost(
   );
 
   void (async () => {
+    const running = new Set<Promise<void>>();
     try {
       for (;;) {
         assertOpen();
+        while (running.size >= MAX_CONCURRENT_HOST_TURNS) {
+          await Promise.race(running);
+          assertOpen();
+        }
         try {
           const assignment = await pickup(
             activeCredential,
@@ -909,37 +1345,37 @@ async function connectAgentHost(
           );
           assertOpen();
           if (!assignment) continue;
-          writeStderrLine(
-            `qwen serve: Agent Host ${activeCredential.hostId} running ${assignment.agent.name} on ${assignment.threadId}.`,
-          );
-          let result: HostRunResult;
-          try {
-            result = await executeAssignment(
-              options,
-              activeCredential,
-              assignment,
-              stop.signal,
+          if (assignment.protocol !== HOST_PROTOCOL_VERSION) {
+            // A v1 coordinator hands out thread runs this Host no longer
+            // executes; the run's lease lapses there.
+            writeStderrLine(
+              'qwen serve: the coordinator speaks an older Agent Host protocol; upgrade it to run agents on this Host.',
             );
-          } catch (error) {
-            result = {
-              threadId: assignment.threadId,
-              runId: assignment.runId,
-              hostId: activeCredential.hostId,
-              leaseId: assignment.lease.leaseId,
-              attempt: assignment.attempt,
-              status:
-                error instanceof Error && error.message === 'not_leasable'
-                  ? 'cancelled'
-                  : 'failed',
-              error: extractErrorMessage(error),
-            };
+            await delay(25_000, undefined, { signal: stop.signal });
+            continue;
           }
-          await returnResult(
-            activeCredential,
-            result,
-            options.generationGuard,
-            stop.signal,
+          writeStderrLine(
+            `qwen serve: Agent Host ${activeCredential.hostId} running ${assignment.agent.name} (${assignment.program}).`,
           );
+          const task: Promise<void> = runAssignment(assignment)
+            .catch(async (error: unknown) => {
+              if (isRevocation(error)) {
+                await discardRevokedCredential(activeCredential).catch(
+                  () => undefined,
+                );
+                stop.abort(error);
+                return;
+              }
+              if (!stop.signal.aborted) {
+                writeStderrLine(
+                  `qwen serve: agent turn failed: ${extractErrorMessage(error)}`,
+                );
+              }
+            })
+            .finally(() => {
+              running.delete(task);
+            });
+          running.add(task);
         } catch (error) {
           if (isRevocation(error)) {
             await discardRevokedCredential(activeCredential).catch(
@@ -965,22 +1401,80 @@ async function connectAgentHost(
       }
     } finally {
       clearInterval(timer);
-      const active = activeConnections.get(
-        JSON.stringify([serverUrl, options.workspaceId, options.workspaceCwd]),
+      // A binding relay outlives its runs, not the connection. `close` is
+      // identity-guarded, so a later connection's relay for the same
+      // binding is left alone.
+      for (const binding of qwenRelayBindings.values()) binding.relay.close();
+      qwenRelayBindings.clear();
+      // Turns stop with the connection (their listeners abort on `stop`).
+      if (!stop.signal.aborted) {
+        stop.abort(new Error('Agent Host connection stopped.'));
+      }
+      const key = connectionKey(
+        serverUrl,
+        options.workspaceId,
+        options.workspaceCwd,
       );
+      const active = activeConnections.get(key);
       if (
         active?.bridge === options.bridge &&
         active.generationGuard === options.generationGuard &&
         active.stop === stop
       ) {
-        activeConnections.delete(
-          JSON.stringify([
-            serverUrl,
-            options.workspaceId,
-            options.workspaceCwd,
-          ]),
-        );
+        activeConnections.delete(key);
       }
     }
   })();
+}
+
+/**
+ * Bind a coordinator's `qwen` turn to this Host's hidden agent session (see
+ * `SessionAgentBinding.remotePersona`). The run entry has no lease: from this
+ * daemon's point of view the turn executes locally.
+ */
+async function markRemoteQwenTurn(
+  workspaceCwd: string,
+  assignment: HostTurnAssignment,
+  nativeSessionId: string,
+): Promise<void> {
+  const agentId = assignment.agent.agentId;
+  await updateSessionAgents(workspaceCwd, assignment.sessionId, (file) => {
+    file.bindings[agentId] = {
+      ...file.bindings[agentId],
+      agentId,
+      nativeSessionId,
+      remotePersona: {
+        name: assignment.agent.name,
+        ...(assignment.agent.instructions
+          ? { instructions: assignment.agent.instructions }
+          : {}),
+        ...(assignment.agent.model ? { model: assignment.agent.model } : {}),
+      },
+    };
+    file.runs = file.runs.filter((run) => run.id !== assignment.runId);
+    file.runs.push({
+      id: assignment.runId,
+      agentId,
+      status: 'running',
+      triggerRecordIds: [],
+      chainDepth: 0,
+      createdAt: Date.now(),
+      startedAt: Date.now(),
+      attempts: assignment.attempt,
+    });
+  });
+}
+
+async function settleRemoteQwenTurn(
+  workspaceCwd: string,
+  assignment: HostTurnAssignment,
+): Promise<void> {
+  await updateSessionAgents(workspaceCwd, assignment.sessionId, (file) => {
+    for (const run of file.runs) {
+      if (run.id === assignment.runId && run.status === 'running') {
+        run.status = 'completed';
+        run.endedAt = Date.now();
+      }
+    }
+  });
 }

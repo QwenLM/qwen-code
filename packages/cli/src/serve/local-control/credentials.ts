@@ -12,6 +12,14 @@ export interface DesktopRelayCredentialClaim {
   sessionId: string;
 }
 
+/** A paired Web Shell device, as listed to the operator. */
+export interface WebShellDevice {
+  id: string;
+  createdAt: number;
+}
+
+const MAX_WEB_SHELL_DEVICES = 128;
+
 /**
  * What the auth middleware needs from a credential source. Kept separate from
  * {@link CredentialStore} so `auth.ts` can depend on the shape by type alone
@@ -51,7 +59,8 @@ export class CredentialStore implements ListenerScopedCredentials {
   #runtime: Buffer | undefined;
   /** Pairing id → sha256 of the pairing secret. */
   readonly #pairing = new Map<string, Buffer>();
-  readonly #webShell = new Set<Buffer>();
+  /** Device id → the digest and issuance time of its Web Shell credential. */
+  readonly #webShell = new Map<string, { digest: Buffer; createdAt: number }>();
   readonly #desktopRelay = new Map<
     string,
     DesktopRelayCredentialClaim & { expiresAt: number }
@@ -69,10 +78,31 @@ export class CredentialStore implements ListenerScopedCredentials {
     return this.#pairing.delete(id);
   }
 
-  addWebShellToken(token: string): boolean {
-    if (this.#webShell.size >= 128) return false;
-    this.#webShell.add(createHash('sha256').update(token, 'utf8').digest());
+  /**
+   * Register a paired device's credential under `id`. Returns false when the
+   * device cap is reached — the caller reports that as a conflict rather than
+   * silently issuing a credential it cannot later list or revoke.
+   */
+  addWebShellToken(id: string, token: string): boolean {
+    if (this.#webShell.size >= MAX_WEB_SHELL_DEVICES) return false;
+    this.#webShell.set(id, {
+      digest: createHash('sha256').update(token, 'utf8').digest(),
+      createdAt: Date.now(),
+    });
     return true;
+  }
+
+  /** Revoke one device. Returns whether that device existed. */
+  revokeWebShellToken(id: string): boolean {
+    return this.#webShell.delete(id);
+  }
+
+  /** A paired device's credential, without any secret material. */
+  listWebShellDevices(): WebShellDevice[] {
+    return Array.from(this.#webShell, ([id, entry]) => ({
+      id,
+      createdAt: entry.createdAt,
+    }));
   }
 
   createDesktopRelayCredential(
@@ -138,8 +168,8 @@ export class CredentialStore implements ListenerScopedCredentials {
     if (this.#runtime !== undefined && equalDigest(candidate, this.#runtime)) {
       matched = true;
     }
-    for (const expected of this.#webShell) {
-      if (equalDigest(candidate, expected)) matched = true;
+    for (const { digest } of this.#webShell.values()) {
+      if (equalDigest(candidate, digest)) matched = true;
     }
     return matched;
   }

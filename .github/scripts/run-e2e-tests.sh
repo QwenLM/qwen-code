@@ -70,7 +70,7 @@ if [ "$sandbox" = 'sandbox:docker' ]; then
     fi
     # Label- and age-filtered, so it cannot touch the image a
     # concurrent shard is testing.
-    docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
+    timeout 20m docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
     if ! build_image; then
       echo "::warning::sandbox image build failed; retrying once"
       build_image

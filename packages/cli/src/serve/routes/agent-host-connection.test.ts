@@ -11,18 +11,47 @@ import {
   createWorkspaceGenerationGuard,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
-import { registerAgentHostConnectionRoutes } from './agent-host-connection.js';
+import {
+  registerAgentHostRemoteConnectRoute,
+  registerAgentHostRuntimeRoutes,
+} from './agent-host-connection.js';
 
-const { issueEnrollment, writeStderrLine } = vi.hoisted(() => ({
+const {
+  issueEnrollment,
+  writeStderrLine,
+  startConnection,
+  stopConnection,
+  saveConnection,
+  removeConnection,
+} = vi.hoisted(() => ({
   issueEnrollment: vi.fn(),
   writeStderrLine: vi.fn(),
+  startConnection: vi.fn(),
+  stopConnection: vi.fn(),
+  saveConnection: vi.fn(),
+  removeConnection: vi.fn(),
 }));
 vi.mock('@qwen-code/qwen-code-core/agents/workspace-agents/store.js', () => ({
   issueAgentHostEnrollment: issueEnrollment,
 }));
 vi.mock('../../utils/stdioHelpers.js', () => ({ writeStderrLine }));
 vi.mock('../agent-host-client.js', () => ({
-  startAgentHostConnection: vi.fn(),
+  startAgentHostConnection: startConnection,
+  stopAgentHostConnection: stopConnection,
+  normalizeServerUrl: (value: string) => value.replace(/\/$/, ''),
+}));
+vi.mock('../agent-host-connections.js', () => ({
+  saveAgentHostConnection: saveConnection,
+  removeAgentHostConnection: removeConnection,
+}));
+vi.mock('../agent-host-programs.js', () => ({
+  getHostProgramProbe: async () => [
+    { program: 'qwen', available: true },
+    { program: 'claude', available: true, version: '2.1.0' },
+    { program: 'codex', available: false, reason: 'not installed' },
+  ],
+  availablePrograms: (probes: Array<{ program: string; available: boolean }>) =>
+    probes.filter((probe) => probe.available).map((probe) => probe.program),
 }));
 
 afterEach(() => {
@@ -41,7 +70,7 @@ it.each(['service', 'enrollment'] as const)(
     let current = original;
     const fetch = vi.fn(async () => {
       if (stage === 'service') current = { ...original };
-      return new Response(JSON.stringify({ protocol: 1, providers: ['qwen'] }));
+      return new Response(JSON.stringify({ protocol: 2, providers: ['qwen'] }));
     });
     vi.stubGlobal('fetch', fetch);
     issueEnrollment.mockImplementation(async () => {
@@ -50,7 +79,7 @@ it.each(['service', 'enrollment'] as const)(
     });
     const app = express();
     app.use(express.json());
-    registerAgentHostConnectionRoutes(
+    registerAgentHostRemoteConnectRoute(
       app,
       '/agent',
       () => current,
@@ -100,7 +129,7 @@ it.each([
         async () =>
           new Response(
             JSON.stringify({
-              protocol: 1,
+              protocol: 2,
               providers: ['qwen'],
               connected: true,
             }),
@@ -113,7 +142,7 @@ it.each([
     });
     const app = express();
     app.use(express.json());
-    registerAgentHostConnectionRoutes(
+    registerAgentHostRemoteConnectRoute(
       app,
       '/agent',
       () => runtime,
@@ -148,7 +177,7 @@ it('rejects a Host connection when the runtime has no generation guard', async (
   } as WorkspaceRuntime;
   const app = express();
   app.use(express.json());
-  registerAgentHostConnectionRoutes(
+  registerAgentHostRuntimeRoutes(
     app,
     '/agent',
     () => runtime,
@@ -163,4 +192,118 @@ it('rejects a Host connection when the runtime has no generation guard', async (
   });
 
   expect(response.status).toBe(409);
+});
+
+function runtimeApp(runtime: WorkspaceRuntime) {
+  const app = express();
+  app.use(express.json());
+  registerAgentHostRuntimeRoutes(
+    app,
+    '/agent',
+    () => runtime,
+    () => (_req, _res, next) => next(),
+  );
+  return app;
+}
+
+const selected = () =>
+  ({
+    workspaceId: 'workspace',
+    workspaceCwd: '/selected',
+    generationGuard: createWorkspaceGenerationGuard(),
+  }) as WorkspaceRuntime;
+
+it('describes this daemon as a v2 Host with its probed programs', async () => {
+  const response = await request(runtimeApp(selected())).get(
+    '/agent/hosts/service',
+  );
+
+  expect(response.status).toBe(200);
+  expect(response.body).toMatchObject({
+    protocol: 2,
+    workspaceCwd: '/selected',
+    providers: ['qwen', 'claude'],
+  });
+  expect(response.body.programs).toHaveLength(3);
+});
+
+it('connects without a provider and remembers the connection', async () => {
+  startConnection.mockResolvedValue(undefined);
+  saveConnection.mockResolvedValue(undefined);
+
+  const response = await request(runtimeApp(selected()))
+    .post('/agent/hosts/connect')
+    .send({
+      serverUrl: 'https://coordinator.example/',
+      workspaceId: 'ws_1',
+      enrollmentToken: 'fresh-token',
+    });
+
+  expect(response.status).toBe(200);
+  expect(response.body).toMatchObject({
+    connected: true,
+    providers: ['qwen', 'claude'],
+  });
+  expect(startConnection).toHaveBeenCalledWith(
+    expect.objectContaining({
+      serverUrl: 'https://coordinator.example',
+      workspaceId: 'ws_1',
+      enrollmentToken: 'fresh-token',
+      allowHttp: false,
+    }),
+  );
+  expect(saveConnection).toHaveBeenCalledWith({
+    serverUrl: 'https://coordinator.example',
+    workspaceId: 'ws_1',
+    workspaceCwd: '/selected',
+    allowHttp: false,
+  });
+});
+
+it('disconnects and forgets a saved connection', async () => {
+  stopConnection.mockReturnValue(false);
+  removeConnection.mockResolvedValue(true);
+
+  const response = await request(runtimeApp(selected()))
+    .delete('/agent/hosts/connect')
+    .send({ serverUrl: 'https://coordinator.example', workspaceId: 'ws_1' });
+
+  expect(response.status).toBe(200);
+  expect(response.body).toEqual({ disconnected: true });
+  expect(removeConnection).toHaveBeenCalledWith({
+    serverUrl: 'https://coordinator.example',
+    workspaceId: 'ws_1',
+    workspaceCwd: '/selected',
+    allowHttp: false,
+  });
+});
+
+it('refuses to pull in a remote that speaks the v1 Host protocol', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(
+      async () =>
+        new Response(JSON.stringify({ protocol: 1, providers: ['qwen'] })),
+    ),
+  );
+  const runtime = selected();
+  const app = express();
+  app.use(express.json());
+  registerAgentHostRemoteConnectRoute(
+    app,
+    '/agent',
+    () => runtime,
+    () => (_req, _res, next) => next(),
+  );
+
+  const response = await request(app).post('/agent/hosts/remote-connect').send({
+    remoteUrl: 'https://worker.example',
+    serverUrl: 'https://coordinator.example',
+    remoteCwd: '/remote',
+    remoteToken: 'remote-token',
+  });
+
+  expect(response.status).toBe(400);
+  expect(response.body.error).toMatch(/older Agent Host protocol/);
+  expect(issueEnrollment).not.toHaveBeenCalled();
 });

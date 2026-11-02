@@ -278,6 +278,7 @@ function toolBlock(
     parentToolCallId: overrides.parentToolCallId,
     subagentType: overrides.subagentType,
     subagentSessionReady: overrides.subagentSessionReady,
+    agent: overrides.agent,
     serverTimestamp: overrides.serverTimestamp,
     clientReceivedAt: createdAt,
     createdAt,
@@ -286,6 +287,35 @@ function toolBlock(
 }
 
 describe('transcriptBlocksToDaemonMessages', () => {
+  it('keeps producer identity across live/history projections and separates identical tool results', () => {
+    const output = {
+      resultDisplay: { type: 'mcp_app', documentId: 'same-content' },
+    };
+    const live = transcriptBlocksToDaemonMessages([
+      toolBlock('live-block', 'producer-a', 'completed', 1, {
+        rawOutput: output,
+      }),
+    ]);
+    const history = transcriptBlocksToDaemonMessages([
+      toolBlock('history-block', 'producer-a', 'completed', 1, {
+        rawOutput: output,
+      }),
+      toolBlock('history-block-2', 'producer-b', 'completed', 2, {
+        rawOutput: output,
+      }),
+    ]);
+    const ids = (
+      messages: ReturnType<typeof transcriptBlocksToDaemonMessages>,
+    ) =>
+      messages.flatMap((message) =>
+        message.role === 'tool_group'
+          ? message.tools.map((tool) => tool.generatedUiToolCallId)
+          : [],
+      );
+    expect(ids(live)).toEqual(['producer-a']);
+    expect(ids(history)).toEqual(['producer-a', 'producer-b']);
+  });
+
   it('keeps shell input previews out of output while preserving actual content', () => {
     const block = toolBlock('shell-live', 'shell-1', 'in_progress', 1000, {
       toolName: 'run_shell_command',
@@ -4015,6 +4045,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       status: 'in_progress',
       kind: 'fetch',
     });
+    expect(pendingTool?.generatedUiToolCallId).toBeUndefined();
 
     const messages = transcriptBlocksToDaemonMessages([
       {
@@ -4057,6 +4088,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       toolName: 'web_fetch',
       status: 'completed',
       rawOutput: 'Content processed successfully.',
+      generatedUiToolCallId: 'webfetch-1',
     });
   });
 
@@ -4364,6 +4396,41 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('prefers the cause label for a loop stop and falls back without one', () => {
+    const loopError = (loop?: { loopType: string; loopReason?: string }) => ({
+      id: 'err-loop',
+      kind: 'error' as const,
+      source: 'turn_error' as const,
+      errorKind: 'loop_detected' as const,
+      text: 'internal fallback',
+      ...(loop ? { loop } : {}),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const labels = {
+      loopDetected: 'Generic loop guidance.',
+      loopDetectedFor: (loop: { loopType?: string; loopReason?: string }) =>
+        loop.loopReason ? `Cause: ${loop.loopReason}` : undefined,
+    };
+
+    const [withCause] = transcriptBlocksToDaemonMessages(
+      [loopError({ loopType: 'turn_tool_call_cap', loopReason: 'backstop' })],
+      { labels },
+    );
+    const [unknownCause] = transcriptBlocksToDaemonMessages(
+      [loopError({ loopType: 'turn_tool_call_cap' })],
+      { labels },
+    );
+    const [noLoop] = transcriptBlocksToDaemonMessages([loopError()], {
+      labels,
+    });
+
+    expect(withCause.content).toBe('Cause: backstop');
+    expect(unknownCause.content).toBe('Generic loop guidance.');
+    expect(noLoop.content).toBe('Generic loop guidance.');
+  });
+
   it('renders model stream interruption errors from structured errorKind labels', () => {
     const messages = transcriptBlocksToDaemonMessages(
       [
@@ -4639,6 +4706,42 @@ describe('transcriptBlocksToDaemonMessages', () => {
   it('returns empty array for empty blocks', () => {
     const messages = transcriptBlocksToDaemonMessages([]);
     expect(messages).toEqual([]);
+  });
+
+  it.each([' ', '\n', '\r\n', '\t'])(
+    'omits a standalone whitespace assistant between tools and thinking: %j',
+    (whitespace) => {
+      const messages = transcriptBlocksToDaemonMessages([
+        toolBlock('tool-1', 'call-1', 'completed', 1),
+        textBlock('blank', 'assistant', whitespace, 2, true),
+        textBlock('thought', 'thought', 'Check the next file.', 3, true),
+        toolBlock('tool-2', 'call-2', 'completed', 4),
+      ]);
+
+      expect(messages.map((message) => message.role)).toEqual([
+        'tool_group',
+        'thinking',
+        'tool_group',
+      ]);
+    },
+  );
+
+  it('preserves whitespace chunks within existing assistant prose and usage', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('first', 'assistant', 'First paragraph.', 1, true),
+      textBlock('spacing', 'assistant', '\n\n', 2, true, {
+        usage: { inputTokens: 10, outputTokens: 2 },
+      }),
+      textBlock('last', 'assistant', 'Second paragraph.\n', 3),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'assistant',
+        content: 'First paragraph.\n\nSecond paragraph.\n',
+        usage: { inputTokens: 10, outputTokens: 2 },
+      },
+    ]);
   });
 
   it('keeps status blocks in the main transcript while subagent is active', () => {
@@ -5424,6 +5527,37 @@ describe('transcriptBlocksToDaemonMessages', () => {
   });
 });
 
+describe('replayed agent identity', () => {
+  function firstTool(blocks: DaemonTranscriptBlock[]) {
+    return transcriptBlocksToDaemonMessages(blocks).find(
+      (message) => message.role === 'tool_group',
+    )?.tools[0];
+  }
+
+  it('adopts the block agent path for a replayed Agent result', () => {
+    const tool = firstTool([
+      toolBlock('agent', 'agent-1', 'completed', 1_000, {
+        toolName: 'Agent',
+        agent: {
+          agentName: '/root/general-purpose',
+          depth: 1,
+          kind: 'subagent',
+        },
+      }),
+    ]);
+    expect(tool?.agentPath).toBe('/root/general-purpose');
+  });
+
+  it('stays unattributed when the replay carried no identity', () => {
+    const tool = firstTool([
+      toolBlock('agent', 'agent-1', 'completed', 1_000, {
+        toolName: 'Agent',
+      }),
+    ]);
+    expect(tool?.agentPath).toBeUndefined();
+  });
+});
+
 describe('running subagent replay start time', () => {
   function firstTool(blocks: DaemonTranscriptBlock[]) {
     return transcriptBlocksToDaemonMessages(blocks).find(
@@ -6048,5 +6182,202 @@ it('projects generic tool wrappers into real names and arguments in chat message
     toolName: 'mcp__server__lookup',
     title: 'mcp__server__lookup',
     args: { query: 'value' },
+  });
+});
+
+describe('session agent messages', () => {
+  const update = (update: Record<string, unknown>) =>
+    normalizeDaemonEvent({
+      v: 1,
+      type: 'session_update',
+      data: { update },
+    });
+  const author = {
+    agentId: 'agent-1',
+    name: 'reviewer',
+    color: '#ff8800',
+    program: 'claude',
+  };
+
+  it('renders an agent reply as its own authored message, apart from the main assistant text around it', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      [
+        update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Main answer.' },
+        }),
+        update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Looks good to me.' },
+          _meta: {
+            source: 'agent_message',
+            qwenDiscreteMessage: true,
+            qwenTranscript: { segmentId: 'agent:run-1' },
+            qwenAgentMessage: {
+              kind: 'agent_message',
+              author,
+              runId: 'run-1',
+              status: 'completed',
+              steps: [{ id: 's1', title: 'Read: a.ts', status: 'completed' }],
+              totalTokens: 1234,
+            },
+          },
+        }),
+        update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Main follow-up.' },
+        }),
+      ].flat(),
+    );
+    const assistants = transcriptBlocksToDaemonMessages(state.blocks).filter(
+      (message) => message.role === 'assistant',
+    );
+    expect(assistants.map((message) => message.content)).toEqual([
+      'Main answer.',
+      'Looks good to me.',
+      'Main follow-up.',
+    ]);
+    expect(assistants[1]).toMatchObject({
+      author: { name: 'reviewer', color: '#ff8800' },
+      agentMessage: {
+        kind: 'agent_message',
+        runId: 'run-1',
+        status: 'completed',
+        totalTokens: 1234,
+        steps: [{ id: 's1', title: 'Read: a.ts', status: 'completed' }],
+      },
+    });
+    expect(assistants[0]).not.toHaveProperty('author');
+    expect(assistants[2]).not.toHaveProperty('author');
+    expect(assistants[2]).not.toHaveProperty('agentMessage');
+  });
+
+  it('keeps a failed agent reply with no text, so its status still shows', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('agent-block', 'assistant', '', 1, false, {
+        segmentId: 'agent:run-2',
+        meta: {
+          source: 'agent_message',
+          qwenDiscreteMessage: true,
+          qwenAgentMessage: {
+            kind: 'agent_message',
+            author,
+            runId: 'run-2',
+            status: 'offline',
+            error: 'runtime went away',
+          },
+        },
+      }),
+    ]);
+    expect(messages).toEqual([
+      expect.objectContaining({
+        id: 'agent-block',
+        role: 'assistant',
+        content: '',
+        author: { name: 'reviewer', color: '#ff8800' },
+        agentMessage: expect.objectContaining({
+          status: 'offline',
+          error: 'runtime went away',
+        }),
+      }),
+    ]);
+  });
+
+  it('renders an @-mention as an ordinary user message', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      [
+        update({
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: '@reviewer please check' },
+          _meta: {
+            source: 'agent_mention',
+            qwenDiscreteMessage: true,
+            qwenAgentMessage: {
+              kind: 'agent_mention',
+              mentionedAgentIds: ['agent-1'],
+            },
+          },
+        }),
+      ].flat(),
+    );
+    const [message] = transcriptBlocksToDaemonMessages(state.blocks);
+    expect(message).toMatchObject({
+      role: 'user',
+      content: '@reviewer please check',
+      source: 'agent_mention',
+      agentMessage: { kind: 'agent_mention', mentionedAgentIds: ['agent-1'] },
+    });
+    expect(message).not.toHaveProperty('author');
+  });
+
+  it('names the agent on a post an agent made into the session', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      [
+        update({
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: '@writer your turn' },
+          _meta: {
+            source: 'agent_mention',
+            qwenDiscreteMessage: true,
+            qwenAgentMessage: {
+              kind: 'agent_mention',
+              author,
+              mentionedAgentIds: ['agent-2'],
+            },
+          },
+        }),
+      ].flat(),
+    );
+    const [message] = transcriptBlocksToDaemonMessages(state.blocks);
+    expect(message).toMatchObject({
+      role: 'user',
+      author: { name: 'reviewer', color: '#ff8800' },
+    });
+  });
+
+  it("names the agent from an exported block's author, which carries no meta", () => {
+    // The export document strips `meta` and keeps the agent as `author`.
+    const exported = (
+      id: string,
+      kind: 'user' | 'assistant',
+      text: string,
+      author?: { name: string },
+    ) =>
+      ({
+        id,
+        kind,
+        text,
+        clientReceivedAt: 0,
+        createdAt: 0,
+        updatedAt: 0,
+        streaming: false,
+        ...(author ? { author } : {}),
+      }) as unknown as DaemonTranscriptBlock;
+    const messages = transcriptBlocksToDaemonMessages([
+      exported('u1', 'user', '@claude-B check', { name: 'lead' }),
+      exported('a1', 'assistant', 'Main answer.'),
+      exported('a2', 'assistant', 'Agent reply.', { name: 'claude-B' }),
+      exported('a3', 'assistant', 'Main follow-up.'),
+    ]);
+    expect(messages.map((message) => message.role)).toEqual([
+      'user',
+      'assistant',
+      'assistant',
+      'assistant',
+    ]);
+    expect(messages[0]).toMatchObject({
+      author: { name: 'lead' },
+      agentMessage: { kind: 'agent_mention' },
+    });
+    expect(messages[2]).toMatchObject({
+      content: 'Agent reply.',
+      author: { name: 'claude-B' },
+      agentMessage: { kind: 'agent_message', author: { name: 'claude-B' } },
+    });
+    expect(messages[1]).not.toHaveProperty('author');
+    expect(messages[3]).not.toHaveProperty('agentMessage');
   });
 });

@@ -17,6 +17,7 @@
 import type {
   ServeWorkspaceMcpStatus,
   ServeWorkspaceSkillsStatus,
+  ServeWorkspaceSkillsRefreshResult,
   ServeWorkspaceProvidersStatus,
   ServeWorkspaceExtensionsStatus,
   ServeWorkspaceHooksStatus,
@@ -104,7 +105,9 @@ export type InvokeWorkspaceCommandFn = <T>(
   opts?: { timeoutMs?: number },
 ) => Promise<T>;
 
-export type RefreshExtensionsForAllSessionsFn = () => Promise<{
+export type RefreshExtensionsForAllSessionsFn = (
+  sessionIds?: readonly string[],
+) => Promise<{
   refreshed: number;
   failed: number;
 }>;
@@ -125,6 +128,12 @@ export interface DaemonWorkspaceService {
   /** Skill status for the bound workspace. */
   getWorkspaceSkillsStatus(
     ctx: WorkspaceRequestContext,
+    /**
+     * Await a new observation, bypassing the warm snapshot path and read
+     * throttling. A retained observation may still answer if both fresh
+     * sources fail.
+     */
+    opts?: { requireFresh?: boolean },
   ): Promise<ServeWorkspaceSkillsStatus>;
 
   /** Live runtime Skills catalog without daemon-local fallback. */
@@ -281,8 +290,13 @@ export interface DaemonWorkspaceService {
   /** Drop cached skill status so extension skill changes are re-enumerated. */
   invalidateWorkspaceSkillsStatus(): void;
 
-  /** Broadcast extension refresh to all active sessions (fire-and-forget). */
-  refreshExtensionsForAllSessions(): Promise<{
+  refreshWorkspaceSkills(
+    ctx: WorkspaceRequestContext,
+    sessionIds?: readonly string[],
+  ): Promise<ServeWorkspaceSkillsRefreshResult>;
+
+  /** Refresh selected sessions, or all active sessions when omitted. */
+  refreshExtensionsForAllSessions(sessionIds?: readonly string[]): Promise<{
     refreshed: number;
     failed: number;
   }>;

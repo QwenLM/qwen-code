@@ -5,8 +5,16 @@
  */
 
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
+import type { ManagedPermissionRules } from '@qwen-code/qwen-code-core/managed-runtime/managed-permission-rules.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
-import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import {
+  type ManagedSessionDurableRef,
+  assertManagedSessionDurableRef,
+  assertManagedSessionStableId,
+  parseManagedSessionRecordJson,
+  type ManagedSessionJsonValue,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   ManagedSessionConflictError,
   type ManagedSessionAction,
@@ -25,42 +33,73 @@ export const HOSTED_APPROVAL_OPTIONS = [
   { id: 'deny', label: 'Deny' },
 ] as const;
 
-export type HostedApprovalMode = 'yolo' | 'default' | 'auto-edit';
+export type HostedApprovalMode = 'yolo' | 'default' | 'auto-edit' | 'auto';
 
 export interface HostedApprovalSettings {
   readonly mode: HostedApprovalMode;
   readonly timeoutMs: number;
+  readonly permissionRules?: ManagedPermissionRules;
 }
 
 // Listing what each mode pre-approves means a tool added to a profile later
-// is asked about until someone decides otherwise.
+// is asked about until someone decides otherwise. `task_list` only reads the
+// Session's own team board (H4e-b1). `todo_write` only writes the Session's
+// own task list, so it is as safe to pre-approve as a read. A tool that
+// reaches the network would not join this list: it contacts a URL nobody in
+// the Session chose.
 const PREAPPROVED_TOOLS: Readonly<
   Record<Exclude<HostedApprovalMode, 'yolo'>, readonly string[]>
 > = {
-  default: ['read_file'],
-  'auto-edit': ['read_file', 'write_file', 'edit'],
+  default: [
+    'read_file',
+    'task_list',
+    'todo_write',
+    'exit_plan_mode',
+    'team_plan_approval',
+  ],
+  auto: [
+    'read_file',
+    'task_list',
+    'todo_write',
+    'exit_plan_mode',
+    'team_plan_approval',
+  ],
+  'auto-edit': [
+    'read_file',
+    'write_file',
+    'edit',
+    'task_list',
+    'todo_write',
+    'exit_plan_mode',
+    'team_plan_approval',
+  ],
 };
 
-// `glob` ships with the `/2` search profiles, so those pre-approve it and no
-// other profile does. A name-keyed allowance would also pre-approve an
-// MCP-declared tool that happens to be called `glob` — the MCP server picks
-// its own names — and dispatch it without ever asking the operator.
+// `glob` ships with the search profiles and the read profile (#13753 I3),
+// so those pre-approve it and no other profile does. A name-keyed allowance
+// would also pre-approve an MCP-declared tool that happens to be called
+// `glob` — the MCP server picks its own names — and dispatch it without ever
+// asking the operator.
 const SEARCH_PREAPPROVED_TOOLS: readonly string[] = ['glob'];
 
 /**
  * Reads a tool profile's approval settings. `plan` needs its own planning
- * semantics and `auto` a classifier, which the Hosted path does not have, so
- * both are refused like any unknown mode. `yolo` never waits, so it ignores
- * the timeout.
+ * semantics and is refused as an execution approval mode. `yolo` retains a
+ * valid timeout for
+ * a later policy selection, while preserving its legacy invalid-timeout fallback.
  */
 export function parseHostedApprovalSettings(
   mode: unknown,
   timeoutMs: unknown,
 ): HostedApprovalSettings | undefined {
   const parsed = mode === undefined ? 'yolo' : mode;
-  if (parsed === 'yolo')
-    return { mode: parsed, timeoutMs: HOSTED_APPROVAL_TIMEOUT_MS };
-  if (parsed !== 'default' && parsed !== 'auto-edit') return undefined;
+  if (
+    parsed !== 'yolo' &&
+    parsed !== 'default' &&
+    parsed !== 'auto-edit' &&
+    parsed !== 'auto'
+  )
+    return undefined;
   if (
     timeoutMs !== undefined &&
     (typeof timeoutMs !== 'number' ||
@@ -68,7 +107,9 @@ export function parseHostedApprovalSettings(
       timeoutMs < MIN_APPROVAL_TIMEOUT_MS ||
       timeoutMs > MAX_APPROVAL_TIMEOUT_MS)
   )
-    return undefined;
+    return parsed === 'yolo'
+      ? { mode: parsed, timeoutMs: HOSTED_APPROVAL_TIMEOUT_MS }
+      : undefined;
   return {
     mode: parsed,
     timeoutMs: (timeoutMs as number | undefined) ?? HOSTED_APPROVAL_TIMEOUT_MS,
@@ -88,28 +129,29 @@ export function readHostedApprovalDefinition(
   return parseHostedApprovalSettings(mode, timeoutMs);
 }
 
-/** Definition fields that pin a mode which asks; `yolo` adds none. */
+/** Legacy fixed `yolo` definitions stay empty; selectable ones retain the timeout. */
 export function hostedApprovalDefinition(
   settings: HostedApprovalSettings,
+  selectable = false,
 ): Record<string, unknown> {
-  return settings.mode === 'yolo'
+  return settings.mode === 'yolo' && !selectable
     ? {}
     : { approvalMode: settings.mode, approvalTimeoutMs: settings.timeoutMs };
 }
 
 /**
- * Whether a call asks the operator. `searchProfile` is the Session's own
- * `/2` search profile, the only place `glob` is pre-approved.
+ * Whether a call asks the operator. `globProfile` is the Session's own
+ * search or read profile, the only places `glob` is pre-approved.
  */
 export function hostedApprovalAsks(
   settings: HostedApprovalSettings,
   toolName: string,
-  searchProfile: boolean = false,
+  globProfile: boolean = false,
 ): boolean {
   if (settings.mode === 'yolo') return false;
   return (
     !PREAPPROVED_TOOLS[settings.mode].includes(toolName) &&
-    !(searchProfile && SEARCH_PREAPPROVED_TOOLS.includes(toolName))
+    !(globProfile && SEARCH_PREAPPROVED_TOOLS.includes(toolName))
   );
 }
 
@@ -123,6 +165,7 @@ interface HostedActionOptionsBase {
   readonly inputRevision: number;
   readonly createdAt: number;
   readonly expiresAt: number;
+  readonly requiresHumanDecision?: true;
   readonly options: ReadonlyArray<{
     readonly id: string;
     readonly label: string;
@@ -133,7 +176,94 @@ export type HostedActionOptions = HostedActionOptionsBase &
   (
     | { readonly v: 1 }
     | { readonly v: 2; readonly inputRef: ManagedSessionDurableRef }
+    | {
+        readonly v: 3;
+        readonly inputRef?: ManagedSessionDurableRef;
+        readonly continuationRef: ManagedSessionDurableRef;
+      }
   );
+
+export function parseHostedActionOptions(bytes: Buffer): HostedActionOptions {
+  const value = parseManagedSessionRecordJson(
+    bytes.toString('utf8'),
+    64 * 1024,
+  );
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Invalid Hosted Action options.');
+  const options = value as Record<string, ManagedSessionJsonValue>;
+  const fields = [
+    'v',
+    'requestId',
+    'turnId',
+    'functionCallId',
+    'toolName',
+    'policyRevision',
+    'inputRevision',
+    'createdAt',
+    'expiresAt',
+    'options',
+  ];
+  if (options['requiresHumanDecision'] !== undefined) {
+    if (options['requiresHumanDecision'] !== true)
+      throw new Error('Invalid Hosted Action human decision floor.');
+    fields.push('requiresHumanDecision');
+  }
+  if (options['v'] === 2 || (options['v'] === 3 && options['inputRef']))
+    fields.push('inputRef');
+  if (options['v'] === 3) fields.push('continuationRef');
+  if (
+    ![1, 2, 3].includes(options['v'] as number) ||
+    Object.keys(options).length !== fields.length ||
+    fields.some((field) => !Object.hasOwn(options, field)) ||
+    !Number.isSafeInteger(options['inputRevision']) ||
+    (options['inputRevision'] as number) < 1 ||
+    options['policyRevision'] !== HOSTED_TOOL_APPROVAL_POLICY ||
+    !Number.isSafeInteger(options['createdAt']) ||
+    !Number.isSafeInteger(options['expiresAt']) ||
+    (options['createdAt'] as number) < 0 ||
+    (options['expiresAt'] as number) <= (options['createdAt'] as number) ||
+    !Array.isArray(options['options']) ||
+    options['options'].length !== 2 ||
+    !isDeepStrictEqual(
+      options['options'].map((option) =>
+        option && typeof option === 'object' && !Array.isArray(option)
+          ? option['id']
+          : null,
+      ),
+      ['allow', 'deny'],
+    ) ||
+    options['options'].some(
+      (option) =>
+        !option ||
+        typeof option !== 'object' ||
+        Array.isArray(option) ||
+        Object.keys(option).length !== 2 ||
+        typeof option['label'] !== 'string' ||
+        !option['label'],
+    )
+  )
+    throw new Error('Invalid Hosted Action options.');
+  for (const field of ['requestId', 'turnId', 'functionCallId', 'toolName'])
+    assertManagedSessionStableId(options[field], field);
+  for (const [field, kind] of [
+    ['inputRef', 'managed-tool-input'],
+    ['continuationRef', 'hosted-approval-continuation'],
+  ]) {
+    if (!Object.hasOwn(options, field)) continue;
+    const ref = assertManagedSessionDurableRef(options[field], field);
+    if (
+      (ref.kind !== kind &&
+        !(
+          field === 'inputRef' &&
+          options['v'] === 3 &&
+          ref.kind === 'managed-extension-command-input'
+        )) ||
+      ref.schemaVersion !== 1
+    )
+      throw new Error('Invalid Hosted Action reference.');
+  }
+  return options as unknown as HostedActionOptions;
+}
 
 function decisionBytes(
   optionId: string,
@@ -142,6 +272,19 @@ function decisionBytes(
 ): Buffer {
   return Buffer.from(
     JSON.stringify({ v: 1, optionId, inputRevision, policyRevision }),
+  );
+}
+
+export function hostedActionDenied(
+  action: ManagedSessionAction,
+  policyRevision: string,
+): boolean {
+  return (
+    action.state === 'decided' &&
+    action.decisionRef?.digest ===
+      createHash('sha256')
+        .update(decisionBytes('deny', action.inputRevision, policyRevision))
+        .digest('hex')
   );
 }
 
@@ -176,12 +319,14 @@ export class HostedApprovalWaiters {
     expiresAt: number,
     signal: AbortSignal,
     isFinal: () => boolean,
+    onPoll?: () => Promise<void>,
   ): Promise<void> {
     let timer: NodeJS.Timeout | undefined;
     let poll: NodeJS.Timeout | undefined;
     let onAbort: () => void = () => undefined;
     try {
-      await new Promise<void>((resolve) => {
+      await new Promise<void>((resolve, reject) => {
+        let polling = false;
         this.waiting.set(requestId, resolve);
         onAbort = resolve;
         signal.addEventListener('abort', onAbort, { once: true });
@@ -189,6 +334,19 @@ export class HostedApprovalWaiters {
         timer.unref();
         poll = setInterval(() => {
           if (isFinal()) resolve();
+          else if (
+            onPoll &&
+            !polling &&
+            !signal.aborted &&
+            Date.now() < expiresAt
+          ) {
+            polling = true;
+            void onPoll()
+              .catch(reject)
+              .finally(() => {
+                polling = false;
+              });
+          }
         }, WAIT_POLL_MS);
         poll.unref();
         // An answer may have landed before the waiter was registered.
@@ -238,16 +396,45 @@ export async function endHostedAction(
   }
 }
 
-async function readHostedActionOptions(
+export async function readHostedActionOptions(
   session: ManagedSession,
   action: ManagedSessionAction,
 ): Promise<HostedActionOptions> {
   if (action.optionsRef === null)
     throw new Error(`Action ${action.requestId} has no options.`);
-  return JSON.parse(
-    (await session.resources.read(action.optionsRef)).toString('utf8'),
-  ) as HostedActionOptions;
+  const options = parseHostedActionOptions(
+    await session.resources.read(action.optionsRef),
+  );
+  if (
+    options.requestId !== action.requestId ||
+    options.inputRevision !== action.inputRevision
+  )
+    throw new Error('Hosted Action options do not match the Action.');
+  return options;
 }
+
+/** The closed vocabulary the Hosted refusals carry in 'reason'. */
+export type HostedRefusalReason =
+  | 'authorization_unreadable'
+  | 'activation_inactive'
+  | 'continuation_not_ready'
+  | 'file_history_unsettled'
+  | 'hook_operations_pending'
+  | 'inputs_unsettled'
+  | 'mcp_operations_pending'
+  | 'not_runnable'
+  | 'publication_incomplete'
+  | 'recovery_unsupported'
+  | 'restore_blocked'
+  | 'restore_verification_failed'
+  | 'takeover_failed'
+  | 'takeover_unrecovered'
+  | 'takeover_unsupported'
+  | 'turn_blocked'
+  | 'turn_unsettled'
+  | 'undo_unsettled'
+  | 'workspace_not_writable'
+  | 'writes_stopped';
 
 export type HostedActionResolution =
   | {
@@ -258,12 +445,19 @@ export type HostedActionResolution =
         readonly optionId: string;
       };
     }
-  | { readonly status: 400 | 404 | 409; readonly code: string };
+  | {
+      readonly status: 400 | 404 | 409;
+      readonly code: string;
+      readonly reason?: HostedRefusalReason;
+    };
 
-const RECOVERY_REQUIRED = {
+const recoveryRequired = (session: ManagedSession): HostedActionResolution => ({
   status: 409,
   code: 'hosted_turn_recovery_required',
-} as const;
+  // A stopped writer is the narrower state, so it is named even when the
+  // Session is also recovery-blocked.
+  reason: session.authority.writesStopped ? 'writes_stopped' : 'turn_blocked',
+});
 
 const ENDED_CODES = {
   expired: 'action_expired',
@@ -332,13 +526,13 @@ export async function resolveHostedAction(
     }
     if (writable()) throw cause;
     waiters.notify(requestId);
-    return RECOVERY_REQUIRED;
+    return recoveryRequired(session);
   };
   if (
     authority.action(requestId)!.state === 'requested' &&
     Date.now() >= options.expiresAt
   ) {
-    if (!writable()) return RECOVERY_REQUIRED;
+    if (!writable()) return recoveryRequired(session);
     try {
       await endHostedAction(session, requestId, 'expired', writable);
     } catch (cause) {
@@ -348,7 +542,7 @@ export async function resolveHostedAction(
   }
   const current = recorded();
   if (current) return current;
-  if (!writable()) return RECOVERY_REQUIRED;
+  if (!writable()) return recoveryRequired(session);
   const decisionRef = await session.resources.publish(
     'managed-action-decision',
     bytes,
@@ -356,7 +550,7 @@ export async function resolveHostedAction(
   // Another answer, the expiry or a cancel may have landed meanwhile.
   const landed = recorded();
   if (landed) return landed;
-  if (!writable()) return RECOVERY_REQUIRED;
+  if (!writable()) return recoveryRequired(session);
   try {
     await authority.resolveAction(
       {
@@ -375,4 +569,43 @@ export async function resolveHostedAction(
   }
   waiters.notify(requestId);
   return { status: 200, body: { requestId, state: 'decided', optionId } };
+}
+
+export function hostedLiveApprovalPoll(
+  session: ManagedSession,
+  waiters: HostedApprovalWaiters,
+  options: HostedActionOptions,
+  readSettings: () => Promise<HostedApprovalSettings>,
+  signal: AbortSignal,
+  globProfile = false,
+  isBlocked: () => boolean = () => false,
+): () => Promise<void> {
+  return async () => {
+    if (isBlocked())
+      throw new Error('Hosted approval policy is recovery blocked.');
+    const settings = await readSettings();
+    if (isBlocked())
+      throw new Error('Hosted approval policy is recovery blocked.');
+    if (
+      options.requiresHumanDecision === true ||
+      signal.aborted ||
+      session.authority.writesStopped ||
+      session.authority.action(options.requestId)?.state !== 'requested' ||
+      hostedApprovalAsks(settings, options.toolName, globProfile)
+    )
+      return;
+    const result = await resolveHostedAction(
+      session,
+      waiters,
+      options.requestId,
+      {
+        optionId: 'allow',
+        inputRevision: options.inputRevision,
+        policyRevision: options.policyRevision,
+      },
+      () => signal.aborted || isBlocked(),
+    );
+    if (result.status !== 200 && result.status !== 409)
+      throw new Error(`Hosted live approval failed: ${result.code}`);
+  };
 }

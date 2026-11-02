@@ -79,9 +79,42 @@ incoming/outgoing 调用在预热前后及请求后进行验证。陈旧、缺�
   不消耗读取重试次数。配置重载重放仍在交付前消费停放集；保留重载失败交付的义务
   继续延后。管理器捕获内部的
   TypeScript 预热错误；其他预热文件失败不会阻止查询已同步目标。传播的失败使用
-  工具已有的失败提示，而不是声称结果干净或完整。成功的空诊断仍显示为干净。除
-  调用层次来源处理外，已有请求/拉取及公共查询的捕获逻辑不变，可能返回空数组或
-  null；这些**不能证明诊断干净**。更广泛的错误结果设计仍属于 PR2。
+  工具已有的失败提示，而不是声称结果干净或完整。成功的空诊断仍显示为干净。
+  两个诊断拉取的错误结果设计现已落地：拉取失败与不可用响应（无响应，或报告的
+  item 无一通过归一化）按服务器记录。`-32601` 拒绝不算失败：服务器从未实现该
+  拉取，因此记入单独的 `unsupported` 账本，该账本在两条分支上都不否决。文档级
+  答案仅当拒绝方声明了被查扩展名、且没有任何应答服务器负责该文件时，才因它被拒。
+  工作区级查询没有被查文件，因而没有可供归属的扩展名：该拒绝既不否决兄弟服务器
+  的报告，也不豁免它，只会在闸门因其他原因已经必须拒绝时出现在拒绝信息中。当
+  查询一无所获、且存在
+  属于未被查文件排除的服务器的失败记录、或某个声明方的拒绝无人背书、或某个
+  可能负责被查文件的服务器不可达时，查询拒绝，工具以
+  `ToolErrorType.EXECUTION_FAILED` 暴露该拒绝。权威空报告只有既相关、又在
+  扩展名可被表定位时为正向拥有，才算干净；无法被任何表定位的扩展名
+  （`.h`、`.mts`、无扩展名文件）没有可判定的归属，仅按相关性判定，与本变更
+  引入归属要求之前一致。非 `file:` URI（`jdt://…`）以另一条路径落入同一不可判定
+  情形：`synchronizeDocument` 在发送任何 `didOpen` 之前就返回，服务器为其从未收到
+  的文档作答；此处保留该直通而不是拒绝，因为拒绝会破坏那些为自身虚拟文档作答的
+  服务器。因此它的空答案仅按相关性被呈现为干净——与本变更之前相同，属于合并基线
+  上既有的 fail-open 而非回归，且任何扫描都无法把它与真正的干净渲染区分开。该直通
+  行为与无法定位扩展名的情形在同一闸门处被钉住，避免后续的归属改动把它悄悄变成
+  拒绝。是否
+  应改判为“无依据”是一个待裁决的问题，本变更不作结论。相关性判定会参照诊断表能定位的**全部**扩展名——语言 ID
+  映射表、诊断专属别名表，以及 ID 即扩展名的身份映射集合——且 JS/TS 家族扩展是
+  单向的：`typescript` 声明覆盖 JavaScript 一侧，而仅声明 `javascript` 的服务器
+  不能声称 `.ts` 或 `.tsx`。拒绝信息会指明是哪一条件不成立：取到了答案且确有
+  被查询服务器应答，但没有任何答案正向拥有被查扩展名；相关答案无法归属到
+  被查文件；或无任何已配置服务器覆盖它。不可能负责被查文件的服务器
+  不会否决文档级查询；工作区级查询在任一已配置服务器不可达、或任一拉取因拒绝
+  以外的原因失败时，拒绝给出无依据的干净报告。在查询进行期间才启动完成的服务器
+  会在该判定之前被询问，而不会被报告为不可达：每次拉取都会重读实时句柄状态并
+  追加新就绪者，且只追加尚未查询过的句柄，因此该轮次有界、不会重复询问同一服务器。
+  若某句柄的就绪状态要到最后一次这样的重读之后才可观测，它仍会以“从未被询问”
+  否决。相关性规则只能豁免一个服务器对*另一台*服务器答案的否决，绝不能豁免
+  唯一的答案本身：没有任何被查询服务器应答的文档级查询必须拒绝，即使所有已记录
+  的失败都属于被查文件所排除的服务器。除调用层次来源处理外，其余请求/拉取及
+  公共查询的捕获逻辑不变，可能
+  返回空数组或 null；这些**不能证明诊断干净**。
 - 传输不确认通知交付。本变更不重构异步写入或已关闭连接的处理。
 
 ## 成本
@@ -106,7 +139,9 @@ incoming/outgoing 调用在预热前后及请求后进行验证。陈旧、缺�
 目标。调用层次测试覆盖工具 JSON 往返、嵌套项、移动行的编辑、其他查询、自行读盘
 服务器及在途响应竞态。固定工作区诊断顺序、结果限制范围及符号重试行为。实际客户端
 和工具测试验证：已跟踪文件被删除、发送抛错或工作区变更不受支持时拒绝操作，包括
-此前已有服务器返回结果的情况，同时保留普通拉取请求的捕获逻辑。初始化测试通过启动路径
+此前已有服务器返回结果的情况。其余（非诊断）请求/拉取的捕获逻辑保持不变；两个
+诊断拉取则改为拒绝失败或不可用的拉取，由 `rejects a failed diagnostics pull
+instead of reporting clean` 及其工作区孪生用例钉住。初始化测试通过启动路径
 验证能力的产生。变异检查必须杀死下列每个具名变异体（除注明外均位于
 `native-lsp-service.ts`），并使所列测试变红：R1-5，`ensureDocumentSynchronized`
 返回恒为 `true` 而非打开标志（`does not delay or retry an empty query after
@@ -121,7 +156,35 @@ for two documents`）；R1-12，委托的语言 ID 失去相对扩展名推导�
 its sibling reloads`）；R1-15，强制预热传入 `false` 而非强制标志（`forces
 unchanged TypeScript warmup with a monotonic didChange before retry`）。R1-14 是
 阴性对照：将 `constants.ts` 中的 `DEFAULT_LSP_WARMUP_DELAY_MS` 提高到 300 后，
-`preserves replayed snapshots` 仍须通过。
+`preserves replayed snapshots` 仍须通过。拒绝闸门另增四项：`DIAGNOSTIC_LANGUAGE_ALIASES`
+删掉 `rust` 行（`lets a -32601 refusal from the rust owner veto a non-owner empty
+answer`）；`declaredOwnerExtensions` 被加上 JS/TS 家族扩展（`does not let a
+javascript-only answerer back a typescript refusal`）；`declaredDiagnosticExtensions`
+不再读取 `extensionToLanguage` 的值（`clears a clean answer through a partial
+extensionToLanguage mapping` 与 `names the failed owner a partial mapping leaves
+unanswered`）；第二个拒绝改用未过滤的 `failures`/`unsupported` 账本指名（`does not
+blame an irrelevant server whose pull resolved to nothing`）。归属拆分另增两项：把
+`serverDeclaredIrrelevant` 的守卫回退为 `KNOWN_DIAGNOSTIC_EXTENSIONS`（`does not
+let a failed sibling veto a clean answer for a placeable extension`，且 `refuses an
+empty answer with no attributable owner from` 的 `pyright` 行会失去其覆盖性理由）；
+从干净答案闸门中去掉 attributable 项（`keeps a clean answer for an extension the
+tables cannot place`，三行全红，另加 `keeps a clean answer for a non-file URI the
+tables cannot place`）。工作区分支与归属表另增四项：工作区 catch 把
+`pullUnsupported` 重新并入 `failures`（`keeps a clean workspace report from the
+pull-capable of two servers`、`does not treat a lone -32601 workspace refusal as
+a failed pull`、`names a -32601 workspace refusal beside the failure that did
+veto`）；`serverDeclaredIrrelevant` 的归属谓词回退为
+`KNOWN_DIAGNOSTIC_EXTENSIONS` / `DIAGNOSTIC_LANGUAGE_IDS`（`does not let a
+downed kotlin sibling veto a clean answer it cannot own`，且 `refuses an empty
+answer with no attributable owner from` 的 `kotlin` 行会失去其覆盖性理由）；
+`declaredDiagnosticExtensions` 重新扩展全部四个 JS/TS 家族 ID（`does not let a
+downed javascript sibling veto a clean answer it cannot own` 及其
+`javascriptreact` 孪生用例）；文档分支的 `unreachableDiagnosticServers` 调用去掉
+被查 `uri`（`does not let a downed python sibling veto a clean answer it cannot
+own`，身份映射各行一同变红）。晚就绪重试另增一项：删掉任一条分支对
+`newlyReadyDiagnosticHandles` 的 `pending.push`（文档分支对应 `asks a server
+that became ready during the diagnostics query before deciding`，工作区分支对应其
+`workspaceDiagnostics` 孪生用例）。
 
 按照 AGENTS.md，涉及的服务、管理器及其相邻单元测试此前已重命名为 kebab-case。
 其聚合导出、原生客户端类型导入、集成测试和直接 E2E 测试框架导入已更新。公共类名

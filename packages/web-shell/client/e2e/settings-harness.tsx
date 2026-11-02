@@ -3,6 +3,10 @@ import ReactDOM from 'react-dom/client';
 import '../styles/standalone.css';
 import type { WebShellSettingItemId } from '../settings';
 import type { WebShellTheme } from '../themeContext';
+import type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipMount,
+} from '../unavailableModels';
 
 const indexEntry = '../index.tsx';
 const { WebShellWithProviders, WEB_SHELL_SETTING_ITEM_IDS } = await import(
@@ -28,6 +32,46 @@ const excludeItems = parseItems(params.get('exclude') ?? '');
 const includeItems = params.has('include')
   ? parseItems(params.get('include') ?? '')
   : undefined;
+const unavailableModels: readonly WebShellUnavailableModel[] | undefined =
+  params.get('unavailableModels') === '1'
+    ? [
+        {
+          id: 'qwen-max',
+          label: 'Qwen Max',
+          tooltip: 'Available on the Pro plan.',
+        },
+        {
+          id: 'gpt-5',
+          label: 'GPT-5',
+          tooltip: 'Requires an enterprise account.',
+        },
+      ]
+    : undefined;
+const mountUnavailableModelTooltip:
+  | WebShellUnavailableModelTooltipMount
+  | undefined =
+  params.get('unavailableMount') === '1'
+    ? (container, info) => {
+        const summary = container.ownerDocument.createElement('p');
+        summary.style.margin = '0';
+        const button = container.ownerDocument.createElement('button');
+        button.type = 'button';
+        button.textContent = 'Authorize';
+        button.style.cssText =
+          'appearance:none;border:1px solid var(--border);border-radius:8px;padding:6px 10px;background:transparent;color:var(--foreground);font:inherit;font-size:13px;font-weight:500;cursor:pointer';
+        const update = () => {
+          summary.textContent = 'Not authorized for the current account.';
+        };
+        update(info);
+        container.replaceChildren(summary, button);
+        return {
+          update,
+          dispose() {
+            container.replaceChildren();
+          },
+        };
+      }
+    : undefined;
 
 function SettingsHarness() {
   const [modelManagement, setModelManagement] = useState(() => ({
@@ -50,8 +94,16 @@ function SettingsHarness() {
       baseUrl={window.location.origin}
       sessionId={sessionId}
       theme={theme}
+      sidebar={params.get('sidebar') === 'false' ? false : undefined}
       settings={{ includeItems, excludeItems }}
+      loadingPhrases={
+        params.has('loadingPhrase')
+          ? () => [params.get('loadingPhrase')!]
+          : undefined
+      }
       modelManagement={modelManagement}
+      unavailableModels={unavailableModels}
+      mountUnavailableModelTooltip={mountUnavailableModelTooltip}
     />
   );
 }

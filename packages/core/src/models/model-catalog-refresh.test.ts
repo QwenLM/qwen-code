@@ -388,6 +388,33 @@ describe('trimModelsDevCatalog', () => {
     expect(models['glm-5-3-flash']).toEqual(models['glm-5.3-flash']);
   });
 
+  it.each(['glm-4.5v', 'glm-4-5v'])(
+    'projects both spellings of the vision model %s',
+    (id) => {
+      const entry = {
+        context: 64_000,
+        output: 16_384,
+        modalities: { image: true, video: true },
+      };
+      const models = trimModelsDevCatalog(
+        {
+          zai: {
+            models: {
+              [id]: chat(id, { context: 64_000, output: 16_384 }, [
+                'text',
+                'image',
+                'video',
+              ]),
+            },
+          },
+        },
+        NOW,
+      ).models;
+      expect(models['glm-4.5v']).toEqual(entry);
+      expect(models['glm-4-5v']).toEqual(entry);
+    },
+  );
+
   it('never aliases over a key the projection committed itself', () => {
     // Both spellings are real keys with different endpoint limits here, so
     // each keeps its own numbers instead of one aliasing over the other.
@@ -539,6 +566,43 @@ describe('trimModelsDevCatalog', () => {
       output: 1000,
       modalities: { image: true, pdf: true },
     });
+  });
+
+  it('aliases a limit-less entry, whose whole content is the modality union', () => {
+    // The disagreement veto above drops the limits but keeps the union, so the
+    // entry reaching the alias pass can carry `modalities` and nothing else.
+    // That shape is live in the shipped snapshot — `qwen3.7-plus` and its twin
+    // `qwen3-7-plus` are both `{image,video}`-only — and skipping it would drop
+    // the twin from the next regeneration, leaving it with no catalog entry to
+    // supply modalities. The twin's limits come from the `/^qwen/` regex rows
+    // either way, since the entry the alias writes is the limit-less one pinned
+    // here — this removes the modality half of the loss #13209 exists to remove.
+    const models = trimModelsDevCatalog(
+      {
+        alibaba: {
+          models: {
+            'qwen3.7-plus': chat(
+              'qwen3.7-plus',
+              { context: 1000000, output: 65536 },
+              ['text', 'image'],
+            ),
+          },
+        },
+        zai: {
+          models: {
+            'qwen3.7-plus': chat(
+              'qwen3.7-plus',
+              { context: 1000000, output: 131072 },
+              ['text', 'video'],
+            ),
+          },
+        },
+      },
+      NOW,
+    ).models;
+    const unionOnly = { modalities: { image: true, video: true } };
+    expect(models['qwen3.7-plus']).toEqual(unionOnly);
+    expect(models['qwen3-7-plus']).toEqual(unionOnly);
   });
 
   it('adds no alias for a spelling normalize() already folds', () => {

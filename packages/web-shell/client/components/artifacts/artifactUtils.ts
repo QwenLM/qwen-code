@@ -92,10 +92,10 @@ const OFFICE_DOCUMENT_EXTENSIONS = new Set([
 
 const AUDIO_EXTENSIONS = new Set(['.m4a', '.mp3', '.ogg', '.wav']);
 
+// Previewable Office types are allowed before this shared fallback is checked.
 const DOWNLOAD_ONLY_EXTENSIONS = new Set([
   ...OFFICE_DOCUMENT_EXTENSIONS,
   ...AUDIO_EXTENSIONS,
-  '.pdf',
   '.mp4',
   '.mov',
   '.webm',
@@ -105,21 +105,54 @@ export function isOfficeDocumentPath(workspacePath?: string): boolean {
   return OFFICE_DOCUMENT_EXTENSIONS.has(pathExtension(workspacePath));
 }
 
+export function isExcelFile(
+  workspacePath?: string,
+  mimeType?: string,
+): boolean {
+  const extension = workspaceFileExtension(workspacePath);
+  return extension
+    ? extension === '.xlsx'
+    : normalizeArtifactMimeType(mimeType) ===
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+}
+
+export const DOCX_MIME_TYPE =
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+export function isDocxFile(workspacePath?: string, mimeType?: string): boolean {
+  const extension = workspaceFileExtension(workspacePath);
+  return extension
+    ? extension === '.docx'
+    : normalizeArtifactMimeType(mimeType) === DOCX_MIME_TYPE;
+}
+
+export function isPdfArtifact(artifact: {
+  kind?: string;
+  workspacePath?: string;
+  mimeType?: string;
+}): boolean {
+  return (
+    workspaceFileExtension(artifact.workspacePath) === '.pdf' ||
+    normalizeArtifactMimeType(artifact.mimeType) === 'application/pdf' ||
+    artifact.kind === 'pdf'
+  );
+}
+
 export function isDownloadOnlyWorkspaceArtifact(artifact: {
   kind?: string;
   workspacePath?: string;
   mimeType?: string;
 }): boolean {
-  const extension = pathExtension(artifact.workspacePath);
+  if (isExcelFile(artifact.workspacePath, artifact.mimeType)) return false;
+  const extension = workspaceFileExtension(artifact.workspacePath);
   const mimeType = normalizeArtifactMimeType(artifact.mimeType);
-  if (
-    extension === '.svg' ||
-    mimeType === 'image/svg+xml' ||
-    DOWNLOAD_ONLY_EXTENSIONS.has(extension)
-  ) {
+  if (extension === '.svg' || mimeType === 'image/svg+xml') {
     return true;
   }
+  if (isDocxFile(artifact.workspacePath, artifact.mimeType)) return false;
+  if (DOWNLOAD_ONLY_EXTENSIONS.has(extension)) return true;
   if (
+    isPdfArtifact(artifact) ||
     getArtifactImageMimeType(artifact) ||
     extension === '.md' ||
     extension === '.markdown' ||
@@ -133,7 +166,6 @@ export function isDownloadOnlyWorkspaceArtifact(artifact: {
   if (
     artifact.kind === 'image' ||
     artifact.kind === 'document' ||
-    artifact.kind === 'pdf' ||
     artifact.kind === 'video' ||
     artifact.kind === 'audio'
   ) {
@@ -143,8 +175,11 @@ export function isDownloadOnlyWorkspaceArtifact(artifact: {
 }
 
 export function pathExtension(workspacePath?: string): string {
-  const path = (workspacePath ?? '').split(/[?#]/, 1)[0];
-  const name = path.split(/[/\\]/).pop() ?? '';
+  return workspaceFileExtension((workspacePath ?? '').split(/[?#]/, 1)[0]);
+}
+
+function workspaceFileExtension(workspacePath?: string): string {
+  const name = (workspacePath ?? '').split(/[/\\]/).pop() ?? '';
   const dot = name.lastIndexOf('.');
   return dot >= 0 ? name.slice(dot).toLowerCase() : '';
 }
@@ -324,8 +359,7 @@ export async function downloadWorkspaceFile(
   try {
     const link = document.createElement('a');
     link.href = url;
-    link.download =
-      normalizePath(workspacePath).split('/').at(-1) ?? workspacePath;
+    link.download = workspaceFileName(workspacePath) ?? workspacePath;
     // Prevent embedding hosts from replacing the native download with navigation.
     link.addEventListener('click', (event) => event.stopPropagation());
     document.body.appendChild(link);
@@ -338,6 +372,28 @@ export async function downloadWorkspaceFile(
 
 export function getArtifactLocation(artifact: DaemonSessionArtifact): string {
   return artifact.workspacePath ?? artifact.url ?? artifact.managedId ?? '';
+}
+
+/**
+ * Workspace files are shown by filename. Links and managed artifacts have no
+ * file, so they keep the stored title.
+ */
+export function artifactDisplayName(
+  artifact: Pick<DaemonSessionArtifact, 'title'> & {
+    workspacePath?: string;
+  },
+): string {
+  return (
+    workspaceFileName(artifact.workspacePath) || artifact.title || 'Artifact'
+  );
+}
+
+/** A backslash stays in the name, matching `path.posix.basename`. */
+export function workspaceFileName(
+  workspacePath: string | undefined,
+): string | undefined {
+  const filename = workspacePath?.split('/').at(-1);
+  return filename || undefined;
 }
 
 export function normalizePath(value: string | undefined): string {

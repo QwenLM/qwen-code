@@ -1,3 +1,4 @@
+import { createDaemonRestRequest } from '../daemon/rest-request.js';
 import {
   useCallback,
   useEffect,
@@ -22,6 +23,10 @@ import {
   isRemoteWorkspaceAddActive,
   leaveRemoteWorkspaceAdd,
 } from '../config/remote-workspace-add';
+import {
+  openHostedWorkspace,
+  useWorkspaceHosts,
+} from '../config/workspace-hosts';
 import type { WebShellLanguage } from '../i18n';
 import { WebShellThemeId, type WebShellTheme } from '../themeContext';
 import { Button } from './ui/button';
@@ -35,6 +40,7 @@ import {
 } from './ui/card';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
+import { Spinner } from './ui/spinner';
 
 // A probe must give up well before the SDK's own 30s fetch timeout
 // (DaemonClient DEFAULT_FETCH_TIMEOUT_MS) so the gate keeps retrying while the
@@ -75,41 +81,43 @@ interface AuthCopy {
 
 // This gate renders before the app (and therefore before its I18nProvider), so
 // it carries its own copy table instead of calling useI18n.
+const EN_COPY: AuthCopy = {
+  pairingFailed:
+    'Pairing failed or the QR code expired. Scan a fresh QR code, or enter the daemon token.',
+  heading: 'Connect to Qwen Code',
+  connecting: 'Connecting…',
+  starting: 'Daemon is starting…',
+  unreachable: 'Cannot reach the daemon. Retrying…',
+  remoteUnreachable:
+    'Cannot reach the daemon. Retrying… Check the address, network, HTTPS certificate, and --allow-origin for this page origin.',
+  notReady: 'Daemon is not ready. Retrying…',
+  startFailed: 'Daemon failed to start.',
+  invalidToken:
+    'Invalid or expired token. Enter the token from the daemon terminal.',
+  enterToken: 'Enter the bearer token from the daemon terminal.',
+  policyBlocked:
+    'Access blocked by the daemon Origin or Host policy. Open its direct address, or check --allow-origin for cross-origin access.',
+  invalidAddress: 'Invalid daemon address. Enter an HTTP or HTTPS origin.',
+  addressChanged:
+    'Connection paused. Select Connect to use the entered address.',
+  confirmTarget:
+    'This page points to a daemon this browser has not connected to before. Connect only if you trust it.',
+  remoteHint:
+    'The token is sent to the address shown above. Enter only a token issued by that daemon.',
+  switchUnavailable:
+    'Browser storage is unavailable, so the token could not be carried to that daemon.',
+  addressLabel: 'Daemon address',
+  tokenLabel: 'Bearer token (optional)',
+  connect: 'Connect',
+  local: 'Return to local workspaces',
+  remoteAddCancel: 'Cancel adding workspace',
+  connectionAddCancel: 'Cancel adding connection',
+  retry: 'Retry',
+  hint: 'This token grants full access to the daemon. Only enter it on a page you opened from the daemon terminal or its QR code.',
+};
+
 const COPY: Record<WebShellLanguage, AuthCopy> = {
-  en: {
-    pairingFailed:
-      'Pairing failed or the QR code expired. Scan a fresh QR code, or enter the daemon token.',
-    heading: 'Connect to Qwen Code',
-    connecting: 'Connecting…',
-    starting: 'Daemon is starting…',
-    unreachable: 'Cannot reach the daemon. Retrying…',
-    remoteUnreachable:
-      'Cannot reach the daemon. Retrying… Check the address, network, HTTPS certificate, and --allow-origin for this page origin.',
-    notReady: 'Daemon is not ready. Retrying…',
-    startFailed: 'Daemon failed to start.',
-    invalidToken:
-      'Invalid or expired token. Enter the token from the daemon terminal.',
-    enterToken: 'Enter the bearer token from the daemon terminal.',
-    policyBlocked:
-      'Access blocked by the daemon Origin or Host policy. Open its direct address, or check --allow-origin for cross-origin access.',
-    invalidAddress: 'Invalid daemon address. Enter an HTTP or HTTPS origin.',
-    addressChanged:
-      'Connection paused. Select Connect to use the entered address.',
-    confirmTarget:
-      'This page points to a daemon this browser has not connected to before. Connect only if you trust it.',
-    remoteHint:
-      'The token is sent to the address shown above. Enter only a token issued by that daemon.',
-    switchUnavailable:
-      'Browser storage is unavailable, so the token could not be carried to that daemon.',
-    addressLabel: 'Daemon address',
-    tokenLabel: 'Bearer token (optional)',
-    connect: 'Connect',
-    local: 'Return to local workspaces',
-    remoteAddCancel: 'Cancel adding workspace',
-    connectionAddCancel: 'Cancel adding connection',
-    retry: 'Retry',
-    hint: 'This token grants full access to the daemon. Only enter it on a page you opened from the daemon terminal or its QR code.',
-  },
+  en: EN_COPY,
   'zh-CN': {
     pairingFailed:
       '配对失败或二维码已过期。请扫描新的二维码，或输入 daemon 令牌。',
@@ -140,6 +148,9 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     retry: '重试',
     hint: '该令牌拥有守护进程的完整访问权限。请仅在从守护进程终端或其二维码打开的页面中输入。',
   },
+  // Not translated yet — same partial-catalog policy as the ru table in
+  // i18n.tsx (#13391): ru reuses the EN copy.
+  ru: EN_COPY,
 };
 
 /** `Retry-After` in milliseconds (delta-seconds or HTTP-date), or undefined. */
@@ -189,6 +200,7 @@ export function StandaloneAuth({
   const copy = COPY[language] ?? COPY.en;
   const remoteWorkspaceAddActive = isRemoteWorkspaceAddActive();
   const remoteConnectionAddActive = isRemoteConnectionAddActive();
+  const hosts = useWorkspaceHosts();
   const [address, setAddress] = useState(initialAddress);
   const [token, setToken] = useState(initialToken ?? '');
   const [accepted, setAccepted] = useState<{ token?: string }>();
@@ -277,7 +289,12 @@ export function StandaloneAuth({
         timerRef.current = setTimeout(() => setAttempt((n) => n + 1), delayMs);
       };
       try {
-        const response = await fetch(`${baseUrl}/capabilities`, {
+        const response = await createDaemonRestRequest(
+          baseUrl,
+          candidate,
+          undefined,
+          true,
+        )('/capabilities', {
           headers: candidate ? { Authorization: `Bearer ${candidate}` } : {},
           signal: controller.signal,
         });
@@ -383,6 +400,39 @@ export function StandaloneAuth({
   ]);
 
   if (accepted) return children(accepted.token);
+  // A credential supplied at boot (the desktop `#token=` URL, `serve --open`,
+  // or a per-tab stored token) almost always authenticates on the first
+  // probe. Painting the credential form during that round trip flashes a login
+  // screen at startup, so hold it back until the probe asks for input.
+  const verifyingBootCredential =
+    busy &&
+    attempt === 0 &&
+    !invalidTarget &&
+    !confirming &&
+    !awaitingPairing &&
+    Boolean(initialToken);
+  if (verifyingBootCredential) {
+    return (
+      <div
+        data-web-shell-root
+        data-web-shell-shadcn
+        data-web-shell-gate
+        className={`flex min-h-screen items-center justify-center bg-background p-6 text-foreground ${
+          theme === WebShellThemeId.Light
+            ? AppStyles.themeLight
+            : `${AppStyles.themeDark} dark`
+        }`}
+      >
+        <div
+          role="status"
+          className="flex items-center gap-2 text-sm text-muted-foreground"
+        >
+          <Spinner aria-hidden="true" />
+          <span>{copy.connecting}</span>
+        </div>
+      </div>
+    );
+  }
   const normalizedAddress = getAllowedDaemonOrigin(address.trim());
   const changingTarget = invalidTarget || normalizedAddress !== baseUrl;
   return (
@@ -536,6 +586,26 @@ export function StandaloneAuth({
                   : copy.local}
             </Button>
           )}
+          {hosts
+            .filter(
+              (host) =>
+                host.origin !== baseUrl &&
+                host.origin !== window.location.origin,
+            )
+            .map((host) => (
+              <Button
+                key={host.origin}
+                variant="outline"
+                onClick={() => {
+                  // See the local-return button: leaving a target must retire
+                  // its probe loop before navigation is committed.
+                  retireProbe();
+                  openHostedWorkspace(host.origin);
+                }}
+              >
+                {host.origin}
+              </Button>
+            ))}
         </CardContent>
         <CardFooter className="justify-center">
           <p className="text-center text-xs text-muted-foreground">

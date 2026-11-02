@@ -7,8 +7,14 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent,
 } from 'react';
-import { LightbulbIcon, ThumbsDownIcon, ThumbsUpIcon } from 'lucide-react';
+import {
+  LightbulbIcon,
+  SplitIcon,
+  ThumbsDownIcon,
+  ThumbsUpIcon,
+} from 'lucide-react';
 import { Markdown } from './Markdown';
+import { SelectionCopyMenu } from './SelectionCopyMenu';
 import { TurnSources } from '../sources/TurnSources';
 import {
   useWebShellCustomization,
@@ -27,21 +33,36 @@ import {
   writeClipboardText,
 } from '../../utils/clipboard';
 import { useCopiedFlash } from '../../hooks/useCopiedFlash';
-import type { DaemonSessionGenerationEvent } from '@qwen-code/sdk/daemon';
+import { getSelectedReplyText } from '../../utils/selectionClipboard';
+import type {
+  DaemonSessionGenerationEvent,
+  QwenAgentMessageMeta,
+} from '@qwen-code/sdk/daemon';
 import type { DaemonMessageAuthor } from '../../adapters/messageTypes';
 import { AuthorAvatar } from './AuthorAvatar';
+import { SquadTag } from './squad-tag';
+import { AgentMessageDetails, isBlankAgentText } from './agent-message-details';
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '../ui/tooltip';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './AssistantMessage.module.css';
 
 interface AssistantMessageProps {
   content: string;
   author?: DaemonMessageAuthor;
+  /** A workspace agent's reply: its run status, error, steps and tokens. */
+  agentMessage?: QwenAgentMessageMeta;
   isStreaming?: boolean;
   timestamp?: number;
   onBranchSession?: () => void | Promise<void>;
   showFooterActions?: boolean;
+  footerAlwaysVisible?: boolean;
   showBranchAction?: boolean;
   /** Satisfied / not-satisfied marks are only offered when this is set. */
   showAssistantFeedback?: boolean;
@@ -58,10 +79,12 @@ interface AssistantMessageProps {
 export const AssistantMessage = memo(function AssistantMessage({
   content,
   author,
+  agentMessage,
   isStreaming,
   timestamp,
   onBranchSession,
   showFooterActions = false,
+  footerAlwaysVisible = false,
   showBranchAction = false,
   showAssistantFeedback = false,
   assistantFeedbackRating,
@@ -72,12 +95,23 @@ export const AssistantMessage = memo(function AssistantMessage({
   onSourceOpen,
 }: AssistantMessageProps) {
   const { t } = useI18n();
-  const documentMode = useTranscriptRenderMode() === 'document';
+  const renderMode = useTranscriptRenderMode();
+  const documentMode = renderMode === 'document';
   const { renderAssistantTurnFooter } = useWebShellCustomization();
+  const contentRef = useRef<HTMLDivElement>(null);
   const [copied, flashCopied] = useCopiedFlash();
+  const [markdownCopied, flashMarkdownCopied] = useCopiedFlash();
   const [branchPending, setBranchPending] = useState(false);
+  // An agent reply of only whitespace or invisible characters (a leader's
+  // U+200B, recorded before the daemon classified it) shows no bubble text;
+  // a squad leader's such reply is its `no_action` line.
+  const blankAgentReply =
+    agentMessage?.kind === 'agent_message' &&
+    !isStreaming &&
+    isBlankAgentText(content);
   const showFooter =
     !!content &&
+    !blankAgentReply &&
     !isStreaming &&
     (showFooterActions || (turnSources?.length ?? 0) > 0) &&
     !documentMode;
@@ -99,13 +133,23 @@ export const AssistantMessage = memo(function AssistantMessage({
       setBranchPending(false);
     }
   }, [branchPending, onBranchSession]);
-  const handleCopy = useCallback(() => {
-    void writeClipboardText(content)
-      .then(() => {
-        flashCopied();
-      })
-      .catch(warnClipboardWriteFailure);
-  }, [content, flashCopied]);
+  const handleCopy = useCallback(
+    (format: 'text' | 'markdown') => {
+      let value = content;
+      if (format === 'text') {
+        const body = contentRef.current;
+        if (!body) return;
+        const range = body.ownerDocument.createRange();
+        range.selectNodeContents(body);
+        const extracted = getSelectedReplyText(body, range);
+        value = extracted && extracted.trim() ? extracted : content;
+      }
+      void writeClipboardText(value)
+        .then(format === 'text' ? flashCopied : flashMarkdownCopied)
+        .catch(warnClipboardWriteFailure);
+    },
+    [content, flashCopied, flashMarkdownCopied],
+  );
   // Clicking the lit icon clears the mark; clicking the other one switches it.
   const handleFeedback = useCallback(
     (
@@ -136,90 +180,183 @@ export const AssistantMessage = memo(function AssistantMessage({
     },
     [assistantFeedbackRating],
   );
+  const squadName =
+    agentMessage?.kind === 'agent_message'
+      ? agentMessage.author?.squadName
+      : undefined;
+  // The squad shown beside the author: the one it leads, or the one whose
+  // leader it answered as a member. Only the leader's counts for no_action.
+  const squadLabel =
+    squadName ??
+    (agentMessage?.kind === 'agent_message'
+      ? agentMessage.author?.memberSquadName
+      : undefined);
+  if (
+    agentMessage?.kind === 'agent_message' &&
+    (agentMessage.squadOutcome === 'no_action' ||
+      (blankAgentReply &&
+        !!squadName &&
+        (agentMessage.status ?? 'completed') === 'completed'))
+  ) {
+    // A squad leader that decided nothing was needed: one muted line, not a
+    // message: the squad's tag, then a plain sentence. The sentence is in the
+    // main dictionary so exported transcripts can show it (the collaboration
+    // dictionary is stubbed there).
+    const noActionKey = 'agentMessage.noAction';
+    const noActionLabel = t(noActionKey, {
+      name: author?.name ?? agentMessage.author?.name ?? '',
+    }).trim();
+    return (
+      <div
+        className={styles.squadNoAction}
+        data-squad-outcome="no_action"
+        role="note"
+      >
+        {squadName && <SquadTag name={squadName} />}
+        <span className={styles.squadNoActionText}>
+          {noActionLabel === noActionKey ? '—' : noActionLabel}
+        </span>
+      </div>
+    );
+  }
   return (
     <div className={styles.message}>
       {author && (
         <div className={styles.author}>
           <AuthorAvatar name={author.name} color={author.color} />
           <span className={styles.authorName}>{author.name}</span>
+          {squadLabel && <SquadTag name={squadLabel} />}
         </div>
       )}
-      {content && (
+      {content && !blankAgentReply && (
         <div
+          ref={contentRef}
           className={`${styles.content}${
             isLocateFlashing ? ` ${flashStyles.flash}` : ''
           }`}
         >
-          <div className={styles.contentBody}>
+          <SelectionCopyMenu
+            className={styles.contentBody}
+            content={content}
+            enabled={renderMode === 'interactive' && !isStreaming}
+          >
             <Markdown
               content={content}
               source="assistant"
               isStreaming={isStreaming}
             />
-          </div>
+          </SelectionCopyMenu>
         </div>
+      )}
+      {agentMessage?.kind === 'agent_message' && (
+        <AgentMessageDetails meta={agentMessage} />
       )}
       {customFooter && (
         <div className={styles.customFooter}>{customFooter}</div>
       )}
       {showFooter && (
-        <div className={styles.messageFooter}>
-          {showFooterActions && (
-            <button
-              type="button"
-              className={styles.copyButton}
-              title={t('assistant.copy')}
-              aria-label={t('assistant.copy')}
-              onClick={handleCopy}
-            >
-              {copied ? <CheckIcon /> : <CopyIcon />}
-            </button>
-          )}
-          {showFooterActions && showAssistantFeedback && (
-            <>
-              <button
-                type="button"
-                className={feedbackButtonClass('up')}
-                title={t('assistant.satisfied')}
-                aria-label={t('assistant.satisfied')}
-                aria-pressed={assistantFeedbackRating === 'up'}
-                onClick={(event) => handleFeedback('up', event)}
-              >
-                <ThumbsUpIcon />
-              </button>
-              <button
-                type="button"
-                className={feedbackButtonClass('down')}
-                title={t('assistant.dissatisfied')}
-                aria-label={t('assistant.dissatisfied')}
-                aria-pressed={assistantFeedbackRating === 'down'}
-                onClick={(event) => handleFeedback('down', event)}
-              >
-                <ThumbsDownIcon />
-              </button>
-            </>
-          )}
-          {showFooterActions && showBranchAction && onBranchSession && (
-            <button
-              type="button"
-              className={styles.copyButton}
-              title={t('assistant.branch')}
-              aria-label={t('assistant.branch')}
-              disabled={branchPending}
-              onClick={() => void handleBranch()}
-            >
-              <BranchIcon />
-            </button>
-          )}
-          {turnSources?.length ? (
-            <TurnSources sources={turnSources} onOpen={onSourceOpen} />
-          ) : null}
-          {showFooterActions && timestamp !== undefined && (
-            <span className={styles.footerTime} aria-hidden="true">
-              {formatTimestamp(timestamp)}
-            </span>
-          )}
-        </div>
+        <TooltipProvider delayDuration={300} disableHoverableContent>
+          <div
+            className={`${styles.messageFooter}${footerAlwaysVisible ? ` ${styles.messageFooterVisible}` : ''}`}
+          >
+            {showFooterActions && (
+              <>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      className={styles.copyButton}
+                      aria-label={t('assistant.copyContent')}
+                      onClick={() => handleCopy('text')}
+                    >
+                      {copied ? <CheckIcon /> : <CopyIcon />}
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" variant="black">
+                    {t('assistant.copyContent')}
+                  </TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      className={styles.copyButton}
+                      aria-label={t('assistant.copyMarkdownSource')}
+                      onClick={() => handleCopy('markdown')}
+                    >
+                      {markdownCopied ? <CheckIcon /> : <MarkdownIcon />}
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" variant="black">
+                    {t('assistant.copyMarkdownSource')}
+                  </TooltipContent>
+                </Tooltip>
+              </>
+            )}
+            {showFooterActions && showAssistantFeedback && (
+              <>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      className={feedbackButtonClass('up')}
+                      aria-label={t('assistant.satisfied')}
+                      aria-pressed={assistantFeedbackRating === 'up'}
+                      onClick={(event) => handleFeedback('up', event)}
+                    >
+                      <ThumbsUpIcon />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" variant="black">
+                    {t('assistant.satisfied')}
+                  </TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      className={feedbackButtonClass('down')}
+                      aria-label={t('assistant.dissatisfied')}
+                      aria-pressed={assistantFeedbackRating === 'down'}
+                      onClick={(event) => handleFeedback('down', event)}
+                    >
+                      <ThumbsDownIcon />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" variant="black">
+                    {t('assistant.dissatisfied')}
+                  </TooltipContent>
+                </Tooltip>
+              </>
+            )}
+            {showFooterActions && showBranchAction && onBranchSession && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className={`${styles.copyButton} ${styles.branchButton}`}
+                    aria-label={t('assistant.branch')}
+                    disabled={branchPending}
+                    onClick={() => void handleBranch()}
+                  >
+                    <SplitIcon aria-hidden="true" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="top" variant="black">
+                  {t('assistant.branch')}
+                </TooltipContent>
+              </Tooltip>
+            )}
+            {turnSources?.length ? (
+              <TurnSources sources={turnSources} onOpen={onSourceOpen} />
+            ) : null}
+            {showFooterActions && timestamp !== undefined && (
+              <span className={styles.footerTime} aria-hidden="true">
+                {formatTimestamp(timestamp)}
+              </span>
+            )}
+          </div>
+        </TooltipProvider>
       )}
     </div>
   );
@@ -250,6 +387,23 @@ function CopyIcon() {
   );
 }
 
+function MarkdownIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="1" y="3" width="14" height="10" rx="1.2" />
+      <path d="M3.5 10V6l2 2 2-2v4M11 6v4m-1.5-1.5L11 10l1.5-1.5" />
+    </svg>
+  );
+}
+
 function CheckIcon() {
   return (
     <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -261,32 +415,6 @@ function CheckIcon() {
         strokeLinejoin="round"
         strokeWidth="1.6"
       />
-    </svg>
-  );
-}
-
-function BranchIcon() {
-  return (
-    <svg viewBox="0 0 16 16" aria-hidden="true">
-      <path
-        d="M5 3.5v5.2c0 2.1 1.7 3.8 3.8 3.8H11"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.35"
-      />
-      <path
-        d="M5 8.2h3.2c1.5 0 2.8-1.2 2.8-2.8V4"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.35"
-      />
-      <circle cx="5" cy="3.5" r="1.5" fill="currentColor" />
-      <circle cx="11" cy="4" r="1.5" fill="currentColor" />
-      <circle cx="11" cy="12.5" r="1.5" fill="currentColor" />
     </svg>
   );
 }

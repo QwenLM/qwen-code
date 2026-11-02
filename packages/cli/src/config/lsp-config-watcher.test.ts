@@ -103,6 +103,26 @@ describe('LspConfigWatcher', () => {
     expect(listener).toHaveBeenCalledTimes(1);
   });
 
+  it('accepts a config saved with a UTF-8 BOM', async () => {
+    const dir = makeTempDir();
+    const configPath = path.join(dir, '.lsp.json');
+    const watcher = new LspConfigWatcher(dir) as unknown as TestableWatcher;
+    const listener = vi.fn();
+    watcher.listener = listener;
+
+    fs.writeFileSync(configPath, '\uFEFF{"typescript":{"command":"tsserver"}}');
+    await watcher.handleChange();
+    expect(listener).toHaveBeenCalledWith({
+      path: configPath,
+      changeType: 'created',
+    });
+
+    // Dropping the BOM leaves the same config, so nothing is reloaded.
+    fs.writeFileSync(configPath, '{"typescript":{"command":"tsserver"}}');
+    await watcher.handleChange();
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
   // Invalid JSON should be visible to the user, but it must not replace the
   // current runtime state. A later delete still needs to reconcile to empty.
   it('notifies invalid config and notifies on later deletion', async () => {

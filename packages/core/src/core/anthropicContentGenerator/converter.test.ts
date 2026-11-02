@@ -27,6 +27,7 @@ import {
   type ConvertLlmRequestToAnthropicOptions as Opts,
 } from './converter.js';
 import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
+import { appendAutoMemoryContext } from '../../memory/request-context.js';
 import {
   content,
   fnCall,
@@ -166,10 +167,10 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('emits scope:"global" on the system text when useGlobalCacheScope is set', () => {
-      // Anthropic-native + caching enabled → the generator passes
-      // `useGlobalCacheScope: true` and the system prefix joins cross-session
-      // caching under the `prompt-caching-scope-2026-01-05` beta. Other
-      // backends pass false (or omit) and get the per-session shape above.
+      // Caching on plus an explicit `forceGlobalCacheScope` opt-in → the
+      // generator passes `useGlobalCacheScope: true`, and the system prefix
+      // joins cross-session caching under the scope beta. Without the opt-in
+      // every backend gets the per-session shape above.
       expect(systemOf('sys', { useGlobalCacheScope: true })).toEqual([
         txt('sys', GLOBAL),
       ]);
@@ -242,6 +243,31 @@ describe('AnthropicContentConverter', () => {
       expect(messages).toEqual([
         assistant(think('internal', 'sig'), txt('visible')),
       ]);
+    });
+
+    it('fills an empty signature for a thought part without thoughtSignature when fillUnsignedThinkingSignature is set', () => {
+      // Cross-provider history where the upstream generator set `thought:
+      // true` without a signature used to replay as a `thinking` block with
+      // no `signature` field at all, which strict Anthropic-compatible
+      // backends (SGLang, llama.cpp, vLLM) reject with HTTP 400. With the
+      // option on, it must replay as an empty signature instead.
+      // https://github.com/QwenLM/qwen-code/issues/11772
+      const { messages } = convert(
+        [content('model', thought('internal'), { text: 'visible' })],
+        { fillUnsignedThinkingSignature: true },
+      );
+      expect(messages).toEqual([
+        assistant(think('internal', ''), txt('visible')),
+      ]);
+    });
+
+    it('leaves a thought part without thoughtSignature unsigned when fillUnsignedThinkingSignature is off', () => {
+      // The fill is opt-in per provider quadrant; without the option the
+      // block keeps its original (unsigned) shape.
+      const { messages } = convert([
+        content('model', thought('internal'), { text: 'visible' }),
+      ]);
+      expect(messages).toEqual([assistant(think('internal'), txt('visible'))]);
     });
 
     it('converts functionCall parts from model role into tool_use blocks', () => {
@@ -1569,9 +1595,9 @@ describe('AnthropicContentConverter', () => {
 
     it('emits scope:"global" on the last tool when useGlobalCacheScope is set', async () => {
       // Mirror of the system-block scope test: cross-session caching for
-      // tools (the largest, slowest-changing prefix) only fires for
-      // Anthropic-native baseURLs. The generator latches the predicate
-      // once per request and forwards the same value here.
+      // tools (the largest, slowest-changing prefix) only fires under an
+      // explicit `forceGlobalCacheScope` opt-in. The generator latches the
+      // predicate once per request and forwards the same value here.
       const result = await converter.convertLlmToolsToAnthropic(
         toolsOf(weather()),
         { useGlobalCacheScope: true },
@@ -1818,6 +1844,46 @@ describe('AnthropicContentConverter', () => {
       expect(lastBlock.cache_control).toEqual(EPH);
     });
 
+    it('keeps the per-turn breakpoint off the request-only memory catalog', () => {
+      // appendAutoMemoryContext appends the catalog as the last block of the
+      // last user message — exactly where this pass stamps its breakpoint.
+      // Stored history never reproduces that block, so anchoring on it writes
+      // an entry no later request can read back and history caching collapses
+      // to system+tools for the whole session. The marker it carries must move
+      // the breakpoint onto the persisted question instead.
+      const contents = appendAutoMemoryContext(
+        [{ role: 'user', parts: [{ text: 'q' }] }],
+        'current memory catalog',
+      );
+      const { messages } = convert(contents);
+      const lastUser = messages[messages.length - 1];
+      expect(lastUser.role).toBe('user');
+      const blocks = Array.isArray(lastUser.content) ? lastUser.content : [];
+      expect(blocks).toHaveLength(2);
+      expect(blocks[0]).toEqual(txt('q', EPH));
+      expect(blocks[1]).not.toHaveProperty('cache_control');
+    });
+
+    it('anchors an earlier user message when the final user contains only the catalog', () => {
+      const contents = appendAutoMemoryContext(
+        [userText('q'), modelText('a')],
+        'current memory catalog',
+      );
+      const { messages } = convert(contents);
+      expect(messages).toEqual([
+        user(txt('q', EPH)),
+        assistant(txt('a')),
+        user(txt('current memory catalog')),
+      ]);
+    });
+
+    it('omits the message breakpoint when there is only the catalog', () => {
+      const { messages } = convert(
+        appendAutoMemoryContext([], 'current memory catalog'),
+      );
+      expect(messages).toEqual([user(txt('current memory catalog'))]);
+    });
+
     it('does not add cache_control to tools when disabled', async () => {
       const result = await noCacheConverter().convertLlmToolsToAnthropic(
         toolsOf(weather(weatherSchema())),
@@ -1868,8 +1934,8 @@ describe('AnthropicContentConverter', () => {
 
       it('honors useGlobalCacheScope independently of enableCacheControl source', async () => {
         // Cache on (per-call), scope off (per-call default): the emitted
-        // shape is per-session even though cache_control IS attached —
-        // non-Anthropic baseURL behavior in one call.
+        // shape is per-session even though cache_control IS attached — the
+        // default on every baseURL.
         const { system } = convert(
           'Hello',
           {

@@ -20,7 +20,14 @@ import {
   resolveReasoningForModel,
   getEffectiveReasoning,
   type ReasoningProfile,
+  type ResolvedReasoning,
 } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
+import {
+  getBuiltinDeepSeekReasoning,
+  getDeepSeekReasoningState,
+} from '@qwen-code/qwen-code-core/core/deepseek-reasoning.js';
+import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
+import { isTieredEffortQwenPrefix } from '@qwen-code/qwen-code-core/core/modalityDefaults.js';
 import type { SessionConfigOption } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../config/settings.js';
 import { ACP_ROUTE_ID_PREFIX } from '../utils/acpModelUtils.js';
@@ -145,7 +152,8 @@ export function getGptReasoningOverrideState(
       blocksTierChange: true;
     }
   | undefined {
-  const capabilities = getGptReasoningCapabilities(generation.model);
+  const model = getRequestModel(generation);
+  const capabilities = getGptReasoningCapabilities(model);
   const profile = configuredReasoning?.profile;
   if ((!capabilities && !profile) || generation.reasoning === false) {
     return undefined;
@@ -158,7 +166,7 @@ export function getGptReasoningOverrideState(
     return undefined;
   }
   const reasoning = getModelConfiguration(
-    generation.model,
+    model,
     configuredReasoning,
   )?.reasoning;
   const defaultEnabled =
@@ -177,7 +185,7 @@ export function getGptReasoningOverrideState(
   const openRouter =
     profile === 'openai-reasoning' || isOpenRouterHostname(generation);
   const removedFlatNone =
-    (generation.thinkingMandatory === true ||
+    ((model === generation.model && generation.thinkingMandatory === true) ||
       reasoning?.canDisable === false ||
       capabilities?.thinkingMandatory) &&
     flat === REASONING_EFFORT_NONE;
@@ -310,8 +318,26 @@ export function getModelConfiguration(
           },
         }
       : modelId
-        ? MODEL_CONFIGURATIONS[modelId]
+        ? (MODEL_CONFIGURATIONS[modelId] ??
+          (isTieredEffortQwenPrefix(modelId)
+            ? MODEL_CONFIGURATIONS['qwen3.8-max']
+            : undefined))
         : undefined;
+}
+
+/**
+ * Routed (opaque) selectors keep their effort controls when the manifest
+ * carries a tiered contract for the model: the new Qwen prefixes and the
+ * stable tiered family they inherit their ladder from. Toggle-only manifest
+ * entries stay on the generic route guard.
+ */
+export function hasTieredManifestReasoning(
+  modelId: string | undefined,
+): boolean {
+  if (!modelId) return false;
+  if (isTieredEffortQwenPrefix(modelId)) return true;
+  const entry = MODEL_CONFIGURATIONS[modelId]?.reasoning;
+  return !!entry && !entry.toggleOnly;
 }
 
 export function getConfiguredModelReasoning(
@@ -335,9 +361,12 @@ export function getConfiguredModelReasoning(
       active?.baseUrl ?? config.getCurrentModelRegistryBaseUrl?.() ?? undefined,
   };
   const reasoning = resolveReasoningForModel(config, generation, modelId);
+  const requestModel = getRequestModel(generation, modelId);
   return (
     reasoning ??
-    (fallbackToManifest ? getModelConfiguration(modelId)?.reasoning : undefined)
+    (fallbackToManifest
+      ? getModelConfiguration(requestModel)?.reasoning
+      : undefined)
   );
 }
 
@@ -388,12 +417,17 @@ export function isReasoningSelectionSupported(
 
 export function clearReasoningRequestOverrides(
   generation: ContentGeneratorConfig,
+  config?: Pick<Config, 'getResolvedModelConfig'>,
 ): void {
+  const deepSeek = getDeepSeekReasoningState(
+    generation,
+    resolveReasoningForModel(config, generation),
+  );
   if (
-    getGptReasoningCapabilities(generation.model) ||
+    getGptReasoningCapabilities(getRequestModel(generation)) ||
     getGptReasoningOverrideState(
       generation,
-      resolveReasoningForModel(undefined, generation),
+      resolveReasoningForModel(config, generation),
     )?.blocksTierChange
   )
     return;
@@ -404,6 +438,22 @@ export function clearReasoningRequestOverrides(
     delete next['enable_thinking'];
     delete next['reasoning_effort'];
     delete next['thinking_budget'];
+    if (deepSeek) {
+      delete next['thinking'];
+      const reasoning = next['reasoning'];
+      if (
+        reasoning &&
+        typeof reasoning === 'object' &&
+        !Array.isArray(reasoning)
+      ) {
+        const { effort: _effort, ...rest } = reasoning as Record<
+          string,
+          unknown
+        >;
+        if (Object.keys(rest).length) next['reasoning'] = rest;
+        else delete next['reasoning'];
+      }
+    }
     generation[source] = next;
   }
 }
@@ -448,6 +498,25 @@ export function applyReasoningSelection(
   const modelsConfig = config.getModelsConfig?.();
   const rebuildable = modelsConfig?.getGenerationConfig?.();
   if (rebuildable !== live) apply(rebuildable);
+  if (
+    live &&
+    getBuiltinDeepSeekReasoning({ ...live, model: getRequestModel(live) })
+  ) {
+    for (const sources of [
+      config.getContentGeneratorConfigSources?.(),
+      modelsConfig?.getGenerationConfigSources?.(),
+    ]) {
+      if (!sources) continue;
+      if (selection === REASONING_EFFORT_NONE) {
+        sources['reasoning'] = {
+          kind: 'programmatic',
+          detail: 'reasoning selection',
+        };
+      } else {
+        delete sources['reasoning'];
+      }
+    }
+  }
 }
 
 export function buildModelReasoningConfigOption(
@@ -610,24 +679,72 @@ export function buildModelReasoningConfigPreview(
 
 export function buildModelReasoningRoutePreview(
   generation: ContentGeneratorConfig,
-  reasoning: ModelReasoningConfiguration | undefined,
+  reasoning: ResolvedReasoning | undefined,
   selection: unknown,
   opaqueRoute = false,
 ): SessionConfigOption[] | undefined {
-  if (opaqueRoute && !reasoning?.profile) return undefined;
+  const model = getRequestModel(generation);
+  const thinkingMandatory =
+    model === generation.model && generation.thinkingMandatory === true;
+  // The new tiered Qwen families resolve no core capability without a
+  // declaration; on routed (opaque) selectors the manifest fallback is their
+  // known contract, so the controls must survive the route guard. The same
+  // holds for the stable tiered family the new prefixes inherit from. Both
+  // only ever map to tiered (non-toggle) manifest entries.
+  const qwenManifest =
+    reasoning === undefined && hasTieredManifestReasoning(model)
+      ? (getModelConfiguration(model)?.reasoning as
+          | ResolvedReasoning
+          | undefined)
+      : undefined;
+  const routeReasoning = reasoning ?? qwenManifest;
+  if (
+    opaqueRoute &&
+    !routeReasoning?.profile &&
+    !qwenManifest &&
+    !getDeepSeekReasoningState(generation, routeReasoning)
+  )
+    return undefined;
+  const parsedSelection = parseReasoningSelection(selection);
+  const usesConfiguredState =
+    !parsedSelection ||
+    parsedSelection === REASONING_EFFORT_DEFAULT ||
+    !isReasoningSelectionSupported(
+      model,
+      parsedSelection,
+      thinkingMandatory,
+      routeReasoning,
+    );
+  const deepSeekState = usesConfiguredState
+    ? getDeepSeekReasoningState(
+        {
+          ...generation,
+          ...(parsedSelection &&
+          parsedSelection !== REASONING_EFFORT_DEFAULT &&
+          parsedSelection !== REASONING_EFFORT_NONE &&
+          generation.reasoning !== false
+            ? {
+                reasoning: { ...generation.reasoning, effort: parsedSelection },
+              }
+            : {}),
+        },
+        routeReasoning,
+      )
+    : undefined;
   return buildModelReasoningConfigPreview(
-    generation.model,
+    model,
     {
       enabled: generation.reasoning === false ? false : undefined,
       effort: generation.reasoning ? generation.reasoning.effort : undefined,
       ...resolvePersistedReasoningConfigState(
-        generation.model,
+        model,
         selection,
-        generation.thinkingMandatory === true,
-        reasoning,
+        thinkingMandatory,
+        routeReasoning,
       ),
+      ...deepSeekState,
     },
-    reasoning,
+    routeReasoning,
     generation,
   );
 }
@@ -638,6 +755,8 @@ export function getReasoningForDisplay(
 ) {
   const resolved = resolveReasoningForModel(config, generation);
   if (!resolved) return generation.reasoning;
+  const deepSeek = getDeepSeekReasoningState(generation, resolved);
+  if (deepSeek) return deepSeek.enabled ? { effort: deepSeek.effort } : false;
   const override = getGptReasoningOverrideState(generation, resolved);
   if (override) return override.enabled ? { effort: override.effort } : false;
   if (config.getReasoningEffortOverride?.()) return generation.reasoning;
