@@ -198,6 +198,13 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
                 RuntimeObservation observation = observe(request, seed, handle);
                 URI originalEndpoint = retained.endpoint() != null ? retained.endpoint()
                         : lastLease == null ? null : lastLease.getEndpoint();
+                // UNKNOWN means the provider lost its process-local attachment,
+                // not that the Worker is gone. Reattach only the exact original
+                // endpoint; never enter provisioning or mint a replacement.
+                if (observation.getOutcome() == RuntimeObservation.Outcome.UNKNOWN
+                        && lastLease != null && supportsReattach(request)) {
+                    observation = reattach(request, seed, handle, lastLease.getEndpoint());
+                }
                 if ((lastLease != null && !lastLease.getEndpoint().equals(originalEndpoint))
                         || (observation.getOutcome() == RuntimeObservation.Outcome.READY
                         && originalEndpoint != null && !originalEndpoint.equals(observation.getEndpoint()))) {
@@ -273,6 +280,29 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
         body.put("handle", handle.getValue().get("provider"));
         Map<String, Object> response = call(client.observe(Map.copyOf(body)));
         return observation(request, seed, handle, response);
+    }
+
+    private RuntimeObservation reattach(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            RuntimeResourceHandle handle, URI endpoint) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("protocolVersion", 1);
+        body.put("provisionRequestId", seed.getProvisionRequestId());
+        body.put("identity", identity(request, seed));
+        body.put("scope", scope(request));
+        body.put("boot", bootDocument(request, seed));
+        body.put("handle", handle.getValue().get("provider"));
+        body.put("endpoint", endpoint.toString());
+        Map<String, Object> response = call(client.reattach(Map.copyOf(body)));
+        return observation(request, seed, handle, response);
+    }
+
+    /**
+     * Whether UNKNOWN may be followed by an explicit provider reattach. Profiles
+     * that have a durable binding opt in; provider-process-local scratch workers
+     * retain their existing fail-closed observation semantics.
+     */
+    protected boolean supportsReattach(RuntimeProvisionRequest request) {
+        return false;
     }
 
     /**

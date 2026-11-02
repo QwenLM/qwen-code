@@ -89,6 +89,11 @@ class ExternalWorkspaceOwnershipTest {
             public CompletionStage<Map<String, Object>> observe(Map<String, Object> ignored) {
                 return CompletableFuture.failedFuture(new AssertionError("No observation in ownership fixture"));
             }
+
+            @Override
+            public CompletionStage<Map<String, Object>> reattach(Map<String, Object> ignored) {
+                return CompletableFuture.failedFuture(new AssertionError("No reattach in ownership fixture"));
+            }
         };
         try (var provider = new ExternalWorkspaceProvisioner(noNetwork, registrations, "provider", Duration.ofSeconds(5))) {
             var handle = provider.ensureResource(request, created.getProvisionSeed(), null).toCompletableFuture().get();

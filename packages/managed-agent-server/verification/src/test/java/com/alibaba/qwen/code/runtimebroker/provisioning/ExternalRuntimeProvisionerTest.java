@@ -459,6 +459,11 @@ class ExternalRuntimeProvisionerTest {
         }
 
         @Override
+        public CompletionStage<Map<String, Object>> reattach(Map<String, Object> request) {
+            return observe(request);
+        }
+
+        @Override
         public CompletionStage<Map<String, Object>> observe(Map<String, Object> request) {
             observations++;
             observeRequest = request;
