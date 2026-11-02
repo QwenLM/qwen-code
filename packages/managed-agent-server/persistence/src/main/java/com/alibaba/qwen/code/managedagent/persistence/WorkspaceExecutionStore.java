@@ -420,8 +420,8 @@ public class WorkspaceExecutionStore
             var external = ExternalStorageRegistrationStore.executionStorage(jdbc, binding.getTenantId(), binding.getStorageId(), true);
             if (external == null) {
                 jdbc.update("INSERT INTO ma_storage_owner"
-                    + " (storage_key, storage_kind) VALUES (?, ?) ON DUPLICATE KEY UPDATE"
-                    + " storage_key = storage_key", key, SshWorkspaceStore.physicalKey(jdbc, binding.getTenantId(), binding.getStorageId()) == null ? "LOCAL" : "SSH_LOCAL");
+                        + " (storage_key, storage_kind) VALUES (?, ?) ON DUPLICATE KEY UPDATE"
+                        + " storage_key = storage_key", key, SshWorkspaceStore.physicalKey(jdbc, binding.getTenantId(), binding.getStorageId()) == null ? "LOCAL" : "SSH_LOCAL");
             }
             var owners = WorkspaceOperations.rows(jdbc, "SELECT holder_key, maintenance_id"
                     + " FROM ma_storage_owner WHERE storage_key = ?"
