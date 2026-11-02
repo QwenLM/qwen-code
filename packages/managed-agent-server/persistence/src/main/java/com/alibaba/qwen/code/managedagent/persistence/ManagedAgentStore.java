@@ -73,12 +73,15 @@ import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.jdbc.core.RowMapper;
+import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -104,9 +107,7 @@ import java.util.regex.Pattern;
 @Repository
 @Qualifier("managedAgentTransactionManager")
 public class ManagedAgentStore implements AgentStateStore {
-    private com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles;
-    @org.springframework.beans.factory.annotation.Autowired
-    public void configureWorktreeFiles(com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles value) { worktreeFiles = value; }
+    private final com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles;
 
     private final HarnessRules harnessRules;
 
@@ -134,22 +135,9 @@ public class ManagedAgentStore implements AgentStateStore {
     private static final String QUALIFIED_TURN_SUMMARY_COLUMNS =
             "turn_record." + String.join(", turn_record.",
                     TURN_SUMMARY_COLUMNS.split(", "));
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
-    @org.springframework.context.annotation.Lazy
-    private ManagedExtensionRecordStore configRecords;
+    private final ManagedExtensionRecordStore configRecords;
     private final JdbcTemplate jdbc;
-    private WorkspaceLifecycleStore lifecycle;
-
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
-    public void setWorkspaceLifecycleStore(WorkspaceLifecycleStore lifecycle) {
-        this.lifecycle = lifecycle;
-    }
-
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
-    public void setManagedAgentDefinitionStore(
-            ManagedAgentDefinitionStore definitions) {
-        this.definitions = definitions;
-    }
+    private final WorkspaceLifecycleStore lifecycle;
 
     private final ObjectMapper objectMapper;
     private final Clock clock;
@@ -160,15 +148,10 @@ public class ManagedAgentStore implements AgentStateStore {
     private final List<String> definitionToolProfiles;
     private final List<String> definitionModels;
     private final List<WebShellModelOption> modelCatalog;
-    private ManagedAgentDefinitionStore definitions;
-    private ManagedSessionSkills creationSkills;
-    private SessionWorktreeStore sessionWorktrees;
-    private com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages;
-
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
-    public void setSessionWorktrees(SessionWorktreeStore value) {
-        this.sessionWorktrees = value;
-    }
+    private final ManagedAgentDefinitionStore definitions;
+    private final ManagedSessionSkills creationSkills;
+    private final SessionWorktreeStore sessionWorktrees;
+    private final com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages;
 
     @Override
     public SessionWorktreeStore.Descriptor findSessionWorktree(String tenantId, String sessionId) {
@@ -180,15 +163,6 @@ public class ManagedAgentStore implements AgentStateStore {
         return SessionWorktreeStore.descriptors(worktreeFiles, jdbc, tenantId, sessionIds);
     }
 
-    @org.springframework.beans.factory.annotation.Autowired
-    public void setExtensionPackages(com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages value) {
-        this.extensionPackages = value;
-    }
-
-    @org.springframework.beans.factory.annotation.Autowired
-    public void setManagedSessionSkills(ManagedSessionSkills skills) {
-        this.creationSkills = skills;
-    }
     private static final Pattern DEFINITION_REVISION = Pattern.compile(
             "^[1-9][0-9]{0,17}$");
     private final boolean workspaceFilesEnabled;
@@ -199,13 +173,9 @@ public class ManagedAgentStore implements AgentStateStore {
     private final List<? extends ManagedAgentSettings.RuntimeBroker.WorkspaceMount> workspaceMounts;
     private final ResidentWorkspaces residentWorkspaces;
     private final WorkspaceCreationRoots createdRoots;
-    private JournalEventTransport journalEventTransport;
+    private final JournalEventTransport journalEventTransport;
     private final boolean journalEventTransportEnabled;
 
-    @org.springframework.beans.factory.annotation.Autowired(required = false)
-    public void setJournalEventTransport(JournalEventTransport transport) {
-        this.journalEventTransport = transport;
-    }
     private static final String SESSION_WITH_STREAM =
             "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", es.last_sequence AS list_last_sequence, es.replay_floor_sequence AS list_floor_sequence FROM ma_session LEFT JOIN ma_event_stream es ON es.tenant_id = ma_session.tenant_id AND es.session_id = ma_session.session_id AND es.stream_kind = 'SESSION' AND es.stream_id = X''";
     private final RowMapper<SessionRecord> sessionMapper = (result, row) -> {
@@ -347,15 +317,35 @@ public class ManagedAgentStore implements AgentStateStore {
                     result.getString("session_id"),
                     result.getString("operation_id"));
 
+    public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper, Clock clock,
+            CommittedEventPublisher eventPublisher, ManagedWorkspaceRegistry workspaces,
+            ManagedAgentSettings properties, HarnessRules harnessRules) {
+        this(jdbc, objectMapper, clock, eventPublisher, workspaces, properties, harnessRules,
+                null, new ManagedSessionSkills(jdbc, objectMapper, new RequestDigests(), null), null,
+                null, null, null, null, null);
+    }
+
+    @Autowired
     public ManagedAgentStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper objectMapper,
             @Qualifier("managedAgentClock") Clock clock, CommittedEventPublisher eventPublisher,
-            ManagedWorkspaceRegistry workspaces,
-            ManagedAgentSettings properties, HarnessRules harnessRules) {
+            ManagedWorkspaceRegistry workspaces, ManagedAgentSettings properties, HarnessRules harnessRules,
+            com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles,
+            ManagedSessionSkills creationSkills,
+            com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages,
+            @Nullable WorkspaceLifecycleStore lifecycle, @Nullable ManagedAgentDefinitionStore definitions,
+            @Nullable SessionWorktreeStore sessionWorktrees, @Nullable JournalEventTransport journalEventTransport,
+            @Lazy @Nullable ManagedExtensionRecordStore configRecords) {
         this.harnessRules = harnessRules;
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
-        this.creationSkills = new ManagedSessionSkills(jdbc, objectMapper,
-                new RequestDigests(), null);
+        this.creationSkills = creationSkills;
+        this.worktreeFiles = worktreeFiles;
+        this.extensionPackages = extensionPackages;
+        this.lifecycle = lifecycle;
+        this.definitions = definitions;
+        this.sessionWorktrees = sessionWorktrees;
+        this.journalEventTransport = journalEventTransport;
+        this.configRecords = configRecords;
         this.clock = clock;
         this.approvalMode =
                 properties.getHarness().getApprovalMode().toLowerCase(Locale.ROOT);

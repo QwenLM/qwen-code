@@ -179,9 +179,9 @@ class WorkspaceCsiSqlWorkerMySqlIT {
         properties.setAgentRevision("construction-fixture/1");
         // Wired as in production, so the receipt commits below reach the capture guard.
         var toolResults = new ManagedToolResultStore(jdbc, manager,
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON,
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON,
                         java.time.Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties,
-                        new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules())));
+                        new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
         journal.setToolResults(toolResults);
         var endpoint = new AtomicReference<URI>();
         var actualClient = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build();
