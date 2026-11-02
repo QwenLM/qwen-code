@@ -413,16 +413,19 @@ describe('bundled review skill', () => {
       '**Whether a PLAN exists is a separate field: `diffPath`.**',
     );
     // …and the re-run instruction, including the flag-replacement rule that
-    // keeps a second `--since` from reading as two anchors.
+    // keeps a second `--since`/`--since-model` from reading as two anchors.
     expect(body).toContain(
-      'REPLACING any `--since` it already carries, never appending a second one',
+      'REPLACING any `--since` and any `--since-model` it already carries, ' +
+        'never appending a second one',
     );
-    // The marker recovery re-run names only `--since`, while the cache-path
-    // opening above requires BOTH fields. A reader who applies just this
-    // sentence drops the model half and hands `fetch-pr` an anchor nothing
-    // certifies. Sliced to THIS sentence — the same `--since <sha>` words
-    // occur in the cache path, where they are already correct — so the
-    // assertion cannot be satisfied by that other occurrence.
+    // The marker recovery re-run must carry BOTH fields, taken from the side
+    // file's `sha`/`model` pair. The command "above" it carries neither on this
+    // path (no cache), or another model's when the cache anchor was withheld —
+    // so a reader who copies the model half from there is refused as
+    // `cross-model-anchor` and reviews the full diff. Sliced to THIS sentence
+    // — the same `--since <sha>` words occur in the cache path, where they are
+    // already correct — so the assertion cannot be satisfied by that other
+    // occurrence.
     const reRunAt = body.indexOf(
       're-run the `fetch-pr` command from above with',
     );
