@@ -691,6 +691,9 @@ jobs:
       # A push to main always builds from scratch, so every cache a pull
       # request starts from is a clean build of main; a pull request whose
       # restore found nothing saves its own clean build for its next run.
+      # The path stays relative: actions/cache versions an entry by its path,
+      # and runner.temp differs between pool hosts, so one host could never
+      # restore what another saved.
       - name: 'Restore the build cache'
         id: 'build_cache'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && github.event_name != 'push' }}"
@@ -698,20 +701,20 @@ jobs:
         continue-on-error: true
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
-          path: '${{ runner.temp }}/qwen-build-cache'
+          path: '.qwen-build-cache'
           key: 'qwen-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.build_key.outputs.key }}'
           restore-keys: 'qwen-build-v1-${{ runner.os }}-${{ runner.arch }}-'
 
       - name: 'Build'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'node scripts/ci-build-cache.mjs build "${RUNNER_TEMP}/qwen-build-cache"'
+        run: 'node scripts/ci-build-cache.mjs build .qwen-build-cache'
 
       - name: 'Pack the build cache'
         id: 'pack_build_cache'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && (github.event_name == 'push' || steps.build_cache.outputs.cache-matched-key == '') }}"
         run: |-
-          rm -rf "${RUNNER_TEMP}/qwen-build-cache"
-          node scripts/ci-build-cache.mjs pack "${RUNNER_TEMP}/qwen-build-cache"
+          rm -rf .qwen-build-cache
+          node scripts/ci-build-cache.mjs pack .qwen-build-cache
 
       - name: 'Save the build cache'
         if: "${{ steps.pack_build_cache.outcome == 'success' }}"
@@ -719,7 +722,7 @@ jobs:
         continue-on-error: true
         uses: 'actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
-          path: '${{ runner.temp }}/qwen-build-cache'
+          path: '.qwen-build-cache'
           key: 'qwen-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.build_key.outputs.key }}'
 
       # Everything the build wrote: the ignored, untracked paths outside
@@ -2252,12 +2255,12 @@ jobs:
         continue-on-error: true
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
-          path: '${{ runner.temp }}/qwen-build-cache'
+          path: '.qwen-build-cache'
           key: 'qwen-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.build_key.outputs.key }}'
           restore-keys: 'qwen-build-v1-${{ runner.os }}-${{ runner.arch }}-'
 
       - name: 'Build'
-        run: 'node scripts/ci-build-cache.mjs build "${RUNNER_TEMP}/qwen-build-cache"'
+        run: 'node scripts/ci-build-cache.mjs build .qwen-build-cache'
 
       - name: 'Install Playwright Chromium and WebKit (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
