@@ -5456,9 +5456,18 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'fill those same variables at startup from operator scopes only',
     );
-    // Posting is consent, not a coordinate: it stays per-invocation.
+    // Posting is consent, not a coordinate: it stays per-invocation, with
+    // one exception — a same-session follow-up inherits the most recent
+    // --publish round's consent, never a cross-session default.
     expect(flat).toContain('Only coordinates like these are defaultable');
     expect(flat).toContain('posting stays a per-invocation request');
+    expect(flat).toContain(
+      'a follow-up round in the same session inherits the publish consent',
+    );
+    // Consent rides on the latest invocation, so a quiet round cannot
+    // revive an older --publish.
+    expect(flat).toContain("that session's most recent round for the same PR");
+    expect(flat).toContain('A follow-up round inherits that request only');
     // The flag is not a shortcut around the metadata rule.
     expect(flat).toContain('does not license an `origin` fallback');
     // ...nor may the image host fall back to a contributor's fork.
@@ -5530,8 +5539,22 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(
       flat.indexOf('Register the round in the shared watch state'),
     ).toBeLessThan(flat.indexOf('Run the follow-up protocol above'));
-    // Publishing consent is not inherited from the phrase.
+    // Publishing consent is inherited only from a same-session --publish
+    // round — announced before posting, with an explicit opt-out. The
+    // phrase itself grants nothing, and neither does a published comment
+    // found on the PR.
     expect(flat).toContain('the phrase alone does not post a comment');
+    expect(flat).toContain(
+      'Publish consent is inherited only from this session',
+    );
+    // The chain keys on the most recent round's invocation, not on any
+    // earlier round and not on whether that round finished.
+    expect(flat).toContain(
+      "the session's most recent round for the same PR was invoked with",
+    );
+    expect(flat).toContain('say so in one line before posting');
+    expect(flat).toContain('`--no-publish` on the trigger opts out');
+    expect(flat).toContain('not consent for this one');
   });
 
   // The TUI renders `argument-hint` beside the command name; without the field

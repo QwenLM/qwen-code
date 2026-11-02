@@ -195,7 +195,9 @@ do not treat a request without those words as a thinner report.
 images land; both defaults, and their `$QWEN_VERIFY_ASSETS_*` overrides, are
 resolved in the local publish rule below. Only coordinates like these are
 defaultable — posting stays a per-invocation request, because it writes to
-the PR.
+the PR. The one exception: a follow-up round in the same session inherits
+the publish consent of that session's most recent round for the same PR
+when it was invoked with `--publish` (see **Manual re-verification** below).
 `--repo <owner>/<repo>` is still resolved as below: the flag does not license
 an `origin` fallback, but a maintainer checkout whose `origin` already is the
 intended `owner/repo` is a match to confirm, not a guess to avoid.
@@ -357,8 +359,14 @@ ambiguous rather than verify a guessed PR. Then, in order:
    the previous-finding status table, re-measure every carried-forward
    finding at `H`.
 5. Inherit the previous round's coordinates (`--repo`, assets repo/branch)
-   instead of asking again. Publishing stays a per-invocation request: the
-   phrase alone does not post a comment.
+   instead of asking again. Publish consent is inherited only from this
+   session: when the session's most recent round for the same PR was
+   invoked with `--publish`, the follow-up round publishes under that
+   consent — say so in one line before posting, naming the round that
+   granted it. `--no-publish` on the trigger opts out. Otherwise,
+   publishing stays a per-invocation request: the phrase alone does not
+   post a comment, and a published comment found on the PR is evidence of
+   a past round, not consent for this one.
 
 To make this trigger automatic instead of typed, install `--watch` (above);
 the two share that head-dedup file.
@@ -366,14 +374,17 @@ the two share that head-dedup file.
 **Maintainer-driven local publish (only on explicit request).** "Never
 post" yields when the maintainer running the local round explicitly asks
 for a PR comment; `--publish` in the invocation is that request, and needs
-nothing restated. Publish onto an assets branch whose raw.githubusercontent.com
-URLs render inline, and resolve both coordinates instead of asking: the
-repository is `--assets-repo`, else `$QWEN_VERIFY_ASSETS_REPO`, else the
-resolved `--repo`; the branch is `--assets-branch`, else
-`$QWEN_VERIFY_ASSETS_BRANCH`, else `assets/pr<n>-validation` — the name the
-existing assets branches already use — and create it when absent, because the
-upload cannot: a contents PUT commits onto an existing ref and answers `422
-Branch not found` for a branch that does not exist yet. GET
+nothing restated. A follow-up round inherits that request only as **Manual
+re-verification** defines: from a `--publish` round for the same PR in the
+same session, announced before posting. Publish onto an assets branch whose
+raw.githubusercontent.com URLs render inline, and resolve both coordinates
+instead of asking: the repository is `--assets-repo`, else
+`$QWEN_VERIFY_ASSETS_REPO`, else the resolved `--repo`; the branch is
+`--assets-branch`, else `$QWEN_VERIFY_ASSETS_BRANCH`, else
+`assets/pr<n>-validation` — the name the existing assets branches already
+use — and create it when absent, because the upload cannot: a contents PUT
+commits onto an existing ref and answers `422 Branch not found` for a branch
+that does not exist yet. GET
 `repos/<assets-repo>/git/ref/heads/<branch>` and, only on a 404, POST
 `repos/<assets-repo>/git/refs` with `ref=refs/heads/<branch>` and the head sha
 of that repository's default branch — `gh api repos/<assets-repo> --jq
