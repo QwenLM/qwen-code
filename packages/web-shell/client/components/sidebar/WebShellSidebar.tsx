@@ -443,19 +443,28 @@ type SessionWorkspaceScope =
   | { kind: 'unknown'; cwd: string };
 
 /**
- * An archive sent with `requireIdle` is refused with `session_busy` when the
+ * An archive sent with `requireIdle` is refused by the daemon when the
  * session started or resumed work after the client's last poll. That refusal
  * is the guarantee working as intended, so it gets a real message instead of
- * the raw daemon code.
+ * the raw daemon string.
+ *
+ * The refusal surfaces as the `error` string of a `DaemonArchiveSessionsResult`
+ * entry, which for the workspace path is `SessionBusyError`'s message
+ * (`... has active or unconfirmed work`, or `... is busy (prompt running)`),
+ * and for the standalone path is `The standalone session is busy.`. None of
+ * these carry the literal `session_busy` token — that is an error *code* on a
+ * different (message-deletion) contract — so we match the daemon's actual
+ * busy prose rather than the token.
  */
 function sessionBusyMessage(
   error: unknown,
   t: (key: 'sidebar.archiveBusy') => string,
 ): Error {
   const message = error instanceof Error ? error.message : String(error);
-  return message.includes('session_busy')
-    ? new Error(t('sidebar.archiveBusy'))
-    : new Error(message);
+  const busy =
+    message.includes('has active or unconfirmed work') ||
+    message.includes('is busy');
+  return busy ? new Error(t('sidebar.archiveBusy')) : new Error(message);
 }
 
 export interface WebShellSidebarWorkspaceOverviewOptions {
@@ -1699,6 +1708,8 @@ export function WebShellSidebar({
     null,
   );
   const [deleteCandidate, setDeleteCandidate] =
+    useState<DaemonSessionSummary | null>(null);
+  const [archiveCandidate, setArchiveCandidate] =
     useState<DaemonSessionSummary | null>(null);
   const [groupMenu, setGroupMenu] = useState<GroupMenuState | null>(null);
   const groupMenuOpenRef = useRef(groupMenu !== null);
@@ -4107,7 +4118,7 @@ export function WebShellSidebar({
     ],
   );
 
-  const handleArchive = useCallback(
+  const runArchive = useCallback(
     (session: DaemonSessionSummary) => {
       const sessionId = session.sessionId;
       const sessionIdentity = getIdentityForSession(session);
@@ -4140,12 +4151,28 @@ export function WebShellSidebar({
                 sessionBusyMessage(itemError.error, t),
                 t('sidebar.archiveFailed'),
               );
-            } else if (attachedSessionId !== undefined) {
+              return;
+            }
+            // A `notFound` result means the session was already gone, not that
+            // it was archived under this request. Only land the attached tab
+            // when the session was actually moved (or already archived), so a
+            // failure cannot strand it on a conversation that no longer
+            // resolves.
+            const didArchive =
+              result.archived.includes(sessionId) ||
+              result.alreadyArchived.includes(sessionId);
+            if (didArchive && attachedSessionId !== undefined) {
               onSessionsDeleted?.([sessionId], { attachedSessionId });
             }
           } else if (scope.kind === 'primary') {
-            await archiveSession(sessionId, { requireIdle: true });
-            if (attachedSessionId !== undefined) {
+            // `archiveSession` resolves `true` only when the session was
+            // actually archived or already archived; it throws on a
+            // per-session error. Land the attached tab only on a confirmed
+            // archive, not unconditionally.
+            const didArchive = await archiveSession(sessionId, {
+              requireIdle: true,
+            });
+            if (didArchive && attachedSessionId !== undefined) {
               onSessionsDeleted?.([sessionId], { attachedSessionId });
             }
           } else {
@@ -4179,6 +4206,28 @@ export function WebShellSidebar({
       workspace.client,
     ],
   );
+
+  const handleArchive = useCallback(
+    (session: DaemonSessionSummary) => {
+      if (!canArchiveSession(session)) return;
+      // Archiving the session this tab is attached to leaves the current
+      // conversation, so confirm it first (mirroring the delete guard,
+      // issue #12619). A non-attached session archives immediately.
+      if (isCurrentSession(session)) {
+        setArchiveCandidate(session);
+        return;
+      }
+      runArchive(session);
+    },
+    [canArchiveSession, isCurrentSession, runArchive],
+  );
+
+  const confirmArchive = useCallback(() => {
+    if (!archiveCandidate) return;
+    const session = archiveCandidate;
+    setArchiveCandidate(null);
+    runArchive(session);
+  }, [archiveCandidate, runArchive]);
 
   const handleUnarchive = useCallback(
     (session: DaemonSessionSummary) => {
@@ -4811,6 +4860,9 @@ export function WebShellSidebar({
 
   const deleteCandidateLabel = deleteCandidate
     ? getCompactSessionLabel(deleteCandidate)
+    : '';
+  const archiveCandidateLabel = archiveCandidate
+    ? getCompactSessionLabel(archiveCandidate)
     : '';
   const groupMenuSelectedColor =
     groupMenu?.session.color &&
@@ -6680,6 +6732,37 @@ export function WebShellSidebar({
                   onClick={confirmDeleteSession}
                 >
                   {t('sidebar.delete')}
+                </button>
+              </div>
+            </div>
+          </DialogShell>
+        )}
+        {archiveCandidate && (
+          <DialogShell
+            title={t('sidebar.archive')}
+            size="sm"
+            onClose={() => setArchiveCandidate(null)}
+          >
+            <div className={styles.confirmContent}>
+              <p className={styles.confirmDescription}>
+                {t('sidebar.archiveConfirmDescription', {
+                  name: archiveCandidateLabel,
+                })}
+              </p>
+              <div className={styles.confirmActions}>
+                <button
+                  className={styles.secondaryButton}
+                  type="button"
+                  onClick={() => setArchiveCandidate(null)}
+                >
+                  {t('common.cancel')}
+                </button>
+                <button
+                  className={styles.secondaryButton}
+                  type="button"
+                  onClick={confirmArchive}
+                >
+                  {t('sidebar.archive')}
                 </button>
               </div>
             </div>

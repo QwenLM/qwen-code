@@ -2387,6 +2387,8 @@ const EN: Messages = {
     'Open another chat first to delete the current no-workspace session',
   'sidebar.deleteConfirmDescription': (v) =>
     `Delete "${v?.name ?? ''}"? This cannot be undone.`,
+  'sidebar.archiveConfirmDescription': (v) =>
+    `Archive "${v?.name ?? ''}" and leave this conversation? You can restore it from Archived later.`,
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
   'sidebar.running': 'Running',
   'sidebar.activeWork': 'Active work',
@@ -6867,6 +6869,8 @@ const ZH: Messages = {
     '请先打开另一个对话，再删除当前无工作区会话',
   'sidebar.deleteConfirmDescription': (v) =>
     `确定删除“${v?.name ?? ''}”吗？删除后不可恢复。`,
+  'sidebar.archiveConfirmDescription': (v) =>
+    `归档“${v?.name ?? ''}”并离开当前对话？之后可从“已归档”中恢复。`,
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
   'sidebar.running': '运行中',
   'sidebar.activeWork': '有活动任务',
