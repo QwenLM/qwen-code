@@ -4226,19 +4226,19 @@ export const ChatEditor = memo(
                 onSelectTab={core.selectAtTab}
               />
             )}
-            {mobileContextRowVisible && (
-              <div
-                ref={mobileContextRowRef}
-                className={styles.mobileContextRow}
-              >
-                {workspaceControls(false)}
-              </div>
-            )}
             {core.mobileComposer && !isSimple && !mobileVoiceActive && (
               <div
                 className={styles.mobileEditingActions}
                 data-web-shell-mobile-editing-actions
               >
+                {mobileContextRowVisible && (
+                  <div
+                    ref={mobileContextRowRef}
+                    className={styles.mobileContextRow}
+                  >
+                    {workspaceControls(false)}
+                  </div>
+                )}
                 {!showAddMenuAction && (
                   <button
                     type="button"
@@ -4266,7 +4266,9 @@ export const ChatEditor = memo(
                     )}
                   </button>
                 )}
-                <span className={styles.mobileEditingSpacer} />
+                {!mobileContextRowVisible && (
+                  <span className={styles.mobileEditingSpacer} />
+                )}
                 {mobileFocused && (
                   <button
                     type="button"
