@@ -181,6 +181,7 @@ function liveSessionSnapshotsEqual(
         JSON.stringify(session.backgroundTurn) ||
       prior.isWaitingForPermission !== session.isWaitingForPermission ||
       prior.isWaitingForUserQuestion !== session.isWaitingForUserQuestion ||
+      prior.hasTurnError !== session.hasTurnError ||
       prior.updatedAt !== session.updatedAt
     ) {
       return false;
@@ -855,6 +856,7 @@ export class SessionCatalogStore {
         const isWaitingForPermission = live?.isWaitingForPermission ?? false;
         const isWaitingForUserQuestion =
           live?.isWaitingForUserQuestion ?? false;
+        const hasTurnError = live?.hasTurnError ?? session.hasTurnError;
         // The daemon watermark only ever advances recency; an equal or older
         // stamp (e.g. a staged page committed fresher data mid-flight) must
         // not regress the row.
@@ -881,6 +883,7 @@ export class SessionCatalogStore {
             JSON.stringify(live?.backgroundTurn) &&
           session.isWaitingForPermission === isWaitingForPermission &&
           session.isWaitingForUserQuestion === isWaitingForUserQuestion &&
+          session.hasTurnError === hasTurnError &&
           session.updatedAt === updatedAt
         ) {
           return session;
@@ -896,6 +899,7 @@ export class SessionCatalogStore {
           hasRunningBackgroundTasks: live?.hasRunningBackgroundTasks,
           isWaitingForPermission,
           isWaitingForUserQuestion,
+          hasTurnError,
           ...(updatedAt !== undefined ? { updatedAt } : {}),
         };
       });

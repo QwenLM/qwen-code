@@ -713,7 +713,8 @@ export function ToolApproval({
               {/* The path is model-supplied (`block.path`) and sits one line
                   above the diff body, so it is the same unsanitized class as
                   `GitDiffDialog`'s file paths: escape it here rather than
-                  leaving the gap half-closed. */}
+                  leaving the gap half-closed. (Merged with upstream's
+                  sanitizeControlChars hardening, which this superset keeps.) */}
               <div>
                 {block.path
                   ? escapePreviewText(sanitizeControlChars(block.path)).replace(

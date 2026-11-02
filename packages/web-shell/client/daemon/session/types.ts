@@ -95,6 +95,20 @@ export interface DaemonStandaloneConnectionState {
   errorCode?: string;
 }
 
+export interface DaemonWorkflowMode {
+  requested: boolean;
+  available: boolean;
+  effective: boolean;
+  reason?: string;
+}
+
+export type DaemonWorkflowModeStatus =
+  | 'unbound'
+  | 'unknown'
+  | 'syncing'
+  | 'ready'
+  | 'unsupported';
+
 export interface DaemonConnectionState {
   status: DaemonConnectionStatus;
   runtimeStopped?: boolean;
@@ -132,6 +146,9 @@ export interface DaemonConnectionState {
   models?: DaemonModelInfo[];
   currentModel?: string;
   reasoning?: DaemonReasoningControls;
+  workflowMode?: DaemonWorkflowMode;
+  workflowModeStatus?: DaemonWorkflowModeStatus;
+  workflowModePending?: boolean;
   currentMode?: string;
   planExecutionMode?: string;
   displayName?: string;
@@ -161,6 +178,11 @@ export interface DaemonConnectionState {
   errorStatus?: number;
   /** True only when the server confirmed the current session is missing. */
   missingSession?: boolean;
+  /**
+   * True while the connection is parked on the daemon's terminal 409
+   * `session_archived` answer for the session it tried to load.
+   */
+  sessionArchived?: boolean;
 }
 
 export interface DaemonReasoningControls {
@@ -316,6 +338,7 @@ export type DaemonNoticeOperation =
   | 'send_shell_command'
   | 'switch_model'
   | 'set_reasoning_effort'
+  | 'set_workflow_mode'
   | 'set_approval_mode'
   | 'submit_permission'
   | 'cancel_prompt'
@@ -545,6 +568,7 @@ export interface DaemonSessionActions {
     }) => void | Promise<void>,
   ): Promise<void>;
 
+  setWorkflowMode(requested: boolean): Promise<void>;
   setReasoningEffort(
     value: ReasoningSelection,
     opts?: { persist?: boolean },

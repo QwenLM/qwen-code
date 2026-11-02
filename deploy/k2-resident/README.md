@@ -59,11 +59,11 @@ bin/qwen-managed-agent-admin csi-protection \
   /absolute/path/registration.json resident-protection resident-binding
 ```
 
-From a module build, run the same entry from the executable server jar:
+From a module build, run the same entry from the repository root:
 
 ```bash
-java -Dloader.main=com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceCsiProtectionMain \
-  -cp target/qwen-managed-agent-server-<version>-exec.jar \
+java -Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.WorkspaceCsiProtectionMain \
+  -cp packages/managed-agent-server/server/target/qwen-managed-agent-server-<version>-exec.jar \
   org.springframework.boot.loader.launch.PropertiesLauncher \
   /absolute/path/registration.json resident-protection resident-binding
 ```
@@ -121,11 +121,11 @@ bin/qwen-managed-agent-admin resident-retirement \
   --spring.config.additional-location=file:/absolute/path/application.yaml
 ```
 
-From a module build, use the executable server jar and the same arguments:
+From a module build, run from the repository root with the same arguments:
 
 ```bash
-java -Dloader.main=com.alibaba.qwen.code.managedagent.persistence.ResidentWorkspaceRetirementMain \
-  -cp target/qwen-managed-agent-server-<version>-exec.jar \
+java -Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.ResidentWorkspaceRetirementMain \
+  -cp packages/managed-agent-server/server/target/qwen-managed-agent-server-<version>-exec.jar \
   org.springframework.boot.loader.launch.PropertiesLauncher \
   inspect /absolute/path/retirement.json \
   --spring.config.additional-location=file:/absolute/path/application.yaml
