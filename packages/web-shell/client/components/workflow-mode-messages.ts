@@ -3,6 +3,15 @@ import type { WebShellLanguage } from '../i18n';
 // Composer-only messages must not grow the read-only transcript renderer.
 const EN = {
   label: 'Workflow mode',
+  menuDescription: 'Let new tasks use workflows',
+  short: {
+    unbound: 'Needs an active session',
+    updating: 'Updating…',
+    syncing: 'Syncing…',
+    unknown: 'State not confirmed',
+    onUnavailable: 'On, but unavailable now',
+    unavailable: 'Unavailable now',
+  },
   details: 'Workflow mode details',
   unbound: 'Create or resume a session to check availability.',
   updating: 'Updating Workflow mode…',
@@ -18,10 +27,20 @@ const EN = {
   nextTurn:
     'Changes apply to the next fresh turn without interrupting the current turn or changing effort.',
   updateFailed: 'Failed to update Workflow mode',
+  clickToTurnOff: 'Click to turn off.',
 };
 
 const ZH: typeof EN = {
   label: 'Workflow 模式',
+  menuDescription: '新任务可交给 workflow 执行',
+  short: {
+    unbound: '需要先有会话',
+    updating: '正在更新…',
+    syncing: '正在同步…',
+    unknown: '状态未确认',
+    onUnavailable: '已开启，当前不可用',
+    unavailable: '当前不可用',
+  },
   details: 'Workflow 模式详情',
   unbound: '创建或恢复会话后查看可用性。',
   updating: '正在更新 Workflow 模式…',
@@ -36,6 +55,7 @@ const ZH: typeof EN = {
   unsupported: '此会话不支持 Workflow 模式。',
   nextTurn: '更改从下一轮新输入开始生效，不会中断当前轮次或修改思考强度。',
   updateFailed: '更新 Workflow 模式失败',
+  clickToTurnOff: '点击关闭。',
 };
 
 export function getWorkflowModeMessages(language: WebShellLanguage) {
