@@ -1445,7 +1445,7 @@ describe('ChannelEditorDialog', () => {
     });
 
     expect(document.body.textContent).toContain(
-      'settings.json lists one repository twice with different settings',
+      'This channel lists one repository twice with different settings',
     );
     expect(onSave).not.toHaveBeenCalled();
   });

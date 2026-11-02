@@ -4649,7 +4649,7 @@ const EN: Messages = {
   'channels.editor.validation.invalidRepoId':
     'Enter each repository as owner/repo.',
   'channels.editor.validation.conflictingRepoAliases':
-    'settings.json lists one repository twice with different settings, spelled differently (for example Owner/repo and owner/repo). Remove one of the entries before saving.',
+    'This channel lists one repository twice with different settings, spelled differently (for example Owner/repo and owner/repo). Remove one of the entries from settings.json before saving.',
   'channels.editor.validation.invalidOption':
     "Remove values that aren't in the allowed list.",
   'channels.editor.validation.number': 'Enter a valid number.',
@@ -9008,7 +9008,7 @@ const ZH: Messages = {
     '群聊 ID 不能是 __proto__、constructor 或 prototype。',
   'channels.editor.validation.invalidRepoId': '仓库需写成 owner/repo 形式。',
   'channels.editor.validation.conflictingRepoAliases':
-    'settings.json 里同一个仓库以不同大小写写了两次且设置不同（例如 Owner/repo 与 owner/repo）。请先删掉其中一条再保存。',
+    '该渠道把同一个仓库以不同大小写写了两次且设置不同（例如 Owner/repo 与 owner/repo）。请先在 settings.json 里删掉其中一条再保存。',
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.number': '请输入有效数字。',
   'channels.editor.validation.outOfRange': (v) =>
