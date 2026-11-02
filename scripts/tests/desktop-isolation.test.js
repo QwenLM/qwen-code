@@ -76,6 +76,30 @@ const stepNamed = (name) =>
   desktopJob.steps.find((step) => step.name === name) ??
   desktopJob.steps.find((step) => String(step.uses ?? '').includes(name));
 
+describe('desktop rpm build-root dependencies', () => {
+  it('checks a versioned EPEL release before installing it', () => {
+    const install = release.jobs.build.steps.find(
+      (step) => step.name === 'Install rpm build-root dependencies',
+    );
+    const source = install.run;
+    const download = source.match(/curl[^\n]+ '(https:\/\/[^']+)'/);
+    expect(download).not.toBeNull();
+    const filename = new URL(download[1]).pathname.split('/').pop();
+    expect(filename).toMatch(/^epel-release-10-\d+\.el10_\d+\.noarch\.rpm$/);
+    expect(source).toContain(`epel_rpm="$RUNNER_TEMP/${filename}"`);
+    expect(source).toMatch(
+      /echo '[0-9a-f]{64}  '"\$epel_rpm" \| sha256sum -c -/,
+    );
+    expect(source).toContain('set -euo pipefail');
+    expect(source.indexOf('sha256sum -c -')).toBeGreaterThan(
+      source.indexOf('curl '),
+    );
+    expect(source.indexOf('dnf install -y "$epel_rpm"')).toBeGreaterThan(
+      source.indexOf('sha256sum -c -'),
+    );
+  });
+});
+
 describe('desktop isolation guard — nativePrefixes coverage', () => {
   it('matches every negated native workspace entry', () => {
     expect(npmNegations.length).toBeGreaterThan(0);

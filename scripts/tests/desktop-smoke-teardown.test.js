@@ -3,13 +3,14 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
+import { isProcessAlive } from '../../packages/desktop/scripts/process-liveness.js';
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -162,6 +163,12 @@ function recordedPid(pidFile) {
 function isAlive(pid) {
   try {
     process.kill(pid, 0);
+    if (process.platform === 'linux') {
+      const state = execFileSync('ps', ['-p', String(pid), '-o', 'stat='], {
+        encoding: 'utf8',
+      }).trim();
+      return !state.startsWith('Z');
+    }
     return true;
   } catch (error) {
     return error.code === 'EPERM';
@@ -196,6 +203,58 @@ beforeAll(() => {
     path.join(manifestDir, 'manifest.json'),
     JSON.stringify({ qwenCodeCommit: 'smoke-test-commit' }),
   );
+});
+
+describe('process liveness', () => {
+  it('treats Linux zombies as stopped while keeping live states alive', () => {
+    const readStat = (state) =>
+      `123 (runtime with spaces (and parentheses)) ${state} 1 2`;
+    const options = { platform: 'linux', kill: () => {} };
+
+    expect(
+      isProcessAlive(123, { ...options, readStat: () => readStat('Z') }),
+    ).toBe(false);
+    expect(
+      isProcessAlive(123, { ...options, readStat: () => readStat('S') }),
+    ).toBe(true);
+  });
+
+  it('keeps conservative liveness for missing or unreadable proc stats', () => {
+    const options = { platform: 'linux', kill: () => {} };
+    const missing = Object.assign(new Error('gone'), { code: 'ENOENT' });
+    const unreadable = Object.assign(new Error('denied'), { code: 'EACCES' });
+
+    expect(
+      isProcessAlive(123, {
+        ...options,
+        readStat: () => {
+          throw missing;
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isProcessAlive(123, {
+        ...options,
+        readStat: () => {
+          throw unreadable;
+        },
+      }),
+    ).toBe(true);
+    for (const platform of ['darwin', 'win32']) {
+      let reads = 0;
+      expect(
+        isProcessAlive(123, {
+          platform,
+          kill: () => {},
+          readStat: () => {
+            reads += 1;
+            return '';
+          },
+        }),
+      ).toBe(true);
+      expect(reads).toBe(0);
+    }
+  });
 });
 
 // The smoke spawns the app path it is handed, and a shebang script is not

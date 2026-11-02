@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isProcessAlive } from './process-liveness.js';
 import { resolveLogRoot, sliceNewLog } from './resolve-log-root.js';
 
 const packageDir = path.resolve(
@@ -283,7 +284,7 @@ function readDaemonPids() {
     }
     for (const record of contents.matchAll(/\[DAEMON\][^\n]*\bpid=(\d+)/g)) {
       const pid = Number(record[1]);
-      if (isAlive(pid)) pids.add(pid);
+      if (isProcessAlive(pid)) pids.add(pid);
     }
   }
   if (pids.size === 0 && fs.existsSync(daemonDir)) {
@@ -295,20 +296,10 @@ function readDaemonPids() {
   return [...pids];
 }
 
-function isAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    // EPERM means the process exists but belongs to another user.
-    return error.code === 'EPERM';
-  }
-}
-
 async function waitForExit(pids, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const alive = pids.filter(isAlive);
+    const alive = pids.filter(isProcessAlive);
     if (alive.length === 0 || Date.now() >= deadline) return alive;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
