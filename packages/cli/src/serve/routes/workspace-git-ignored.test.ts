@@ -46,7 +46,14 @@ afterEach(async () => {
   await fs.rm(directory, { recursive: true, force: true });
 });
 
-function mount(trusted = true) {
+function mount(
+  trusted = true,
+  env: WorkspaceRuntime['env'] = {
+    mode: 'parent-process',
+    overlayKeys: [],
+    effectiveEnv: process.env,
+  },
+) {
   const generationGuard = createWorkspaceGenerationGuard();
   const runtime = {
     workspaceId: 'selected',
@@ -54,13 +61,18 @@ function mount(trusted = true) {
     primary: false,
     trusted,
     generationGuard,
-    env: { effectiveEnv: process.env },
+    env,
   } as WorkspaceRuntime;
   const primary = {
     ...runtime,
     workspaceId: 'primary',
     workspaceCwd: directory,
     primary: true,
+    env: {
+      mode: 'parent-process' as const,
+      overlayKeys: [],
+      effectiveEnv: process.env,
+    },
   };
   const app = express();
   app.use(express.json());
@@ -73,6 +85,30 @@ function mount(trusted = true) {
 }
 
 describe('workspace Git ignore query', () => {
+  it.each([{ HOME: '/selected-workspace-home' }, undefined])(
+    'uses only the selected runtime environment snapshot (%j)',
+    async (env) => {
+      const query = vi
+        .spyOn(gitIgnored, 'getGitIgnoredPaths')
+        .mockResolvedValueOnce([]);
+      const { app } = mount(true, {
+        mode: 'runtime-overlay',
+        overlayKeys: [],
+        effectiveEnv: env,
+      });
+      const response = await request(app)
+        .post('/workspaces/selected/git/check-ignore')
+        .send({ paths: ['file.ts'] });
+      expect(response.status).toBe(200);
+      expect(query).toHaveBeenCalledWith(
+        repo,
+        ['file.ts'],
+        env ?? {},
+        expect.any(AbortSignal),
+      );
+    },
+  );
+
   it('reports an unavailable Git query as a service failure', async () => {
     vi.spyOn(gitIgnored, 'getGitIgnoredPaths').mockRejectedValueOnce(
       new Error('Git output exceeded its limit'),
@@ -129,11 +165,11 @@ describe('workspace Git ignore query', () => {
     );
     git('add', 'vendor');
     expect(
-      await getGitIgnoredPaths(repo, [
-        'ignored.log',
-        'vendor/module.ts',
-        'another.log',
-      ]),
+      await getGitIgnoredPaths(
+        repo,
+        ['ignored.log', 'vendor/module.ts', 'another.log'],
+        process.env,
+      ),
     ).toEqual(['ignored.log', 'another.log']);
   });
 
@@ -251,7 +287,9 @@ describe('workspace Git ignore query', () => {
   });
 
   it('retains contained files outside a Git repository', async () => {
-    expect(await getGitIgnoredPaths(directory, ['normal.ts'])).toEqual([]);
+    expect(
+      await getGitIgnoredPaths(directory, ['normal.ts'], process.env),
+    ).toEqual([]);
   });
 
   it('keeps ignore verdicts when another path crosses a symbolic link', async () => {
@@ -259,7 +297,11 @@ describe('workspace Git ignore query', () => {
     await fs.mkdir(path.join(repo, 'source'));
     await fs.symlink('source', path.join(repo, 'link'), 'dir');
     expect(
-      await getGitIgnoredPaths(repo, ['first.log', 'link/file.ts', 'last.log']),
+      await getGitIgnoredPaths(
+        repo,
+        ['first.log', 'link/file.ts', 'last.log'],
+        process.env,
+      ),
     ).toEqual(['first.log', 'last.log']);
   });
 
@@ -292,7 +334,11 @@ describe('workspace Git ignore query', () => {
       worktree,
     );
     expect(
-      await getGitIgnoredPaths(worktree, ['tracked.log', 'new.log']),
+      await getGitIgnoredPaths(
+        worktree,
+        ['tracked.log', 'new.log'],
+        process.env,
+      ),
     ).toEqual(['new.log']);
   });
 

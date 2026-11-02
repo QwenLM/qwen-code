@@ -102,7 +102,7 @@ export function registerWorkspaceQualifiedGitRoutes(
       const ignoredPaths = await getGitIgnoredPaths(
         cwd,
         paths,
-        runtime.env.effectiveEnv,
+        runtime.env.effectiveEnv ?? {},
         abort.signal,
       );
       runtime.generationGuard?.assertOpen();

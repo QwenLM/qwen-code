@@ -29,7 +29,7 @@ export function isGitIgnorePaths(value: unknown): value is string[] {
 export async function getGitIgnoredPaths(
   cwd: string,
   paths: readonly string[],
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.ProcessEnv,
   signal?: AbortSignal,
 ): Promise<string[]> {
   const requestSignal = AbortSignal.any([
