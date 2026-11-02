@@ -384,6 +384,48 @@ interface PrWatchStateFile {
   entries: Record<string, PrWatchEntry>;
 }
 
+/**
+ * Shape check for a persisted watch entry. The container check alone lets a
+ * legal-JSON malformed value (e.g. `null`) through, and
+ * `reconcilePendingWatch` dereferences every entry — one bad entry would
+ * throw each poll and starve the API-independent drain of the entries after
+ * it. A malformed entry is dropped (healthy entries survive) rather than
+ * resetting the whole file.
+ */
+function isPrWatchEntryShape(value: unknown): value is PrWatchEntry {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const entry = value as PrWatchEntry;
+  const stringOrUndef = (v: unknown) =>
+    v === undefined || typeof v === 'string';
+  const numberOrUndef = (v: unknown) =>
+    v === undefined || typeof v === 'number';
+  const isPending = (item: unknown) =>
+    item !== null &&
+    typeof item === 'object' &&
+    typeof (item as PendingWatchEvent).key === 'string' &&
+    typeof (item as PendingWatchEvent).issueNumber === 'number' &&
+    (item as PendingWatchEvent).envelope !== null &&
+    typeof (item as PendingWatchEvent).envelope === 'object';
+  return (
+    stringOrUndef(entry.headSha) &&
+    stringOrUndef(entry.ci) &&
+    stringOrUndef(entry.mergeableState) &&
+    stringOrUndef(entry.prState) &&
+    stringOrUndef(entry.prUpdatedAt) &&
+    numberOrUndef(entry.headObservedAt) &&
+    numberOrUndef(entry.lastCiFetchAt) &&
+    numberOrUndef(entry.seq) &&
+    stringOrUndef(entry.ciFiredSha) &&
+    (entry.pending === undefined ||
+      (Array.isArray(entry.pending) && entry.pending.every(isPending))) &&
+    (entry.fired === undefined ||
+      (Array.isArray(entry.fired) &&
+        entry.fired.every((k) => typeof k === 'string')))
+  );
+}
+
 interface BoundSessionConfigFields {
   deliverToBoundSessions?: unknown;
   prWatchEvents?: unknown;
@@ -668,24 +710,25 @@ function isDefiniteNoWriteGithubError(err: unknown): boolean {
 }
 
 /**
- * Watch-pass fail-fast predicate. Unlike the shared no-write predicate
- * (primary limit only), the watch must also bail on SECONDARY/abuse limits
- * (403/429 carrying retry-after, remaining>0): githubApi would otherwise
- * block-sleep the retry-after per call, and with up to MAX_WATCHED_PRS PRs
- * stacking sleeps the watch pass would pin the notification lane for
- * minutes. The watch is best-effort detection — a rate-limited pass is
- * skipped and retried next poll, never slept through. Kept watch-local so
- * the publication lane's retry semantics are unchanged.
+ * Watch-pass fail-fast predicate. The watch is best-effort detection that runs
+ * serially before the notification lane, so it must not sleep through
+ * `githubApi`'s 1s+2s backoff on conditions a retry cannot fix:
+ * - any rate limit (403/429). GitHub does not always send `retry-after` on a
+ *   secondary/abuse limit, so waiting for that header misses the common shape;
+ * - permanent per-PR statuses (404/410/451 — the PR was deleted, transferred,
+ *   or the repo became unavailable). A retry re-fetches the same answer.
+ * The per-PR catch isolates one PR's failure, so this never blocks the rest of
+ * the pass. Kept watch-local so the publication lane's retry semantics are
+ * unchanged.
  */
-function isWatchRateLimitError(err: unknown): boolean {
-  if (isDefiniteNoWriteGithubError(err)) return true;
-  const e = err as {
-    status?: number;
-    response?: { headers?: Record<string, string | number> };
-  };
+function isWatchFailFastError(err: unknown): boolean {
+  const e = err as { status?: number };
   return (
-    (e.status === 403 || e.status === 429) &&
-    e.response?.headers?.['retry-after'] !== undefined
+    e.status === 403 ||
+    e.status === 429 ||
+    e.status === 404 ||
+    e.status === 410 ||
+    e.status === 451
   );
 }
 
@@ -768,6 +811,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * workspace).
    */
   private boundSnapshotSeen = false;
+  /**
+   * Consecutive binding-refresh failures since the last success. While no
+   * snapshot has ever succeeded, the cold-start gate defers the comment lane,
+   * so a permanent failure (an old daemon lacking the route, rotated
+   * credentials) would freeze every notification silently. The streak drives
+   * a distinct, throttled, actionable log so the stall is observable; the
+   * gate itself stays fail-closed.
+   */
+  private boundSnapshotFailureStreak = 0;
   private prWatchState: PrWatchStateFile = { version: 1, entries: {} };
   private prWatchStateLoaded = false;
   private inboundRecoveryPending = true;
@@ -855,7 +907,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     process.stderr.write(`[Channel:${this.name}] using ${credential}\n`);
     this.webOrigin = baseUrl
       .replace(/\/api\/v3\/?$/, '')
-      .replace(/^https:\/\/api\.github\.com/, 'https://github.com');
+      .replace(/^https:\/\/api\.github\.com/, 'https://github.com')
+      // GitHub Enterprise Cloud data-residency tenants serve the web UI at
+      // <tenant>.ghe.com and the REST API at api.<tenant>.ghe.com. Binding
+      // URLs carry the web host, so map the API host to it. Scoped to a
+      // single .ghe.com label on purpose: a self-hosted GHE Server may
+      // legitimately serve web and API from an `api.`-prefixed host.
+      .replace(/^https:\/\/api\.([^./]+\.ghe\.com)/i, 'https://$1');
     this.githubHost = new URL(this.webOrigin).hostname.toLowerCase();
     this.octokit = new Octokit({
       auth,
@@ -2206,19 +2264,23 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // the try so a state read/write failure fails closed rather than being
     // misclassified as a task failure that recovery would re-run.
     if (cancelled) return true;
+    // Bound tasks never produce a pending final delivery (their reply is not
+    // published), and the acceptance mark must land BEFORE any cross-lane read
+    // that can throw — otherwise a corrupt or unreadable pending-deliveries
+    // file leaves the task running without deliveredAt, and recovery replays
+    // the injection (the POST carries no idempotency key).
+    if (task.delivery?.kind === 'bound-session') {
+      this.transitionInboundTask(task.id, 'running', {
+        deliveredAt: Date.now(),
+      });
+      this.removeInboundTask(task.id);
+      return true;
+    }
     if (this.hasPendingFinalDeliveryForTask(task)) {
       this.transitionInboundTask(task.id, 'reply_pending', {
         envelope: undefined,
       });
     } else {
-      if (task.delivery?.kind === 'bound-session') {
-        // Persist the acceptance mark BEFORE removing the task: a crash in
-        // this window must not replay the injection on recovery (the daemon
-        // already queued the prompt; the POST carries no idempotency key).
-        this.transitionInboundTask(task.id, 'running', {
-          deliveredAt: Date.now(),
-        });
-      }
       this.removeInboundTask(task.id);
     }
     return true;
@@ -2727,6 +2789,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.lastBindingsPartial = snapshot.partial;
       this.boundRefreshFailed = false;
       this.boundSnapshotSeen = true;
+      this.boundSnapshotFailureStreak = 0;
       if (!snapshot.partial) this.boundSnapshotTrusted = true;
       const map = new Map<string, PrBindingSummary>();
       for (const summary of snapshot.bindings) {
@@ -2781,12 +2844,32 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // is skipped entirely this poll so a transient failure cannot prune
       // the persisted watch baseline.
       this.boundRefreshFailed = true;
-      process.stderr.write(
-        `[Channel:${this.name}] failed to refresh PR-bound sessions, keeping previous map: ${sanitizeLogText(
-          err instanceof Error ? err.message : String(err),
-          200,
-        )}\n`,
+      const detail = sanitizeLogText(
+        err instanceof Error ? err.message : String(err),
+        200,
       );
+      if (!this.boundSnapshotSeen) {
+        // No snapshot has EVER succeeded: the cold-start gate defers the
+        // comment lane, so every notification is stalled. A permanent
+        // failure (an old daemon lacking the route, rotated credentials)
+        // would otherwise freeze the channel with only a misleading
+        // "keeping previous map" line — there is no previous map. Surface it
+        // distinctly and actionably, throttled so a transient outage does
+        // not spam; the gate itself stays fail-closed.
+        this.boundSnapshotFailureStreak += 1;
+        if (
+          this.boundSnapshotFailureStreak === 1 ||
+          this.boundSnapshotFailureStreak % 10 === 0
+        ) {
+          process.stderr.write(
+            `[Channel:${this.name}] binding snapshot has never succeeded (${this.boundSnapshotFailureStreak} consecutive failures): the comment lane is deferred and ALL notifications are stalled. Verify GET /sessions/pr-bindings is reachable and the worker credentials are valid: ${detail}\n`,
+          );
+        }
+      } else {
+        process.stderr.write(
+          `[Channel:${this.name}] failed to refresh PR-bound sessions, keeping previous map: ${detail}\n`,
+        );
+      }
     }
   }
 
@@ -2801,6 +2884,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     return summary
       ? { kind: 'bound-session', sessionId: summary.sessionId }
       : undefined;
+  }
+
+  /**
+   * Remove a session the daemon reported permanently gone from both binding
+   * maps. A later partial snapshot otherwise retains it by recency (an
+   * incomplete enumeration is a non-absence, but an authoritative Gone is),
+   * shadowing any live follower of the same PR.
+   */
+  private evictBoundSession(sessionId: string): void {
+    for (const [key, summary] of this.boundSessionByPr) {
+      if (summary.sessionId === sessionId) this.boundSessionByPr.delete(key);
+    }
+    this.lastBindings = this.lastBindings.filter(
+      (binding) => binding.sessionId !== sessionId,
+    );
   }
 
   private buildBoundSessionPrompt(envelope: Envelope): string {
@@ -2906,6 +3004,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       await boundSessions.deliverPrompt(delivery.sessionId, prompt);
     } catch (err) {
       if (!(err instanceof BoundSessionGoneError)) throw err;
+      // The daemon's Gone verdict is authoritative deletion evidence. Evict
+      // the dead session BEFORE refreshing: a partial snapshot would
+      // otherwise retain it by recency forever, permanently shadowing a live
+      // follower and degrading every comment to the public path.
+      this.evictBoundSession(delivery.sessionId);
       // The session disappeared between selection and delivery. Re-resolve
       // once; a different candidate takes the event.
       await this.refreshBoundSessions();
@@ -2913,8 +3016,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       if (next && next.sessionId !== delivery.sessionId) {
         this.transitionInboundTask(task.id, 'running', { delivery: next });
         task.delivery = next;
-        await boundSessions.deliverPrompt(next.sessionId, prompt);
-        return;
+        try {
+          await boundSessions.deliverPrompt(next.sessionId, prompt);
+          return;
+        } catch (retryErr) {
+          if (!(retryErr instanceof BoundSessionGoneError)) throw retryErr;
+          // The re-resolved candidate is gone too. Evict it and fall through
+          // to the private-retire / public-fallback contract rather than
+          // letting the Gone consume the failure budget and dead-letter.
+          this.evictBoundSession(next.sessionId);
+        }
       }
       if (isWatch) {
         // Private-only: no public fallback for watch events (a channel
@@ -2984,7 +3095,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // non-index property on save, silently wiping the watch on each poll.
       !Array.isArray(parsed.entries)
     ) {
-      this.prWatchState = { version: 1, entries: parsed.entries };
+      const entries: Record<string, PrWatchEntry> = {};
+      let dropped = 0;
+      for (const [key, value] of Object.entries(parsed.entries)) {
+        if (isPrWatchEntryShape(value)) entries[key] = value;
+        else dropped += 1;
+      }
+      if (dropped > 0) {
+        process.stderr.write(
+          `[Channel:${this.name}] dropped ${dropped} malformed PR watch entr${dropped === 1 ? 'y' : 'ies'} from state, keeping the rest\n`,
+        );
+      }
+      this.prWatchState = { version: 1, entries };
     }
     this.prWatchStateLoaded = true;
   }
@@ -3155,7 +3277,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }),
       `pulls.get(watch ${key})`,
       3,
-      (err) => !isWatchRateLimitError(err),
+      (err) => !isWatchFailFastError(err),
     );
     const entry = this.prWatchState.entries[key] ?? {};
     const firstObservation =
@@ -3456,7 +3578,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }),
       `checks.listForRef(${sha})`,
       3,
-      (err) => !isWatchRateLimitError(err),
+      (err) => !isWatchFailFastError(err),
     )) as Array<{
       name?: string | null;
       status?: string | null;
@@ -3504,7 +3626,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }),
       `combinedStatus(${sha})`,
       3,
-      (err) => !isWatchRateLimitError(err),
+      (err) => !isWatchFailFastError(err),
     );
     // GitHub returns {state:"pending", total_count:0, statuses:[]} for a
     // SHA with no legacy commit statuses; an empty combined status must not

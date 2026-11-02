@@ -171,8 +171,9 @@ so the session that follows the PR handles the event with its existing context.
   without consuming the retry budget; the deferral is bounded (240 consecutive
   deferrals — ~4 hours at the default 60s poll, and proportionally longer with
   a larger `pollInterval`), and events that exhaust it are retired to a private
-  dead-letter log (`github-bound-deadletter.jsonl` in the channel state
-  directory) with a stderr alert rather than silently dropped.
+  dead-letter log
+  (`~/.qwen/channels/<workspace-scope>/<channel>-<name-hash>-github-bound-deadletter.jsonl`)
+  with a stderr alert rather than silently dropped.
 - This feature requires a daemon-managed channel; standalone
   `qwen channel start` ignores the setting with a warning.
 

@@ -436,6 +436,7 @@ export function createBoundSessionsAccessor(
     deliverPrompt: async (sessionId, prompt) => {
       let res = await postPrompt(sessionId, prompt);
       let releaseWake: (() => Promise<void>) | undefined;
+      let wokeSession = false;
       try {
         if (res.status === 404 && wake) {
           // Dormant session: the bindings route lists persisted active
@@ -461,11 +462,25 @@ export function createBoundSessionsAccessor(
           }
           if (cwd !== undefined) {
             releaseWake = await wake(sessionId, cwd);
+            wokeSession = true;
             await discardBody(res);
             res = await postPrompt(sessionId, prompt);
           }
         }
         if (res.status === 404) {
+          if (wokeSession) {
+            // A 404 AFTER a successful wake is more likely a reversible
+            // lifecycle transition — the owning workspace began draining
+            // between the resume and this retry, and the prompt route answers
+            // this same 404 for a non-active owner — than permanent deletion.
+            // Defer one cycle: the next wake's resume reports a permanent
+            // 404/409 if the session is truly gone, so the fallback is only
+            // delayed, never lost to the failure budget.
+            throw new BoundSessionUnavailableError(
+              sessionId,
+              'post-wake retry 404 (reversible lifecycle state)',
+            );
+          }
           throw new BoundSessionGoneError(sessionId);
         }
         if (res.status === 503) {
@@ -519,6 +534,17 @@ export function createBoundSessionsAccessor(
             `POST /session/:id/prompt failed: HTTP ${res.status}`,
           );
         }
+      } catch (err) {
+        // An authoritative Gone is durable evidence: evict the dead session's
+        // cached cwd so a permanent partial snapshot cannot make every later
+        // delivery pay a doomed resume round-trip (and the map grow without
+        // bound). A post-wake retry 404 is NOT Gone (it classifies as
+        // Unavailable), so a possibly-reversible lifecycle state never
+        // evicts a live session's wake cwd.
+        if (err instanceof BoundSessionGoneError) {
+          cwdBySession.delete(sessionId);
+        }
+        throw err;
       } finally {
         // Never leave a response body unconsumed: an unread undici body
         // holds its connection until GC, leaking sockets in this
@@ -921,14 +947,19 @@ export async function runChannelDaemonWorker(
           // restorable either (409 session_archived) and is excluded from
           // the candidate set by contract, so it takes the same fallback.
           // A superseded session (409 worktree_session_superseded) is never
-          // restored again — the worktree reset severed it permanently — so
-          // it is gone too, not retry-later backpressure that would defer
-          // ~4h and dead-letter without ever falling back.
+          // restored again — the worktree reset severed it permanently. The
+          // interrupted-worktree shapes (409 worktree_marker_missing /
+          // worktree_reset_interrupted) do not converge under a RESUME retry
+          // — the repair is a worktree-reset retry — so deferring them would
+          // dead-letter after the horizon without ever falling back. All of
+          // them are gone for delivery purposes, not retry-later backpressure.
           if (
             status === 404 ||
             (status === 409 &&
               (code === 'session_archived' ||
-                code === 'worktree_session_superseded'))
+                code === 'worktree_session_superseded' ||
+                code === 'worktree_marker_missing' ||
+                code === 'worktree_reset_interrupted'))
           ) {
             throw new BoundSessionGoneError(sessionId);
           }

@@ -3024,6 +3024,46 @@ describe('runChannelDaemonWorker', () => {
       await handle.close();
     });
 
+    it('maps a missing-worktree-marker wake conflict to BoundSessionGoneError', async () => {
+      const sdk = createSdk();
+      sdk.DaemonSessionClient.resume.mockRejectedValue({
+        status: 409,
+        body: { code: 'worktree_marker_missing' },
+      });
+      sdk.client.requestRest
+        .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+        .mockResolvedValueOnce(boundSessionResponse());
+
+      const { handle, boundSessions } = await startBoundWorker(sdk);
+
+      // The repair is a worktree-reset retry, which a RESUME retry never
+      // performs: deferring would dead-letter the event at the horizon.
+      await expect(
+        boundSessions.deliverPrompt('bound-1', 'x'),
+      ).rejects.toBeInstanceOf(BoundSessionGoneError);
+      expect(sdk.client.requestRest).toHaveBeenCalledTimes(2);
+      await handle.close();
+    });
+
+    it('maps an interrupted-worktree reset wake conflict to BoundSessionGoneError', async () => {
+      const sdk = createSdk();
+      sdk.DaemonSessionClient.resume.mockRejectedValue({
+        status: 409,
+        body: { code: 'worktree_reset_interrupted' },
+      });
+      sdk.client.requestRest
+        .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+        .mockResolvedValueOnce(boundSessionResponse());
+
+      const { handle, boundSessions } = await startBoundWorker(sdk);
+
+      await expect(
+        boundSessions.deliverPrompt('bound-1', 'x'),
+      ).rejects.toBeInstanceOf(BoundSessionGoneError);
+      expect(sdk.client.requestRest).toHaveBeenCalledTimes(2);
+      await handle.close();
+    });
+
     it('maps a workspace-mismatch wake failure to BoundSessionUnavailableError', async () => {
       const sdk = createSdk();
       sdk.DaemonSessionClient.resume.mockRejectedValue({
@@ -4878,6 +4918,40 @@ describe('createBoundSessionsAccessor', () => {
     expect(wake).toHaveBeenCalledWith('session-1', '/ws/a');
   });
 
+  it('evicts the cached cwd when a wake reports the session deleted', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(bindingsResponse())
+      .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+      .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+      .mockResolvedValueOnce(
+        jsonResponse(200, { bindings: [], partial: true }),
+      );
+    const wake = vi
+      .fn()
+      .mockRejectedValue(new BoundSessionGoneError('session-1'));
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest), wake);
+    await accessor.listPrBindings();
+
+    await expect(
+      accessor.deliverPrompt('session-1', 'x'),
+    ).rejects.toBeInstanceOf(BoundSessionGoneError);
+    expect(wake).toHaveBeenNthCalledWith(1, 'session-1', '/ws/a');
+
+    // A later partial snapshot can omit the dead session, so the cached cwd
+    // must not survive an authoritative Gone: otherwise every delivery pays
+    // a doomed resume instead of taking the cold path.
+    const err = await accessor
+      .deliverPrompt('session-1', 'x')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BoundSessionUnavailableError);
+    expect((err as Error).message).toContain(
+      'absent from a partial bindings snapshot; deferring delivery',
+    );
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(requestRest).toHaveBeenCalledTimes(4);
+  });
+
   it('surfaces Gone when the wake reports the session deleted', async () => {
     const requestRest = vi
       .fn()
@@ -4992,6 +5066,43 @@ describe('createBoundSessionsAccessor', () => {
     expect((err as Error).message).toBe(
       'Prompt queue of bound session session-1 is full',
     );
+  });
+
+  it('wakes only on 404, not on a full prompt queue', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(bindingsResponse())
+      .mockResolvedValueOnce(jsonResponse(503, { code: 'prompt_queue_full' }));
+    const wake = vi.fn().mockResolvedValue(undefined);
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest), wake);
+    await accessor.listPrBindings();
+
+    // A 503 is backpressure on a live session: waking it would pay a
+    // pointless resume (and a bindings refresh) per retry.
+    await expect(
+      accessor.deliverPrompt('session-1', 'x'),
+    ).rejects.toBeInstanceOf(BoundSessionQueueFullError);
+    expect(wake).not.toHaveBeenCalled();
+    // Prewarm bindings read + the single prompt POST, nothing else.
+    expect(requestRest).toHaveBeenCalledTimes(2);
+  });
+
+  it('wakes only on 404, not on a generic 500 prompt failure', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(bindingsResponse())
+      .mockResolvedValueOnce(jsonResponse(500, { error: 'boom' }));
+    const wake = vi.fn().mockResolvedValue(undefined);
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest), wake);
+    await accessor.listPrBindings();
+
+    const err = await accessor
+      .deliverPrompt('session-1', 'x')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain('failed: HTTP 500');
+    expect(wake).not.toHaveBeenCalled();
+    expect(requestRest).toHaveBeenCalledTimes(2);
   });
 
   it('maps other 503s to BoundSessionUnavailableError', async () => {
@@ -5116,7 +5227,37 @@ describe('createBoundSessionsAccessor', () => {
     expect((err as Error).name).not.toBe('BoundSessionUnavailableError');
   });
 
-  it('maps a post-wake 404 to Gone after exactly one wake', async () => {
+  it('defers a post-wake 404 as reversible', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(bindingsResponse())
+      .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+      .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }));
+    const release = vi.fn().mockResolvedValue(undefined);
+    const wake = vi.fn().mockResolvedValue(release);
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest), wake);
+    await accessor.listPrBindings();
+
+    const err = await accessor
+      .deliverPrompt('session-1', 'x')
+      .catch((e: unknown) => e);
+    // The wake succeeded, so this 404 is a reversible lifecycle transition
+    // (the owning workspace began draining), not deletion: deferring keeps
+    // the event alive for the next wake instead of the gone fallback.
+    expect(err).toBeInstanceOf(BoundSessionUnavailableError);
+    expect((err as Error).message).toContain(
+      'post-wake retry 404 (reversible lifecycle state)',
+    );
+    expect((err as Error).name).not.toBe('BoundSessionGoneError');
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(requestRest).toHaveBeenCalledTimes(3);
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('defers a post-wake 404 even when the wake returns no detach', async () => {
+    // The SDK may resume a session without a detach handle; the wake still
+    // succeeded, so a retry 404 stays reversible. The classification keys on
+    // "the wake ran", not on the detach return.
     const requestRest = vi
       .fn()
       .mockResolvedValueOnce(bindingsResponse())
@@ -5126,12 +5267,38 @@ describe('createBoundSessionsAccessor', () => {
     const accessor = createBoundSessionsAccessor(makeClient(requestRest), wake);
     await accessor.listPrBindings();
 
-    const err = await accessor
-      .deliverPrompt('session-1', 'x')
-      .catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(BoundSessionGoneError);
+    await expect(
+      accessor.deliverPrompt('session-1', 'x'),
+    ).rejects.toBeInstanceOf(BoundSessionUnavailableError);
     expect(wake).toHaveBeenCalledTimes(1);
-    expect(requestRest).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps the cached cwd when a post-wake 404 only defers', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(bindingsResponse())
+      .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+      .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+      .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+      .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }));
+    const release = vi.fn().mockResolvedValue(undefined);
+    const wake = vi.fn().mockResolvedValue(release);
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest), wake);
+    await accessor.listPrBindings();
+
+    await expect(
+      accessor.deliverPrompt('session-1', 'x'),
+    ).rejects.toBeInstanceOf(BoundSessionUnavailableError);
+
+    // Only an authoritative Gone evicts the wake cache: a deferred delivery
+    // must still know the workspace, or the next attempt would refresh
+    // bindings on every cycle.
+    await expect(
+      accessor.deliverPrompt('session-1', 'x'),
+    ).rejects.toBeInstanceOf(BoundSessionUnavailableError);
+    expect(wake).toHaveBeenCalledTimes(2);
+    expect(wake).toHaveBeenNthCalledWith(2, 'session-1', '/ws/a');
+    expect(requestRest).toHaveBeenCalledTimes(5);
   });
 
   it('defers delivery when a cold cache meets a partial snapshot', async () => {
@@ -5214,7 +5381,7 @@ describe('createBoundSessionsAccessor', () => {
     expect(release).toHaveBeenCalledOnce();
   });
 
-  it('releases the wake registration when the retried prompt fails', async () => {
+  it('releases the wake registration when the retried prompt is deferred', async () => {
     const requestRest = vi
       .fn()
       .mockResolvedValueOnce(bindingsResponse())
@@ -5227,7 +5394,7 @@ describe('createBoundSessionsAccessor', () => {
 
     await expect(
       accessor.deliverPrompt('session-1', 'x'),
-    ).rejects.toBeInstanceOf(BoundSessionGoneError);
+    ).rejects.toBeInstanceOf(BoundSessionUnavailableError);
     expect(release).toHaveBeenCalledOnce();
     expect(requestRest.mock.invocationCallOrder[2]).toBeLessThan(
       release.mock.invocationCallOrder[0]!,
