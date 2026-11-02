@@ -271,7 +271,7 @@ class LocalStorageAliasTest {
         String session = "retired-private";
         session(tenant, "other-storage", session);
         var transactions = new TransactionTemplate(manager);
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String token = "a".repeat(64);
         byte[] bytes = ("{\"subtype\":\"session_execution_engine\"}\n{\"subtype\":\"managed_session_header_v1\"}\n").getBytes(java.nio.charset.StandardCharsets.UTF_8);
         transactions.execute(status -> journal.acquireWriter(tenant, session, token,

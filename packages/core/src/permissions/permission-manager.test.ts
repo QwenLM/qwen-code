@@ -3341,6 +3341,11 @@ describe('PermissionManager — compound shell write attribution', () => {
     expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
   });
 
+  it('deny rule matches a redirect on the `cd` segment itself', async () => {
+    const ctx = sh('cd .qwen > .qwen/settings.json', '/repo');
+    expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
+  });
+
   it('deny rule matches a write through a `bash -lc` wrapper after `cd`', async () => {
     const ctx = sh("cd .qwen && bash -lc 'echo {} > settings.json'", '/repo');
     expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');

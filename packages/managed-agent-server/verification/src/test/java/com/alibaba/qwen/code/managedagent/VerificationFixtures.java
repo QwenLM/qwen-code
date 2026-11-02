@@ -37,12 +37,68 @@ public final class VerificationFixtures {
                 null, lifecycle, definitions, null, null, null);
     }
 
-    public static ManagedSessionStore configure(ManagedSessionStore store) {
-        store.configureHarnessRules(
-                new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        store.configureReaderVersion(
-                new com.alibaba.qwen.code.managedagent.config.ManagedSessionReaderVersion());
-        return store;
+    public static ManagedSessionStore managedSessionStore(org.springframework.jdbc.core.JdbcTemplate jdbc) {
+        return managedSessionStore(jdbc, new ManagedExtensionRecordStore(jdbc), null);
+    }
+
+    public static ManagedSessionStore managedSessionStore(org.springframework.jdbc.core.JdbcTemplate jdbc,
+            ManagedExtensionRecordStore records) {
+        return managedSessionStore(jdbc, records, null);
+    }
+
+    public static ManagedSessionStore managedSessionStore(org.springframework.jdbc.core.JdbcTemplate jdbc,
+            com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy credentials) {
+        return managedSessionStore(jdbc, new ManagedExtensionRecordStore(jdbc), null,
+                null, null, null, null, null, credentials, null);
+    }
+
+    public static ManagedSessionStore managedSessionStore(org.springframework.jdbc.core.JdbcTemplate jdbc,
+            ManagedExtensionRecordStore records, ManagedActionStore actions) {
+        return managedSessionStore(jdbc, records, actions, null, null, null, null, null,
+                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
+    }
+
+    public static ManagedSessionStore managedSessionStore(org.springframework.jdbc.core.JdbcTemplate jdbc,
+            ManagedExtensionRecordStore records, ManagedActionStore actions,
+            WorkspaceExecutionStore execution,
+            com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore sessions,
+            com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore objects,
+            ManagedToolResultStore results,
+            com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport transport,
+            com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy credentials,
+            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository bindings) {
+        return new ManagedSessionStore(jdbc, records, actions,
+                new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(),
+                new com.alibaba.qwen.code.managedagent.config.ManagedSessionReaderVersion(),
+                execution, sessions, objects, results, transport, credentials, bindings);
+    }
+
+    public static java.util.List<Object> agentStoreOwners(Object store, String name) {
+        var owners = java.util.Arrays.stream(store.getClass().getDeclaredFields())
+                .filter(field -> field.getType().getSimpleName().startsWith("Agent"))
+                .map(field -> org.springframework.test.util.ReflectionTestUtils.getField(store, field.getName()))
+                .filter(owner -> org.springframework.util.ReflectionUtils.findField(owner.getClass(), name) != null)
+                .toList();
+        if (owners.isEmpty()) {
+            throw new IllegalArgumentException("No Agent collaborator owns " + name);
+        }
+        return owners;
+    }
+
+    public static Object agentStoreField(Object store, String name) {
+        var owners = agentStoreOwners(store, name);
+        Object value = org.springframework.test.util.ReflectionTestUtils.getField(owners.getFirst(), name);
+        for (Object owner : owners) {
+            org.assertj.core.api.Assertions.assertThat(org.springframework.test.util.ReflectionTestUtils.getField(owner, name))
+                    .as(name).isSameAs(value);
+        }
+        return value;
+    }
+
+    public static void setAgentStoreField(Object store, String name, Object value) {
+        for (Object owner : agentStoreOwners(store, name)) {
+            org.springframework.test.util.ReflectionTestUtils.setField(owner, name, value);
+        }
     }
 
     public static SessionWorktreeStore configure(SessionWorktreeStore store) {
