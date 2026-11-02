@@ -5,12 +5,22 @@
  */
 
 import express, { type RequestHandler } from 'express';
-import { mkdtempSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { appendChannelEvent } from '@qwen-code/channel-base';
+import {
+  appendChannelEvent,
+  channelEventFilePath,
+  channelEventScopeDir,
+} from '@qwen-code/channel-base';
 import type {
   ChannelManagementService,
   ChannelMutationResult,
@@ -844,5 +854,40 @@ describe('workspace Channel event journal', () => {
     expect(response.status).toBe(400);
     expect(response.body.code).toBe('invalid_channel_management_request');
     expect(response.body.error).toBe(message);
+  });
+
+  it('clamps an oversized limit to the maximum page', async () => {
+    const { app } = mount();
+    const path = channelEventFilePath('bot', '/work/primary');
+    mkdirSync(dirname(path), { recursive: true });
+    const line = JSON.stringify({
+      at: new Date(2026, 0, 1).toISOString(),
+      channel: 'bot',
+      type: 'poll',
+      outcome: 'ok',
+    });
+    writeFileSync(path, `${line}\n`.repeat(501));
+
+    const response = await request(app).get(
+      '/workspace/channels/events?limit=100000',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.events).toHaveLength(500);
+    expect(response.body.truncated).toBe(true);
+  });
+
+  it('reports a failure instead of an empty journal when the scope is unreadable', async () => {
+    const { app } = mount();
+    append('/work/primary', 1);
+    const dir = channelEventScopeDir('/work/primary');
+    chmodSync(dir, 0o000);
+    try {
+      const response = await request(app).get('/workspace/channels/events');
+      expect(response.status).toBe(500);
+      expect(response.body.code).toBe('channel_management_failed');
+    } finally {
+      chmodSync(dir, 0o700);
+    }
   });
 });

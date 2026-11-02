@@ -140,17 +140,31 @@ routes.
 The route never accepts a path from the request. The scope directory is
 derived from the resolved runtime's workspace cwd through
 `getWorkspaceScopeDirName`; a managed Channel's working directory must
-canonicalize to that same workspace, so its journal lives there. Reads are
-bounded: at most the last 2 MiB of each journal file (current and `.1`), at most
-32 journal files per request, at most 500 records returned. A `channel` filter
-narrows the candidate files by their name-derived identity **before** the
-32-file cap, so an explicitly requested, quieter Channel stays reachable even
-when busier peers have newer files.
+canonicalize to that same workspace, so its journal lives there. A `channel`
+filter narrows the candidate files by their name-derived identity **before**
+any cap, so an explicitly requested, quieter Channel stays reachable even when
+busier peers have newer files.
+
+Reads are asynchronous and chunked, because this route runs on the daemon that
+also serves sessions: a synchronous multi-megabyte scan would stall every other
+request for its whole duration. The bounds are 256 KiB per journal file
+(current and `.1`), 4 MiB per request in total, 32 journal files per request,
+and 500 records returned; candidates are ordered freshest-first so the
+allowance is spent on the journals an operator is most likely looking at.
+Anything a bound clips — dropped files or an exhausted byte budget — sets
+`truncated`, so the page's completeness banner cannot claim a timeline is whole
+when Channels were left out.
+
+A missing scope directory means "no Channel has written yet" and stays an empty
+result. Any other read failure (permissions, I/O) propagates, and the route
+answers 5xx instead of an empty list: "this workspace's Channels did nothing"
+must not be the answer when the journal could not be read.
 
 ### 4. Web Shell
 
-- `useChannelEvents` polls the route while the page is mounted (5 s), and the
-  page also offers a manual refresh. Every snapshot is tagged with the query
+- `useChannelEvents` polls the route while the page is mounted and visible
+  (5 s), pauses while the tab is hidden, and reloads as soon as it becomes
+  visible again; the page also offers a manual refresh. Every snapshot is tagged with the query
   that produced it (workspace, Channel, types, limit) and mismatched data is
   masked, the way `useDaemonChannels` does: the underlying resource keeps its
   previous data while a request is in flight or after it fails, so without the
@@ -210,8 +224,10 @@ when busier peers have newer files.
 - A synchronous append sits in the message path. The record is small, and a
   failure is swallowed; the alternative (async queue) would lose the last
   events on a crash, which is when they matter.
-- The route reads from disk on every request. Only tail windows are read and
-  the page polls every 5 s while visible.
+- The route reads from disk on every request. Reads are awaited in 64 KiB
+  chunks under a 4 MiB per-request budget, so a poll yields to the rest of the
+  daemon instead of blocking it, and the page polls every 5 s only while its
+  tab is visible.
 
 ## Validation
 

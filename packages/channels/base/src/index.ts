@@ -5,6 +5,7 @@ export {
 } from './paths.js';
 export {
   appendChannelEvent,
+  channelEventFilePath,
   channelEventScopeDir,
   CHANNEL_EVENT_MAX_READ,
   CHANNEL_EVENT_TYPES,

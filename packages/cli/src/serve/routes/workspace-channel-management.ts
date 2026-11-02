@@ -525,7 +525,7 @@ export function registerWorkspaceChannelManagementRoutes(
         // workspace, so its journal lives in the workspace's own scope.
         const scopeDir = channelEventScopeDir(runtime.workspaceCwd);
         res.status(200).json(
-          readChannelEvents({
+          await readChannelEvents({
             scopeDirs: [scopeDir],
             ...query,
           }),

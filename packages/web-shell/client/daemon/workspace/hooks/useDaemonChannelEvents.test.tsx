@@ -139,4 +139,44 @@ describe('useDaemonChannelEvents', () => {
     expect(result?.data).toBeUndefined();
     expect(result?.error?.message).toBe('workspace-b unavailable');
   });
+
+  it('does not poll while the tab is hidden and resumes when it is visible', async () => {
+    const setVisibility = (value: DocumentVisibilityState) => {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        get: () => value,
+      });
+    };
+    actions.listChannelEvents.mockResolvedValue(journal('alpha-bot'));
+
+    function TestComponent() {
+      useDaemonChannelEvents({ workspaceCwd: '/workspace-a' });
+      return null;
+    }
+
+    vi.useFakeTimers();
+    setVisibility('hidden');
+    try {
+      await act(async () => root.render((<TestComponent />) as ReactNode));
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(actions.listChannelEvents).not.toHaveBeenCalled();
+
+      setVisibility('visible');
+      await act(async () => {
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(actions.listChannelEvents).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(actions.listChannelEvents).toHaveBeenCalledTimes(2);
+
+      setVisibility('hidden');
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(actions.listChannelEvents).toHaveBeenCalledTimes(2);
+    } finally {
+      setVisibility('visible');
+      vi.useRealTimers();
+    }
+  });
 });

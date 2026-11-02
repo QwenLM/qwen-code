@@ -103,15 +103,32 @@ export function useDaemonChannelEvents(
     if (!enabled) return;
     let cancelled = false;
     let timer = 0;
+    const schedule = () => {
+      // A forgotten background tab must not keep reading journals on a daemon
+      // that is also serving sessions. Check again when the timer fires: the
+      // tab can go hidden after the timer was armed.
+      if (document.visibilityState === 'hidden') return;
+      timer = window.setTimeout(() => {
+        if (document.visibilityState === 'hidden') return;
+        void run();
+      }, CHANNEL_EVENTS_RELOAD_MS);
+    };
     const run = async () => {
       await reload();
       if (cancelled) return;
-      timer = window.setTimeout(() => void run(), CHANNEL_EVENTS_RELOAD_MS);
+      schedule();
     };
-    void run();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') return;
+      window.clearTimeout(timer);
+      void run();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    if (document.visibilityState !== 'hidden') void run();
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, [enabled, reload]);
 

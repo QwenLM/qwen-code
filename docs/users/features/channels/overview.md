@@ -595,7 +595,8 @@ skipped and why (`reason_filter`, `mention_required`, `duplicate`, a sender-gate
 rejection), the replies it published or suppressed, its inbound task
 transitions, and how each poll went. Pick the workspace whose Channels you want
 to inspect, then filter by Channel and by event type; the page refreshes every
-few seconds and has a manual refresh.
+few seconds while its tab is visible, pauses in a background tab, and has a
+manual refresh.
 
 Use it to answer "why did the bot not reply to that comment?" without reading
 the daemon log. Events never include message text — only routing decisions,
