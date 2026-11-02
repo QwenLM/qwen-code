@@ -318,7 +318,9 @@ export function createDaemonSessionFactory({
  * detaching would pin the woken session live until the TTL reaper.
  *
  * Error classification: a 404 (session or workspace truly gone) becomes
- * `BoundSessionGoneError` so the adapter falls back to the channel path;
+ * `BoundSessionGoneError` so the adapter falls back to the channel path —
+ * except a 404 on the retry AFTER a successful wake, which is reversible
+ * backpressure (the owner may have begun draining) and defers one cycle;
  * queue-full and temporarily-unavailable conditions (503, restore conflicts,
  * session limits, draining workspaces) are backpressure that defers the
  * event without consuming the failure budget; everything else propagates
