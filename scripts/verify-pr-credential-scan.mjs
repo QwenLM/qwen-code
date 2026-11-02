@@ -22,7 +22,10 @@
  * The pathspecs both restrict enumeration to credential-shaped names and
  * exclude those directories, so an installed tree's multi-megabyte ignored
  * listing never reaches the output buffer. A credential file placed in the
- * project (including a nested ignored directory) is still reported.
+ * project (including a nested ignored directory) is still reported. Two
+ * exclusions are deliberate: credentials inside `node_modules`/`dist` are
+ * accepted as installed/build content, and a nested git repository is refused
+ * outright because git will not descend into it — scan that clone separately.
  *
  * Usage:
  *   node scripts/verify-pr-credential-scan.mjs <root>
@@ -33,8 +36,6 @@
 import { spawnSync } from 'node:child_process';
 import { basename } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
-
-const EXCLUDED_SEGMENTS = new Set(['node_modules', 'dist', '.git']);
 
 const CREDENTIAL_BASENAME =
   /^(?:\.env(?:\..*)?|.*\.env|.*\.pem|.*\.key|credentials.*|\.npmrc|\.netrc)$/;
@@ -55,17 +56,19 @@ const CREDENTIAL_PATHSPECS = [
   ':(exclude,glob)**/dist/**',
 ];
 
+// A nested clone is a repository git does not descend into, so a credential
+// file inside it would silently pass an ignored-file scan. Dependencies and
+// build output keep their own exclusion: a vendored `.git` is no more a
+// project credential than a vendored `.env`.
+const NESTED_REPO_PATHSPECS = [
+  ':(glob)**/.git',
+  ':(exclude,glob)**/node_modules/**',
+  ':(exclude,glob)**/dist/**',
+];
+
 /** True for a path whose basename is credential-shaped. */
 export function isCredentialShaped(path) {
   return CREDENTIAL_BASENAME.test(basename(path));
-}
-
-/**
- * True for a path under an installed/build directory at any depth, including
- * a workspace package's own `node_modules` and `dist`.
- */
-export function isExcluded(path) {
-  return path.split('/').some((segment) => EXCLUDED_SEGMENTS.has(segment));
 }
 
 export function gitScanArgs(root) {
@@ -82,15 +85,47 @@ export function gitScanArgs(root) {
   ];
 }
 
+/** Returns the nested repositories found under `root`, sorted. */
+export function nestedGitRepos(root, { maxBuffer = 8 * 1024 * 1024 } = {}) {
+  const result = spawnSync(
+    'git',
+    [
+      '-C',
+      root,
+      'ls-files',
+      '--others',
+      '--ignored',
+      '--exclude-standard',
+      '-z',
+      '--',
+      ...NESTED_REPO_PATHSPECS,
+    ],
+    { encoding: 'utf8', maxBuffer },
+  );
+  if (result.status !== 0) {
+    throw new Error(
+      `could not list nested repositories: ${(result.stderr || '').trim() || 'git failed'}`,
+    );
+  }
+  return result.stdout.split('\0').filter(Boolean).sort();
+}
+
 /**
  * Returns the ignored credential-shaped files under `root`, sorted. An empty
  * array is the clean state; a git failure is thrown so the caller can refuse
- * rather than treat it as clean.
+ * rather than treat it as clean, and a nested repository is refused because a
+ * scan of the outer tree cannot see into it.
  */
 export function scanIgnoredCredentials(
   root,
   { maxBuffer = 8 * 1024 * 1024 } = {},
 ) {
+  const nested = nestedGitRepos(root, { maxBuffer });
+  if (nested.length > 0) {
+    throw new Error(
+      `nested git repository under ${nested[0]} — scan that clone separately or remove it`,
+    );
+  }
   const result = spawnSync('git', gitScanArgs(root), {
     encoding: 'utf8',
     maxBuffer,
@@ -103,7 +138,6 @@ export function scanIgnoredCredentials(
   return result.stdout
     .split('\0')
     .filter(Boolean)
-    .filter((path) => !isExcluded(path))
     .filter((path) => isCredentialShaped(path))
     .sort();
 }

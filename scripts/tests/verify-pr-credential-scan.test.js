@@ -144,6 +144,20 @@ describe('scanIgnoredCredentials', () => {
     ]);
   });
 
+  it('refuses a nested repository instead of silently skipping it', () => {
+    const dir = makeRepo(['tmp/pr-clone/.env'], ['tmp/']);
+    execFileSync('git', ['init', '-q', '.'], {
+      cwd: join(dir, 'tmp', 'pr-clone'),
+      env: gitEnv,
+    });
+    expect(() => scanIgnoredCredentials(dir)).toThrow(
+      /nested git repository under tmp\/pr-clone/,
+    );
+    const result = run(dir);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('nested git repository');
+  });
+
   it('stays silent on a clean tree', () => {
     const dir = makeRepo(['src/app.ts'], ['node_modules/']);
     const result = run(dir);
@@ -168,6 +182,8 @@ describe('scanIgnoredCredentials', () => {
     tmpDirs.push(notRepo);
     const result = run(notRepo);
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain('could not list ignored files');
+    expect(result.stderr).toMatch(
+      /could not list (nested repositories|ignored files)/,
+    );
   });
 });

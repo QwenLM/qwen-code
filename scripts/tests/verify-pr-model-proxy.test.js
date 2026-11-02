@@ -253,7 +253,7 @@ describe('verify-pr-model-proxy', () => {
           method: 'POST',
           headers: {
             authorization: `Bearer ${TOKEN}`,
-            connection: 'x-client-hop',
+            connection: ' x-client-hop , keep-alive ',
             'x-client-hop': 'client-secret',
             'proxy-authorization': 'Basic client-proxy-secret',
             'transfer-encoding': 'chunked',
@@ -620,6 +620,10 @@ describe('local container recipe pins', () => {
     expect(skill).toContain("The round's engine is the released CLI");
     expect(skill).toContain('npm run build && npm run bundle');
     expect(skill).toContain('npm install -g --prefix "$HOME/.local" /work');
+  });
+
+  it('refuses a nested repository in the scan description', () => {
+    expect(skill).toMatch(/nested\s+git repository outright/);
   });
 
   it('pins the checker head from the host snapshot', () => {

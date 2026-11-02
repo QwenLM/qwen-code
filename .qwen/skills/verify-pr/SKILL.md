@@ -340,9 +340,11 @@ certify the round.
    '
    ```
 
-   The scan names credential-shaped ignored files (nested ones included) while
-   leaving installed dependencies and build output alone. Exit 4 means this is
-   not a boundary: stop and run nothing else.
+   The scan names credential-shaped ignored files (nested ones included),
+   leaves installed dependencies and build output alone, and refuses a nested
+   git repository outright: git does not descend into it, so a credential
+   file inside one would otherwise pass silently. Exit 4 means this is not a
+   boundary: stop and run nothing else.
 
 6. **Run the round inside**, installing the CLI into the fresh home because
    the container is not root. Each `docker exec` is a new shell, so the

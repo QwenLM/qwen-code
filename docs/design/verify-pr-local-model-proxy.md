@@ -97,9 +97,11 @@ the real key.
   and the CLI's JSON coordinates.
 - Credential scan: a nested ignored `.env`, `*.pem`, `credentials*`, `.npmrc`
   or `.netrc` is refused; installed `node_modules`/`dist` are ignored at any
-  depth, including inside a workspace package; enumeration is path-limited so
-  a large ignored dependency tree is never buffered; a missing `--ignored`
-  mode or a dropped pattern turns its test red.
+  depth, including inside a workspace package, and their contents are a
+  documented exclusion; enumeration is path-limited so a large ignored
+  dependency tree is never buffered; a nested git repository is refused
+  because git does not descend into it; a missing `--ignored` mode or a
+  dropped pattern turns its test red.
 - Checker: `--context` overrides the writable artifact copy, refuses an
   unusable snapshot instead of falling back (with a usable writable copy
   seeded), and keeps its existing exit codes.
