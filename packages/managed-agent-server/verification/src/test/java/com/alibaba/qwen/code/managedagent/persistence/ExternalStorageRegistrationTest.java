@@ -317,7 +317,10 @@ public class ExternalStorageRegistrationTest {
         assertConflict(() -> store.publishWorkspace("tenant", "publish", "workspace", "provider", 1, "other-actor", "E2B Workspace"), "idempotency_conflict");
         assertThatThrownBy(() -> store.publishWorkspace("foreign", "publish", "workspace", "provider", 1, "actor", "E2B Workspace"))
                 .isInstanceOf(RuntimeBrokerException.class);
-        mvc.perform(operator(route).content(input).with(request -> { request.setRemoteAddr("192.0.2.1"); return request; }))
+        mvc.perform(operator(route).content(input).with(request -> {
+            request.setRemoteAddr("192.0.2.1");
+            return request;
+        }))
                 .andExpect(status().isForbidden());
         mvc.perform(operator(route).content(input.replace("\"providerId\":", "\"providerId\":\"other\",\"providerId\":")))
                 .andExpect(status().isBadRequest());
