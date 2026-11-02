@@ -160,9 +160,13 @@ on one fleet ladder for unmodeled fleet values.
 `scripts/tests/ci-platform-lanes.test.js` pins the `runs-on` literals (lint on
 `lint_runner`, test on `ubuntu_runner`) and evaluates each lane's timeout from
 its own routing output; note that suite runs in the test job's side lane on
-every full-profile PR, while the routing battery runs before dependency
-install in the same job — which is why the load-bearing HOME guard lives in
-the routing battery.
+every full-profile PR. The routing battery runs in lint_and_static after
+dependency install (it imports the `yaml` package, so it cannot join the
+dep-free fast lane), and on `github_ci_only` PRs it does not run in the PR's
+own run at all — a stripped isolation is caught by the next full-profile PR
+or main push, one run later. The HOME guard still lives there because the
+battery drives the real `pick_runner` shell and gates every full-profile PR,
+a strictly larger surface than the vitest side lane.
 
 ## Decision record and open questions
 

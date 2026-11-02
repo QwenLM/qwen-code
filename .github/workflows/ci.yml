@@ -2319,10 +2319,10 @@ jobs:
     # executes PR code on the pool for every pull request — accepted under the
     # same 2026-10-31 decision, and it carries NO secrets by construction
     # (every model key is emptied at the integration step; the job's only
-    # token is the read-only checkout grant). Its PR-code step already pins a
-    # step-level runner.temp HOME with the key scrub, so the pool exposure is
-    # the class already accepted for lint. test and integration_cli keep the
-    # association-gated ubuntu_runner.
+    # token is the read-only checkout grant). The lane publishes a run-unique
+    # HOME from its first step (lint's shape) and empties every model key at
+    # the gate, so the pool exposure is the class already accepted for lint.
+    # test and integration_cli keep the association-gated ubuntu_runner.
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.lint_runner || ''["ubuntu-latest"]'') }}'
     # Dependency installation alone can exceed 30 minutes on a contended shared
     # ECS host, before the separately bounded 20-minute integration step starts.

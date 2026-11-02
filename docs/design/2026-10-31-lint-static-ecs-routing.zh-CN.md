@@ -130,8 +130,12 @@ association/事件矩阵下的行为、`lint_runner` 的两车道范围（超集
 `scripts/tests/ci-platform-lanes.test.js` 钉住
 `runs-on` 字面量（lint 读 `lint_runner`、test 读 `ubuntu_runner`），并按各车道
 自己的路由输出求值 timeout；注意该套件在 test job 的旁路 lane 上对每个
-full-profile PR 运行，而路由电池在同一 job 的依赖安装之前就跑——所以承重的
-HOME 守卫放在路由电池里。
+full-profile PR 运行。路由电池在 lint_and_static 的依赖安装之后运行（它
+import `yaml` 包，进不了免依赖快车道），且对 `github_ci_only` PR 在其自身
+的 run 里根本不跑——被剥掉的隔离要等下一个 full-profile PR 或 main push
+才会被抓到，晚一个 run。HOME 守卫仍放在那里，是因为电池驱动真实的
+`pick_runner` shell 并门禁每个 full-profile PR，覆盖面严格大于 vitest 旁路
+lane。
 
 ## 决策记录与开放问题
 
