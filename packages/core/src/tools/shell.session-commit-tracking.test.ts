@@ -716,7 +716,10 @@ describe.skipIf(process.platform === 'win32')(
           `exec ${JSON.stringify(gitPath)} "$@"\n`,
       );
       fs.chmodSync(probeGitPath, 0o755);
-      vi.stubEnv('PATH', `${probeBinDir}${path.delimiter}${process.env['PATH']}`);
+      vi.stubEnv(
+        'PATH',
+        `${probeBinDir}${path.delimiter}${process.env['PATH']}`,
+      );
 
       await runPromoted('git commit -m "nothing staged"', true);
       firePromoteSettle!();
