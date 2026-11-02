@@ -87,9 +87,9 @@ class ManagedTurnCommandOperationTest {
                 return Instant.ofEpochMilli(now.get());
             }
         };
-        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), clock,
+        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), clock,
                 ignored -> {}, new ManagedWorkspaceRegistry(jdbc),
-                new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION",
                 "create", "digest", "qwen-code", null, null, List.of(), null)
                 .sessionId();
@@ -275,10 +275,10 @@ class ManagedTurnCommandOperationTest {
                 return result;
             }
         };
-        ManagedAgentStore racing = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(racingJdbc,
+        ManagedAgentStore racing = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(racingJdbc,
                 new ObjectMapper(), clock, ignored -> {},
                 new ManagedWorkspaceRegistry(racingJdbc),
-                new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         assertThat(racing.turnInputAcceptance(TENANT, sessionId,
                 admitted.operationId())).isEqualTo(AcceptanceVerdict.unknown());
         assertThat(raced).isTrue();
