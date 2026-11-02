@@ -12631,6 +12631,11 @@ describe('LlmChat', async () => {
       // First-copy-wins: an in-window survivor suppresses both synthesis
       // and the widen pass; a genuine copy further down is today's shape
       // and is not chased (only same-window duplicates are deduped).
+      // Scope note (not a regression): the "exactly one tool_result on
+      // the wire" guarantee only holds for ids the window left UNMATCHED.
+      // An id the window already matched can still ship a later genuine
+      // copy twice — same behaviour on `main` — so this is deliberately
+      // outside the widen pass's contract.
       const { result } = repair([
         userText('kick off'),
         callTurn('call_inwin'),
@@ -12641,6 +12646,59 @@ describe('LlmChat', async () => {
 
       expect(result.injected).toEqual([]);
       expect(result.droppedDuplicates).toEqual([]);
+    });
+
+    it('leaves a later call intact when the hoisted source turn sits directly above it', () => {
+      // The emptied source turn is dropped even when the next entry is a
+      // `model[functionCall]` turn, so the two assistant turns become
+      // adjacent (`m'mid'` | `m[call_b]`). Anthropic and OpenAI merge
+      // consecutive assistant messages; the Gemini path has no such
+      // normalisation but the pairing invariant still holds. The drop
+      // decision is made before any splice, so the later call and its
+      // response must both survive — no turn is lost to a stale index.
+      const { result, history } = repair([
+        userText('kick off'),
+        callTurn('call_a'),
+        userText('go'),
+        modelText('mid'),
+        resultTurn('call_a', 'real a'),
+        callTurn('call_b'),
+        resultTurn('call_b', 'real b'),
+      ]);
+
+      expect(result.injected).toEqual([]);
+      expect(result.droppedDuplicates).toEqual([]);
+      // The fr-only source turn is dropped: 7 → 6 entries.
+      expect(history.length).toBe(6);
+      // The real fr heads the user turn adjacent to call_a.
+      expect(history[2]!.parts![0]!.functionResponse?.id).toBe('call_a');
+      expect(history[2]!.parts![1]).toEqual({ text: 'go' });
+      // The intervening model turn and the later call both survive,
+      // now adjacent to each other.
+      expect(history[3]).toEqual(modelText('mid'));
+      expect(history[4]!.parts![0]!.functionCall?.id).toBe('call_b');
+      // call_b is still paired with its own response.
+      expect(history[5]!.parts![0]!.functionResponse?.id).toBe('call_b');
+    });
+
+    it('keeps the source turn text when a late response sits behind a model turn', () => {
+      // The widen path relocates the fr but must NOT delete the source
+      // turn when it also carries the user's own message: cleanup drops
+      // only turns whose every part is a `functionResponse`.
+      const { result, history } = repair([
+        userText('kick off'),
+        callTurn('cid_text'),
+        userText('follow up'),
+        modelText('On it.'),
+        resultTurn('cid_text', 'real data', { text: 'thanks anyway' }),
+      ]);
+
+      expect(result.injected).toEqual([]);
+      // The source turn survives as a text-only message: 5 entries.
+      expect(history.length).toBe(5);
+      expect(history[2]!.parts![0]!.functionResponse?.id).toBe('cid_text');
+      expect(history[2]!.parts![1]).toEqual({ text: 'follow up' });
+      expect(history[4]!.parts).toEqual([{ text: 'thanks anyway' }]);
     });
 
     it('synthesizes missing fr AND hoists real fr in a parallel tool_use mismatch', () => {

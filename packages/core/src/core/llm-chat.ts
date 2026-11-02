@@ -2278,11 +2278,15 @@ function adoptLateResponses(
  * of new user turns inserted (0 or 1) so the outer loop can advance its
  * cursor.
  *
- * Order: (1) splice removal targets desc-by-desc, (2) drop empty user
- * turns after the resolved adjacent turn, (3) HEAD-insert at that user
- * turn OR splice a new user turn there. The HEAD insert is
- * load-bearing (mirrors upstream `hoistToolResults`) — see the
- * canonical note for why tail-append re-triggers the wedge.
+ * Order: (1) mark the source turns a removal will empty, (2) splice
+ * removal targets desc-by-desc, (3) drop the emptied source turns,
+ * (4) drop empty user turns after the resolved adjacent turn,
+ * (5) HEAD-insert at that user turn OR splice a new user turn there.
+ * The drop decision in (1) is taken against the unmutated history and
+ * applied only after every part-splice, so a late-hoist removal can
+ * never delete a turn through an index shifted by an earlier splice.
+ * The HEAD insert is load-bearing (mirrors upstream `hoistToolResults`)
+ * — see the canonical note for why tail-append re-triggers the wedge.
  */
 function applyRepair(
   history: Content[],
@@ -2298,7 +2302,22 @@ function applyRepair(
   }));
   const partsToInject: Part[] = [...syntheticParts, ...plan.hoistedParts];
 
-  // (1) Splice removal targets, descending so indices stay valid.
+  // (1) Decide which source turns a removal will empty, BEFORE any
+  // mutation. Only a turn whose every part is a `functionResponse` is a
+  // drop candidate — a turn that also carries the user's own text must
+  // survive as a text-only message. Reading these indices up front keeps
+  // the drop immune to the array shifts the splices below cause.
+  const dropTurnIdx = new Set<number>();
+  for (const loc of plan.removalTargets) {
+    if (loc.turnIdx < plan.scanEnd) continue;
+    const parts = history[loc.turnIdx]?.parts ?? [];
+    if (parts.length === 0) continue;
+    if (parts.every((part) => part.functionResponse !== undefined)) {
+      dropTurnIdx.add(loc.turnIdx);
+    }
+  }
+
+  // (2) Splice removal targets, descending so indices stay valid.
   const removals = [...plan.removalTargets].sort((a, b) => {
     if (a.turnIdx !== b.turnIdx) return b.turnIdx - a.turnIdx;
     return b.partIdx - a.partIdx;
@@ -2306,18 +2325,18 @@ function applyRepair(
   for (const loc of removals) {
     const turnParts = history[loc.turnIdx].parts;
     if (turnParts) turnParts.splice(loc.partIdx, 1);
-    // A late-hoist removal can empty a user turn beyond the scanned
-    // window; step (2) below only sweeps the window itself, so drop
-    // that turn here. Descending order keeps the index valid.
-    if (
-      loc.turnIdx >= plan.scanEnd &&
-      (history[loc.turnIdx]?.parts?.length ?? 0) === 0
-    ) {
-      history.splice(loc.turnIdx, 1);
+  }
+
+  // (3) Drop the source turns a removal emptied, still descending so the
+  // remaining indices stay valid. Runs only after every part-splice above,
+  // never interleaved with them.
+  for (const idx of [...dropTurnIdx].sort((a, b) => b - a)) {
+    if ((history[idx]?.parts?.length ?? 0) === 0) {
+      history.splice(idx, 1);
     }
   }
 
-  // (2) Drop now-empty user turns after the resolved adjacent turn.
+  // (4) Drop now-empty user turns after the resolved adjacent turn.
   // Preserve the adjacent turn even if empty — we'll rewrite it
   // below.
   const adjacentIdx = plan.adjacentIdx;
@@ -2329,7 +2348,7 @@ function applyRepair(
 
   if (partsToInject.length === 0) return { insertedBefore: 0 };
 
-  // (3) Place new parts at the head of the adjacent user turn, OR
+  // (5) Place new parts at the head of the adjacent user turn, OR
   // insert a fresh user turn at the resolved adjacency.
   const next = history[adjacentIdx];
   if (next?.role === 'user') {
