@@ -47,7 +47,8 @@
  *
  * On readiness, prints one JSON line: {port, baseUrl, token, nonce}. Give the
  * container `baseUrl` as the provider base URL and `token` as its credential;
- * `GET /__health` echoes `nonce`. Only `POST .../chat/completions` is relayed.
+ * `GET /__health` echoes `nonce`. Only `POST <basePath>/chat/completions` is
+ * relayed — the path is matched exactly, not as a suffix.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -167,12 +168,14 @@ export function createModelProxy({
       target.pathname = path;
       target.search = incoming.search;
 
-      if (
-        req.method !== 'POST' ||
-        !target.pathname.endsWith('/chat/completions')
-      ) {
+      // Exact path, not a suffix: `endsWith('/chat/completions')` would also
+      // relay `/admin/chat/completions` to the upstream.
+      const allowedPath = basePath
+        ? `${basePath}/chat/completions`
+        : '/chat/completions';
+      if (req.method !== 'POST' || target.pathname !== allowedPath) {
         res.writeHead(403, { 'content-type': 'text/plain' });
-        res.end('proxy: only POST /chat/completions is allowed\n');
+        res.end(`proxy: only POST ${allowedPath} is allowed\n`);
         return;
       }
 

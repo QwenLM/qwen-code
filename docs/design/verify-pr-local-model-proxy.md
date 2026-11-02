@@ -36,13 +36,14 @@ A host-side relay plus a recipe that names its trust boundaries.
 
 - `scripts/verify-pr-model-proxy.mjs` listens on a chosen host address (the
   Docker bridge for container clients), holds `REVIEW_OPENAI_API_KEY`, and
-  relays only `POST /chat/completions`. Clients present a per-run bearer token
-  (`QWEN_VERIFY_PROXY_TOKEN`); the proxy swaps it for the real key upstream.
-  A nonce-echoing health endpoint distinguishes the process from a squatter.
-  Hop-by-hop request headers are stripped. The idle watchdog is per-chunk,
-  matches the qwen client's own 240 s stream tolerance, stays quiet while the
-  downstream is paused, and re-arms on drain; a disconnect before upstream
-  headers aborts the fetch instead of paying for a completion nobody reads.
+  relays only the exact `${basePath}/chat/completions` path. Clients present a
+  per-run bearer token (`QWEN_VERIFY_PROXY_TOKEN`); the proxy swaps it for the
+  real key upstream. A nonce-echoing health endpoint distinguishes the process
+  from a squatter. Hop-by-hop request headers and the upstream
+  `content-encoding` are stripped. The idle watchdog is per-chunk, matches the
+  qwen client's own 240 s stream tolerance, stays quiet while the downstream is
+  paused, and re-arms on drain; a disconnect before upstream headers aborts
+  the fetch instead of paying for a completion nobody reads.
 - The recipe uses two checkouts. `<trusted-clone>` runs the proxy and the
   post-round checker; `<pr-clone>` is a standalone clone at the PR head that
   the container mounts. A linked worktree is rejected by construction because
@@ -50,8 +51,11 @@ A host-side relay plus a recipe that names its trust boundaries.
 - The container is named and detached (`sleep infinity` plus `docker exec`),
   runs as the host uid with `HOME=/tmp/qwen-home`, mounts the full snapshot
   from a host copy outside the tree, and sets the credential-free attestation
-  inside only after rejecting credential-shaped ignored files. The CLI
-  installs into the fresh home, so nothing in the tree becomes root-owned.
+  inside only after rejecting credential-shaped ignored entries at any depth
+  (`.env`/`*.env`/`*.pem`/`*.key`/`credentials*`/`.npmrc`/`.netrc`). The CLI
+  installs into the fresh home, so nothing in the tree becomes root-owned; the
+  round's engine is the released CLI unless the tree's own build is installed
+  over it.
 - The round reads `$QWEN_VERIFY_CONTEXT` from the full snapshot. After the
   round, the checker runs from `<trusted-clone>` with `--context <host copy>`,
   so a writable artifact `context.json` cannot pin its own expected head.
@@ -77,9 +81,10 @@ the real key.
 
 ## Acceptance
 
-- Proxies: bearer rejection, path allowlist, base-path prefixing, real-key
-  injection, hop-by-hop stripping with a chunked body, pre-header disconnect
-  abort, paused-downstream survival, slow-but-healthy streams, upstream reset
+- Proxies: bearer rejection, exact path allowlist, base-path prefixing,
+  real-key injection, hop-by-hop stripping with a chunked body, a gzip upstream
+  body with the header stripped, pre-header disconnect abort,
+  paused-downstream survival, slow-but-healthy streams, upstream reset
   survival, IPv6 listen formatting, and the CLI's JSON coordinates.
 - Checker: `--context` overrides the writable artifact copy, refuses an
   unusable snapshot instead of falling back, and keeps its existing exit

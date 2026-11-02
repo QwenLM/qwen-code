@@ -302,13 +302,17 @@ run with the real key and the maintainer's `gh` access.
 5. **Attest inside, after a check — never on the `docker run` line.** The
    gate only sees known credential names and home paths, and gitignored files
    in the round tree are invisible to its clean-tree check, so review the
-   mount list and reject credential-shaped ignored files first:
+   mount list and reject credential-shaped ignored entries at any depth first:
 
    ```bash
    docker exec -i qwen-verify-<n> bash -lc '
      set -e
-     test -z "$(git -C /work status --porcelain --ignored -- .env ".env.*")" ||
-       { echo "ignored credential file in the round tree"; exit 1; }
+     credentials="$(git -C /work status --porcelain --ignored -- \
+       ":(glob)**/.env" ":(glob)**/.env.*" ":(glob)**/*.env" \
+       ":(glob)**/*.pem" ":(glob)**/*.key" ":(glob)**/credentials*" \
+       ":(glob)**/.npmrc" ":(glob)**/.netrc")"
+     test -z "$credentials" ||
+       { printf "%s\n" "$credentials"; exit 1; }
      export QWEN_VERIFY_CREDENTIAL_FREE=1
      node /work/scripts/verify-pr-prepare.mjs --require-isolation
    '
@@ -317,7 +321,9 @@ run with the real key and the maintainer's `gh` access.
    Exit 4 means this is not a boundary: stop and run nothing else.
 
 6. **Run the round inside**, installing the CLI into the fresh home because
-   the container is not root:
+   the container is not root. The round's engine is the released CLI; the PR
+   clone supplies the workspace skill and code. To run the tree's own CLI
+   instead, build it and install `/work` into the same prefix:
 
    ```bash
    docker exec -i qwen-verify-<n> bash -lc '

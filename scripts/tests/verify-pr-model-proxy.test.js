@@ -9,6 +9,7 @@ import { once } from 'node:events';
 import { readFileSync } from 'node:fs';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   DEFAULT_IDLE_TIMEOUT_MS,
@@ -63,6 +64,7 @@ async function startUpstream({
   resetAfterFirstChunk = false,
   resetDelayMs = 50,
   respectBackpressure = false,
+  gzipBody = false,
 } = {}) {
   const requests = [];
   const events = [];
@@ -81,6 +83,21 @@ async function startUpstream({
       if (delayMs) await sleep(delayMs);
       if (res.destroyed) {
         events.push('aborted-before-headers');
+        return;
+      }
+      if (gzipBody) {
+        // The gzip header is what the relay must drop: undici hands the proxy
+        // decoded bytes, so forwarding `content-encoding: gzip` makes the
+        // client gunzip plain text.
+        res.writeHead(status, {
+          'content-type': 'text/event-stream',
+          'content-encoding': 'gzip',
+          'content-length': String(
+            gzipSync(Buffer.from(chunks.join(''))).length,
+          ),
+        });
+        events.push('write-head');
+        res.end(gzipSync(Buffer.from(chunks.join(''))));
         return;
       }
       res.writeHead(status, { 'content-type': 'text/event-stream' });
@@ -165,6 +182,10 @@ describe('verify-pr-model-proxy', () => {
     expect(get.status).toBe(403);
     const post = await fetch(`${proxy}/v1/models`, chatRequest());
     expect(post.status).toBe(403);
+    // Exact path, not a suffix: this must not reach the upstream as
+    // /v1/admin/chat/completions.
+    const admin = await fetch(`${proxy}/admin/chat/completions`, chatRequest());
+    expect(admin.status).toBe(403);
     expect(upstream.requests).toHaveLength(0);
   });
 
@@ -194,6 +215,20 @@ describe('verify-pr-model-proxy', () => {
     const res = await fetch(`${proxy}/v1/chat/completions`, chatRequest());
     expect(res.status).toBe(200);
     expect(upstream.requests[0].url).toBe('/v1/chat/completions');
+  });
+
+  it('strips the upstream content-encoding instead of forwarding it', async () => {
+    const upstream = await startUpstream({
+      gzipBody: true,
+      chunks: ['data: gzip-ok\n\n'],
+    });
+    const proxy = await startProxy(upstream);
+    const res = await fetch(`${proxy}/chat/completions`, chatRequest());
+    expect(res.status).toBe(200);
+    // undici already decoded the body; forwarding the header would make the
+    // client gunzip plain text.
+    expect(res.headers.get('content-encoding')).toBeNull();
+    expect(await res.text()).toBe('data: gzip-ok\n\n');
   });
 
   it('strips hop-by-hop headers and relays a chunked request body', async () => {
@@ -524,10 +559,17 @@ describe('local container recipe pins', () => {
   it('keeps the attestation off the docker run line and behind a check', () => {
     const dockerRun = skill.split('docker run -d')[1]?.split('```')[0] ?? '';
     expect(dockerRun).not.toContain('QWEN_VERIFY_CREDENTIAL_FREE');
-    expect(skill).toContain(
-      'git -C /work status --porcelain --ignored -- .env',
-    );
+    // Any depth, not only a root .env: a nested secrets/.env must be caught.
+    expect(skill).toContain(':(glob)**/.env');
+    expect(skill).toContain(':(glob)**/*.pem');
+    expect(skill).toContain(':(glob)**/credentials*');
+    expect(skill).not.toMatch(/--ignored -- \.env\b/);
     expect(skill).toContain('export QWEN_VERIFY_CREDENTIAL_FREE=1');
+  });
+
+  it('names the released CLI as the engine and offers the tree build', () => {
+    expect(skill).toContain("The round's engine is the released CLI");
+    expect(skill).toContain('install `/work` into the same prefix');
   });
 
   it('pins the checker head from the host snapshot', () => {

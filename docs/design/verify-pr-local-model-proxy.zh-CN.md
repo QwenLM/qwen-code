@@ -18,9 +18,9 @@
 
 一个宿主机侧转发器，加一套点明信任边界的配方。
 
-- `scripts/verify-pr-model-proxy.mjs` 监听选定的宿主地址（容器客户端用 Docker 网桥），持有 `REVIEW_OPENAI_API_KEY`，只转发 `POST /chat/completions`。客户端出示一次性 bearer token（`QWEN_VERIFY_PROXY_TOKEN`），代理在上游替换为真实 key。回显 nonce 的健康端点用于区分本进程与抢占者。hop-by-hop 请求头被剥离。空闲看门狗按块续期，与 qwen 客户端自身的 240 秒流容忍一致；下游暂停期间不中止，drain 时续期；上游响应头之前客户端断开时中止 fetch，而不是为无人读取的补全付费。
+- `scripts/verify-pr-model-proxy.mjs` 监听选定的宿主地址（容器客户端用 Docker 网桥），持有 `REVIEW_OPENAI_API_KEY`，只转发精确的 `${basePath}/chat/completions` 路径。客户端出示一次性 bearer token（`QWEN_VERIFY_PROXY_TOKEN`），代理在上游替换为真实 key。回显 nonce 的健康端点用于区分本进程与抢占者。hop-by-hop 请求头与上游 `content-encoding` 被剥离（undici 已解码，转发该头会让客户端二次解压）。空闲看门狗按块续期，与 qwen 客户端自身的 240 秒流容忍一致；下游暂停期间不中止，drain 时续期；上游响应头之前客户端断开时中止 fetch，而不是为无人读取的补全付费。
 - 配方使用两个检出。`<trusted-clone>` 运行代理与轮次后的检查器；`<pr-clone>` 是停在 PR head 的独立克隆，供容器挂载。链接 worktree 因其 gitfile 指向挂载外而在构造上被排除。
-- 容器有名字且后台运行（`sleep infinity` 加 `docker exec`），以宿主 uid 运行、`HOME=/tmp/qwen-home`，从树外的宿主副本挂载完整快照，并在拒绝凭据形状的 ignored 文件之后才在容器内设置无凭据宣誓。CLI 安装进这个新 home，因此树里不会出现 root 属主文件。
+- 容器有名字且后台运行（`sleep infinity` 加 `docker exec`），以宿主 uid 运行、`HOME=/tmp/qwen-home`，从树外的宿主副本挂载完整快照，并在拒绝任意深度的凭据形状 ignored 条目（`.env`/`*.env`/`*.pem`/`*.key`/`credentials*`/`.npmrc`/`.netrc`）之后才在容器内设置无凭据宣誓。CLI 安装进这个新 home，因此树里不会出现 root 属主文件；轮次的引擎是发布版 CLI，除非把树内构建装到同一前缀覆盖它。
 - 轮次从完整快照读取 `$QWEN_VERIFY_CONTEXT`。轮次结束后，检查器从 `<trusted-clone>` 运行并带 `--context <宿主副本>`，因此可写的产物 `context.json` 无法自证其期望 head。
 
 CI 车道保留内联代理：那份副本运行在 base-pinned workflow 的 root 步骤里，若改为指向 PR 检出，PR 就能读到真实 key。
@@ -34,7 +34,7 @@ CI 车道保留内联代理：那份副本运行在 base-pinned workflow 的 roo
 
 ## 验收
 
-- 代理：bearer 拒绝、路径白名单、base path 前缀、真实 key 注入、chunked 请求体下 hop-by-hop 剥离、响应头前断连中止、下游暂停存活、慢但健康的流、上游重置存活、IPv6 监听格式化，以及 CLI 的 JSON 坐标。
+- 代理：bearer 拒绝、精确路径白名单、base path 前缀、真实 key 注入、chunked 请求体下 hop-by-hop 剥离、gzip 上游响应（头被剥离）、响应头前断连中止、下游暂停存活、慢但健康的流、上游重置存活、IPv6 监听格式化，以及 CLI 的 JSON 坐标。
 - 检查器：`--context` 覆盖可写产物副本、不可用快照时拒绝而不是回退，并保持既有退出码。
 - 变异证据：移除上述任一守卫，对应 pin 必须变红。
 - 真实 Docker 冒烟：`QWEN_VERIFY_PROXY_TOKEN` 时门禁通过、`OPENAI_API_KEY` 时门禁拒绝、容器请求到达 mock 上游且真实 key 已注入。
