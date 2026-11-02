@@ -2500,13 +2500,16 @@ jobs:
         if: "${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
 
-      - name: 'Configure persistent npm cache (self-hosted)'
+      # HOME is per-run (isolated above), so this cache dies with the job —
+      # the name must not promise persistence. The cold install is the
+      # accepted cost (review round-3); a shared pnpm store is a follow-up.
+      - name: 'Configure per-run npm cache (self-hosted)'
         if: "${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         run: |-
           cache_dir="${HOME}/.cache/qwen-code/npm"
           mkdir -p "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "Using npm cache at ${cache_dir}"
+          echo "Using per-run npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Disk floor gate (self-hosted)'
@@ -2538,6 +2541,9 @@ jobs:
           QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}/.qwen'
           API_KEY: ''
           ANTHROPIC_API_KEY: ''
+          # The SDK auth resolver back-fills this from env; a runner-account
+          # residue would survive into fork PR code (review round-3).
+          ANTHROPIC_AUTH_TOKEN: ''
           ANTHROPIC_BASE_URL: ''
           ANTHROPIC_MODEL: ''
           BAILIAN_CODING_PLAN_API_KEY: ''

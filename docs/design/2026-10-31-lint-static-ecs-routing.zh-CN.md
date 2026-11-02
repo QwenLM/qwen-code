@@ -34,7 +34,7 @@ scripts/prepare.js）——但按构造零密钥：集成门禁清空所有模�
 （corepack 缓存命中不重验条目——共享 home 是跨 job 投毒通道），XDG_CACHE_HOME
 留在共享的可校验 tool cache 上，末尾 always() 清理步骤回收该 HOME。路由电池
 钉住车道集合、首步隔离、清理步骤，以及按值强制（非按名）的零密钥 env 契约
-（非路径 key 必须为空、gate 不得引用任何 secrets.\*）。
+（非路径 key 必须为空——包括 `ANTHROPIC_AUTH_TOKEN`（Anthropic SDK 的鉴权解析器会从 env 回填它）、gate 不得引用任何 secrets.\*）。
 
 回退优先级：`MAINTAINER_ECS_RUNNER_DISABLED=true` 覆盖一切，包括手动调度。
 `LINUX_RUNNER_FLEET=hosted` 把 pull request、merge group 和 push 强制到 hosted，
@@ -147,7 +147,7 @@ lane。
   stage-3 正是因此暂缓）；这是人的决定，不是代码变更。
 - PR 自身 CI 在池上验证路由管道（作者是 collaborator，该运行中两个输出一致）；
   fork 分歧由路由回归矩阵证明，其首个线上端到端见证是下一个不可信 fork PR。
-- 另行拥有的后续：per-run HOME 下恢复热共享 pnpm store（如通过 `XDG_DATA_HOME`
+- 另行拥有的后续：per-run HOME 下恢复热共享 pnpm store（no-AK 车道现在与 lint 同付已接受的冷装成本）（如通过 `XDG_DATA_HOME`
   指向内容可校验的共享路径），找回约 900 s 的冷装成本；磁盘下限门覆盖 `/tmp`
   inode；fleet metadata 加固；`test` 车道固定 `qwen-ci-home` 的持久化问题；
   若重新审视已接受的残余暴露面，则建隔离 fleet。

@@ -41,7 +41,8 @@ poisoning channel), XDG_CACHE_HOME stays on the shared verified tool
 cache, and an always() cleanup step reclaims the home at the end. The
 routing battery pins the lane set, the first-step isolation, the cleanup,
 and a zero-secrets env contract enforced by VALUE (every non-path key must
-be empty; no secrets.\* anywhere in the gate).
+be empty, including `ANTHROPIC_AUTH_TOKEN`, which the Anthropic SDK's auth
+resolver back-fills from env; no secrets.\* anywhere in the gate).
 
 Fallback priority: `MAINTAINER_ECS_RUNNER_DISABLED=true` overrides everything,
 including manual dispatch. `LINUX_RUNNER_FLEET=hosted` forces pull requests,
@@ -183,7 +184,8 @@ a strictly larger surface than the vitest side lane.
   collaborator, so both outputs agree on that run); the fork divergence is
   proven by the routing battery, and its first live end-to-end witness is the
   next untrusted fork PR.
-- Follow-ups owned separately: warm shared pnpm store under the per-run HOME
+- Follow-ups owned separately: warm shared pnpm store (the no-AK lane now
+  pays the same accepted cold-install cost as lint) under the per-run HOME
   (e.g. via `XDG_DATA_HOME` at a content-verified shared path) to recover the
   ~900 s cold-install cost; disk-floor gate coverage of `/tmp` inodes; fleet
   metadata hardening; the `test` lane's constant `qwen-ci-home` persistence;
