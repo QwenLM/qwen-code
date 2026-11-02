@@ -222,6 +222,11 @@ describe('isDestructiveCommand — git commit --amend', () => {
     // any test, so a mutation could remove it silently (#13570 review).
     "eval 'git commit --amend --no-edit'",
     'command git commit --amend --no-edit',
+    // An apostrophe inside a double-quoted span is literal text, not a new
+    // single-quoted region; it must not hide the substitution after it
+    // (#13570 review).
+    `echo "don't \$(git commit --amend --no-edit)"`,
+    `x="it's \$(git commit --amend)"`,
   ])('blocks amend through an execution wrapper: %s', (command) => {
     expectBlocked(command, 'amend the commit', 'amend');
   });

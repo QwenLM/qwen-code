@@ -2449,7 +2449,10 @@ function extractCommandSubstitutionBodies(command: string): string[] {
       index++;
       continue;
     }
-    if (char === "'" || char === '"') {
+    // Only an unquoted quote opens a new state. Inside `"…"` an apostrophe is
+    // literal text: letting it open a single-quoted span would swallow the
+    // rest of the command and hide any `$( … )` in it (#13570 review).
+    if (!quote && (char === "'" || char === '"')) {
       quote = char;
       index++;
       continue;
