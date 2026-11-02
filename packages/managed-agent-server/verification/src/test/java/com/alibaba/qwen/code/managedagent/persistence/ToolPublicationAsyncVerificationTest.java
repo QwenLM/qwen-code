@@ -68,10 +68,10 @@ public class ToolPublicationAsyncVerificationTest {
     void setup() {
         DataSource source = dataSource();
         com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
-        fixture = PublicationJournalFixture.create(source);
+        bucket = new Bucket();
+        fixture = PublicationJournalFixture.create(source, null, bucket, null);
         fixture.reserve();
         key = fixture.binding.path("sessionKey");
-        bucket = new Bucket();
         data = replacement();
     }
 
@@ -314,7 +314,9 @@ public class ToolPublicationAsyncVerificationTest {
                 .withBean("managedJdbcTemplate", org.springframework.jdbc.core.JdbcTemplate.class, () -> fixture.jdbc)
                 .withBean("managedAgentTransactionManager", PlatformTransactionManager.class, () -> fixture.manager)
                 .withBean(WriterCredentialPolicy.class, WriterCredentialPolicy::unbound)
-                .withBean(ManagedSessionStore.class, () -> fixture.sessions)
+                .withBean(ManagedSessionStore.class, () -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(
+                        fixture.jdbc, new ManagedExtensionRecordStore(fixture.jdbc), null, null, null, bucket, null, null,
+                        WriterCredentialPolicy.unbound(), fixture.bindings))
                 .withBean(HarnessRules.class, SdkHarnessRules::new)
                 .withBean(StorageReadPolicy.class, ManagedSessionReaderVersion::new)
                 .withBean(com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository.class, () -> fixture.executions)
