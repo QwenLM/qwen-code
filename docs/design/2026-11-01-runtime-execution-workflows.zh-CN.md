@@ -10,19 +10,22 @@
 
 Registry 明确了 Binding 与 Session 状态持有者，但执行对账、接管扫描与取消仍在 `RuntimeBrokerService` 中。它们共享执行读取、带 fencing 的结算和后台 hold 结算，不能安全地把私有 helper 复制三遍。用直接依赖的模块内部协作者拆出三个流程，并建立一个共享执行状态边界。保留当前可观察行为，包括失败时机、异步 continuation、writer fencing 和清理顺序。
 
-不修改公共接口、HTTP 路由、schema、协议、依赖或 Runtime 启动策略。供应、Binding 恢复/排空、分发、续租调度和物理 Session 释放仍在服务中。这是结构调整；完整集成验收与实现完成分别记录。
+不修改公共接口、HTTP 路由、schema、协议、依赖或 Runtime 启动策略。供应、Binding 恢复/排空、Binding 续租调度和物理 Session 释放仍在服务中。这是结构调整；完整集成验收与实现完成分别记录。
+
+本文记录 #16029 已合并的执行流程拆分。[Dispatcher 后续设计](2026-11-01-runtime-execution-dispatcher.zh-CN.md) 将分发预留项、在途调用和完成处理一起迁移，并替换原有取消回调。下方归属表和取消装配说明反映该后续实现。
 
 ## 归属与依赖
 
-| 组件                           | 持有职责                                                                                               | 调用方                                              |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------ | --------------------------------------------------- |
-| `RuntimeBindingRegistry`       | 已有本地 Binding/Session map 与 context；READY/历史 Session 校验                                       | 服务与全部三个执行流程                              |
-| `RuntimeExecutionState`        | 已有 execution 归属读取、带 fencing 的分发结算/UNKNOWN 转换、过期 claim 隔离和后台行结算               | 分发、对账、恢复、取消及现有确认/control 路径       |
-| `RuntimeExecutionReconciler`   | 按 execution ID 预留的查询槽位、`ExecutionObservationCooldown`、证据校验与对账 CAS                     | 服务观察入口与接管扫描                              |
-| `RuntimeExecutionRecovery`     | 有界接管扫描与后台 hold 观察/清理流程                                                                  | acquire/接管、普通/排空 release、后台观察与任务停止 |
-| `RuntimeExecutionCancellation` | 持久取消意图与物理取消/确认流程                                                                        | 服务取消入口                                        |
-| `RuntimeBrokerSupport`         | 不变的无状态 future/错误映射、payload/reference 校验和 status 投影                                     | 抽出的协作者与服务                                  |
-| 服务                           | 公共门面、`closed`、分发预留项/在途调用、scheduler、provisioner 生命周期、Binding/Session 生命周期编排 | 现有 adapter 与装配                                 |
+| 组件                           | 持有职责                                                                                 | 调用方                                              |
+| ------------------------------ | ---------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| `RuntimeBindingRegistry`       | 已有本地 Binding/Session map 与 context；READY/历史 Session 校验                         | 服务与全部三个执行流程                              |
+| `RuntimeExecutionState`        | 已有 execution 归属读取、带 fencing 的分发结算/UNKNOWN 转换、过期 claim 隔离和后台行结算 | 分发、对账、恢复、取消及现有确认/control 路径       |
+| `RuntimeExecutionReconciler`   | 按 execution ID 预留的查询槽位、`ExecutionObservationCooldown`、证据校验与对账 CAS       | 服务观察入口与接管扫描                              |
+| `RuntimeExecutionRecovery`     | 有界接管扫描与后台 hold 观察/清理流程                                                    | acquire/接管、普通/排空 release、后台观察与任务停止 |
+| `RuntimeExecutionCancellation` | 持久取消意图与物理取消/确认流程                                                          | 服务取消入口                                        |
+| `RuntimeExecutionDispatcher`   | 分发预留项/在途调用、claim 转换、分发续租、v3 结果等待、完成处理和持久 SSH 确认          | 服务的 execution/start 与 drain 路径；取消流程      |
+| `RuntimeBrokerSupport`         | 不变的无状态 future/错误映射、payload/reference 校验、status/回执投影和续租间隔计算      | 抽出的协作者与服务                                  |
+| 服务                           | 公共门面、`closed`、scheduler、provisioner 生命周期、Binding/Session 生命周期编排        | 现有 adapter 与装配                                 |
 
 全部类保留在现有 runtime-broker service package 内，采用 package-private，不新增接口或 Spring 装配。Repository 仍是唯一持久权威。context 的锁继续归 Registry，每个复合读取/准入/释放决策保留当前锁区域。support 类只共享多个真实调用方已有的规则，不引入可配置流程框架。
 
@@ -48,7 +51,7 @@ Registry 明确了 Binding 与 Session 状态持有者，但执行对账、接�
 
 ## 取消设计
 
-把取消准入、prepared provider 确认、物理取消与结果校验迁入 `RuntimeExecutionCancellation`。它使用 Registry、执行状态、execution repository、transport、现有 invocation 集合、协调 scheduler、取消时限和关闭屏障。服务门面为唯一的 DISPATCHING 分支传入现有双参数分发动作；这个逐调用传入的 `BiConsumer` 是抽出流程接收的唯一 service 动作。不保存 service 引用，不把 map/私有生命周期 helper 作为回调传递。
+把取消准入、prepared provider 确认、物理取消与结果校验迁入 `RuntimeExecutionCancellation`。它使用 Registry、执行状态、execution repository、transport、具体分发器、协调 scheduler、取消时限和关闭屏障。取消流程通过 `isInvoking` 查询在途调用，并在未发送的 DISPATCHING 分支调用 `beginDispatch`，不再接收可变 invocation 集合或逐调用传入的 service 回调。不保存 service 引用，不把 map/私有生命周期 helper 作为回调传递。
 
 保留在要求活跃 Session 前读取终态回执归属的顺序。若原 worker 可能仍保留 preparation，prepared provider 的已取消回执仍需原 worker 确认。非终态取消先持久化意图，再发送 worker 请求。hold 行和已授权的私有 CSI 调用保留原拒绝规则。租约过期后，本进程仍运行的 invocation 可继续接收取消；本进程未运行的 invocation 先按 repository 时钟执行 dispatch fence。UNKNOWN 只在对账证据足够时才能结算。
 
@@ -68,10 +71,10 @@ Registry 明确了 Binding 与 Session 状态持有者，但执行对账、接�
 
 在模块共享的 10 分钟本地验证预算内，复用匹配源码的 SDK 和 JDK 21/Maven 环境，运行受影响 Java 测试、Checkstyle 和最小子进程路径，并检查真实选中的报告。完整 MySQL 8.4、打包 Hosted/fault 恢复和 SpotBugs 仍需 CI 验收；fixture/H2 或测试 worker 子进程通过不构成这些结果。本次无 TypeScript/共享契约变化，不需要 JavaScript 构建。
 
-验收要求：三个公共入口族委托给对应协作者；查询预留项与 cooldown 归同一持有者；协作者不访问 service 内部；唯一的取消分发动作显式传入；SQL/schema/公共契约无 diff；迁移算法语义不变；顺序回归与定向测试通过；双语文档及两轮干净自审完成。在被验收版本运行所需门禁前，CI 验收仍待完成。
+验收要求：三个公共入口族委托给对应协作者；查询预留项与 cooldown 归同一持有者；协作者不访问 service 内部；取消流程直接使用分发器，不接收 service 回调或可变 invocation 集合；SQL/schema/公共契约无 diff；迁移算法语义不变；顺序回归与定向测试通过；双语文档及两轮干净自审完成。在被验收版本运行所需门禁前，CI 验收仍待完成。
 
 ## 风险与待定问题
 
 主要风险是同步异常映射、完成顺序、guard 计数和跨代际路由改变。通过机械迁移和保留调用点包络降低风险，现有集成测试继续经公共服务门面验证它们。共享的不可变依赖直接传递，不隐藏在通用 context 对象中。
 
-回调例外刻意限于取消的未发送分发分支；抽取整个 dispatcher 会扩大本次范围。没有待定产品决策。后续 dispatcher 抽取可在不改变取消语义的前提下，把该动作替换为具体协作者。
+原 #16029 切片刻意将回调例外限制在取消的未发送分发分支。Dispatcher 后续实现用具体协作者替换它，保持取消语义，并将分发状态与完成处理一起迁移。没有待定产品决策。进一步拆分供应或 Session 生命周期不在本增量范围内。
