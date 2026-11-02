@@ -62,18 +62,13 @@ export function stripReasoningContent(
   return [next as unknown as OpenAI.Chat.ChatCompletionMessageParam];
 }
 
-// Servers that type `tools[].function.parameters` as a required field reject a
-// request whose parameterless tool omits it: serde-based routers report `missing
-// field parameters` (#11956), Pydantic-typed ones report `Field required`. The
-// converter omits the field on purpose (#11431): #10080 keeps an empty
-// `properties` off older llama.cpp grammars. That shape returns HTTP 200 on the
-// three llama.cpp builds #10080 verified (b10068/b10745/b10425) and LM Studio's
-// validator accepts it, but the rejection behind that relaxation was never
-// reproduced live and no wider engine survey exists. The 400 in #11410 was the
-// bare `{"type":"object"}` shape lacking `properties`, not this one. So callers
-// here decide per route. Running at the outbound boundary is also what lets an
-// empty `properties` reach the wire at all: `relaxSchemaForFunctionCalling`
-// strips it during conversion.
+// A parameterless tool omits `parameters` by default; servers that type
+// `tools[].function.parameters` as a required field reject that omission, so
+// callers here decide per route with generationConfig.toolParametersMandatory.
+// Rationale and its measurement bounds:
+// docs/design/2026-09-17-parameterless-tool-parameters.md. Running at the
+// outbound boundary is also what lets an empty `properties` reach the wire at
+// all: `relaxSchemaForFunctionCalling` strips it during conversion.
 //
 // The checks below are runtime guards rather than narrowings: openai's types
 // admit only function tools, but `generationConfig.extra_body` is a user knob

@@ -44,9 +44,9 @@ export class MiniMaxOpenAICompatibleProvider extends DefaultOpenAICompatibleProv
    * MiniMax rejects a function tool that carries no `parameters` at all
    * (#11834: `400 invalid params, function parameters is empty (2013)`), so
    * zero-argument tools get an empty object schema injected on every request.
-   * The base provider injects the same schema only when the user opts in with
-   * `generationConfig.toolParametersMandatory`, because the endpoints #10080
-   * was written for (llama.cpp, LM Studio, vLLM) reject that shape.
+   * The base provider injects the same schema only on an explicit
+   * `generationConfig.toolParametersMandatory` opt-in; why that stays opt-in:
+   * docs/design/2026-09-17-parameterless-tool-parameters.md.
    *
    * Keep the unconditional injection out of the converter: an injection placed
    * there would run ahead of `relaxSchemaForFunctionCalling`, which strips empty

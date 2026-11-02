@@ -257,12 +257,11 @@ export class DefaultOpenAICompatibleProvider
 
   /**
    * Fill `parameters` for a tool that declares none, only when the user opts in
-   * with `generationConfig.toolParametersMandatory`. A server that types the
-   * field as required rejects the omission, while #10080 keeps an empty
-   * `properties` off older llama.cpp grammars, so the choice stays per route
-   * rather than a converter-wide shape. Subclasses that chain `super.buildRequest`
-   * inherit this; DashScope builds its request from scratch and calls it from its
-   * own merge step.
+   * with `generationConfig.toolParametersMandatory`. That stays a per-route
+   * choice rather than a converter-wide shape:
+   * docs/design/2026-09-17-parameterless-tool-parameters.md. Subclasses that
+   * chain `super.buildRequest` inherit this; DashScope builds its request from
+   * scratch and calls it from its own merge step.
    */
   protected emitMandatoryToolParameters(
     request: OpenAI.Chat.ChatCompletionCreateParams,
