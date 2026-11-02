@@ -30,6 +30,7 @@ import {
   PRIVATE_ACP_CAPABILITY_ENV,
   PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
   PRIVATE_CONVERSATIONS_RUNTIME_ENV,
+  resolveUsageStatisticsEnabled,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -859,7 +860,12 @@ export async function main() {
       // The container mounts only the user settings dir and builds its env
       // passthrough from `process.env`, so a System-scope opt-out would never
       // reach the sandboxed CLI and it would fetch models.dev.
-      if (settings.merged.model?.catalogRefresh === false) {
+      if (
+        settings.merged.model?.catalogRefresh === false ||
+        resolveUsageStatisticsEnabled(
+          settings.merged.privacy?.usageStatisticsEnabled,
+        ) === false
+      ) {
         process.env[MODEL_CATALOG_REFRESH_ENV] = 'off';
       }
 
