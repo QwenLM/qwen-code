@@ -6,13 +6,13 @@
 
 This is the implementation contract for the accepted Store decomposition. The baseline is main `e3c7a6d7efc6df6c58ffa8ddd9c42dbb0e1784c4`. R0 ([#16061](https://github.com/QwenLM/qwen-code/pull/16061)) merged as `1bdad7d4b7949a6f8370c95965ec55901e75f67a`; its [full gate](https://github.com/QwenLM/qwen-code/actions/runs/41322812090) was still running when R1 preparation began. Merge and qualification are separate evidence. [#16029](https://github.com/QwenLM/qwen-code/pull/16029) is merged and adds no prerequisite work.
 
-R1 delivers this complete bilingual contract, the entry/transaction/caller inventory below and a lock-order audit that follows the planned collaborators across source files. It changes no production Store behavior. Subsequent slices preserve both facades and migrate implementation inside the existing persistence module. Each row in the implementation checklist is a separate PR; qualify the previous slice before migrating the next.
+R1 delivers this complete bilingual contract, the entry/transaction/caller inventory below and a lock-order audit that follows collaborators across source files. A1–A9 and B0–B6 are now implemented together on the implementation branch, retaining the stage ownership and acceptance checklist below. Both facades remain stable; implementation stays inside persistence. Implementation and qualification remain separate: the complete change requires the full Managed Agent gate before acceptance.
 
 Related designs: [structure review](2026-10-31-managed-agent-structure-review.md), [Agent constructor wiring](2026-11-01-managed-agent-store-wiring.md), [Maven boundaries](2026-10-29-managed-agent-maven-modules.md).
 
 ## Problem and decisions
 
-The two Stores mix transaction entry points with SQL, mutable business state and several unrelated operation state machines. Moving methods by name would conceal side effects and can disable the existing single-file lock-order audit. A stable facade and one small extraction per PR make transaction behavior and callers independently reviewable.
+The two Stores mix transaction entry points with SQL, mutable business state and several unrelated operation state machines. Moving methods by name would conceal side effects and can disable the existing single-file lock-order audit. Stable facades and explicit component ownership keep transaction behavior and callers reviewable throughout the extraction.
 
 Keep public business interfaces, DTOs, exception mapping and package-visible compatibility bridges. New collaborators are package-private `final` classes in the same package, constructed once by the facade. Add no Spring beans, Maven modules, public business interfaces, mutable dependency setup or generic Context/Support container. Existing worktree, definition and skills components retain their responsibilities.
 
@@ -86,32 +86,32 @@ Follow a field receiver only when the reference is final and its declared class 
 
 Retain current facade entry sets, transaction checks, sibling boundary sets and ambiguity/deferred-body assertions. Collect entry populations under their facade owner so a same-named collaborator cannot satisfy them; order, ambiguity and compiled-member checks still cover the whole source family. Regression examples must cover a multi-file transitive delegate, moving the Session lock after Turn access, removing the lock entirely (caught by the pinned locker population), hiding it behind an unresolved receiver, shadowing, ambiguous overloads and file-specific constants/imports.
 
-The audit establishes source-level ordering, not transaction runtime semantics or database deadlock freedom. Future slices still need their relevant runtime and MySQL evidence.
+The audit establishes source-level ordering, not transaction runtime semantics or database deadlock freedom. Each implemented stage still needs its relevant runtime and MySQL evidence.
 
 ## Implementation checklist
 
-This table is the sole stage checklist, mirrored completely in the Chinese version. The entry inventory is its method-level detail, not another independent status list. Update both languages with each accepted slice's PR, exact tested revision, relevant evidence and remaining gaps.
+This table is the sole stage checklist, mirrored completely in the Chinese version. The entry inventory is its method-level detail, not another independent status list. Update both languages with each stage's implementation, exact tested revision, relevant evidence and remaining gaps. The stages are delivered together; none is accepted merely because its code has moved.
 
-| Order | Deliverable                                                            | Entry inventory        | Status / evidence                                                                                |
-| ----- | ---------------------------------------------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------ |
-| R0    | Complete Agent constructor wiring and actual Spring factory regression | Existing wiring design | #16061 merged; full qualification pending at R1 start                                            |
-| R1    | Bilingual contract/inventory and cross-file lock audit                 | Both inventories below | Implemented; 56 focused tests and all reactor Checkstyle checks pass; full CI acceptance pending |
-| A1    | Ordinary Agent queries and first required row helpers                  | Agent A1               | Not started                                                                                      |
-| A2    | Event journal                                                          | Agent A2               | Not started                                                                                      |
-| A3    | Message projection                                                     | Agent A3               | Not started                                                                                      |
-| A4    | Session policies                                                       | Agent A4               | Not started                                                                                      |
-| A5    | Commands, receipts and settlement                                      | Agent A5               | Not started                                                                                      |
-| A6    | Session admission                                                      | Agent A6               | Not started                                                                                      |
-| A7    | Lifecycle operations                                                   | Agent A7               | Not started                                                                                      |
-| A8    | Execution operations                                                   | Agent A8               | Not started                                                                                      |
-| A9    | Turn execution and Agent facade cleanup                                | Agent A9               | Not started                                                                                      |
-| B0    | Session constructor wiring                                             | Journal B0             | Not started                                                                                      |
-| B1    | Rows, fencing and writer lifecycle                                     | Journal B1             | Not started                                                                                      |
-| B2    | Lifecycle authorization                                                | Journal B2             | Not started                                                                                      |
-| B3    | History queries                                                        | Journal B3             | Not started                                                                                      |
-| B4    | Resource writes                                                        | Journal B4             | Not started                                                                                      |
-| B5    | Resource reads                                                         | Journal B5             | Not started                                                                                      |
-| B6    | Ordinary/CSI terminal commit and Journal facade cleanup                | Journal B6             | Not started                                                                                      |
+| Order | Deliverable                                                            | Entry inventory        | Status / evidence                                                                                 |
+| ----- | ---------------------------------------------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------- |
+| R0    | Complete Agent constructor wiring and actual Spring factory regression | Existing wiring design | #16061 merged; full Hosted gate failed in two cases, attribution pending                          |
+| R1    | Bilingual contract/inventory and cross-file lock audit                 | Both inventories below | R1 revision: 56 focused tests and all reactor Checkstyle checks pass; new-revision evidence below |
+| A1    | Ordinary Agent queries and first required row helpers                  | Agent A1               | Implemented; qualification pending                                                                |
+| A2    | Event journal                                                          | Agent A2               | Implemented; qualification pending                                                                |
+| A3    | Message projection                                                     | Agent A3               | Implemented; qualification pending                                                                |
+| A4    | Session policies                                                       | Agent A4               | Implemented; qualification pending                                                                |
+| A5    | Commands, receipts and settlement                                      | Agent A5               | Implemented; qualification pending                                                                |
+| A6    | Session admission                                                      | Agent A6               | Implemented; qualification pending                                                                |
+| A7    | Lifecycle operations                                                   | Agent A7               | Implemented; qualification pending                                                                |
+| A8    | Execution operations                                                   | Agent A8               | Implemented; qualification pending                                                                |
+| A9    | Turn execution and Agent facade cleanup                                | Agent A9               | Implemented; qualification pending                                                                |
+| B0    | Session constructor wiring                                             | Journal B0             | Implemented; qualification pending                                                                |
+| B1    | Rows, fencing and writer lifecycle                                     | Journal B1             | Implemented; qualification pending                                                                |
+| B2    | Lifecycle authorization                                                | Journal B2             | Implemented; qualification pending                                                                |
+| B3    | History queries                                                        | Journal B3             | Implemented; qualification pending                                                                |
+| B4    | Resource writes                                                        | Journal B4             | Implemented; qualification pending                                                                |
+| B5    | Resource reads                                                         | Journal B5             | Implemented; qualification pending                                                                |
+| B6    | Ordinary/CSI terminal commit and Journal facade cleanup                | Journal B6             | Implemented; qualification pending                                                                |
 
 ## Validation and release criteria
 
@@ -119,7 +119,11 @@ R1 has no CLI/HTTP behavior change: a global CLI baseline and model calls do not
 
 Local R1 evidence: the original 44 lock-audit tests and 12 added regressions all pass on macOS/JDK 21, with zero failures, errors or skips. The tested audit source SHA-256 is `bc6317d65f0d68dc9837f1d49f85e9a18ed41506e04ef395d33c326c65cd0052`; all eight reactor Checkstyle checks pass. The shared local Java budget totals 413.575/600 seconds, including the conservative R0 carryover and preserved repair attempts. This is focused evidence only: full verify, SpotBugs, real MySQL, Hosted/fault and cross-platform qualification for R1 remain pending CI.
 
-For later slices, cover tenant/actor isolation, cursor semantics and batch query counts; admission/replay including definition/skills/worktree; sequence/dedup/projection gaps/retraction/replay floor; after-commit notification and rollback/replay silence; lease generation/token/expiry and unknown-acceptance non-redispatch; atomic journal rollback/replay; resource corruption/read-lease invalidation and owner-read cleanup; publication/snapshot lock order and CSI same-connection atomicity.
+Local A1–A9/B0–B6 evidence on the implementation worktree based on `77a0d4a4d7cbc9eeab2213b8bf45af117b47d83d`: 260 distinct cases in 17 completed Java suites pass after repairing two new wiring-fixture failures; the successful 17-case wiring rerun supersedes those two failures only. Production sources compiled; the complete verification source tree compiled before the final source-only lock-audit assertion repairs. Seven reactor Checkstyle executions (parent and six production modules) passed; the verification module's final Checkstyle execution was not reached. Root build/bundle, typecheck and all 54 dedicated script tests passed. Logs, report XML and source fingerprints are retained under `.qwen/investigations/managed-store-split-implementation/`.
+
+Both bounded Maven invocations hit their deadlines; neither is an overall successful run. The shared Java ledger is 598.655/600 seconds, including prior work and preserved failed attempts. `SessionRowLockOrderTest` started but was interrupted; its updated populations and subsequent source-only repairs to assertion order, SQL-owner populations and the exact same-name reference handle remain unverified. Ten other selected suites did not complete: `JournalEventPublicationPointTest`, `ManagedEventReplayTest`, `ManagedSchemaJournalAtomicityTest`, `ManagedSessionCreationSkillsTest`, `ManagedSessionNativeReadTest`, `ManagedSessionStoreBindingTest`, `ManagedSessionStoreCredentialTest`, `ManagedTaskCancelOperationTest`, `ReplayFloorRetractionTest` and `WorkspaceSessionCloseTest`. Complete those checks and the verification-module Checkstyle in CI, alongside full verify, SpotBugs, real MySQL, Hosted/fault and cross-platform qualification. No new-revision CI acceptance is claimed.
+
+Qualification of each implemented stage must cover tenant/actor isolation, cursor semantics and batch query counts; admission/replay including definition/skills/worktree; sequence/dedup/projection gaps/retraction/replay floor; after-commit notification and rollback/replay silence; lease generation/token/expiry and unknown-acceptance non-redispatch; atomic journal rollback/replay; resource corruption/read-lease invalidation and owner-read cleanup; publication/snapshot lock order and CSI same-connection atomicity.
 
 Use real MySQL evidence for SQL/concurrency paths. CI owns full verify, SpotBugs, complete MySQL, Hosted/fault and cross-platform checks. The current push-time fast tier omits required qualification; the full Managed Agent gate on the accepted revision is the release criterion. Keep every unrun gate explicit.
 
@@ -128,6 +132,16 @@ Each slice needs two consecutive clean complete-diff self-audits and independent
 ## Risks and open decisions
 
 The accepted architectural direction has no outstanding product decision. The main implementation risks are hidden query side effects, shared receipt/resource validation, lazy construction cycles, moved transaction boundaries and source-audit blind spots. Resolve an unexpected dependency in the smallest affected slice and update both language versions before changing the design. Do not silently absorb an algorithm, SQL, storage or protocol redesign into a movement PR.
+
+## Implemented dependency boundaries
+
+The facade evaluates the same settings and catalog validation once, in the original order, then supplies the same values and dependency instances to final collaborator fields. Agent construction is Rows → Queries/EventJournal → Policies/Projection → Commands → Admissions/Lifecycle/TurnExecution → ExecutionOperations. Journal construction is Rows → Fencing → WriterLifecycle/HistoryQueries/LifecycleAuthorization/ResourceWrites/ResourceReads → Commit. No collaborator receives a facade or a constructor callback bundle.
+
+Shared Session/Turn point reads live in Rows; Queries forwards its three compatible point-read entries to those implementations. Policies owns shared admission predicates, while Rows owns their existing key encoders and database-time reads. The nine-argument default Session admission remains the original interface-default forwarding entry on the facade, preserving virtual dispatch and its transaction boundary. Resource row verification remains separate from object IO, leases and quarantine. Commit calls the extracted lifecycle-dispatch authorization block at its original location, with the existing call-local resource reader.
+
+Session construction now resolves all nine former setter references. The required Spring dependencies remain required; standalone constructors retain their original null/in-process/unbound defaults. Either missing lifecycle dependency disables both. Only a same-data-source JDBC runtime binding repository enables CSI. Maintenance entry points and fixtures supply dependencies before constructing downstream consumers; actual Spring factory construction is covered separately.
+
+The lock audit keeps its facade populations and pins the 24 migrated private-helper overloads by owner/name/arity. Companion sources are analyzed with their complete family and retain separate, explicit SQL-owner boundary populations. Compiled-member coverage, fail-closed receiver resolution and the original negative regressions remain required. The original-line inventories below refer to the recorded baseline, not the new source locations.
 
 ## Agent entry inventory
 

@@ -137,6 +137,10 @@ class SessionRowLockOrderTest {
     // new sibling turn-row access — fails here instead of passing
     // unaudited.
     private static final Set<String> SIBLING_SESSION_LOCKERS = Set.of(
+            "AgentEventJournal.java", "AgentExecutionOperations.java", "AgentLifecycleOperations.java",
+            "AgentSessionAdmissions.java", "AgentSessionCommands.java", "AgentSessionPolicies.java",
+            "AgentStoreRows.java", "AgentTurnExecution.java",
+            "JournalLifecycleAuthorization.java", "JournalWriterLifecycle.java",
             "HarnessPlacementStore.java",
             "ManagedActionStore.java", "ManagedExtensionAgentLaunch.java", "ManagedExtensionRecordStore.java",
             "ManagedLegacySessionGuard.java",
@@ -155,6 +159,8 @@ class SessionRowLockOrderTest {
     // writes, so it is a turn reader but not a session locker and stays out of
     // the session-first order audit below.
     private static final Set<String> SIBLING_TURN_READERS = Set.of(
+            "AgentExecutionOperations.java", "AgentLifecycleOperations.java", "AgentMessageProjection.java", "AgentSessionCommands.java",
+            "AgentSessionPolicies.java", "AgentSessionQueries.java", "AgentStoreRows.java", "AgentTurnExecution.java",
             "JdbcSessionRecoveryRepository.java",
             "AutomationLedgerStore.java", "ChildResultRelayStore.java",
             "HostedCleanupDebtStore.java",
@@ -224,10 +230,10 @@ class SessionRowLockOrderTest {
                             Set.of("ManagedSchemaJdbcTemplate.getSingleColumnRowMapper/1")),
                     // Both publisher overloads avoid Session and Turn rows.
                     Map.entry("ManagedSessionStore.java",
-                            Set.of("ManagedSessionStore.publishAgentResource/6",
-                                    "ManagedSessionStore.sha256/1",
-                                    "ManagedSessionStore.storedTransaction/1",
-                                    "ManagedSessionStore.usesDataSource/1")),
+                            Set.of("JournalResourceWrites.publishAgentResource/6",
+                                    "JournalStoreRows.sha256/1",
+                                    "JournalStoreRows.storedTransaction/1",
+                                    "JournalStoreRows.usesDataSource/1|ManagedSessionStore.usesDataSource/1")),
                     Map.entry("ManagedTaskEventStore.java",
                             Set.of("ManagedTaskEventStore.eventRow/2")),
                     Map.entry("ManagedToolResultProjector.java",
@@ -382,7 +388,8 @@ class SessionRowLockOrderTest {
             List<String> violations, Set<String> lockersWithoutTurnAccess,
             Set<String> turnRowAccessors, Set<String> exemptions,
             Set<String> deferredBodies, boolean locksSessionRow,
-            boolean touchesTurnRow) { }
+            boolean touchesTurnRow, Set<String> lockSources, Set<String> turnSources,
+            Set<String> turnMembers) { }
 
     @Test
     void mutationEntriesAcquireTheSessionRowLockBeforeAnyTurnRowAccess()
@@ -456,51 +463,82 @@ class SessionRowLockOrderTest {
         assertThat(audit.turnRowAccessors())
                 .containsExactlyInAnyOrder("advanceReplayFloor",
                         "beginChildClose", "beginContextCompression",
-                        "beginLifecycle", "beginOperation",
+                        "beginOperation",
                         "beginWorkspaceClose", "beginWorkspaceLifecycle",
                         "bindHarness", "bindRecoveredHarness",
                         "cancelBeforeAdmission", "changeSessionModel", "changeSessionApproval", "claimTurn",
-                        "completeCwdChangeOperation", "completeHarnessTurn",
-                        "deferTurnRetry", "failTurn", "failRecoveryBlockedTurn", "failWorktreeInitialTurns",
-                        "settleFailedTurn", "findActiveTurns",
+                        "completeCwdChangeOperation", "deferTurnRetry", "failTurn", "failRecoveryBlockedTurn", "failWorktreeInitialTurns",
+                        "findActiveTurns",
                         "findDispatchable", "findLatestTurns",
                         "findReplayFloorTargets", "findTurn", "findTurnModelSelection", "findTurnApprovalSelection",
-                        "findTurnSummary", "hasActiveTurn",
-                        // #14387's lifecycle gate counts live Turns under
-                        // its caller's session-row lock. Its recovery-blocked
-                        // verdict can take the session-row lock through the
-                        // cross-file legacy guard before the Turn update, a
-                        // lock this same-file parse cannot see; both pin here
-                        // as Turn-row accessors, not lockers.
-                        "hasLiveTurn",
+                        "findTurnSummary",
                         // D7-2's Tool-recovery park: the park write and its
                         // due scan reach the Turn row, and the cross-file
                         // legacy guard may take the session lock before it.
                         // Both pin here as Turn-row accessors, not lockers.
                         "findRuntimeRecoveryParked",
                         "parkTurnForRuntimeRecovery",
-                        "insertCancelCommand", "insertChildSession",
-                        "insertChildSessionCommand", "insertPublicChildSessionCommand", "insertCsiSessionCommand",
+                        "insertCancelCommand", "insertChildSessionCommand", "insertPublicChildSessionCommand", "insertCsiSessionCommand",
                         "insertInternalTeamLeadSessionCommand",
-                        "insertSession", "insertSessionCommand", "insertTurn",
-                        "insertTurnCommand", "insertWorkspaceSessionCommand",
+                        "insertSessionCommand", "insertTurnCommand", "insertWorkspaceSessionCommand",
                         "listTurns", "markSubmissionAttempted",
                         "markTurnRecoveryBlocked", "markTurnFailureRecovery",
                         "requestRecoveryRecheck",
-                        "materializeEvent", "materializeInput",
                         "materializeNextBatch", "recordAdmission",
                         "recordHarnessEvents", "recordRecoveryAdmission",
-                        "releaseTurnLease", "renewTurn", "requireTurn",
-                        "requireTurnForUpdate", "requirePolicyChange", "requireMcpManagement", "requireMcpSettingsCommit",
-                        "requireConfigurationCommit", "requireExtensionManagement", "requireChildExtensionBootstrap",
-                        "requireMcpManagementIdle", "retractContinuationOutput",
+                        "releaseTurnLease", "renewTurn", "requireMcpManagement", "requireMcpSettingsCommit",
+                        "requireConfigurationCommit", "requireExtensionManagement", "retractContinuationOutput",
                         "retractHarnessTurnOutput", "scheduleTurnRetry",
-                        "settleTurnCommands",
                         // D7-2's journal evidence for a parked input reads
                         // its Turn and takes no lock.
                         "turnInputAcceptance",
-                        "updateHarnessCursor", "validateOperationStart",
                         "withdrawSubmissionAttempted", "cancelUnadmittedTurn");
+        Set<String> movedHelperNames = Set.of(
+                "beginLifecycle",
+                "completeHarnessTurn",
+                "settleFailedTurn",
+                "hasActiveTurn",
+                "hasLiveTurn",
+                "insertChildSession",
+                "insertSession",
+                "insertTurn",
+                "materializeEvent",
+                "materializeInput",
+                "requireTurn",
+                "requireTurnForUpdate",
+                "requirePolicyChange",
+                "requireChildExtensionBootstrap",
+                "requireMcpManagementIdle",
+                "settleTurnCommands",
+                "updateHarnessCursor",
+                "validateOperationStart");
+        assertThat(audit.turnMembers().stream().filter(handle -> movedHelperNames.contains(
+                handle.substring(handle.indexOf('.') + 1, handle.indexOf('/')))))
+                .containsExactlyInAnyOrder(
+                        "AgentLifecycleOperations.beginLifecycle/8",
+                        "AgentLifecycleOperations.beginLifecycle/9",
+                        "AgentLifecycleOperations.beginLifecycle/10",
+                        "AgentLifecycleOperations.beginLifecycle/11",
+                        "AgentTurnExecution.completeHarnessTurn/8",
+                        "AgentTurnExecution.settleFailedTurn/7",
+                        "AgentSessionPolicies.hasActiveTurn/2",
+                        "AgentLifecycleOperations.hasLiveTurn/2",
+                        "AgentSessionAdmissions.insertChildSession/10",
+                        "AgentSessionAdmissions.insertSession/11",
+                        "AgentSessionAdmissions.insertSession/12",
+                        "AgentSessionAdmissions.insertSession/13",
+                        "AgentSessionAdmissions.insertSession/14",
+                        "AgentSessionCommands.insertTurn/7",
+                        "AgentMessageProjection.materializeEvent/2",
+                        "AgentMessageProjection.materializeInput/2",
+                        "AgentStoreRows.requireTurn/3",
+                        "AgentStoreRows.requireTurnForUpdate/3",
+                        "AgentSessionPolicies.requirePolicyChange/2",
+                        "AgentSessionPolicies.requireChildExtensionBootstrap/3",
+                        "AgentSessionPolicies.requireMcpManagementIdle/1",
+                        "AgentSessionCommands.settleTurnCommands/4",
+                        "AgentTurnExecution.updateHarnessCursor/7",
+                        "AgentLifecycleOperations.validateOperationStart/2");
         // The references the parse cannot resolve to one member —
         // ItemRow.toRecord behind the lambda parameter at the item read,
         // and main's this::renameDelivery RowMapper references (#13682),
@@ -510,10 +548,10 @@ class SessionRowLockOrderTest {
         // The nine-argument default delegate is covered through a real Spring proxy in
         // AgentStateStoreProxyTransactionTest; its deepest writer is audited here.
         assertThat(audit.exemptions())
-                .containsExactly("ItemRow.toRecord/0",
-                        "ManagedAgentStore.insertSessionCommand/9",
-                        "ManagedAgentStore.readMap/1",
-                        "ManagedAgentStore.renameDelivery/2");
+                .containsExactly("AgentSessionCommands.renameDelivery/2",
+                        "AgentStoreRows.readMap/1",
+                        "ItemRow.toRecord/0",
+                        "ManagedAgentStore.insertSessionCommand/9");
         // The harvest is asserted against the bytecode's own enumeration,
         // recursively over nested types and as a multiset: a member the
         // parse dropped — including one of two overloads sharing a
@@ -561,24 +599,43 @@ class SessionRowLockOrderTest {
                     .endsWith(".java")).sorted().toList();
         }
         Map<String, Audit> audits = new LinkedHashMap<>();
+        Map<String, Audit> families = new HashMap<>();
         for (Path source : sources) {
             String name = source.getFileName().toString();
             if (MANAGED_AGENT_STORE.equals(name)) {
                 continue;
             }
-            List<Path> selected = "ManagedSessionStore.java".equals(name)
-                    ? storeSources(STORE_PACKAGE, name) : List.of(source);
-            Audit audit = audit(readSources(selected));
-            if ("ManagedSessionStore.java".equals(name)) {
-                assertThat(audit.members()).as("Journal facade and companion members")
-                        .isEqualTo(compiledMembers(selected, audit.members()));
+            String facade = name.startsWith("Agent") ? MANAGED_AGENT_STORE
+                    : name.startsWith("Journal") || name.equals("ManagedSessionStore.java")
+                            ? "ManagedSessionStore.java" : null;
+            Audit audit;
+            if (facade == null) {
+                audit = audit(readSources(List.of(source)));
+            } else {
+                audit = families.get(facade);
+                if (audit == null) {
+                    List<Path> selected = storeSources(STORE_PACKAGE, facade);
+                    audit = audit(readSources(selected));
+                    assertThat(audit.members()).as("%s and companion members", facade)
+                            .isEqualTo(compiledMembers(selected, audit.members()));
+                    families.put(facade, audit);
+                }
             }
             audits.put(name, audit);
-            if (audit.locksSessionRow()) {
-                sessionLockers.add(name);
-            }
-            if (audit.touchesTurnRow()) {
-                turnReaders.add(name);
+            if (facade == null || name.equals(facade)) {
+                if (audit.locksSessionRow()) {
+                    sessionLockers.add(name);
+                }
+                if (audit.touchesTurnRow()) {
+                    turnReaders.add(name);
+                }
+            } else {
+                if (audit.lockSources().contains(name)) {
+                    sessionLockers.add(name);
+                }
+                if (audit.turnSources().contains(name)) {
+                    turnReaders.add(name);
+                }
             }
         }
         assertThat(sessionLockers).isEqualTo(SIBLING_SESSION_LOCKERS);
@@ -587,7 +644,8 @@ class SessionRowLockOrderTest {
         // is whatever the locker/reader intersection computed.
         Set<String> orderAudited = new TreeSet<>(sessionLockers);
         orderAudited.retainAll(turnReaders);
-        assertThat(orderAudited).containsExactly("ManagedActionStore.java",
+        assertThat(orderAudited).containsExactly("AgentExecutionOperations.java", "AgentLifecycleOperations.java", "AgentSessionCommands.java",
+                "AgentSessionPolicies.java", "AgentStoreRows.java", "AgentTurnExecution.java", "ManagedActionStore.java",
                 "ManagedUserMessageStore.java",
                 "WorkspaceRecoveryStore.java");
         // ManagedActionStore.admit takes the tenant lock before the
@@ -603,7 +661,8 @@ class SessionRowLockOrderTest {
         }
         Map<String, Set<String>> exemptions = new TreeMap<>();
         for (Map.Entry<String, Audit> entry : audits.entrySet()) {
-            if (!entry.getValue().exemptions().isEmpty()) {
+            if (!entry.getKey().startsWith("Agent") && !entry.getKey().startsWith("Journal")
+                    && !entry.getValue().exemptions().isEmpty()) {
                 exemptions.put(entry.getKey(), entry.getValue().exemptions());
             }
         }
@@ -2339,7 +2398,14 @@ class SessionRowLockOrderTest {
                 deferredBodies, events.values().stream().flatMap(List::stream)
                         .anyMatch(Event::lock),
                 events.values().stream().flatMap(List::stream)
-                        .anyMatch(Event::turn));
+                        .anyMatch(Event::turn),
+                events.entrySet().stream().filter(entry -> entry.getValue().stream().anyMatch(Event::lock))
+                        .map(entry -> entry.getKey().owner().split("\\.")[0] + ".java")
+                        .collect(Collectors.toCollection(TreeSet::new)),
+                events.entrySet().stream().filter(entry -> entry.getValue().stream().anyMatch(Event::turn))
+                        .map(entry -> entry.getKey().owner().split("\\.")[0] + ".java")
+                        .collect(Collectors.toCollection(TreeSet::new)),
+                turnReaching.stream().map(Key::handle).collect(Collectors.toCollection(TreeSet::new)));
     }
 
     // The members of one type, recursively through its nested types, keyed

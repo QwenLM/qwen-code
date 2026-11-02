@@ -173,8 +173,6 @@ class WorkspaceCsiSqlWorkerMySqlIT {
         var binding = bindings.claimOperation(initial.getBindingId(), "owned-test", Duration.ofMinutes(5));
         var reserved = storage.reserve(registration, bindings, binding, UUID.randomUUID().toString());
         bindings.releaseOperation(binding.getBindingId(), "owned-test", binding.getOperationGeneration());
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
-        journal.setCsiBindings(bindings);
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision("construction-fixture/1");
         // Wired as in production, so the receipt commits below reach the capture guard.
@@ -182,7 +180,9 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                 com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON,
                         java.time.Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties,
                         new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
-        journal.setToolResults(toolResults);
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc,
+                new ManagedExtensionRecordStore(jdbc), null, null, null, null, toolResults, null,
+                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), bindings);
         var endpoint = new AtomicReference<URI>();
         var actualClient = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build();
         var mappedClient = mock(HttpClient.class);

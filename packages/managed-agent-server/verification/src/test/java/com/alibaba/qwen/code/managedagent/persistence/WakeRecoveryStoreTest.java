@@ -143,7 +143,7 @@ public class WakeRecoveryStoreTest {
         append("input.accepted", "turn", "monitor");
         var pending = candidate();
         assertThat(store.claim(pending)).isTrue();
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
         for (String status : List.of("CLOSING", "CLOSED")) {
             jdbc.update("UPDATE ma_session SET status = ?", status);
