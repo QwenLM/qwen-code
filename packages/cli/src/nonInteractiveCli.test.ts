@@ -6859,7 +6859,7 @@ describe('runNonInteractive', () => {
         mockLlmClient.sendMessageStream.mock.calls[0];
       expect(request).toEqual([{ text: `FIX IT\n${image}` }]);
       expect(options).toMatchObject({
-        submittedPrompt: 'FIX IT',
+        submittedPrompt: `FIX IT\n${image}`,
         humanInput: { text: 'FIX IT' },
       });
       expect(startTurn.mock.calls[0][0]).toBe('FIX IT');

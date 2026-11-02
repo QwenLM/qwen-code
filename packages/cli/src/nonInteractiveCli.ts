@@ -1450,8 +1450,9 @@ export async function runNonInteractive(
               prompt = options.promptParts
                 ? [rewrittenText, ...options.promptParts.blocks].join('\n')
                 : rewrittenText;
-              // The transcript shows the text, as it does without a rewrite.
-              submittedPrompt = rewrittenText;
+              // The transcript keeps the same shape it has without a
+              // rewrite: a message's other blocks stay after its text.
+              submittedPrompt = prompt;
             }
             promptContext = submitted.context;
           }
