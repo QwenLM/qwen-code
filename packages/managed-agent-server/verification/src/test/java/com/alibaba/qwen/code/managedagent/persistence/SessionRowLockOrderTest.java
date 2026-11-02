@@ -26,6 +26,7 @@ import com.sun.source.tree.YieldTree;
 import com.sun.source.util.JavacTask;
 import com.sun.source.util.TreeScanner;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.transaction.annotation.Transactional;
 
 import javax.lang.model.element.Modifier;
@@ -71,10 +72,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 //   and a helper moved into a nested type stays visible.
 // - A call resolves to exactly one member: through the caller's enclosing
 //   type chain for a bare or this. call, through the named type for a
-//   Type. call, or through a same-file final class declared by a parameter
-//   or block local. A direct `var = new Type(...)` also names that final
-//   class. Block scopes restore their receiver bindings; fields, other
-//   inference, local/anonymous classes and generic methods stay unknown.
+//   Type. call, or through a parsed final class declared by a parameter,
+//   block local or final field. A direct `var = new Type(...)` also names
+//   that final class. Block scopes restore their receiver bindings;
+//   mutable fields, other inference, local/anonymous classes and generic
+//   methods stay unknown.
 //   A reference the audit cannot resolve to one member — an
 //   overload set tied on name and arity, a call on a receiver whose type
 //   the parse cannot see, a method reference whose arity is not spelled —
@@ -96,9 +98,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 //   the lock — and the implicit row lock of an INSERT or UPDATE on the
 //   session table counts, which is what admits the create path: it writes
 //   the session row before the turn row.
-// - Calls that leave the file are outside the audit; the sibling
-//   boundary below pins which files lock the session row or touch the
-//   turn row at all. A lambda handed straight into a call folds there —
+// - Store facades include their Agent/Journal companion source files.
+//   Calls outside that source family remain outside the audit; the
+//   sibling boundary pins every file that locks Session or touches Turn.
+//   A lambda handed straight into a call folds there —
 //   its body runs within the call — while a lambda in any other position,
 //   or an anonymous-class method body, runs where it is invoked, which
 //   the parse cannot see: such a body is held aside and fails closed when
@@ -108,7 +111,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 //   statement's spelling.
 //   Transactionality is runtime wiring — a Spring proxy, or a
 //   TransactionTemplate in another file's caller — not a spelling a
-//   same-file parse can see, so the audit pins the order, not the
+//   source parse can see, so the audit pins the order, not the
 //   annotation.
 class SessionRowLockOrderTest {
     private static final Path STORE_PACKAGE = Path.of("..", "persistence", "src", "main", "java")
@@ -134,11 +137,16 @@ class SessionRowLockOrderTest {
     // new sibling turn-row access — fails here instead of passing
     // unaudited.
     private static final Set<String> SIBLING_SESSION_LOCKERS = Set.of(
+            "AgentEventJournal.java", "AgentExecutionOperations.java", "AgentLifecycleOperations.java",
+            "AgentSessionAdmissions.java", "AgentSessionCommands.java", "AgentSessionPolicies.java",
+            "AgentStoreRows.java", "AgentTurnExecution.java",
+            "JournalLifecycleAuthorization.java", "JournalWriterLifecycle.java",
             "HarnessPlacementStore.java",
             "ManagedActionStore.java", "ManagedExtensionAgentLaunch.java", "ManagedExtensionRecordStore.java",
             "ManagedLegacySessionGuard.java",
             "ManagedProjectionResourceCollector.java",
             "ManagedRuntimeRetentionGuard.java",
+            "ManagedSessionModelConfigs.java",
             "ManagedSessionRetirementStore.java", "ManagedSessionStore.java",
             "ManagedToolResultStore.java",
             "ManagedUserMessageStore.java",
@@ -152,6 +160,8 @@ class SessionRowLockOrderTest {
     // writes, so it is a turn reader but not a session locker and stays out of
     // the session-first order audit below.
     private static final Set<String> SIBLING_TURN_READERS = Set.of(
+            "AgentExecutionOperations.java", "AgentLifecycleOperations.java", "AgentMessageProjection.java", "AgentSessionCommands.java",
+            "AgentSessionPolicies.java", "AgentSessionQueries.java", "AgentStoreRows.java", "AgentTurnExecution.java",
             "JdbcSessionRecoveryRepository.java",
             "AutomationLedgerStore.java", "ChildResultRelayStore.java",
             "HostedCleanupDebtStore.java",
@@ -221,10 +231,10 @@ class SessionRowLockOrderTest {
                             Set.of("ManagedSchemaJdbcTemplate.getSingleColumnRowMapper/1")),
                     // Both publisher overloads avoid Session and Turn rows.
                     Map.entry("ManagedSessionStore.java",
-                            Set.of("ManagedSessionStore.publishAgentResource/6",
-                                    "ManagedSessionStore.sha256/1",
-                                    "ManagedSessionStore.storedTransaction/1",
-                                    "ManagedSessionStore.usesDataSource/1")),
+                            Set.of("JournalResourceWrites.publishAgentResource/6",
+                                    "JournalStoreRows.sha256/1",
+                                    "JournalStoreRows.storedTransaction/1",
+                                    "JournalStoreRows.usesDataSource/1|ManagedSessionStore.usesDataSource/1")),
                     Map.entry("ManagedTaskEventStore.java",
                             Set.of("ManagedTaskEventStore.eventRow/2")),
                     Map.entry("ManagedToolResultProjector.java",
@@ -367,7 +377,7 @@ class SessionRowLockOrderTest {
     }
 
     // One ordered step in a member body: a SQL spelling (callee == null,
-    // lock/turn flag what the text bears) or a call to a same-file member
+    // lock/turn flag what the text bears) or a call to a parsed member
     // (callee set, flags unused).
     private record Event(boolean lock, boolean turn, Key callee) { }
 
@@ -379,13 +389,14 @@ class SessionRowLockOrderTest {
             List<String> violations, Set<String> lockersWithoutTurnAccess,
             Set<String> turnRowAccessors, Set<String> exemptions,
             Set<String> deferredBodies, boolean locksSessionRow,
-            boolean touchesTurnRow) { }
+            boolean touchesTurnRow, Set<String> lockSources, Set<String> turnSources,
+            Set<String> turnMembers) { }
 
     @Test
     void mutationEntriesAcquireTheSessionRowLockBeforeAnyTurnRowAccess()
             throws IOException {
-        Audit audit = audit(Files.readString(STORE_PACKAGE.resolve(
-                MANAGED_AGENT_STORE)));
+        List<Path> sources = storeSources(STORE_PACKAGE, MANAGED_AGENT_STORE);
+        Audit audit = audit(readSources(sources), "ManagedAgentStore");
         assertThat(audit.violations()).isEmpty();
         // The derivation is only evidence if it accounts for every writer
         // that takes the session-row lock, so the set is asserted exactly:
@@ -453,72 +464,98 @@ class SessionRowLockOrderTest {
         assertThat(audit.turnRowAccessors())
                 .containsExactlyInAnyOrder("advanceReplayFloor",
                         "beginChildClose", "beginContextCompression",
-                        "beginLifecycle", "beginOperation",
+                        "beginOperation",
                         "beginWorkspaceClose", "beginWorkspaceLifecycle",
                         "bindHarness", "bindRecoveredHarness",
                         "cancelBeforeAdmission", "changeSessionModel", "changeSessionApproval", "claimTurn",
-                        "completeCwdChangeOperation", "completeHarnessTurn",
-                        "deferTurnRetry", "failTurn", "failRecoveryBlockedTurn", "failWorktreeInitialTurns",
-                        "settleFailedTurn", "findActiveTurns",
+                        "completeCwdChangeOperation", "deferTurnRetry", "failTurn", "failRecoveryBlockedTurn", "failWorktreeInitialTurns",
+                        "findActiveTurns",
                         "findDispatchable", "findLatestTurns",
                         "findReplayFloorTargets", "findTurn", "findTurnModelSelection", "findTurnApprovalSelection",
-                        "findTurnSummary", "hasActiveTurn",
-                        // #14387's lifecycle gate counts live Turns under
-                        // its caller's session-row lock. Its recovery-blocked
-                        // verdict can take the session-row lock through the
-                        // cross-file legacy guard before the Turn update, a
-                        // lock this same-file parse cannot see; both pin here
-                        // as Turn-row accessors, not lockers.
-                        "hasLiveTurn",
+                        "findTurnSummary",
                         // D7-2's Tool-recovery park: the park write and its
                         // due scan reach the Turn row, and the cross-file
                         // legacy guard may take the session lock before it.
                         // Both pin here as Turn-row accessors, not lockers.
                         "findRuntimeRecoveryParked",
                         "parkTurnForRuntimeRecovery",
-                        "insertCancelCommand", "insertChildSession",
-                        "insertChildSessionCommand", "insertPublicChildSessionCommand", "insertCsiSessionCommand",
+                        "insertCancelCommand", "insertChildSessionCommand", "insertPublicChildSessionCommand", "insertCsiSessionCommand",
                         "insertInternalTeamLeadSessionCommand",
-                        "insertSession", "insertSessionCommand", "insertTurn",
-                        "insertTurnCommand", "insertWorkspaceSessionCommand",
+                        "insertSessionCommand", "insertTurnCommand", "insertWorkspaceSessionCommand",
                         "listTurns", "markSubmissionAttempted",
                         "markTurnRecoveryBlocked", "markTurnFailureRecovery",
                         "requestRecoveryRecheck",
-                        "materializeEvent", "materializeInput",
                         "materializeNextBatch", "recordAdmission",
                         "recordHarnessEvents", "recordRecoveryAdmission",
-                        "releaseTurnLease", "renewTurn", "requireTurn",
-                        "requireTurnForUpdate", "requirePolicyChange", "requireMcpManagement", "requireMcpSettingsCommit",
-                        "requireConfigurationCommit", "requireExtensionManagement", "requireChildExtensionBootstrap",
-                        "requireMcpManagementIdle", "retractContinuationOutput",
+                        "releaseTurnLease", "renewTurn", "requireMcpManagement", "requireMcpSettingsCommit",
+                        "requireConfigurationCommit", "requireExtensionManagement", "retractContinuationOutput",
                         "retractHarnessTurnOutput", "scheduleTurnRetry",
-                        "settleTurnCommands",
                         // D7-2's journal evidence for a parked input reads
                         // its Turn and takes no lock.
                         "turnInputAcceptance",
-                        "updateHarnessCursor", "validateOperationStart",
                         "withdrawSubmissionAttempted", "cancelUnadmittedTurn");
-        // The references the parse cannot resolve to one member —
-        // ItemRow.toRecord behind the lambda parameter at the item read,
-        // and main's this::renameDelivery RowMapper references (#13682),
-        // whose arity a method reference never spells — are pinned exactly:
-        // a new unresolvable reference fails here, and an entry goes stale
-        // the day the call is typed or moved.
+        Set<String> movedHelperNames = Set.of(
+                "beginLifecycle",
+                "completeHarnessTurn",
+                "settleFailedTurn",
+                "hasActiveTurn",
+                "hasLiveTurn",
+                "insertChildSession",
+                "insertSession",
+                "insertTurn",
+                "materializeEvent",
+                "materializeInput",
+                "requireTurn",
+                "requireTurnForUpdate",
+                "requirePolicyChange",
+                "requireChildExtensionBootstrap",
+                "requireMcpManagementIdle",
+                "settleTurnCommands",
+                "updateHarnessCursor",
+                "validateOperationStart");
+        assertThat(audit.turnMembers().stream().filter(handle -> movedHelperNames.contains(
+                handle.substring(handle.indexOf('.') + 1, handle.indexOf('/')))))
+                .containsExactlyInAnyOrder(
+                        "AgentLifecycleOperations.beginLifecycle/8",
+                        "AgentLifecycleOperations.beginLifecycle/10",
+                        "AgentLifecycleOperations.beginLifecycle/11",
+                        "AgentTurnExecution.completeHarnessTurn/8",
+                        "AgentTurnExecution.settleFailedTurn/7",
+                        "AgentSessionPolicies.hasActiveTurn/2",
+                        "AgentLifecycleOperations.hasLiveTurn/2",
+                        "AgentSessionAdmissions.insertChildSession/10",
+                        "AgentSessionAdmissions.insertSession/11",
+                        "AgentSessionAdmissions.insertSession/12",
+                        "AgentSessionAdmissions.insertSession/13",
+                        "AgentSessionAdmissions.insertSession/14",
+                        "AgentSessionCommands.insertTurn/7",
+                        "AgentMessageProjection.materializeEvent/2",
+                        "AgentMessageProjection.materializeInput/2",
+                        "AgentStoreRows.requireTurn/3",
+                        "AgentStoreRows.requireTurnForUpdate/3",
+                        "AgentSessionPolicies.requirePolicyChange/2",
+                        "AgentSessionPolicies.requireChildExtensionBootstrap/3",
+                        "AgentSessionPolicies.requireMcpManagementIdle/1",
+                        "AgentSessionCommands.settleTurnCommands/4",
+                        "AgentTurnExecution.updateHarnessCursor/7",
+                        "AgentLifecycleOperations.validateOperationStart/2");
+        // Unresolvable references, including this::renameDelivery RowMapper
+        // references (#13682) whose arity a method reference never spells,
+        // are pinned exactly: a new unresolvable reference fails here,
+        // and an entry goes stale the day the call is typed or moved.
         // The nine-argument default delegate is covered through a real Spring proxy in
         // AgentStateStoreProxyTransactionTest; its deepest writer is audited here.
         assertThat(audit.exemptions())
-                .containsExactly("ItemRow.toRecord/0",
-                        "ManagedAgentStore.insertSessionCommand/9",
-                        "ManagedAgentStore.readMap/1",
-                        "ManagedAgentStore.renameDelivery/2");
+                .containsExactly("AgentSessionCommands.renameDelivery/2",
+                        "AgentStoreRows.readMap/1",
+                        "ManagedAgentStore.insertSessionCommand/9");
         // The harvest is asserted against the bytecode's own enumeration,
         // recursively over nested types and as a multiset: a member the
         // parse dropped — including one of two overloads sharing a
         // name/arity key — would let a writer pass unaudited.
         assertThat(audit.members())
                 .as("the parse must see every compiled member")
-                .isEqualTo(compiledMembers(ManagedAgentStore.class,
-                        audit.members()));
+                .isEqualTo(compiledMembers(sources, audit.members()));
     }
 
     // The pinned order is load-bearing only inside one transaction: the
@@ -559,18 +596,43 @@ class SessionRowLockOrderTest {
                     .endsWith(".java")).sorted().toList();
         }
         Map<String, Audit> audits = new LinkedHashMap<>();
+        Map<String, Audit> families = new HashMap<>();
         for (Path source : sources) {
             String name = source.getFileName().toString();
             if (MANAGED_AGENT_STORE.equals(name)) {
                 continue;
             }
-            Audit audit = audit(Files.readString(source));
-            audits.put(name, audit);
-            if (audit.locksSessionRow()) {
-                sessionLockers.add(name);
+            String facade = name.startsWith("Agent") ? MANAGED_AGENT_STORE
+                    : name.startsWith("Journal") || name.equals("ManagedSessionStore.java")
+                            ? "ManagedSessionStore.java" : null;
+            Audit audit;
+            if (facade == null) {
+                audit = audit(readSources(List.of(source)));
+            } else {
+                audit = families.get(facade);
+                if (audit == null) {
+                    List<Path> selected = storeSources(STORE_PACKAGE, facade);
+                    audit = audit(readSources(selected));
+                    assertThat(audit.members()).as("%s and companion members", facade)
+                            .isEqualTo(compiledMembers(selected, audit.members()));
+                    families.put(facade, audit);
+                }
             }
-            if (audit.touchesTurnRow()) {
-                turnReaders.add(name);
+            audits.put(name, audit);
+            if (facade == null || name.equals(facade)) {
+                if (audit.locksSessionRow()) {
+                    sessionLockers.add(name);
+                }
+                if (audit.touchesTurnRow()) {
+                    turnReaders.add(name);
+                }
+            } else {
+                if (audit.lockSources().contains(name)) {
+                    sessionLockers.add(name);
+                }
+                if (audit.turnSources().contains(name)) {
+                    turnReaders.add(name);
+                }
             }
         }
         assertThat(sessionLockers).isEqualTo(SIBLING_SESSION_LOCKERS);
@@ -579,7 +641,8 @@ class SessionRowLockOrderTest {
         // is whatever the locker/reader intersection computed.
         Set<String> orderAudited = new TreeSet<>(sessionLockers);
         orderAudited.retainAll(turnReaders);
-        assertThat(orderAudited).containsExactly("ManagedActionStore.java",
+        assertThat(orderAudited).containsExactly("AgentExecutionOperations.java", "AgentLifecycleOperations.java", "AgentSessionCommands.java",
+                "AgentSessionPolicies.java", "AgentStoreRows.java", "AgentTurnExecution.java", "ManagedActionStore.java",
                 "ManagedUserMessageStore.java",
                 "WorkspaceRecoveryStore.java");
         // ManagedActionStore.admit takes the tenant lock before the
@@ -595,7 +658,8 @@ class SessionRowLockOrderTest {
         }
         Map<String, Set<String>> exemptions = new TreeMap<>();
         for (Map.Entry<String, Audit> entry : audits.entrySet()) {
-            if (!entry.getValue().exemptions().isEmpty()) {
+            if (!entry.getKey().startsWith("Agent") && !entry.getKey().startsWith("Journal")
+                    && !entry.getValue().exemptions().isEmpty()) {
                 exemptions.put(entry.getKey(), entry.getValue().exemptions());
             }
         }
@@ -1894,33 +1958,411 @@ class SessionRowLockOrderTest {
                 "badWriter");
     }
 
-    // Runs the audit over one parsed compilation unit and answers the
-    // violation list alongside the pinned populations.
-    private static Audit audit(String source) {
-        CompilationUnitTree unit = parse(source);
-        Map<Key, MethodTree> methods = new LinkedHashMap<>();
-        Map<String, String> constants = new HashMap<>();
-        Set<String> finalTypes = new HashSet<>();
-        for (Tree declaration : unit.getTypeDecls()) {
-            if (declaration instanceof ClassTree type) {
-                harvest(type, "", methods, constants, finalTypes);
+    @Test
+    void theAuditFollowsFinalFieldsAcrossSourceFiles() {
+        for (String receiver : List.of("rows", "this.rows")) {
+            List<String> sources = splitStore(receiver + ".lockSession();"
+                    + " jdbc.update(\"UPDATE ma_turn SET status = 'FAILED'\");",
+                    "jdbc.queryForMap(\"SELECT session_id FROM ma_session FOR UPDATE\");");
+            Audit result = audit(sources);
+            assertThat(result.violations()).isEmpty();
+            assertThat(result.lockers()).containsExactlyInAnyOrder("writer", "write", "lockSession");
+            assertThat(result.turnRowAccessors()).containsExactlyInAnyOrder("writer", "write");
+            assertThat(result.members()).containsExactly("AgentOperations#write/0",
+                    "AgentRows#lockSession/0", "SyntheticStore#writer/0");
+        }
+    }
+
+    @Test
+    void theAuditResolvesFieldTypesOutsideMethodLocalTypeScopes() {
+        for (String receiver : List.of("rows", "this.rows")) {
+            for (String localType : List.of("record QueuedInput(String value) { }",
+                    "record AgentRows(String value) { }")) {
+                List<String> sources = splitStore(localType + receiver + ".lockSession();"
+                        + " jdbc.update(\"UPDATE ma_turn SET status = 'FAILED'\");",
+                        "jdbc.queryForMap(\"SELECT session_id FROM ma_session FOR UPDATE\");");
+                Audit result = audit(sources);
+                assertThat(result.violations()).isEmpty();
+                assertThat(result.lockers()).containsExactlyInAnyOrder("writer", "write", "lockSession");
+                List<String> generic = new ArrayList<>(sources);
+                generic.set(1, generic.get(1).replace(localType, "")
+                        .replace("void write()", "<AgentRows> void write()"));
+                assertThat(audit(generic).lockers()).isEqualTo(result.lockers());
+                assertThat(audit(generic).violations()).isEmpty();
             }
         }
-        // A call through a type the file imports leaves the file: no
-        // same-file member can share an imported type's simple name.
-        Set<String> importedTypes = unit.getImports().stream()
-                .filter(declaration -> !declaration.isStatic())
-                .map(declaration -> declaration.getQualifiedIdentifier()
-                        .toString())
-                .filter(name -> !name.endsWith(".*"))
-                .map(name -> name.substring(name.lastIndexOf('.') + 1))
-                .collect(Collectors.toSet());
+    }
+
+    @Test
+    void theAuditKeepsFieldLockChecksWithLocalRecords() {
+        String localType = "record QueuedInput(String value) { }";
+        String lock = "jdbc.queryForMap(\"SELECT session_id FROM ma_session FOR UPDATE\");";
+        String turn = "jdbc.update(\"UPDATE ma_turn SET status = 'FAILED'\");";
+        for (String receiver : List.of("rows", "this.rows")) {
+            String call = receiver + ".lockSession();";
+            assertThat(audit(splitStore(localType + turn + call, lock)).violations())
+                    .containsExactlyInAnyOrder("writer", "write");
+            Audit removed = audit(splitStore(localType + call + turn, ""));
+            assertThat(removed.turnRowAccessors()).contains("writer");
+            assertThat(removed.lockers()).doesNotContain("writer");
+            List<String> hidden = new ArrayList<>(splitStore(localType + call + turn, lock));
+            hidden.set(1, hidden.get(1).replace("final AgentRows rows", "final Port rows"));
+            assertThatThrownBy(() -> audit(hidden)).isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("lockSession").hasMessageContaining("write");
+        }
+    }
+
+    @Test
+    void theAuditDoesNotUseOuterFieldTypesInsideClassBodies() {
+        for (String receiver : List.of("rows", "this.rows")) {
+            for (String body : List.of(
+                    "class Local { final DangerRows rows; void run() { " + receiver + ".touch(); } }",
+                    "Runnable action = new Runnable() { final DangerRows rows;"
+                            + " public void run() { " + receiver + ".touch(); } };",
+                    "class Local { void run(DangerRows rows) { rows.touch(); } }",
+                    "Runnable action = new Runnable() { final DangerRows rows;"
+                            + " Object value = " + receiver + ".touch(); public void run() { } };")) {
+                List<String> sources = List.of("""
+                        class SyntheticStore {
+                            final SafeRows rows;
+                            void writer() { %s }
+                        }
+                        """.formatted(body), """
+                        final class SafeRows { Object touch() { return null; } }
+                        """, """
+                        final class DangerRows {
+                            Object touch() {
+                                jdbc.update("UPDATE ma_turn SET status = 'FAILED'");
+                                return null;
+                            }
+                        }
+                        """);
+                assertThatThrownBy(() -> audit(sources)).isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("touch").hasMessageContaining("writer");
+            }
+        }
+    }
+
+    @Test
+    void theAuditRejectsAMovedLockAcrossSourceFiles() {
+        Audit result = audit(splitStore("jdbc.update(\"UPDATE ma_turn SET status = 'FAILED'\");"
+                + " rows.lockSession();",
+                "jdbc.queryForMap(\"SELECT session_id FROM ma_session FOR UPDATE\");"));
+        assertThat(result.violations()).containsExactlyInAnyOrder("writer", "write");
+    }
+
+    @Test
+    void thePinnedPopulationRejectsADeletedCrossFileLock() {
+        Audit result = audit(splitStore("rows.lockSession();"
+                + " jdbc.update(\"UPDATE ma_turn SET status = 'FAILED'\");", ""));
+        assertThat(result.turnRowAccessors()).contains("writer");
+        assertThatThrownBy(() -> assertThat(result.lockers()).contains("writer"))
+                .isInstanceOf(AssertionError.class).hasMessageContaining("writer");
+    }
+
+    @Test
+    void theFacadePopulationRejectsASameNamedDelegatesLostLock() {
+        List<String> sources = List.of("""
+                class SyntheticStore {
+                    final AgentCommands commands;
+                    void writer() { commands.writer(); }
+                }
+                """, """
+                final class AgentCommands {
+                    void writer() {
+                        jdbc.queryForMap("SELECT session_id FROM ma_session FOR UPDATE");
+                        touchTurn();
+                    }
+                    void touchTurn() { jdbc.update("UPDATE ma_turn SET status = 'FAILED'"); }
+                }
+                """);
+        Audit original = audit(sources, "SyntheticStore");
+        assertThat(original.lockers()).containsExactly("writer");
+        assertThat(original.turnRowAccessors()).containsExactly("writer");
+        List<String> changed = new ArrayList<>(sources);
+        changed.set(0, changed.getFirst().replace("commands.writer()", "commands.touchTurn()"));
+        assertThat(audit(changed).lockers()).isEqualTo(audit(sources).lockers());
+        Audit broken = audit(changed, "SyntheticStore");
+        assertThat(broken.members()).isEqualTo(original.members());
+        assertThat(broken.turnRowAccessors()).containsExactly("writer");
+        assertThatThrownBy(() -> assertThat(broken.lockers()).contains("writer"))
+                .isInstanceOf(AssertionError.class).hasMessageContaining("writer");
+    }
+
+    @Test
+    void theAuditRejectsUnresolvedCrossFileFieldReceivers() {
+        List<String> sources = splitStore("rows.lockSession();"
+                + " jdbc.update(\"UPDATE ma_turn SET status = 'FAILED'\");",
+                "jdbc.queryForMap(\"SELECT session_id FROM ma_session FOR UPDATE\");");
+        for (String declaration : List.of("final Port rows", "AgentRows rows", "final Object rows")) {
+            List<String> changed = new ArrayList<>(sources);
+            changed.set(1, changed.get(1).replace("final AgentRows rows", declaration));
+            assertThatThrownBy(() -> audit(changed)).isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("lockSession").hasMessageContaining("write");
+        }
+        List<String> polymorphic = new ArrayList<>(sources);
+        polymorphic.set(2, polymorphic.get(2).replace("final class AgentRows", "class AgentRows"));
+        assertThatThrownBy(() -> audit(polymorphic)).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("lockSession");
+    }
+
+    @Test
+    void theAuditDistinguishesFieldsFromShadowingReceiversAcrossFiles() {
+        List<String> sources = splitStore("rows.lockSession();"
+                + " jdbc.update(\"UPDATE ma_turn SET status = 'FAILED'\");",
+                "jdbc.queryForMap(\"SELECT session_id FROM ma_session FOR UPDATE\");");
+        List<String> explicit = new ArrayList<>(sources);
+        explicit.set(0, explicit.get(0).replace("writer()", "writer(Port operations)")
+                .replace("operations.write()", "this.operations.write()"));
+        assertThat(audit(explicit).violations()).isEmpty();
+        assertThat(audit(explicit).lockers()).contains("writer");
+        List<String> shadowed = new ArrayList<>(explicit);
+        shadowed.set(0, shadowed.get(0).replace("this.operations.write()", "operations.write()"));
+        assertThatThrownBy(() -> audit(shadowed)).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("write").hasMessageContaining("writer");
+    }
+
+    @Test
+    void theAuditKeepsCrossFileOverloadsAmbiguous() {
+        List<String> sources = splitStore("rows.lockSession(value);"
+                + " jdbc.update(\"UPDATE ma_turn SET status = 'FAILED'\");", "");
+        sources = new ArrayList<>(sources);
+        sources.set(2, """
+                final class AgentRows {
+                    void lockSession(String value) {
+                        jdbc.queryForMap("SELECT session_id FROM ma_session FOR UPDATE");
+                    }
+                    void lockSession(Integer value) { }
+                }
+                """);
+        List<String> ambiguous = sources;
+        assertThatThrownBy(() -> audit(ambiguous)).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("AgentRows.lockSession/1");
+    }
+
+    @Test
+    void theAuditKeepsConstantsScopedToTheirSourceFile() {
+        List<String> sources = List.of("""
+                class SyntheticStore {
+                    final AgentRows rows;
+                    static final String SQL = "UPDATE ma_turn SET status = 'FAILED'";
+                    void writer() { jdbc.update(SQL); rows.lockSession(); }
+                }
+                """, """
+                final class AgentRows {
+                    static final String SQL = "SELECT session_id FROM ma_session FOR UPDATE";
+                    void lockSession() { jdbc.queryForMap(SQL); }
+                }
+                """);
+        assertThat(audit(sources).violations()).containsExactly("writer");
+        List<String> qualified = new ArrayList<>(sources);
+        qualified.set(0, """
+                class SyntheticStore {
+                    final AgentRows rows;
+                    void writer() {
+                        jdbc.update(AgentSql.SQL);
+                        rows.lockSession();
+                    }
+                }
+                """);
+        qualified.add("""
+                final class AgentSql {
+                    static final String SQL = "UPDATE ma_turn SET status = 'FAILED'";
+                }
+                """);
+        assertThat(audit(qualified).violations()).containsExactly("writer");
+    }
+
+    @Test
+    void theAuditKeepsImportedReceiverTypesScopedToTheirSourceFile() {
+        List<String> sources = splitStore("rows.lockSession();"
+                + " jdbc.update(\"UPDATE ma_turn SET status = 'FAILED'\");",
+                "jdbc.queryForMap(\"SELECT session_id FROM ma_session FOR UPDATE\");");
+        List<String> ownPackage = sources.stream().map(source -> "package sample;\n" + source).toList();
+        ownPackage = new ArrayList<>(ownPackage);
+        ownPackage.set(1, ownPackage.get(1).replace("package sample;",
+                "package sample; import sample.AgentRows;"));
+        assertThat(audit(ownPackage).lockers()).contains("writer");
+        List<String> external = new ArrayList<>(ownPackage);
+        external.set(1, external.get(1).replace("import sample.AgentRows;", "import external.AgentRows;"));
+        assertThatThrownBy(() -> audit(external)).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("lockSession");
+        List<String> unrelated = new ArrayList<>(sources);
+        unrelated.add("import external.AgentRows; final class Unrelated { void pure() {} }");
+        assertThat(audit(unrelated).lockers()).contains("writer");
+    }
+
+    @Test
+    void theAuditDoesNotCreditAnExternalTypeWithParsedMembers() {
+        for (String lock : List.of("AgentRows.lockSession()", "jdbc.queryForMap(AgentRows.SQL)",
+                "jdbc.queryForMap(AgentRows.SQL + \" \" )")) {
+            List<String> sources = List.of("""
+                    import external.AgentRows;
+                    class SyntheticStore {
+                        static final String SQL = "SELECT session_id FROM ma_session FOR UPDATE";
+                        void writer() {
+                            %s;
+                            jdbc.update("UPDATE ma_turn SET status = 'FAILED'");
+                        }
+                    }
+                    """.formatted(lock), """
+                    final class AgentRows {
+                        static final String SQL = "SELECT session_id FROM ma_session FOR UPDATE";
+                        static void lockSession() { jdbc.queryForMap(SQL); }
+                    }
+                    """);
+            Audit result = audit(sources);
+            assertThat(result.turnRowAccessors()).contains("writer");
+            assertThat(result.lockers()).doesNotContain("writer");
+        }
+    }
+
+    @Test
+    void theAuditResolvesFieldsInTheirDeclaringType() {
+        Audit result = audit(List.of("""
+                class SyntheticStore {
+                    final AgentRows rows;
+                    class Nested {
+                        final class AgentRows {
+                            void lockSession() {
+                                jdbc.queryForMap("SELECT session_id FROM ma_session FOR UPDATE");
+                            }
+                        }
+                        void writer() {
+                            rows.lockSession();
+                            jdbc.update("UPDATE ma_turn SET status = 'FAILED'");
+                        }
+                    }
+                }
+                """, """
+                final class AgentRows {
+                    void lockSession() { }
+                }
+                """));
+        assertThat(result.turnRowAccessors()).contains("writer");
+        assertThat(result.lockers()).doesNotContain("writer");
+    }
+
+    @Test
+    void theSourceFamiliesIncludeNewCollaboratorsWithoutAClassAllowlist(@TempDir Path directory)
+            throws IOException {
+        for (String name : List.of(MANAGED_AGENT_STORE, "ManagedSessionStore.java",
+                "AgentRows.java", "AgentFutureWorkflow.java", "JournalRows.java", "OtherStore.java")) {
+            Files.writeString(directory.resolve(name), "class " + name.replace(".java", "") + " {}");
+        }
+        assertThat(storeSources(directory, MANAGED_AGENT_STORE))
+                .containsExactly(directory.resolve("AgentFutureWorkflow.java"), directory.resolve("AgentRows.java"),
+                        directory.resolve(MANAGED_AGENT_STORE));
+        assertThat(storeSources(directory, "ManagedSessionStore.java"))
+                .containsExactly(directory.resolve("JournalRows.java"), directory.resolve("ManagedSessionStore.java"));
+    }
+
+    private static List<String> splitStore(String writeBody, String lockBody) {
+        return List.of("""
+                class SyntheticStore {
+                    final AgentOperations operations;
+                    void writer() { operations.write(); }
+                }
+                """, """
+                final class AgentOperations {
+                    final AgentRows rows;
+                    void write() { %s }
+                }
+                """.formatted(writeBody), """
+                final class AgentRows {
+                    void lockSession() { %s }
+                }
+                """.formatted(lockBody));
+    }
+
+    private static List<Path> storeSources(Path directory, String facade)
+            throws IOException {
+        String prefix = MANAGED_AGENT_STORE.equals(facade) ? "Agent" : "Journal";
+        try (var files = Files.list(directory)) {
+            List<Path> selected = files.filter(path -> {
+                String name = path.getFileName().toString();
+                return name.equals(facade) || name.startsWith(prefix) && name.endsWith(".java");
+            }).sorted().toList();
+            assertThat(selected).contains(directory.resolve(facade));
+            return selected;
+        }
+    }
+
+    private static List<String> readSources(List<Path> paths) throws IOException {
+        List<String> sources = new ArrayList<>();
+        for (Path path : paths) {
+            sources.add(Files.readString(path));
+        }
+        return sources;
+    }
+
+    private static Audit audit(String source) {
+        return audit(List.of(source));
+    }
+
+    private static Audit audit(List<String> sources) {
+        return audit(sources, null);
+    }
+
+    // Each source keeps its imports and unqualified constants; member
+    // identities and final receiver types span the complete source family.
+    // Facade populations retain their owner so a same-named collaborator
+    // cannot conceal an entry losing its lock or Turn access.
+    private static Audit audit(List<String> sources, String populationOwner) {
+        List<CompilationUnitTree> units = sources.stream().map(SessionRowLockOrderTest::parse).toList();
+        Map<Key, MethodTree> methods = new LinkedHashMap<>();
+        Map<Key, Map<String, String>> memberConstants = new HashMap<>();
+        Map<Key, Set<String>> memberImports = new HashMap<>();
+        Map<String, Map<String, VariableTree>> fields = new HashMap<>();
+        Map<String, String> qualifiedConstants = new HashMap<>();
+        Set<String> finalTypes = new HashSet<>();
+        Set<String> sourceTypes = new HashSet<>();
+        for (CompilationUnitTree unit : units) {
+            String prefix = unit.getPackageName() == null ? "" : unit.getPackageName() + ".";
+            for (Tree declaration : unit.getTypeDecls()) {
+                if (declaration instanceof ClassTree type) {
+                    sourceTypes.add(prefix + type.getSimpleName());
+                }
+            }
+        }
+        for (CompilationUnitTree unit : units) {
+            Map<Key, MethodTree> localMethods = new LinkedHashMap<>();
+            Map<String, String> constants = new HashMap<>();
+            for (Tree declaration : unit.getTypeDecls()) {
+                if (declaration instanceof ClassTree type) {
+                    harvest(type, "", localMethods, constants, finalTypes, fields);
+                }
+            }
+            Set<String> importedTypes = unit.getImports().stream()
+                    .filter(declaration -> !declaration.isStatic())
+                    .map(declaration -> declaration.getQualifiedIdentifier().toString())
+                    .filter(name -> !name.endsWith(".*") && !sourceTypes.contains(name))
+                    .map(name -> name.substring(name.lastIndexOf('.') + 1))
+                    .collect(Collectors.toSet());
+            for (Map.Entry<Key, MethodTree> member : localMethods.entrySet()) {
+                if (methods.putIfAbsent(member.getKey(), member.getValue()) != null) {
+                    throw new IllegalStateException("duplicate parsed member " + member.getKey());
+                }
+                memberConstants.put(member.getKey(), constants);
+                memberImports.put(member.getKey(), importedTypes);
+            }
+            constants.forEach((name, value) -> {
+                if (name.contains(".")) {
+                    qualifiedConstants.put(name, value);
+                }
+            });
+        }
         List<Ambiguous> ambiguous = new ArrayList<>();
         Map<Key, List<Event>> events = new LinkedHashMap<>();
         Map<Key, List<List<Event>>> heldLambdas = new LinkedHashMap<>();
         for (Map.Entry<Key, MethodTree> member : methods.entrySet()) {
+            Map<String, String> constants = new HashMap<>(qualifiedConstants);
+            constants.putAll(memberConstants.get(member.getKey()));
+            Set<String> importedTypes = memberImports.get(member.getKey());
+            constants.keySet().removeIf(name -> name.contains(".")
+                    && importedTypes.contains(name.substring(0, name.indexOf('.'))));
             MemberScan scan = eventsOf(member.getValue(), member.getKey(),
-                    methods, constants, importedTypes, finalTypes, ambiguous);
+                    methods, constants, importedTypes, finalTypes, fields, ambiguous);
             events.put(member.getKey(), scan.events());
             heldLambdas.put(member.getKey(), scan.heldLambdas());
         }
@@ -1959,9 +2401,9 @@ class SessionRowLockOrderTest {
         // An unresolvable reference is exempt only while every candidate
         // provably reaches neither side; the moment one does, the audit
         // fails closed instead of guessing an attribution. The one
-        // exception is a file no member of which reaches the turn row:
+        // exception is a source family with no member reaching the turn row:
         // there an attribution can move only the session lock, and a lock
-        // with no turn access anywhere in the file orders nothing.
+        // with no turn access anywhere in the family orders nothing.
         Set<String> exemptions = new TreeSet<>();
         for (Ambiguous reference : ambiguous) {
             boolean sideReaching = reference.candidates().stream()
@@ -1983,6 +2425,7 @@ class SessionRowLockOrderTest {
         // never enters `lockers`, so only this set fails loudly when one
         // appears.
         Set<String> turnRowAccessors = turnReaching.stream()
+                .filter(key -> populationOwner == null || key.owner().equals(populationOwner))
                 .map(Key::name)
                 .collect(Collectors.toCollection(TreeSet::new));
         Set<String> lockers = new TreeSet<>();
@@ -1997,10 +2440,15 @@ class SessionRowLockOrderTest {
                     || !lockReaching.contains(key)) {
                 continue;
             }
-            // Overloads audit as separate members but name one locker.
-            lockers.add(key.name());
+            // Overloads audit as separate members but name one locker;
+            // order is still checked across every owner in the family.
+            if (populationOwner == null || key.owner().equals(populationOwner)) {
+                lockers.add(key.name());
+                if (!turnReaching.contains(key)) {
+                    lockersWithoutTurnAccess.add(key.name());
+                }
+            }
             if (!turnReaching.contains(key)) {
-                lockersWithoutTurnAccess.add(key.name());
                 continue;
             }
             if (lockAfterTurn(key, events, lockReaching, turnReaching,
@@ -2017,7 +2465,14 @@ class SessionRowLockOrderTest {
                 deferredBodies, events.values().stream().flatMap(List::stream)
                         .anyMatch(Event::lock),
                 events.values().stream().flatMap(List::stream)
-                        .anyMatch(Event::turn));
+                        .anyMatch(Event::turn),
+                events.entrySet().stream().filter(entry -> entry.getValue().stream().anyMatch(Event::lock))
+                        .map(entry -> entry.getKey().owner().split("\\.")[0] + ".java")
+                        .collect(Collectors.toCollection(TreeSet::new)),
+                events.entrySet().stream().filter(entry -> entry.getValue().stream().anyMatch(Event::turn))
+                        .map(entry -> entry.getKey().owner().split("\\.")[0] + ".java")
+                        .collect(Collectors.toCollection(TreeSet::new)),
+                turnReaching.stream().map(Key::handle).collect(Collectors.toCollection(TreeSet::new)));
     }
 
     // The members of one type, recursively through its nested types, keyed
@@ -2028,7 +2483,7 @@ class SessionRowLockOrderTest {
     // constant scores exactly like the inline spelling.
     private static void harvest(ClassTree type, String ownerPath,
             Map<Key, MethodTree> methods, Map<String, String> constants,
-            Set<String> finalTypes) {
+            Set<String> finalTypes, Map<String, Map<String, VariableTree>> fields) {
         String path = ownerPath.isEmpty() ? type.getSimpleName().toString()
                 : ownerPath + "." + type.getSimpleName();
         if (type.getModifiers().getFlags().contains(Modifier.FINAL)) {
@@ -2043,17 +2498,21 @@ class SessionRowLockOrderTest {
                 }
                 methods.put(new Key(path, method.getName().toString(),
                         paramTypes), method);
-            } else if (member instanceof VariableTree field
-                    && field.getModifiers().getFlags()
+            } else if (member instanceof VariableTree field) {
+                fields.computeIfAbsent(path, ignored -> new HashMap<>())
+                        .put(field.getName().toString(), field);
+                if (field.getModifiers().getFlags()
                             .contains(Modifier.STATIC)
-                    && field.getModifiers().getFlags()
+                        && field.getModifiers().getFlags()
                             .contains(Modifier.FINAL)
-                    && field.getInitializer() != null
-                    && "String".equals(String.valueOf(field.getType()))) {
-                constants.put(field.getName().toString(),
-                        flatten(field.getInitializer(), constants));
+                        && field.getInitializer() != null
+                        && "String".equals(String.valueOf(field.getType()))) {
+                    String value = flatten(field.getInitializer(), constants);
+                    constants.put(field.getName().toString(), value);
+                    constants.put(path + "." + field.getName(), value);
+                }
             } else if (member instanceof ClassTree nested) {
-                harvest(nested, path, methods, constants, finalTypes);
+                harvest(nested, path, methods, constants, finalTypes, fields);
             }
         }
     }
@@ -2152,6 +2611,7 @@ class SessionRowLockOrderTest {
     private static MemberScan eventsOf(MethodTree method, Key caller,
             Map<Key, MethodTree> methods, Map<String, String> constants,
             Set<String> importedTypes, Set<String> finalTypes,
+            Map<String, Map<String, VariableTree>> fields,
             List<Ambiguous> ambiguous) {
         boolean typedReceivers = method.getTypeParameters().isEmpty();
         boolean[] localClass = {false};
@@ -2163,14 +2623,27 @@ class SessionRowLockOrderTest {
             }
         }.scan(method.getBody(), null);
         typedReceivers &= !localClass[0];
-        Map<String, String> receivers = new HashMap<>();
+        Set<String> visibleFinalTypes = finalTypes.stream()
+                .filter(type -> !importedTypes.contains(type.split("\\.")[0]))
+                .collect(Collectors.toSet());
+        Map<String, String> fieldReceivers = new HashMap<>();
+        for (String owner = caller.owner(); owner != null;
+                owner = owner.lastIndexOf('.') < 0 ? null : owner.substring(0, owner.lastIndexOf('.'))) {
+            for (VariableTree field : fields.getOrDefault(owner, Map.of()).values()) {
+                // Method-local types cannot change the declared type of a field.
+                fieldReceivers.putIfAbsent(field.getName().toString(),
+                        field.getModifiers().getFlags().contains(Modifier.FINAL)
+                                ? receiverType(field, owner, visibleFinalTypes) : "");
+            }
+        }
+        Map<String, String> receivers = new HashMap<>(fieldReceivers);
         for (VariableTree parameter : method.getParameters()) {
             receivers.put(parameter.getName().toString(), typedReceivers
-                    ? receiverType(parameter, caller, finalTypes) : "");
+                    ? receiverType(parameter, caller.owner(), visibleFinalTypes) : "");
         }
         EventScanner scanner = new EventScanner(new ArrayList<>(), caller,
                 methods, new HashMap<>(constants), importedTypes,
-                finalTypes, receivers, typedReceivers, ambiguous);
+                visibleFinalTypes, receivers, fieldReceivers, typedReceivers, ambiguous);
         if (method.getBody() != null) {
             scanner.scan(method.getBody(), null);
         }
@@ -2180,10 +2653,10 @@ class SessionRowLockOrderTest {
     private record MemberScan(List<Event> events,
             List<List<Event>> heldLambdas) { }
 
-    // A final same-file class cannot dispatch to a hidden subtype. Only
-    // explicit parameter/local types and direct `var = new Type(...)`
-    // inference qualify; fields, casts and other inference stay unknown.
-    private static String receiverType(VariableTree variable, Key caller,
+    // A parsed final class cannot dispatch to a hidden subtype. Only
+    // explicit types and direct `var = new Type(...)` inference qualify;
+    // casts and other inference stay unknown.
+    private static String receiverType(VariableTree variable, String declaringOwner,
             Set<String> finalTypes) {
         String type = String.valueOf(variable.getType());
         if (variable.getType() == null || type.equals("var")) {
@@ -2193,7 +2666,7 @@ class SessionRowLockOrderTest {
             }
             type = creation.getIdentifier().toString();
         }
-        for (String owner = caller.owner(); owner != null;
+        for (String owner = declaringOwner; owner != null;
                 owner = owner.lastIndexOf('.') < 0 ? null
                         : owner.substring(0, owner.lastIndexOf('.'))) {
             String candidate = owner + "." + type;
@@ -2221,6 +2694,7 @@ class SessionRowLockOrderTest {
         private final Set<String> importedTypes;
         private final Set<String> finalTypes;
         private final Map<String, String> receivers;
+        private final Map<String, String> fieldReceivers;
         private final boolean typedReceivers;
         private final List<Ambiguous> ambiguous;
         // The lambda nodes passed straight into a call, marked at the call
@@ -2231,7 +2705,7 @@ class SessionRowLockOrderTest {
         EventScanner(List<Event> events, Key caller,
                 Map<Key, MethodTree> methods, Map<String, String> constants,
                 Set<String> importedTypes, Set<String> finalTypes,
-                Map<String, String> receivers, boolean typedReceivers,
+                Map<String, String> receivers, Map<String, String> fieldReceivers, boolean typedReceivers,
                 List<Ambiguous> ambiguous) {
             this.events = events;
             this.caller = caller;
@@ -2240,6 +2714,7 @@ class SessionRowLockOrderTest {
             this.importedTypes = importedTypes;
             this.finalTypes = finalTypes;
             this.receivers = new HashMap<>(receivers);
+            this.fieldReceivers = fieldReceivers;
             this.typedReceivers = typedReceivers;
             this.ambiguous = ambiguous;
         }
@@ -2253,7 +2728,7 @@ class SessionRowLockOrderTest {
                     if (statement instanceof VariableTree variable) {
                         receivers.put(variable.getName().toString(),
                                 typedReceivers ? receiverType(variable,
-                                        caller, finalTypes) : "");
+                                        caller.owner(), finalTypes) : "");
                     }
                 }
                 return null;
@@ -2386,7 +2861,7 @@ class SessionRowLockOrderTest {
             // any that reach a side.
             EventScanner held = new EventScanner(new ArrayList<>(), caller,
                     methods, constants, importedTypes, finalTypes,
-                    receivers, typedReceivers, ambiguous);
+                    receivers, fieldReceivers, typedReceivers, ambiguous);
             held.scan(node.getBody(), null);
             heldLambdas.add(held.events);
             heldLambdas.addAll(held.heldLambdas);
@@ -2407,20 +2882,20 @@ class SessionRowLockOrderTest {
             scan(node.getIdentifier(), null);
             scan(node.getTypeArguments(), null);
             scan(node.getArguments(), null);
-            EventScanner held = new EventScanner(new ArrayList<>(), caller,
-                    methods, constants, importedTypes, finalTypes,
-                    receivers, typedReceivers, ambiguous);
+            EventScanner held = classBodyScanner(node.getClassBody(), new ArrayList<>());
+            EventScanner immediate = classBodyScanner(node.getClassBody(), events);
             for (Tree member : node.getClassBody().getMembers()) {
                 if (member instanceof MethodTree method) {
                     if (method.getBody() != null) {
                         held.scan(method.getBody(), null);
                     }
                 } else {
-                    scan(member, null);
+                    immediate.scan(member, null);
                 }
             }
             heldLambdas.add(held.events);
             heldLambdas.addAll(held.heldLambdas);
+            heldLambdas.addAll(immediate.heldLambdas);
             return null;
         }
 
@@ -2431,9 +2906,7 @@ class SessionRowLockOrderTest {
             // declaration — so its bodies must be held aside exactly like
             // an anonymous-class body; folding them inline would score the
             // session lock the body takes where it never runs.
-            EventScanner held = new EventScanner(new ArrayList<>(), caller,
-                    methods, constants, importedTypes, finalTypes,
-                    receivers, typedReceivers, ambiguous);
+            EventScanner held = classBodyScanner(node, new ArrayList<>());
             for (Tree member : node.getMembers()) {
                 if (member instanceof MethodTree method
                         && method.getBody() != null
@@ -2444,6 +2917,22 @@ class SessionRowLockOrderTest {
             heldLambdas.add(held.events);
             heldLambdas.addAll(held.heldLambdas);
             return null;
+        }
+
+        private EventScanner classBodyScanner(ClassTree type, List<Event> targetEvents) {
+            // A local or anonymous class changes `this` and can shadow outer fields.
+            Map<String, String> unknown = new HashMap<>(receivers);
+            fieldReceivers.keySet().forEach(name -> unknown.put(name, ""));
+            unknown.replaceAll((name, owner) -> "");
+            for (Tree member : type.getMembers()) {
+                if (member instanceof VariableTree field) {
+                    unknown.put(field.getName().toString(), "");
+                } else if (member instanceof MethodTree method) {
+                    method.getParameters().forEach(parameter -> unknown.put(parameter.getName().toString(), ""));
+                }
+            }
+            return new EventScanner(targetEvents, caller, methods, constants, importedTypes, finalTypes,
+                    unknown, unknown, false, ambiguous);
         }
 
         @Override
@@ -2461,6 +2950,16 @@ class SessionRowLockOrderTest {
                 addSpelling(text, events);
             }
             return null;
+        }
+
+        @Override
+        public Void visitMemberSelect(MemberSelectTree node, Void unused) {
+            String text = constants.get(node.toString());
+            if (text != null) {
+                addSpelling(text, events);
+                return null;
+            }
+            return super.visitMemberSelect(node, unused);
         }
 
         // The calls and references inside an expression whose spelling was
@@ -2486,7 +2985,7 @@ class SessionRowLockOrderTest {
 
         private void addCall(MethodInvocationTree node) {
             resolve(node.getMethodSelect(), node.getArguments().size(),
-                    caller, methods, importedTypes, receivers, ambiguous).forEach(key ->
+                    caller, methods, importedTypes, receivers, fieldReceivers, ambiguous).forEach(key ->
                     events.add(new Event(false, false, key)));
         }
 
@@ -2508,15 +3007,15 @@ class SessionRowLockOrderTest {
         }
     }
 
-    // The same-file member an invocation resolves to, or the reference
+    // The parsed member an invocation resolves to, or the reference
     // recorded as ambiguous. A bare or this. call searches the caller's
     // enclosing type chain innermost first; a Type. call searches the
-    // named type. An exact same-file final receiver uses its full owner
+    // named type. An exact parsed final receiver uses its full owner
     // path. Other receivers remain ambiguous and fail closed when any
     // same-named candidate reaches either audited side.
     private static List<Key> resolve(Tree select, int argCount, Key caller,
             Map<Key, MethodTree> methods, Set<String> importedTypes,
-            Map<String, String> receivers,
+            Map<String, String> receivers, Map<String, String> fieldReceivers,
             List<Ambiguous> ambiguous) {
         if (select instanceof IdentifierTree identifier) {
             return resolveInOwnerChain(identifier.getName().toString(),
@@ -2524,6 +3023,21 @@ class SessionRowLockOrderTest {
         }
         if (select instanceof MemberSelectTree memberSelect) {
             String name = memberSelect.getIdentifier().toString();
+            if (memberSelect.getExpression() instanceof MemberSelectTree field
+                    && field.getExpression() instanceof IdentifierTree base
+                    && base.getName().contentEquals("this")) {
+                String owner = fieldReceivers.getOrDefault(field.getIdentifier().toString(), "");
+                List<Key> exact = methods.keySet().stream()
+                        .filter(key -> key.owner().equals(owner) && key.name().equals(name)
+                                && key.arity() == argCount).toList();
+                if (exact.size() == 1) {
+                    return exact;
+                }
+                if (!exact.isEmpty()) {
+                    ambiguous.add(new Ambiguous(caller, handle(exact), exact));
+                    return List.of();
+                }
+            }
             if (memberSelect.getExpression() instanceof IdentifierTree base) {
                 if (base.getName().contentEquals("this")) {
                     return resolveInOwnerChain(name, argCount, caller,
@@ -2543,6 +3057,9 @@ class SessionRowLockOrderTest {
                         return List.of();
                     }
                 } else {
+                    if (importedTypes.contains(receiver)) {
+                        return List.of();
+                    }
                     List<Key> inType = methods.keySet().stream()
                             .filter(key -> key.ownerSimpleName()
                                     .contentEquals(base.getName().toString())
@@ -2555,9 +3072,6 @@ class SessionRowLockOrderTest {
                     if (!inType.isEmpty()) {
                         ambiguous.add(new Ambiguous(caller,
                                 inType.getFirst().handle(), inType));
-                        return List.of();
-                    }
-                    if (importedTypes.contains(base.getName().toString())) {
                         return List.of();
                     }
                 }
@@ -2666,8 +3180,8 @@ class SessionRowLockOrderTest {
                     "");
         }
         if (node instanceof MemberSelectTree select) {
-            return constants.getOrDefault(select.getIdentifier().toString(),
-                    "");
+            return constants.getOrDefault(select.getExpression().toString().equals("this")
+                    ? select.getIdentifier().toString() : select.toString(), "");
         }
         // An expression the walk cannot resolve still carries its string
         // literals — a table name handed to a helper inside the SQL's own
@@ -2694,10 +3208,19 @@ class SessionRowLockOrderTest {
     // component accessors and toString/equals/hashCode — are absent from
     // the parse tree unless the record declares them, so only the
     // undeclared ones are filtered.
-    private static List<String> compiledMembers(Class<?> type,
+    private static List<String> compiledMembers(List<Path> sources,
             List<String> parsed) {
         List<String> compiled = new ArrayList<>();
-        collectCompiled(type, parsed, compiled);
+        for (Path source : sources) {
+            String name = source.getFileName().toString().replace(".java", "");
+            try {
+                Class<?> type = Class.forName(ManagedAgentStore.class.getPackageName() + "." + name,
+                        false, ManagedAgentStore.class.getClassLoader());
+                collectCompiled(type, parsed, compiled);
+            } catch (ClassNotFoundException error) {
+                throw new IllegalStateException("uncompiled audit source " + source, error);
+            }
+        }
         compiled.sort(null);
         return compiled;
     }

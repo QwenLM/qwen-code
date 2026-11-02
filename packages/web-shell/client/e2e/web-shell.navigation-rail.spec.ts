@@ -83,6 +83,12 @@ test('click opens Home and functional pages while collapse retains the draft @sm
     'Plugins',
   );
   await expect(
+    page.getByTestId('inline-panel').getByRole('button', {
+      name: 'Back to conversation',
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  await expect(
     rail.getByRole('button', { name: 'Plugins', exact: true }),
   ).toHaveAttribute('aria-current', 'page');
   await page.screenshot({ path: info.outputPath('plugins-dark.png') });
@@ -384,6 +390,96 @@ test('split view keeps the home column and a working collapse control', async ({
   await expect(page.locator(homeColumn)).toBeHidden();
   await rail.getByRole('button', { name: 'Expand', exact: true }).click();
   await expect(page.locator(homeColumn)).toBeVisible();
+});
+
+test('narrow Plugins page keeps a visible back control to the conversation', async ({
+  page,
+  baseURL,
+}) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await installMockDaemon(page, createWebShellDaemonScenario(), { baseURL });
+  await page.goto('/e2e/navigation-rail-harness.html?narrow');
+  await expect(page.locator(homeColumn)).toBeHidden();
+  await page.getByRole('button', { name: 'Toggle menu' }).click();
+  await page
+    .getByRole('dialog', { name: 'Workspace sidebar' })
+    .getByRole('button', { name: 'Plugins', exact: true })
+    .click();
+
+  const panel = page.getByTestId('inline-panel');
+  await expect(panel).toHaveAttribute('aria-label', 'Plugins');
+  const back = panel.getByRole('button', {
+    name: 'Back to conversation',
+    exact: true,
+  });
+  await expect(back).toBeVisible();
+  await back.click();
+  await expect(panel).toHaveCount(0);
+});
+
+test('narrow Plugins header keeps the workspace picker clear of the tabs', async ({
+  page,
+  baseURL,
+}) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  const scenario = createWebShellDaemonScenario();
+  scenario.capabilities.workspaces = [
+    {
+      id: 'primary',
+      cwd: scenario.workspaceCwd,
+      displayName: 'Primary',
+      primary: true,
+      trusted: true,
+    },
+    {
+      id: 'secondary',
+      cwd: '/tmp/qwen-web-shell-e2e-secondary',
+      displayName: 'Secondary',
+      primary: false,
+      trusted: true,
+    },
+  ];
+  await installMockDaemon(page, scenario, { baseURL });
+  await page.goto('/e2e/navigation-rail-harness.html?narrow');
+  await page.getByRole('button', { name: 'Toggle menu' }).click();
+  await page
+    .getByRole('dialog', { name: 'Workspace sidebar' })
+    .getByRole('button', { name: 'Plugins', exact: true })
+    .click();
+
+  const panel = page.getByTestId('inline-panel');
+  await panel.getByRole('tab', { name: 'MCP', exact: true }).click();
+  const select = panel.getByRole('combobox', {
+    name: 'Workspace',
+    exact: true,
+  });
+  await expect(select).toBeVisible();
+  const host = page.getByTestId('host-shell');
+  const lastTab = panel.getByRole('tab').last();
+
+  for (const width of [500, 390]) {
+    await host.evaluate((element, next) => {
+      element.style.width = `${next}px`;
+    }, width);
+    await page.waitForTimeout(50);
+    const tabBox = (await lastTab.boundingBox())!;
+    const selectBox = (await select.boundingBox())!;
+    const hostBox = (await host.boundingBox())!;
+    expect(selectBox.width).toBeGreaterThan(0);
+    const overlaps =
+      tabBox.x < selectBox.x + selectBox.width &&
+      selectBox.x < tabBox.x + tabBox.width &&
+      tabBox.y < selectBox.y + selectBox.height &&
+      selectBox.y < tabBox.y + tabBox.height;
+    expect(overlaps).toBe(false);
+    // Wrapping the header must not push the picker out of the host: a build
+    // that only shrinks the tab group keeps the tabs off the picker but leaves
+    // it clipped at the host's right edge.
+    expect(selectBox.x).toBeGreaterThanOrEqual(hostBox.x);
+    expect(selectBox.x + selectBox.width).toBeLessThanOrEqual(
+      hostBox.x + hostBox.width + 1,
+    );
+  }
 });
 
 test('a very narrow host still contains the compact drawer', async ({

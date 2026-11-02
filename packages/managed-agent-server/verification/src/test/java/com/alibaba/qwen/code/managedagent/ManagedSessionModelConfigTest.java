@@ -81,13 +81,28 @@ class ManagedSessionModelConfigTest {
         beans = new DefaultListableBeanFactory();
         beans.registerSingleton("protector", new AesGcmSecretProtector("test-key", new byte[32]));
         configs = repository();
-        store = VerificationFixtures.configure(new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
-                registry, properties, new SdkHarnessRules()));
-        store.setModelConfigs(configs);
+        store = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
+                registry, properties, new SdkHarnessRules(),
+                new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(),
+                new com.alibaba.qwen.code.managedagent.persistence.ManagedSessionSkills(jdbc, json, new RequestDigests(), null),
+                null, null, null, null, null, null, configs);
         harness = mock(HarnessConnector.class);
         when(harness.supportsModelConfiguration()).thenReturn(true);
         service = new ManagedAgentService(store, new RequestDigests(), mock(HarnessCoordinator.class), harness, registry,
                 new SdkHarnessRules());
+    }
+
+    @Test
+    void legacyCreationPersistsConfigurationAndReplaysBeforeAdmissionPolicy() {
+        var config = config("legacy-key");
+        String session = new TransactionTemplate(manager).execute(status -> service.createSession(
+                tenant, "actor", "legacy", "qwen-code", null, null, null, List.of(), config)).sessionId();
+        assertThat(store.requireSession(tenant, session).modelConfigDigest()).isEqualTo(config.digest());
+        assertThat(configs.read(tenant, session, config.digest()).wireValue()).isEqualTo(config.wireValue());
+        properties.setModelConfigBaseUrls(List.of());
+        when(harness.supportsModelConfiguration()).thenReturn(false);
+        assertThat(new TransactionTemplate(manager).execute(status -> service.createSession(
+                tenant, "actor", "legacy", "qwen-code", null, null, null, List.of(), config)).sessionId()).isEqualTo(session);
     }
 
     @Test
@@ -141,7 +156,7 @@ class ManagedSessionModelConfigTest {
     void privateReadRequiresCurrentTenantWorkspaceWriterGenerationAndDigest() {
         var config = config("private-key");
         String session = create("private", config);
-        var sessionStore = VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var sessionStore = VerificationFixtures.managedSessionStore(jdbc);
         new TransactionTemplate(manager).execute(status -> sessionStore.acquireWriter(tenant, session, token,
                 new AcquireWriterRequest("ws", "writer", 60_000L)));
         var controller = new ManagedSessionStoreController(sessionStore, null, null);

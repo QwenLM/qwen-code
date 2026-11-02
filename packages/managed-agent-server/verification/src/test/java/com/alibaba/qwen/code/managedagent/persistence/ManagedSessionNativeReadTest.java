@@ -84,7 +84,7 @@ class ManagedSessionNativeReadTest {
         binding = bindings.compareAndSet(binding, binding.withAttestation(lease,
                 new RuntimeResourceHandle("kubernetes-workspace", 3, Map.of("podUid", "fixture-original")),
                 Instant.now(), Instant.now()));
-        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         transactions.execute(status -> store.acquireWriter("tenant", session, TOKEN,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 300_000L)));
         jdbc.update(

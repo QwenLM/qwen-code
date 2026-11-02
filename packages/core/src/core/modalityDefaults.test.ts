@@ -219,8 +219,16 @@ describe('defaultModalities', () => {
   describe('Kimi', () => {
     casesFor('returns image + video for', [
       ['kimi-k3', ONLY_IMAGE_VIDEO],
+      ['kimi-k3.1-pro', ONLY_IMAGE_VIDEO],
+      ['k3.1-pro', ONLY_IMAGE_VIDEO],
+      ['k3.1-pro-highspeed', ONLY_IMAGE_VIDEO],
       ['kimi-k2.5', ONLY_IMAGE_VIDEO],
     ]);
+
+    it('returns image only for the K3 256K variant', () => {
+      expect(defaultModalities('k3-256k')).toEqual({ image: true });
+      expect(defaultModalities('kimi-k3-256k')).toEqual({ image: true });
+    });
 
     it('returns text-only for kimi-k2', () => {
       TEXT_ONLY('kimi-k2');
@@ -309,10 +317,41 @@ describe('isTieredEffortWireModel', () => {
     expect(isTieredEffortWireModel('Qwen3.8-Max')).toBe(true);
   });
 
+  it('matches the invite-series and qwen4 prefixes case-insensitively', () => {
+    expect(isTieredEffortWireModel('qwen-latest-series-invite-202610-m6')).toBe(
+      true,
+    );
+    expect(isTieredEffortWireModel('QWEN-LATEST-SERIES-INVITE-x')).toBe(true);
+    expect(isTieredEffortWireModel('qwen4')).toBe(true);
+    expect(isTieredEffortWireModel('qwen4-plus')).toBe(true);
+    expect(isTieredEffortWireModel('Qwen4-Max-2026-10-01')).toBe(true);
+  });
+
   it('rejects other qwen models and non-qwen ids', () => {
     expect(isTieredEffortWireModel('qwen3.7-max')).toBe(false);
+    expect(isTieredEffortWireModel('qwen3.9-max')).toBe(false);
+    expect(isTieredEffortWireModel('qwen-latest-series-other')).toBe(false);
+    expect(isTieredEffortWireModel('company-qwen4')).toBe(false);
     expect(isTieredEffortWireModel('coder-model')).toBe(false);
     expect(isTieredEffortWireModel('glm-5.2')).toBe(false);
     expect(isTieredEffortWireModel(undefined)).toBe(false);
+  });
+
+  it('keeps a configured toggle-only protocol ahead of the new prefixes', () => {
+    expect(
+      isTieredEffortWireModel('qwen-latest-series-invite-202610-m6', {
+        thinking: true,
+        toggleOnly: true,
+        disableField: 'enable_thinking',
+      }),
+    ).toBe(false);
+    expect(
+      isTieredEffortWireModel('qwen4-plus', {
+        thinking: true,
+        efforts: ['low', 'high'],
+        defaultEffort: 'high',
+        disableField: 'reasoning_effort',
+      }),
+    ).toBe(true);
   });
 });

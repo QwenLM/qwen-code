@@ -2,8 +2,9 @@
 
 [English](2026-10-29-managed-agent-maven-modules.md) | [简体中文](2026-10-29-managed-agent-maven-modules.zh-CN.md)
 
-Status: implemented in the working tree; final acceptance is pending CI. The
-investigation used `523be857db`. This design supersedes the single-module
+Status: merged in [PR #15871](https://github.com/QwenLM/qwen-code/pull/15871)
+at `f3af3dd857`. The post-merge evidence below separates completed checks from
+remaining acceptance work. The investigation used `523be857db`. This design supersedes the single-module
 boundary in the [source layout](2026-10-15-managed-agent-server-layout.md) and
 [Java package design](2026-10-19-managed-agent-package-boundaries.md).
 
@@ -105,6 +106,8 @@ results and synchronous, asynchronous and callback errors into contract values.
 Keep HTTP, transport, protocol, generation, capability and refusal distinctions,
 including retry inputs, status, reason and cause. Delegate SDK payload-digest and
 permission-rule algorithms through narrow ports instead of duplicating them.
+Stream idle timeouts retain a distinct transport-failure subtype and the original
+idle duration, so retry diagnostics distinguish silence from other transport failures.
 Workspace scope and authorization wrappers stay in the control plane. Physical
 provisioning and communication belong to adapters; construction and listeners
 belong to server composition.
@@ -279,3 +282,58 @@ sites. These new Java regressions have not
 run locally: the shared budget remains exhausted, and earlier Java passes do not
 validate this increment. Final compilation, quality checks and regressions remain
 pending CI.
+
+## Post-merge verification
+
+The following snapshot covers CI source `8f93271371` on 2026-10-30. Its Managed
+Agent and Java SDK subtrees are identical to merge commit `f3af3dd857`; other
+monorepo files differ. Earlier local results above remain historical evidence.
+
+| Scope                     | Observed evidence                                                             | Limit                                                                                                         |
+| ------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Java 21 fast verification | 5,987 tests, zero failures/errors, 17 skips; paging tests passed all 11 cases | Does not replace full specialist profiles                                                                     |
+| Full SDK matrix           | Linux Java 11/17/21 and Windows Java 21 passed                                | The Linux Java 21 Broker selection ran 1,259 tests with 16 skips                                              |
+| macOS Java 21             | 1,259 tests, one failure, 13 skips                                            | The caller-cancellation probe did not wait for a response-start signal; the actual CI timing was not recorded |
+| Real integrations         | Real daemon and both RocketMQ Broker/multi-node gates passed                  | MySQL, Hosted failover and Hosted fault jobs were still running or queued in this snapshot                    |
+
+The source runs are the [fast gate](https://github.com/QwenLM/qwen-code/actions/runs/41048531547)
+and [full gate](https://github.com/QwenLM/qwen-code/actions/runs/41071842780).
+The cancellation follow-up waits for the first flushed response byte, checks
+successful future cancellation, observes I/O failure across the complete handler,
+and closes its executor. The original 300 ms deadline, 10 s caller timeout and
+2 s peer-close assertion remain. Production cancellation is unchanged; a fresh
+macOS run is required before calling the revised probe verified.
+
+The existing independent Maven host fixture is now connected to the full MySQL
+lane. It installs only the parent and production reactor into the job-local Maven
+repository, resolves the same version as an ordinary server dependency, and runs
+the inactive and explicitly enabled host tests separately with empty selections
+rejected. This checks absence of automatic managed resources and successful
+opt-in composition; its new CI execution remains pending.
+
+Reference-distribution CI checks the exact archive's checksums and boots the
+packaged server against MySQL. Packaged maintenance entry points remain covered by
+the packaging integration tests. Ordinary-host, executable/archive and real
+integration results are separate evidence. Live cloud OSS qualification is not
+established by these runs. This follow-up does not publish or deploy artifacts and
+does not reset the shared local Java budget.
+
+### Hosted fault follow-up
+
+The full run at `2d878d48e2` executed 165 Hosted integration cases with four
+failures, 20 errors and four skips. Nineteen errors came from test-only reflection
+against the SDK wrapper instead of its delegate; the pool fixture also requested
+a concrete bean now hidden behind that wrapper. The event-reader replay used the
+old source-directory depth. The two idle-stream cases exposed loss of the SDK's
+idle subtype and duration at the contract boundary. The recovery-settlement
+driver treated the documented retryable `503 message_projection_pending` response
+as fatal during its existing bounded Items poll.
+
+The follow-up unwraps the known boundary only for test fault injection, locates
+the TypeScript reader by walking to its repository marker, preserves the neutral
+idle subtype, and retries only that exact projection-pending response at the
+Items poll. The existing deadlines, terminal-state checks, single-execution
+assertions and report-completeness gates remain intact. New Java regressions and
+the complete Hosted/admission profiles remain pending CI; local Java checks do
+not resume after the shared budget is exhausted. The separate RocketMQ disk
+protection failure remains an environment blocker and is not fixed by this change.

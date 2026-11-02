@@ -101,13 +101,13 @@ class WorkspaceCsiNativeActivationGateTest {
         sessionId = com.alibaba.qwen.code.managedagent.persistence.PrivateCsiFixture.create(jdbc, manager, JSON, properties,
                 new com.alibaba.qwen.code.managedagent.contracts.workspace.PrivateCsiSession.Request(registration, "actor", "create", null, null,
                         new WorkspaceSelection("workspace", "."))).sessionId();
-        var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
+                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         request = transaction.execute(status -> managed.requireCsiRequest(registration, sessionId));
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
         sessions = new JdbcRuntimeSessionRepository(source);
         executions = new JdbcToolExecutionRepository(source, bindings);
-        journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         binding = bindings.findOrCreate(request);
         binding = bindings.claimOperation(binding.getBindingId(), "operator", Duration.ofSeconds(120));
         reservation = reservations.reserve(registration, bindings, binding, UUID.randomUUID().toString());

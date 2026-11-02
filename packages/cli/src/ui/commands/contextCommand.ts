@@ -33,6 +33,9 @@ import {
   estimateContextTextTokens,
   resolveSlimmingConfig,
   formatContextFileDisplayPath,
+  getAllMemoryFilenames,
+  isSubpath,
+  Storage,
   type CompactionThresholds,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -98,10 +101,28 @@ function parseMemoryFiles(
   memoryContent: string,
   workingDir: string,
   extensionOwners: ReadonlyMap<string, string> = new Map(),
+  admissionRoot: string = workingDir,
 ): ContextMemoryDetail[] {
   if (!memoryContent || memoryContent.trim().length === 0) return [];
 
   const results: ContextMemoryDetail[] = [];
+  // The preview resolves the owning workspace from the session's admission
+  // root (status.workspaceRoot), which stays put when session/cd relocates
+  // the live cwd. Gate on that same root — not the live working dir — so a
+  // row is a link exactly when the client can read it; a global memory file
+  // is read through the workspace-independent memory route. Normalize both
+  // sides of the global-dir comparison: getGlobalQwenDir() returns an
+  // absolute QWEN_HOME verbatim, trailing separator included, while
+  // path.dirname() never produces one.
+  const root = path.resolve(admissionRoot);
+  const globalDir = path.resolve(Storage.getGlobalQwenDir());
+  const memoryFilenames = new Set(getAllMemoryFilenames());
+  const openablePath = (absolutePath: string): string | undefined =>
+    isSubpath(root, absolutePath) ||
+    (path.resolve(path.dirname(absolutePath)) === globalDir &&
+      memoryFilenames.has(path.basename(absolutePath)))
+      ? absolutePath
+      : undefined;
   // Use backreference (\1) to ensure start/end path markers match
   const regex =
     /--- Context from: (.+?) ---\n([\s\S]*?)--- End of Context from: \1 ---/g;
@@ -116,12 +137,14 @@ function parseMemoryFiles(
     // global memory files don't render as `../../..` chains.
     const absolutePath = path.resolve(workingDir, filePath);
     const owner = extensionOwners.get(absolutePath);
+    const openPath = openablePath(absolutePath);
     results.push({
       // An extension's file is named by its extension rather than by a path
       // under the install directory, which is what makes the row actionable:
       // the reader can disable or migrate that extension.
       path: owner ?? formatContextFileDisplayPath(absolutePath, workingDir),
       tokens: estimateContextTextTokens(content),
+      ...(openPath !== undefined ? { absolutePath: openPath } : {}),
     });
   }
 
@@ -470,6 +493,7 @@ export async function collectContextData(
     memoryContent,
     config.getWorkingDir(),
     extensionContextFileOwners(config, config.getWorkingDir()),
+    config.storage.getProjectRoot(),
   );
   const memoryFiles: ContextMemoryDetail[] = [];
   const instructionFilesTokens = instructionFiles.reduce(

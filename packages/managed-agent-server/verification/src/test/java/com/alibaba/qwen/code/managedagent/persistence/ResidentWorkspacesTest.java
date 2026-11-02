@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeB
 import com.alibaba.qwen.code.managedagent.contracts.event.CommittedEventPublisher;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.runtime.ProtectionIdentity;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
@@ -75,8 +76,8 @@ class ResidentWorkspacesTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getRuntimeBroker().setResidentWorkspaces(List.of(mapping));
         authority = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, manager, null, properties));
-        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), mock(CommittedEventPublisher.class),
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), mock(CommittedEventPublisher.class),
+                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         residents = new ResidentWorkspaces(List.of(mapping));
         storage = new WorkspaceCsiReservationStore(jdbc, manager, new ObjectMapper());
         storage.register(mapping.registration());
@@ -160,13 +161,19 @@ class ResidentWorkspacesTest {
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getRuntimeBroker().setResidentWorkspaces(List.of(mapping));
-        var peer = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(peerJdbc, new ObjectMapper(), Clock.systemUTC(),
-                mock(CommittedEventPublisher.class), new ManagedWorkspaceRegistry(peerJdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var peer = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(peerJdbc, new ObjectMapper(), Clock.systemUTC(),
+                mock(CommittedEventPublisher.class), new ManagedWorkspaceRegistry(peerJdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var peerTransaction = new TransactionTemplate(new DataSourceTransactionManager(source));
         start.await(10, java.util.concurrent.TimeUnit.SECONDS);
-        return peerTransaction.execute(status -> peer.insertWorkspaceSessionCommand("tenant", "owner", key,
-                "digest-" + key, "qwen-code", null, "Session", List.of(), null,
-                new WorkspaceSelection("workspace", ".")));
+        return peerTransaction.execute(status -> peer.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId("tenant")
+                .actorId("owner")
+                .idempotencyKey(key)
+                .requestDigest("digest-" + key)
+                .agentId("qwen-code")
+                .title("Session")
+                .selection(new WorkspaceSelection("workspace", "."))
+                .build()));
     }
 
     @Test
@@ -419,8 +426,15 @@ class ResidentWorkspacesTest {
     }
 
     private StoreModels.Admission create(String key) {
-        return transaction.execute(status -> store.insertWorkspaceSessionCommand("tenant", "owner", key,
-                "digest-" + key, "qwen-code", null, "Session", List.of(), null, new WorkspaceSelection("workspace", ".")));
+        return transaction.execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId("tenant")
+                .actorId("owner")
+                .idempotencyKey(key)
+                .requestDigest("digest-" + key)
+                .agentId("qwen-code")
+                .title("Session")
+                .selection(new WorkspaceSelection("workspace", "."))
+                .build()));
     }
 
     private RuntimeBindingRecord ready(RuntimeProvisionRequest request) {

@@ -82,6 +82,7 @@ class ManagedMessagePagingTest {
         seed(10000, false);
         var page = read(null, 2, true);
         assertThat(page.items()).extracting(StoreModels.ItemRecord::itemId).containsExactly(id(9999), id(10000));
+        assertThatThrownBy(() -> page.items().clear()).isInstanceOf(UnsupportedOperationException.class);
         assertThat(page.hasMore()).isTrue();
         assertThat(jdbc.messageReads).isEqualTo(2);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource", Long.class)).isZero();

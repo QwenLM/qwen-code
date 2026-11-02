@@ -331,6 +331,7 @@ import {
   answerResumedTurnCalls,
   fillParkedRoundAgentGaps,
   fillParkedRoundCommandGaps,
+  HostedChildLedgerRecoveryRequiredError,
   HostedRecoveryQuiescingError,
   isDurableBlockedVerdict,
   originalRuntimeBroker,
@@ -618,6 +619,7 @@ async function extensionBootstrapIncomplete(
 function liftRecoveryBlock(session: HostedSession): void {
   session.blocked = false;
   session.recoveryReason = undefined;
+  session.recoveryCancelPromptId = undefined;
   session.cleanupBlocked = false;
 }
 
@@ -682,6 +684,8 @@ interface HostedSession {
    * until the block clears. Only `managed_session_store_unavailable` goes
    * here; other recovery blocks keep naming themselves at the caller. */
   recoveryReason?: string;
+  /** The one A6 block whose pre-aborted managed cancel can still settle. */
+  recoveryCancelPromptId?: string;
   toolProfile?: HostedWorkspaceToolProfile | typeof HOSTED_MCP_PROFILE;
   foregroundOnly?: boolean;
   publicChildAgentsVersion?: 1;
@@ -11115,6 +11119,7 @@ export function registerHostedHarnessSessionRoutes(
               commands: session.commands,
               children: session.childAgents,
               messages: session.messages,
+              signal: abort.signal,
             });
             if (outstanding.length > 0 || filled > 0) {
               projected = await session.managed.sink.project();
@@ -11375,6 +11380,13 @@ export function registerHostedHarnessSessionRoutes(
         }
       } catch (cause) {
         if (cause instanceof HostedToolRecoveryRequiredError) {
+          session.recoveryCancelPromptId =
+            cause instanceof HostedChildLedgerRecoveryRequiredError
+              ? promptId
+              : undefined;
+          if (cause instanceof HostedChildLedgerRecoveryRequiredError)
+            // A blocked continue's admission must not replay as a cancel.
+            session.admissions.delete(promptId);
           session.blocked = true;
           writeStderrLineSafe(
             `qwen serve: Hosted Harness turn ${promptId} is recovery blocked: ${String(cause.cause)}`,
@@ -11467,7 +11479,7 @@ export function registerHostedHarnessSessionRoutes(
     const request = recoveryRequest(req);
     if (!request) return error(res, 400, 'invalid_managed_runtime_recovery');
     const { promptId, checkpointId, activationId } = request;
-    if (session.blocked) {
+    if (session.blocked && session.recoveryCancelPromptId !== promptId) {
       // A retry-inviting refusal: keep an adopted lease owed with the
       // still-READY identity — the next takeover re-acquires it
       // idempotently, while a release would persist RELEASED and wedge
@@ -11584,7 +11596,7 @@ export function registerHostedHarnessSessionRoutes(
     if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
     if (session.mcpBusy || session.mcpRecovering)
       return error(res, 409, 'hosted_mcp_operation_active');
-    if (session.blocked)
+    if (session.blocked && session.recoveryCancelPromptId !== promptId)
       return error(
         res,
         409,
@@ -11667,6 +11679,8 @@ export function registerHostedHarnessSessionRoutes(
                 commands: session.commands,
               });
             }
+            const cancelCommandFillAbort = new AbortController();
+            cancelCommandFillAbort.abort();
             await fillParkedRoundCommandGaps({
               managed: session.managed,
               sessionId,
@@ -11676,6 +11690,7 @@ export function registerHostedHarnessSessionRoutes(
               commands: session.commands,
               children: session.childAgents,
               messages: session.messages,
+              signal: cancelCommandFillAbort.signal,
             });
           }
         } else if (agentWait !== null) {
@@ -12007,6 +12022,11 @@ export function registerHostedHarnessSessionRoutes(
         // No handback here: the coordinator retries a failed cancel, and a
         // release would wedge that retry; the success path above already
         // released and discharged the flag itself.
+        if (
+          session.recoveryCancelPromptId === promptId &&
+          !unsettledInputs(session).has(promptId)
+        )
+          liftRecoveryBlock(session);
         session.active = undefined;
       }
     })();

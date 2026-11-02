@@ -564,6 +564,84 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `context-usage-${theme}`);
     });
 
+    test('context instruction file preview', async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd: '/workspace',
+        workspaceFiles: {
+          '/workspace/AGENTS.md':
+            '# AGENTS.md\n\n## Working Principles\n\n- Simplicity first: minimum code that solves the problem.\n- No abstractions for single-use code.\n',
+        },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await page.route(/\/session\/[^/]+\/context-usage(?:\?|$)/, (route) =>
+        route.fulfill({
+          json: {
+            v: 1,
+            sessionId: scenario.sessionId,
+            workspaceCwd: scenario.workspaceCwd,
+            formattedText: '',
+            usage: {
+              modelName: 'Qwen Test',
+              totalTokens: 60_000,
+              contextWindowSize: 100_000,
+              breakdown: {
+                systemPrompt: 10_000,
+                builtinTools: 10_000,
+                mcpTools: 0,
+                instructionFiles: 5_000,
+                memoryFiles: 1_000,
+                skills: 10_000,
+                messages: 24_000,
+                freeSpace: 30_000,
+                autocompactBuffer: 10_000,
+              },
+              builtinTools: [],
+              mcpTools: [],
+              instructionFiles: [
+                {
+                  path: 'AGENTS.md',
+                  tokens: 5_000,
+                  absolutePath: '/workspace/AGENTS.md',
+                },
+              ],
+              memoryFiles: [{ path: 'auto memory', tokens: 1_000 }],
+              skills: [],
+              showDetails: true,
+            },
+          } satisfies DaemonSessionContextUsageStatus,
+        }),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      await page
+        .getByRole('button', { name: 'Context Usage', exact: true })
+        .click();
+      const panel = page.locator('[class*="panel"][aria-busy]');
+      await expect(panel).toContainText('Remaining 40.0k');
+      await panel.locator('summary').filter({ hasText: 'Advanced' }).click();
+      await panel
+        .locator('summary')
+        .filter({ hasText: 'Instruction files' })
+        .click();
+      await expect(
+        panel.getByRole('button', { name: 'AGENTS.md', exact: true }),
+      ).toBeVisible();
+      await captureScreenshot(page, `context-instruction-files-panel-${theme}`);
+      await panel
+        .getByRole('button', { name: 'AGENTS.md', exact: true })
+        .click();
+      await expect(
+        page.getByText('Simplicity', { exact: false }).first(),
+      ).toBeVisible();
+      await captureScreenshot(
+        page,
+        `context-instruction-file-preview-${theme}`,
+      );
+    });
+
     test('trajectory', async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         transcriptPage: {
@@ -1335,6 +1413,17 @@ for (const theme of THEMES) {
                 ],
               },
               {
+                key: 'reasonFilter',
+                label: 'Reason Filter',
+                kind: 'string-list',
+                options: [
+                  { value: 'mention', label: 'mention' },
+                  { value: 'review_requested', label: 'review_requested' },
+                  { value: 'assign', label: 'assign' },
+                  { value: 'ci_activity', label: 'ci_activity' },
+                ],
+              },
+              {
                 key: 'privatePolicy',
                 label: 'Private Policy',
                 kind: 'enum',
@@ -1379,7 +1468,25 @@ for (const theme of THEMES) {
           name: 'Use local GitHub CLI authentication',
         }),
       ).toBeVisible();
+      // Anchor the capture to the checklist so a regression that falls back to
+      // a free-text filter fails here instead of shipping a stale picture.
+      const reasonFilter = page.getByRole('group', { name: 'Reason Filter' });
+      await expect(reasonFilter.getByRole('checkbox')).toHaveCount(4);
+      await expect(
+        reasonFilter.getByRole('checkbox', {
+          name: /mention — the bot is @mentioned/,
+        }),
+      ).toBeChecked({ checked: false });
       await captureScreenshot(page, `github-channel-editor-${theme}`);
+      // The dialog body scrolls, and the checklist sits below the fold at this
+      // viewport. Capture it separately and pin that it is fully on screen, so
+      // the published picture cannot quietly omit the feature it documents.
+      await page
+        .getByText('Reason Filter', { exact: true })
+        .first()
+        .scrollIntoViewIfNeeded();
+      await expect(reasonFilter).toBeInViewport({ ratio: 1 });
+      await captureScreenshot(page, `github-channel-editor-reasons-${theme}`);
       await page.getByLabel('Instance name').fill('github-bot');
       await page.getByRole('button', { name: 'Save' }).click();
       await expect(

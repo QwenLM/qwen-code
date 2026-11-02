@@ -8,6 +8,10 @@ import {
 } from './components/managed/managed-lifecycle-messages.js';
 import { plural } from './utils/plural.js';
 import {
+  ACTIVITY_MESSAGES_EN,
+  ACTIVITY_MESSAGES_ZH,
+} from './components/sidebar/activity-messages.js';
+import {
   MESSAGE_DELETION_MESSAGES_EN,
   MESSAGE_DELETION_MESSAGES_ZH,
 } from './components/message-deletion-messages.js';
@@ -194,6 +198,10 @@ const EN: Messages = {
   'managed.refresh': 'Refresh',
   'managed.empty': 'No managed tasks yet.',
   'managed.loading': 'Loading…',
+  'managed.listLoadFailed': 'Managed sessions could not be loaded.',
+  'managed.listRetry': 'Retry loading sessions',
+  'managed.errorDetails': (v) =>
+    `HTTP ${v?.status ?? ''} · ${v?.code ?? ''}${v?.requestId ? ` · Request ID: ${v.requestId}` : ''}`,
   'managed.todo.loadedWindow': 'From the loaded session transcript.',
   'managed.more': 'Load more',
   'managed.titleSearch': 'Search session titles',
@@ -1141,6 +1149,8 @@ const EN: Messages = {
   'session.contextConflict':
     'A standalone or Live conversation link cannot include a workspace target.',
   'session.loadFailed': 'Failed to load conversation',
+  'session.splitAddFailed':
+    'Some sessions could not be added to Split View. Please try again.',
   'session.notFound': 'Conversation not found',
   'session.notFoundDescription':
     'This standalone conversation no longer exists.',
@@ -2087,6 +2097,7 @@ const EN: Messages = {
   'localFiles.blocker.unsupportedDaemon':
     'This daemon does not advertise the client filesystem bridge (client_mcp_over_ws). Start the daemon with QWEN_SERVE_CLIENT_MCP_OVER_WS=1 to enable local files.',
   ...FILES_MESSAGES_EN,
+  ...ACTIVITY_MESSAGES_EN,
   'rightPanel.add': 'Add panel',
   'attachment.showPreview': 'Preview',
   'attachment.showSource': 'Source',
@@ -2331,6 +2342,12 @@ const EN: Messages = {
   'sidebar.projectFallback': 'Workspace',
   'sidebar.sessionsOverview': 'Session Overview',
   'sidebar.splitView': 'Split View',
+  'sidebar.addToSplitView': 'Add to Split View',
+  'sidebar.splitAtCapacity': (v) =>
+    `Split View already shows ${v?.max ?? 6} sessions — close a pane to add another`,
+  'sidebar.splitAlreadyOpen': 'This session is already open in Split View',
+  'sidebar.splitCurrentDisabled':
+    'The current session cannot be added while Split View is closed',
   'sidebar.settings': 'Settings',
   'update.button': 'Update',
   'update.restarting': 'Restarting…',
@@ -3550,6 +3567,7 @@ const EN: Messages = {
   'skills.toggleUnsupported':
     'The connected daemon does not support skill enable or disable actions.',
   'skills.title': 'Skills',
+  'plugins.backToChat': 'Back to conversation',
   'plugins.extensions': 'Extensions',
   'plugins.agents': 'Agents',
   'plugins.mcp': 'MCP',
@@ -3624,6 +3642,8 @@ const EN: Messages = {
   'contextUsage.compressInterrupted':
     'Connection changed during compression. Refresh to check current usage.',
   'contextUsage.compressFailed': 'Compression failed. You can try again.',
+  'contextUsage.previewTruncated':
+    'This file is large; the preview shows only its beginning.',
   'contextUsage.compressRefreshFailed':
     'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
   'contextUsage.compressUnavailable':
@@ -4373,6 +4393,8 @@ const EN: Messages = {
     'Update public settings or explicitly change stored credentials.',
   'channels.editor.section.identity': 'Identity',
   'channels.editor.section.credentials': 'Credentials',
+  'channels.editor.section.connection': 'Connection',
+  'channels.editor.section.routing': 'Notifications and routing',
   'channels.editor.section.session': 'Conversation management',
   'channels.editor.section.access': 'Access control',
   'channels.editor.section.access.description':
@@ -4404,6 +4426,12 @@ const EN: Messages = {
   'channels.editor.field.github.token': 'Personal Access Token',
   'channels.editor.field.github.token.description':
     'Optional classic PAT with "notifications" scope. Overrides local gh authentication',
+  'channels.editor.field.github.token.localGhHint':
+    'Local gh authentication is selected. The token cannot be edited here, and any stored token is removed on save.',
+  'channels.editor.field.github.allowedRepos': 'Allowed repositories',
+  'channels.editor.field.github.allowedRepos.description':
+    'Comma-separated repository full names, for example owner/repo.',
+  'channels.editor.field.github.allowedRepos.placeholder': 'owner/repo',
   'channels.editor.field.github.useLocalGh':
     'Use local GitHub CLI authentication',
   'channels.editor.field.github.useLocalGh.description':
@@ -4416,7 +4444,37 @@ const EN: Messages = {
     'Must be "Open", "Allowlist", or "Pairing" for notifications to flow',
   'channels.editor.field.github.reasonFilter': 'Reason Filter',
   'channels.editor.field.github.reasonFilter.description':
-    'Optional. Comma-separated notification reasons to process. Valid values: mention, review_requested, assign, author, comment, ci_activity, manual, state_change, subscribed, team_mention, security_alert, approval_requested, invitation, member_feature_requested, security_advisory_credit. Leave empty to process all.',
+    'Optional. Only notifications with a checked reason are processed. Leave every reason unchecked to process all of them.',
+  'channels.editor.field.github.reasonFilter.option.mention':
+    'mention — the bot is @mentioned',
+  'channels.editor.field.github.reasonFilter.option.review_requested':
+    'review_requested — the bot, or a team it belongs to, was asked to review a pull request',
+  'channels.editor.field.github.reasonFilter.option.assign':
+    'assign — the bot was assigned to the issue',
+  'channels.editor.field.github.reasonFilter.option.author':
+    'author — the bot created the thread',
+  'channels.editor.field.github.reasonFilter.option.comment':
+    'comment — the bot commented on the thread',
+  'channels.editor.field.github.reasonFilter.option.ci_activity':
+    'ci_activity — a workflow run the bot triggered completed',
+  'channels.editor.field.github.reasonFilter.option.manual':
+    'manual — the bot subscribed to the thread from an issue or pull request',
+  'channels.editor.field.github.reasonFilter.option.state_change':
+    'state_change — the bot changed the thread state, such as closing an issue',
+  'channels.editor.field.github.reasonFilter.option.subscribed':
+    'subscribed — the bot is watching the repository',
+  'channels.editor.field.github.reasonFilter.option.team_mention':
+    'team_mention — a team the bot belongs to is @mentioned',
+  'channels.editor.field.github.reasonFilter.option.security_alert':
+    'security_alert — GitHub found a security vulnerability in the repository',
+  'channels.editor.field.github.reasonFilter.option.approval_requested':
+    'approval_requested — the bot was asked to review and approve a deployment',
+  'channels.editor.field.github.reasonFilter.option.invitation':
+    'invitation — the bot accepted an invitation to contribute to the repository',
+  'channels.editor.field.github.reasonFilter.option.member_feature_requested':
+    'member_feature_requested — organization members asked to enable a feature such as Copilot',
+  'channels.editor.field.github.reasonFilter.option.security_advisory_credit':
+    'security_advisory_credit — the bot was credited for contributing to a security advisory',
   'channels.editor.field.gitlab.token': 'Personal Access Token',
   'channels.editor.field.gitlab.token.description':
     'PAT with "read_api" + "api" scopes',
@@ -4592,6 +4650,10 @@ const EN: Messages = {
   'channels.editor.validation.invalidName': 'Choose a different instance name.',
   'channels.editor.validation.invalidGroupId':
     'Enter a group ID other than __proto__, constructor, or prototype.',
+  'channels.editor.validation.invalidRepoId':
+    'Enter each repository as owner/repo.',
+  'channels.editor.validation.conflictingRepoAliases':
+    'This channel lists one repository twice with different settings, spelled differently (for example Owner/repo and owner/repo). Remove one of the entries from settings.json before saving.',
   'channels.editor.validation.invalidOption':
     "Remove values that aren't in the allowed list.",
   'channels.editor.validation.number': 'Enter a valid number.',
@@ -4761,6 +4823,10 @@ const ZH: Messages = {
   'managed.refresh': '刷新',
   'managed.empty': '暂无托管任务。',
   'managed.loading': '加载中…',
+  'managed.listLoadFailed': '托管会话加载失败。',
+  'managed.listRetry': '重新加载会话',
+  'managed.errorDetails': (v) =>
+    `HTTP ${v?.status ?? ''} · ${v?.code ?? ''}${v?.requestId ? ` · 请求 ID：${v.requestId}` : ''}`,
   'managed.todo.loadedWindow': '来自当前已加载的会话记录。',
   'managed.more': '加载更多',
   'managed.titleSearch': '搜索会话标题',
@@ -5726,6 +5792,7 @@ const ZH: Messages = {
   'session.capabilitiesFailed': '无法加载 Daemon 能力。请重试后再打开该会话。',
   'session.contextConflict': 'Standalone 或 Live 会话链接不能同时指定工作区。',
   'session.loadFailed': '会话加载失败',
+  'session.splitAddFailed': '部分会话无法添加到分屏视图，请重试。',
   'session.notFound': '会话不存在',
   'session.notFoundDescription': '该 Standalone 会话已不存在。',
   'session.resolving': '正在打开会话...',
@@ -6599,6 +6666,7 @@ const ZH: Messages = {
   'localFiles.blocker.unsupportedDaemon':
     '该 daemon 未启用客户端文件桥（client_mcp_over_ws）。以 QWEN_SERVE_CLIENT_MCP_OVER_WS=1 启动 daemon 即可启用本地文件。',
   ...FILES_MESSAGES_ZH,
+  ...ACTIVITY_MESSAGES_ZH,
   'rightPanel.add': '添加页签',
   'attachment.showPreview': '预览',
   'attachment.showSource': '源码',
@@ -6817,6 +6885,11 @@ const ZH: Messages = {
   'sidebar.projectFallback': '工作区',
   'sidebar.sessionsOverview': '会话总览',
   'sidebar.splitView': '分屏',
+  'sidebar.addToSplitView': '添加到分屏视图',
+  'sidebar.splitAtCapacity': (v) =>
+    `分屏视图已显示 ${v?.max ?? 6} 个会话 — 请先关闭一个面板再添加`,
+  'sidebar.splitAlreadyOpen': '该会话已在分屏视图中打开',
+  'sidebar.splitCurrentDisabled': '分屏视图关闭时，无法添加当前会话',
   'sidebar.settings': '设置',
   'update.button': '更新',
   'update.restarting': '重启中…',
@@ -7937,6 +8010,7 @@ const ZH: Messages = {
     '该技能所属扩展当前未启用，请先启用对应扩展。',
   'skills.toggleUnsupported': '当前连接的 daemon 不支持启用或禁用 Skill。',
   'skills.title': 'Skills',
+  'plugins.backToChat': '返回对话',
   'plugins.extensions': '扩展',
   'plugins.agents': '智能体',
   'plugins.mcp': 'MCP',
@@ -8005,6 +8079,7 @@ const ZH: Messages = {
   'contextUsage.compressInterrupted':
     '压缩期间连接发生变化，请刷新查看当前使用量。',
   'contextUsage.compressFailed': '压缩失败，可以重试。',
+  'contextUsage.previewTruncated': '文件较大，预览仅显示开头部分。',
   'contextUsage.compressRefreshFailed':
     '压缩已完成，但用量刷新失败。请点击刷新重试。',
   'contextUsage.compressUnavailable':
@@ -8691,6 +8766,8 @@ const ZH: Messages = {
   'channels.editor.editDescription': '更新公开配置，或明确更改已保存的凭据。',
   'channels.editor.section.identity': '频道标识',
   'channels.editor.section.credentials': '应用凭据',
+  'channels.editor.section.connection': '连接',
+  'channels.editor.section.routing': '通知与路由',
   'channels.editor.section.session': '会话管理',
   'channels.editor.section.access': '访问控制',
   'channels.editor.section.access.description':
@@ -8722,6 +8799,12 @@ const ZH: Messages = {
   'channels.editor.field.github.token': '个人访问令牌',
   'channels.editor.field.github.token.description':
     '可选。填写具有 "notifications" 权限的经典 PAT；优先于本地 gh 认证',
+  'channels.editor.field.github.token.localGhHint':
+    '已选择本地 gh 认证：此处无法编辑令牌，保存时会移除已存的令牌。',
+  'channels.editor.field.github.allowedRepos': '允许的仓库',
+  'channels.editor.field.github.allowedRepos.description':
+    '逗号分隔的仓库全名，例如 owner/repo。',
+  'channels.editor.field.github.allowedRepos.placeholder': 'owner/repo',
   'channels.editor.field.github.useLocalGh': '使用本地 GitHub CLI 认证',
   'channels.editor.field.github.useLocalGh.description':
     '未配置令牌时，显式复用 daemon 主机上账户级的 gh 登录',
@@ -8733,7 +8816,37 @@ const ZH: Messages = {
     '必须设为 "Open"、"Allowlist" 或 "Pairing" 才能接收通知',
   'channels.editor.field.github.reasonFilter': '通知原因过滤',
   'channels.editor.field.github.reasonFilter.description':
-    '可选。逗号分隔的通知原因。有效值：mention、review_requested、assign、author、comment、ci_activity、manual、state_change、subscribed、team_mention、security_alert、approval_requested、invitation、member_feature_requested、security_advisory_credit。留空则处理全部。',
+    '可选。只处理勾选原因的通知；全部不勾选则处理所有通知。',
+  'channels.editor.field.github.reasonFilter.option.mention':
+    'mention — 有人在评论或正文中 @ 了机器人',
+  'channels.editor.field.github.reasonFilter.option.review_requested':
+    'review_requested — 机器人或其所在团队被请求评审 PR',
+  'channels.editor.field.github.reasonFilter.option.assign':
+    'assign — 机器人被指派到该 issue',
+  'channels.editor.field.github.reasonFilter.option.author':
+    'author — 该线程由机器人创建',
+  'channels.editor.field.github.reasonFilter.option.comment':
+    'comment — 机器人在该线程里评论过',
+  'channels.editor.field.github.reasonFilter.option.ci_activity':
+    'ci_activity — 机器人触发的工作流运行已完成',
+  'channels.editor.field.github.reasonFilter.option.manual':
+    'manual — 机器人在 issue 或 PR 上订阅了该线程',
+  'channels.editor.field.github.reasonFilter.option.state_change':
+    'state_change — 机器人改变了线程状态，例如关闭 issue',
+  'channels.editor.field.github.reasonFilter.option.subscribed':
+    'subscribed — 机器人正在关注该仓库',
+  'channels.editor.field.github.reasonFilter.option.team_mention':
+    'team_mention — 机器人所在团队被 @',
+  'channels.editor.field.github.reasonFilter.option.security_alert':
+    'security_alert — GitHub 在仓库中发现了安全漏洞',
+  'channels.editor.field.github.reasonFilter.option.approval_requested':
+    'approval_requested — 机器人被请求审核并批准部署',
+  'channels.editor.field.github.reasonFilter.option.invitation':
+    'invitation — 机器人接受了参与该仓库的邀请',
+  'channels.editor.field.github.reasonFilter.option.member_feature_requested':
+    'member_feature_requested — 组织成员请求启用 Copilot 等功能',
+  'channels.editor.field.github.reasonFilter.option.security_advisory_credit':
+    'security_advisory_credit — 机器人因参与安全公告而被致谢',
   'channels.editor.field.gitlab.token': '个人访问令牌',
   'channels.editor.field.gitlab.token.description':
     '需要 "read_api" + "api" 权限的 PAT',
@@ -8901,6 +9014,9 @@ const ZH: Messages = {
   'channels.editor.validation.invalidName': '请使用其他实例名称。',
   'channels.editor.validation.invalidGroupId':
     '群聊 ID 不能是 __proto__、constructor 或 prototype。',
+  'channels.editor.validation.invalidRepoId': '仓库需写成 owner/repo 形式。',
+  'channels.editor.validation.conflictingRepoAliases':
+    '该渠道把同一个仓库以不同大小写写了两次且设置不同（例如 Owner/repo 与 owner/repo）。请先在 settings.json 里删掉其中一条再保存。',
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.number': '请输入有效数字。',
   'channels.editor.validation.outOfRange': (v) =>
