@@ -1372,6 +1372,91 @@ describe('ChannelEditorDialog', () => {
     );
   });
 
+  it('keeps a newly entered PAT when local gh is switched on and back off', async () => {
+    // Restoring `preserve` unconditionally would drop the token the operator
+    // just typed: a new channel would then submit no credential at all, with
+    // the input gone so it cannot be re-entered.
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, onSave });
+
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'github-bot');
+      setInputValue(inputByLabel('Personal Access Token')!, 'ghp_typed');
+    });
+    const toggle = document.querySelector<HTMLButtonElement>(
+      'button[role="switch"]',
+    );
+    await act(async () => {
+      toggle!.click();
+    });
+    await act(async () => {
+      toggle!.click();
+    });
+
+    expect(inputByLabel('Personal Access Token')?.value).toBe('ghp_typed');
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledWith(
+      'github-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({ useLocalGh: false }),
+        secrets: { token: { operation: 'replace', value: 'ghp_typed' } },
+      }),
+    );
+  });
+
+  it('keeps a replacement PAT when local gh is switched on and back off', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: { type: 'github', groupPolicy: 'open', useLocalGh: false },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, instance, onSave });
+
+    const replace = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Replace',
+    );
+    await act(async () => {
+      replace!.click();
+    });
+    await act(async () => {
+      setInputValue(inputByLabel('Personal Access Token')!, 'ghp_replacement');
+    });
+    const toggle = document.querySelector<HTMLButtonElement>(
+      'button[role="switch"]',
+    );
+    await act(async () => {
+      toggle!.click();
+    });
+    await act(async () => {
+      toggle!.click();
+    });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledWith(
+      'github-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({ useLocalGh: false }),
+        secrets: { token: { operation: 'replace', value: 'ghp_replacement' } },
+      }),
+    );
+  });
+
   it('clears a stored token when local gh authentication is switched on', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     const instance: DaemonChannelInstanceSnapshot = {

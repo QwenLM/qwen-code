@@ -64,6 +64,7 @@ import {
   toList,
   validateChannelEditorDraft,
   type ChannelEditorDraft,
+  type ChannelSecretDraft,
   type ChannelEditorValidationCode,
   type ChannelGroupSenders,
 } from './channel-editor-state';
@@ -264,6 +265,8 @@ export function ChannelEditorDialog({
   const [saving, setSaving] = useState(false);
   const [reloading, setReloading] = useState(false);
   const dismissedRef = useRef(false);
+  /** The token draft as it stood before local gh auth overrode it. */
+  const tokenBeforeLocalGh = useRef<ChannelSecretDraft | undefined>(undefined);
   const accessFields = descriptor.fields.filter((field) =>
     SHARED_ACCESS_FIELD_KEYS.has(field.key),
   );
@@ -293,6 +296,7 @@ export function ChannelEditorDialog({
   useEffect(() => {
     if (!open) return;
     dismissedRef.current = false;
+    tokenBeforeLocalGh.current = undefined;
     setDraft(createChannelEditorDraft(descriptor, instance));
     setErrors({});
     setSubmitError(undefined);
@@ -552,6 +556,10 @@ export function ChannelEditorDialog({
           update(checked);
           return;
         }
+        // Read both outside the updater: it runs lazily during the next
+        // render, by which point the ref below has already been reassigned.
+        const tokenBeforeToggle = draft.secrets['token'];
+        const tokenToRestore = tokenBeforeLocalGh.current;
         setDraft((current) => {
           const secrets = { ...current.secrets };
           if (checked) {
@@ -562,9 +570,15 @@ export function ChannelEditorDialog({
             // actually takes effect when the draft is saved.
             if (hasToken) secrets['token'] = { operation: 'clear' };
           } else if (secrets['token']?.operation === 'clear') {
-            // The switch is a preference: flipping it back must not leave the
-            // draft demanding a credential the operator never chose to delete.
-            secrets['token'] = { operation: 'preserve' };
+            // The switch is a preference: flipping it back restores whatever
+            // the operator had, including a PAT they just typed. Falling back
+            // to `preserve` unconditionally would discard a new or replacement
+            // token and submit the wrong credential operation.
+            secrets['token'] =
+              tokenToRestore ??
+              (instance?.secrets['token']?.present
+                ? { operation: 'preserve' }
+                : { operation: 'replace', value: '' });
           }
           return {
             ...current,
@@ -572,6 +586,7 @@ export function ChannelEditorDialog({
             secrets,
           };
         });
+        tokenBeforeLocalGh.current = checked ? tokenBeforeToggle : undefined;
       };
       return (
         <FieldShell
