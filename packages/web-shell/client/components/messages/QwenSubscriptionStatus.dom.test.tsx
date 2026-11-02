@@ -28,6 +28,7 @@ function render(
     onRetry: vi.fn(),
     onCancel: vi.fn(),
     onSwitchProvider: vi.fn(),
+    onUseAnotherAccount: vi.fn(),
   };
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -100,7 +101,7 @@ describe('QwenSubscriptionStatus', () => {
           button.getAttribute('aria-label'),
         ),
       ).toEqual(['View Plans', 'Switch Provider']);
-      expect(container.querySelectorAll('button')).toHaveLength(2);
+      expect(container.querySelectorAll('button')).toHaveLength(3);
       expect(container.textContent).not.toContain('Cancel');
       expect(container.textContent).not.toContain('Sign out');
       click('View Plans');
@@ -108,6 +109,8 @@ describe('QwenSubscriptionStatus', () => {
       expect(callbacks.onRetry).not.toHaveBeenCalled();
       click('Switch Provider');
       expect(callbacks.onSwitchProvider).toHaveBeenCalledOnce();
+      click('Use another account');
+      expect(callbacks.onUseAnotherAccount).toHaveBeenCalledOnce();
       expect(callbacks.onOpenPurchase).toHaveBeenCalledOnce();
       expect(callbacks.onCancel).not.toHaveBeenCalled();
     },
@@ -146,7 +149,7 @@ describe('QwenSubscriptionStatus', () => {
   });
 
   it.each(['query failure', 'purchase timeout'])(
-    'offers only a retry after %s',
+    'offers retry and account switching after %s',
     (message) => {
       const callbacks = render({
         status: 'purchase-required',
@@ -155,12 +158,14 @@ describe('QwenSubscriptionStatus', () => {
         message,
         canCheckAgain: true,
       });
-      expect(container.querySelectorAll('button')).toHaveLength(1);
+      expect(container.querySelectorAll('button')).toHaveLength(2);
       expect(container.textContent).not.toContain('View Plans');
       expect(container.textContent).not.toContain('Switch Provider');
       click('Retry Connection');
       expect(callbacks.onOpenPurchase).not.toHaveBeenCalled();
       expect(callbacks.onRetry).toHaveBeenCalledOnce();
+      click('Use another account');
+      expect(callbacks.onUseAnotherAccount).toHaveBeenCalledOnce();
     },
   );
 
@@ -185,7 +190,9 @@ describe('QwenSubscriptionStatus', () => {
           item.textContent === 'Retry Connection',
       );
       expect(button?.disabled).toBe(true);
-      expect(container.querySelectorAll('button')).toHaveLength(1);
+      expect(container.querySelectorAll('button')).toHaveLength(
+        status === 'purchase-required' ? 2 : 1,
+      );
       act(() => button?.click());
       expect(callbacks.onRetry).not.toHaveBeenCalled();
       expect(container.textContent).not.toContain('Press any key');

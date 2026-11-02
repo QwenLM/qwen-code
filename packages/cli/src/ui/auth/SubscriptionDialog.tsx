@@ -108,6 +108,7 @@ export function SubscriptionDialog({
       canCheckAgain={flow.canCheckAgain}
       onOpenPlans={flow.openPlans}
       onCheckAgain={flow.checkAgain}
+      onUseAnotherAccount={() => void flow.switchAccount()}
       onSwitchProvider={() => {
         flow.cancel();
         onSwitchProvider();

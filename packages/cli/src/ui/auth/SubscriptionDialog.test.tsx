@@ -30,6 +30,7 @@ const flow = vi.hoisted(() => ({
   canCheckAgain: false,
   openPlans: vi.fn(),
   checkAgain: vi.fn(),
+  switchAccount: vi.fn(),
   cancel: vi.fn(),
 }));
 vi.mock('./use-subscription.js', () => ({ useSubscription: () => flow }));
@@ -110,6 +111,35 @@ it('shows Retry Connection after purchase timeout and disables it while checking
     ui.unmount();
   }
 });
+
+it.each([false, true])(
+  'switches account with the keyboard (canCheckAgain=%s)',
+  async (canCheckAgain) => {
+    flow.state = { status: 'purchase-required', plan: 'Free' };
+    flow.canCheckAgain = canCheckAgain;
+    const onBack = vi.fn();
+    const ui = renderWithProviders(
+      <SubscriptionDialog onBack={onBack} onSwitchProvider={vi.fn()} />,
+    );
+    try {
+      expect(ui.lastFrame()).toContain('Use another account');
+      await settle(100);
+      for (let index = 0; index < (canCheckAgain ? 1 : 2); index++) {
+        ui.stdin.write('\u001b[B');
+        await settle(50);
+      }
+      await vi.waitFor(() =>
+        expect(ui.lastFrame()).toContain('› Use another account'),
+      );
+      ui.stdin.write('\u001b[13u');
+      await vi.waitFor(() => expect(flow.switchAccount).toHaveBeenCalledOnce());
+      expect(onBack).not.toHaveBeenCalled();
+      expect(flow.cancel).not.toHaveBeenCalled();
+    } finally {
+      ui.unmount();
+    }
+  },
+);
 
 it('waits for automatic activation without a Connect or Sign out menu', () => {
   flow.state = { status: 'ready', plan: 'Plus' };

@@ -12,7 +12,7 @@ afterEach(() => {
   container?.remove();
 });
 
-it('offers only membership retry after a no-membership recheck', () => {
+it('offers membership retry and account switching after a no-membership recheck', () => {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -36,6 +36,7 @@ it('offers only membership retry after a no-membership recheck', () => {
           onOpenPurchase={openPlans}
           onRetry={retry}
           onSwitchProvider={switchProvider}
+          onUseAnotherAccount={vi.fn()}
           onCancel={cancel}
         />
       </I18nProvider>,
@@ -46,7 +47,8 @@ it('offers only membership retry after a no-membership recheck', () => {
       (item) =>
         item.getAttribute('aria-label') === label || item.textContent === label,
     );
-  expect(container.querySelectorAll('button')).toHaveLength(1);
+  expect(container.querySelectorAll('button')).toHaveLength(2);
+  expect(button('Use another account')).toBeDefined();
   expect(button('Retry Connection')).toBeDefined();
   expect(button('Sign out')).toBeUndefined();
   expect(button('View Plans')).toBeUndefined();

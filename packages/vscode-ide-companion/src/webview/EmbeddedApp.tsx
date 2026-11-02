@@ -455,20 +455,10 @@ export function EmbeddedApp() {
           daemonClient.cancelSubscriptionLogin.bind(daemonClient),
         getSubscriptionUserInfo:
           daemonClient.getSubscriptionUserInfo.bind(daemonClient),
-        signOutSubscription: async (
-          ...args: Parameters<DaemonClient['signOutSubscription']>
-        ) => {
-          const flowId = subscriptionFlowRef.current;
-          const result = await daemonClient.signOutSubscription(...args);
-          if (flowId && subscriptionFlowRef.current === flowId)
-            vscode.postMessage({
-              type: 'qwenSubscriptionSignedOut',
-              data: { flowId },
-            });
-          return result;
-        },
+        signOutSubscription:
+          daemonClient.signOutSubscription.bind(daemonClient),
       },
-    [daemonClient, vscode],
+    [daemonClient],
   );
   useEffect(() => {
     setAuthConnecting(false);
@@ -1714,6 +1704,12 @@ export function EmbeddedApp() {
             }
             onOpenExternal={(url) =>
               vscode.postMessage({ type: 'openExternalUrl', data: { url } })
+            }
+            onSignedOut={() =>
+              vscode.postMessage({
+                type: 'qwenSubscriptionSignedOut',
+                data: { flowId: subscriptionFlowId },
+              })
             }
             onClose={() =>
               vscode.postMessage({

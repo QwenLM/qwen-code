@@ -1768,6 +1768,7 @@ export default {
   'Opens the Qwen Code plans page in your browser':
     '在浏览器中打开 Qwen Code 套餐页',
   'Switch Provider': '切换供应商',
+  'Use another account': '使用其他账号',
   'Choose another model provider': '选择其他模型供应商',
   'Sign out': '退出登录',
   'Enter to select, ↑↓ to navigate · Esc to close':

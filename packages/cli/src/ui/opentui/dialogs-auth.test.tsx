@@ -103,6 +103,7 @@ const subscription = vi.hoisted(() => ({
   canCheckAgain: false,
   openPlans: vi.fn(),
   checkAgain: vi.fn(),
+  switchAccount: vi.fn(),
   cancel: vi.fn(),
 }));
 vi.mock('../auth/use-subscription.js', async (importOriginal) => ({
@@ -1709,6 +1710,23 @@ describe('real subscription entry', () => {
     await press('return');
     expect(subscription.checkAgain).toHaveBeenCalledTimes(1);
   });
+
+  it.each([false, true])(
+    'switches accounts without leaving the subscription view (canCheckAgain=%s)',
+    async (canCheckAgain) => {
+      subscription.state = { status: 'purchase-required', plan: 'Free' };
+      subscription.canCheckAgain = canCheckAgain;
+      renderDialog();
+      await press('return');
+      for (let index = 0; index < (canCheckAgain ? 1 : 2); index++)
+        await press('down');
+      expect(screen.getByText('Use another account')).toBeTruthy();
+      await press('return');
+      expect(subscription.switchAccount).toHaveBeenCalledOnce();
+      expect(subscription.cancel).not.toHaveBeenCalled();
+      expect(screen.queryByText('Connect a Provider')).toBeNull();
+    },
+  );
 
   it('shows the development entry before configuring OAuth', () => {
     delete process.env['QWEN_OAUTH_BASE_URL'];

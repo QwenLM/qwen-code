@@ -65,6 +65,7 @@ async function render(
     desktopSuccess?: boolean;
     onAuthError?: (message: string) => void;
     onModelsUnavailable?: () => void;
+    onSignedOut?: () => void;
   } = {},
 ) {
   await act(async () => {
@@ -145,7 +146,7 @@ it.each(['free', 'go'])(
       [...container.querySelectorAll('button')].map(
         (button) => button.textContent,
       ),
-    ).toEqual(['View Plans', 'Switch Provider']);
+    ).toEqual(['View Plans', 'Switch Provider', 'Use another account']);
     await click('View Plans');
     expect(open).toHaveBeenCalledTimes(2);
     expect(open).toHaveBeenLastCalledWith(
@@ -176,6 +177,221 @@ it('keeps authorization navigation when a failed first membership query is retri
   await tick(5000);
   expect(transport.getSubscriptionUserInfo).toHaveBeenCalledTimes(2);
   expect(open.mock.calls.map(([url]) => url)).toEqual([authorizationUrl]);
+});
+
+it.each([false, true])(
+  'waits for credential cleanup then opens a fresh authorization once (dialog=%s)',
+  async (dialog) => {
+    let finish!: () => void;
+    transport.signOutSubscription.mockReturnValue(
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const onSignedOut = vi.fn();
+    await render(undefined, transport, { dialog, onSignedOut });
+    transport.startSubscriptionLogin.mockResolvedValue({
+      id: 'flow-two',
+      status: 'waiting',
+      authorizationUrl,
+    });
+    transport.getSubscriptionLogin.mockResolvedValue({
+      id: 'flow-two',
+      status: 'ready',
+      userInfo: { ...user, email: 'second@example.test', member_type: 'pro' },
+    });
+    const button = [...document.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Use another account',
+    )!;
+    expect(button).toBeDefined();
+    await act(async () => {
+      button.click();
+      button.click();
+    });
+    expect(transport.signOutSubscription).toHaveBeenCalledOnce();
+    expect(transport.startSubscriptionLogin).toHaveBeenCalledOnce();
+    expect(open).not.toHaveBeenCalledWith(authorizationUrl);
+    expect(document.body.textContent).not.toContain('Use another account');
+    await tick(10_000);
+    expect(transport.getSubscriptionUserInfo).not.toHaveBeenCalled();
+    await act(async () => finish());
+    expect(transport.startSubscriptionLogin).toHaveBeenCalledTimes(2);
+    expect(transport.cancelSubscriptionLogin).toHaveBeenCalledWith('flow-one');
+    expect(
+      open.mock.calls.filter(([url]) => url === authorizationUrl),
+    ).toHaveLength(1);
+    expect(close).not.toHaveBeenCalled();
+    expect(onSignedOut).not.toHaveBeenCalled();
+    await tick(1000);
+    expect(document.body.textContent).toContain('second@example.test');
+    expect(document.body.textContent).toContain('Qwen Pro is active');
+  },
+);
+
+it('ignores a late purchase query after account switching', async () => {
+  let completeQuery!: (info: typeof user) => void;
+  let querySignal: AbortSignal | undefined;
+  transport.getSubscriptionUserInfo.mockImplementation(
+    ({ signal }: { signal: AbortSignal }) => {
+      querySignal = signal;
+      return new Promise((resolve) => {
+        completeQuery = resolve;
+      });
+    },
+  );
+  await render();
+  await tick(5000);
+  transport.startSubscriptionLogin.mockResolvedValue({
+    id: 'flow-two',
+    status: 'waiting',
+    authorizationUrl,
+  });
+  transport.getSubscriptionLogin.mockResolvedValue({
+    id: 'flow-two',
+    status: 'waiting',
+    authorizationUrl,
+  });
+  await click('Use another account');
+  expect(querySignal?.aborted).toBe(true);
+  await act(async () => completeQuery({ ...user, member_type: 'pro' }));
+  expect(container.textContent).toContain('Waiting for sign-in');
+  expect(container.textContent).not.toContain('Qwen Pro is active');
+});
+
+it.each(['unmount', 'transport'] as const)(
+  'ignores credential cleanup completion after %s',
+  async (change) => {
+    let finish!: () => void;
+    transport.signOutSubscription.mockReturnValue(
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    await render();
+    await click('Use another account');
+    const nextTransport = {
+      ...transport,
+      startSubscriptionLogin: vi.fn().mockResolvedValue({
+        ...ready,
+        userInfo: { ...user, member_type: 'plus' },
+      }),
+    };
+    if (change === 'unmount') await act(async () => root!.render(null));
+    else await render(undefined, nextTransport);
+    await act(async () => finish());
+    expect(transport.startSubscriptionLogin).toHaveBeenCalledOnce();
+    expect(open).not.toHaveBeenCalledWith(authorizationUrl);
+    if (change === 'transport') {
+      expect(nextTransport.startSubscriptionLogin).toHaveBeenCalledOnce();
+      expect(container.textContent).toContain('Qwen Plus is active');
+    }
+  },
+);
+
+it.each([false, true])(
+  'does not restart authorization after cancelling cleanup without unmount (dialog=%s)',
+  async (dialog) => {
+    let finish!: () => void;
+    transport.signOutSubscription.mockReturnValue(
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    await render(undefined, transport, { dialog });
+    transport.startSubscriptionLogin.mockResolvedValue({
+      id: 'flow-two',
+      status: 'waiting',
+      authorizationUrl,
+    });
+    transport.getSubscriptionLogin.mockResolvedValue({
+      id: 'flow-two',
+      status: 'waiting',
+      authorizationUrl,
+    });
+    const press = async (label: string) => {
+      const button = [...document.body.querySelectorAll('button')].find(
+        (item) => item.textContent === label,
+      );
+      expect(button, `Missing ${label}`).toBeDefined();
+      await act(async () => button!.click());
+    };
+    await press('Use another account');
+    expect(transport.signOutSubscription).toHaveBeenCalledOnce();
+    await press(dialog ? 'previous' : 'Cancel');
+    expect(close).toHaveBeenCalledOnce();
+    await act(async () => finish());
+    await tick(1000);
+    expect(transport.startSubscriptionLogin).toHaveBeenCalledOnce();
+    expect(open).not.toHaveBeenCalledWith(authorizationUrl);
+  },
+);
+
+it.each([false, true])(
+  'does not restart a queued account switch after cancel (dialog=%s)',
+  async (dialog) => {
+    let finish!: () => void;
+    transport.signOutSubscription.mockReturnValue(
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    await render(undefined, transport, { dialog });
+    transport.startSubscriptionLogin.mockResolvedValue({
+      id: 'flow-two',
+      status: 'waiting',
+      authorizationUrl,
+    });
+    const findButton = (label: string) => {
+      const button = [...document.body.querySelectorAll('button')].find(
+        (item) => item.textContent === label,
+      );
+      expect(button, `Missing ${label}`).toBeDefined();
+      return button!;
+    };
+    await act(async () => findButton('Use another account').click());
+    await act(async () => {
+      finish();
+      await Promise.resolve();
+      await Promise.resolve();
+      findButton(dialog ? 'previous' : 'Cancel').click();
+    });
+    expect(close).toHaveBeenCalledOnce();
+    expect(transport.startSubscriptionLogin).toHaveBeenCalledOnce();
+    expect(open).not.toHaveBeenCalledWith(authorizationUrl);
+  },
+);
+
+it.each(['cleanup', 'revoke'] as const)(
+  'does not restart authorization on account switch %s failure',
+  async (errorStage) => {
+    transport.signOutSubscription.mockRejectedValue({
+      body: { code: 'credentials_error', errorStage },
+    });
+    const onSignedOut = vi.fn();
+    await render(undefined, transport, { onSignedOut });
+    await click('Use another account');
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      errorStage === 'cleanup'
+        ? 'remove local Qwen credentials'
+        : 'signed out locally',
+    );
+    expect(transport.startSubscriptionLogin).toHaveBeenCalledOnce();
+    expect(onSignedOut).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+  },
+);
+
+it('notifies final sign-out only after credentials are removed', async () => {
+  transport.startSubscriptionLogin.mockResolvedValue({
+    ...ready,
+    userInfo: { ...user, member_type: 'pro' },
+  });
+  const onSignedOut = vi.fn();
+  await render(undefined, transport, { onSignedOut });
+  await click('Sign out');
+  expect(onSignedOut).toHaveBeenCalledOnce();
+  expect(close).toHaveBeenCalledOnce();
+  expect(transport.startSubscriptionLogin).toHaveBeenCalledOnce();
 });
 
 it('cancels a late start response after the panel was closed and never opens its URL', async () => {
@@ -240,7 +456,7 @@ it('aborts a manual check on unmount without signing out', async () => {
     },
   );
   await click('Retry Connection');
-  expect(container.querySelectorAll('button')).toHaveLength(1);
+  expect(container.querySelectorAll('button')).toHaveLength(2);
   act(() => {
     root!.unmount();
     root = undefined;

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useI18n } from '../../i18n';
 import styles from './QwenSubscriptionStatus.module.css';
 import authStyles from './AuthMessage.module.css';
+import { Button } from '../ui/button';
 
 export type QwenSubscriptionState =
   | { status: 'waiting'; authorizationUrl: string }
@@ -23,6 +24,7 @@ export interface QwenSubscriptionStatusProps {
   onOpenPurchase: () => void;
   onRetry: () => void;
   onSwitchProvider: () => void;
+  onUseAnotherAccount: () => void;
   onCancel: () => void;
 }
 
@@ -32,6 +34,7 @@ export function QwenSubscriptionStatus({
   onOpenPurchase,
   onRetry,
   onSwitchProvider,
+  onUseAnotherAccount,
   onCancel,
 }: QwenSubscriptionStatusProps) {
   const { t, language } = useI18n();
@@ -134,6 +137,13 @@ export function QwenSubscriptionStatus({
             </button>
           ))}
         </div>
+        <Button
+          variant="ghost"
+          className={styles.muted}
+          onClick={onUseAnotherAccount}
+        >
+          {t('subscription.useAnotherAccount')}
+        </Button>
       </section>
     );
   }

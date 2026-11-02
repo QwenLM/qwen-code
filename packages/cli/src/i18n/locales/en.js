@@ -1853,6 +1853,7 @@ export default {
   'Opens the Qwen Code plans page in your browser':
     'Opens the Qwen Code plans page in your browser',
   'Switch Provider': 'Switch Provider',
+  'Use another account': 'Use another account',
   'Choose another model provider': 'Choose another model provider',
   'Sign out': 'Sign out',
   'Enter to select, ↑↓ to navigate · Esc to close':

@@ -119,7 +119,7 @@ export function useSubscription(
     status: 'waiting',
     authorizationUrl: '',
   });
-  const [attempt, setAttempt] = useState(0);
+  const [attempt, setAttempt] = useState<number | null>(0);
   const stateRef = useRef(state);
   stateRef.current = state;
   const lifetime = useRef<AbortController | null>(null);
@@ -225,6 +225,7 @@ export function useSubscription(
   };
 
   useEffect(() => {
+    if (attempt === null) return;
     if (retryOwner.current !== transport) {
       retryAt.current = 0;
       retryOwner.current = transport;
@@ -356,7 +357,7 @@ export function useSubscription(
       return;
     const current = stateRef.current;
     if (current.status === 'error' && current.retry === 'authorization') {
-      setAttempt((value) => value + 1);
+      setAttempt((value) => (value === null ? null : value + 1));
       return;
     }
     const signal = lifetime.current?.signal;
@@ -444,6 +445,14 @@ export function useSubscription(
     }
   };
 
+  const switchAccount = async () => {
+    if (signingOut.current || stateRef.current.status !== 'purchase-required')
+      return;
+    setState({ status: 'waiting', authorizationUrl: '' });
+    if (await signOut())
+      setAttempt((value) => (value === null ? null : value + 1));
+  };
+
   const expire = useCallback((message?: string) => {
     lifetime.current?.abort();
     confirmedMembership.current = undefined;
@@ -466,6 +475,12 @@ export function useSubscription(
     expire,
     retry,
     signOut,
+    switchAccount,
+    cancel: () => {
+      lifetime.current?.abort();
+      lifetime.current = null;
+      setAttempt(null);
+    },
     openAuthorization: openUrl,
     openPlans: () => openUrl(plansUrl.current),
   };

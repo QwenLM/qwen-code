@@ -28,6 +28,7 @@ const callbacks = () => ({
   onOpenPlans: vi.fn(),
   onCheckAgain: vi.fn(),
   onSwitchProvider: vi.fn(),
+  onUseAnotherAccount: vi.fn(),
 });
 
 describe('QwenSubscriptionStatus', () => {
@@ -61,12 +62,17 @@ describe('QwenSubscriptionStatus', () => {
       expect(menu.items.map((item) => item.title)).toEqual([
         'View Plans',
         'Switch Provider',
+        'Use another account',
       ]);
       for (const action of Object.values(actions))
         expect(action).not.toHaveBeenCalled();
       for (const item of menu.items) menu.onSelect(item.value);
       expect(actions.onCheckAgain).not.toHaveBeenCalled();
-      for (const action of [actions.onOpenPlans, actions.onSwitchProvider])
+      for (const action of [
+        actions.onOpenPlans,
+        actions.onSwitchProvider,
+        actions.onUseAnotherAccount,
+      ])
         expect(action).toHaveBeenCalledOnce();
       ui.unmount();
     },
@@ -87,11 +93,14 @@ describe('QwenSubscriptionStatus', () => {
     const items = vi.mocked(DescriptiveRadioButtonSelect).mock.calls.at(-1)![0]
       .items;
     expect(items.find((item) => item.key === 'check')?.disabled).toBe(true);
-    expect(items.map((item) => item.title)).toEqual(['Retry Connection']);
+    expect(items.map((item) => item.title)).toEqual([
+      'Retry Connection',
+      'Use another account',
+    ]);
     ui.unmount();
   });
 
-  it('offers only retry when the caller supplies a query error', () => {
+  it('offers retry and account switching after a failed membership recheck', () => {
     const actions = callbacks();
     const message =
       "Couldn't check your subscription status. Please try again.";
@@ -111,7 +120,7 @@ describe('QwenSubscriptionStatus', () => {
     expect(ui.lastFrame()).not.toContain('Switch Provider');
     expect(ui.lastFrame()).not.toContain('Sign out');
     const menu = vi.mocked(DescriptiveRadioButtonSelect).mock.calls.at(-1)![0];
-    expect(menu.items).toHaveLength(1);
+    expect(menu.items).toHaveLength(2);
     menu.onSelect(menu.items[0]!.value);
     expect(actions.onCheckAgain).toHaveBeenCalledOnce();
     expect(actions.onOpenPlans).not.toHaveBeenCalled();
@@ -137,11 +146,11 @@ describe('QwenSubscriptionStatus', () => {
   });
 
   it.each([
-    ['zh', '查看套餐', '切换供应商', '重试'],
-    ['zh-TW', '檢視方案', '切換供應商', '重試'],
+    ['zh', '查看套餐', '切换供应商', '重试', '使用其他账号'],
+    ['zh-TW', '檢視方案', '切換供應商', '重試', '使用其他帳號'],
   ])(
     'localizes purchase and retry actions in %s',
-    async (language, plans, provider, retry) => {
+    async (language, plans, provider, retry, account) => {
       await setLanguageAsync(language);
       const actions = callbacks();
       const ui = render(
@@ -156,7 +165,11 @@ describe('QwenSubscriptionStatus', () => {
         const menu = vi
           .mocked(DescriptiveRadioButtonSelect)
           .mock.calls.at(-1)![0];
-        expect(menu.items.map((item) => item.title)).toEqual([plans, provider]);
+        expect(menu.items.map((item) => item.title)).toEqual([
+          plans,
+          provider,
+          account,
+        ]);
         ui.rerender(
           <QwenSubscriptionStatus
             status="purchase-required"
@@ -170,7 +183,10 @@ describe('QwenSubscriptionStatus', () => {
           const retryMenu = vi
             .mocked(DescriptiveRadioButtonSelect)
             .mock.calls.at(-1)![0];
-          expect(retryMenu.items.map((item) => item.title)).toEqual([retry]);
+          expect(retryMenu.items.map((item) => item.title)).toEqual([
+            retry,
+            account,
+          ]);
         });
       } finally {
         ui.unmount();

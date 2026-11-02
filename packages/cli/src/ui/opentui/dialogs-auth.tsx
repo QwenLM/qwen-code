@@ -1372,6 +1372,16 @@ function SubscriptionView({
           },
         ]
       : []),
+    ...(state.status === 'purchase-required'
+      ? [
+          {
+            key: 'account',
+            value: 'account',
+            label: t('Use another account'),
+            run: () => void flow.switchAccount(),
+          },
+        ]
+      : []),
   ];
   const purchase = state.status === 'purchase-required';
   const lines = purchase

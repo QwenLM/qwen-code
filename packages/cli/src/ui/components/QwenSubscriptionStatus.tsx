@@ -22,6 +22,7 @@ type QwenSubscriptionStatusProps = { onCancel?: () => void } & (
       onOpenPlans: () => void;
       onCheckAgain: () => void;
       onSwitchProvider: () => void;
+      onUseAnotherAccount: () => void;
     }
   | {
       status: 'error';
@@ -65,30 +66,38 @@ export function QwenSubscriptionStatus(
     );
   }
 
-  const actions = props.canCheckAgain
-    ? [
-        {
-          key: 'check',
-          value: props.onCheckAgain,
-          title: t('Retry Connection'),
-          description: '',
-          disabled: props.checking,
-        },
-      ]
-    : [
-        {
-          key: 'plans',
-          value: props.onOpenPlans,
-          title: t('View Plans'),
-          description: t('Opens the Qwen Code plans page in your browser'),
-        },
-        {
-          key: 'provider',
-          value: props.onSwitchProvider,
-          title: t('Switch Provider'),
-          description: t('Choose another model provider'),
-        },
-      ];
+  const actions = [
+    ...(props.canCheckAgain
+      ? [
+          {
+            key: 'check',
+            value: props.onCheckAgain,
+            title: t('Retry Connection'),
+            description: '',
+            disabled: props.checking,
+          },
+        ]
+      : [
+          {
+            key: 'plans',
+            value: props.onOpenPlans,
+            title: t('View Plans'),
+            description: t('Opens the Qwen Code plans page in your browser'),
+          },
+          {
+            key: 'provider',
+            value: props.onSwitchProvider,
+            title: t('Switch Provider'),
+            description: t('Choose another model provider'),
+          },
+        ]),
+    {
+      key: 'account',
+      value: props.onUseAnotherAccount,
+      title: t('Use another account'),
+      description: '',
+    },
+  ];
   return (
     <Box flexDirection="column">
       <Text color={theme.status.success}>

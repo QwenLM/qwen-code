@@ -11,6 +11,7 @@ export function QwenSubscriptionSidebarStatus({
   onOpenPurchase,
   onRetry,
   onSwitchProvider,
+  onUseAnotherAccount,
   onCancel,
 }: QwenSubscriptionStatusProps) {
   const { t } = useI18n();
@@ -87,6 +88,13 @@ export function QwenSubscriptionSidebarStatus({
               {action.label}
             </Button>
           ))}
+          <Button
+            variant="ghost"
+            className={styles.action}
+            onClick={onUseAnotherAccount}
+          >
+            {english('subscription.useAnotherAccount')}
+          </Button>
         </div>
       </section>
     );

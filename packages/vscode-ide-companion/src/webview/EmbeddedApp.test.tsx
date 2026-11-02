@@ -307,6 +307,30 @@ describe('EmbeddedApp host wiring', () => {
     ).toBeNull();
   });
 
+  it('keeps account switching in the native flow and only announces final sign-out explicitly', async () => {
+    await renderApp();
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: { type: 'qwenSubscriptionAuth', data: { flowId: 'flow-a' } },
+        }),
+      );
+    });
+    const panel = mocks.subscriptionProps.current!;
+    const transport = panel.transport as {
+      signOutSubscription: () => Promise<void>;
+    };
+    await act(async () => transport.signOutSubscription());
+    expect(postMessagesOfType('qwenSubscriptionSignedOut')).toHaveLength(0);
+    expect(
+      document.querySelector('[data-testid="subscription-real"]'),
+    ).not.toBeNull();
+    act(() => callback<() => void>(panel, 'onSignedOut')());
+    expect(postMessagesOfType('qwenSubscriptionSignedOut')).toEqual([
+      { type: 'qwenSubscriptionSignedOut', data: { flowId: 'flow-a' } },
+    ]);
+  });
+
   it('shows selected Qwen in the sidebar with VS Code theme tokens and host-owned activation', async () => {
     await renderApp();
     await act(async () =>

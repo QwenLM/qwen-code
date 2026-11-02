@@ -156,6 +156,7 @@ export function useSubscription({
   onActivate?: (signal: AbortSignal) => Promise<void>;
 } = {}) {
   const [state, setState] = useState<SubscriptionState>({ status: 'waiting' });
+  const [attempt, setAttempt] = useState<number | null>(0);
   const [email, setEmail] = useState('');
   const [deviceAuth, setDeviceAuth] =
     useState<SubscriptionDeviceAuthorization>();
@@ -182,6 +183,7 @@ export function useSubscription({
   stateRef.current = state;
 
   useEffect(() => {
+    if (attempt === null) return;
     const controller = new AbortController();
     const { signal } = controller;
     lifetime.current = controller;
@@ -189,6 +191,8 @@ export function useSubscription({
     confirmedPaidOwner.current = null;
     busy.current = false;
     setState({ status: 'waiting' });
+    setDeviceAuth(undefined);
+    setEmail('');
     setChecking(false);
     setConnecting(false);
     setConnectionError(undefined);
@@ -270,8 +274,35 @@ export function useSubscription({
     });
     return () => {
       controller.abort();
+      if (lifetime.current === controller) lifetime.current = null;
     };
-  }, [suppressBrowserLaunch]);
+  }, [suppressBrowserLaunch, attempt]);
+
+  const switchAccount = async () => {
+    const owner = lifetime.current;
+    const activeSession = session.current;
+    if (
+      stateRef.current.status !== 'purchase-required' ||
+      !owner ||
+      owner.signal.aborted ||
+      !activeSession
+    )
+      return;
+    owner.abort();
+    setDeviceAuth(undefined);
+    setEmail('');
+    setChecking(false);
+    setState({ status: 'waiting' });
+    try {
+      await activeSession.signOut();
+      if (lifetime.current !== owner) return;
+      retryAt.current = 0;
+      setAttempt((value) => (value === null ? null : value + 1));
+    } catch (error) {
+      if (lifetime.current === owner)
+        setState(authenticationError(subscriptionError(error, 'cleanup')));
+    }
+  };
 
   const checkAgain = () => {
     const current = stateRef.current;
@@ -428,6 +459,11 @@ export function useSubscription({
       }
     },
     checkAgain,
-    cancel: () => lifetime.current?.abort(),
+    switchAccount,
+    cancel: () => {
+      lifetime.current?.abort();
+      lifetime.current = null;
+      setAttempt(null);
+    },
   };
 }

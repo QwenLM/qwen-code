@@ -2584,6 +2584,7 @@ export default {
   'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai':
     '在 chat.qwen.ai 訂閱 Plus／Pro 方案以使用 Qwen Code + Agent',
   'Switch Provider': '切換供應商',
+  'Use another account': '使用其他帳號',
   'Waiting for sign-in…': '正在等待登入…',
   'Waiting for your subscription to become active…': '正在等待你的訂閱生效…',
   'You are signed out locally, but the remote session could not be revoked.':

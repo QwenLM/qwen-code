@@ -92,6 +92,7 @@ type FlowProps = {
   transport: SubscriptionTransport;
   onOpenExternal: (url: string) => void | Promise<void>;
   onClose: () => void;
+  onSignedOut?: () => void;
   onOtherProviders: () => void;
   onActivate?: (signal: AbortSignal) => Promise<string | void>;
   onActivated?: (message?: string) => void;
@@ -259,10 +260,14 @@ export function QwenSubscriptionFlow(props: FlowProps) {
   }, [canActivate, flow.readySignal, flow.working, connect]);
   const close = () => {
     activation.current?.abort();
+    flow.cancel();
     props.onClose();
   };
   const signOut = async () => {
-    if ((await flow.signOut()) && mounted.current) props.onClose();
+    if ((await flow.signOut()) && mounted.current) {
+      props.onSignedOut?.();
+      props.onClose();
+    }
   };
   if (
     props.desktopSuccess &&
@@ -286,8 +291,12 @@ export function QwenSubscriptionFlow(props: FlowProps) {
       onOpenAuthorization={flow.openAuthorization}
       onOpenPurchase={flow.openPlans}
       onRetry={flow.retry}
+      onUseAnotherAccount={() => {
+        void flow.switchAccount();
+      }}
       onSwitchProvider={() => {
         activation.current?.abort();
+        flow.cancel();
         props.onOtherProviders();
       }}
       onCancel={close}

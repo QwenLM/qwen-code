@@ -179,6 +179,225 @@ it('reopens plans for a saved Free account without requesting a device code', as
   unmount();
 });
 
+it.each([false, true])(
+  'clears credentials before authorizing another account (suppressBrowserLaunch=%s)',
+  async (suppressBrowserLaunch) => {
+    mocks.getUserInfo.mockResolvedValue(null);
+    let finishCleanup!: () => void;
+    mocks.signOut.mockReturnValue(
+      new Promise<void>((resolve) => {
+        finishCleanup = resolve;
+      }),
+    );
+    let finishLogin!: (info: typeof free) => void;
+    mocks.signIn
+      .mockImplementationOnce(async (onDevice) => {
+        onDevice(device);
+        return free;
+      })
+      .mockImplementationOnce((onDevice) => {
+        onDevice({ ...device, user_code: 'NEXT-CODE' });
+        return new Promise((resolve) => {
+          finishLogin = resolve;
+        });
+      });
+    const onActivate = vi.fn().mockResolvedValue(undefined);
+    const hook = renderHook(() =>
+      useSubscription({ suppressBrowserLaunch, onActivate }),
+    );
+    await flush();
+    const oldSignal = mocks.signIn.mock.calls[0][1] as AbortSignal;
+    act(() => {
+      void hook.result.current.switchAccount();
+      void hook.result.current.switchAccount();
+    });
+    expect(mocks.signOut).toHaveBeenCalledOnce();
+    expect(oldSignal.aborted).toBe(true);
+    expect(hook.result.current.state.status).toBe('waiting');
+    expect(hook.result.current.deviceAuth).toBeUndefined();
+    expect(hook.result.current.email).toBe('');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(mocks.getUserInfo).toHaveBeenCalledOnce();
+    expect(mocks.signIn).toHaveBeenCalledOnce();
+    await act(async () => finishCleanup());
+    expect(mocks.signIn).toHaveBeenCalledTimes(2);
+    expect(hook.result.current.deviceAuth?.verification_uri_complete).toContain(
+      'user_code=NEXT-CODE',
+    );
+    if (suppressBrowserLaunch) expect(mocks.browser).not.toHaveBeenCalled();
+    else
+      expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
+        'https://pre4-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+        'https://pre4-chat.qwen.ai/authorize?user_code=NEXT-CODE&client=qwen-code',
+      ]);
+    await act(async () =>
+      finishLogin({ ...free, email: 'next@example.test', member_type: 'pro' }),
+    );
+    expect(hook.result.current.email).toBe('next@example.test');
+    expect(hook.result.current.state).toEqual({ status: 'ready', plan: 'Pro' });
+    expect(onActivate).toHaveBeenCalledOnce();
+    hook.unmount();
+  },
+);
+
+it.each(['cancel', 'unmount', 'new lifetime'] as const)(
+  'ignores late account cleanup after %s',
+  async (action) => {
+    let finish!: () => void;
+    mocks.signOut.mockReturnValue(
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const hook = renderHook(
+      ({ suppressBrowserLaunch }) => useSubscription({ suppressBrowserLaunch }),
+      { initialProps: { suppressBrowserLaunch: false } },
+    );
+    await flush();
+    act(() => {
+      void hook.result.current.switchAccount();
+    });
+    if (action === 'cancel') act(() => hook.result.current.cancel());
+    else if (action === 'unmount') hook.unmount();
+    else {
+      hook.rerender({ suppressBrowserLaunch: true });
+      await flush();
+    }
+    const queries = mocks.getUserInfo.mock.calls.length;
+    const opened = mocks.browser.mock.calls.length;
+    await act(async () => finish());
+    expect(mocks.getUserInfo).toHaveBeenCalledTimes(queries);
+    expect(mocks.browser).toHaveBeenCalledTimes(opened);
+    expect(mocks.signIn).not.toHaveBeenCalled();
+    if (action !== 'unmount') hook.unmount();
+  },
+);
+
+it('does not restart a queued account switch after cancel', async () => {
+  let finish!: () => void;
+  mocks.signOut.mockReturnValue(
+    new Promise<void>((resolve) => {
+      finish = resolve;
+    }),
+  );
+  mocks.getUserInfo.mockResolvedValueOnce(free).mockResolvedValue(null);
+  mocks.signIn.mockImplementation(async (onDevice) => {
+    onDevice(device);
+    return free;
+  });
+  const hook = renderHook(() => useSubscription());
+  await flush();
+  const opened = mocks.browser.mock.calls.length;
+  let switching!: Promise<void>;
+  act(() => {
+    switching = hook.result.current.switchAccount();
+  });
+  await act(async () => {
+    finish();
+    await switching;
+    hook.result.current.cancel();
+  });
+  expect(mocks.getUserInfo).toHaveBeenCalledOnce();
+  expect(mocks.signIn).not.toHaveBeenCalled();
+  expect(mocks.browser).toHaveBeenCalledTimes(opened);
+  hook.unmount();
+});
+
+it.each(['cleanup', 'revoke'] as const)(
+  'keeps account-switch %s failures visible without starting authorization',
+  async (stage) => {
+    mocks.signOut.mockRejectedValue(
+      new SubscriptionOAuthError(
+        'credentials_error',
+        undefined,
+        undefined,
+        undefined,
+        stage,
+      ),
+    );
+    const hook = renderHook(() => useSubscription());
+    await flush();
+    await act(async () => {
+      await hook.result.current.switchAccount();
+    });
+    expect(hook.result.current.state).toMatchObject({
+      status: 'error',
+      message: expect.stringContaining(
+        stage === 'cleanup'
+          ? 'remove local Qwen credentials'
+          : 'signed out locally',
+      ),
+    });
+    expect(mocks.signIn).not.toHaveBeenCalled();
+    expect(mocks.getUserInfo).toHaveBeenCalledOnce();
+    hook.unmount();
+  },
+);
+
+it('ignores a late old membership query after switching accounts', async () => {
+  let finishQuery!: (info: typeof free) => void;
+  mocks.getUserInfo
+    .mockResolvedValueOnce(free)
+    .mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishQuery = resolve;
+      }),
+    )
+    .mockResolvedValue(null);
+  mocks.signIn.mockImplementation((onDevice) => {
+    onDevice({ ...device, user_code: 'NEXT-CODE' });
+    return new Promise(() => {});
+  });
+  const hook = renderHook(() => useSubscription());
+  await flush();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5000);
+  });
+  const signal = mocks.getUserInfo.mock.calls[1][0] as AbortSignal;
+  await act(async () => {
+    await hook.result.current.switchAccount();
+  });
+  expect(signal.aborted).toBe(true);
+  await act(async () => finishQuery({ ...free, member_type: 'pro' }));
+  expect(hook.result.current.state.status).toBe('waiting');
+  expect(hook.result.current.deviceAuth?.verification_uri_complete).toContain(
+    'NEXT-CODE',
+  );
+  hook.unmount();
+});
+
+it('discards the previous account cooldown after successful cleanup', async () => {
+  mocks.getUserInfo
+    .mockResolvedValueOnce(free)
+    .mockRejectedValueOnce(
+      new SubscriptionOAuthError(
+        'rate_limited',
+        429,
+        undefined,
+        60_000,
+        'userinfo',
+      ),
+    )
+    .mockRejectedValueOnce(queryFailure())
+    .mockResolvedValue(free);
+  const hook = renderHook(() => useSubscription());
+  await flush();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5000);
+  });
+  expect(hook.result.current.canCheckAgain).toBe(true);
+  await act(async () => {
+    await hook.result.current.switchAccount();
+  });
+  expect(hook.result.current.state.status).toBe('query-error');
+  await act(async () => hook.result.current.checkAgain());
+  expect(mocks.getUserInfo).toHaveBeenCalledTimes(4);
+  expect(hook.result.current.state.status).toBe('purchase-required');
+  hook.unmount();
+});
+
 it('stops automatic polling at 120 seconds and allows a single manual query', async () => {
   const { result, unmount } = renderHook(() =>
     useSubscription({ suppressBrowserLaunch: true }),
