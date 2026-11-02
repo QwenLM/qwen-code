@@ -32,6 +32,13 @@ mvn -f packages/managed-agent-server/pom.xml -DskipTests clean process-classes &
 
 Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 AgentDefinition 可选择的范围、Session 模型目录、可信 actor 请求头和服务账号，以及各嵌套分组。
 
+`model-config-base-urls` 是允许完整 Session 模型配置使用的 HTTP(S) API 地址 YAML
+列表，按完整字符串精确匹配；默认空列表会禁用新配置。公共创建接口接受
+`model_config`，WebShell 创建接口接受 `modelConfig`。还需启用 Session Store、
+Harness 能力 `session-model-config/1` 和 `SecretProtector`（标准服务由已启用的
+Runtime Broker 及其凭据密钥环提供）。模型 ID 和 API key 无需在 Harness 注册。
+参见 [Session 模型配置设计](../design/managed-session-model-config.zh-CN.md)。
+
 | 属性 | 环境变量 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
 | `agent-revision` | `QWEN_MANAGED_AGENT_REVISION` | 字符串 | `1` | 内置 `qwen-code` agent 的修订号标签，会固定在使用它的每个 Session 上；请求中指定 `qwen-code` 的其他修订号会被拒绝。长度必须为 1 到 128 个字符（否则启动时拒绝）。 |

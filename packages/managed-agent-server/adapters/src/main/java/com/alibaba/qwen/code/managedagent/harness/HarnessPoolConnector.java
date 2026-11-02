@@ -360,6 +360,11 @@ public class HarnessPoolConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsModelConfiguration() {
+        return feature("session-model-config/1");
+    }
+
+    @Override
     public boolean supportsUserMessageQueue() { return feature("user-message-queue/1"); }
 
     @Override

@@ -279,14 +279,19 @@ qwen:
 
 重启单 Java control plane，验证既有 binding 可以加载，并确认新 binding 记录写入 `reference-v2`。新 secret 只使用 active key；旧记录继续由其已记录的 key ID 加密。服务器不会在读取时重加密旧记录，删除仍被引用的密钥会使这些记录不可读。
 
-只有在没有持久化记录再引用 `reference-v1` 之后，才能退场该密钥。`ma_runtime_binding` 的 `credential_key_id` 与 `runtime_credential_key_id` 是仅有的两处持久化引用；两列都以 UTF-8 字节存储。查询时不要加 `CONVERT`，让去重与密钥选择一样按字节精确比较：转换后的值携带该字符集的默认排序规则，会把仅大小写或重音不同的两个 ID 合并，从而漏掉仍被记录引用的密钥。
+只有在没有持久化记录再引用 `reference-v1` 之后，才能退场该密钥。
+Runtime binding 和完整 Session 模型配置都会保存密钥 ID。按字节比较这些 ID，
+避免大小写或重音差异掩盖仍被引用的密钥：
 
 ```sql
 SELECT DISTINCT credential_key_id AS key_id
 FROM ma_runtime_binding WHERE credential_key_id IS NOT NULL
 UNION
 SELECT DISTINCT runtime_credential_key_id AS key_id
-FROM ma_runtime_binding WHERE runtime_credential_key_id IS NOT NULL;
+FROM ma_runtime_binding WHERE runtime_credential_key_id IS NOT NULL
+UNION
+SELECT DISTINCT CAST(model_config_key_id AS BINARY) AS key_id
+FROM ma_session WHERE model_config_key_id IS NOT NULL;
 ```
 
 查询结果列出持久化记录仍需要的 key ID：预期只剩 active ID（`reference-v2`）。只要结果中仍出现 `reference-v1`，就必须继续配置该密钥。

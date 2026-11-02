@@ -86,6 +86,7 @@ public class ManagedAgentProperties
             List.of("hosted-workspace-files/1");
     private List<String> definitionModels = List.of();
     private List<ModelOption> modelCatalog = List.of();
+    private List<String> modelConfigBaseUrls = List.of();
     private String trustedActorHeader = "";
     // The account the server runs as; preflight checks file access as it.
     private String serviceUser = "";

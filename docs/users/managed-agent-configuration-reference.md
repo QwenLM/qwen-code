@@ -32,6 +32,15 @@ Spring settings the packaged `application.yml` maps to variables, and the listen
 
 Top-level settings of the Managed Agent server: the built-in agent revision, what stored AgentDefinitions may select, the Session model catalog, the trusted actor header and the service account, alongside the nested sections.
 
+`model-config-base-urls` is an optional YAML list of exact HTTP(S) base URLs
+permitted for complete Session model configurations. It defaults to empty, which
+disables new configurations. Public creation accepts `model_config`; WebShell
+creation accepts `modelConfig`. The feature also requires the Session Store,
+Harness capability `session-model-config/1`, and a `SecretProtector` (provided by
+the enabled Runtime Broker and its credential key ring in the standard server).
+The model ID and API key need no Harness registration. See the
+[Session model configuration design](../design/managed-session-model-config.md).
+
 | Property | Variable | Type | Default | Description |
 | --- | --- | --- | --- | --- |
 | `agent-revision` | `QWEN_MANAGED_AGENT_REVISION` | string | `1` | The revision label of the built-in `qwen-code` agent, pinned on each Session that uses it; a request naming any other revision of `qwen-code` is refused. Must be 1 to 128 characters (startup refusal). |

@@ -88,6 +88,18 @@ public interface AgentStateStore {
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest);
 
+    public default Admission insertSessionCommand(String tenantId, String actorId,
+            String operation, String idempotencyKey, String requestDigest,
+            String agentId, String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest,
+            com.alibaba.qwen.code.managedagent.model.SessionModelConfig modelConfig) {
+        if (modelConfig != null) {
+            throw new UnsupportedOperationException("Session model configuration is unavailable");
+        }
+        return insertSessionCommand(tenantId, actorId, operation, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest);
+    }
+
     /**
      * H4b: creates a child Session under its parent's exact binding,
      * stamping the lineage in the same transaction. The idempotency key
@@ -273,6 +285,24 @@ public interface AgentStateStore {
     public default com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Descriptor findSessionWorktree(
             String tenantId, String sessionId) {
         return null;
+    }
+
+    public default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
+            String approvalMode, boolean approvalSelectionSupported, Boolean planMode, boolean planModeSupported,
+            List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId,
+            List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> extensionPins,
+            Set<String> extensionLifecycleProfiles,
+            com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Plan worktree,
+            com.alibaba.qwen.code.managedagent.model.SessionModelConfig modelConfig) {
+        if (modelConfig != null) {
+            throw new UnsupportedOperationException("Session model configuration is unavailable");
+        }
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
+                approvalSelectionSupported, planMode, planModeSupported, skills, publicChildrenSupported,
+                modelId, extensionPins, extensionLifecycleProfiles, worktree);
     }
 
     public default Map<String, com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Descriptor> findSessionWorktrees(

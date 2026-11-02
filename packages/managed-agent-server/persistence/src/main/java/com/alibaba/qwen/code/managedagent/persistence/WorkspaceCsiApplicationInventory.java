@@ -231,6 +231,7 @@ final class WorkspaceCsiApplicationInventory {
                     + "retirement_generation:BIGINT,retired_at:BIGINT,recovery_protected:BOOLEAN,"
                     + "resource_gc_completed:BOOLEAN,runtime_request_key:CHAR,csi_guard:BOOLEAN,"
                     + "model_id:VARBINARY,model_revision:BIGINT,selected_approval_mode:VARCHAR,approval_revision:BIGINT,"
+                    + "model_config_digest:VARCHAR,model_config_key_id:VARCHAR,model_config_ciphertext:LONGTEXT,"
                     + "plan_enabled:BOOLEAN,permission_rules_json:LONGTEXT,public_child_agents_version:INT,harness_instance_id:VARBINARY,harness_owner_boot_id:VARBINARY,"
                     + "harness_placement_epoch:BIGINT,harness_placement_state:VARCHAR"),
             declaration("ma_session_head", "tenant_key,harness_key",

@@ -36,6 +36,7 @@ import type {
 import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
 import { buildSessionHistoryFromConversation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
+import type { HostedModelConfigReader } from './hosted-model-config.js';
 import { loadSettings } from '../config/settings.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
@@ -311,6 +312,7 @@ export async function runHostedHarnessTextTurn(input: {
   workspaceContext?: { read(): string | undefined };
   agentDefinition?: HostedAgentDefinition;
   modelSelection?: HostedModelSelection;
+  modelConfig?: HostedModelConfigReader;
   publicChildModelRoute?: PublicChildModelRoute;
   agentInstructions?: string;
   extensionInstructions?: string;
@@ -323,6 +325,14 @@ export async function runHostedHarnessTextTurn(input: {
     model: string,
   ) => Promise<void>;
 }): Promise<HostedHarnessModelResult> {
+  const sessionModelConfig = await input.modelConfig?.();
+  if (
+    sessionModelConfig &&
+    input.modelSelection &&
+    sessionModelConfig.model !== input.modelSelection.modelId
+  ) {
+    throw new HostedModelUnavailableError();
+  }
   const settings = loadSettings(input.cwd, {
     skipLoadEnvironment: true,
     skipWorkspaceSettings: true,
@@ -346,14 +356,19 @@ export async function runHostedHarnessTextTurn(input: {
     undefined,
     undefined,
     true,
-    { toolInvocationGuard: () => ({ allowed: false }) },
+    {
+      toolInvocationGuard: () => ({ allowed: false }),
+      ...(sessionModelConfig ? { modelConfiguration: sessionModelConfig } : {}),
+    },
   );
   const outputBudget = config.getToolOutputBatchBudget?.();
   if (outputBudget !== undefined)
     input.toolTurn?.setToolOutputBudget?.(outputBudget);
-  const model = input.modelSelection
-    ? { id: input.modelSelection.modelId }
-    : input.agentDefinition?.model;
+  const model = sessionModelConfig
+    ? { id: sessionModelConfig.model }
+    : input.modelSelection
+      ? { id: input.modelSelection.modelId }
+      : input.agentDefinition?.model;
   if (input.publicChildModelRoute)
     await applyHostedPublicChildModelPin(
       config,
@@ -362,7 +377,7 @@ export async function runHostedHarnessTextTurn(input: {
         : model,
       input.publicChildModelRoute.origin ?? input.publicChildModelRoute,
     );
-  else await applyHostedModelPin(config, model);
+  else if (!sessionModelConfig) await applyHostedModelPin(config, model);
   if (input.publicChildModelRoute?.origin) {
     // Config falls back to its own generator until authentication fills this frame.
     const view = {} as RuntimeContentGeneratorView;

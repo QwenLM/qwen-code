@@ -24,6 +24,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelOption;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelSelection;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSessionOptions;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.SessionModelConfig;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
@@ -162,6 +163,12 @@ public class ManagedAgentStore implements AgentStateStore {
     private ManagedAgentDefinitionStore definitions;
     private ManagedSessionSkills creationSkills;
     private SessionWorktreeStore sessionWorktrees;
+    private ManagedSessionModelConfigs modelConfigs;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setModelConfigs(ManagedSessionModelConfigs value) {
+        this.modelConfigs = value;
+    }
     private com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages;
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
@@ -242,7 +249,8 @@ public class ManagedAgentStore implements AgentStateStore {
                 readBinding(result),
                 result.getString("approval_mode"),
                 result.getString("tool_profile"),
-                result.getString("agent_definition_digest"), result.getInt("public_child_agents_version"));
+                result.getString("agent_definition_digest"), result.getInt("public_child_agents_version"),
+                result.getString("model_config_digest"));
     }
 
     private final RowMapper<TurnSummary> turnSummaryMapper =
@@ -398,12 +406,29 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest) {
+        return insertSessionCommand(tenantId, actorId, operation, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, null);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertSessionCommand(String tenantId, String actorId,
+            String operation, String idempotencyKey, String requestDigest,
+            String agentId, String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig) {
+        if (modelConfig != null) {
+            modelConfigs.requireAdmission(modelConfig);
+        }
         AgentPin pin = resolveAgentPin(tenantId, agentId, requestedRevision,
                 false);
         requireCreationScope(tenantId, idempotencyKey, false);
-        return insertSession(tenantId, operation, idempotencyKey,
+        Admission admission = insertSession(tenantId, operation, idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
                 null, actorId, pin);
+        if (modelConfig != null) {
+            modelConfigs.save(tenantId, admission.sessionId(), modelConfig);
+        }
+        return admission;
     }
 
     @Override
@@ -515,6 +540,21 @@ public class ManagedAgentStore implements AgentStateStore {
             boolean planModeSupported, List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId,
             List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> extensionPins,
             Set<String> extensionLifecycleProfiles, SessionWorktreeStore.Plan worktree) {
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, requestedApprovalMode,
+                approvalSelectionSupported, requestedPlanMode, planModeSupported, skills, publicChildrenSupported,
+                modelId, extensionPins, extensionLifecycleProfiles, worktree, null);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
+            String requestedApprovalMode, boolean approvalSelectionSupported, Boolean requestedPlanMode,
+            boolean planModeSupported, List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId,
+            List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> extensionPins,
+            Set<String> extensionLifecycleProfiles, SessionWorktreeStore.Plan worktree, SessionModelConfig modelConfig) {
         if (!input.isEmpty() && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
@@ -525,6 +565,12 @@ public class ManagedAgentStore implements AgentStateStore {
         if (!existing.isEmpty()) {
             return replayWorkspaceCommand(tenantId, actorId,
                     requestDigest, existing.getFirst(), false);
+        }
+        if (modelConfig != null) {
+            modelConfigs.requireAdmission(modelConfig);
+            if (modelId != null) {
+                throw new ManagedAgentException(400, "invalid_model_config", "Choose either a model ID or a complete configuration.");
+            }
         }
         if (modelId != null && (!"qwen-code".equals(agentId) || !workspaceFilesEnabled
                 || modelCatalog.stream().noneMatch(option -> option.modelId().equals(modelId)))) {
@@ -594,6 +640,9 @@ public class ManagedAgentStore implements AgentStateStore {
         Admission admission = insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
                 target, actorId, pin, null, planMode, modelId);
+        if (modelConfig != null) {
+            modelConfigs.save(tenantId, admission.sessionId(), modelConfig);
+        }
         if (worktree != null) {
             sessionWorktrees.admit(tenantId, actorId, admission.sessionId(), worktree, workspace);
         }
@@ -950,6 +999,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " covered_sequence, gmt_modified) VALUES"
                         + " (?, ?, 'SESSION', '', 0, ?)",
                 tenantId, sessionId, now);
+        if (parent.modelConfigDigest() != null) {
+            modelConfigs.inherit(tenantId, parentSessionId, sessionId);
+        }
         if (snapshot != null) {
             byte[] owner = jdbc.queryForObject("SELECT COALESCE(owner_actor_key, creator_actor_key) FROM ma_session WHERE tenant_id=? AND session_id=?", byte[].class, tenantId, parentSessionId);
             jdbc.update("UPDATE ma_session SET public_child_agents_version=1, owner_actor_key=?, approval_mode=?, selected_approval_mode=NULL, approval_revision=0, model_id=?, model_revision=1 WHERE tenant_id=? AND session_id=?",
@@ -4916,6 +4968,9 @@ public class ManagedAgentStore implements AgentStateStore {
         if (!access.atLeast(WorkspaceAccess.OPERATOR)) {
             throw new ManagedAgentException(403, "session_operation_forbidden",
                     "Only a Workspace operator may change the model");
+        }
+        if (session.modelConfigDigest() != null) {
+            throw new ManagedAgentException(409, "model_config_immutable", "This Session has an immutable model configuration.");
         }
         if (!supported || modelCatalog.isEmpty() || !workspaceFilesEnabled) {
             throw new ManagedAgentException(409, "unsupported_feature", "Model selection is unavailable");

@@ -91,6 +91,77 @@ const TOKEN_B = 'b'.repeat(32);
 describe('HTTP Managed Session store', () => {
   const temporaryDirectories: string[] = [];
 
+  it('reads a model configuration only with an acquired writer and a bound digest', async () => {
+    const server = new FakeManagedSessionStore();
+    const digest = `sha256:${'a'.repeat(64)}`;
+    const response = { digest, config: { api_key: 'synthetic-key' } };
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) =>
+      requestUrl(input).endsWith('/model-config:query')
+        ? jsonResponse(response)
+        : server.fetch(input, init),
+    );
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn,
+    });
+    try {
+      await expect(stores.modelConfig(digest)).rejects.toThrow();
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      await expect(stores.modelConfig('invalid')).rejects.toThrow();
+      await expect(stores.modelConfig(digest)).resolves.toEqual(response);
+      const requests = fetchFn.mock.calls.filter(([input]) =>
+        requestUrl(input).endsWith('/model-config:query'),
+      );
+      expect(requests).toHaveLength(1);
+      const init = requests[0]![1];
+      expect(JSON.parse(String(init?.body))).toEqual({
+        workspaceId: SESSION_KEY.workspaceId,
+        writerId: 'harness-a',
+        writerGeneration: 1,
+        expectedDigest: digest,
+      });
+      expect(
+        new Headers(init?.headers).get('X-Qwen-Managed-Writer-Token'),
+      ).toBe(TOKEN_A);
+      await stores.modelConfig(digest, 'legacy-close');
+      expect(
+        JSON.parse(String(fetchFn.mock.calls.at(-1)?.[1]?.body)),
+      ).toMatchObject({ kind: 'legacy-close', expectedDigest: digest });
+    } finally {
+      await stores.stopLocal();
+    }
+  });
+
+  it.each(['synthetic-secret-invalid-json', 'x'.repeat(17000)])(
+    'bounds and redacts an invalid private model response',
+    async (body) => {
+      const server = new FakeManagedSessionStore();
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn: async (input, init) =>
+          requestUrl(input).endsWith('/model-config:query')
+            ? new Response(body)
+            : server.fetch(input, init),
+      });
+      try {
+        await stores.journalStore.open({ sessionKey: SESSION_KEY });
+        const failure = await stores
+          .modelConfig(`sha256:${'a'.repeat(64)}`)
+          .catch((error: unknown) => error);
+        expect(failure).toBeInstanceOf(Error);
+        expect(String(failure)).not.toContain(body);
+      } finally {
+        await stores.stopLocal();
+      }
+    },
+  );
+
   it.each([false, true])(
     'claims user messages with the current writer and initialOnly=%s',
     async (initialOnly) => {

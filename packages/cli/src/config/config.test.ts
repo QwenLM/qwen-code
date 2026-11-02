@@ -1793,6 +1793,62 @@ describe('loadCliConfig', () => {
     expect(nativeLspServiceMock).not.toHaveBeenCalled();
   });
 
+  it('isolates a host-owned Session connection from same-ID providers, environment and auxiliary models', async () => {
+    process.argv = ['node', 'script.js'];
+    vi.stubEnv('OPENAI_API_KEY', 'ambient-key');
+    vi.stubEnv('OPENAI_BASE_URL', 'https://ambient.example/v1');
+    const argv = await parseArguments();
+    const settings: Settings = {
+      modelProviders: {
+        openai: [
+          {
+            id: 'shared',
+            apiKey: 'catalog-key',
+            baseUrl: 'https://catalog.example/v1',
+          },
+        ],
+      },
+      fastModel: 'ambient-fast',
+      compactionModel: 'ambient-compaction',
+      advisorModel: 'ambient-advisor',
+      modelFallbacks: ['ambient-fallback'],
+    };
+    const modelConfiguration = {
+      authType: AuthType.USE_ANTHROPIC,
+      model: 'shared',
+      apiKey: 'session-key',
+      baseUrl: 'https://session.example/v1',
+      samplingParams: { temperature: 0.4 },
+    };
+    await loadCliConfig(
+      settings,
+      argv,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      { modelConfiguration },
+    );
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        authType: AuthType.USE_ANTHROPIC,
+        generationConfig: modelConfiguration,
+        modelProvidersConfig: {},
+        providerProtocolConfig: {},
+        fastModel: undefined,
+        compactionModel: undefined,
+        advisorModel: undefined,
+        modelFallbacks: [],
+      }),
+    );
+    expect(settings.fastModel).toBe('ambient-fast');
+    expect(settings.modelProviders?.openai?.[0]?.apiKey).toBe('catalog-key');
+    expect(process.env['OPENAI_API_KEY']).toBe('ambient-key');
+  });
+
   it('passes the effective model API to Config at startup', async () => {
     process.argv = ['node', 'script.js'];
     vi.stubEnv('RESPONSES_KEY', 'responses-key');
