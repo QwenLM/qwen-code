@@ -663,14 +663,19 @@ async function runPreparedHostedHarnessTextTurn(
               .update(selected.baseUrl ?? '')
               .digest('hex'),
             providerPin: llmPreparedProviderPin(selected),
-            origin: {
-              modelId: config.getModel(),
-              authType: active.authType!,
-              endpointDigest: createHash('sha256')
-                .update(active.baseUrl ?? '')
-                .digest('hex'),
-              providerPin: llmPreparedProviderPin(active),
-            },
+            ...(!input.modelConfig ||
+            llmPreparedProviderPin(selected) !== llmPreparedProviderPin(active)
+              ? {
+                  origin: {
+                    modelId: config.getModel(),
+                    authType: active.authType!,
+                    endpointDigest: createHash('sha256')
+                      .update(active.baseUrl ?? '')
+                      .digest('hex'),
+                    providerPin: llmPreparedProviderPin(active),
+                  },
+                }
+              : {}),
           },
         };
       });

@@ -44,6 +44,7 @@ import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordin
 import type { HostedModelRequest } from './hosted-model-recovery.js';
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import type { PublicChildModelRoute } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 
 const state = vi.hoisted(() => ({
   config: undefined as unknown as {
@@ -501,6 +502,143 @@ describe('Hosted Harness model boundary', () => {
     ).rejects.toBeInstanceOf(HostedModelUnavailableError);
     expect(model.sendMessageStream).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    'same',
+    'explicit-inherit',
+    'explicit-same',
+    'legacy-explicit-same',
+    'endpoint-drift',
+    'provider-pin-drift',
+  ])(
+    'inherits a configured child route with an empty host registry (%s)',
+    async (scenario) => {
+      const model = config([]);
+      const generation = {
+        model: 'tenant-model',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://tenant.test/v1',
+        apiKey: 'synthetic-tenant-key',
+        samplingParams: { temperature: 0.25 },
+      };
+      const modelConfig = vi.fn().mockResolvedValue(generation);
+      const getAllConfiguredModels = vi.fn().mockReturnValue([]);
+      const switchModel = vi.fn();
+      state.config['getModel'] = () => generation.model;
+      state.config['getModelsConfig'] = () => ({
+        getCurrentAuthType: () => generation.authType,
+        getGenerationConfig: () => generation,
+      });
+      state.config['getContentGeneratorConfig'] = () => generation;
+      state.config['getAllConfiguredModels'] = getAllConfiguredModels;
+      state.config['switchModel'] = switchModel;
+      const resolveForModel = vi.fn().mockResolvedValue({
+        model: generation.model,
+        contentGeneratorConfig: generation,
+      });
+      state.config['getBaseLlmClient'] = () => ({ resolveForModel });
+      let explicitRoute: PublicChildModelRoute | undefined;
+      model.sendMessageStream.mockImplementation(
+        async function* (_request, _signal, _promptId, options) {
+          await (
+            options as { onPreparedRequest: LlmPreparedRequestCallback }
+          ).onPreparedRequest({
+            request: { model: generation.model, contents: [], config: {} },
+            history: [],
+            completedToolCallIds: [],
+            routeSelector: `openai:${generation.model}`,
+            providerPin: llmPreparedProviderPin(generation),
+            promptTokensForClamp: 0,
+          });
+          if (scenario.includes('explicit-') && !explicitRoute) {
+            expect(model.shutdown).not.toHaveBeenCalled();
+            const selector =
+              scenario === 'explicit-inherit' ? 'inherit' : generation.model;
+            const resolved =
+              await setChildModelResolver.mock.calls[0]![0](selector);
+            expect(resolveForModel).toHaveBeenCalledExactlyOnceWith(selector, {
+              failClosed: true,
+            });
+            expect(resolved.modelId).toBe(generation.model);
+            explicitRoute = resolved.route;
+          }
+          yield { type: LlmEventType.Content, value: 'done' };
+          yield { type: LlmEventType.Finished };
+        },
+      );
+      const setChildModelRoute =
+        vi.fn<(modelId: string, route: PublicChildModelRoute) => void>();
+      const setChildModelResolver = vi.fn<
+        (
+          resolve: (selector: string) => Promise<{
+            modelId: string;
+            route: PublicChildModelRoute;
+          }>,
+        ) => void
+      >();
+      await expect(
+        runHostedHarnessTextTurn({
+          ...input,
+          ...(scenario === 'legacy-explicit-same' ? {} : { modelConfig }),
+          toolTurn: {
+            declarations: async () => [{ name: 'agent' }],
+            consumeResults: async () => undefined,
+            execute: vi.fn(),
+            capturesChildModelRoute: () => true,
+            setChildModelRoute,
+            setChildModelResolver,
+          },
+        }),
+      ).resolves.toMatchObject({ text: 'done' });
+      expect(setChildModelRoute).toHaveBeenCalledExactlyOnceWith(
+        generation.model,
+        {
+          authType: generation.authType,
+          endpointDigest: createHash('sha256')
+            .update(generation.baseUrl)
+            .digest('hex'),
+          providerPin: llmPreparedProviderPin(generation),
+        },
+      );
+      let route = { ...setChildModelRoute.mock.calls[0]![1] };
+      if (scenario === 'legacy-explicit-same') {
+        expect(explicitRoute).toEqual({
+          ...route,
+          origin: { modelId: generation.model, ...route },
+        });
+        expect(modelConfig).not.toHaveBeenCalled();
+        expect(
+          vi.mocked(loadCliConfig).mock.calls.at(-1)?.[9],
+        ).not.toHaveProperty('modelConfiguration');
+        return;
+      }
+      if (scenario.startsWith('explicit-')) {
+        expect(explicitRoute).toBeDefined();
+        route = explicitRoute!;
+      }
+      if (scenario === 'endpoint-drift') route.endpointDigest = 'f'.repeat(64);
+      if (scenario === 'provider-pin-drift') route.providerPin = 'f'.repeat(64);
+      const child = runHostedHarnessTextTurn({
+        ...input,
+        modelConfig,
+        modelSelection: { modelId: generation.model, revision: 1 },
+        publicChildModelRoute: route,
+      });
+      if (scenario === 'same' || scenario.startsWith('explicit-')) {
+        await expect(child).resolves.toMatchObject({ text: 'done' });
+        expect(model.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(getAllConfiguredModels).not.toHaveBeenCalled();
+      } else {
+        await expect(child).rejects.toBeInstanceOf(HostedModelUnavailableError);
+        expect(model.sendMessageStream).toHaveBeenCalledOnce();
+      }
+      expect(modelConfig).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[9]).toMatchObject({
+        modelConfiguration: generation,
+      });
+      expect(switchModel).not.toHaveBeenCalled();
+    },
+  );
 
   it('restores a configured endpoint by exact route and uses its registry key', async () => {
     config([]);
