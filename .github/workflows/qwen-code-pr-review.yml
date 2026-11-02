@@ -1200,12 +1200,19 @@ jobs:
           fi
 
           # shellcheck disable=SC2016
+          # Shared by the proxy bypass below and the cohort notice, so the
+          # notice cannot name a host the traffic was not routed through.
+          openai_base_host() {
+            node -e 'console.log(new URL(process.env.OPENAI_BASE_URL).hostname)'
+          }
+
+          # shellcheck disable=SC2016
           configure_qwen_network() {
             local openai_host proxy_bin
             if ! command -v node >/dev/null 2>&1; then
               fail "node is required to parse OPENAI_BASE_URL for the proxy bypass."
             fi
-            openai_host="$(node -e 'console.log(new URL(process.env.OPENAI_BASE_URL).hostname)')"
+            openai_host="$(openai_base_host)"
             if [ -z "$openai_host" ]; then
               fail "Could not parse a hostname from OPENAI_BASE_URL."
             fi
@@ -1671,9 +1678,9 @@ jobs:
             PROMPT="${PROMPT} --comment"
           fi
 
-          # The percent both consumers read — the router's bucket test and the
-          # cohort notice below — normalized once so the notice cannot report a
-          # split the router did not apply. Shape follows SALVAGE_ELAPSED_PERCENT
+          # The percent both consumers read — the bucket test and the cohort
+          # notice below — normalized once so the notice cannot report a split
+          # the bucket test did not apply. Shape follows SALVAGE_ELAPSED_PERCENT
           # (strip leading zeros, bound the digit count) but clamps to the
           # opposite pole: there 100 means cede, here it would mean full
           # rollout, so a typo on a repository variable must land on off. Keep
@@ -1752,13 +1759,13 @@ jobs:
             fi
           fi
           export OPENAI_MODEL OPENAI_BASE_URL OPENAI_API_KEY
-          REVIEW_ENDPOINT_HOST="$(node -e 'console.log(new URL(process.env.OPENAI_BASE_URL).hostname)')"
+          REVIEW_ENDPOINT_HOST="$(openai_base_host)"
           # The run's own record of which cohort served this review: the model
           # is not carried anywhere else a later comparison could read it (the
           # cost ledger has tokens, not a model), so a rollout that cannot be
-          # told apart afterwards is unmeasurable. Both fields are the resolved
-          # ones — the raw percent would certify a cohort the router clamped
-          # away.
+          # told apart afterwards is unmeasurable. Every field is the resolved
+          # one — the raw percent would certify a split the bucket test
+          # clamped away.
           echo "::notice title=Review model::${OPENAI_MODEL:-<CLI default>} (PR #${PR_NUMBER:-?}, canary ${CANARY_PERCENT_EFFECTIVE}%, bucket ${REVIEW_BUCKET}/${REVIEW_BUCKET_COUNT}, cohort ${REVIEW_COHORT}, endpoint ${REVIEW_ENDPOINT_HOST})"
 
           MODEL_ARGS=()

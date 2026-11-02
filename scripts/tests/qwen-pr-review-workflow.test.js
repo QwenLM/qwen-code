@@ -7581,7 +7581,17 @@ describe('review model canary routing', () => {
     expect(notice).toBeGreaterThan(start);
     expect(args).toBeGreaterThan(notice);
     expect(end).toBeGreaterThan(args);
-    const block = run.slice(start, end);
+    // The step logs the pre-override host under its own label; reverting that
+    // rename would report a same-named value the notice no longer means.
+    expect(run).toContain('echo "initial_openai_host=${openai_host}"');
+    expect(run).not.toContain('echo "openai_host=${openai_host}"');
+    // The notice derives its endpoint host from openai_base_host(), which the
+    // workflow defines above configure_qwen_network — outside this slice, and
+    // shared with the proxy bypass. Deleting that helper must fail here.
+    const helperStart = run.indexOf('openai_base_host() {');
+    expect(helperStart).toBeGreaterThan(-1);
+    const helperEnd = run.indexOf('\n}', helperStart) + '\n}'.length;
+    const block = `${run.slice(helperStart, helperEnd)}\n${run.slice(start, end)}`;
 
     // GITHUB_RUN_ID is pinned so the fourth argument cannot be swapped for a
     // per-run value unnoticed: 9999999 % 10 = 9 is outside every percent a
@@ -7622,6 +7632,18 @@ describe('review model canary routing', () => {
         'default-model|--model default-model',
     );
 
+    // A percent that is not a multiple of ten switches the bucket count to
+    // 100, so a notice hard-coding the count prints a bucket the split never
+    // used: 12387 % 100 = 87 is outside 8%, 12307 % 100 = 7 is inside it.
+    expect(serve('canary-model', '8', '12387')).toBe(
+      '::notice title=Review model::default-model (PR #12387, canary 8%, bucket 87/100, cohort default, endpoint default.example.com)\n' +
+        'default-model|--model default-model',
+    );
+    expect(serve('canary-model', '8', '12307')).toBe(
+      '::notice title=Review model::canary-model (PR #12307, canary 8%, bucket 7/100, cohort canary, endpoint default.example.com)\n' +
+        'canary-model|--model canary-model',
+    );
+
     // The notice reports the percent the router APPLIED, not the configured
     // one. Both of these clamp to off, so the raw variable would announce a
     // canary cohort that never ran — '10 ' is the silent spelling, since
@@ -7656,7 +7678,10 @@ describe('review model canary routing', () => {
     const notice = run.indexOf('echo "::notice title=Review model::');
     const args = run.indexOf('MODEL_ARGS=()', notice);
     const end = run.indexOf('\nfi', args) + '\nfi'.length;
-    const block = run.slice(start, end);
+    const helperStart = run.indexOf('openai_base_host() {');
+    expect(helperStart).toBeGreaterThan(-1);
+    const helperEnd = run.indexOf('\n}', helperStart) + '\n}'.length;
+    const block = `${run.slice(helperStart, helperEnd)}\n${run.slice(start, end)}`;
 
     const serve = (canary, percent, pr, canaryUrl, canaryKey, dflt) =>
       execFileSync(
@@ -7705,10 +7730,10 @@ describe('review model canary routing', () => {
       'https://canary.example.com/v1',
       undefined,
     );
-    expect(noKey).toContain('::warning::');
-    expect(noKey).toContain('falling back to the default cohort');
-    expect(noKey).toContain(
-      'default-model|default|https://default.example.com/v1|default-key',
+    expect(noKey).toBe(
+      '::warning::canary endpoint unusable (REVIEW_OPENAI_API_KEY_CANARY missing or QWEN_PR_REVIEW_BASE_URL_CANARY unparseable); falling back to the default cohort.\n' +
+        '::notice title=Review model::default-model (PR #12300, canary 10%, bucket 0/10, cohort default, endpoint default.example.com)\n' +
+        'default-model|default|https://default.example.com/v1|default-key',
     );
 
     // A key without a URL is inert: the model split still applies, the
@@ -7773,9 +7798,10 @@ describe('review model canary routing', () => {
       'not a url',
       'canary-key',
     );
-    expect(badUrl).toContain('::warning::');
-    expect(badUrl).toContain(
-      'default-model|default|https://default.example.com/v1|default-key',
+    expect(badUrl).toBe(
+      '::warning::canary endpoint unusable (REVIEW_OPENAI_API_KEY_CANARY missing or QWEN_PR_REVIEW_BASE_URL_CANARY unparseable); falling back to the default cohort.\n' +
+        '::notice title=Review model::default-model (PR #12300, canary 10%, bucket 0/10, cohort default, endpoint default.example.com)\n' +
+        'default-model|default|https://default.example.com/v1|default-key',
     );
   });
 });
