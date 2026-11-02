@@ -361,9 +361,10 @@ public class ExternalStorageRegistrationTest {
         var request = new com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest(scope, id,
                 com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE_FILES, "workspace");
         var initial = bindings.findOrCreate(request);
-        var seed = initial.getProvisionSeed();
+        var claimed = bindings.claimOperation(initial.getBindingId(), "test", java.time.Duration.ofMinutes(5));
+        var seed = claimed.getProvisionSeed();
         var lease = new com.alibaba.qwen.code.runtimebroker.RuntimeLease(seed.getProvisionalRuntimeId(), java.net.URI.create("http://127.0.0.1:1"), seed.getToken(), seed.getLeaseId(), seed.getEpoch());
-        var ready = bindings.compareAndSet(initial, initial.withAttestation(lease, new com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle(request.getProvisionerKind(), 1, java.util.Map.of("fixture", true)), java.time.Instant.now(), java.time.Instant.now()));
+        var ready = bindings.compareAndSet(claimed, claimed.withAttestation(lease, new com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle(request.getProvisionerKind(), 1, java.util.Map.of("fixture", true)), java.time.Instant.now(), java.time.Instant.now()));
         var runtimeSessions = new com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository(jdbc.getDataSource());
         var session = new com.alibaba.qwen.code.runtimebroker.RuntimeSession(id, UUID.randomUUID().toString(), "bootstrap", scope);
         var record = runtimeSessions.findOrCreate(new com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord(session, ready.getBindingId(), ready.getGeneration(),
