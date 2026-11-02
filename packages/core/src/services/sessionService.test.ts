@@ -1066,7 +1066,10 @@ describe('SessionService', () => {
       const ids = Array.from({ length: 25 }, (_, index) =>
         (index + 1).toString(16).padStart(32, '0'),
       );
-      listIds(...ids);
+      // readdir order is not name order (ext4 returns hash order), so hand the
+      // files over reversed: only the sort's tie-break can restore the order
+      // the cursor filter assumes.
+      listIds(...ids.slice().reverse());
       byMtime({}, Date.now());
       vi.mocked(jsonl.readLines).mockImplementation(async (filePath) => [
         {

@@ -146,7 +146,13 @@ export function invalidateWorkspaceSessionListCache(
 export class InvalidCursorError extends Error {
   constructor(
     cursor: string,
-    kind: 'numeric' | 'organized' | 'live' | 'parent' | 'metadata' = 'numeric',
+    kind:
+      | 'numeric'
+      | 'persisted'
+      | 'organized'
+      | 'live'
+      | 'parent'
+      | 'metadata' = 'numeric',
   ) {
     super(`Invalid cursor: "${cursor}" is not a valid ${kind} cursor`);
     this.name = 'InvalidCursorError';
@@ -181,7 +187,7 @@ export function isPersistedSessionCursor(cursor: string): boolean {
 function parseSessionCursor(cursor: string): number | string | undefined {
   if (cursor === '') return undefined;
   if (!isPersistedSessionCursor(cursor)) {
-    throw new InvalidCursorError(cursor);
+    throw new InvalidCursorError(cursor, 'persisted');
   }
   const trimmed = cursor.trim();
   // A bare offset parses as a number; a composite cursor stays opaque so it
