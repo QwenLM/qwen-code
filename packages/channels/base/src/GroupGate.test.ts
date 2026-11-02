@@ -34,6 +34,30 @@ function envelope(overrides: Partial<Envelope> = {}): Envelope {
 }
 
 describe('GroupGate', () => {
+  it('matches group IDs verbatim unless the platform normalizes them', () => {
+    const gate = new GroupGate('allowlist', { 'QwenLM/qwen-code': {} });
+    expect(
+      gate.check(envelope({ isGroup: true, chatId: 'qwenlm/qwen-code' }))
+        .reason,
+    ).toBe('not_allowlisted');
+  });
+
+  it('admits a differently-cased group ID through the platform normalizer', () => {
+    const gate = new GroupGate(
+      'allowlist',
+      { 'qwenlm/qwen-code': { requireMention: false } },
+      undefined,
+      (groupId) => groupId.toLowerCase(),
+    );
+    expect(
+      gate.check(envelope({ isGroup: true, chatId: 'QwenLM/qwen-code' }))
+        .allowed,
+    ).toBe(true);
+    expect(
+      gate.check(envelope({ isGroup: true, chatId: 'other/repo' })).reason,
+    ).toBe('not_allowlisted');
+  });
+
   it('inherits requireMention by field even when the group has another override', () => {
     const gate = new GroupGate('allowlist', {
       '*': { requireMention: false },

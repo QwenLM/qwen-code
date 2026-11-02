@@ -6909,6 +6909,90 @@ describe('ChatEditor Workflow mode', () => {
     expect(composerCoreState.submitText).not.toHaveBeenCalled();
   });
 
+  it('shows a dismissible chip while Workflow is requested, even mid-response', () => {
+    const onWorkflowModeChange = vi.fn();
+    const props = {
+      ...ready,
+      isRunning: true,
+      disabled: true,
+      visibleToolbarActions: ['addMenu', 'workflowMode', 'model'] as const,
+      onWorkflowModeChange,
+    };
+    const container = renderChatEditor(props);
+    const chip = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-workflow-chip]',
+    )!;
+    expect(chip.getAttribute('aria-pressed')).toBe('true');
+    expect(chip.getAttribute('aria-disabled')).toBeNull();
+    expect(chip.hasAttribute('data-unavailable')).toBe(false);
+    act(() => chip.click());
+    expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(false);
+
+    rerenderChatEditor(container, {
+      ...props,
+      workflowMode: { requested: false, available: true, effective: false },
+    });
+    expect(
+      container.querySelector('[data-web-shell-workflow-chip]'),
+    ).toBeNull();
+  });
+
+  it('keeps the chip dismissible but marked while the requested mode is unavailable', () => {
+    const onWorkflowModeChange = vi.fn();
+    const container = renderChatEditor({
+      workflowModeStatus: 'ready',
+      workflowMode: {
+        requested: true,
+        available: false,
+        effective: false,
+        reason: 'workflow_unavailable',
+      },
+      visibleToolbarActions: ['addMenu', 'workflowMode'],
+      onWorkflowModeChange,
+    });
+    const chip = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-workflow-chip]',
+    )!;
+    expect(chip.hasAttribute('data-unavailable')).toBe(true);
+    act(() => chip.click());
+    expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it('makes the chip inert while a Workflow write is pending', () => {
+    const onWorkflowModeChange = vi.fn();
+    const container = renderChatEditor({
+      ...ready,
+      workflowModePending: true,
+      visibleToolbarActions: ['addMenu', 'workflowMode'],
+      onWorkflowModeChange,
+    });
+    const chip = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-workflow-chip]',
+    )!;
+    expect(chip.getAttribute('aria-disabled')).toBe('true');
+    act(() => chip.click());
+    expect(onWorkflowModeChange).not.toHaveBeenCalled();
+  });
+
+  it('hands focus to the composer when the focused chip goes away', () => {
+    const props = {
+      ...ready,
+      visibleToolbarActions: ['addMenu', 'workflowMode'] as const,
+      onWorkflowModeChange: vi.fn(),
+    };
+    const container = renderChatEditor(props);
+    const chip = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-workflow-chip]',
+    )!;
+    act(() => chip.focus());
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, {
+      ...props,
+      workflowMode: { requested: false, available: true, effective: false },
+    });
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
   it('hides Workflow when the host excludes the add menu', () => {
     const container = renderChatEditor({
       ...ready,
@@ -6916,6 +7000,9 @@ describe('ChatEditor Workflow mode', () => {
     });
     expect(
       container.querySelector('[data-testid="composer-add-menu-trigger"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-workflow-chip]'),
     ).toBeNull();
   });
 

@@ -12,7 +12,6 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelSelection
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
@@ -265,7 +264,7 @@ class ManagedModelSelectionTest {
                     "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}");
         }
         if (shape.equals("recovery")) {
-            transaction().execute(status -> com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).acquireWriter(tenant, session,
+            transaction().execute(status -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).acquireWriter(tenant, session,
                     "model-selection-writer-token-0123456789", new AcquireWriterRequest("ws", "writer", 60_000L)));
             jdbc.update("UPDATE ma_session_head SET recovery_status='BLOCKED' WHERE tenant_id=?", tenant);
         }

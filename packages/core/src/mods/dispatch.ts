@@ -35,6 +35,7 @@ export const MOD_EVENTS = [
   'clock.sleep',
   'command.register',
   'command.run',
+  'prompt.submit',
   'session.cwd',
   'session.end',
   'session.id',
@@ -55,8 +56,12 @@ export const MOD_EVENTS = [
   'ui.log',
   'ui.render',
 ] as const;
-// Events a host raises only where it draws: the load request names the sites.
-export const MOD_HOST_EVENTS: readonly ModEvent[] = ['ui.render'];
+// Events only some hosts raise: the load request names the sites a host
+// draws, and whether it raises `prompt.submit`.
+export const MOD_HOST_EVENTS: readonly ModEvent[] = [
+  'prompt.submit',
+  'ui.render',
+];
 // `$` methods that read rather than dispatch, so no hook hears them.
 export const MOD_READS = ['ui.resolve'] as const;
 export type ModEvent = (typeof MOD_EVENTS)[number];
@@ -127,6 +132,18 @@ export function validateInput(
       !isDeepStrictEqual({ ...value, args: '' }, { ...original, args: '' })
     )
       throw new Error('Mod hook changed pinned event fields.');
+  } else if (event === 'prompt.submit') {
+    if (
+      !only(value, ['text', 'context', 'origin', 'wait', 'turnId']) ||
+      !text(value['text']) ||
+      !validContext(value['context']) ||
+      ['origin', 'wait', 'turnId'].some(
+        (key) => !isDeepStrictEqual(value[key], original[key]),
+      )
+    )
+      throw new Error(
+        'Mod prompt.submit takes { text, context } as a list of texts; origin, wait and turnId are pinned.',
+      );
   } else if (event === 'command.register') {
     if (
       Object.keys(value).some(
@@ -252,6 +269,16 @@ export function validateResult(
     valid =
       Object.keys(value).every((key) => key === echoed) &&
       typeof value[echoed] === 'string';
+  else if (event === 'prompt.submit')
+    valid =
+      'drop' in value
+        ? only(value, ['drop']) && text(value['drop'])
+        : only(value, ['text', 'context', 'origin']) &&
+          text(value['text']) &&
+          validContext(value['context']) &&
+          // An answer may leave the origin out, never set another.
+          (value['origin'] === undefined ||
+            isDeepStrictEqual(value['origin'], input?.['origin']));
   else if (event === 'turn.complete')
     valid =
       only(value, ['text', 'usage']) &&
@@ -267,6 +294,10 @@ export function validateResult(
   }
   if (!valid) throw new Error('Unsupported ' + event + ' result fields.');
 }
+
+// What the model reads beside a prompt: a list of texts.
+const validContext = (value: unknown) =>
+  value === undefined || (Array.isArray(value) && value.every(text));
 
 function validUsage(value: unknown): boolean {
   if (
@@ -395,5 +426,7 @@ export interface ModInvocation {
   recovering: boolean;
   aborted: boolean;
   last?: Promise<unknown>;
+  // A local late-drop fallback does not count as a host continuation.
+  promptFallback?: Promise<unknown>;
   next: (input: ModInput, frames: ModFrame[]) => Promise<unknown>;
 }
