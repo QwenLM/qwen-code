@@ -41,6 +41,7 @@ describe('notes compaction commit boundary', () => {
       getAdditionalContext: () => 'Preserve the hook context.',
     });
     const post = vi.fn().mockResolvedValue(undefined);
+    const invalidatePendingExtract = vi.fn();
     const recorder = {
       getSessionId: () => 'session',
       assertNotesWriterReady: vi.fn(),
@@ -67,6 +68,7 @@ describe('notes compaction commit boundary', () => {
         getFunctionDeclarations: () =>
           SESSION_CONTEXT_TOOL_NAMES.map((name) => ({ name })),
       }),
+      getMemoryManager: () => ({ invalidatePendingExtract }),
       getHookSystem: () => ({
         firePreCompactEvent: pre,
         firePostCompactEvent: post,
@@ -100,7 +102,16 @@ describe('notes compaction commit boundary', () => {
       notes: revision,
       latestUser: state.latestUser,
     });
-    return { chat, config, recorder, original, pre, post, revision };
+    return {
+      chat,
+      config,
+      recorder,
+      original,
+      pre,
+      post,
+      revision,
+      invalidatePendingExtract,
+    };
   }
 
   it('uses literal notes with hooks and paired pending input, with no summarization call', async () => {
@@ -154,7 +165,8 @@ describe('notes compaction commit boundary', () => {
   });
 
   it('does not install history or fire PostCompact until its exact checkpoint is durable', async () => {
-    const { chat, recorder, original, post } = fixture();
+    const { chat, recorder, original, post, invalidatePendingExtract } =
+      fixture();
     let accept!: (id: string) => void;
     vi.mocked(recorder.recordChatCompressionStrict).mockImplementation(
       () =>
@@ -168,9 +180,14 @@ describe('notes compaction commit boundary', () => {
     );
     expect(chat.getHistory()).toEqual(original);
     expect(post).not.toHaveBeenCalled();
+    expect(invalidatePendingExtract).not.toHaveBeenCalled();
     accept('committed-window');
     expect((await transition).strategy).toBe('notes');
     expect(chat.getHistory()).not.toEqual(original);
+    expect(invalidatePendingExtract).toHaveBeenCalledExactlyOnceWith(
+      'session',
+      expect.anything(),
+    );
     expect(post).toHaveBeenCalledOnce();
   });
 

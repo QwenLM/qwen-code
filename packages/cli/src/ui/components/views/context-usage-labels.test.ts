@@ -28,6 +28,8 @@ const CATEGORY_LABELS = [
   'Built-in tools',
   'MCP tools',
   'Memory files',
+  'Instruction files',
+  'Auto memory',
   'Skills',
   'Startup context',
   'Messages',

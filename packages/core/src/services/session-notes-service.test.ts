@@ -57,6 +57,9 @@ describe('local session notes', () => {
       getSessionId: () => sessionId,
       getProjectRoot: () => workspace,
       getCliVersion: () => 'test',
+      getModel: () => 'test',
+      getAuthType: () => undefined,
+      getApprovalMode: () => 'default',
       getResumedSessionData: () => undefined,
       getSessionService: () => sessions,
       getChatCompression: () => ({ strategy: 'notes' }),
@@ -155,6 +158,42 @@ describe('local session notes', () => {
       ).toBe(2);
     },
   );
+
+  it('invalidates notes with a deleted source in both the live recorder and cold replay', async () => {
+    recorder.recordUserMessage(
+      'keep the constraint',
+      undefined,
+      undefined,
+      'first',
+    );
+    const revision = await write();
+    recorder.recordUserMessage(
+      'surviving request',
+      undefined,
+      undefined,
+      'second',
+    );
+    recorder.observeNotesInput(createUserContent('surviving request'));
+    await recorder.flush();
+    const snapshot = await recorder.getMessageGroups();
+    await recorder.deleteMessageGroups({
+      snapshot: snapshot.snapshot,
+      groupIds: [snapshot.groups[0].id],
+    });
+    expect((await reader.readNotesState(sessionId)).notes).toBeUndefined();
+    expect(recorder.getSessionNotesState().notes).toBeUndefined();
+    expect(recorder.getSessionNotesState().latestUser?.text).toBe(
+      'surviving request',
+    );
+    expect(await notes.read()).toBeUndefined();
+    await expect(
+      notes.requestReset(
+        revision.revision,
+        respond(ToolNames.NEW_CONTEXT, ''),
+        signal,
+      ),
+    ).rejects.toThrow();
+  });
 
   it('persists a bounded canonical revision before projecting Markdown and restores it cold', async () => {
     recorder.recordUserMessage('keep the constraint');

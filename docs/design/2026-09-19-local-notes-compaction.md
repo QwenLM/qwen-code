@@ -319,6 +319,12 @@ The common transition follows this order:
    completion event and `PostCompact` once. Restart after a crash uses the same
    checkpoint. An abort after durable commit does not revert the persisted state.
 
+The strict checkpoint retains the summary/context prefix lengths, prompt IDs,
+and directory-context indices used by current replay and message deletion.
+A successful notes commit also discards any parked memory-extraction snapshot.
+Deleting a message group invalidates a saved notes revision if its covered leaf
+or original window no longer belongs to the active branch, matching cold replay.
+
 One compaction attempt owns the hooks, including a notes attempt that falls
 back to summary. Reuse already obtained `PreCompact` context on fallback rather
 than firing a side-effecting hook twice. A summary fallback in a notes-enabled

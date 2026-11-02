@@ -256,7 +256,12 @@ In addition to the core `spawnOrAttach`, `sendPrompt`, `cancelSession`,
 
 `BridgeSpawnRequest.sessionScope` was renamed from `'per-client'` to
 `'thread'`. `BridgeRestoredSession` now carries `compactedReplay`,
-`liveJournal`, and `lastEventId`. Those replay fields are a bounded in-memory
+`liveJournal`, optional `lifecycleReplay` and `lifecycleReplayIncomplete`, and
+`lastEventId`. The lifecycle supplement contains at most 1024 metadata-only
+frames from the in-memory replay window when refreshing a persisted page; it
+can overlap that page. A true incomplete flag means unavailable, degraded, or
+truncated lifecycle coverage. Neither the supplement nor a false flag promises
+complete history or currently running status. Those replay fields are a bounded in-memory
 window for live sessions, capped by `BridgeOptions.compactedReplayMaxBytes`
 (default 4 MiB, hard ceiling 256 MiB). The in-flight `liveJournal` is
 separately capped by `BridgeOptions.maxJournalEvents` (default 10 000 replay

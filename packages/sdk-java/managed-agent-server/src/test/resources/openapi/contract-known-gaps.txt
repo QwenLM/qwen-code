@@ -1,9 +1,0 @@
-# Known gaps between the server and
-# src/main/resources/openapi/managed-agent-public-api.openapi.json.
-#
-# ManagedAgentApiContractTest fails on any drift that is not listed here and on
-# any listed gap that no longer occurs. Close a gap by fixing the server, then
-# delete its line. Never delete a schema field to make a gap disappear.
-# D1 to D3 were tracked in https://github.com/QwenLM/qwen-code/issues/12793;
-# the remaining Stage D slices are tracked in
-# https://github.com/QwenLM/qwen-code/issues/12867.

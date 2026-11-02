@@ -27,6 +27,88 @@ export class HostedTextDeltaStream {
     private readonly turnId: string,
   ) {}
 
+  bindMessageId(messageId: string): void {
+    if (this.firstSequence !== undefined)
+      throw new Error('Stream message still owns published deltas.');
+    this.messageId = messageId;
+    this.ordinal = 0;
+  }
+
+  async retractOriginal(
+    messageId: string,
+    source: {
+      sourceBootId: string;
+      sourceEventEpoch: string;
+      sourceActivation: ManagedSession['activation'];
+    },
+  ): Promise<void> {
+    const authority = this.session.authority;
+    const events = authority.eventsInSequenceRange(
+      1,
+      authority.committedSequence,
+    );
+    if (
+      events.some(
+        (event) =>
+          event.kind === 'message.retracted' &&
+          event.payload['messageId'] === messageId,
+      )
+    )
+      return;
+    const deltas = events.filter(
+      (event) =>
+        event.kind === 'message.delta' &&
+        event.payload['messageId'] === messageId &&
+        event.payload['turnId'] === this.turnId,
+    );
+    if (!deltas.length) return;
+    if (
+      deltas.some(
+        (event) =>
+          event.subject?.type !== 'activation' ||
+          event.subject.activationId !== source.sourceActivation.activationId ||
+          event.subject.epoch !== source.sourceActivation.epoch,
+      )
+    )
+      throw new Error('Original stream owner conflicts.');
+    const fromSequence = deltas[0].sequence;
+    const throughSequence = deltas.at(-1)!.sequence;
+    const activation = this.session.activation;
+    const commandId = `assistant-retract:${this.turnId}:${messageId}`;
+    await authority.appendExecutionEvent(
+      {
+        operation: 'assistantRetract',
+        commandId,
+        sessionKey: authority.sessionHeader.sessionKey,
+        contentDigest: createHash('sha256')
+          .update(`${messageId}:${fromSequence}:${throughSequence}`)
+          .digest('hex'),
+      },
+      (sequence) => ({
+        v: 1,
+        sequence,
+        eventId: commandId,
+        sessionKey: authority.sessionHeader.sessionKey,
+        kind: 'message.retracted',
+        occurredAt: Date.now(),
+        subject: {
+          type: 'activation',
+          scopeId: activation.activationId,
+          ...activation,
+        },
+        payload: {
+          messageId,
+          turnId: this.turnId,
+          fromSequence,
+          throughSequence,
+          sourceBootId: source.sourceBootId,
+          sourceEventEpoch: source.sourceEventEpoch,
+        },
+      }),
+      { class: 'harness', activation },
+    );
+  }
+
   /** The messageId the in-flight assistant message must commit under. */
   takeMessageId(): string | undefined {
     const id = this.messageId;

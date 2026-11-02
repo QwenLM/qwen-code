@@ -70,6 +70,7 @@ interface Shape {
    * pointer then carries one bridge sentence.
    */
   skillDeferred?: boolean;
+  bridgeAvailable?: boolean;
 }
 
 /**
@@ -83,6 +84,7 @@ async function buildTool({
   todo = true,
   skills = true,
   skillDeferred = false,
+  bridgeAvailable = skillDeferred,
 }: Shape = {}): Promise<AgentTool> {
   const subagentManager = {
     listSubagents: vi.fn().mockResolvedValue(subagents),
@@ -109,15 +111,17 @@ async function buildTool({
       ? {
           getSkillManager: () => ({}),
           getToolRegistry: () => ({
-            getAllToolNames: () =>
-              skillDeferred
+            getAllToolNames: () => [
+              ToolNames.AGENT,
+              ToolNames.SKILL,
+              ...(bridgeAvailable
                 ? [
-                    ToolNames.AGENT,
-                    ToolNames.SKILL,
                     ToolNames.TOOL_SEARCH,
                     ToolNames.TOOL_CALL,
+                    ToolNames.LIST_AGENTS,
                   ]
-                : [ToolNames.AGENT, ToolNames.SKILL],
+                : []),
+            ],
             isPermissionDeferred: (name: string) =>
               skillDeferred && name === ToolNames.SKILL,
           }),
@@ -163,7 +167,9 @@ describe('AgentTool per-turn size budgets', () => {
     const tool = await buildTool();
     expect(tool.shouldDefer).toBe(true);
     expect(tool.alwaysLoad).toBe(false);
-    expect(tool.description).toContain(
+    expect(tool.description).not.toContain('In Direct mode:');
+    const bridgedTool = await buildTool({ skillDeferred: true });
+    expect(bridgedTool.description).toContain(
       'In Direct mode: If the list_agents tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
     );
   });
@@ -194,7 +200,7 @@ describe('AgentTool per-turn size budgets', () => {
     expect(tool.description.length).toBeLessThanOrEqual(7_900);
     // The bridge sentence is the only difference from the pointer shape, so
     // assert the delta too: a reworded or duplicated bridge sentence moves it.
-    const pointer = await buildTool();
+    const pointer = await buildTool({ bridgeAvailable: true });
     const bridge = tool.description.length - pointer.description.length;
     // Floored as well as capped, and both bounds are load-bearing: a resolver
     // change that stops emitting the bridge sentence lands this delta at 0,

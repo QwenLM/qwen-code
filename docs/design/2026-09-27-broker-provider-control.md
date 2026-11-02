@@ -58,12 +58,13 @@ Session's workspace is refused the same way, since core's shell tool would ask
 and a preapproved Session never asks. The worker checks again just before the
 call runs, resolving the path afresh the way the kernel follows it, and settles
 the call as an error if a link has since moved it out. `mediaContext` is
-admitted for `read_file` only; it binds the
-tool's model-facing description to the Harness's modalities, while the read
-itself decides media delivery from this worker's own content-generator
-modalities, which it does not have, so a media file is still answered with the
-unsupported-type placeholder. Delivering media through the worker is follow-up
-work. Foreign Session references and unknown fields are refused
+admitted for `read_file` only. Its invocation-local effective modality view
+governs both description and actual reads, enabling images and PDFs only when
+requested; audio/video remain disabled. The worker does not initialize a model
+or upload through an inherited Omni environment opt-in. PDFs retain native-byte,
+text-first and image-rendering behavior within the
+[provider media budget](2026-10-07-managed-runtime-provider-media.md).
+Foreign Session references and unknown fields are refused
 before dispatch. The Broker also refuses, with 400
 `runtime_control_operation_invalid`, an operation with an unpaired surrogate in
 any key or string, which the JSON writer would otherwise send as `?`.
@@ -81,7 +82,7 @@ Control requests and responses are bounded at 8 MiB for `bind-history`,
 `checkpoint` and `history`, and 1 MiB for other operations. Tool arguments
 also have the existing core limit of 256 KiB of canonical JSON; fitting the
 outer envelope does not bypass that limit. An `execute`, `status` or `cancel`
-result that would exceed its operation's response budget is fitted rather
+non-media result that would exceed its operation's response budget is fitted rather
 than refused: the worker first evicts oldest progress events (announced
 through `firstAvailableSeq`/`progressGap`), then cuts bulk text fields
 head-and-tail with an inline notice and sets `truncated` on shell displays.
@@ -89,8 +90,14 @@ When even fully cut text could not fit beside what the cut cannot reach, a
 structured display (such as an edit's file diff, which only feeds the UI), then
 artifacts, which also only feed a client surface, and then hook results are
 dropped before any text is cut, and content the cut
-cannot reach at all (inline media) turns the model content into an explicit
-stub.
+cannot reach at all turns the non-media model content into an explicit stub.
+Media reads have a fixed 768 KiB aggregate base64 ceiling and a 896 KiB complete
+ToolResult ceiling. ReadFile settles budget errors as `FILE_TOO_LARGE` before
+Runtime terminal retention. Accepted media-bearing ToolResults stay identical
+through execute/status/cancel fitting; progress and auxiliary Hook details may
+be omitted, but a Hook stop decision remains. Invalid or unadmitted media is a
+protocol fault, never a rewritten successful stub. The 1 MiB envelope cap is
+unchanged. This does not enable the public Hosted raw file loop's media path.
 The cut is measured in JSON-encoded UTF-8 bytes, the unit of the wire limit,
 and removes whole code points, so a surrogate pair is never split; the notice
 reports how many characters (code points) were omitted. When several fields

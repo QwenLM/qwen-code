@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isInternalCodeModeToolResult } from '@qwen-code/qwen-code-core/transcriptRecords';
 import { isShellResultDisplay } from '@qwen-code/qwen-code-core/shellResult';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -138,7 +139,7 @@ function calculateFileStats(records: ChatRecord[]): FileOperationStats {
   for (const record of records) {
     if (
       record.type !== 'tool_result' ||
-      record.subtype === 'code_mode_tool_result' ||
+      isInternalCodeModeToolResult(record) ||
       !record.toolCallResult
     )
       continue;

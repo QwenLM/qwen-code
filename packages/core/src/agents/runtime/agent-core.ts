@@ -17,6 +17,11 @@
  */
 
 import {
+  createToolLifecycle,
+  type ToolLifecycleEvent,
+  type ToolExecutionStatus,
+} from '../../telemetry/tool-lifecycle.js';
+import {
   captureHookExecutionOwner,
   runWithHookExecutionOwner,
   type HookExecutionOwner,
@@ -384,8 +389,10 @@ Important Rules:
  - When the task is complete, return the final result as a normal model response (not a tool call) and stop.`;
   }
 
-  // Context files (QWEN.md + output-language.md) keep the subagent aligned
-  // with project conventions; the volatile auto-memory section stays last.
+  // Context files and memory policy keep the subagent aligned. The policy
+  // promises the changing legacy catalog at the request tail: LlmChat appends
+  // it for in-process runs, and peer-process executors (codex/ACP) must
+  // append `getAutoMemoryContext()` themselves.
   return assembleSystemPrompt({
     base: finalPrompt,
     contextFiles: runtimeContext.getUserMemory(),
@@ -1028,6 +1035,10 @@ export class AgentCore {
     // provider id would keep deterministic providers in a tool-result loop.
     const duplicateProviderToolCallResponseIds = new Set<string>();
     let stickyMaxOutputTokens: number | undefined;
+    // Whether THIS round's stream produced a chunk (model acceptance). The
+    // round finally uses it to tell a pre-acceptance failure apart from the
+    // round that just took a reminder for the NEXT round.
+    let roundSawModelChunk = false;
     const loopDetector = new LoopDetectionService(this.runtimeContext);
     loopDetector.reset(
       `${this.runtimeContext.getSessionId()}#${this.subagentId}`,
@@ -1072,6 +1083,7 @@ export class AgentCore {
       try {
         const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${this.promptOrdinal++}`;
         turnCounter += 1;
+        roundSawModelChunk = false;
         retryWaitScope = this.createRetryWaitScope(
           turnCounter,
           promptId,
@@ -1201,6 +1213,13 @@ export class AgentCore {
 
           // Handle chunk events
           if (streamEvent.type === 'chunk') {
+            // First chunk of the round: the model accepted the request. If
+            // it carries a prepared loop-protection reminder, its delivery
+            // accounting settles here — the same model-acceptance boundary
+            // the core client commits at. Later chunks no-op once the
+            // prepared receipt is consumed.
+            roundSawModelChunk = true;
+            loopDetector.commitLoopReminderDelivery();
             const resp = streamEvent.value;
             // Track the response ID for tool call correlation
             if (resp.responseId) {
@@ -1379,6 +1398,8 @@ export class AgentCore {
             break;
           }
           currentMessages = toolCallResult.messages;
+          const toolPartCount =
+            currentMessages[currentMessages.length - 1]?.parts?.length ?? 0;
 
           const externalInputs = this.drainExternalInputs(options);
           if (externalInputs.length > 0) {
@@ -1398,6 +1419,24 @@ export class AgentCore {
           if ((currentMessages[0]?.parts?.length ?? 0) === 0) {
             terminateMode = AgentTerminateMode.ERROR;
             break;
+          }
+          // Right after the tool results, before any external input, as in
+          // the core client and the daemon.
+          const loopReminder = loopDetector.takeLoopReminder();
+          if (loopReminder) {
+            currentMessages[currentMessages.length - 1].parts!.splice(
+              toolPartCount,
+              0,
+              { text: loopReminder },
+            );
+            // The reminder text rides in currentMessages toward the next
+            // round's model call, but that round can still exit at the
+            // abort/maxTurns/time checks or fail in prepareTools() before
+            // any request is attempted. Like the core client, the delivery
+            // stays prepared here and only settles when that round crosses
+            // the model-acceptance boundary (first chunk above); a round that
+            // exits before its first chunk abandons it in the round finally,
+            // so `reminded` telemetry credits a warning the model actually saw.
           }
         } else {
           const immediateExternalInputs = this.drainExternalInputs(options);
@@ -1491,6 +1530,16 @@ export class AgentCore {
         }
         throw error;
       } finally {
+        // The round exited without a chunk proving model acceptance
+        // (prepareTools/send rejection, zero-chunk break, abort before the
+        // first chunk): put the prepared reminder delivery back so
+        // `reminded` stays un-credited and the streak's warning stays
+        // eligible for a later round. The round that just TOOK a reminder
+        // for the next one saw its own chunks and skips this; a committed
+        // delivery makes the abandon a no-op.
+        if (!roundSawModelChunk) {
+          loopDetector.abandonLoopReminderDelivery();
+        }
         retryWaitScope?.close();
         // Reverse-cleanup fires whether the iteration ended normally, broke,
         // returned, or threw — preventing parent-listener accumulation on
@@ -1768,6 +1817,13 @@ export class AgentCore {
     currentRound: number;
     durationMs?: number;
   }): void {
+    const lifecycle =
+      canonicalToolName(params.name) === ToolNames.TODO_WRITE
+        ? undefined
+        : createToolLifecycle(this.runtimeContext, params.callId, params.name, {
+            subagentId: this.subagentId,
+            persist: false,
+          }).finish('error', 'not_started');
     this.eventEmitter?.emit(AgentEventType.TOOL_CALL, {
       subagentId: this.subagentId,
       round: params.currentRound,
@@ -1786,6 +1842,7 @@ export class AgentCore {
       round: params.currentRound,
       callId: params.callId,
       name: params.name,
+      lifecycle,
       success: false,
       error: params.errorMessage,
       responseParts: params.responseParts,
@@ -2186,6 +2243,29 @@ export class AgentCore {
     // Build scheduler
     let resolveBatch: (() => void) | null = null;
     const emittedCallIds = new Set<string>();
+    const toolLifecycles = new Map<
+      string,
+      ReturnType<typeof createToolLifecycle>
+    >();
+    const executionResults = new Map<
+      string,
+      { status: ToolExecutionStatus; durationMs: number }
+    >();
+    const startedLifecycles = new Set<string>();
+    const publishLifecycle = (
+      callId: string,
+      lifecycle: ToolLifecycleEvent | undefined,
+    ) => {
+      if (!lifecycle) return;
+      this.eventEmitter?.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
+        subagentId: this.subagentId,
+        round: currentRound,
+        callId,
+        outputChunk: '',
+        lifecycle,
+        timestamp: Date.now(),
+      });
+    };
     // pidMap: callId → PTY PID, populated by onToolCallsUpdate when a shell
     // tool spawns a PTY. Shared with outputUpdateHandler via closure so the
     // PID is included in TOOL_OUTPUT_UPDATE events for interactive shell support.
@@ -2306,6 +2386,24 @@ export class AgentCore {
     };
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
+      onToolExecutionStarted: (callId, epoch) => {
+        startedLifecycles.add(callId);
+        publishLifecycle(
+          callId,
+          toolLifecycles
+            .get(callId)
+            ?.start(epoch, executionRequestByCallId.get(callId)?.name),
+        );
+      },
+      onToolExecutionSettled: (callId, status, durationMs) => {
+        executionResults.set(callId, { status, durationMs });
+        if (emittedCallIds.has(callId)) {
+          publishLifecycle(
+            callId,
+            toolLifecycles.get(callId)?.finish('cancelled', status, durationMs),
+          );
+        }
+      },
       shouldObserveProducer: (callId) => !emittedCallIds.has(callId),
       // `declaredToolNames` is the batch's own list, computed above from the
       // `toolsList` sent to the model. See `CoreToolSchedulerOptions.hasSkillTool`
@@ -2347,12 +2445,28 @@ export class AgentCore {
           // Record stats
           this.recordToolCallStats(toolName, success, duration, errorMessage);
 
+          const execution = executionResults.get(call.request.callId);
+          const lifecycle =
+            startedLifecycles.has(call.request.callId) && !execution
+              ? undefined
+              : toolLifecycles
+                  .get(call.request.callId)
+                  ?.finish(
+                    call.status === 'cancelled'
+                      ? 'cancelled'
+                      : success
+                        ? 'success'
+                        : 'error',
+                    execution?.status ?? 'not_started',
+                    execution?.durationMs,
+                  );
           // Emit tool result event
           this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
             subagentId: this.subagentId,
             round: currentRound,
             callId: call.request.callId,
             name: toolName,
+            lifecycle,
             success,
             error: errorMessage,
             responseParts: call.response.responseParts,
@@ -2575,6 +2689,15 @@ export class AgentCore {
           : {}),
       };
 
+      if (canonicalToolName(toolName) !== ToolNames.TODO_WRITE) {
+        toolLifecycles.set(
+          callId,
+          createToolLifecycle(this.runtimeContext, callId, toolName, {
+            subagentId: this.subagentId,
+            persist: false,
+          }),
+        );
+      }
       if (canonicalToolName(toolName) === ToolNames.TOOL_CALL) {
         pendingToolCallStarts.add(callId);
       } else {
@@ -2630,11 +2753,22 @@ export class AgentCore {
             responseParts,
           });
 
+          const execution = executionResults.get(req.callId);
           this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
             subagentId: this.subagentId,
             round: currentRound,
             callId: req.callId,
             name: toolName,
+            lifecycle:
+              startedLifecycles.has(req.callId) && !execution
+                ? undefined
+                : toolLifecycles
+                    .get(req.callId)
+                    ?.finish(
+                      'cancelled',
+                      execution?.status ?? 'not_started',
+                      execution?.durationMs,
+                    ),
             success: false,
             error: errorMessage,
             responseParts,
@@ -2975,6 +3109,7 @@ export class AgentCore {
     emitter.on(
       AgentEventType.TOOL_OUTPUT_UPDATE,
       (event: AgentToolOutputUpdateEvent) => {
+        if (event.lifecycle) return;
         this.liveOutputs.set(event.callId, event.outputChunk);
         if (event.pid !== undefined) {
           this.shellPids.set(event.callId, event.pid);

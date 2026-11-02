@@ -9,6 +9,7 @@ import {
   hydrateString,
   substituteHookVariables,
   performVariableReplacement,
+  replacePluginRootInMarkdown,
 } from './variables.js';
 import { HookType, type HookDefinition } from '../hooks/types.js';
 import * as fs from 'node:fs';
@@ -376,6 +377,78 @@ describe('performVariableReplacement', () => {
     expect(fs.readFileSync(path.join(extDir, 'file.txt'), 'utf-8')).toBe(
       'content',
     );
+  });
+
+  describe('replacePluginRootInMarkdown', () => {
+    /** Writes `files`, runs the markdown-only plugin-root pass, returns a reader. */
+    function replaceRootIn(
+      files: Record<string, string>,
+      {
+        dir = 'root-ext',
+        installedDir,
+      }: { dir?: string; installedDir?: string } = {},
+    ) {
+      const extDir = writeExt(files, dir);
+      replacePluginRootInMarkdown(extDir, installedDir);
+      const read = (rel: string) =>
+        fs.readFileSync(path.join(extDir, rel), 'utf-8');
+      return { extDir, read };
+    }
+
+    it('should replace ${CLAUDE_PLUGIN_ROOT} in markdown files', () => {
+      const { extDir, read } = replaceRootIn({
+        'skills/hello/SKILL.md':
+          'Run `${CLAUDE_PLUGIN_ROOT}/scripts/hello.sh` to greet.',
+      });
+
+      expect(read('skills/hello/SKILL.md')).toBe(
+        `Run \`${extDir}/scripts/hello.sh\` to greet.`,
+      );
+    });
+
+    it('should edit a staging directory using a separate installed path', () => {
+      const installedDir = path.join(testDir, 'installed-root');
+      const { read } = replaceRootIn(
+        { 'README.md': '${CLAUDE_PLUGIN_ROOT}/config.json' },
+        { dir: 'root-staging', installedDir },
+      );
+
+      expect(read('README.md')).toBe(`${installedDir}/config.json`);
+    });
+
+    it('should preserve replacement metacharacters in the installed path', () => {
+      const installedDir = path.join(testDir, "root-installed-$&-$`-$'");
+      const { read } = replaceRootIn(
+        { 'README.md': '${CLAUDE_PLUGIN_ROOT}/config.json' },
+        { dir: 'root-meta', installedDir },
+      );
+
+      expect(read('README.md')).toBe(`${installedDir}/config.json`);
+    });
+
+    it('should leave shell scripts untouched', () => {
+      const { read } = replaceRootIn({
+        'scripts/hello.sh': 'echo "${CLAUDE_PLUGIN_ROOT}/scripts/hello"',
+      });
+
+      expect(read('scripts/hello.sh')).toContain(
+        '${CLAUDE_PLUGIN_ROOT}/scripts/hello',
+      );
+    });
+
+    it('should not rewrite ```! fences, which stay hook-gated', () => {
+      const { read } = replaceRootIn({ 'README.md': '```!\nnpm install\n```' });
+
+      expect(read('README.md')).toBe('```!\nnpm install\n```');
+    });
+
+    it('should not rewrite .claude paths, which stay hook-gated', () => {
+      const { read } = replaceRootIn({
+        'README.md': 'See ~/.claude/settings.json',
+      });
+
+      expect(read('README.md')).toBe('See ~/.claude/settings.json');
+    });
   });
 
   // performVariableReplacement only processes .md files, so these all use one.

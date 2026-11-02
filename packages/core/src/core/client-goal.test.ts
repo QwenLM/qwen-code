@@ -273,6 +273,11 @@ function setupGoalClient() {
     getModel: vi.fn(() => 'test-model'),
     getSkipNextSpeakerCheck: vi.fn(() => false),
     getSkipLoopDetection: vi.fn(() => false),
+    getMaxToolCallsPerTurn: vi.fn(() => Number.POSITIVE_INFINITY),
+    getToolRegistry: vi.fn(() => ({
+      getAllToolNames: () => [],
+      getTool: () => undefined,
+    })),
     startActiveTodoWorkChain: vi.fn(),
     startAutomaticActiveTodoWorkChain: vi.fn(),
     endAutomaticActiveTodoWorkChain: vi.fn(),

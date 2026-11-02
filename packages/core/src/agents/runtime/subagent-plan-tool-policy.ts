@@ -53,6 +53,7 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
+  ToolNames.AUTOFIX_PR,
   ToolNames.LIST_AGENTS,
   ToolNames.TASK_STOP,
   ToolNames.SEND_MESSAGE,
@@ -81,12 +82,6 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   // fan-out: a subagent spawned by Workflow that calls Workflow would create
   // O(k^n) subagents.
   ToolNames.WORKFLOW,
-  ToolNames.THREAD_POST,
-  ToolNames.THREAD_WAIT,
-  ToolNames.THREAD_BLOCK,
-  ToolNames.THREAD_REVIEW,
-  ToolNames.THREAD_CREATE,
-  ToolNames.THREAD_READ,
   // Recall state and shared memory writes belong to the parent session.
   ToolNames.SEARCH_MEMORY,
   ToolNames.MANAGE_MEMORY,
@@ -176,6 +171,7 @@ export const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
+  ToolNames.AUTOFIX_PR,
   ToolNames.LIST_AGENTS,
   ToolNames.TASK_STOP,
   ToolNames.TEAM_CREATE,
@@ -198,12 +194,6 @@ export const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   // for nested agents — without WORKFLOW here, a teammate-launched
   // workflow re-arms the O(k^n) fan-out the subagent set prevents.
   ToolNames.WORKFLOW,
-  ToolNames.THREAD_POST,
-  ToolNames.THREAD_WAIT,
-  ToolNames.THREAD_BLOCK,
-  ToolNames.THREAD_REVIEW,
-  ToolNames.THREAD_CREATE,
-  ToolNames.THREAD_READ,
   // Teammates also share the leader's memory state.
   ToolNames.SEARCH_MEMORY,
   ToolNames.MANAGE_MEMORY,

@@ -54,12 +54,25 @@ function stripOutputControlChars(text: string): string {
   return out;
 }
 
-type OutputTailResult =
+export type BackgroundShellOutputTail =
   | { text: string; truncated: boolean }
   | { error: string }
   | undefined;
 
-function readOutputTail(outputFile: string): OutputTailResult {
+/**
+ * Reads the last {@link MAX_NOTIFICATION_OUTPUT_TAIL_BYTES} bytes of a
+ * background shell's captured stdout/stderr.
+ *
+ * The completion notification uses this to show the model what the shell
+ * printed; the daemon's shell-task detail route reads the same tail so the
+ * user sees the same bytes. `undefined` means no displayable text (an empty
+ * or non-regular file, or a tail containing only stripped control characters
+ * and trailing whitespace). `{ error }` means the read failed, including a
+ * missing file.
+ */
+export function readBackgroundShellOutputTail(
+  outputFile: string,
+): BackgroundShellOutputTail {
   let fd: number | undefined;
   try {
     // O_NOFOLLOW (or the compensating identity check where the flag does
@@ -537,7 +550,7 @@ export class BackgroundShellRegistry {
         `<result>${escapeXml(stripDisplayControlChars(entry.error))}</result>`,
       );
     }
-    const outputTail = readOutputTail(entry.outputFile);
+    const outputTail = readBackgroundShellOutputTail(entry.outputFile);
     if (outputTail) {
       if ('error' in outputTail) {
         xmlParts.push(`<output-tail error="unreadable" />`);

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+
 import type {
   Config,
   ConfigInitializeOptions,
@@ -15,6 +17,7 @@ import { computeInitialTurnFromHistory } from '@qwen-code/qwen-code-core/service
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
+import { ModSession } from '../services/mod-session.js';
 import { ControlContext } from './control/ControlContext.js';
 import { ControlDispatcher } from './control/ControlDispatcher.js';
 import { ControlService } from './control/ControlService.js';
@@ -36,6 +39,7 @@ import {
   isControlCancel,
 } from './types.js';
 import { createMinimalSettings } from '../config/settings.js';
+import { readHumanInputFromSdkMessage } from './sdk-human-input.js';
 import type { LoadedSettings } from '../config/settings.js';
 import {
   runNonInteractive,
@@ -81,6 +85,7 @@ class Session {
   private promptIdCounter: number | null = null;
   private inputReader: StreamJsonInputReader;
   private outputAdapter: StreamJsonOutputAdapter;
+  private readonly modSession?: ModSession;
   private controlContext: ControlContext | null = null;
   private dispatcher: ControlDispatcher | null = null;
   private controlService: ControlService | null = null;
@@ -117,6 +122,7 @@ class Session {
       config,
       config.getIncludePartialMessages(),
     );
+    this.modSession = ModSession.create(config, settings, this.outputAdapter);
     this.unsubscribeRecordingFailure = subscribeToHeadlessChatRecordingFailures(
       config,
       this.outputAdapter,
@@ -152,9 +158,11 @@ class Session {
    * carries several turns under a single id: the key the rewind mapping from
    * #9466 anchors on (it fails closed to a positional walk when ids repeat),
    * and the `prompt_id` on persisted `ui_telemetry` records, which is what
-   * the next resume reads back to seed from. File-history snapshots are not
-   * at stake on this path — checkpointing defaults off outside interactive
-   * sessions, so headless turns write none.
+   * the next resume reads back to seed from. Headless turns write no
+   * file-history snapshots themselves, but one retained from an earlier
+   * interactive turn outlives the conversation-only rewind that discarded its
+   * turn, so this seed still reads `file_history_snapshot` ordinals — or the
+   * replacement turn re-wears that identity (#11408).
    *
    * ACP seeds through this same helper (`primeTurnFromHistory`). Interactive
    * mode seeds too, but by its own inline count of resumed user turns
@@ -337,6 +345,7 @@ class Session {
       getActiveTurnAbortSignal: () => this.activeTurnAbortController?.signal,
       settings: this.settings,
       permissionMode: this.config.getApprovalMode(),
+      waitForInitialization: () => this.waitForInitialization(),
       onInterrupt: () => this.handleInterrupt(),
       onContinueLastTurn: () => this.requestContinueLastTurn(),
     });
@@ -408,7 +417,7 @@ class Session {
     try {
       // Dispatch the initialize request first
       // This registers SDK MCP servers in the control context
-      await this.dispatcher?.dispatch(request);
+      await this.dispatcher?.dispatch(request, true);
 
       // Get sendSdkMcpMessage callback from SdkMcpController
       // This callback is used by McpClientManager to send MCP messages
@@ -431,21 +440,25 @@ class Session {
 
   /**
    * Direct mode initialization flow
-   * Initializes config and enqueues the first user message
+   * Enqueues the first user message, then initializes config
    */
   private async initializeDirectMode(
     userMessage: CLIUserMessage,
   ): Promise<void> {
     this.ensureInitializationPromise();
     try {
+      // Enqueue the first user message before awaiting initialization. Any
+      // message that arrives while config is still initializing is enqueued by
+      // the read loop, so waiting here would let it overtake this one and run
+      // first. processUserMessage awaits initialization before touching
+      // config, so enqueuing early cannot start work too soon.
+      this.enqueueUserMessage(userMessage);
+
       // Initialize config
       await this.ensureConfigInitialized();
 
       // Initialization complete!
       this.completeInitialization();
-
-      // Enqueue the first user message for processing
-      this.enqueueUserMessage(userMessage);
     } catch (error) {
       debugLogger.error('[Session] Direct mode initialization failed:', error);
       this.failInitialization(
@@ -456,7 +469,7 @@ class Session {
 
   /**
    * Handle control request asynchronously (fire-and-forget from main loop).
-   * Errors are handled internally and responses sent by dispatcher.
+   * Errors are handled internally.
    */
   private handleControlRequestAsync(request: CLIControlRequest): void {
     const dispatcher = this.getDispatcher();
@@ -465,9 +478,43 @@ class Session {
       return;
     }
 
+    if (
+      request.request.subtype === 'initialize' &&
+      this.initializationResolve !== null
+    ) {
+      this.outputAdapter.send({
+        type: 'control_response',
+        response: {
+          subtype: 'error',
+          request_id: request.request_id,
+          error: 'Session initialization is in progress. Try again when ready.',
+        },
+      });
+      return;
+    }
+
     // Fire-and-forget: dispatch runs concurrently
     // The dispatcher's pendingIncomingRequests tracks completion
-    void dispatcher.dispatch(request).catch((error) => {
+    void (async () => {
+      if (request.request.subtype === 'initialize') {
+        try {
+          await this.waitForInitialization();
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          this.outputAdapter.send({
+            type: 'control_response',
+            response: {
+              subtype: 'error',
+              request_id: request.request_id,
+              error: `Session initialization failed: ${message}`,
+            },
+          });
+          return;
+        }
+      }
+      await dispatcher.dispatch(request);
+    })().catch((error) => {
       debugLogger.error('[Session] Control request dispatch error:', error);
       // Error response is already sent by dispatcher.dispatch()
     });
@@ -497,6 +544,7 @@ class Session {
 
   private async processUserMessage(userMessage: CLIUserMessage): Promise<void> {
     const input = extractUserMessageText(userMessage);
+    const humanInput = readHumanInputFromSdkMessage(userMessage);
     if (!input) {
       debugLogger.debug('[Session] No text content in user message');
       return;
@@ -510,6 +558,8 @@ class Session {
 
     try {
       await runNonInteractive(this.config, this.settings, input, promptId, {
+        ...(humanInput ? { humanInput } : {}),
+        modSession: this.modSession,
         abortController: turnAbortController,
         adapter: this.outputAdapter,
         controlService: this.controlService ?? undefined,
@@ -550,11 +600,16 @@ class Session {
 
     const chat = llmClient.getChat();
     const historyTail =
+      chat.getHistoryForRecovery?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
       chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
       chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT);
+    const cancellation = getLastApiPromptCancellation(
+      chat.getHistoryShallow(),
+      await this.config.getChatRecordingService()!.readActiveTranscriptChain(),
+    );
     const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
       sessionId: this.sessionId,
-      apiHistory: historyTail,
+      apiHistory: cancellation ? [] : historyTail,
       completedToolCallIds: chat.getCompletedToolCallIds?.(),
     });
     debugLogger.info('[Session] requestContinueLastTurn recovery', {
@@ -604,6 +659,7 @@ class Session {
       const promptId = this.getNextPromptId();
       turnAbortController = this.startTurn();
       await runNonInteractive(this.config, this.settings, '', promptId, {
+        modSession: this.modSession,
         abortController: turnAbortController,
         adapter: this.outputAdapter,
         controlService: this.controlService ?? undefined,
@@ -675,6 +731,7 @@ class Session {
         combinedModelText,
         promptId,
         {
+          modSession: this.modSession,
           abortController: turnAbortController,
           adapter: this.outputAdapter,
           controlService: this.controlService ?? undefined,
@@ -950,7 +1007,8 @@ class Session {
     }
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
+    await this.modSession?.close();
     this.unsubscribeRecordingFailure();
   }
 
@@ -1100,6 +1158,6 @@ export async function runNonInteractiveStreamJson(
     await manager.run();
   } finally {
     await settleChatRecording(config, { finalize: true });
-    manager.dispose();
+    await manager.dispose();
   }
 }

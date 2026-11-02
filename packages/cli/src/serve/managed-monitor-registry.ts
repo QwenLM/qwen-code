@@ -33,6 +33,10 @@ export class ManagedMonitorRegistry {
     return this.physical.size;
   }
 
+  get hasActivity(): boolean {
+    return this.physical.hasActivity;
+  }
+
   /** Read-only: a watching entry holds its Session's Runtime. */
   hasHolds(sessionId: string): boolean {
     return this.physical.hasHolds(sessionId);

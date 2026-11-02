@@ -1,7 +1,7 @@
 {
   "source": "https://models.dev/api.json",
   "fetchedAt": "2026-10-03T13:57:42.041Z",
-  "projection": 2,
+  "projection": 3,
   "models": {
     "claude-fable-5": {
       "context": 1000000,
@@ -675,10 +675,34 @@
       "output": 98304,
       "modalities": {}
     },
+    "glm-4-5v": {
+      "context": 64000,
+      "output": 16384,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
     "glm-4-6": {
       "context": 204800,
       "output": 131072,
       "modalities": {}
+    },
+    "glm-4-6v": {
+      "context": 128000,
+      "output": 32768,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
+    },
+    "glm-4-6v-flash": {
+      "context": 128000,
+      "output": 32768,
+      "modalities": {
+        "image": true,
+        "video": true
+      }
     },
     "glm-4-7": {
       "context": 204800,

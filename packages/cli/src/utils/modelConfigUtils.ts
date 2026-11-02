@@ -22,6 +22,7 @@ import {
   stripRuntimeSnapshotPrefix,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from '../config/settings.js';
+import { getBuiltinDeepSeekReasoning } from '@qwen-code/qwen-code-core/core/deepseek-reasoning.js';
 import { sanitizeProviderBaseUrl } from './acpModelUtils.js';
 
 /**
@@ -475,6 +476,12 @@ export function resolveCliGenerationConfig(
       : undefined;
   if (reasoningDisabled && generationConfig.thinkingMandatory !== true) {
     generationConfig.reasoning = false;
+    if (getBuiltinDeepSeekReasoning({ ...generationConfig, authType })) {
+      resolved.sources['reasoning'] = {
+        kind: 'settings',
+        settingsPath: 'model.reasoningEffort',
+      };
+    }
   } else if (reasoningEffort && generationConfig.reasoning !== false) {
     generationConfig.reasoning = {
       ...(generationConfig.reasoning ?? {}),

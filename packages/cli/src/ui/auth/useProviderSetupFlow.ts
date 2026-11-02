@@ -91,6 +91,7 @@ export interface ProviderSetupState {
 
   // Model IDs
   modelIds: string;
+  explicitModelIds: string[];
   modelIdsError: string | null;
 
   // Advanced config
@@ -137,6 +138,7 @@ export function useProviderSetupFlow(
   const [apiKey, setApiKey] = useState('');
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
   const [modelIds, setModelIds] = useState('');
+  const [explicitModelIds, setExplicitModelIds] = useState<string[]>([]);
   const [modelIdsError, setModelIdsError] = useState<string | null>(null);
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [modalityEnabled, setModalityEnabled] = useState(false);
@@ -196,12 +198,11 @@ export function useProviderSetupFlow(
       setApiKey(prefillKey);
 
       setApiKeyError(null);
-      // Built-in defaults go to the recommended list (checked), user-added
-      // custom IDs go to the input box. The ModelIdsStep component splits
-      // flow.state.modelIds automatically based on config.models.
+      // Keep saved choices distinguishable from defaults when discovery omits an ID.
       const defaultIds = getDefaultModelIds(config);
       const customIds = existingModelIds ?? [];
-      setModelIds([...defaultIds, ...customIds].join(', '));
+      setExplicitModelIds(customIds);
+      setModelIds([...new Set([...defaultIds, ...customIds])].join(', '));
       setModelIdsError(null);
       setThinkingEnabled(false);
       setModalityEnabled(false);
@@ -392,7 +393,7 @@ export function useProviderSetupFlow(
       if (provider?.validateApiKey) {
         const err = provider.validateApiKey(trimmed, baseUrl);
         if (err) {
-          setApiKeyError(err);
+          setApiKeyError(t(err));
           return false;
         }
       }
@@ -416,6 +417,7 @@ export function useProviderSetupFlow(
 
   const changeModelIds = useCallback((value: string) => {
     setModelIds(value);
+    setExplicitModelIds(normalizeModelIds(value));
     setModelIdsError(null);
   }, []);
 
@@ -431,6 +433,7 @@ export function useProviderSetupFlow(
         return false;
       }
       setModelIds(normalized.join(', '));
+      setExplicitModelIds(normalized);
       setModelIdsError(null);
       submitOrNext({ ...overrides, modelIds: normalized });
       return true;
@@ -594,6 +597,7 @@ export function useProviderSetupFlow(
     apiKey,
     apiKeyError,
     modelIds,
+    explicitModelIds,
     modelIdsError,
     thinkingEnabled,
     modalityEnabled,

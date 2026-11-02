@@ -194,6 +194,7 @@ function serializeWorkflowTask(
   return {
     kind: 'workflow',
     id: entry.runId,
+    ...optionalField('parentSessionId', entry.parentSessionId),
     ...optionalField('toolUseId', entry.toolUseId),
     ...optionalField('workflowName', entry.workflowName),
     ...optionalField('sourceRef', entry.sourceRef && { ...entry.sourceRef }),
@@ -251,6 +252,7 @@ function serializeWorkflowSnapshot(
   return {
     kind: 'workflow',
     id: snapshot.runId,
+    ...optionalField('parentSessionId', snapshot.parentSessionId),
     isHistorical: true,
     ...optionalField('argsOmitted', snapshot.argsOmitted),
     // The daemon's own answer, so a client never offers a retry or rerun it

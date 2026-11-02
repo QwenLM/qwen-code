@@ -283,6 +283,11 @@ Cursor 绑定冻结的源快照和有效分支；rewind 或 transcript 替换使
    使普通压缩会清理的缓存失效，并只发送一次 completion event 和 `PostCompact`。
    崩溃后恢复使用同一份 checkpoint。Durable commit 后的 abort 不回滚已持久化状态。
 
+严格写入的 checkpoint 保留当前回放和消息删除所需的 summary/context prefix 长度、
+prompt ID 和目录上下文索引。Notes 提交成功后也会丢弃暂存的记忆提取快照。
+删除消息组后，如果笔记覆盖的 leaf 或原始窗口已不在有效分支上，
+该笔记 revision 会失效，与冷启动回放保持一致。
+
 一次压缩尝试统一拥有 hooks，包括 notes 失败后回退 summary 的情况。
 回退时复用已经拿到的 `PreCompact` 上下文，避免重复执行有副作用的 hook。
 Notes 会话内的 summary fallback 也使用同一 durable commit 边界。

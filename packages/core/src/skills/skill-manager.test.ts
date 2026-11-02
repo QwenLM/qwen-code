@@ -471,6 +471,78 @@ describe('SkillManager', () => {
     });
   });
 
+  describe('controlled bundled Generated UI writer', () => {
+    const skillsDir = path.join('/bundle', 'generated-ui', 'skills');
+    const prepareWriter = () => {
+      vi.spyOn(mockConfig, 'getBundledGeneratedUiSkillsDir').mockReturnValue(
+        skillsDir,
+      );
+      const status = vi
+        .spyOn(mockConfig, 'getBundledGeneratedUiStatus')
+        .mockReturnValue({ version: 1, enabled: true });
+      mockReaddirByDir({ [skillsDir]: [dirent('generated-ui')] });
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(
+        skillFile(
+          'generated-ui',
+          'Generated UI writer',
+          'Write a generated document.',
+        ),
+      );
+      mockParseYaml.mockImplementation((source: string) => yaml.parse(source));
+      return status;
+    };
+
+    it('discovers the controlled source and direct bundled loading uses the same source', async () => {
+      prepareWriter();
+      expect((await manager.listSkills()).map((skill) => skill.name)).toEqual([
+        'generated-ui',
+      ]);
+      const skill = await manager.loadSkill('generated-ui', 'bundled');
+      expect(skill?.filePath).toBe(
+        path.join(skillsDir, 'generated-ui', 'SKILL.md'),
+      );
+      expect(skill?.level).toBe('bundled');
+    });
+
+    it('filters a cached writer after a live policy restriction', async () => {
+      const status = prepareWriter();
+      expect(await manager.loadSkill('generated-ui', 'bundled')).not.toBeNull();
+      status.mockReturnValue({
+        version: 1,
+        enabled: false,
+        reason: 'policy-disabled',
+      });
+      expect(await manager.loadSkill('generated-ui', 'bundled')).toBeNull();
+      expect(await manager.loadSkill('generated-ui')).toBeNull();
+      expect(
+        await manager.loadSkillForRuntime('generated-ui', 'bundled'),
+      ).toBeNull();
+      expect(await manager.listSkills()).toEqual([]);
+      expect(manager.getCachedSkills()).toEqual([]);
+    });
+
+    it('never discovers a writer when the feature is unavailable, including Safe mode', async () => {
+      vi.spyOn(mockConfig, 'isSafeMode').mockReturnValue(true);
+      mockReaddirByDir({ [skillsDir]: [dirent('generated-ui')] });
+      expect(await manager.listSkills()).toEqual([]);
+      expect(await manager.loadSkill('generated-ui', 'bundled')).toBeNull();
+      expect(fs.readdir).not.toHaveBeenCalledWith(skillsDir, expect.anything());
+    });
+
+    it('keeps an independent user skill with the same name available', async () => {
+      mockReaddirByDir({ [USER_QWEN_DIR]: [dirent('generated-ui')] });
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(
+        skillFile('generated-ui', 'Personal skill', 'Personal body.'),
+      );
+      mockParseYaml.mockImplementation((source: string) => yaml.parse(source));
+      const skill = await manager.loadSkill('generated-ui');
+      expect(skill?.level).toBe('user');
+      expect(mockConfig.isSkillEnabled(skill!)).toBe(true);
+    });
+  });
+
   describe('listSkills', () => {
     beforeEach(() => {
       // Other provider dirs (.agents, .cursor, .codex, .claude) list empty.

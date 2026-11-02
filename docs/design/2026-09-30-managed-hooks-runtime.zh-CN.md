@@ -135,6 +135,54 @@ trusted function Hook 取消或超时时，Runtime 最多等待一秒，确认�
 是结束证据，仅有 abort signal 不是。超过宽限期仍未结束的回调保留 unknown 结果和
 原 Runtime hold，不重放。原生 Legacy function Hook 的取消行为保持不变。
 
+可信函数 handler 模块本身的求值也有有界预算：`max(manifest function 超时（毫秒），500 ms 下限)`，
+下限避免冷启动但健康的求值被一份为 callback 声明的预算误判。该预算只约束会让出
+事件循环的求值：顶层代码同步阻塞的模块会跑赢自己的计时器，因为 Runtime 只能停止
+等待，无法中断加载。ESM 求值无法取消，求值超时或 abort 只弃用等待：operation 在
+Runtime 侧结算——释放其在 16 个准入名额中占用的那一个，并解除 Runtime `close()`
+挂起——但在模块顶层代码实际结束前持续保留 hold；永不 settle 的求值在 worker
+生命周期内保留 hold。Runtime 以专用编码
+`managed_hook_module_evaluation_timeout` 报告求值超时、以
+`managed_hook_module_evaluation_abandoned` 报告因取消或关停而弃用的求值；Harness
+将两者都以 outcome_unknown 围闭，而不是对可能仍在运行的代码出具
+not_started_proven——或提交确定的取消。该围闭不是终态：求值确定结束后，Runtime
+会以此时可证明的事实重发回执——模块已加载时 callback 可证明从未派发，因此因取消或
+关停而弃用的求值重发 cancelled 结果、超预算的求值重发 timeout 结果；模块本身失败时
+重发 `managed_hook_handler_unavailable`——于是下一次 status 轮询即可核对该记录——无论这次
+轮询来自显式 status 调用、来自回合路径在拒绝新 occurrence 之前的一次核对、来自被阻塞
+Session 在拒绝下一个 prompt 之前的对账，还是来自 drain。带结果的重发还会结算被围闭
+搁浅的那个回合，Session 保持可用、可删除；而重发的
+`managed_hook_handler_unavailable` 会对账为 `not_started_proven`，这会解除 hold 并让
+DELETE 完成，但记录仍为 `recovery_blocked`，因此该 Session 的后续回合仍需恢复。只有永不结束的求值才会在
+worker 生命周期内保留该围闭及其恢复屏障。求值失败的模块以
+`managed_hook_handler_unavailable` 结算，
+Harness 记为 not_started_proven——无论是在任何顶层语句执行前被拒绝、在顶层执行
+中途被拒绝，还是在完整求值之后才被拒绝（例如形状或 handlerRevision 校验）；
+因此该证明并不覆盖任何已经发生的顶层副作用。
+Harness 释放此前 owner 时 Broker 可能拒绝：因 owner 已不存在而拒绝
+（404 `runtime_session_not_found`）时记为已释放、写入 debug 日志且不再重试。被 Harness 以
+outcome_unknown 围闭的执行永远不会被 drain 越过、也不会进入释放集合，因此 hold
+围闭的拒绝只会来自在围闭存在之前就把被弃用求值认证为已取消的 Runtime——准确说，由 Hook
+执行引起的 hold 围闭拒绝满足这一排他性。同一编码也会为该 Runtime Session
+上未完成的非 Hook 工作作答——MCP、Monitor 或后台任务的 hold、provider
+侧的未决工作，或进行中的工具调用——基于记录的释放门并不检查这些。两处 pending-work
+生产者都用专用编码 `managed_runtime_owner_hold_pending` 命名该情况：该 Runtime
+Session 仍持有任何类型的未完成工作。通用的 conflict 编码仍是身份不匹配
+或任何未预期 provider 错误也会共用的兜底值，因此只有该专用编码被读作 hold，其余拒绝
+一律按原样向上传播。被 hold 围闭的
+owner 拒绝（409 `managed_runtime_owner_hold_pending`）时本次跳过、写入 daemon 的 stderr
+且不记为已释放，该 Hook Session 之后每个回合都会再次尝试释放。获取路径上的其余
+任何拒绝都会抛出并阻塞替换 activation；而后续回合的重试趟改为吸收并上报该拒绝、
+让 owner 保持围闭状态——因为那一趟运行在已获取的 Session 上，不能因一个陈旧
+owner 而让健康的活回合失败。拥有自己 Runtime owner 的 Hook Session 在 close 时，
+无论被围闭的是它自己还是此前 owner，都以 Hook recovery-required 条件作答，而不是
+抛出裸 Broker 拒绝——于是 DELETE 与 detach 会指明被保留的 hold，并保持 Session
+处于 attached、可重试状态，而不是把它删除。与 MCP 共用 owner 的 Hook Session
+不释放该 broker，其释放由 MCP session 作答，仍报告通用的 close 失败。在该共用形态下，
+从 Hook 记录恢复的此前 owner 仍由该 Hook Session 负责释放：其中某个 owner 的 hold
+围闭同样被吸收、上报并在后续回合重试，close 在尝遍其余 owner 之后以 Hook
+recovery-required 条件作答。
+
 Workspace 的 Write/Edit 备份和显式撤销共用 Session 的 Hook Runtime owner，
 快照仍保存真实 prompt 身份。已确认准入的 async Hook 可以与 history bind、prepare
 及 snapshot 并行；撤销和释放 owner 仍要求全部 Hook 执行结束。撤销也排除 Hook
@@ -173,8 +221,10 @@ H2 明确接受真正 unknown 带来的无期限可用性损失。SessionEnd 或
 结果未知时，DELETE 返回 503，保留已 attach 的 Session 和原 Workspace owner。
 重试观察同一个已保存的 occurrence，不重新派发。Detach 也要求全部 Hook 副作用
 已结算。保留的 owner 可能阻塞同 Workspace 的其他 Session 的工具执行，不会阻塞
-不同 Workspace 的 Runtime worker。未知操作在 worker 生命周期内持续占用 16 个
-准入名额之一并保留 hold；包括已结算结果在内的全部已保存回执都计入 4096 条生命周期
+不同 Workspace 的 Runtime worker。从未在 Runtime 侧结算的未知操作在 worker
+生命周期内保留 hold，并持续占用 16 个准入名额之一；module 求值被弃用的
+operation 则在 Runtime 侧结算、释放其准入名额，仅在模块顶层代码结束前保留
+hold。包括已结算结果在内的全部已保存回执都计入 4096 条生命周期
 上限。超时、用户取消、DELETE 或进程替换都不能证明完成或允许重放。H2 不提供运维
 放弃 unknown 的接口；回执对账和有持久化屏障的回收在
 [#13133](https://github.com/QwenLM/qwen-code/issues/13133) 跟踪。这是明确接受的恢复

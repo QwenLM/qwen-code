@@ -13,8 +13,11 @@ import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { ManagedCsiMount } from './managed-csi-mount.js';
+import { parseManagedCsiFileBoot } from './managed-csi-file-envelope.js';
+import type { ManagedSshRuntime } from './managed-runtime-ssh-worker.js';
+import * as csiFileWorker from './managed-csi-file-worker.js';
 import {
   MANAGED_CSI_ACK_PATH,
   parseManagedCsiBoot,
@@ -39,6 +42,13 @@ import {
   testInternals,
 } from './managed-runtime-ledger.js';
 import { ManagedToolExecutor } from './managed-runtime-tool-executor.js';
+import {
+  MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+  MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
+} from './managed-extension-profile.js';
+import { MANAGED_SHELL_PUBLISHER_ROUTE } from './managed-shell-publisher.js';
+import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
+import { MANAGED_TOOL_RESULT_PROTOCOL } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 
 const boot = Object.freeze({
   type: 'boot',
@@ -154,6 +164,40 @@ async function waitForReady(
 }
 
 describe('Managed Runtime attestation worker', () => {
+  it('refuses an SSH runtime for every CSI boot before worker delegation', async () => {
+    const fixtures = JSON.parse(
+      readFileSync(
+        new URL(
+          './contracts/managed-csi-files-v2.fixtures.json',
+          import.meta.url,
+        ),
+        'utf8',
+      ),
+    ) as { boot: unknown; executionBoot5: unknown; finalizationBoot6: unknown };
+    const start = vi
+      .spyOn(csiFileWorker, 'startManagedCsiFileWorker')
+      .mockRejectedValue(new Error('private worker delegation must not run'));
+    onTestFinished(() => start.mockRestore());
+    const sshRuntime = {} as ManagedSshRuntime;
+    for (const document of [
+      fixtures.boot,
+      fixtures.executionBoot5,
+      fixtures.finalizationBoot6,
+    ]) {
+      const csi = parseManagedCsiFileBoot(document);
+      await expect(
+        startManagedRuntimeAttestationWorker(
+          csi,
+          undefined,
+          undefined,
+          true,
+          sshRuntime,
+        ),
+      ).rejects.toThrow('Managed Runtime worker boot payload is invalid.');
+    }
+    expect(start).not.toHaveBeenCalled();
+  });
+
   it('reads one bounded closed boot payload from stdin', async () => {
     const serialized = JSON.stringify(boot);
     const parsed = await readManagedRuntimeWorkerBoot(
@@ -336,40 +380,47 @@ describe('Managed Runtime attestation worker', () => {
     expect(unknown.headers.get('cache-control')).toBe('no-store');
   });
 
-  it('creates its ledger from the launch environment, arms its watch, and never leaks the path', async () => {
-    const sandbox = await mkdtemp(path.join(tmpdir(), 'qwen-worker-ledger-'));
-    const ledgerFile = path.join(sandbox, 'worker.json');
-    const previous = process.env[MANAGED_RUNTIME_LEDGER_ENV];
-    const forWorkspace = vi.spyOn(ManagedToolExecutor, 'forWorkspace');
-    const watch = vi.spyOn(ManagedRuntimeLedger.prototype, 'watch');
-    onTestFinished(async () => {
-      forWorkspace.mockRestore();
-      watch.mockRestore();
-      await worker.close().catch(() => undefined);
-      if (previous === undefined) {
-        delete process.env[MANAGED_RUNTIME_LEDGER_ENV];
-      } else {
-        process.env[MANAGED_RUNTIME_LEDGER_ENV] = previous;
-      }
-      await rm(sandbox, { recursive: true, force: true });
-    });
-    process.env[MANAGED_RUNTIME_LEDGER_ENV] = ledgerFile;
+  it.each([boot, contextFixtures.boot])(
+    'creates a boot v$version ledger from the launch environment and never leaks its path',
+    async (document) => {
+      const sandbox = await mkdtemp(path.join(tmpdir(), 'qwen-worker-ledger-'));
+      const ledgerFile = path.join(sandbox, 'worker.json');
+      const previous = process.env[MANAGED_RUNTIME_LEDGER_ENV];
+      const forWorkspace = vi.spyOn(ManagedToolExecutor, 'forWorkspace');
+      const watch = vi.spyOn(ManagedRuntimeLedger.prototype, 'watch');
+      onTestFinished(async () => {
+        forWorkspace.mockRestore();
+        watch.mockRestore();
+        await worker.close().catch(() => undefined);
+        if (previous === undefined) {
+          delete process.env[MANAGED_RUNTIME_LEDGER_ENV];
+        } else {
+          process.env[MANAGED_RUNTIME_LEDGER_ENV] = previous;
+        }
+        await rm(sandbox, { recursive: true, force: true });
+      });
+      process.env[MANAGED_RUNTIME_LEDGER_ENV] = ledgerFile;
 
-    const worker = await startManagedRuntimeAttestationWorker(boot);
+      const worker = await startManagedRuntimeAttestationWorker(document);
 
-    expect(forWorkspace).toHaveBeenCalledWith(
-      boot.workspaceCwd,
-      boot.runtimeInstanceId,
-      expect.objectContaining({ ledger: expect.any(ManagedRuntimeLedger) }),
-    );
-    expect(watch).toHaveBeenCalledTimes(1);
-    // The path is for the worker alone: no Shell command inherits the name
-    // of the file that accounts for it.
-    expect(process.env[MANAGED_RUNTIME_LEDGER_ENV]).toBeUndefined();
-    expect(
-      testInternals.readLedgerDocument(ledgerFile)?.worker.incarnation,
-    ).toBe(boot.runtimeIncarnation);
-  });
+      if (document.version === 1) {
+        expect(forWorkspace).toHaveBeenCalledWith(
+          document.workspaceCwd,
+          document.runtimeInstanceId,
+          expect.objectContaining({ ledger: expect.any(ManagedRuntimeLedger) }),
+        );
+      } else expect(forWorkspace).not.toHaveBeenCalled();
+      expect(watch).toHaveBeenCalledTimes(1);
+      // The path is for the worker alone: no Shell command inherits the name
+      // of the file that accounts for it.
+      expect(process.env[MANAGED_RUNTIME_LEDGER_ENV]).toBeUndefined();
+      expect(
+        testInternals.readLedgerDocument(ledgerFile)?.worker.incarnation,
+      ).toBe(document.runtimeIncarnation);
+      await worker.close();
+      expect(testInternals.readLedgerDocument(ledgerFile)).toBeUndefined();
+    },
+  );
 
   it('rejects an invalid identity before opening a listener', async () => {
     const listeners = () =>
@@ -437,6 +488,82 @@ describe('Managed Runtime attestation worker', () => {
     child.kill('SIGTERM');
     expect(await exited).toBe(process.platform === 'win32' ? null : 0);
   }, 30_000);
+
+  it.each([
+    'workspace',
+    ...(process.platform === 'darwin' || process.platform === 'linux'
+      ? ['extensions']
+      : []),
+  ])(
+    'registers the Shell publisher in the native %s worker and requires an active Session',
+    async (profile) => {
+      const directory = await mkdtemp(path.join(tmpdir(), 'qwen-publisher-'));
+      onTestFinished(() => rm(directory, { recursive: true, force: true }));
+      const workspace = path.join(directory, 'workspace');
+      await mkdir(workspace);
+      const contextBoot: ManagedContextBoot = {
+        ...contextFixtures.boot,
+        mountRoot: workspace,
+        capabilityDigest:
+          profile === 'extensions'
+            ? process.platform === 'linux'
+              ? MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST
+              : MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST
+            : WORKSPACE_CAPABILITY_DIGEST,
+        ...(profile === 'extensions'
+          ? {
+              managedExtensions: {
+                enabled: true,
+                mode:
+                  process.platform === 'linux'
+                    ? 'linux-cgroup'
+                    : 'developer-process-group',
+                cacheDirectory: path.join(directory, 'private-cache'),
+                ...(process.platform === 'linux'
+                  ? { cgroupRoot: directory }
+                  : {}),
+              },
+            }
+          : {}),
+      };
+      const child = spawnWorker();
+      child.stdin?.end(JSON.stringify(contextBoot));
+      const ready = await waitForReady(child);
+      const response = await fetch(
+        ready.url + MANAGED_SHELL_PUBLISHER_ROUTE.path,
+        {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${contextBoot.token}`,
+            'cache-control': 'no-store',
+            'content-type': 'application/json',
+            'x-qwen-managed-lease-id': contextBoot.leaseId,
+            'x-qwen-managed-lease-epoch': String(contextBoot.epoch),
+          },
+          body: JSON.stringify({
+            protocolVersion: 3,
+            toolResult: MANAGED_TOOL_RESULT_PROTOCOL,
+            sessionId: 'uninstalled-session',
+            publisher: {
+              url: 'http://127.0.0.1:43123/internal/hosted-shell-publisher/v1',
+              token: 'a'.repeat(43),
+            },
+          }),
+        },
+      );
+      expect(response.status).toBe(409);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(await response.json()).toEqual({
+        code: 'managed_runtime_identity_conflict',
+      });
+      const exited = new Promise<number | null>((resolve) =>
+        child.once('exit', resolve),
+      );
+      child.kill('SIGTERM');
+      expect(await exited).toBe(process.platform === 'win32' ? null : 0);
+    },
+    30_000,
+  );
 
   it.each([
     ['boot v2 with an extra key', { ...contextFixtures.boot, extra: true }],
@@ -598,6 +725,158 @@ const csiAckFixture = JSON.parse(
   request: ManagedCsiAckRequest;
 };
 
+describe('CSI root descriptor ownership in worker startup', () => {
+  function setup() {
+    const boot = parseManagedCsiBoot(csiAckFixture.boot);
+    vi.stubEnv('QWEN_POD_UID', csiAckFixture.expectedPod.uid);
+    vi.stubEnv('QWEN_POD_NAMESPACE', csiAckFixture.expectedPod.namespace);
+    vi.stubEnv('QWEN_NODE_NAME', csiAckFixture.expectedPod.nodeName);
+    const observe = vi
+      .spyOn(ManagedCsiMount.prototype, 'observe')
+      .mockResolvedValue({
+        mountId: '1',
+        device: '259:8',
+        source: '/dev/nvme0n1',
+        diskSerial: boot.storage.diskSerial,
+        rootDevice: '66312',
+        rootInode: '2',
+      });
+    const close = vi.spyOn(ManagedCsiMount.prototype, 'close');
+    onTestFinished(() => {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+    });
+    return { boot, observe, close };
+  }
+
+  it('closes the mount owner when Pod route registration refuses startup', async () => {
+    const { boot, observe, close } = setup();
+    vi.stubEnv('QWEN_NODE_NAME', 'not/a/node');
+    const listen = vi.spyOn(Server.prototype, 'listen');
+    await expect(
+      startManagedRuntimeAttestationWorker(boot, undefined, undefined, true),
+    ).rejects.toThrow();
+    expect(observe).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(listen).not.toHaveBeenCalled();
+  });
+
+  it('closes the mount owner on listener failure', async () => {
+    const { boot, close } = setup();
+    vi.spyOn(Server.prototype, 'listen').mockImplementation(function (
+      this: Server,
+    ) {
+      queueMicrotask(() => this.emit('error', new Error('listener failed')));
+      return this;
+    });
+    await expect(
+      startManagedRuntimeAttestationWorker(boot, undefined, undefined, true),
+    ).rejects.toThrow('listener failed');
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['registration', 'listen', 'address'])(
+    'retains the %s error and a simultaneous mount cleanup failure',
+    async (stage) => {
+      const { boot, close } = setup();
+      const cleanup = new Error('mount cleanup failed');
+      close.mockRejectedValue(cleanup);
+      let primary: string;
+      if (stage === 'registration') {
+        primary = 'Managed CSI Pod identity is unavailable.';
+        vi.stubEnv('QWEN_NODE_NAME', 'not/a/node');
+      } else if (stage === 'listen') {
+        primary = 'listener failed';
+        vi.spyOn(Server.prototype, 'listen').mockImplementation(function (
+          this: Server,
+        ) {
+          queueMicrotask(() => this.emit('error', new Error(primary)));
+          return this;
+        });
+      } else {
+        primary = 'Managed Runtime worker listener is unavailable.';
+        vi.spyOn(Server.prototype, 'listen').mockImplementation(function (
+          this: Server,
+        ) {
+          queueMicrotask(() => this.emit('listening'));
+          return this;
+        });
+      }
+      await expect(
+        startManagedRuntimeAttestationWorker(boot, undefined, undefined, true),
+      ).rejects.toMatchObject({
+        message: primary,
+        cause: expect.objectContaining({ message: primary }),
+        errors: [expect.objectContaining({ message: primary }), cleanup],
+      });
+      expect(close).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('closes the listener and mount even when executor shutdown fails', async () => {
+    const { boot, close } = setup();
+    const nativeListen = Server.prototype.listen;
+    vi.spyOn(Server.prototype, 'listen').mockImplementation(function (
+      this: Server,
+    ) {
+      return Reflect.apply(nativeListen, this, [0, '127.0.0.1']);
+    });
+    const worker = await startManagedRuntimeAttestationWorker(
+      boot,
+      undefined,
+      undefined,
+      true,
+    );
+    vi.spyOn(ManagedToolExecutor.prototype, 'close').mockRejectedValue(
+      new Error('executor close failed'),
+    );
+    await expect(worker.close()).rejects.toThrow('executor close failed');
+    expect(close).toHaveBeenCalledTimes(1);
+    const url = new URL(worker.ready.url);
+    expect(await connects(url.hostname, Number(url.port))).toBe(false);
+  });
+
+  it('retains executor, listener and mount failures after attempting every shutdown', async () => {
+    const { boot, close } = setup();
+    const nativeListen = Server.prototype.listen;
+    vi.spyOn(Server.prototype, 'listen').mockImplementation(function (
+      this: Server,
+    ) {
+      return Reflect.apply(nativeListen, this, [0, '127.0.0.1']);
+    });
+    const worker = await startManagedRuntimeAttestationWorker(
+      boot,
+      undefined,
+      undefined,
+      true,
+    );
+    const executorFailure = new Error('executor close failed');
+    const listenerFailure = new Error('listener close failed');
+    const mountFailure = new Error('mount close failed');
+    vi.spyOn(ManagedToolExecutor.prototype, 'close').mockRejectedValue(
+      executorFailure,
+    );
+    const nativeClose = Server.prototype.close;
+    vi.spyOn(Server.prototype, 'close').mockImplementation(function (
+      this: Server,
+      callback?: (error?: Error) => void,
+    ) {
+      return nativeClose.call(this, () => callback?.(listenerFailure));
+    });
+    close.mockRejectedValue(mountFailure);
+    const closing = worker.close();
+    expect(worker.close()).toBe(closing);
+    await expect(closing).rejects.toMatchObject({
+      message: executorFailure.message,
+      cause: executorFailure,
+      errors: [executorFailure, listenerFailure, mountFailure],
+    });
+    expect(close).toHaveBeenCalledTimes(1);
+    const url = new URL(worker.ready.url);
+    expect(await connects(url.hostname, Number(url.port))).toBe(false);
+  });
+});
+
 describe('boot-v3 original-worker ACK ownership', () => {
   it.each([false, true])(
     'registers the owned ACK route in the actual boot-v3 startup (capture profile: %s)',
@@ -625,8 +904,8 @@ describe('boot-v3 original-worker ACK ownership', () => {
       const nativeListen = Server.prototype.listen;
       const listen = vi
         .spyOn(Server.prototype, 'listen')
-        .mockImplementation(function (this: Server) {
-          return Reflect.apply(nativeListen, this, [0, '127.0.0.1']);
+        .mockImplementation(function (this: Server, ...args: unknown[]) {
+          return Reflect.apply(nativeListen, this, [0, ...args.slice(1)]);
         });
       try {
         const worker = await startManagedRuntimeAttestationWorker(

@@ -119,8 +119,57 @@ export function substituteHookVariables(
 }
 
 /**
+ * Substitutes the `${CLAUDE_PLUGIN_ROOT}` token in `content`.
+ * The function replacer keeps `$` sequences in `pluginRoot` literal.
+ */
+const replacePluginRootToken = (content: string, pluginRoot: string): string =>
+  content.replace(/\$\{CLAUDE_PLUGIN_ROOT\}/g, () => pluginRoot);
+
+/**
+ * Resolve `${CLAUDE_PLUGIN_ROOT}` in every markdown file of the extension.
+ * This runs for every Claude/Qoder-origin install, whether or not the plugin
+ * ships hooks, because skill/command/agent markdown references plugin scripts
+ * by that token.
+ * @param extensionPath - The path to the extension directory to edit
+ * @param pluginRoot - The installed path to substitute for ${CLAUDE_PLUGIN_ROOT}
+ */
+export function replacePluginRootInMarkdown(
+  extensionPath: string,
+  pluginRoot = extensionPath,
+): void {
+  try {
+    const mdFiles = glob.sync('**/*.md', { cwd: extensionPath, nodir: true });
+
+    for (const file of mdFiles) {
+      const filePath = path.join(extensionPath, file);
+
+      try {
+        const content = fs.readFileSync(filePath, 'utf8');
+        const updatedContent = replacePluginRootToken(content, pluginRoot);
+
+        if (updatedContent !== content) {
+          fs.writeFileSync(filePath, updatedContent, 'utf8');
+          debugLogger.debug(
+            `Replaced \${CLAUDE_PLUGIN_ROOT} in file: ${filePath}`,
+          );
+        }
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to process file ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to scan markdown files in extension directory ${extensionPath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/**
  * Perform variable replacement in all markdown and shell script files of the extension.
- * This is done during the conversion phase to avoid modifying files during every extension load.
+ * This runs at install time on the staged copy, so the substituted plugin root is the
+ * final installed path and extension loads need no further rewriting.
  * @param extensionPath - The path to the extension directory to edit
  * @param pluginRoot - The installed path to substitute for ${CLAUDE_PLUGIN_ROOT}
  */
@@ -145,10 +194,7 @@ export function performVariableReplacement(
         const content = fs.readFileSync(filePath, 'utf8');
 
         // Replace ${CLAUDE_PLUGIN_ROOT} with the actual extension path
-        const updatedContent = content.replace(
-          /\$\{CLAUDE_PLUGIN_ROOT\}/g,
-          () => pluginRoot,
-        );
+        const updatedContent = replacePluginRootToken(content, pluginRoot);
 
         // Replace Markdown shell syntax ```! ... ``` with system-recognized !{...} syntax
         // This regex finds code blocks with ! language identifier and captures their content

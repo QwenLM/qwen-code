@@ -112,6 +112,7 @@ import {
   clearAutoMemoryRootCache,
   getAutoMemoryIndexPath,
   getUserAutoMemoryIndexPath,
+  getTeamAutoMemoryRoot,
 } from '../memory/paths.js';
 import {
   rebuildTeamAutoMemoryIndex,
@@ -1756,6 +1757,35 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('lsp client lifecycle', () => {
+    it('stops the session lsp client on shutdown (#14751)', async () => {
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const config = makeConfig({ lspClient: { stop } as never });
+      await config.initialize(SKIP_ALL_INIT);
+      await config.shutdown();
+      expect(stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops the client even when shutdown runs before initialize', async () => {
+      // loadCliConfig installs the client before initialization, so a session
+      // that dies during startup (e.g. daemon admission rejects it) still owns
+      // language servers; teardown must not skip them over `initialized`.
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const config = makeConfig({ lspClient: { stop } as never });
+      await config.shutdown();
+      expect(stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the remaining cleanup running when lsp stop rejects', async () => {
+      const stop = vi.fn().mockRejectedValue(new Error('stop failed'));
+      const config = makeConfig({ lspClient: { stop } as never });
+      await config.initialize({ ...SKIP_ALL_INIT, skipSkillManager: false });
+      await config.shutdown();
+      expect(stop).toHaveBeenCalledTimes(1);
+      expect(config.getSkillManager()?.stopWatching).toHaveBeenCalledTimes(1);
+    });
+  });
+
   // Shared isolation for the debug-fallback tests. The module-level
   // vi.mock('node:fs') overrides only the sync fs API, so an un-spied
   // fs.promises call would write into the real global debug dir: spy the whole
@@ -2768,7 +2798,18 @@ describe('Server Config (config.ts)', () => {
         .spyOn(sandboxPolicy, 'probeShellSandbox')
         .mockResolvedValue(resolvedPolicy);
       try {
-        const config = new Config(parameters());
+        const config = new Config({
+          ...parameters(),
+          bundledGeneratedUi: {
+            enabled: true,
+            server: {
+              command: process.execPath,
+              args: ['/bundle/generated-ui/main.js'],
+            },
+            skillsDir: '/bundle/generated-ui/skills',
+          },
+        });
+        config.setMcpAppHostSupported(true);
         const admittedPolicy = config.getShellExecutionSandbox();
         const refreshExtensions = vi.spyOn(
           config.getExtensionManager(),
@@ -2777,6 +2818,12 @@ describe('Server Config (config.ts)', () => {
         await config.initialize();
         expect(probe).toHaveBeenCalledWith(admittedPolicy, undefined);
         expect(config.getShellExecutionSandbox()).toBe(resolvedPolicy);
+        expect(config.getBundledGeneratedUiStatus()).toEqual({
+          version: 1,
+          enabled: false,
+          reason: 'unsupported-runtime',
+        });
+        expect(config.getBundledGeneratedUiSkillsDir()).toBeUndefined();
         expect(HookSystem).not.toHaveBeenCalled();
         expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
         expect(refreshExtensions).not.toHaveBeenCalled();
@@ -2973,6 +3020,23 @@ describe('Server Config (config.ts)', () => {
       expectRebound(child, parent, worktreeDir);
     });
 
+    it.each([undefined, 'CLI', 'desktop'])(
+      'preserves runtime channel %s through nested agent configs',
+      (channel) => {
+        const parent = makeConfig({ channel });
+        const { config: child } = deriveAgentConfig(
+          parent,
+          path.resolve('/tmp/agent'),
+        );
+        const { config: nested } = deriveAgentConfig(
+          child,
+          path.resolve('/tmp/nested-agent'),
+        );
+        expect(child.getChannel()).toBe(channel);
+        expect(nested.getChannel()).toBe(channel);
+      },
+    );
+
     it('rebinds agent workspace getters and private field reads together', () => {
       const agentWorkspace = path.resolve('/tmp/agent-workspace');
       const parent = makeConfig({ fileFiltering: ignoreFiles() });
@@ -3151,6 +3215,356 @@ describe('Server Config (config.ts)', () => {
     it('returns the same cache instance on repeated getter calls within one Config', () => {
       const config = makeConfig();
       expect(config.getFileReadCache()).toBe(config.getFileReadCache());
+    });
+  });
+
+  describe('bundled Generated UI', () => {
+    const server: MCPServerConfig = {
+      command: process.execPath,
+      args: ['/bundle/generated-ui/main.js'],
+      includeTools: ['generated_ui_show'],
+      trust: false,
+    };
+    const candidate = {
+      enabled: true,
+      server,
+      skillsDir: '/bundle/generated-ui/skills',
+    };
+    const create = (
+      overrides: Partial<ConfigParameters> = {},
+      mcpAppHost = true,
+    ) => {
+      const config = makeConfig({
+        sandbox: undefined,
+        bundledGeneratedUi: candidate,
+        ...overrides,
+      });
+      config.setMcpAppHostSupported(mcpAppHost);
+      return config;
+    };
+    const ready = async (overrides: Partial<ConfigParameters> = {}) => {
+      const config = create(overrides);
+      await config.initialize();
+      return config;
+    };
+    const expectUnavailable = (config: Config, reason: string) => {
+      expect(config.getBundledGeneratedUiStatus()).toEqual({
+        version: 1,
+        enabled: false,
+        reason,
+      });
+      expect(config.getBundledGeneratedUiSkillsDir()).toBeUndefined();
+      expect(
+        config.isSkillEnabled({ name: 'generated-ui', level: 'bundled' }),
+      ).toBe(false);
+    };
+
+    it('keeps default-off and pre-initialization sessions inactive', async () => {
+      const pending = create();
+      expect(pending.getBundledGeneratedUiStatus().enabled).toBe(false);
+      expect(pending.getMcpServers()).not.toHaveProperty('generated-ui');
+      const config = await ready({ bundledGeneratedUi: undefined });
+      expectUnavailable(config, 'setting-disabled');
+      config.setMcpServers({ ordinary: { command: 'ordinary' } });
+      expect(config.getBundledGeneratedUiStatus().enabled).toBe(false);
+      expect(
+        config.isSkillEnabled({ name: 'generated-ui', level: 'user' }),
+      ).toBe(true);
+    });
+
+    it('stays inactive for clients that do not render MCP Apps', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const config = create({}, false);
+        await config.initialize();
+        expectUnavailable(config, 'unsupported-client');
+        expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+        expect(config.getWarnings()).not.toContainEqual(
+          expect.stringContaining('Generated UI'),
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('stays inactive for channel sessions the daemon creates', async () => {
+      const config = create();
+      config.setSessionSource('channel', 'feishu-main');
+      await config.initialize();
+      expectUnavailable(config, 'unsupported-client');
+      expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+      expect(config.getWarnings()).not.toContainEqual(
+        expect.stringContaining('Generated UI'),
+      );
+    });
+
+    it('keeps a disabled setting ahead of the client check', async () => {
+      expectUnavailable(
+        await (async () => {
+          const config = create({ bundledGeneratedUi: undefined }, false);
+          await config.initialize();
+          return config;
+        })(),
+        'setting-disabled',
+      );
+    });
+
+    it('registers one independent binding after initialization and retains it across reloads', async () => {
+      const config = await ready();
+      expect(config.getBundledGeneratedUiStatus()).toEqual({
+        version: 1,
+        enabled: true,
+      });
+      expect(config.getMcpServers()?.['generated-ui']).toBe(server);
+      expect(config.getSettingsMcpServers()?.['generated-ui']).toBeUndefined();
+      expect(config.getBundledGeneratedUiSkillsDir()).toBe(candidate.skillsDir);
+      await config.reinitializeMcpServers({
+        ordinary: { command: 'ordinary' },
+      });
+      expect(config.getMcpServers()?.['generated-ui']).toBe(server);
+      expect(config.getBundledGeneratedUiStatus().enabled).toBe(true);
+      const snapshot = config.getBundledGeneratedUiStatus();
+      snapshot.enabled = false;
+      expect(config.getBundledGeneratedUiStatus().enabled).toBe(true);
+    });
+
+    it('freezes the switch until a new owning Config is created', async () => {
+      const settingsCandidate = { ...candidate, enabled: false };
+      const old = await ready({ bundledGeneratedUi: settingsCandidate });
+      settingsCandidate.enabled = true;
+      await old.reinitializeMcpServers({ ordinary: { command: 'ordinary' } });
+      expectUnavailable(old, 'setting-disabled');
+      const next = await ready({ bundledGeneratedUi: settingsCandidate });
+      expect(next.getBundledGeneratedUiStatus().enabled).toBe(true);
+      settingsCandidate.enabled = false;
+      await next.reinitializeMcpServers({});
+      expect(next.getBundledGeneratedUiStatus().enabled).toBe(true);
+      expectUnavailable(
+        await ready({ bundledGeneratedUi: settingsCandidate }),
+        'setting-disabled',
+      );
+    });
+
+    it.each([
+      ['settings', { mcpServers: { 'generated-ui': { command: 'manual' } } }],
+      [
+        'session',
+        {
+          topTierMcpServers: { 'generated-ui': { command: 'manual' } },
+          mcpServers: { 'generated-ui': { command: 'manual' } },
+        },
+      ],
+    ] as const)(
+      'preserves a manual %s provider and does not activate later',
+      async (_label, overrides) => {
+        const config = await ready(overrides);
+        expectUnavailable(config, 'provider-conflict');
+        expect(config.getMcpServers()?.['generated-ui']?.command).toBe(
+          'manual',
+        );
+        config.setMcpServers({});
+        expectUnavailable(config, 'provider-conflict');
+      },
+    );
+
+    it('checks runtime overlays injected after construction', async () => {
+      const config = create();
+      config.addRuntimeMcpServer('generated-ui', { command: 'runtime-manual' });
+      await config.initialize();
+      expectUnavailable(config, 'provider-conflict');
+      expect(config.getMcpServers()?.['generated-ui']?.command).toBe(
+        'runtime-manual',
+      );
+    });
+
+    it('checks active extensions discovered during initialization', async () => {
+      const config = create();
+      const extension = extensionFixture('manual-ui');
+      extension.config.mcpServers = {
+        'generated-ui': { command: 'extension-manual' },
+      };
+      vi.spyOn(config, 'getActiveExtensions').mockReturnValue([extension]);
+      await config.initialize();
+      expectUnavailable(config, 'provider-conflict');
+      expect(config.getMcpServers()?.['generated-ui']?.command).toBe(
+        'extension-manual',
+      );
+    });
+
+    it.each([
+      { bareMode: true },
+      { safeMode: true },
+      { sandbox: SANDBOX },
+      { provisionalWorkspace: true },
+    ])(
+      'withholds the provider and writer in unsupported modes: %j',
+      async (mode) => {
+        const config = await ready(mode);
+        expectUnavailable(config, 'unsupported-runtime');
+        expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+      },
+    );
+
+    it('does not enable Generated UI for managed execution', async () => {
+      const config = create({ sessionExecutionEngine: 'managed' });
+      vi.spyOn(internals(config), 'activateChatRecording').mockResolvedValue(
+        undefined,
+      );
+      await config.initialize();
+      expectUnavailable(config, 'unsupported-runtime');
+      expect(config.getMcpServers()).toEqual({});
+    });
+
+    it('does not enable a local provider for an SSH execution environment', async () => {
+      const config = create({
+        executionEnvironment: new SshExecutionEnvironment(
+          { host: 'host', directory: '/srv/project' },
+          '/local/anchor',
+        ),
+      });
+      await config.initialize(SKIP_LLM_INIT);
+      expectUnavailable(config, 'unsupported-runtime');
+      expect(config.getMcpServers()).toEqual({});
+    });
+
+    it('keeps read-only Agent Host sessions unavailable', async () => {
+      const config = create();
+      config.setSessionSource('agent-host');
+      await config.initialize();
+      expectUnavailable(config, 'unsupported-runtime');
+    });
+
+    it.each([
+      { skipMcpDiscovery: true, disableBundledGeneratedUi: true },
+      { skipSkillManager: true, skipHooks: true },
+    ])(
+      'withholds the provider in bootstrap/read-only initialization: %j',
+      async (options) => {
+        const config = create();
+        await config.initialize(options);
+        expectUnavailable(config, 'unsupported-runtime');
+        expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+      },
+    );
+
+    it('keeps normal deferred MCP discovery eligible', async () => {
+      const config = create();
+      await config.initialize({ skipMcpDiscovery: true });
+      expect(config.getBundledGeneratedUiStatus()).toEqual({
+        version: 1,
+        enabled: true,
+      });
+      expect(config.getMcpServers()?.['generated-ui']).toBe(server);
+    });
+
+    it('withholds untrusted workspaces and incomplete assets', async () => {
+      expectUnavailable(
+        await ready({ folderTrust: true, trustedFolder: false }),
+        'workspace-untrusted',
+      );
+      expectUnavailable(
+        await ready({
+          bundledGeneratedUi: {
+            enabled: true,
+            unavailableReason: 'assets-missing',
+          },
+        }),
+        'assets-missing',
+      );
+    });
+
+    it('warns about an unavailable runtime only for an explicit opt-in', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const byDefault = await ready({
+          folderTrust: true,
+          trustedFolder: false,
+        });
+        expectUnavailable(byDefault, 'workspace-untrusted');
+        expect(byDefault.getWarnings()).not.toContainEqual(
+          expect.stringContaining('Generated UI'),
+        );
+        const requested = await ready({
+          folderTrust: true,
+          trustedFolder: false,
+          bundledGeneratedUi: { ...candidate, explicit: true },
+        });
+        expectUnavailable(requested, 'workspace-untrusted');
+        expect(requested.getWarnings()).toContainEqual(
+          expect.stringContaining(
+            'Bundled Generated UI is unavailable (workspace-untrusted)',
+          ),
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it.each([
+      { allowedMcpServers: [] },
+      { excludedMcpServers: ['generated-*'] },
+      { pendingMcpServers: ['generated-ui'] },
+      { disabledTools: ['generated_ui_show'] },
+      { disabledTools: ['mcp__generated-ui__generated_ui_show'] },
+    ])('honors existing MCP/tool restrictions: %j', async (policy) => {
+      const config = await ready(policy);
+      expectUnavailable(config, 'policy-disabled');
+      expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+    });
+
+    it('applies live admission restrictions to the provider and cached writer', async () => {
+      const config = await ready();
+      config.setAllowedMcpServers([]);
+      expectUnavailable(config, 'policy-disabled');
+      expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+      config.setAllowedMcpServers(undefined);
+      expect(config.getBundledGeneratedUiStatus().enabled).toBe(true);
+      config.setDisabledTools(
+        new Set(['mcp__generated-ui__generated_ui_show']),
+      );
+      expectUnavailable(config, 'policy-disabled');
+    });
+
+    it('does not let a newly enabled extension take over an active built-in binding', async () => {
+      const config = await ready();
+      const extension = extensionFixture('late-manual-ui');
+      extension.config.mcpServers = {
+        'generated-ui': { command: 'extension-manual' },
+      };
+      const active = vi
+        .spyOn(config, 'getActiveExtensions')
+        .mockReturnValue([extension]);
+      expectUnavailable(config, 'provider-conflict');
+      expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+      expect(config.isBundledGeneratedUiServer('generated-ui')).toBe(true);
+      await config.reinitializeMcpServers({});
+      expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+      active.mockReturnValue([]);
+      expect(config.getMcpServers()?.['generated-ui']).toBe(server);
+    });
+
+    it('rejects hot shadowing without changing the active binding', async () => {
+      const config = await ready();
+      expect(() =>
+        config.addRuntimeMcpServer('generated-ui', { command: 'manual' }),
+      ).toThrow('Restart the owning session');
+      expect(() =>
+        config.setMcpServers({ 'generated-ui': { command: 'manual' } }),
+      ).toThrow('Restart the owning session');
+      expect(config.getMcpServers()?.['generated-ui']).toBe(server);
+    });
+
+    it('cannot grant a disabled bundled writer through skills.enabled', async () => {
+      const config = await ready({
+        bundledGeneratedUi: { enabled: false },
+        enabledSkillNamesProvider: () => new Set(['generated-ui']),
+      });
+      expect(
+        config.isSkillEnabled({ name: 'generated-ui', level: 'bundled' }),
+      ).toBe(false);
+      expect(
+        config.isSkillEnabled({ name: 'generated-ui', level: 'project' }),
+      ).toBe(true);
     });
   });
 
@@ -3634,6 +4048,27 @@ describe('Server Config (config.ts)', () => {
     };
     const emptyResume = () =>
       ({ conversation: { messages: [] } }) as unknown as ResumedSessionData;
+
+    it('drops the extraction-cadence state of both sides of a session switch', async () => {
+      const config = await initConfig({}, LEGACY_SKIP_ALL_INIT);
+      const discard = vi.spyOn(
+        config.getMemoryManager(),
+        'discardExtractCadence',
+      );
+      const previous = config.getSessionId();
+
+      config.startNewSession('replacement-session');
+      expect(discard).toHaveBeenLastCalledWith(previous, 'replacement-session');
+
+      // Resuming the id the session already has is not a lifecycle transition,
+      // but the resumed id still must not inherit the earlier skip.
+      discard.mockClear();
+      config.startNewSession('replacement-session');
+      expect(discard).toHaveBeenCalledWith(
+        'replacement-session',
+        'replacement-session',
+      );
+    });
 
     it('clears loaded Skill state at the session boundary', async () => {
       const config = await initConfig({}, LEGACY_SKIP_ALL_INIT);
@@ -5619,9 +6054,9 @@ describe('Server Config (config.ts)', () => {
 
     it('shares a failed in-flight initialization with concurrent callers', async () => {
       const config = makeConfig();
-      vi.spyOn(internals(config), 'initializeInternal').mockRejectedValue(
-        new Error('startup discovery exploded'),
-      );
+      const initializeInternal = vi
+        .spyOn(internals(config), 'initializeInternal')
+        .mockRejectedValue(new Error('startup discovery exploded'));
 
       const [firstError, secondError] = await Promise.all([
         config.initialize().catch((error: unknown) => error),
@@ -5630,9 +6065,8 @@ describe('Server Config (config.ts)', () => {
       expect(firstError).toBeInstanceOf(Error);
       expect(secondError).toBe(firstError);
 
-      // A failed-and-settled first flight still flips `initializationSettled`,
-      // so a later call must throw rather than re-join the stale rejection.
-      await expect(config.initialize()).rejects.toThrow(ALREADY_INITIALIZED);
+      await expect(config.initialize()).rejects.toBe(firstError);
+      expect(initializeInternal).toHaveBeenCalledOnce();
     });
 
     it('should skip implicit startup discovery in bare mode', async () => {
@@ -6211,6 +6645,14 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('DW03: applies the constructor and live workflow keyword preference', () => {
+      const config = makeConfig({ workflowKeywordTriggerEnabled: false });
+      expect(config.getWorkflowKeywordTriggerEnabled()).toBe(false);
+      config.setWorkflowKeywordTriggerEnabled(true);
+      expect(config.getWorkflowKeywordTriggerEnabled()).toBe(true);
+      expect(makeConfig().getWorkflowKeywordTriggerEnabled()).toBe(true);
+    });
+
     describe('bundled review workflow activation', () => {
       beforeEach(() => {
         vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', undefined);
@@ -6650,6 +7092,26 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    it.each([
+      ['deepseek-v4.1-flash-1017', 'qwen3.8-max', true],
+      ['qwen3.8-max', 'deepseek-v4.1-flash-1017', false],
+    ] as const)(
+      'reports reasoning overrides for final %s -> %s',
+      (model, finalModel, tiered) => {
+        const config = maxEffortConfig({
+          model,
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          extra_body: { model: finalModel, thinking_budget: 4096 },
+        });
+        expect(config.getReasoningEffortOverride()).toEqual(
+          tiered
+            ? { source: 'extra_body', field: 'thinking_budget' }
+            : undefined,
+        );
+      },
+    );
+
     it('does not report an identical static effort or a non-tiered model', () => {
       const config = maxEffortConfig({
         extra_body: { reasoning_effort: 'max' },
@@ -6913,6 +7375,174 @@ describe('Server Config (config.ts)', () => {
         expect(config.getContentGeneratorConfig().reasoning).toEqual({
           effort: 'high',
         });
+      },
+    );
+
+    it.each([
+      ['https://api.deepseek.com/v1', 'settings'],
+      ['https://api.deepseek.com/v1', 'programmatic'],
+      ['https://api.deepseek.com/v1', 'modelProviders'],
+      ['https://dashscope.aliyuncs.com/compatible-mode/v1', 'settings'],
+      ['https://dashscope.aliyuncs.com/compatible-mode/v1', 'programmatic'],
+      ['https://dashscope.aliyuncs.com/compatible-mode/v1', 'modelProviders'],
+    ] as const)(
+      'preserves only explicit DeepSeek off on %s from %s across refresh and reload',
+      async (baseUrl, kind) => {
+        const actual = await vi.importActual<
+          typeof import('../core/contentGenerator.js')
+        >('../core/contentGenerator.js');
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+          actual.resolveContentGeneratorConfigWithSources,
+        );
+        const model = 'deepseek-flash';
+        const source =
+          kind === 'settings'
+            ? { kind, settingsPath: 'model.reasoningEffort' }
+            : kind === 'programmatic'
+              ? { kind, detail: 'reasoning selection' }
+              : {
+                  kind,
+                  authType: AuthType.USE_OPENAI,
+                  modelId: model,
+                  detail: 'generationConfig.reasoning',
+                };
+        const config = makeConfig({
+          authType: AuthType.USE_OPENAI,
+          model,
+          generationConfig: { apiKey: 'test-key', baseUrl, reasoning: false },
+          generationConfigSources: { reasoning: source },
+          modelProvidersConfig: {
+            openai: [
+              { id: model, baseUrl, generationConfig: { reasoning: false } },
+            ],
+          },
+        });
+        for (const stage of ['initial', 'refresh', 'reload']) {
+          if (stage === 'reload') {
+            config.reloadModelProvidersConfig({
+              openai: [
+                {
+                  id: model,
+                  baseUrl,
+                  generationConfig: { reasoning: { effort: 'high' } },
+                },
+              ],
+            });
+          }
+          await config.refreshAuth(AuthType.USE_OPENAI, stage === 'initial');
+          const expected =
+            kind === 'modelProviders' && stage === 'reload'
+              ? { effort: 'high' }
+              : false;
+          expect(config.getContentGeneratorConfig().reasoning).toEqual(
+            expected,
+          );
+          expect(
+            config.getModelsConfig().getGenerationConfig().reasoning,
+          ).toEqual(expected);
+          expect(
+            config.getContentGeneratorConfigSources()['reasoning'],
+          ).toMatchObject(source);
+          expect(
+            config.getModelsConfig().getGenerationConfigSources()['reasoning'],
+          ).toMatchObject(source);
+        }
+      },
+    );
+
+    it.each([
+      ['deepseek-v4.1-flash-1017', false],
+      ['gpt-5.4', false],
+      ['deepseek-v4.1-flash-1017', true],
+    ] as const)(
+      'restores explicit reasoning off from %s using final DeepSeek mandatory=%s',
+      async (model, finalMandatory) => {
+        const actual = await vi.importActual<
+          typeof import('../core/contentGenerator.js')
+        >('../core/contentGenerator.js');
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+          actual.resolveContentGeneratorConfigWithSources,
+        );
+        const baseUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+        const generationConfig = {
+          apiKey: 'test-key',
+          baseUrl,
+          thinkingMandatory: true,
+          extra_body: { model: 'deepseek-v4-pro' },
+        };
+        const config = makeConfig({
+          authType: AuthType.USE_OPENAI,
+          model,
+          generationConfig: { ...generationConfig, reasoning: false },
+          generationConfigSources: {
+            reasoning: { kind: 'programmatic', detail: 'reasoning selection' },
+          },
+          modelProvidersConfig: {
+            openai: [
+              { id: model, baseUrl, generationConfig },
+              {
+                id: 'deepseek-v4-pro',
+                baseUrl,
+                ...(finalMandatory
+                  ? {
+                      capabilities: {
+                        reasoning: {
+                          thinking: true,
+                          efforts: ['high', 'max'],
+                          defaultEffort: 'high',
+                          disableField: 'enable_thinking',
+                          canDisable: false,
+                        },
+                      },
+                    }
+                  : {}),
+              },
+            ],
+          },
+        });
+        for (const initial of [true, false]) {
+          await config.refreshAuth(AuthType.USE_OPENAI, initial);
+          expect(config.getContentGeneratorConfig().reasoning).toBe(
+            finalMandatory ? undefined : false,
+          );
+          expect(config.getModelsConfig().getGenerationConfig().reasoning).toBe(
+            finalMandatory ? undefined : false,
+          );
+        }
+      },
+    );
+
+    it.each([
+      { model: 'deepseek-v4-pro' },
+      { authType: AuthType.USE_ANTHROPIC },
+      { baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
+      { thinkingMandatory: true },
+    ])(
+      'does not restore explicit DeepSeek off onto a changed route or mandatory profile %j',
+      async (changed) => {
+        const config = makeConfig({
+          authType: AuthType.USE_OPENAI,
+          model: 'deepseek-flash',
+          generationConfig: {
+            baseUrl: 'https://api.deepseek.com/v1',
+            reasoning: false,
+          },
+          generationConfigSources: {
+            reasoning: {
+              kind: 'settings',
+              settingsPath: 'model.reasoningEffort',
+            },
+          },
+        });
+        resolveGeneratorTo({
+          model: 'deepseek-flash',
+          authType: AuthType.USE_OPENAI,
+          apiKey: 'test-key',
+          baseUrl: 'https://api.deepseek.com/v1',
+          ...changed,
+        });
+        await config.refreshAuth(changed.authType ?? AuthType.USE_OPENAI, true);
+        expect(config.getContentGeneratorConfig().reasoning).toBeUndefined();
       },
     );
 
@@ -7439,14 +8069,87 @@ describe('Server Config (config.ts)', () => {
 
     await config.refreshHierarchicalMemory();
 
-    // Context files stay in userMemory; the volatile auto-memory section is
-    // kept separate so prompt assembly can order stable → context → volatile.
+    // The system policy stays separate from the request-only catalog.
     expect(config.getUserMemory()).toContain('Project rules');
     expect(config.getUserMemory()).not.toContain('# auto memory');
     expect(config.getAutoMemoryPrompt()).toContain('# auto memory');
-    expect(config.getAutoMemoryPrompt()).toContain(
+    expect(config.getAutoMemoryPrompt()).not.toContain(
       '[Project Memory](project.md)',
     );
+    expect(config.getAutoMemoryContext()).toContain(
+      '[Project Memory](project.md)',
+    );
+  });
+
+  it('delivers each memory tier in the request catalog while keeping indexes out of the policy', async () => {
+    const config = makeConfig({ enableTeamMemory: true });
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+    loadProjectRules();
+    const projectEntry = '- [Project](project.md) — PROJECT_ENTRY';
+    const userEntry = '- [User](user.md) — USER_ENTRY';
+    const teamEntry = '- [Team](team.md) — TEAM_ENTRY';
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce(
+      mockAutoMemoryIndexRead(projectEntry),
+    );
+    vi.mocked(readUserAutoMemoryIndexWithStats).mockResolvedValueOnce(
+      mockAutoMemoryIndexRead(userEntry),
+    );
+    vi.mocked(rebuildTeamAutoMemoryIndex).mockResolvedValueOnce(teamEntry);
+
+    await config.refreshHierarchicalMemory();
+
+    for (const [indexPath, entry] of [
+      [getAutoMemoryIndexPath(config.getProjectRoot()), projectEntry],
+      [getUserAutoMemoryIndexPath(), userEntry],
+      [
+        path.join(getTeamAutoMemoryRoot(config.getProjectRoot()), 'MEMORY.md'),
+        teamEntry,
+      ],
+    ]) {
+      expect(config.getAutoMemoryContext()).toContain(
+        `## ${indexPath}\n\n${entry}`,
+      );
+      expect(config.getAutoMemoryPrompt()).not.toContain(entry);
+    }
+  });
+
+  it('keeps policy stable through first save, update, no-op and deletion', async () => {
+    const config = makeConfig();
+    loadProjectRules();
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(null);
+    await config.refreshHierarchicalMemory();
+    const policy = config.getAutoMemoryPrompt();
+    const emptyCatalog = config.getAutoMemoryContext();
+    const scoped = Object.create(config) as Config;
+    scoped.getAutoMemoryPrompt = () => '';
+    expect(scoped.getAutoMemoryContext()).toBe('');
+
+    for (const index of ['- [First](first.md)', '- [Updated](updated.md)']) {
+      vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(
+        mockAutoMemoryIndexRead(index),
+      );
+      await config.refreshHierarchicalMemory();
+      expect(config.getAutoMemoryPrompt()).toBe(policy);
+      expect(config.getAutoMemoryContext()).toContain(index);
+      expect(scoped.getAutoMemoryContext()).toBe('');
+    }
+    const populatedCatalog = config.getAutoMemoryContext();
+    await config.refreshHierarchicalMemory();
+    expect(config.getAutoMemoryContext()).toBe(populatedCatalog);
+
+    vi.mocked(readAutoMemoryIndexWithStats).mockRejectedValueOnce(
+      new Error('read failed'),
+    );
+    await expect(config.refreshHierarchicalMemory()).rejects.toThrow(
+      'read failed',
+    );
+    expect(config.getAutoMemoryPrompt()).toBe(policy);
+    expect(config.getAutoMemoryContext()).toBe(populatedCatalog);
+
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(null);
+    await config.refreshHierarchicalMemory();
+    expect(config.getAutoMemoryPrompt()).toBe(policy);
+    expect(config.getAutoMemoryContext()).toBe(emptyCatalog);
   });
 
   /**
@@ -7762,6 +8465,7 @@ describe('Server Config (config.ts)', () => {
       memoryRecallModeInitialized: true,
       memoryCorpusRevision: 'legacy-revision',
       autoMemoryPrompt: 'legacy prompt',
+      autoMemoryContext: 'legacy catalog',
     });
     vi.spyOn(config, 'isManagedMemoryAvailable').mockReturnValue(true);
     vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
@@ -7800,13 +8504,16 @@ describe('Server Config (config.ts)', () => {
       config.confirmMemoryRecallTransition(transition!),
     ).resolves.toBe(true);
 
+    expect(config.getAutoMemoryContext()).toBe('legacy catalog');
     config.commitMemoryRecallTransition(transition!);
+    expect(config.getAutoMemoryContext()).toBe('');
     expect(config.getMemoryRecallMode()).toBe('structured');
     expect(config.getAutoMemoryPrompt()).toBe(transition?.autoMemoryPrompt);
 
     config.rollbackMemoryRecallTransition(transition!);
     expect(config.getMemoryRecallMode()).toBe('legacy');
     expect(config.getAutoMemoryPrompt()).toBe('legacy prompt');
+    expect(config.getAutoMemoryContext()).toBe('legacy catalog');
 
     scan.mockResolvedValueOnce({ ready: true, revision: 'changed-revision' });
     await expect(
@@ -7964,6 +8671,49 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     expectWarning(config, ALWAYS_ON_CONTEXT);
+  });
+
+  it('refreshHierarchicalMemory should count the request-only catalog in the context warning estimate', async () => {
+    // The warning is built from [userMemory, policy, catalog]. With
+    // the full protocol the policy alone already exceeds the small-window
+    // bound, so asserting only that the warning fires cannot tell which term
+    // it was built from — dropping the catalog keeps it green while the
+    // estimate under-reports by every MEMORY.md index line. Compare the quoted
+    // figure across two index sizes instead.
+    const warningTokenFigure = (config: Config) => {
+      const warning = config
+        .getWarnings()
+        .find((w) => w.includes(ALWAYS_ON_CONTEXT));
+      const match = /uses about ([\d,]+) tokens/.exec(warning ?? '');
+      expect(match).not.toBeNull();
+      return Number(match![1].replace(/,/g, ''));
+    };
+    const indexWithLines = (count: number) =>
+      '# Managed Auto-Memory Index\n\n' +
+      Array.from(
+        { length: count },
+        (_, i) => `- [Entry ${i}](entry-${i}.md) — remembered note`,
+      ).join('\n');
+    const refreshWithIndex = async (indexContent: string) => {
+      const config = makeConfig(smallWindow());
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValue(
+        memoryLoad({ memoryContent: 'short project rules', fileCount: 1 }),
+      );
+      vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce(
+        mockAutoMemoryIndexRead(indexContent),
+      );
+      await config.refreshHierarchicalMemory();
+      return config;
+    };
+
+    const smallIndex = warningTokenFigure(
+      await refreshWithIndex(indexWithLines(2)),
+    );
+    const largeIndex = warningTokenFigure(
+      await refreshWithIndex(indexWithLines(60)),
+    );
+
+    expect(largeIndex).toBeGreaterThan(smallIndex);
   });
 
   it('refreshHierarchicalMemory should warn when always-loaded context is large for the model window', async () => {
@@ -8730,6 +9480,7 @@ describe('Server Config (config.ts)', () => {
     const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
     Object.assign(config, {
       autoMemoryPrompt: 'structured prompt naming the old workspace',
+      autoMemoryContext: 'old workspace catalog',
       memoryRecallMode: 'structured',
     });
     vi.mocked(loadServerHierarchicalMemory).mockRejectedValueOnce(
@@ -8741,6 +9492,7 @@ describe('Server Config (config.ts)', () => {
     expect(result.memoryRefreshError).toEqual(new Error('memory failed'));
     expect(config.getMemoryRecallMode()).toBe('legacy');
     expect(config.getAutoMemoryPrompt()).toBe('');
+    expect(config.getAutoMemoryContext()).toBe('');
 
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();
@@ -8786,7 +9538,10 @@ describe('Server Config (config.ts)', () => {
       expect(readAutoMemoryIndexWithStats).not.toHaveBeenCalled();
     } else {
       expect(config.getAutoMemoryPrompt()).toContain('# auto memory');
-      expect(config.getAutoMemoryPrompt()).toContain(
+      expect(config.getAutoMemoryPrompt()).not.toContain(
+        'MEMORY.md is currently empty',
+      );
+      expect(config.getAutoMemoryContext()).toContain(
         'MEMORY.md is currently empty',
       );
     }
@@ -9792,6 +10547,21 @@ describe('Server Config (config.ts)', () => {
       expect(makeConfig().getMaxToolCallsPerTurn()).toBe(
         DEFAULT_MAX_TOOL_CALLS_PER_TURN,
       );
+    });
+
+    it('defaults loopProtection to warn', () => {
+      expect(makeConfig().getLoopProtection()).toBe('warn');
+      expect(makeConfig({ loopProtection: 'stop' }).getLoopProtection()).toBe(
+        'stop',
+      );
+    });
+
+    it('falls back to warn for an unknown loopProtection mode', () => {
+      expect(
+        makeConfig({
+          loopProtection: 'Stop' as never,
+        }).getLoopProtection(),
+      ).toBe('warn');
     });
 
     it('should use a custom maxToolCallsPerTurn if provided', () => {
@@ -12213,59 +12983,6 @@ describe('applyWorkspaceAgentPersona', () => {
     expect(new Config(baseParams).isWorkspaceAgentSession()).toBe(false);
   });
 
-  it('registers collaboration tools for top-level agents, not ordinary sessions', async () => {
-    // `registerFactory` is a single mock on the prototype, so every registry
-    // shares one call log. Snapshot and clear between the two, or the ordinary
-    // session inherits the agent's registrations and the negative half of this
-    // test can never fail.
-    const factory = ToolRegistry.prototype.registerFactory as unknown as Mock;
-    factory.mockClear();
-    await agentSession().createToolRegistry(undefined, { skipDiscovery: true });
-    const agentTools = factory.mock.calls.map(([name]) => name as string);
-
-    factory.mockClear();
-    await new Config(baseParams).createToolRegistry(undefined, {
-      skipDiscovery: true,
-    });
-    const ordinaryTools = factory.mock.calls.map(([name]) => name as string);
-    // Asserted against the recorded registrations, not `getAllToolNames`:
-    // that method is stubbed to `[]` at module scope, so the positive half
-    // could never pass and the negative half could never fail.
-    for (const name of [
-      'thread_post',
-      'thread_read',
-      'thread_create',
-      'thread_wait',
-      'thread_block',
-      'thread_review',
-    ]) {
-      expect(agentTools).toContain(name);
-      expect(ordinaryTools).not.toContain(name);
-    }
-  });
-
-  it('registers no thread tools for a session-agents session', async () => {
-    // Both collaboration surfaces coexist for now: a session the session-agents
-    // orchestrator drives has no thread behind it, so its thread tools could
-    // only ever throw "requires an active agent run context".
-    const factory = ToolRegistry.prototype.registerFactory as unknown as Mock;
-    factory.mockClear();
-    const config = agentSession();
-    config.markSessionAgentSession();
-    await config.createToolRegistry(undefined, { skipDiscovery: true });
-    const registered = factory.mock.calls.map(([name]) => name as string);
-    for (const name of [
-      'thread_post',
-      'thread_read',
-      'thread_create',
-      'thread_wait',
-      'thread_block',
-      'thread_review',
-    ]) {
-      expect(registered).not.toContain(name);
-    }
-  });
-
   it('pins a session-agents session to default approval', () => {
     // Every write or command a session agent runs asks the person in the chat
     // session, whatever the settings say (session-multi-agent design §8-1).
@@ -12315,16 +13032,11 @@ describe('applyWorkspaceAgentPersona', () => {
     const config = agentSession();
     config.applyWorkspaceAgentPersona('Read only', 'alice', [
       'read_file',
-      'thread_review',
+      'grep_search',
       'write_file',
     ]);
     const guard = config.getToolInvocationGuard()!;
-    for (const toolName of [
-      'read_file',
-      'thread_review',
-      'write_file',
-      'glob',
-    ]) {
+    for (const toolName of ['read_file', 'grep_search', 'write_file', 'glob']) {
       const result = await guard({
         callId: 'guard-check',
         toolName,
@@ -12332,7 +13044,7 @@ describe('applyWorkspaceAgentPersona', () => {
         signal: new AbortController().signal,
       });
       expect(result.allowed).toBe(
-        toolName === 'read_file' || toolName === 'thread_review',
+        toolName === 'read_file' || toolName === 'grep_search',
       );
     }
   });
@@ -12365,7 +13077,7 @@ describe('applyWorkspaceAgentPersona', () => {
     }
   });
 
-  it('keeps agent-host sessions read-only without collaboration tools', async () => {
+  it('keeps agent-host sessions read-only', async () => {
     const config = new Config(baseParams);
     config.setSessionSource('agent-host', 'host_1');
     const guard = config.getToolInvocationGuard()!;
@@ -12384,21 +13096,6 @@ describe('applyWorkspaceAgentPersona', () => {
         signal: new AbortController().signal,
       });
       expect(result.allowed).toBe(allowed);
-    }
-
-    const factory = ToolRegistry.prototype.registerFactory as unknown as Mock;
-    factory.mockClear();
-    await config.createToolRegistry(undefined, { skipDiscovery: true });
-    const registered = factory.mock.calls.map(([name]) => name as string);
-    for (const toolName of [
-      'thread_post',
-      'thread_read',
-      'thread_create',
-      'thread_wait',
-      'thread_block',
-      'thread_review',
-    ]) {
-      expect(registered).not.toContain(toolName);
     }
   });
 

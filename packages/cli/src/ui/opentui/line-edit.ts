@@ -27,9 +27,9 @@
  * the app's exit handler acts on ctrl+C wherever a dialog owns the screen, and
  * ctrl+X is unbound in this renderer. ctrl+D is deliberately absent: the app's
  * global EXIT binding acts on it, and this reducer hands it back unhandled, so
- * no field ever edits on that key. Three rendering differences remain as well:
- * ink windows the field at `inputWidth` columns, where these rows do no column
- * windowing of their own; ink blinks the cursor cell every 530 ms, where a
+ * no field ever edits on that key. Legacy dialog rows still render spans without column
+ * windowing; catalog source and setting fields use `windowLineAtCaret`.
+ * ink blinks the cursor cell every 530 ms, where a
  * steady cell keeps the dialog from repainting on a timer; and the cell carries
  * the theme accent, as the composer's cursor does, where ink paints a gray read
  * from the terminal background (and falls back to an underline where a block
@@ -47,8 +47,10 @@ import type { Key } from '../contexts/KeypressContext.js';
 import {
   cpLen,
   cpSlice,
+  getCachedStringWidth,
   stripUnsafeCharacters,
   toCodePoints,
+  truncateToWidth,
 } from '../utils/textUtils.js';
 import { isDeleteWordBackwardSequence } from './input-prompt-key.js';
 
@@ -159,6 +161,32 @@ export function caretSpans(state: LineState): {
       Math.min(clamped.cursor + 1, end),
     ),
     after: cpSlice(clamped.text, clamped.cursor + 1, end),
+  };
+}
+
+export function windowLineAtCaret(
+  state: LineState,
+  width: number,
+): { before: string; at: string; after: string } {
+  if (width < 1) return { before: '', at: '', after: '' };
+  const spans = caretSpans(state);
+  const at = spans.at || ' ';
+  const atWidth = getCachedStringWidth(at);
+  if (atWidth > width) return { before: '', at: ' ', after: '' };
+  const afterWidth = Math.min(
+    getCachedStringWidth(spans.after),
+    Math.floor((width - atWidth) / 2),
+  );
+  let before = spans.before;
+  while (before && getCachedStringWidth(before) + atWidth + afterWidth > width)
+    before = cpSlice(before, 1);
+  return {
+    before,
+    at,
+    after: truncateToWidth(
+      spans.after,
+      Math.max(0, width - getCachedStringWidth(before + at)),
+    ),
   };
 }
 

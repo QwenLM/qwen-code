@@ -62,11 +62,45 @@ import {
   isChildAcceptanceSuccessor,
   parseChildAcceptance,
 } from './managed-child-acceptance-record.js';
+import {
+  isSessionMessageStart,
+  isSessionMessageSuccessor,
+  parseSessionMessage,
+} from './managed-session-message-record.js';
+import {
+  isSessionCommandStart,
+  isSessionCommandSuccessor,
+  parseSessionCommand,
+} from './managed-session-command-record.js';
+import {
+  isTeamMessageStart,
+  isTeamMessageSuccessor,
+  isTeamPlanStart,
+  isTeamPlanSuccessor,
+  isTeamStateStart,
+  isTeamStateSuccessor,
+  isTeamTaskStart,
+  isTeamTaskSuccessor,
+  parseTeamMessage,
+  parseTeamPlan,
+  parseTeamState,
+  parseTeamTask,
+} from './managed-team-record.js';
+import {
+  parseHistoryMaintenance,
+  isHistoryMaintenanceStart,
+  isHistoryMaintenanceSuccessor,
+} from './managed-history-maintenance-record.js';
+import {
+  parseManagedToolStage,
+  isManagedToolStageStart,
+  isManagedToolStageSuccessor,
+} from './managed-tool-stage-record.js';
 
 // H0c of #12827: how the Session authority keys, chains and projects the
 // Stage H records of managed-extension-record/1. The shared fixtures in
 // contracts/managed-extension-projection-v1.fixtures.json pin it, and
-// ManagedExtensionProjection in packages/sdk-java/managed-agent-server
+// ManagedExtensionProjection in packages/managed-agent-server
 // replays the same cases.
 
 export const MANAGED_TASK_KINDS = [
@@ -75,6 +109,7 @@ export const MANAGED_TASK_KINDS = [
   'background_shell',
   'monitor',
   'automation_run',
+  'channel_delivery',
 ] as const;
 export const MANAGED_TASK_STATES = [
   'pending',
@@ -119,6 +154,26 @@ export interface ManagedExtensionRecordBody {
 }
 
 /**
+ * The task kind one child run projects, by its own kind. Each kind is
+ * named, so a kind added to `AnyChildRun` fails to compile here rather
+ * than projecting as a child agent by default.
+ */
+function childRunTaskKind(record: AnyChildRun): ManagedTaskKind {
+  switch (record.kind) {
+    case 'shell':
+      return 'background_shell';
+    case 'child_agent':
+      return 'child_agent';
+    case 'workflow':
+      return 'workflow';
+    default: {
+      const exhaustive: never = record;
+      return exhaustive;
+    }
+  }
+}
+
+/**
  * The record bodies defined so far. A domain joins when its slice defines
  * its body; enabling it for submission remains a separate step. A body
  * never joins a domain that is already enabled for envelope commits: the
@@ -128,6 +183,24 @@ export interface ManagedExtensionRecordBody {
 export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
   Partial<Record<ManagedSessionDomain, ManagedExtensionRecordBody>>
 > = Object.freeze({
+  tool_stage: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseManagedToolStage(value);
+      return { record, recordId: record.toolStageId, run: record.run };
+    },
+    isStart: isManagedToolStageStart,
+    isSuccessor: isManagedToolStageSuccessor,
+  }),
+  history_maintenance: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseHistoryMaintenance(value);
+      return { record, recordId: record.operationId, run: record.run };
+    },
+    isStart: isHistoryMaintenanceStart,
+    isSuccessor: isHistoryMaintenanceSuccessor,
+  }),
   mcp_configuration: Object.freeze({
     taskKindOf: () => null,
     parse: (value: unknown) => {
@@ -174,10 +247,7 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isSuccessor: isMonitorRunSuccessor,
   }),
   child_run: Object.freeze({
-    taskKindOf: (record: unknown) =>
-      (record as AnyChildRun).kind === 'shell'
-        ? 'background_shell'
-        : 'child_agent',
+    taskKindOf: (record: unknown) => childRunTaskKind(record as AnyChildRun),
     parse: (value: unknown) => {
       const record = parseChildRun(value);
       return {
@@ -199,7 +269,7 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isSuccessor: isChannelRouteSuccessor,
   }),
   channel_delivery: Object.freeze({
-    taskKindOf: () => null,
+    taskKindOf: () => 'channel_delivery',
     parse: (value: unknown) => {
       const record = parseChannelDelivery(value);
       return { record, recordId: record.deliveryId, run: record.run };
@@ -234,6 +304,60 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isStart: isAutomationRunStart,
     isSuccessor: isAutomationRunSuccessor,
   }),
+  session_message: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseSessionMessage(value);
+      return { record, recordId: record.messageId, run: record.run };
+    },
+    isStart: isSessionMessageStart,
+    isSuccessor: isSessionMessageSuccessor,
+  }),
+  session_command: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseSessionCommand(value);
+      return { record, recordId: record.commandId, run: record.run };
+    },
+    isStart: isSessionCommandStart,
+    isSuccessor: isSessionCommandSuccessor,
+  }),
+  team_state: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseTeamState(value);
+      return { record, recordId: record.teamId, run: record.run };
+    },
+    isStart: isTeamStateStart,
+    isSuccessor: isTeamStateSuccessor,
+  }),
+  team_task: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseTeamTask(value);
+      return { record, recordId: record.taskId, run: record.run };
+    },
+    isStart: isTeamTaskStart,
+    isSuccessor: isTeamTaskSuccessor,
+  }),
+  team_message: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseTeamMessage(value);
+      return { record, recordId: record.messageId, run: record.run };
+    },
+    isStart: isTeamMessageStart,
+    isSuccessor: isTeamMessageSuccessor,
+  }),
+  team_plan: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseTeamPlan(value);
+      return { record, recordId: record.requestId, run: record.run };
+    },
+    isStart: isTeamPlanStart,
+    isSuccessor: isTeamPlanSuccessor,
+  }),
 });
 
 // An envelope domain's commits predates any body a later slice could
@@ -267,6 +391,16 @@ export function managedExtensionRecordKey(
 
 export function managedTaskId(recordKey: string): string {
   return `task_${recordKey}`;
+}
+
+/** The task ID of one child run: what its launch answers and `send_message` takes. */
+export function managedChildTaskId(
+  sessionId: string,
+  childRunId: string,
+): string {
+  return managedTaskId(
+    managedExtensionRecordKey(sessionId, 'child_run', childRunId),
+  );
 }
 
 /** The part of `SessionTaskView` that the record revisions determine. */

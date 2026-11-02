@@ -2,11 +2,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StrictMode, act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { I18nProvider, type WebShellLanguage } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
 import { InteractionBlockContext } from '../../interactionBlockContext';
 import { immediateClipboardWrite } from '../../test/reactHarness';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
+import { getSelectedReplyContent } from '../../utils/selectionClipboard';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -149,6 +152,36 @@ function click(el: Element): void {
   });
 }
 
+function pointerClick(el: Element): void {
+  act(() => {
+    el.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+    );
+    el.dispatchEvent(new MouseEvent('pointerup', { bubbles: true }));
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+}
+
+function menuItem(container: HTMLElement, text: string): HTMLElement {
+  const el = [
+    ...container.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+  ].find((item) => item.textContent === text);
+  expect(el).toBeDefined();
+  return el!;
+}
+
+function copyTableText(container: HTMLElement): void {
+  pointerClick(button(container, 'Copy'));
+  const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+    .filter((menuItem) => menuItem.textContent === 'Copy text')
+    .at(-1);
+  expect(item).toBeDefined();
+  act(() => {
+    item!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+  });
+  click(item!);
+}
+
 function doubleClick(el: Element): void {
   act(() => {
     el.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
@@ -197,9 +230,18 @@ function inputValue(input: HTMLInputElement, value: string): void {
 }
 
 function selectValue(trigger: HTMLElement, value: string): void {
-  click(trigger);
+  pointerClick(trigger);
   const option = document.querySelector<HTMLElement>(
-    `[role="option"][data-value="${value}"]`,
+    `[role="menuitemradio"][data-value="${value}"]`,
+  );
+  expect(option).not.toBeNull();
+  click(option!);
+}
+
+function selectDensity(container: HTMLElement, value: string): void {
+  pointerClick(button(container, 'Table density'));
+  const option = document.querySelector<HTMLElement>(
+    `[role="menuitemradio"][data-value="${value}"]`,
   );
   expect(option).not.toBeNull();
   click(option!);
@@ -266,17 +308,6 @@ function shadowPortalRoot(container: HTMLElement): HTMLElement {
   );
   expect(portalRoot).not.toBeNull();
   return portalRoot!;
-}
-
-function textButtonContaining(
-  container: HTMLElement,
-  text: string,
-): HTMLButtonElement {
-  const el = [...container.querySelectorAll('button')].find((button) =>
-    button.textContent?.includes(text),
-  );
-  expect(el).not.toBeNull();
-  return el!;
 }
 
 function mockClipboard() {
@@ -495,7 +526,7 @@ describe('EnhancedMarkdownTable', () => {
   it('preserves table state and scroll position through fullscreen and restores focus', async () => {
     const container = renderTable();
     click(button(container, 'Sort by Score'));
-    selectValue(button(container, 'Table density'), 'compact');
+    selectDensity(container, 'compact');
     click(button(container, 'View details for row 1'));
     const scroller = container.querySelector<HTMLElement>('[tabindex="0"]')!;
     scroller.scrollTop = 80;
@@ -688,6 +719,28 @@ describe('EnhancedMarkdownTable', () => {
     expect(button(container, 'Sort by Score')).toBeDefined();
   });
 
+  it('uses one sort icon and marks the active direction', () => {
+    const container = renderTable();
+    const trigger = () =>
+      container.querySelector<HTMLButtonElement>(
+        'button[aria-label^="Sort by Score"]',
+      )!;
+
+    expect(trigger().querySelectorAll('svg')).toHaveLength(1);
+    expect(trigger().getAttribute('data-sort-direction')).toBe('none');
+
+    click(button(container, 'Sort by Score'));
+    expect(trigger().querySelectorAll('svg')).toHaveLength(1);
+    expect(trigger().getAttribute('data-sort-direction')).toBe('asc');
+
+    click(button(container, 'Sort by Score, ascending'));
+    expect(trigger().querySelectorAll('svg')).toHaveLength(1);
+    expect(trigger().getAttribute('data-sort-direction')).toBe('desc');
+
+    click(button(container, 'Sort by Score, descending'));
+    expect(trigger().getAttribute('data-sort-direction')).toBe('none');
+  });
+
   it('filters rows from a column value menu', () => {
     const container = renderTable();
 
@@ -738,20 +791,42 @@ describe('EnhancedMarkdownTable', () => {
     expect(appRoot?.contains(popover)).toBe(false);
     expect(document.body.style.pointerEvents).not.toBe('none');
 
-    click(
+    pointerClick(
       container.querySelector<HTMLElement>(
         '[data-name="markdown-table-text-operator-0"]',
       )!,
     );
-    const select = portalRoot?.querySelector<HTMLElement>(
-      '[data-slot="select-content"]',
+    const operatorMenu = portalRoot?.querySelector<HTMLElement>(
+      '[data-slot="dropdown-menu-content"]',
     );
-    expect(select).not.toBeNull();
-    expect(select?.className).toContain('web-shell-popover-z-index');
-    expect(select?.dataset.markdownTableFilterOwner).toBe(
+    expect(operatorMenu).not.toBeNull();
+    expect(operatorMenu?.className).toContain('web-shell-popover-z-index');
+    expect(operatorMenu?.dataset.markdownTableFilterOwner).toBe(
       popover?.dataset.markdownTableFilterOwner,
     );
   });
+
+  it.each([
+    ['Team', 'text', '0'],
+    ['Score', 'number', '1'],
+  ])(
+    'opens the %s filter operators without locking the page',
+    (column, kind, index) => {
+      const container = renderTable();
+      click(button(container, `Filter ${column}`));
+
+      pointerClick(
+        container.querySelector<HTMLElement>(
+          `[data-name="markdown-table-${kind}-operator-${index}"]`,
+        )!,
+      );
+
+      expect(document.querySelector('[role="menuitemradio"]')).not.toBeNull();
+      expect(document.body.style.pointerEvents).not.toBe('none');
+      expect(document.body.hasAttribute('data-scroll-locked')).toBe(false);
+      expect(container.textContent).toContain('Custom filter');
+    },
+  );
 
   it('applies a custom number filter', () => {
     const container = renderTable();
@@ -981,7 +1056,7 @@ describe('EnhancedMarkdownTable', () => {
     expect(rowTexts(container)).toEqual(['0.5', '75%']);
   });
 
-  it('preserves table alignment without applying it to row details', () => {
+  it('preserves source alignment without applying it to row details', () => {
     const container = renderTableContent([
       <thead key="head">
         <tr>
@@ -1222,7 +1297,7 @@ describe('EnhancedMarkdownTable', () => {
 
     doubleClick(dataCell(container, 1, 0));
     await act(async () => {
-      textButton(document.body, 'Copy').click();
+      textButton(cellDialog()!, 'Copy').click();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -1248,7 +1323,7 @@ describe('EnhancedMarkdownTable', () => {
 
     doubleClick(dataCell(container, 0, 0));
     await act(async () => {
-      textButton(document.body, 'Copy').click();
+      textButton(cellDialog()!, 'Copy').click();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -1289,7 +1364,7 @@ describe('EnhancedMarkdownTable', () => {
     doubleClick(dataCell(container, 0, 0));
     expect(cellDialog()?.textContent).toContain('Alpha');
     await act(async () => {
-      textButton(document.body, 'Copy').click();
+      textButton(cellDialog()!, 'Copy').click();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -1301,7 +1376,7 @@ describe('EnhancedMarkdownTable', () => {
     expect(cellDialog()?.textContent).not.toContain('Copied!');
 
     await act(async () => {
-      textButton(document.body, 'Copy').click();
+      textButton(cellDialog()!, 'Copy').click();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -1326,7 +1401,7 @@ describe('EnhancedMarkdownTable', () => {
 
     doubleClick(dataCell(container, 0, 0));
     await act(async () => {
-      textButton(document.body, 'Copy').click();
+      textButton(cellDialog()!, 'Copy').click();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -1482,16 +1557,235 @@ describe('EnhancedMarkdownTable', () => {
     expect(cellDialog()).toBeNull();
   });
 
-  it('quick copies the visible sorted table', () => {
+  it('copies the visible sorted table as text from the menu', () => {
     const writeText = mockClipboard();
     const container = renderTable();
 
     click(button(container, 'Sort by Score'));
-    click(textButton(container, 'Copy table'));
+    copyTableText(container);
 
     expect(writeText).toHaveBeenCalledWith(
       ['Team\tScore', 'Beta\t2', 'Alpha\t10', 'Gamma\t30'].join('\n'),
     );
+  });
+
+  it('expands copy options without copying', () => {
+    const writeText = mockClipboard();
+    const container = renderTable();
+
+    pointerClick(button(container, 'Copy'));
+
+    expect(writeText).not.toHaveBeenCalled();
+    expect(menuItem(container, 'Copy text')).toBeDefined();
+    expect(menuItem(container, 'Copy Markdown')).toBeDefined();
+  });
+
+  it('marks pointer selection so it does not show the focus ring', () => {
+    const container = renderTable();
+    const scroller = container.querySelector<HTMLElement>(
+      '[class*="scroller"]',
+    )!;
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 0, 0));
+
+    expect(scroller.dataset.pointerFocus).toBe('true');
+    act(() => scroller.blur());
+    expect(scroller.hasAttribute('data-pointer-focus')).toBe(false);
+  });
+
+  it('keeps the selected cells after copying from the menu', () => {
+    mockClipboard();
+    const container = renderTable();
+
+    dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
+    expect(container.textContent).toContain('Selected 4');
+
+    copyTableText(container);
+
+    expect(container.textContent).toContain('Selected 4');
+    act(() =>
+      document.body.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true }),
+      ),
+    );
+    expect(container.textContent).not.toContain('Selected');
+  });
+
+  it('copies the visible table as Markdown from the copy menu', () => {
+    const writeText = mockClipboard();
+    const container = renderTable();
+
+    click(button(container, 'Sort by Score'));
+    pointerClick(button(container, 'Copy'));
+    click(menuItem(container, 'Copy Markdown'));
+
+    expect(writeText).toHaveBeenCalledWith(
+      [
+        '| Team | Score |',
+        '| --- | --- |',
+        '| Beta | 2 |',
+        '| Alpha | 10 |',
+        '| Gamma | 30 |',
+      ].join('\n'),
+    );
+  });
+
+  it('offers a plain-text copy action in the copy menu', () => {
+    const writeText = mockClipboard();
+    const container = renderTable();
+
+    pointerClick(button(container, 'Copy'));
+    click(menuItem(container, 'Copy text'));
+
+    expect(writeText).toHaveBeenCalledWith(
+      ['Team\tScore', 'Alpha\t10', 'Beta\t2', 'Gamma\t30'].join('\n'),
+    );
+  });
+
+  it('copies Markdown table structure with literal cell text', () => {
+    mockClipboard();
+    const values = [
+      '*literal*',
+      '[x](url)',
+      '<script>alert(1)</script>',
+      '&lt;tag&gt;',
+      'a\\b|c',
+      '`code` and ~~text~~',
+      '$price$',
+      '',
+    ];
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Value</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        {values.map((value, index) => (
+          <tr key={index}>
+            <td>
+              <code>{value}</code>
+            </td>
+          </tr>
+        ))}
+      </tbody>,
+    ]);
+    pointerClick(button(container, 'Copy'));
+    click(menuItem(container, 'Copy Markdown'));
+    const copied = vi
+      .mocked(navigator.clipboard.writeText)
+      .mock.calls.at(-1)![0];
+    expect(copied).toContain('&lt;script&gt;');
+
+    const roundTrip = document.createElement('div');
+    document.body.appendChild(roundTrip);
+    const root = createRoot(roundTrip);
+    mounted.push({ root, container: roundTrip });
+    act(() =>
+      root.render(
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{copied}</ReactMarkdown>,
+      ),
+    );
+    expect(
+      [...roundTrip.querySelectorAll('td')].map((cell) => cell.textContent),
+    ).toEqual(values);
+    expect(roundTrip.querySelector('script, a, em, del')).toBeNull();
+  });
+
+  it('encodes CRLF, CR and LF when copying Markdown cells', () => {
+    const writeText = mockClipboard();
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Value</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>{'one\r\ntwo\rthree\nfour'}</td>
+        </tr>
+      </tbody>,
+    ]);
+    pointerClick(button(container, 'Copy'));
+    click(menuItem(container, 'Copy Markdown'));
+    expect(writeText).toHaveBeenCalledWith(
+      '| Value |\n| --- |\n| one<br>two<br>three<br>four |',
+    );
+  });
+
+  it('copies Markdown using only visible columns in their current order', () => {
+    const writeText = mockClipboard();
+    const container = renderWideTable();
+    dragColumn(container, 'Move Score', 'Move Team');
+    toggleTableColumn(container, 'Region');
+    click(button(container, 'Sort by Score'));
+    pointerClick(button(container, 'Copy'));
+    click(menuItem(container, 'Copy Markdown'));
+    expect(writeText).toHaveBeenCalledWith(
+      [
+        '| Score | Team |',
+        '| --- | --- |',
+        '| 2 | Beta |',
+        '| 10 | Alpha |',
+      ].join('\n'),
+    );
+    click(button(container, 'Filter Team'));
+    click(
+      container.querySelector(
+        '[data-name="markdown-table-filter-option-0-1"]',
+      )!,
+    );
+    click(textButton(container, 'Confirm'));
+    pointerClick(button(container, 'Copy'));
+    click(menuItem(container, 'Copy Markdown'));
+    expect(writeText).toHaveBeenLastCalledWith(
+      '| Score | Team |\n| --- | --- |\n| 10 | Alpha |',
+    );
+  });
+
+  it('applies GFM alignment equally to numeric and text cells', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={{
+              table: ({ children }) => (
+                <EnhancedMarkdownTable>{children}</EnhancedMarkdownTable>
+              ),
+            }}
+          >
+            {
+              '| Default | Left | Center | Right |\n| --- | :--- | :---: | ---: |\n| 123 | 123 | 123 | 123 |\n| text | text | text | text |'
+            }
+          </ReactMarkdown>
+        </I18nProvider>,
+      ),
+    );
+    for (const rowIndex of [0, 1]) {
+      expect(
+        [0, 1, 2, 3].map(
+          (columnIndex) =>
+            dataCell(container, rowIndex, columnIndex).style.textAlign,
+        ),
+      ).toEqual(['', 'left', 'center', 'right']);
+    }
+  });
+
+  it('announces successful table copying in a live status', async () => {
+    mockClipboard();
+    const container = renderTable();
+    const status = container.querySelector(
+      '[role="status"][aria-live="polite"]',
+    );
+    expect(status?.textContent).toBe('');
+    copyTableText(container);
+    await act(async () => {});
+    expect(status?.textContent).toBe('Copied!');
   });
 
   it('sanitizes spreadsheet formulas when copying TSV', () => {
@@ -1525,7 +1819,7 @@ describe('EnhancedMarkdownTable', () => {
       </tbody>,
     ]);
 
-    click(textButton(container, 'Copy table'));
+    copyTableText(container);
     expect(writeText).toHaveBeenCalledWith(
       [
         'Name\tFormula',
@@ -1537,7 +1831,7 @@ describe('EnhancedMarkdownTable', () => {
     );
 
     dragCells(dataCell(container, 0, 1), dataCell(container, 0, 1));
-    click(textButton(container, 'Copy TSV'));
+    click(textButton(container, 'Copy text'));
     expect(writeText).toHaveBeenLastCalledWith("'=1+1");
   });
 
@@ -1562,12 +1856,12 @@ describe('EnhancedMarkdownTable', () => {
     expect(rowTexts(container)).toEqual(['Alpha|10', 'Beta|2', 'Gamma|30']);
   });
 
-  it('quick copy skips hidden columns', () => {
+  it('copying text skips hidden columns', () => {
     const writeText = mockClipboard();
     const container = renderTable();
 
     toggleTableColumn(container, 'Team');
-    click(textButton(container, 'Copy table'));
+    copyTableText(container);
 
     expect(writeText).toHaveBeenCalledWith(
       ['Score', '10', '2', '30'].join('\n'),
@@ -1864,7 +2158,7 @@ describe('EnhancedMarkdownTable', () => {
 
   it('resizes compact auto columns from their rendered width with keyboard arrows', () => {
     const container = renderTable();
-    selectValue(button(container, 'Table density'), 'compact');
+    selectDensity(container, 'compact');
     const header = button(container, 'Sort by Team').closest('th');
     expect(header).not.toBeNull();
     Object.defineProperty(header, 'getBoundingClientRect', {
@@ -1902,14 +2196,14 @@ describe('EnhancedMarkdownTable', () => {
     expect(columnGroup(container, 0).style.width).toContain('160px');
   });
 
-  it('reorders columns and quick copies in the visible order', () => {
+  it('reorders columns and copies them in the visible order', () => {
     const writeText = mockClipboard();
     const container = renderWideTable();
 
     dragColumn(container, 'Move Score', 'Move Team');
 
     expect(rowTexts(container)).toEqual(['10|Alpha|US', '2|Beta|EMEA']);
-    click(textButton(container, 'Copy table'));
+    copyTableText(container);
     expect(writeText).toHaveBeenCalledWith(
       ['Score\tTeam\tRegion', '10\tAlpha\tUS', '2\tBeta\tEMEA'].join('\n'),
     );
@@ -1964,6 +2258,94 @@ describe('EnhancedMarkdownTable', () => {
     expect(details?.textContent).toContain('Region');
   });
 
+  it('starts scrolling from a stationary edge press and stops after release', async () => {
+    const container = renderTable();
+    const scroller = container.querySelector<HTMLElement>('[tabindex="0"]')!;
+    vi.spyOn(scroller, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 0,
+      top: 0,
+      left: 0,
+      right: 200,
+      bottom: 100,
+      width: 200,
+      height: 100,
+      toJSON: () => ({}),
+    });
+    const lastCell = dataCell(container, 2, 0);
+    for (const cell of container.querySelectorAll('td[data-column-index]')) {
+      vi.spyOn(cell, 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(40, 0, 160, 48),
+      );
+    }
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: () => lastCell,
+    });
+
+    act(() => {
+      dataCell(container, 0, 0).dispatchEvent(
+        new MouseEvent('mousedown', {
+          bubbles: true,
+          button: 0,
+          clientX: 100,
+          clientY: 96,
+        }),
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      );
+    });
+
+    expect(scroller.scrollTop).toBeGreaterThan(0);
+    expect(container.textContent).toContain('Selected 3');
+
+    act(() => {
+      window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    });
+    const stoppedAt = scroller.scrollTop;
+    await act(async () => {
+      await new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      );
+    });
+    expect(scroller.scrollTop).toBe(stoppedAt);
+  });
+
+  it('does not poll layout while a selection stays away from the edges', async () => {
+    const container = renderTable();
+    const scroller = container.querySelector<HTMLElement>('[tabindex="0"]')!;
+    const measure = vi
+      .spyOn(scroller, 'getBoundingClientRect')
+      .mockReturnValue(new DOMRect(0, 0, 200, 200));
+    act(() =>
+      dataCell(container, 0, 0).dispatchEvent(
+        new MouseEvent('mousedown', {
+          bubbles: true,
+          button: 0,
+          clientX: 100,
+          clientY: 100,
+        }),
+      ),
+    );
+    await act(async () => {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    });
+    expect(measure).toHaveBeenCalled();
+    measure.mockClear();
+    await act(async () => {
+      await new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      );
+    });
+    expect(measure).not.toHaveBeenCalled();
+    act(() =>
+      window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })),
+    );
+  });
+
   it('keeps hidden columns out of reordered selections', () => {
     const writeText = mockClipboard();
     const container = renderWideTable();
@@ -1980,7 +2362,7 @@ describe('EnhancedMarkdownTable', () => {
     expect(container.textContent).toContain('Min 2');
     expect(container.textContent).toContain('Max 10');
 
-    click(textButton(container, 'Copy TSV'));
+    click(textButton(container, 'Copy text'));
 
     expect(writeText).toHaveBeenCalledWith(['10\tAlpha', '2\tBeta'].join('\n'));
   });
@@ -2276,11 +2658,17 @@ describe('EnhancedMarkdownTable', () => {
 
     expect(cell.textContent).not.toContain('Expand text');
     expect(textButton(container, 'Expand text')).toBeDefined();
+    expect(
+      textButton(container, 'Expand text').querySelector('svg'),
+    ).not.toBeNull();
     expect(cell.querySelector<HTMLElement>('[title]')?.title).toBe(longText);
 
     click(textButton(container, 'Expand text'));
 
     expect(textButton(container, 'Collapse text')).toBeDefined();
+    expect(
+      textButton(container, 'Collapse text').querySelector('svg'),
+    ).not.toBeNull();
     expect(container.textContent).not.toContain('Selected 1');
     expect(cell.querySelector<HTMLElement>('[title]')).toBeNull();
 
@@ -2333,7 +2721,7 @@ describe('EnhancedMarkdownTable', () => {
     ]);
 
     dragCells(dataCell(container, 0, 0), dataCell(container, 0, 0));
-    click(textButton(container, 'Copy TSV'));
+    click(textButton(container, 'Copy text'));
 
     expect(writeText).toHaveBeenCalledWith(longText);
   });
@@ -2355,12 +2743,12 @@ describe('EnhancedMarkdownTable', () => {
     ]);
 
     dragCells(dataCell(container, 0, 0), dataCell(container, 0, 0));
-    click(textButton(container, 'Copy TSV'));
+    click(textButton(container, 'Copy text'));
 
     expect(writeText).toHaveBeenCalledWith('line 1 line 2 line 3');
   });
 
-  it('flattens cell-internal newlines when quick copying the visible table', async () => {
+  it('flattens cell-internal newlines when copying the visible table as text', async () => {
     const writeText = mockClipboard();
     const multilineText = 'line 1\nline 2\nline 3';
     const container = renderTableContent([
@@ -2376,8 +2764,8 @@ describe('EnhancedMarkdownTable', () => {
       </tbody>,
     ]);
 
+    copyTableText(container);
     await act(async () => {
-      textButton(container, 'Copy table').click();
       await Promise.resolve();
     });
 
@@ -2401,12 +2789,12 @@ describe('EnhancedMarkdownTable', () => {
     ]);
 
     dragCells(dataCell(container, 0, 0), dataCell(container, 0, 0));
-    click(textButton(container, 'Copy TSV'));
+    click(textButton(container, 'Copy text'));
 
     expect(writeText).toHaveBeenCalledWith('data =CMD("calc")');
   });
 
-  it('flattens cell-internal tabs when quick copying the visible table', async () => {
+  it('flattens cell-internal tabs when copying the visible table as text', async () => {
     const writeText = mockClipboard();
     const tabbedText = 'data\t=CMD("calc")';
     const container = renderTableContent([
@@ -2422,8 +2810,8 @@ describe('EnhancedMarkdownTable', () => {
       </tbody>,
     ]);
 
+    copyTableText(container);
     await act(async () => {
-      textButton(container, 'Copy table').click();
       await Promise.resolve();
     });
 
@@ -2499,6 +2887,24 @@ describe('EnhancedMarkdownTable', () => {
     expect(container.textContent).not.toContain('Expand text');
   });
 
+  it.each(['Copy', 'Table density'])(
+    'opens %s without locking the page or hiding the table',
+    (label) => {
+      const container = renderTable();
+
+      pointerClick(button(container, label));
+
+      expect(document.querySelector('[role="menu"]')).not.toBeNull();
+      expect(document.body.style.pointerEvents).not.toBe('none');
+      expect(document.body.hasAttribute('data-scroll-locked')).toBe(false);
+      expect(
+        container
+          .querySelector('[data-web-shell-app-root]')
+          ?.closest('[aria-hidden="true"]'),
+      ).toBeNull();
+    },
+  );
+
   it('selects display density from the toolbar', () => {
     const container = renderTable();
     const shell = container.querySelector<HTMLElement>('[class*="tableShell"]');
@@ -2510,7 +2916,7 @@ describe('EnhancedMarkdownTable', () => {
     expect(columns()[0]?.style.width).toBe('40px');
     expect(columns()[1]?.style.width).toContain('160px');
 
-    selectValue(button(container, 'Table density'), 'compact');
+    selectDensity(container, 'compact');
     expect(shell?.className).toContain('densityCompact');
     expect(button(container, 'Table density').textContent).toContain(
       'Compact density',
@@ -2519,8 +2925,25 @@ describe('EnhancedMarkdownTable', () => {
     expect(columns()[1]?.style.width).toContain('72px');
     expect(columns()[1]?.style.width).not.toContain('160px');
 
-    selectValue(button(container, 'Table density'), 'comfortable');
+    selectDensity(container, 'comfortable');
     expect(shell?.className).toContain('densityComfortable');
+    pointerClick(button(container, 'Table density'));
+    expect(
+      container
+        .querySelector('[role="menuitemradio"][data-value="comfortable"]')
+        ?.getAttribute('aria-checked'),
+    ).toBe('true');
+    expect(
+      container
+        .querySelector('[role="menuitemradio"][data-value="compact"]')
+        ?.getAttribute('aria-checked'),
+    ).toBe('false');
+    click(
+      container.querySelector(
+        '[role="menuitemradio"][data-value="comfortable"]',
+      )!,
+    );
+
     expect(button(container, 'Table density').textContent).toContain(
       'Comfortable density',
     );
@@ -2642,7 +3065,7 @@ describe('EnhancedMarkdownTable', () => {
     render(['10']);
 
     expect(container.textContent).not.toContain('Selected');
-    expect(container.textContent).not.toContain('Copy TSV');
+    expect(container.textContent).not.toContain('Copy text');
   });
 
   it('clears a selection when clicking outside the table', () => {
@@ -2658,7 +3081,7 @@ describe('EnhancedMarkdownTable', () => {
     });
 
     expect(container.textContent).not.toContain('Selected');
-    expect(container.textContent).not.toContain('Copy TSV');
+    expect(container.textContent).not.toContain('Copy text');
   });
 
   it('uses numeric cells only for mixed-selection arithmetic', () => {
@@ -2897,32 +3320,34 @@ describe('EnhancedMarkdownTable', () => {
     dragColumn(container, 'Move Score', 'Move Team');
     freezeFirstColumn(container, 'Score');
     dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
-    click(textButton(container, 'Copy TSV'));
+    click(textButton(container, 'Copy text'));
 
     expect(writeText).toHaveBeenCalledWith(['10\tAlpha', '2\tBeta'].join('\n'));
   });
 
-  it('shows checkmark feedback after quick copy', async () => {
+  it('shows checkmark feedback after copying from the menu', async () => {
     vi.useFakeTimers();
     mockClipboard();
     const container = renderTable();
 
+    copyTableText(container);
     await act(async () => {
-      textButton(container, 'Copy table').click();
       await Promise.resolve();
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain('✓');
+    expect(
+      button(container, 'Copy').querySelector('.lucide-check'),
+    ).not.toBeNull();
     expect(container.textContent).toContain('Copied!');
-    expect(container.textContent).not.toContain('Copy table');
+    expect(container.textContent).not.toContain('Copy');
 
     await act(async () => {
       vi.advanceTimersByTime(2000);
     });
 
     expect(container.textContent).not.toContain('✓');
-    expect(container.textContent).toContain('Copy table');
+    expect(container.textContent).toContain('Copy');
   });
 
   it('keeps copy feedback working under StrictMode effect replay', async () => {
@@ -2952,8 +3377,8 @@ describe('EnhancedMarkdownTable', () => {
     });
     mounted.push({ root, container });
 
+    copyTableText(container);
     await act(async () => {
-      textButton(container, 'Copy table').click();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -2961,20 +3386,22 @@ describe('EnhancedMarkdownTable', () => {
     expect(container.textContent).toContain('Copied!');
   });
 
-  it('keeps quick copy feedback visible for the latest click', async () => {
+  it('keeps copy feedback visible for the latest click', async () => {
     vi.useFakeTimers();
     mockClipboard();
     const container = renderTable();
 
+    copyTableText(container);
     await act(async () => {
-      textButton(container, 'Copy table').click();
       await Promise.resolve();
       await Promise.resolve();
     });
 
     await act(async () => {
       vi.advanceTimersByTime(1000);
-      textButtonContaining(container, 'Copied!').click();
+    });
+    copyTableText(container);
+    await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -2984,23 +3411,23 @@ describe('EnhancedMarkdownTable', () => {
     });
 
     expect(container.textContent).toContain('Copied!');
-    expect(container.textContent).not.toContain('Copy table');
+    expect(container.textContent).not.toContain('Copy');
 
     await act(async () => {
       vi.advanceTimersByTime(1000);
     });
 
     expect(container.textContent).not.toContain('Copied!');
-    expect(container.textContent).toContain('Copy table');
+    expect(container.textContent).toContain('Copy');
   });
 
-  it('resets quick copy feedback when visible table data changes', async () => {
+  it('resets copy feedback when visible table data changes', async () => {
     vi.useFakeTimers();
     mockClipboard();
     const container = renderTable();
 
+    copyTableText(container);
     await act(async () => {
-      textButton(container, 'Copy table').click();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -3010,16 +3437,14 @@ describe('EnhancedMarkdownTable', () => {
     click(button(container, 'Sort by Score'));
 
     expect(container.textContent).not.toContain('Copied!');
-    expect(container.textContent).toContain('Copy table');
+    expect(container.textContent).toContain('Copy');
   });
 
-  it('ignores stale quick copy feedback after visible data changes', async () => {
+  it('ignores stale copy feedback after visible data changes', async () => {
     const clipboard = mockClipboardDelayed();
     const container = renderTable();
 
-    act(() => {
-      textButton(container, 'Copy table').click();
-    });
+    copyTableText(container);
     click(button(container, 'Sort by Score'));
 
     await act(async () => {
@@ -3028,16 +3453,16 @@ describe('EnhancedMarkdownTable', () => {
     });
 
     expect(container.textContent).not.toContain('Copied!');
-    expect(container.textContent).toContain('Copy table');
+    expect(container.textContent).toContain('Copy');
   });
 
-  it('resets quick copy feedback when filters change visible rows', async () => {
+  it('resets copy feedback when filters change visible rows', async () => {
     vi.useFakeTimers();
     mockClipboard();
     const container = renderTable();
 
+    copyTableText(container);
     await act(async () => {
-      textButton(container, 'Copy table').click();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -3053,7 +3478,7 @@ describe('EnhancedMarkdownTable', () => {
     click(textButton(container, 'Confirm'));
 
     expect(container.textContent).not.toContain('Copied!');
-    expect(container.textContent).toContain('Copy table');
+    expect(container.textContent).toContain('Copy');
   });
 
   it('does not show copied feedback when clipboard write fails', async () => {
@@ -3061,15 +3486,15 @@ describe('EnhancedMarkdownTable', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const container = renderTable();
 
+    copyTableText(container);
     await act(async () => {
-      textButton(container, 'Copy table').click();
       await Promise.resolve();
       await Promise.resolve();
     });
 
     expect(warn).toHaveBeenCalled();
     expect(container.textContent).not.toContain('Copied!');
-    expect(container.textContent).toContain('Copy table');
+    expect(container.textContent).toContain('Copy');
   });
 
   it('shows text feedback after copying a selection', async () => {
@@ -3080,20 +3505,20 @@ describe('EnhancedMarkdownTable', () => {
     dragCells(dataCell(container, 0, 0), dataCell(container, 0, 0));
 
     await act(async () => {
-      textButton(container, 'Copy TSV').click();
+      textButton(container, 'Copy text').click();
       await Promise.resolve();
       await Promise.resolve();
     });
 
     expect(container.textContent).toContain('Copied!');
-    expect(container.textContent).not.toContain('Copy TSV');
+    expect(container.textContent).not.toContain('Copy text');
     expect(textButton(container, 'Copied!').querySelector('svg')).toBeNull();
 
     await act(async () => {
       vi.advanceTimersByTime(2000);
     });
 
-    expect(container.textContent).toContain('Copy TSV');
+    expect(container.textContent).toContain('Copy text');
   });
 
   it('resets selection copy feedback when the selection changes', async () => {
@@ -3104,7 +3529,7 @@ describe('EnhancedMarkdownTable', () => {
     dragCells(dataCell(container, 0, 0), dataCell(container, 0, 0));
 
     await act(async () => {
-      textButton(container, 'Copy TSV').click();
+      textButton(container, 'Copy text').click();
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -3114,7 +3539,7 @@ describe('EnhancedMarkdownTable', () => {
     dragCells(dataCell(container, 1, 0), dataCell(container, 1, 0));
 
     expect(container.textContent).not.toContain('Copied!');
-    expect(container.textContent).toContain('Copy TSV');
+    expect(container.textContent).toContain('Copy text');
   });
 
   it('ignores stale selection copy feedback after selection changes', async () => {
@@ -3123,7 +3548,7 @@ describe('EnhancedMarkdownTable', () => {
 
     dragCells(dataCell(container, 0, 0), dataCell(container, 0, 0));
     act(() => {
-      textButton(container, 'Copy TSV').click();
+      textButton(container, 'Copy text').click();
     });
     dragCells(dataCell(container, 1, 0), dataCell(container, 1, 0));
 
@@ -3133,7 +3558,7 @@ describe('EnhancedMarkdownTable', () => {
     });
 
     expect(container.textContent).not.toContain('Copied!');
-    expect(container.textContent).toContain('Copy TSV');
+    expect(container.textContent).toContain('Copy text');
   });
 
   it('resets interactive state when table columns change', () => {
@@ -3219,7 +3644,7 @@ describe('EnhancedMarkdownTable', () => {
 
     toggleTableColumn(container, 'Region');
     dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
-    click(textButton(container, 'Copy TSV'));
+    click(textButton(container, 'Copy text'));
 
     expect(writeText).toHaveBeenCalledWith(['Alpha\t10', 'Beta\t2'].join('\n'));
   });
@@ -3319,7 +3744,7 @@ describe('EnhancedMarkdownTable', () => {
         new MouseEvent('mouseover', { bubbles: true, relatedTarget: from }),
       );
     });
-    click(textButton(container, 'Copy TSV'));
+    click(textButton(container, 'Copy text'));
 
     expect(writeText).toHaveBeenCalledWith('Alpha');
   });
@@ -3341,7 +3766,7 @@ describe('EnhancedMarkdownTable', () => {
       from.dispatchEvent(touchEvent('touchmove', [{ clientX: 2, clientY: 2 }]));
       from.dispatchEvent(touchEvent('touchend', []));
     });
-    click(textButton(container, 'Copy TSV'));
+    click(textButton(container, 'Copy text'));
 
     expect(writeText).toHaveBeenCalledWith(['Alpha\t10', 'Beta\t2'].join('\n'));
   });
@@ -3586,7 +4011,7 @@ describe('EnhancedMarkdownTable', () => {
     );
 
     expect(container.textContent).toContain('plain fallback');
-    expect(container.textContent).not.toContain('Copy table');
+    expect(container.textContent).not.toContain('Copy');
   });
 
   it('falls back when a table has no parsed columns', () => {
@@ -3605,7 +4030,7 @@ describe('EnhancedMarkdownTable', () => {
     );
 
     expect(container.textContent).toContain('plain fallback');
-    expect(container.textContent).not.toContain('Copy table');
+    expect(container.textContent).not.toContain('Copy');
   });
 
   it('shows a distinct message for empty tables', () => {
@@ -3655,7 +4080,7 @@ describe('EnhancedMarkdownTable', () => {
       </tr>,
     ]);
 
-    expect(container.textContent).toContain('Copy table');
+    expect(container.textContent).toContain('Copy');
     expect(rowTexts(container)).toEqual(['Alpha|10']);
   });
 
@@ -3684,7 +4109,7 @@ describe('EnhancedMarkdownTable', () => {
       'zh-CN',
     );
 
-    expect(container.textContent).toContain('复制表格');
+    expect(container.textContent).toContain('复制');
     expect(container.textContent).toContain('标准密度');
     expect(container.textContent).toContain('展开文本');
     expect(container.textContent).toContain('详情');
@@ -3699,5 +4124,91 @@ describe('EnhancedMarkdownTable', () => {
     click(button(container, '筛选 Team'));
     expect(container.textContent).not.toContain('隐藏列');
     expect(container.textContent).not.toContain('升序排序');
+  });
+});
+
+describe('rendered table selection semantics', () => {
+  it('preserves renderer-padded empty cells in copied rows', () => {
+    const container = renderTableContent([
+      <thead key="head">
+        <tr>
+          <th>Name</th>
+          <th>Value</th>
+          <th>Extra</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>Alpha</td>
+          <td></td>
+          <td>42</td>
+        </tr>
+        <tr>
+          <td>Beta</td>
+        </tr>
+      </tbody>,
+    ]);
+    const range = document.createRange();
+    range.selectNodeContents(container);
+    expect(getSelectedReplyContent(container, range)).toEqual({
+      text: 'Name\tValue\tExtra\nAlpha\t\t42\nBeta\t\t',
+      markdown:
+        '| Name | Value | Extra |\n| --- | --- | --- |\n| Alpha |  | 42 |\n| Beta |  |  |',
+    });
+  });
+  it('marks the real table interaction surface and omits toolbar/action chrome', () => {
+    const container = renderTable();
+    const range = document.createRange();
+    range.selectNodeContents(container);
+    expect(
+      container.querySelector('[data-selection-copy-table] table'),
+    ).not.toBeNull();
+    expect(getSelectedReplyContent(container, range)).toEqual({
+      text: 'Team\tScore\nAlpha\t10\nBeta\t2\nGamma\t30',
+      markdown:
+        '| Team | Score |\n| --- | --- |\n| Alpha | 10 |\n| Beta | 2 |\n| Gamma | 30 |',
+    });
+    expect(
+      container
+        .querySelector('thead th')
+        ?.hasAttribute('data-selection-copy-ignore'),
+    ).toBe(true);
+    expect(
+      container
+        .querySelector('tbody td')
+        ?.hasAttribute('data-selection-copy-ignore'),
+    ).toBe(true);
+  });
+  it('omits an actual empty-table status from both copy projections', () => {
+    const container = renderTableContent(
+      <thead>
+        <tr>
+          <th>Name</th>
+        </tr>
+      </thead>,
+    );
+    expect(container.textContent).toContain('This table has no data.');
+    const before = document.createElement('p');
+    before.textContent = 'Before';
+    container.prepend(before);
+    const after = document.createElement('p');
+    after.textContent = 'After';
+    container.append(after);
+    const range = document.createRange();
+    range.selectNodeContents(container);
+    const value = getSelectedReplyContent(container, range)!;
+    expect(value.text).toBe('Before\nName\nAfter');
+    expect(value.markdown).toBe('Before\n\n| Name |\n| --- |\n\nAfter');
+  });
+  it('omits expanded row details while keeping the visible table once', () => {
+    const container = renderTable();
+    click(button(container, 'View details for row 1'));
+    expect(container.textContent).toContain('Row details');
+    const range = document.createRange();
+    range.selectNodeContents(container);
+    const value = getSelectedReplyContent(container, range)!;
+    expect(value.text).toBe('Team\tScore\nAlpha\t10\nBeta\t2\nGamma\t30');
+    expect(value.markdown).not.toContain('Row details');
+    expect(value.markdown.match(/Alpha/g)).toHaveLength(1);
   });
 });
