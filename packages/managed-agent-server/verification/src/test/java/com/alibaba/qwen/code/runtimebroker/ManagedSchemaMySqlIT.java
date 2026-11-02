@@ -258,6 +258,18 @@ class ManagedSchemaMySqlIT {
                         "ALTER TABLE ma_session_head MODIFY writer_lease_until BIGINT UNSIGNED NULL");
             }
             ManagedSchema.initialize(source);
+            for (String[] column : new String[][] {
+                {"is_plan_enabled", "TINYINT NOT NULL DEFAULT 0", "TINYINT UNSIGNED NOT NULL DEFAULT 0"},
+                {"child_depth", "INT NULL", "INT UNSIGNED NULL"}
+            }) {
+                statement.execute("ALTER TABLE ma_session MODIFY " + column[0] + " " + column[1]);
+                try {
+                    assertThrows(IllegalStateException.class, () -> ManagedSchema.validate(source));
+                } finally {
+                    statement.execute("ALTER TABLE ma_session MODIFY " + column[0] + " " + column[2]);
+                }
+                ManagedSchema.validate(source);
+            }
             if (mariaDb) {
                 String url = connection.getMetaData().getURL();
                 DataSource disabledChecks = new DriverManagerDataSource(

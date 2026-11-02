@@ -62,7 +62,7 @@ class WorkspaceQueryScaleMySqlIT {
                         .put("kind", "managed-definition").put("schemaVersion", 1).put("byteLength", 2)
                         .put("digest", com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.hash("{}".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
                 assertThat(new WorkspaceRecoveryReader(jdbc, null).resource(source, ref).path("bytesBase64").asText()).isEqualTo("e30=");
-                assertBounded(jdbc, jdbc.resource, "PRIMARY", 5);
+                assertBounded(jdbc, jdbc.resource, "uk_ma_resource_business_key", 5);
                 assertBounded(jdbc, jdbc.reference, "idx_ma_ref_resource", 5);
             }
         }
@@ -190,11 +190,11 @@ class WorkspaceQueryScaleMySqlIT {
         assertThat(query).isNotNull();
         var plan = ExecutedQueryPlan.explain(jdbc, query.sql(), query.arguments());
         assertThat(plan.tableScan()).as(plan.text()).isFalse();
-        if ("PRIMARY".equals(index) && plan.text().contains("Rows fetched before execution")) {
+        if (plan.text().contains("Rows fetched before execution")) {
             var table = com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.parse(jdbc.queryForObject("EXPLAIN FORMAT=JSON " + query.sql(), String.class, query.arguments()))
                     .path("query_block").path("table");
             assertThat(table.path("access_type").asText()).isEqualTo("const");
-            assertThat(table.path("key").asText()).isEqualTo("PRIMARY");
+            assertThat(table.path("key").asText()).isEqualTo(index);
             assertThat(table.path("rows_examined_per_scan").asInt()).isEqualTo(1);
         } else {
             assertThat(plan.usesIndex(index)).as(plan.text()).isTrue();

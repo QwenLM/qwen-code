@@ -1240,13 +1240,13 @@ class WorkspaceCsiApplicationInventoryTest {
     }
 
     @Test
-    void generatedRowIdentityIsValidatedButExcludedFromRecoveryEvidence() throws Exception {
+    void generatedRowIdentityIsExcludedFromEvidenceAndCatalogDriftIsRejected() throws Exception {
         var before = inspect();
         assertThat(before.table("ma_session").columns()).noneMatch(column -> column.name().equals("id"));
         assertThat(before.table("ma_session").rows()).allSatisfy(row -> assertThat(row.fields()).doesNotContainKey("id"));
         jdbc.update("UPDATE ma_session SET id = id + 1000");
         assertThat(inspect().bytes()).isEqualTo(before.bytes());
-        jdbc.execute("ALTER TABLE ma_session ALTER COLUMN id DROP IDENTITY");
+        dropRowIdentity();
         assertThat(inspect().blockers()).anyMatch(blocker -> blocker.table().equals("inventory")
                 && blocker.code().equals("schema_drift"));
     }
@@ -1499,6 +1499,10 @@ class WorkspaceCsiApplicationInventoryTest {
             }
             statement.executeBatch();
         }
+    }
+
+    void dropRowIdentity() {
+        jdbc.execute("ALTER TABLE ma_session ALTER COLUMN id DROP IDENTITY");
     }
 
     void alterColumn(String table, String column, String type) {

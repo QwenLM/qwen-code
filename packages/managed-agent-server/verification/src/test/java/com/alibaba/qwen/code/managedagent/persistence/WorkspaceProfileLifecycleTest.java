@@ -384,7 +384,7 @@ class WorkspaceProfileLifecycleTest {
         assertThat(f.jdbc.queryForObject("SELECT producer_phase FROM ma_output_capture WHERE tenant_id = ?", String.class, "tenant-1")).isEqualTo("OPEN");
         verifyPublications.run();
         verifyResources.run();
-        for (String mutation : java.util.List.of("state = 'FENCED'", "producer_phase = 'FINISHING'", "quarantined = TRUE", "terminal_resource_id = 'unexpected'")) {
+        for (String mutation : java.util.List.of("state = 'FENCED'", "producer_phase = 'FINISHING'", "is_quarantined = TRUE", "terminal_resource_id = 'unexpected'")) {
             f.jdbc.update("UPDATE ma_output_capture SET " + mutation + " WHERE tenant_id = ?", "tenant-1");
             assertThatThrownBy(verifyPublications::run).isInstanceOf(ManagedAgentException.class);
             assertThatThrownBy(verifyResources::run).isInstanceOf(ManagedAgentException.class);

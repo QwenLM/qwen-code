@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import javax.sql.DataSource;
 
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.SQLException;
 import java.util.Map;
 import java.util.Set;
@@ -37,6 +38,16 @@ class ManagedSchemaTest {
                 }
                 try (var keys = connection.getMetaData().getImportedKeys(null, null, table)) {
                     assertTrue(!keys.next(), table);
+                }
+            }
+            for (var key : Map.of(
+                    "ma_runtime_slot", "request_key",
+                    "ma_runtime_binding", "binding_id",
+                    "ma_tool_execution", "execution_call_id_hash",
+                    "ma_storage_owner", "storage_key").entrySet()) {
+                try (var columns = connection.getMetaData().getColumns(null, null, key.getKey(), key.getValue())) {
+                    assertTrue(columns.next(), key.getKey());
+                    assertEquals(DatabaseMetaData.columnNoNulls, columns.getInt("NULLABLE"), key.getKey());
                 }
             }
             statement.execute("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
@@ -261,6 +272,7 @@ class ManagedSchemaTest {
                         "idx_ma_runtime_storage_alias_state",
                         "idx_ma_session_storage_scope",
                         "idx_ma_head_workspace",
+                        "idx_ma_work_evidence",
                         "idx_ma_storage_owner_binding")) {
             DataSource source = initialized();
             try (var connection = source.getConnection();

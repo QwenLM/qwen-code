@@ -762,6 +762,8 @@ CREATE INDEX idx_ma_work_storage ON ma_operation_work (storage_key, work_kind, s
 
 CREATE INDEX idx_ma_work_physical ON ma_operation_work (physical_key, work_kind, state);
 
+CREATE INDEX idx_ma_work_evidence ON ma_operation_work (evidence_resource_key);
+
 CREATE TABLE ma_workspace (
     tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
     workspace_id VARBINARY(512) NOT NULL COMMENT 'Workspace identity within the tenant.',
@@ -906,7 +908,7 @@ CREATE TABLE ma_storage (
 CREATE INDEX idx_ma_storage_physical ON ma_storage (physical_key);
 
 CREATE TABLE ma_runtime_slot (
-    request_key CHAR(64) COMMENT 'Hashed Runtime request identity selecting a stable slot.',
+    request_key CHAR(64) NOT NULL COMMENT 'Hashed Runtime request identity selecting a stable slot.',
     tenant_id VARBINARY(2048) NOT NULL COMMENT 'Tenant identity used for isolation.',
     workspace_id VARBINARY(2048) NOT NULL COMMENT 'Workspace identity within the tenant.',
     workspace_generation VARBINARY(2048) NOT NULL COMMENT 'Workspace generation captured for this binding.',
@@ -924,7 +926,7 @@ CREATE TABLE ma_runtime_slot (
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Stable Runtime request slots retaining generation counters across binding collection.';
 
 CREATE TABLE ma_runtime_binding (
-    binding_id VARBINARY(2048) COMMENT 'Runtime binding identity.',
+    binding_id VARBINARY(2048) NOT NULL COMMENT 'Runtime binding identity.',
     request_key CHAR(64) NOT NULL COMMENT 'Hashed Runtime request identity selecting a stable slot.',
     scope_key CHAR(64) NOT NULL COMMENT 'Hashed scope identity used to partition records.',
     tenant_id VARBINARY(2048) NOT NULL COMMENT 'Tenant identity used for isolation.',
@@ -1007,7 +1009,7 @@ CREATE TABLE ma_runtime_session (
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Runtime execution Sessions attached to a binding and originating Harness Session.';
 
 CREATE TABLE ma_tool_execution (
-    execution_call_id_hash CHAR(64) COMMENT 'Hash of the stable execution-call identity.',
+    execution_call_id_hash CHAR(64) NOT NULL COMMENT 'Hash of the stable execution-call identity.',
     execution_call_id VARBINARY(2048) NOT NULL COMMENT 'Original stable identity of the tool execution.',
     idempotency_key_hash CHAR(64) NOT NULL COMMENT 'Hash enforcing tool execution idempotency.',
     idempotency_key VARBINARY(2048) NOT NULL COMMENT 'Original key identifying retries of the same request.',
@@ -1050,7 +1052,7 @@ CREATE TABLE ma_tool_execution (
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Idempotent tool executions, dispatch fencing, cancellation, and terminal results.';
 
 CREATE TABLE ma_storage_owner (
-    storage_key CHAR(64) COMMENT 'Canonical storage coordination key for ownership and execution membership.',
+    storage_key CHAR(64) NOT NULL COMMENT 'Canonical storage coordination key for ownership and execution membership.',
     holder_key CHAR(64) COMMENT 'Identity of the exclusive storage holder, when present.',
     binding_id VARBINARY(2048) COMMENT 'Runtime binding identity.',
     runtime_generation BIGINT UNSIGNED COMMENT 'Generation of the referenced Runtime binding.',

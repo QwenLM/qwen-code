@@ -339,7 +339,7 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
                 "SELECT " + ManagedSchemaProjection.RUNTIME_SESSION.columns() + " FROM ma_runtime_session WHERE scope_key = ? AND runtime_session_id = ?",
                 scopeHash(runtime.getRequest().getScope()), ref.path("sessionId").asText());
         require(runtime.getRequest().getScope().equals(scope(session))
-                && session.get("execution_storage_key") == null && Boolean.FALSE.equals(session.get("is_execution_exclusive"))
+                && session.get("execution_storage_key") == null && !flag(session, "is_execution_exclusive")
                 && runtime.getBindingId().equals(session.get("binding_id"))
                 && runtime.getGeneration() == rawNumber(session, "runtime_generation")
                 && binding.path("sessionKey").path("sessionId").asText().equals(session.get("harness_session_id")));

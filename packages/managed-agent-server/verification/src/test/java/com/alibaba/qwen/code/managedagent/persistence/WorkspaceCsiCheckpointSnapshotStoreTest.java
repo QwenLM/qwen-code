@@ -182,6 +182,7 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
         "UPDATE ma_tool_execution SET reference_json = REPLACE(reference_json, 'payloadDigest', 'wrongDigest')",
         "UPDATE ma_tool_execution SET reference_json = '{}'",
         "UPDATE ma_runtime_session SET binding_id = 'different'",
+        "UPDATE ma_runtime_session SET is_execution_exclusive = TRUE",
         "UPDATE ma_output_capture SET is_quarantined = TRUE",
         "UPDATE ma_output_capture SET producer_phase = 'FINISHED'",
         "UPDATE ma_output_capture SET binding_digest = 'bad'",
