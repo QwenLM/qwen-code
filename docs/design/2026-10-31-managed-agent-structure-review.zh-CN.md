@@ -60,24 +60,25 @@ Managed Agent 服务端从首篇设计（2026-09-19）起，约两个月内长�
 
 **D1. 上帝类。** 最大的生产类：
 
-| 类                                 | 模块           | 行数  | 备注                                                                                        |
-| ---------------------------------- | -------------- | ----- | ------------------------------------------------------------------------------------------- |
-| `ManagedAgentStore`                | persistence    | 7,751 | 300+ 方法，7 个公开 setter                                                                  |
-| `RuntimeBrokerService`             | runtime-broker | 6,329 | 230+ 方法；冷却与 hold 清单已提取（`ExecutionObservationCooldown`、`RuntimeHoldInventory`） |
-| `ManagedSessionStore`              | persistence    | 3,931 |                                                                                             |
-| `WorkspaceCsiApplicationInventory` | persistence    | 3,319 |                                                                                             |
-| `ToolPublicationDataStore`         | persistence    | 2,709 |                                                                                             |
-| `QwenHostedHarnessConnector`       | adapters       | 2,328 |                                                                                             |
-| `ManagedAgentService`              | control-plane  | 2,120 |                                                                                             |
-| `HarnessCoordinator`               | control-plane  | 1,770 |                                                                                             |
+| 类                                 | 模块           | 行数  | 备注                                                                                                                               |
+| ---------------------------------- | -------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `ManagedAgentStore`                | persistence    | 7,657 | 300+ 方法，7 个公开 setter                                                                                                         |
+| `RuntimeBrokerService`             | runtime-broker | 4,270 | ~150 方法；binding registry、execution reconciler/recovery/cancellation/dispatcher、support/state、冷却与 hold 清单已提取（见 P1） |
+| `ManagedSessionStore`              | persistence    | 3,931 |                                                                                                                                    |
+| `WorkspaceCsiApplicationInventory` | persistence    | 3,319 |                                                                                                                                    |
+| `ToolPublicationDataStore`         | persistence    | 2,709 |                                                                                                                                    |
+| `QwenHostedHarnessConnector`       | adapters       | 2,328 |                                                                                                                                    |
+| `ManagedAgentService`              | control-plane  | 2,120 |                                                                                                                                    |
+| `HarnessCoordinator`               | control-plane  | 1,770 |                                                                                                                                    |
 
 `ManagedAgentStore` 混合了会话准入、turn、event、item/message 投影、worktree、
 MCP 管理、definition pin、skills 与 extension 投影。它的 7 个公开
 `set*`/`configure*` 方法是构造后的可变装配：Bean 在完全装配好之前就可能被
-观察到。`RuntimeBrokerService` 把 provisioning、绑定 CAS、租约、取消、恢复
-扫描与 extension 命令揉在一个类里；observation 冷却与 tool hold 清单是
-首批委托给已提取协作者的关注点（见下方 P1 提取切片）。测试
-镜像了同样的形状：`RuntimeBrokerServiceTest` 8,002 行，
+观察到。`RuntimeBrokerService` 原本把 provisioning、绑定 CAS、租约、取消、恢复
+扫描与 extension 命令揉在一个类里；P1 提取切片已把 binding registry、
+execution 对账/恢复/取消/分发、support/state、observation 冷却与 tool hold
+清单委托给九个模块内协作者，留下 4,270 行的门面（见下方 P1 提取切片）。测试
+镜像了同样的形状：`RuntimeBrokerServiceTest` 7,992 行，
 `HarnessCoordinatorTest` 4,910 行。
 
 **D2. 望远镜式会话创建 API。** `insertWorkspaceSessionCommand` 在
@@ -204,7 +205,7 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
   `@Autowired` 注入（`extensionPackages`、`creationSkills`、`worktreeFiles`
   ——后者的 bean 由 `ManagedAgentConfiguration.managedWorktreeFiles()`
   供给；`VerificationFixtures` 里的直接调用是测试装配，不是生产接线）。
-  改为构造 `ObjectProvider` 注入是对这个 7,700 行中心类的大改动，涉及约
+  改为构造 `ObjectProvider` 注入是对这个 7,657 行中心类的大改动，涉及约
   30 处测试装配点，且其正确性依赖 Spring 运行时装配——手动 setter 的单测
   无法完全覆盖。[专门的构造装配设计](2026-11-01-managed-agent-store-wiring.zh-CN.md)
   覆盖必需/可选依赖、额外的延迟 record-store 字段及其 Session-store 回环、
@@ -218,20 +219,23 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
   （`RuntimeHoldInventory`）：持久化分页与 RELEASED 过滤逐字迁移，服务
   保留准入、租户解析与错误映射边界。恢复扫描随后调研，证实深度耦合——
   `scanExecutions` 驱动 `reconcileInContext`，后台进程 settle 族拥有
-  `SessionContext` 内存索引与 CAS settle 循环——现在提取会造出注入十来个
-  回调的协作者而非干净的缝；它等待对账路径先成为独立协作者。取消遵循
-  同一原则：只在缝干净处提取。带入对账切片的覆盖缺口：base 中没有测试
+  `SessionContext` 内存索引与 CAS settle 循环——独立提取会需要注入十来个
+  回调。该簇此后已通过 [Runtime Binding Registry](2026-10-31-runtime-binding-registry.zh-CN.md)
+  与[执行流程抽取](2026-11-01-runtime-execution-workflows.zh-CN.md)提取：
+  对账、恢复扫描与取消现分别落在 `RuntimeExecutionReconciler`、
+  `RuntimeExecutionRecovery`、`RuntimeExecutionCancellation`，簇内不再有
+  等待项。带入对账切片的覆盖缺口：base 中没有测试
   固定 `lookupOnce` 先 stamp 后释放在途槽位的顺序。
   [流程抽取](2026-11-01-runtime-execution-workflows.zh-CN.md) 现已在对账器边界
   增加确定性阻塞 stamp 回归；其验证证据随该增量记录。
-- 对账、恢复扫描与取消**不是**干净的独立边界（2026-10-31 调研）。前置条件是
+- 对账、恢复扫描与取消当时**不是**干净的独立边界（2026-10-31 调研）。前置条件是
   [Runtime Binding Registry](2026-10-31-runtime-binding-registry.zh-CN.md)
   首片：它持有 `liveBindings`、`bindingOperations`、`sessions`、本地
   Session context 及 Binding 校验/失效 helper。源码审计修正了最初三张 map
   的草案：`bindingOperations` 必须随 Binding 生命周期操作迁移；按 execution
-  ID 索引的 `reconciliations` 则继续与 `ExecutionObservationCooldown` 放在
-  一起，在后续对账切片迁移。Registry 首片中，服务仍保留供应、排空、恢复、
-  execution 结算、续租和 scheduler 生命周期。这样无需注入 service 回调即可建立具体持有者。
+  ID 索引的 `reconciliations` 则先与 `ExecutionObservationCooldown` 放在
+  一起，已在后续对账切片迁出。Registry 首片中，服务仍保留供应、排空、恢复、
+  execution 结算、续租和 scheduler 生命周期。这样无需注入 service 回调就建立了具体持有者。
   M6 先 stamp 后移除槽位的覆盖缺口由[执行流程抽取](2026-11-01-runtime-execution-workflows.zh-CN.md)
   中阻塞 stamp 的回归处理；该切片在 Registry 后实现对账、接管扫描和取消。
   Registry 首片本身不宣称具备该覆盖。并发、清理与验收要求见所链接的双语
