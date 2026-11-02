@@ -152,6 +152,43 @@ describe('OpenTuiPermissionsDialog rule rows', () => {
     expect(container.textContent).toContain('(invalid: not applied)');
   });
 
+  it('sanitizes the delete-confirm rule without changing its raw value', () => {
+    const esc = String.fromCharCode(27);
+    const raw = `Bash(docker *${esc}[2J`;
+    const onDeleteRule = vi.fn();
+    const { container } = render(
+      <OpenTuiPermissionsDialog
+        rules={[
+          {
+            raw,
+            toolName: 'Bash',
+            type: 'deny',
+            scope: 'user',
+            invalid: true,
+          },
+        ]}
+        directories={[]}
+        initialDirectories={[]}
+        onAddRule={vi.fn()}
+        onDeleteRule={onDeleteRule}
+        onAddDirectory={vi.fn()}
+        onRemoveDirectory={vi.fn()}
+        onExit={vi.fn()}
+      />,
+    );
+
+    press('right');
+    press('right');
+    press('down');
+    press('return');
+
+    expect(screen.getByText(/Delete deny rule/)).toBeTruthy();
+    expect(container.textContent).toContain('Bash(docker *');
+    expect(container.textContent).not.toContain(esc);
+    press('return');
+    expect(onDeleteRule).toHaveBeenCalledWith(raw, 'deny');
+  });
+
   it('clips the add-rule scope row to the framed width, so it cannot wrap', () => {
     // The scope step paints inside the DialogFrame — border and padding take
     // four columns of the area width first — but the label clip was budgeted
