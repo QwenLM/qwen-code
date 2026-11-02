@@ -36,6 +36,7 @@ import {
   environmentFileEntry,
   execStartArguments,
   execStartPath,
+  fetchRefusal,
   formatEnvironmentFile,
   javaFeatureVersion,
   meetsMinimum,
@@ -248,6 +249,63 @@ test('reads the datasource, configuration and listener settings', () => {
     serverBaseUrl(new Map([['QWEN_MANAGED_AGENT_SERVER_ADDRESS', '0.0.0.0']])),
     'http://127.0.0.1:8080',
   );
+});
+
+test('refuses only the URLs fetch refuses', async () => {
+  for (const url of [
+    'http://127.0.0.1:8080',
+    'https://[::1]:8443/manage',
+    'HTTP://Example.test',
+    'http://127.0.0.1:80',
+    'http://127.0.0.1:4170',
+  ]) {
+    assert.equal(fetchRefusal(url), undefined, url);
+  }
+  assert.equal(
+    fetchRefusal('http://[fe80::1%eth0]:8080'),
+    'is not a URL: a URL cannot carry an IPv6 zone',
+  );
+  assert.equal(fetchRefusal('http://127.0.0.1:70000'), 'is not a URL');
+  assert.equal(fetchRefusal('proxy.test:8443'), 'is not an http or https URL');
+  for (const url of [
+    'http://admin@127.0.0.1:8080',
+    'http://:secret@127.0.0.1:8080',
+  ]) {
+    assert.equal(
+      fetchRefusal(url),
+      'carries a user name or password, so fetch refuses it',
+      url,
+    );
+  }
+  assert.equal(
+    fetchRefusal('https://127.0.0.1:6000'),
+    'is on port 6000, so fetch refuses to dial it',
+  );
+
+  // Each URL it refuses, the runtime's fetch rejects before it dials: a port
+  // it blocks, a scheme it does not fetch, or credentials.
+  const refused = [
+    'proxy.test:8443',
+    'ftp://127.0.0.1:2121',
+    'http://admin:secret@127.0.0.1:18080',
+    'http://:secret@127.0.0.1:18080',
+  ];
+  for (let port = 1; port <= 65535; port++) {
+    if (fetchRefusal(`http://127.0.0.1:${port}`)) {
+      refused.push(`http://127.0.0.1:${port}`);
+    }
+  }
+  assert.equal(refused.length, 4 + 82);
+  for (const url of refused) {
+    await assert.rejects(
+      fetch(`${url}/actuator/health`, { signal: AbortSignal.timeout(1000) }),
+      (error) =>
+        error instanceof TypeError &&
+        (/credentials/.test(error.message) ||
+          ['bad port', 'unknown scheme'].includes(error.cause?.message)),
+      url,
+    );
+  }
 });
 
 function sha256(text) {
@@ -1737,7 +1795,7 @@ test('start gives up when the control plane never reports UP', async (t) => {
   assert.equal(await host.upgrade('start', '--timeout', '5'), 1);
   assert.match(
     host.output.join('\n'),
-    /did not report UP at http:\/\/127.0.0.1:18080\/actuator\/health within 5s and keeps running; .* run stop to start it again/,
+    /did not report UP at http:\/\/127.0.0.1:18080\/actuator\/health within 5s \(the last probe: HTTP 200, status DOWN\) and keeps running; .* run stop to start it again/,
   );
   assert.equal(host.units[SERVER].ActiveState, 'active');
   assert.equal(await host.upgrade('start'), 1);
@@ -1866,8 +1924,86 @@ test('a health probe that never answers ends at the timeout', async (t) => {
   const started = Date.now();
   assert.equal(await host.upgrade('start', '--timeout', '1'), 1);
   assert.ok(Date.now() - started < 4000, `${Date.now() - started}ms`);
-  assert.match(host.output.join('\n'), /within 1s and keeps running/);
+  assert.match(
+    host.output.join('\n'),
+    /within 1s \(the last probe: The operation was aborted due to timeout\) and keeps running/,
+  );
   assert.ok(host.requests.every(({ init }) => init.signal));
+});
+
+test('verify says what the health endpoint answered instead of UP', async (t) => {
+  const { host, target } = await backedUp(t);
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  host.responses['GET /actuator/health'] = { status: 'UP' };
+  assert.equal(await host.upgrade('start'), 0);
+  const fake = host.system.fetch;
+  for (const [answer, health] of [
+    [
+      'HTTP 404',
+      () => {
+        delete host.responses['GET /actuator/health'];
+        return fake;
+      },
+    ],
+    // UP counts only with a success status.
+    [
+      'HTTP 503, status UP',
+      () => async () => ({
+        ok: false,
+        status: 503,
+        json: async () => ({ status: 'UP' }),
+      }),
+    ],
+    // A proxy's error page, and a body that breaks off after a success.
+    [
+      'HTTP 502',
+      () => async () => ({
+        ok: false,
+        status: 502,
+        json: async () => JSON.parse('<html>Bad Gateway</html>'),
+      }),
+    ],
+    [
+      'HTTP 200, terminated',
+      () => async () => ({
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new TypeError('terminated');
+        },
+      }),
+    ],
+    // fetch words every failure as "fetch failed"; its cause says why.
+    [
+      'self-signed certificate',
+      () => async () => {
+        throw new TypeError('fetch failed', {
+          cause: Object.assign(new Error('self-signed certificate'), {
+            code: 'DEPTH_ZERO_SELF_SIGNED_CERT',
+          }),
+        });
+      },
+    ],
+    // A refused connection on each address of a name has only its code.
+    [
+      'ECONNREFUSED',
+      () => async () => {
+        throw new TypeError('fetch failed', {
+          cause: Object.assign(new AggregateError([], ''), {
+            code: 'ECONNREFUSED',
+          }),
+        });
+      },
+    ],
+  ]) {
+    host.system.fetch = health();
+    assert.equal(await host.upgrade('verify'), 1);
+    assert.equal(
+      rowsOf(host.output).health,
+      `FAIL http://127.0.0.1:18080/actuator/health is not UP: ${answer}`,
+    );
+  }
+  host.system.fetch = fake;
 });
 
 test('verify runs the online preflight and reads the API', async (t) => {
@@ -2094,7 +2230,7 @@ test('start refuses listeners it cannot reach before it starts anything', async 
   assert.equal(await host.upgrade('start'), 1);
   assert.match(
     host.output.join('\n'),
-    /start refused: The server's configuration puts the control plane at "http:\/\/\[fe80:0:0:0:0:0:0:1%1\]:8080", which is not a URL: a URL cannot carry an IPv6 zone\. Bind it where a URL can name it, or pass --server-url <a URL that serves \/actuator\/health>\./,
+    /start refused: The server's configuration puts the control plane at "http:\/\/\[fe80:0:0:0:0:0:0:1%1\]:8080", which is not a URL: a URL cannot carry an IPv6 zone\. Bind it where fetch can reach it, or pass --server-url <a URL that serves \/actuator\/health>\./,
   );
   host.resolved = { healthUrl: `${zoned}:9091/actuator/health` };
   assert.equal(await host.upgrade('start'), 1);
@@ -2118,8 +2254,39 @@ test('start refuses listeners it cannot reach before it starts anything', async 
   );
   assert.match(
     host.output.join('\n'),
-    /start refused: --server-url "http:\/\/\[fe80::1%eth0\]:8080" is not a URL\./,
+    /start refused: --server-url "http:\/\/\[fe80::1%eth0\]:8080" is not a URL: a URL cannot carry an IPv6 zone\./,
   );
+  // fetch would refuse each probe: a port it blocks, a URL without a scheme
+  // and credentials, which the health endpoint never needs.
+  host.resolved = {
+    serverUrl: 'http://127.0.0.1:6000',
+    healthUrl: 'http://127.0.0.1:6000/actuator/health',
+  };
+  assert.equal(await host.upgrade('start'), 1);
+  assert.match(
+    host.output.join('\n'),
+    /puts the control plane at "http:\/\/127\.0\.0\.1:6000", which is on port 6000, so fetch refuses to dial it\. Bind it where fetch can reach it, or pass --server-url/,
+  );
+  host.resolved = {};
+  for (const [serverUrl, refusal] of [
+    ['proxy.test:8443', 'is not an http or https URL'],
+    [
+      'http://admin:secret@127.0.0.1:18080',
+      'carries a user name or password, so fetch refuses it',
+    ],
+    [
+      'http://127.0.0.1:10080/',
+      'is on port 10080, so fetch refuses to dial it',
+    ],
+  ]) {
+    assert.equal(await host.upgrade('start', '--server-url', serverUrl), 1);
+    assert.ok(
+      host.output.includes(
+        `start refused: --server-url ${JSON.stringify(serverUrl.replace(/\/$/, ''))} ${refusal}.`,
+      ),
+      host.output.join('\n'),
+    );
+  }
   assert.equal(host.units[HARNESS].ActiveState, 'inactive');
   assert.equal(host.units[SERVER].ActiveState, 'inactive');
   assert.ok(host.services.every(({ args }) => args.includes(RESOLVER)));
@@ -2992,7 +3159,10 @@ test('verify bounds every request and retries a poll the restart failed', async 
   );
   assert.ok(Date.now() - started < 8000, `${Date.now() - started}ms`);
   const rows = rowsOf(host.output);
-  assert.match(rows.health, /^FAIL/);
+  assert.match(
+    rows.health,
+    /^FAIL http:\/\/127\.0\.0\.1:18080\/actuator\/health is not UP: .*timeout/i,
+  );
   assert.match(
     rows.session,
     /^FAIL GET \/v1\/agents\/sessions\?limit=1: .*timeout/i,

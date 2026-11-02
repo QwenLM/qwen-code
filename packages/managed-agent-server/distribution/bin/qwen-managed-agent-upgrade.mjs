@@ -497,6 +497,41 @@ export function serverBaseUrl(environment) {
   return `http://${host}:${environment.get('SERVER_PORT') || '8080'}`;
 }
 
+// The ports fetch refuses to dial over http and https, as the Fetch standard
+// lists them (https://fetch.spec.whatwg.org/#bad-port) and Node's fetch reads
+// them.
+const FETCH_BLOCKED_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79,
+  87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137,
+  139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532,
+  540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723,
+  2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669,
+  6679, 6697, 10080,
+]);
+
+/**
+ * Why fetch refuses every request to `url`, or undefined when it dials it: not
+ * a URL, as a link-local IPv6 address with its zone is not; a scheme other
+ * than http and https, as `proxy.test:8443` has; a user name or password,
+ * which a request may not carry; or a port the Fetch standard blocks.
+ */
+export function fetchRefusal(url) {
+  if (!URL.canParse(url)) {
+    return `is not a URL${/\[[^\]]*%/.test(url) ? ': a URL cannot carry an IPv6 zone' : ''}`;
+  }
+  const { protocol, username, password, port } = new URL(url);
+  if (protocol !== 'http:' && protocol !== 'https:') {
+    return 'is not an http or https URL';
+  }
+  if (username || password) {
+    return 'carries a user name or password, so fetch refuses it';
+  }
+  if (FETCH_BLOCKED_PORTS.has(Number(port))) {
+    return `is on port ${port}, so fetch refuses to dial it`;
+  }
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Host access
 
@@ -2462,9 +2497,10 @@ async function resolveConfiguration(system, deployment) {
  * Harness: the listeners the server's configuration resolves to, with the
  * control plane at --server-url when that is given. When the configuration
  * does not resolve, the URLs server.env names, and a line that says so. A
- * listener without a fixed port or a URL is refused before anything runs.
- * verify, which does not reach the Harness, leaves the configuration alone
- * when --server-url names the control plane.
+ * listener without a fixed port, or at a URL fetch refuses, is refused before
+ * anything runs. verify, which does not reach the Harness, passes
+ * `reachesHarness: false`, and then leaves the configuration alone when
+ * --server-url names the control plane.
  */
 async function listeners(
   system,
@@ -2505,17 +2541,17 @@ async function listeners(
       `The server's configuration gives ${urls.server ? 'the health endpoint' : 'the control plane'} no fixed port: 0 picks one at start, and a negative one opens none. Pass --server-url <a URL that serves /actuator/health>.`,
     );
   }
-  // fetch would fail on each probe until the timeout, so say why up front. A
-  // link-local listener keeps its IPv6 zone, which no URL can carry.
+  // fetch would fail on each probe until the timeout, so say why up front.
   for (const [name, url] of [
     ['the control plane', urls.server],
     ['the health endpoint', urls.health],
   ]) {
-    if (!URL.canParse(url)) {
+    const refusal = fetchRefusal(url);
+    if (refusal) {
       throw new Refusal(
         options.serverUrl
-          ? `--server-url ${JSON.stringify(options.serverUrl)} is not a URL.`
-          : `The server's configuration puts ${name} at ${JSON.stringify(url)}, which is not a URL${url.includes('%') ? ': a URL cannot carry an IPv6 zone' : ''}. Bind it where a URL can name it, or pass --server-url <a URL that serves /actuator/health>.`,
+          ? `--server-url ${JSON.stringify(options.serverUrl)} ${refusal}.`
+          : `The server's configuration puts ${name} at ${JSON.stringify(url)}, which ${refusal}. Bind it where fetch can reach it, or pass --server-url <a URL that serves /actuator/health>.`,
       );
     }
   }
@@ -2555,16 +2591,42 @@ async function waitFor(system, deadline, probe) {
 // waits for the whole budget.
 const PROBE_TIMEOUT_MS = 5000;
 
+/**
+ * Whether the health endpoint reports UP, and what it answered when it does
+ * not: its status, or why fetch failed, which fetch itself words only as
+ * "fetch failed".
+ */
 async function health(system, url, budgetMs, capMs = PROBE_TIMEOUT_MS) {
+  let response;
   try {
-    const response = await system.fetch(url, {
+    response = await system.fetch(url, {
       signal: AbortSignal.timeout(Math.min(budgetMs, capMs)),
     });
-    const body = await response.json();
-    return response.ok && body?.status === 'UP';
-  } catch {
-    return false;
+  } catch (error) {
+    // The cause says why, or, for a connection refused on each address of a
+    // name, only its code.
+    return {
+      up: false,
+      answer: error.cause?.message || error.cause?.code || error.message,
+    };
   }
+  const status = `HTTP ${response.status}`;
+  let body;
+  try {
+    body = await response.json();
+  } catch (error) {
+    // A proxy's error page is no JSON, and its status says enough.
+    return {
+      up: false,
+      answer: response.ok ? `${status}, ${error.message}` : status,
+    };
+  }
+  return response.ok && body?.status === 'UP'
+    ? { up: true }
+    : {
+        up: false,
+        answer: body?.status ? `${status}, status ${body.status}` : status,
+      };
 }
 
 async function phaseStart(system, deployment, options) {
@@ -2649,6 +2711,7 @@ async function phaseStart(system, deployment, options) {
   system.out(`Starting ${server.name}`);
   runChecked(system, 'systemctl', ['start', server.name]);
   const serverStarted = await showUnit(system, server.name);
+  let answer;
   const healthy = await waitFor(
     system,
     system.now() + options.timeout * 1000,
@@ -2658,7 +2721,9 @@ async function phaseStart(system, deployment, options) {
       ) {
         return false;
       }
-      return (await health(system, urls.health, budget)) ? true : undefined;
+      const probe = await health(system, urls.health, budget);
+      answer = probe.answer;
+      return probe.up ? true : undefined;
     },
   );
   if (healthy === false) {
@@ -2671,7 +2736,7 @@ async function phaseStart(system, deployment, options) {
   if (!healthy) {
     // Left running: the journal may show a start that is merely slow.
     throw new Refusal(
-      `${server.name} did not report UP at ${urls.health} within ${options.timeout}s and keeps running; see journalctl -u ${server.name}, then run verify, or run stop to start it again.`,
+      `${server.name} did not report UP at ${urls.health} within ${options.timeout}s${answer ? ` (the last probe: ${answer})` : ''} and keeps running; see journalctl -u ${server.name}, then run verify, or run stop to start it again.`,
     );
   }
   system.out(
@@ -2871,10 +2936,11 @@ async function phaseVerify(system, deployment, options) {
   const budget = options.timeout * 1000;
   // start has waited for UP already, so one probe that may take the whole
   // budget tells a slow answer from a wrong one.
+  const probe = await health(system, urls.health, budget, budget);
   rows.push(
-    (await health(system, urls.health, budget, budget))
+    probe.up
       ? row('health', 'PASS', `${urls.health} is UP`)
-      : row('health', 'FAIL', `${urls.health} is not UP`),
+      : row('health', 'FAIL', `${urls.health} is not UP: ${probe.answer}`),
   );
   const ingress = 'read a Session through the ingress';
   const resolved = options.tenant
