@@ -61,7 +61,9 @@ public final class StoreLockTrace extends DelegatingDataSource {
         }
 
         boolean mappedHead() {
-            return head() && sql.startsWith("select tenant_id, workspace_id, session_id, storage_version,");
+            return head() && sql.startsWith("select tenant_id, workspace_id, session_id, storage_version,")
+                    && sql.contains("from ma_session_head where tenant_key = ? and harness_key = ?"
+                            + " and tenant_id = ? and session_id = ? and head_kind = 'managed_session'");
         }
 
         boolean head() {

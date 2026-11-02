@@ -134,7 +134,7 @@ class WorkspaceCsiNativeActivationGateTest {
     }
 
     @Test
-    void csiCommitAndReplayEachKeepOneRootAndOneHeadPerTransaction() throws Exception {
+    void csiCommitAndReplayKeepOneJournalHeadAndOrderedAuthorityChecks() throws Exception {
         trace.clear();
         ready();
         trace.assertRootBeforeHead("tenant", sessionId);
@@ -145,7 +145,10 @@ class WorkspaceCsiNativeActivationGateTest {
         assertThat(commit(1).replayed()).isTrue();
         trace.assertRootBeforeHead("tenant", sessionId);
         trace.assertOneTransaction("tenant", sessionId);
-        assertThat(trace.successful("tenant", sessionId).stream().filter(StoreLockTrace.Event::mappedHead)).hasSize(1);
+        var replayHeads = trace.successful("tenant", sessionId).stream().filter(StoreLockTrace.Event::head).toList();
+        assertThat(replayHeads).hasSize(2);
+        assertThat(replayHeads.stream().filter(StoreLockTrace.Event::mappedHead)).hasSize(1);
+        assertThat(replayHeads.getLast().sql()).contains("and harness_session_id = ? for update");
         assertThat(trace.successful("tenant", sessionId).stream().filter(event -> event.sql()
                 .startsWith("select tenant_id, session_id, csi_guard from ma_session "))).hasSize(1);
     }

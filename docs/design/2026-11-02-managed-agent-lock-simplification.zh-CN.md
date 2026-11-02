@@ -4,7 +4,7 @@
 
 ## 状态与边界
 
-实现基于 #16090 的 Store 拆分，已核对版本为 `66d23ceb1a5bee7e9cb6362cfc238eb64297f3e6`，该 PR 于 2026-11-02 以 `d9d6fc4a4b8e654d405dbb1d01bf3404e6435a1c` 合并。本分支已 rebase 到 `main` 的 `73474ef094ea1c6bb2a95a9a2a33a28b0ec58e9e`。rebase 后实现补丁完全一致，此后仅更新了本双语设计中的依赖状态。实现与验收分别记录；本地结果及待完成的 CI 资格见下文。
+实现基于 #16090 的 Store 拆分，已核对版本为 `66d23ceb1a5bee7e9cb6362cfc238eb64297f3e6`，该 PR 于 2026-11-02 以 `d9d6fc4a4b8e654d405dbb1d01bf3404e6435a1c` 合并。本分支已 rebase 到 `main` 的 `73474ef094ea1c6bb2a95a9a2a33a28b0ec58e9e`。rebase 后原实现补丁完全一致。后续 CI 分类修复记录在下文，该修复不修改生产代码。实现与验收分别记录；本地结果及待完成的 CI 资格见下文。
 
 保留公共 API、schema、事务管理器、传播方式、隔离级别、错误码、重放回执和 writer/CSI fencing。生产修改限定在 persistence。现有租户 guard 和 CSI 特殊顺序保留超时及错误映射。本次不引入通用锁管理器，也不跨事务缓存锁的持有状态。
 
@@ -54,6 +54,8 @@ JDBC 记录器观察执行尝试及完成、绑定的身份参数、JDBC 连接�
 
 `StoreLockTrace` 使用固定表名、锁定读取和身份谓词写法，记录 prepared/plain/batch 执行的尝试、成功和失败，复制批次参数，并在事务结束后清除锁证明。记录器不执行任何数据库探测查询。连接 ID 标识借用的 JDBC 连接，并非数据库服务端连接 ID。`StoreLockTraceTest` 还实际执行漏锁、反序、跨连接、提前提交和错误 Session 的 JDBC 反例。
 
+优化次数还匹配 journal 读取器固定的 WHERE 形式。CSI replay 准入使用相同的完整 head 投影和不同的身份谓词，执行必须保留的 authority 复核；该读取仍参与 head 锁序及事务断言，但与优化的 journal 读取分别计数。因此 replay 在同一事务内保留一次 journal head 和一次 authority head 读取。分类回归也验证 authority 读取先于 root 时会被拒绝。
+
 | 源码分组 / 特殊路径                                       | 场景归属                                                                                               |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
 | 七处 Agent 成对读取和 CAS 拒绝/快路径                     | `AgentLockContractTest`、`AgentLockContractMySqlIT`、`RecoverySettlementStoreMySqlIT`                  |
@@ -72,7 +74,7 @@ JDBC 记录器观察执行尝试及完成、绑定的身份参数、JDBC 连接�
 
 使用 JDK 21、隔离 Maven 仓库及模块共享的 600 秒本地验证预算。H2 验证夹具/契约，MySQL 8.4 提供并发证据。完整 verify、Checkstyle、SpotBugs、MySQL、Hosted/fault 和平台资格仍由 CI 门禁承担。跳过或不可用检查记为待完成，不能记作通过。无需生产部署或 schema 迁移；回退本独立改动即可恢复原实现。
 
-原检查器为 3,281 行。替代检查器、JDBC 记录器、负向夹具、Agent/Journal 场景、MySQL 适配测试及两份清单合计 1,487 行；加上现有业务/CSI 测试净增的 123 行，替代验证总计 1,610 行，净减少 1,671 行。计数已包含 633 行清单数据，没有将解析器移至其他文件。
+原检查器为 3,281 行。替代检查器、JDBC 记录器、负向夹具、Agent/Journal 场景、MySQL 适配测试及两份清单合计 1,511 行；加上现有业务/CSI 测试净增的 125 行，替代验证总计 1,636 行，净减少 1,645 行。计数已包含 633 行清单数据，没有将解析器移至其他文件。
 
 ## SQL 实测与验证记录
 
@@ -101,4 +103,6 @@ JDBC 记录器观察执行尝试及完成、绑定的身份参数、JDBC 连接�
 - 全部 reactor 模块的 Checkstyle 通过；最终 15 个记录器用例通过，包含实际 JDBC 顺序反例。早期尝试曾因新增夹具设置、过宽的 head 计数和测试格式失败，这些尝试均保留在本地预算日志中。
 - 待完成：完整 Maven `verify`、SpotBugs、完整 MySQL profile、真实 producer 的 native CSI 成功提交/重放、Hosted/fault 消费者、Linux 和 Windows。本地缺少 Core/CLI 构建产物，因此未运行这些真实进程场景，也未记作通过。不削弱任何 CI 配置或覆盖门禁。
 
-命令从 `packages/managed-agent-server` 运行，通过 `mvn -Dtest=... test checkstyle:check` 选择上列测试类；MySQL 选择额外使用 `-Pmysql-integration -Dmysql.url=... -Dmysql.user=...`。本地 Java 验证共耗时 544.76/600 秒，包含准备、全部失败尝试和 MySQL 清理。共享预算账本和每次尝试的日志位于 `.qwen/investigations/managed-lock-simplification/`。现已对齐依赖：`git range-diff` 确认 rebase 后实现补丁一致，与已验证修订的对比也确认 persistence 代码、受影响测试源码及锁清单均未变化。保留既有聚焦验证证据；新基线中的其他集成变化仍由 CI 验证。最终验收仍待上述 CI 门禁。本次改动不包含部署。
+CI 随后在 `c6d83e08a268395011c7ceb71a9dcbfe9cf60a67` 上执行了真实 producer 套件：该轮 Java 运行的 6,100 个用例中，新 replay 成本断言有一处失败，另有 17 个用例跳过。轨迹表明锁序及单事务断言通过，但成本分类器把保留的 authority 复核误计为第二次 journal 读取。现已修正分类及 native 预期，未修改生产代码。后续本地 42 个记录器、journal、native-read 和清单用例以及全 reactor Checkstyle 通过。修正版本的真实 producer 场景仍待 CI，本地这轮运行不能证明其成功。
+
+命令从 `packages/managed-agent-server` 运行，通过 `mvn -Dtest=... test checkstyle:check` 选择上列测试类；MySQL 选择额外使用 `-Pmysql-integration -Dmysql.url=... -Dmysql.user=...`。本地 Java 验证共耗时 571.08/600 秒，包含准备、全部失败尝试和 MySQL 清理。共享预算账本和每次尝试的日志位于 `.qwen/investigations/managed-lock-simplification/`。分类修复前已对齐依赖：`git range-diff` 确认 rebase 后实现补丁一致，与已验证修订的对比也确认 persistence 代码、受影响测试源码及锁清单均未变化。保留既有聚焦验证证据和新增分类回归；新基线中的其他集成变化仍由 CI 验证。最终验收仍待上述 CI 门禁。本次改动不包含部署。

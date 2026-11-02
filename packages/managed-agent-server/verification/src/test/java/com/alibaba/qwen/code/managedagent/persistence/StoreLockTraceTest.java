@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -83,6 +84,27 @@ class StoreLockTraceTest {
                 assertThat(rows.next()).isTrue();
             }
         }
+    }
+
+    @Test
+    void replayAuthorityHeadKeepsItsLockOrderButIsNotAnOptimizedJournalRead() {
+        String select = "select " + ManagedSchemaProjection.SESSION_HEAD.columns().toLowerCase(java.util.Locale.ROOT)
+                + " from ma_session_head where ";
+        var journal = new StoreLockTrace.Event(SUCCEEDED, 1, 1, false,
+                select + "tenant_key = ? and harness_key = ? and tenant_id = ? and session_id = ?"
+                        + " and head_kind = 'managed_session' for update",
+                Map.of(1, "tenant-key", 2, "session-key", 3, "tenant", 4, "session"));
+        var authority = new StoreLockTrace.Event(SUCCEEDED, 1, 1, false,
+                select + "head_kind = 'managed_session' and tenant_id = ? and session_id = ?"
+                        + " and tenant_key = ? and harness_key = ? and harness_session_id = ? for update",
+                Map.of(1, "tenant", 2, "session", 3, "tenant-key", 4, "session-key", 5, "session"));
+        assertThat(journal.mappedHead()).isTrue();
+        assertThat(authority.mappedHead()).isFalse();
+        assertThat(authority.head()).isTrue();
+        var root = event(SUCCEEDED, 1, 1, "ma_session", "session");
+        StoreLockTrace.assertOrder(List.of(root, journal, authority), "tenant", "session", true);
+        assertThatThrownBy(() -> StoreLockTrace.assertOrder(List.of(authority, root, journal),
+                "tenant", "session", true)).isInstanceOf(AssertionError.class);
     }
 
     @Test
