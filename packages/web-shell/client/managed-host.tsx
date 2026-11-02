@@ -3,6 +3,7 @@ import {
   ManagedAgentWebShell,
   type ManagedAgentWebShellProps,
 } from './ManagedAgentWebShell';
+import { installWebShellShadowStyles } from './shadowDom';
 
 export type { ManagedAgentWebShellProps } from './ManagedAgentWebShell';
 export type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
@@ -14,6 +15,11 @@ export function renderManagedAgentWebShell(
   update(nextProps: ManagedAgentWebShellProps): void;
   unmount(): void;
 } {
+  const containerRoot = container.getRootNode();
+  const removeStyles =
+    containerRoot instanceof ShadowRoot
+      ? installWebShellShadowStyles(containerRoot)
+      : undefined;
   const root = createRoot(container);
   const update = (nextProps: ManagedAgentWebShellProps) => {
     root.render(<ManagedAgentWebShell {...nextProps} />);
@@ -23,6 +29,7 @@ export function renderManagedAgentWebShell(
     update,
     unmount() {
       root.unmount();
+      removeStyles?.();
     },
   };
 }

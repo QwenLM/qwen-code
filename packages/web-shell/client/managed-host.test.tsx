@@ -29,3 +29,36 @@ it('mounts, replaces props and disposes a host root', async () => {
     host.remove();
   }
 });
+
+it('keeps shadow-root styles until the last host root unmounts', async () => {
+  const packageStyle = document.createElement('style');
+  packageStyle.dataset.qwenWebShell = 'component';
+  packageStyle.textContent = '[data-web-shell-root] { color: red; }';
+  document.head.appendChild(packageStyle);
+  const host = document.createElement('div');
+  document.body.appendChild(host);
+  const shadow = host.attachShadow({ mode: 'open' });
+  const first = document.createElement('div');
+  const second = document.createElement('div');
+  shadow.append(first, second);
+  let left!: ReturnType<typeof renderManagedAgentWebShell>;
+  let right!: ReturnType<typeof renderManagedAgentWebShell>;
+  try {
+    await act(async () => {
+      left = renderManagedAgentWebShell(first, { sessionId: 'first' });
+      right = renderManagedAgentWebShell(second, { sessionId: 'second' });
+    });
+    const hasStyles = () =>
+      shadow.querySelectorAll('style').length > 0 ||
+      (shadow.adoptedStyleSheets?.length ?? 0) > 0;
+    expect(hasStyles()).toBe(true);
+    await act(async () => left.unmount());
+    expect(second.textContent).toBe('second');
+    expect(hasStyles()).toBe(true);
+    await act(async () => right.unmount());
+    expect(hasStyles()).toBe(false);
+  } finally {
+    packageStyle.remove();
+    host.remove();
+  }
+});
