@@ -177,31 +177,38 @@ describe('check-disk-floor', () => {
   it('falls back to /tmp when TMPDIR is unset', () => {
     // The incident fleet's os.tmpdir() is /tmp with TMPDIR unset; the
     // script's `${TMPDIR:-/tmp}` default must keep gating that path. A
-    // regression to plain `${TMPDIR}` appends nothing there and the incident
-    // class returns with the suite green (mutation-verified).
+    // regression to plain `${TMPDIR}` appends nothing and the incident
+    // class returns with the suite green. RUNNER_TEMP is pinned to a
+    // different directory so a dir[/tmp] sample can ONLY come from the
+    // OS-temp append, not the RUNNER_TEMP default (mutation-verified).
     const { TMPDIR, ...envWithoutTmpdir } = process.env;
-    const result = runGate({
-      dirs: [],
-      env: {
-        ...envWithoutTmpdir,
-        GITHUB_WORKSPACE: '.',
-        DISK_FLOOR_MIN_FREE_KB: '1',
-        DISK_FLOOR_MIN_FREE_INODES: '999999999999',
-      },
-    });
-    // /tmp (or its platform symlink target) is appended and breaches the
-    // impossible inode floor. On macOS TMPDIR resolves inside /var/folders,
-    // so assert the appended third sample by count: workspace + RUNNER_TEMP
-    // default + the OS temp default.
-    const samples = result.stdout
-      .split('\n')
-      .filter((line) => line.startsWith('DISKFLOOR '));
-    const appended = samples.filter((line) =>
-      /dir\[(\/tmp|\/var\/folders\/[^\]]+)\]/.test(line),
-    );
-    assert.ok(
-      appended.length >= 1,
-      `expected the /tmp fallback sample, got: ${result.stdout}`,
-    );
+    const ws = mkdtempSync(join(tmpdir(), 'disk-floor-ws-'));
+    const temp = mkdtempSync(join(tmpdir(), 'disk-floor-tmp-'));
+    try {
+      const result = runGate({
+        env: {
+          ...envWithoutTmpdir,
+          GITHUB_WORKSPACE: ws,
+          RUNNER_TEMP: temp,
+          DISK_FLOOR_MIN_FREE_KB: '1',
+          DISK_FLOOR_MIN_FREE_INODES: '1',
+        },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.ok(result.stdout.includes(`dir[${ws}]`));
+      assert.ok(result.stdout.includes(`dir[${temp}]`));
+      assert.ok(
+        result.stdout
+          .split('\n')
+          .some(
+            (line) =>
+              line.startsWith('DISKFLOOR ') && line.includes('dir[/tmp]'),
+          ),
+        `expected the /tmp fallback sample, got: ${result.stdout}`,
+      );
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+      rmSync(temp, { recursive: true, force: true });
+    }
   });
 });
