@@ -7458,7 +7458,9 @@ describe('review model canary routing', () => {
     const step = parse(workflow).jobs['review-pr'].steps.find(
       (s) => s.name === 'Run review',
     );
-    expect(step.env.REVIEW_MODEL_DEFAULT).toBe('${{ vars.QWEN_PR_REVIEW_MODEL }}');
+    expect(step.env.REVIEW_MODEL_DEFAULT).toBe(
+      '${{ vars.QWEN_PR_REVIEW_MODEL }}',
+    );
     expect(step.env.REVIEW_MODEL_CANARY).toBe(
       '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY }}',
     );
@@ -7484,7 +7486,9 @@ describe('review model canary routing', () => {
     const select = run.indexOf('REVIEW_COHORT=default');
     expect(select).toBeGreaterThan(-1);
     expect(select).toBeLessThan(run.indexOf('MODEL_ARGS=()'));
-    expect(run.indexOf('::notice title=Review model::')).toBeGreaterThan(select);
+    expect(run.indexOf('::notice title=Review model::')).toBeGreaterThan(
+      select,
+    );
   });
 
   it('buckets by PR number and stays inside the configured percent', () => {
@@ -7552,7 +7556,9 @@ describe('review model canary routing', () => {
     expect(pick('main', 'canary', '08', '12308')).toBe('main');
     expect(pick('main', 'canary', '0050', '12324')).toBe('canary');
     expect(pick('main', 'canary', '250', '12399')).toBe('main');
-    expect(pick('main', 'canary', '18446744073709551666', '12300')).toBe('main');
+    expect(pick('main', 'canary', '18446744073709551666', '12300')).toBe(
+      'main',
+    );
 
     // A PR number that cannot be read keeps the default rather than guessing.
     expect(pick('main', 'canary', '100', '')).toBe('main');
