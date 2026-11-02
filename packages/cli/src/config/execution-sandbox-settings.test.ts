@@ -101,17 +101,21 @@ describe('operator execution sandbox policy', () => {
       ).toEqual(restricted);
     },
   );
-  it.each([null, false, 'replace', [], { name: 'x' }])(
+  it.each([null, false, 'replace', [], { name: 'x', catalogRefresh: true }])(
     'project model=%j cannot re-enable the operator catalog refresh opt-out',
     (model) => {
       write(user, { model: { catalogRefresh: false } });
       write(path.join(workspace, '.qwen', 'settings.json'), { model });
-      expect(
-        loadSettings(workspace, {
-          skipLoadEnvironment: true,
-          workspaceTrusted: true,
-        }).merged.model?.catalogRefresh,
-      ).toBe(false);
+      const merged = loadSettings(workspace, {
+        skipLoadEnvironment: true,
+        workspaceTrusted: true,
+      }).merged;
+      expect(merged.model?.catalogRefresh).toBe(false);
+      if (model && typeof model === 'object' && !Array.isArray(model)) {
+        // The restore re-adds only the operator key: a project that replaced
+        // the whole section keeps its own model keys.
+        expect(merged.model?.name).toBe('x');
+      }
     },
   );
   it('workspace cannot enable the mode', () => {

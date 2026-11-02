@@ -98,6 +98,19 @@ export function selectOperatorExecutionSandbox(
   return selected;
 }
 
+/** Operator scopes resolve like a normal load: system over user over defaults. */
+export function selectOperatorCatalogRefresh(
+  ...scopes: OperatorSettingsScope[]
+): boolean | undefined {
+  let selected: boolean | undefined;
+  for (const scope of scopes) {
+    if (typeof scope.model?.catalogRefresh === 'boolean') {
+      selected = scope.model.catalogRefresh;
+    }
+  }
+  return selected;
+}
+
 /** Bare mode still honors operator confinement without loading project/env data. */
 export function readOperatorSandboxSettings(): SandboxSettingsInput {
   return sandboxSettingsFromScopes(readOperatorSettingsScopes());
@@ -128,13 +141,7 @@ export function readBareModeOperatorSettings(): SandboxSettingsInput & {
     },
     undefined,
   );
-  const catalogRefresh = scopes.reduce<boolean | undefined>(
-    (current, scope) =>
-      typeof scope.model?.catalogRefresh === 'boolean'
-        ? scope.model.catalogRefresh
-        : current,
-    undefined,
-  );
+  const catalogRefresh = selectOperatorCatalogRefresh(...scopes);
   return {
     ...sandboxSettingsFromScopes(scopes),
     ...(usageStatisticsEnabled === undefined

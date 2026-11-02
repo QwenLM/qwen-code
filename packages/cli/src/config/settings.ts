@@ -25,6 +25,7 @@ import {
   parseExecutionSandboxSettings,
   readBareModeOperatorSettings,
   readOperatorSandboxSettings,
+  selectOperatorCatalogRefresh,
   selectOperatorExecutionSandbox,
   stripUtf8Bom,
 } from './execution-sandbox-settings.js';
@@ -752,14 +753,10 @@ function mergeSettings(
   } else if (merged.tools && typeof merged.tools === 'object') {
     delete merged.tools.executionSandbox;
   }
-  const operatorCatalogRefresh = [systemDefaults, user, system].reduce<
-    boolean | undefined
-  >(
-    (current, scope) =>
-      typeof scope.model?.catalogRefresh === 'boolean'
-        ? scope.model.catalogRefresh
-        : current,
-    undefined,
+  const operatorCatalogRefresh = selectOperatorCatalogRefresh(
+    systemDefaults,
+    user,
+    system,
   );
   // Same shape as the executionSandbox restore: a project that replaces the
   // whole `model` section cannot reset the operator's refresh opt-out.
