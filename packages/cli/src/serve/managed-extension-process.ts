@@ -234,6 +234,16 @@ export class ManagedExtensionProcessOwners {
         ...(preread && detachPreread ? { preread, detachPreread } : {}),
       };
     } catch (error) {
+      // A failed startup never hands detachPreread to a caller. Release the
+      // early listeners and their buffers here: the stopped child stays in the
+      // owner map, so otherwise child -> listener -> buffer would retain every
+      // preread byte for the lifetime of this instance, accumulating across
+      // repeated failed starts.
+      detachPreread?.();
+      if (preread) {
+        preread.stdout.length = 0;
+        preread.stderr.length = 0;
+      }
       // Unknown cleanup keeps the owner: nobody can reinterpret a failed
       // startup as permission to discard its process identity.
       child.stdio[3]?.destroy();

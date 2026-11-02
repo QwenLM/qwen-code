@@ -921,16 +921,20 @@ it('keeps its mount while a Hook outcome is unknown (#13800)', async () => {
 });
 
 it('refuses to swap its broker while it still holds the mount', async () => {
-  await hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
+  await hooks.ensureReady();
+  await hooks.acquire();
+  // The mount is held with no outstanding Hook work, so the pre-existing
+  // mountWorkUnproven() guard does NOT fire — only the mount-held clause can
+  // refuse the swap. This pins the new clause itself rather than letting the
+  // older guard satisfy the assertion.
   expect(hooks.mountHeld).toBe(true);
+  expect(hooks.mountWorkUnproven()).toBe(false);
   const owned = hooks.broker;
   const extensionBroker = new HostedWorkspaceBroker(
     options,
     session.authority.sessionHeader.sessionKey,
     'extensions-components-other',
   );
-  // Swapping now would orphan the owned broker's mount claim and leave
-  // `acquired` pointing at the old owner, so the handback gate must refuse.
   expect(() => hooks.delegateBrokerToMcp(extensionBroker)).toThrow(
     HostedHookRecoveryRequiredError,
   );
