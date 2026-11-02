@@ -25,6 +25,12 @@ interface DaemonChannelEventsOptions extends DaemonResourceOptions {
   limit?: number;
 }
 
+/** A loaded journal together with the query that produced it. */
+interface ChannelEventsSnapshot {
+  queryKey: string;
+  list: DaemonChannelEventList;
+}
+
 /**
  * A workspace's Channel event journal, polled while `enabled`. The page can
  * also call `reload` for an explicit refresh.
@@ -61,7 +67,18 @@ export function useDaemonChannelEvents(
     [typesKey],
   );
 
-  const load = useCallback(async (): Promise<DaemonChannelEventList> => {
+  // The resource keeps its previous data while a new query is in flight or
+  // after it fails, so every snapshot is tagged with the query that produced
+  // it and mismatched data is masked — otherwise the last workspace's rows
+  // (and their Channel names) would show under the newly selected one.
+  const queryKey = [
+    workspaceCwd ?? '',
+    channel ?? '',
+    typesKey,
+    limit ?? '',
+  ].join('\u0000');
+
+  const load = useCallback(async (): Promise<ChannelEventsSnapshot> => {
     if (!workspaceCwd) {
       throw new Error('Channel events require a workspace.');
     }
@@ -70,10 +87,11 @@ export function useDaemonChannelEvents(
       ...(channel ? { channels: [channel] } : {}),
       ...(types ? { types } : {}),
     };
-    return workspaceClient
-      ? workspaceClient.workspaceChannelEvents(query)
-      : actions.listChannelEvents(query);
-  }, [actions, channel, limit, types, workspaceClient, workspaceCwd]);
+    const list = workspaceClient
+      ? await workspaceClient.workspaceChannelEvents(query)
+      : await actions.listChannelEvents(query);
+    return { queryKey, list };
+  }, [actions, channel, limit, queryKey, types, workspaceClient, workspaceCwd]);
   const resource = useDaemonResource(load, {
     ...resourceOptions,
     autoLoad: false,
@@ -97,5 +115,7 @@ export function useDaemonChannelEvents(
     };
   }, [enabled, reload]);
 
-  return resource;
+  const data =
+    resource.data?.queryKey === queryKey ? resource.data.list : undefined;
+  return { ...resource, data };
 }

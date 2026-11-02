@@ -99,7 +99,7 @@ GET /workspaces/:workspace/channels/events
 
 ### 4. Web Shell
 
-- `useChannelEvents` 在页面挂载期间轮询该路由（5 秒），页面另提供手动刷新。
+- `useChannelEvents` 在页面挂载期间轮询该路由（5 秒），页面另提供手动刷新。每份快照都带上产生它的查询（工作区、渠道、类型、limit），不匹配的数据会被遮蔽，做法与 `useDaemonChannels` 一致：底层 resource 在请求进行中或失败后仍保留旧数据，没有这个标记的话，上一个工作区的行——以及过滤选项里它的渠道名——就会显示在新选中的工作区下。
 - `ChannelEventsPage` 渲染按时间倒序的时间线，带工作区选择器、渠道过滤、类型过滤，每行显示：时间、渠道、类型、结果、目标（`owner/repo#12`）、操作者、原因或触发类型、耗时、错误。工作区选择器与管理页一样列出已注册的非 live 工作区，因为 provider 的 cwd 是 daemon 全局的主工作区，否则在次工作区启动的渠道将无法查看。切换工作区会重置渠道过滤。
 - 它是独立页面：`activePanel` 取值 `channel-events`，URL 为 `/channel-events`，侧边栏主导航项为 `channelEvents`。
 - 由 `channel_management` 能力位与受信任工作区门禁，与管理页一致。

@@ -150,7 +150,12 @@ when busier peers have newer files.
 ### 4. Web Shell
 
 - `useChannelEvents` polls the route while the page is mounted (5 s), and the
-  page also offers a manual refresh.
+  page also offers a manual refresh. Every snapshot is tagged with the query
+  that produced it (workspace, Channel, types, limit) and mismatched data is
+  masked, the way `useDaemonChannels` does: the underlying resource keeps its
+  previous data while a request is in flight or after it fails, so without the
+  tag the last workspace's rows — and their Channel names in the filter — would
+  show under the newly selected workspace.
 - `ChannelEventsPage` renders a newest-first timeline with a workspace
   selector, a Channel filter, a type filter, and a row per event: time, Channel,
   type, outcome, target (`owner/repo#12`), actor, reason or trigger kind,
