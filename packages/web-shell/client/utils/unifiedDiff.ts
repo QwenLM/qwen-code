@@ -474,8 +474,11 @@ export function diffPreviewText(
   return lines
     .filter(
       (line) =>
-        line.content !== DIFF_CRLF_UNIFORM_MARKER &&
-        line.content !== DIFF_CRLF_MIXED_MARKER,
+        !(
+          line.type === 'header' &&
+          (line.content === DIFF_CRLF_UNIFORM_MARKER ||
+            line.content === DIFF_CRLF_MIXED_MARKER)
+        ),
     )
     .map((line) => {
       const content =

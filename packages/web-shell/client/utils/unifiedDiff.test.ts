@@ -596,6 +596,15 @@ describe('raw patches are never certified from their own rows', () => {
 });
 
 describe('diffPreviewText', () => {
+  it.each(
+    [DIFF_CRLF_UNIFORM_MARKER, DIFF_CRLF_MIXED_MARKER].flatMap((marker) =>
+      ['-', '+', ' '].map((prefix) => ({ marker, prefix })),
+    ),
+  )('preserves literal source row "$prefix$marker"', ({ marker, prefix }) => {
+    const diff = `@@ -1,1 +1,1 @@\n${prefix}${marker}`;
+    expect(diffPreviewText(diff, stubT)).toBe(diff);
+  });
+
   it('localizes a marker-only preview instead of leaking the token', () => {
     // The pane resolves the notice at its render boundary; Copy reads the same
     // preview, so it has to resolve it too or it hands over `\diff-omitted`.
