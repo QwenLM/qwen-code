@@ -4,7 +4,7 @@
 
 ## 问题
 
-PR #15453 将只读拒绝和硬链接保留应用到了共享原子写入函数。内部存储也使用该函数：
+将只读拒绝和硬链接保留应用到共享原子写入函数，也会影响内部存储：
 worktree sidecar 需要通过 rename 恢复在 link-then-unlink 发布期间中断、停留于 nlink 2
 的状态；凭证存储则使用 forceMode 替换文件并修正权限。用户文件编辑与内部持久化需要
 不同的契约。
@@ -14,7 +14,9 @@ worktree sidecar 需要通过 rename 恢复在 link-then-unlink 发布期间中�
 保留主线原子写入函数的契约。在一个内部异步写入函数中实现用户文件策略，由
 StandardFileSystemService.writeTextFile 和沙箱文件 worker 调用。Write、Edit、
 Notebook Edit 和拦截的 sed 编辑会进入本地文件服务；沙箱 Write 和 Edit 会进入 worker。
-委托给 ACP 以及 managed 文件系统后端的写入保持各自现有契约。
+ACP 对端不具备 writeTextFile 能力时，写入会使用配置的回退服务；默认的
+StandardFileSystemService 回退服务会应用此策略。委托给 ACP 对端以及 managed
+文件系统后端的写入保持各自现有契约。
 
 对已存在的普通用户文件检查写权限。不可写时以 EACCES 拒绝，并将 Windows access
 返回的 EPERM 规范化为该错误码。沿用用户文件路径跟随符号链接的行为。目标存在多个
@@ -45,7 +47,9 @@ helper 为内部实现，具有两个生产调用方，仅提供编码和现有�
 
 ## 状态
 
-已实现。macOS 验证通过：500 条定向 core 测试、针对构建后生产模块的 11 项真实
-文件系统检查、使用本地 mock 模型的三项构建后 CLI 工具场景、仓库 build、bundle、
-typecheck、ESLint 和格式检查。原生 Linux/Windows 验证留待 CI。E2E 计划与观测结果
-记录在 .qwen/e2e-tests/issue-15454.md 和 .qwen/issues/issue-15454.md 中。
+已实现。[`8339fb66` 的 macOS 验证报告](https://github.com/QwenLM/qwen-code/pull/15453#issuecomment-6459393431)
+记录了 500 条定向 core 测试、针对构建后生产模块的 11 项真实文件系统检查、使用本地
+mock 模型的三项构建后 CLI 工具场景，以及仓库 build、bundle、typecheck、ESLint
+和格式检查，均通过。[同一 head 的 Linux CI](https://github.com/QwenLM/qwen-code/actions/runs/40623619906/job/124242666885)
+通过了 39,796 条 core 测试，包括新增的用户文件及沙箱 worker 测试。原生 Windows
+行为及实际沙箱后端/容器执行仍未验证。

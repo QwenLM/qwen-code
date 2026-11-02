@@ -4,8 +4,8 @@
 
 ## Problem
 
-PR #15453 applies read-only refusal and hard-link preservation to the shared
-atomic writer. Internal stores also use that writer: worktree sidecars need
+Applying read-only refusal and hard-link preservation to the shared atomic
+writer would also affect internal stores: worktree sidecars need
 rename to recover from a link-then-unlink publication interrupted at nlink 2,
 and credential stores use forceMode to replace files with restrictive modes.
 User file editing and internal persistence require different contracts.
@@ -16,7 +16,10 @@ Keep the main-branch atomic writer contract. Apply the user file policy in one
 internal asynchronous writer called by StandardFileSystemService.writeTextFile
 and the sandbox file worker. Write, Edit, Notebook Edit, and intercepted sed
 edits reach the local file service; sandbox Write and Edit reach the worker.
-Delegated ACP and managed filesystem backends retain their existing contracts.
+When an ACP peer lacks the writeTextFile capability, writes use the configured
+fallback. The default StandardFileSystemService fallback applies this policy.
+Writes delegated to ACP peers and managed filesystem backends retain their
+existing contracts.
 
 For an existing regular user file, check write access. Refuse an unwritable
 file with EACCES; normalize Windows access EPERM to that code. Follow symlinks
@@ -57,8 +60,11 @@ to bypass mode bits. This change does not eliminate filesystem TOCTOU races.
 
 ## Status
 
-Implemented. macOS validation passed: 500 targeted core tests, 11 real-filesystem
-checks against built production modules, three built-CLI tool scenarios using a
-local mock model, repository build, bundle, typecheck, ESLint, and formatting.
-Native Linux/Windows validation remains for CI. The E2E plan and observed results
-are recorded in .qwen/e2e-tests/issue-15454.md and .qwen/issues/issue-15454.md.
+Implemented. The [macOS verification report for `8339fb66`](https://github.com/QwenLM/qwen-code/pull/15453#issuecomment-6459393431)
+records 500 passing targeted core tests, 11 real-filesystem checks against built
+production modules, three built-CLI tool scenarios using a local mock model,
+and successful repository build, bundle, typecheck, ESLint, and formatting checks.
+[Linux CI on the same head](https://github.com/QwenLM/qwen-code/actions/runs/40623619906/job/124242666885)
+passed 39,796 core tests, including the new user-file and sandbox worker tests.
+Native Windows behavior and actual sandbox backend/container execution remain
+unverified.
