@@ -59,8 +59,12 @@ function barrier() {
   return { promise, release };
 }
 
-function modeSwitch(page: Page) {
-  return page.getByRole('switch', { name: 'Workflow mode', exact: true });
+async function modeSwitch(page: Page) {
+  const trigger = page.getByTestId('composer-add-menu-trigger');
+  if ((await trigger.getAttribute('aria-expanded')) !== 'true') {
+    await trigger.click();
+  }
+  return page.getByTestId('composer-add-menu-workflow');
 }
 
 function configUpdate(
@@ -90,6 +94,7 @@ async function openSession(
   await daemon.sse.waitForConnection(sessionId);
   await daemon.sendEvent(replayCompleteEvent({ sessionId }));
   await expect(page.locator('[data-web-shell-composer-editor]')).toBeVisible();
+  await expect(page.getByTestId('composer-add-menu-workflow')).toHaveCount(0);
 }
 
 test('keeps new-chat Workflow informational without creating a session @smoke', async ({
@@ -100,13 +105,11 @@ test('keeps new-chat Workflow informational without creating a session @smoke', 
     baseURL,
   });
   await gotoEmptyMobileWelcomeHarness(page);
-  const control = page.locator('[data-web-shell-workflow-mode-control]');
-  await expect(control).toBeVisible();
-  await expect(modeSwitch(page)).toHaveCount(0);
-  await control.getByRole('button').click();
-  await expect(
-    page.getByRole('dialog', { name: 'Workflow mode', exact: true }),
-  ).toContainText('Create or resume a session to check availability.');
+  const row = await modeSwitch(page);
+  await expect(row).toBeDisabled();
+  await expect(row).toContainText(
+    'Create or resume a session to check availability.',
+  );
   expect(daemon.configOptionRequests()).toHaveLength(0);
   expect(daemon.promptRequests()).toHaveLength(0);
   expect(
@@ -125,11 +128,13 @@ test('toggles only session Workflow, remains usable while busy, and preserves ef
   });
   const daemon = await installMockDaemon(page, scenario, { baseURL });
   await openSession(page, daemon);
-  const toggle = modeSwitch(page);
+  const toggle = await modeSwitch(page);
   await expect(toggle).toBeEnabled();
   await expect(toggle).not.toBeChecked();
   await toggle.focus();
   await page.keyboard.press('Space');
+  await expect(toggle).toBeHidden();
+  await modeSwitch(page);
   await expect(toggle).toBeChecked();
   expect(daemon.configOptionRequests().map((request) => request.body)).toEqual([
     { configId: 'workflow_mode', value: 'on' },
@@ -137,11 +142,17 @@ test('toggles only session Workflow, remains usable while busy, and preserves ef
   expect(daemon.promptRequests()).toHaveLength(0);
   expect(scenario.state.configOptions).toContainEqual(reasoningOption());
 
+  await page.keyboard.press('Escape');
+
+  await expect(page.getByTestId('composer-add-menu-workflow')).toBeHidden();
   await page.locator('[data-web-shell-model-button]').click();
   await page.locator('[data-web-shell-effort="low"]').click();
   await expect.poll(() => daemon.configOptionRequests().length).toBe(2);
   await page.keyboard.press('Escape');
-  await expect(toggle).toBeChecked();
+  await expect(page.getByTestId('composer-add-menu-workflow')).toBeHidden();
+  await expect(await modeSwitch(page)).toBeChecked();
+  await page.keyboard.press('Escape');
+  await expect(page.getByTestId('composer-add-menu-workflow')).toBeHidden();
   expect(daemon.configOptionRequests()[1]?.body).toEqual({
     configId: 'reasoning_effort',
     value: 'low',
@@ -151,8 +162,11 @@ test('toggles only session Workflow, remains usable while busy, and preserves ef
   await editor.fill('DW04B busy fixture');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  await modeSwitch(page);
   await expect(toggle).toBeEnabled();
   await toggle.click();
+  await expect(toggle).toBeHidden();
+  await modeSwitch(page);
   await expect(toggle).not.toBeChecked();
   expect(daemon.configOptionRequests()[2]?.body).toEqual({
     configId: 'workflow_mode',
@@ -175,20 +189,30 @@ test('preserves requested on when unavailable, permits off, and clears omitted s
   });
   const daemon = await installMockDaemon(page, scenario, { baseURL });
   await openSession(page, daemon);
-  const toggle = modeSwitch(page);
+  const toggle = await modeSwitch(page);
   await expect(toggle).toBeChecked();
   await expect(toggle).toBeEnabled();
+  await expect(toggle).toHaveAccessibleDescription(
+    /Workflow mode is on, but currently unavailable\./,
+  );
+  const rowBounds = await toggle.boundingBox();
+  const referenceBounds = await page
+    .getByTestId('composer-add-menu-reference-file')
+    .boundingBox();
+  expect(rowBounds).not.toBeNull();
+  expect(referenceBounds).not.toBeNull();
+  expect(rowBounds!.height).toBeLessThanOrEqual(referenceBounds!.height + 1);
   await page.screenshot({
     path: testInfo.outputPath('workflow-unavailable-on.png'),
   });
   await toggle.click();
+  await expect(toggle).toBeHidden();
+  await modeSwitch(page);
   await expect(toggle).not.toBeChecked();
   await expect(toggle).toBeDisabled();
   scenario.state.configOptions = [];
   await daemon.sendEvent(configUpdate(scenario, 1, false));
-  await expect(
-    page.locator('[data-web-shell-workflow-mode-control]'),
-  ).toHaveCount(0);
+  await expect(page.getByTestId('composer-add-menu-workflow')).toHaveCount(0);
   expect(daemon.configOptionRequests().map((request) => request.body)).toEqual([
     { configId: 'workflow_mode', value: 'off' },
   ]);
@@ -203,7 +227,7 @@ test('a live config push beats an already pending context response', async ({
   });
   const daemon = await installMockDaemon(page, scenario, { baseURL });
   await openSession(page, daemon);
-  await expect(modeSwitch(page)).toBeEnabled();
+  await expect(await modeSwitch(page)).toBeEnabled();
   const readStarted = barrier();
   const releaseRead = barrier();
   const delivered = barrier();
@@ -234,7 +258,7 @@ test('a live config push beats an already pending context response', async ({
     await readStarted.promise;
     scenario.state.configOptions = [workflowOption(true)];
     await daemon.sendEvent(configUpdate(scenario, 2));
-    await expect(modeSwitch(page)).toBeChecked();
+    await expect(await modeSwitch(page)).toBeChecked();
     const response = page.waitForResponse('**/session/*/context');
     releaseRead.release();
     await delivered.promise;
@@ -245,7 +269,7 @@ test('a live config push beats an already pending context response', async ({
           requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
         ),
     );
-    await expect(modeSwitch(page)).toBeChecked();
+    await expect(await modeSwitch(page)).toBeChecked();
     expect(daemon.configOptionRequests()).toHaveLength(0);
   } finally {
     releaseRead.release();
@@ -262,7 +286,7 @@ for (const outcome of ['success', 'rejected'] as const) {
     });
     const daemon = await installMockDaemon(page, scenario, { baseURL });
     await openSession(page, daemon);
-    await expect(modeSwitch(page)).toBeEnabled();
+    await expect(await modeSwitch(page)).toBeEnabled();
     const ackStarted = barrier();
     const releaseAck = barrier();
     const delivered = barrier();
@@ -281,19 +305,20 @@ for (const outcome of ['success', 'rejected'] as const) {
       delivered.release();
     });
     try {
-      await modeSwitch(page).click();
+      await (await modeSwitch(page)).click();
+      await expect(page.getByTestId('composer-add-menu-workflow')).toBeHidden();
       await ackStarted.promise;
-      await expect(modeSwitch(page)).toBeDisabled();
+      await expect(await modeSwitch(page)).toBeDisabled();
       scenario.state.configOptions = [workflowOption(true)];
       await daemon.sendEvent(configUpdate(scenario, 1));
-      await expect(modeSwitch(page)).toBeChecked();
+      await expect(await modeSwitch(page)).toBeChecked();
       scenario.state.configOptions = [workflowOption()];
       await daemon.sendEvent(configUpdate(scenario, 2));
-      await expect(modeSwitch(page)).not.toBeChecked();
+      await expect(await modeSwitch(page)).not.toBeChecked();
       releaseAck.release();
       await delivered.promise;
-      await expect(modeSwitch(page)).toBeEnabled();
-      await expect(modeSwitch(page)).not.toBeChecked();
+      await expect(await modeSwitch(page)).toBeEnabled();
+      await expect(await modeSwitch(page)).not.toBeChecked();
       expect(writes).toEqual([{ configId: 'workflow_mode', value: 'on' }]);
       expect(daemon.promptRequests()).toHaveLength(0);
     } finally {
@@ -321,10 +346,11 @@ test('accepts a successful ACK without configOptions and reads the current owner
     scenario.state.configOptions = [workflowOption(true)];
     await route.fulfill({ json: { persisted: true } });
   });
-  await expect(modeSwitch(page)).toBeEnabled();
-  await modeSwitch(page).click();
-  await expect(modeSwitch(page)).toBeChecked();
-  await expect(modeSwitch(page)).toBeEnabled();
+  await expect(await modeSwitch(page)).toBeEnabled();
+  await (await modeSwitch(page)).click();
+  await expect(page.getByTestId('composer-add-menu-workflow')).toBeHidden();
+  await expect(await modeSwitch(page)).toBeChecked();
+  await expect(await modeSwitch(page)).toBeEnabled();
   expect(writes).toBe(1);
   expect(daemon.promptRequests()).toHaveLength(0);
 });
@@ -338,7 +364,7 @@ test('reconciles after reconnect without installing historical mode or synthetic
   });
   const daemon = await installMockDaemon(page, scenario, { baseURL });
   await openSession(page, daemon);
-  await expect(modeSwitch(page)).toBeChecked();
+  await expect(await modeSwitch(page)).toBeChecked();
   await daemon.sendEvent(configUpdate(scenario, 1));
   await daemon.sendEvent({
     v: 1,
@@ -349,7 +375,7 @@ test('reconciles after reconnect without installing historical mode or synthetic
       currentModelId: scenario.currentModel,
     },
   });
-  await expect(modeSwitch(page)).toBeChecked();
+  await expect(await modeSwitch(page)).toBeChecked();
   await daemon.sse.close();
   await daemon.sse.waitForConnection(scenario.sessionId);
   await daemon.sendEvent({
@@ -364,8 +390,8 @@ test('reconciles after reconnect without installing historical mode or synthetic
   await daemon.sendEvent(
     replayCompleteEvent({ sessionId: scenario.sessionId }),
   );
-  await expect(modeSwitch(page)).toBeEnabled();
-  await expect(modeSwitch(page)).toBeChecked();
+  await expect(await modeSwitch(page)).toBeEnabled();
+  await expect(await modeSwitch(page)).toBeChecked();
   expect(daemon.configOptionRequests()).toHaveLength(0);
 });
 
@@ -404,7 +430,7 @@ test('isolates an old mode ACK across A to B to a new A attachment', async ({
     });
   });
   await openSession(page, daemon);
-  await expect(modeSwitch(page)).toBeEnabled();
+  await expect(await modeSwitch(page)).toBeEnabled();
   const started = barrier();
   const release = barrier();
   const writes: Array<{ sessionId: string; body: unknown }> = [];
@@ -423,21 +449,25 @@ test('isolates an old mode ACK across A to B to a new A attachment', async ({
   });
   const sidebar = page.locator('[data-sidebar-shell]');
   try {
-    await modeSwitch(page).click();
+    await (await modeSwitch(page)).click();
+    await expect(page.getByTestId('composer-add-menu-workflow')).toBeHidden();
     await started.promise;
     await sidebar.getByText('Workflow session B', { exact: true }).click();
+    await expect(page.getByTestId('composer-add-menu-workflow')).toBeHidden();
     await daemon.sse.waitForConnection('workflow-b');
     await daemon.sendEvent(replayCompleteEvent({ sessionId: 'workflow-b' }));
-    await expect(modeSwitch(page)).toBeEnabled();
-    await expect(modeSwitch(page)).not.toBeChecked();
-    await modeSwitch(page).click();
-    await expect(modeSwitch(page)).toBeChecked();
+    await expect(await modeSwitch(page)).toBeEnabled();
+    await expect(await modeSwitch(page)).not.toBeChecked();
+    await (await modeSwitch(page)).click();
+    await expect(page.getByTestId('composer-add-menu-workflow')).toBeHidden();
+    await expect(await modeSwitch(page)).toBeChecked();
     values.set('workflow-a', false);
     await sidebar.getByText('Workflow session A', { exact: true }).click();
+    await expect(page.getByTestId('composer-add-menu-workflow')).toBeHidden();
     await daemon.sse.waitForConnection('workflow-a');
     await daemon.sendEvent(replayCompleteEvent({ sessionId: 'workflow-a' }));
-    await expect(modeSwitch(page)).toBeEnabled();
-    await expect(modeSwitch(page)).not.toBeChecked();
+    await expect(await modeSwitch(page)).toBeEnabled();
+    await expect(await modeSwitch(page)).not.toBeChecked();
     const ack = page.waitForResponse('**/session/workflow-a/config-option');
     release.release();
     const response = await ack;
@@ -449,8 +479,8 @@ test('isolates an old mode ACK across A to B to a new A attachment', async ({
           requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
         ),
     );
-    await expect(modeSwitch(page)).not.toBeChecked();
-    await expect(modeSwitch(page)).toBeEnabled();
+    await expect(await modeSwitch(page)).not.toBeChecked();
+    await expect(await modeSwitch(page)).toBeEnabled();
     expect(writes).toEqual([
       {
         sessionId: 'workflow-a',
@@ -518,18 +548,28 @@ test('split panes read and write their own Workflow owner', async ({
     await daemon.sse.waitForConnection(sessionId);
     await daemon.sendEvent(replayCompleteEvent({ sessionId }));
   }
-  const left = page
+  const leftTrigger = page
     .locator('[data-pane-session-id="workflow-left"]')
-    .getByRole('switch', { name: 'Workflow mode', exact: true });
-  const right = page
+    .getByTestId('composer-add-menu-trigger');
+  const rightTrigger = page
     .locator('[data-pane-session-id="workflow-right"]')
-    .getByRole('switch', { name: 'Workflow mode', exact: true });
-  await expect(left).toBeEnabled();
-  await expect(left).not.toBeChecked();
-  await expect(right).toBeChecked();
-  await left.click();
-  await expect(left).toBeChecked();
-  await expect(right).toBeChecked();
+    .getByTestId('composer-add-menu-trigger');
+  const row = page.getByTestId('composer-add-menu-workflow');
+  await rightTrigger.click();
+  await expect(row).toBeChecked();
+  await page.keyboard.press('Escape');
+  await expect(page.getByTestId('composer-add-menu-workflow')).toBeHidden();
+  await leftTrigger.click();
+  await expect(row).toBeEnabled();
+  await expect(row).not.toBeChecked();
+  await row.click();
+  await expect(row).toBeHidden();
+  await leftTrigger.click();
+  await expect(row).toBeChecked();
+  await page.keyboard.press('Escape');
+  await expect(page.getByTestId('composer-add-menu-workflow')).toBeHidden();
+  await rightTrigger.click();
+  await expect(row).toBeChecked();
   expect(writes).toEqual(['workflow-left']);
   expect(daemon.promptRequests()).toHaveLength(0);
 });

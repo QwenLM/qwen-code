@@ -810,15 +810,14 @@ class WorkspaceLifecycleStoreTest {
             transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
             var properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
-            store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
             bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
             var beans = new DefaultListableBeanFactory();
             beans.registerSingleton("bindings", bindings);
             lifecycle = new WorkspaceLifecycleStore(jdbc, json, beans.getBeanProvider(RuntimeBindingRepository.class));
+            store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), null, lifecycle);
             beans.registerSingleton("results", new ManagedToolResultStore(jdbc, new DataSourceTransactionManager(source), store));
             lifecycle.setProfiles(new WorkspaceProfileLifecycleVerifier(jdbc, beans.getBeanProvider(ToolPublicationDataStore.class),
                     beans.getBeanProvider(ManagedToolResultStore.class)));
-            store.setWorkspaceLifecycleStore(lifecycle);
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                     + " display_name, config_ref, policy_ref, state) VALUES ('tenant', 'workspace', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')",
                     WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);

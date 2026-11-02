@@ -219,8 +219,16 @@ describe('defaultModalities', () => {
   describe('Kimi', () => {
     casesFor('returns image + video for', [
       ['kimi-k3', ONLY_IMAGE_VIDEO],
+      ['kimi-k3.1-pro', ONLY_IMAGE_VIDEO],
+      ['k3.1-pro', ONLY_IMAGE_VIDEO],
+      ['k3.1-pro-highspeed', ONLY_IMAGE_VIDEO],
       ['kimi-k2.5', ONLY_IMAGE_VIDEO],
     ]);
+
+    it('returns image only for the K3 256K variant', () => {
+      expect(defaultModalities('k3-256k')).toEqual({ image: true });
+      expect(defaultModalities('kimi-k3-256k')).toEqual({ image: true });
+    });
 
     it('returns text-only for kimi-k2', () => {
       TEXT_ONLY('kimi-k2');
