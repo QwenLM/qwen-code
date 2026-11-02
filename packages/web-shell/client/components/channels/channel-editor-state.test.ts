@@ -1631,6 +1631,104 @@ describe('Per-repository overrides', () => {
     expect(request.config['groups']).toEqual(groups);
   });
 
+  it('returns a repository to the channel-wide list when the policy is set back to inherit', () => {
+    // The mirror of the case above. An empty array is not nullish, so leaving
+    // it behind keeps denying everyone while the row reads "Inherit" and the
+    // hint promises the channel-wide list is back.
+    const instance = githubInstance({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': { senders: 'allowlist', allowedUsers: [] },
+    });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].senders = '';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': {},
+    });
+  });
+
+  it('keeps a typed speaker list when the policy is set back to inherit', () => {
+    // The box still shows the list, so keeping it matches what the operator
+    // sees; only an empty box means "no per-repository list".
+    const instance = githubInstance({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': { senders: 'allowlist', allowedUsers: ['alice'] },
+    });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].senders = '';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': { allowedUsers: ['alice'] },
+    });
+  });
+
+  it('keeps a stored list when the policy moves to an allowlist without editing the text', () => {
+    // A row that already carries members must not have them clobbered with []
+    // just because the policy moved.
+    const instance = githubInstance({
+      'qwenlm/qwen-code': { senders: 'open', allowedUsers: ['alice'] },
+    });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].senders = 'allowlist';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({
+      'qwenlm/qwen-code': { senders: 'allowlist', allowedUsers: ['alice'] },
+    });
+  });
+
+  it('returns a stored require-mention and policy to inheritance', () => {
+    const instance = githubInstance({
+      'qwenlm/qwen-code': { requireMention: true, senders: 'open' },
+    });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].requireMention = '';
+    draft.groupOverrides['qwenlm/qwen-code'].senders = '';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({ 'qwenlm/qwen-code': {} });
+  });
+
+  it('writes a speaker list while the policy stays inherited', () => {
+    // The reason the speaker box is shown for an inheriting row at all.
+    const instance = githubInstance({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': {},
+    });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].allowedUsers = 'alice';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': { allowedUsers: ['alice'] },
+    });
+  });
+
   it('drops the per-repository list when an inheriting row is cleared', () => {
     const instance = githubInstance({
       '*': { senders: 'allowlist', allowedUsers: ['op'] },

@@ -2012,7 +2012,10 @@ describe('GitHub per-repository settings', () => {
         clientId: 'id',
         clientSecret: 'secret',
         groupPolicy: 'allowlist',
-        groups: { 'group-a': {} },
+        // Shaped like a repository on purpose: a `group-a` fixture would pass
+        // even if the platform gate were removed, because the owner/repo
+        // filter would hide the rows anyway.
+        groups: { 'acme/widgets': {} },
       },
       secrets: {},
       startsWithServe: false,
@@ -2022,5 +2025,93 @@ describe('GitHub per-repository settings', () => {
 
     expect(rowLabels('Require a mention')).toHaveLength(0);
     expect(document.body.textContent).not.toContain('Per-repository settings');
+  });
+
+  it('derives the speaker hint from what the save will own, not the draft policy', async () => {
+    // Two stored shapes this PR deliberately preserves. A policy with no list
+    // inherits the channel-wide members; a list with no policy admits nobody.
+    // Reading the hint off the draft policy tells both the opposite.
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { senders: 'allowlist', allowedUsers: ['op', 'release-bot'] },
+        'qwenlm/qwen-code': { senders: 'allowlist' },
+        'acme/widgets': { allowedUsers: [] },
+      }),
+    });
+
+    expect(descriptionOf(rowControl('qwenlm/qwen-code', 'speakers'))).toContain(
+      'Leave empty to keep the channel-wide list',
+    );
+    expect(descriptionOf(rowControl('acme/widgets', 'speakers'))).toContain(
+      'Empty means nobody',
+    );
+  });
+
+  it('shows each row its own stored speakers and edits only that row', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { senders: 'allowlist', allowedUsers: ['op'] },
+        'qwenlm/qwen-code': {
+          senders: 'allowlist',
+          allowedUsers: ['alice', 'bob'],
+        },
+        'acme/widgets': {},
+      }),
+      onSave,
+    });
+
+    expect(
+      (rowControl('qwenlm/qwen-code', 'speakers') as HTMLInputElement).value,
+    ).toBe('alice, bob');
+    expect(
+      (rowControl('acme/widgets', 'speakers') as HTMLInputElement).value,
+    ).toBe('');
+
+    await act(async () => {
+      setInputValue(
+        rowControl('acme/widgets', 'speakers') as HTMLInputElement,
+        'carol',
+      );
+    });
+    await save();
+
+    const request = onSave.mock.calls[0][1] as {
+      config: Record<string, unknown>;
+    };
+    expect(request.config['groups']).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': {
+        senders: 'allowlist',
+        allowedUsers: ['alice', 'bob'],
+      },
+      'acme/widgets': { allowedUsers: ['carol'] },
+    });
+  });
+
+  it('shows an explicitly open row as Anyone rather than as inheriting', async () => {
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { senders: 'allowlist', allowedUsers: ['op'] },
+        'qwenlm/qwen-code': { senders: 'open' },
+      }),
+    });
+
+    expect(rowControl('qwenlm/qwen-code', 'senders')?.textContent).toContain(
+      'Anyone',
+    );
+    expect(rowControl('qwenlm/qwen-code', 'speakers')).toBeNull();
+  });
+
+  it('renders the localized interval label, not the descriptor fallback', async () => {
+    // The fixture's descriptor label is byte-identical to the English string,
+    // so only a zh-CN render proves the label mapping is load-bearing.
+    await renderDialog({ descriptor: GITHUB_POLLING, language: 'zh-CN' });
+
+    expect(inputByLabel('轮询间隔（毫秒）')).not.toBeNull();
+    expect(sectionHeadingOfLabel('轮询间隔（毫秒）')).toBe('连接');
   });
 });

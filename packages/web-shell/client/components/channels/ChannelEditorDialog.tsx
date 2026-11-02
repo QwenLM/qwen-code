@@ -61,6 +61,7 @@ import {
   hasDescriptorPrivatePolicy,
   configuredPrivatePolicy,
   PRIVATE_ONLY_FIELD_KEYS,
+  projectRepositoryGroup,
   repositoryAllowlistIds,
   toList,
   validateChannelEditorDraft,
@@ -845,8 +846,17 @@ export function ChannelEditorDialog({
     const repositories = repositoryAllowlistIds(draft.allowedGroupIds);
     if (repositories.length === 0) return null;
     const groups = instance?.config['groups'];
-    const wildcard =
-      isRecord(groups) && isRecord(groups['*']) ? groups['*'] : {};
+    // Fold the stored keys the same way the save path does, so a mixed-case
+    // stored repository still finds its own row.
+    const storedGroups = isRecord(groups)
+      ? Object.fromEntries(
+          Object.entries(groups).map(([key, value]) => [
+            key.toLowerCase(),
+            value,
+          ]),
+        )
+      : {};
+    const wildcard = isRecord(storedGroups['*']) ? storedGroups['*'] : {};
     const inheritedRequireMention =
       typeof wildcard['requireMention'] === 'boolean'
         ? wildcard['requireMention']
@@ -864,6 +874,16 @@ export function ChannelEditorDialog({
           const override =
             draft.groupOverrides[repositoryId] ?? EMPTY_GROUP_OVERRIDE;
           const effectiveSenders = override.senders || inheritedSenders;
+          const storedGroup = isRecord(storedGroups[repositoryId])
+            ? storedGroups[repositoryId]
+            : {};
+          // Ask the save path what this row will own, rather than guessing from
+          // the draft policy: a stored allowlist with no list inherits its
+          // members, and a stored empty list admits nobody even with no policy
+          // beside it. The copy has to match what the runtime will resolve.
+          const ownsSpeakerList = Array.isArray(
+            projectRepositoryGroup(storedGroup, override)['allowedUsers'],
+          );
           const headingId = `${formId}-repo-${repositoryId}`;
           const mentionId = `${formId}-mention-${repositoryId}`;
           const sendersId = `${formId}-senders-${repositoryId}`;
@@ -957,7 +977,7 @@ export function ChannelEditorDialog({
                   id={speakersId}
                   label={t('channels.editor.field.github.repositorySpeakers')}
                   description={t(
-                    override.senders === 'allowlist'
+                    ownsSpeakerList
                       ? 'channels.editor.field.github.repositorySpeakers.description'
                       : 'channels.editor.field.github.repositorySpeakers.inherited',
                   )}

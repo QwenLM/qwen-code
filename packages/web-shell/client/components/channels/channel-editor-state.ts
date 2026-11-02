@@ -536,8 +536,13 @@ function splitList(value: string): string[] {
  * Apply one repository's draft over its stored settings. Only a field that
  * differs from the stored reading is written, so an untouched repository keeps
  * every key it had — including ones this form does not model.
+ *
+ * Exported because the row's helper text must describe what this projection
+ * writes, not what the draft happens to hold: deriving the copy from the draft
+ * policy alone tells two deliberately-preserved stored shapes the opposite of
+ * what the runtime does.
  */
-function mergeGroupOverride(
+export function projectRepositoryGroup(
   stored: Record<string, unknown>,
   override: ChannelGroupOverrideDraft,
 ): Record<string, unknown> {
@@ -547,31 +552,34 @@ function mergeGroupOverride(
     if (override.requireMention === '') delete group['requireMention'];
     else group['requireMention'] = override.requireMention === 'true';
   }
-  if (override.senders !== initial.senders) {
+  const policyChanged = override.senders !== initial.senders;
+  if (policyChanged) {
     if (override.senders === '') delete group['senders'];
     else group['senders'] = override.senders;
   }
+  const users = splitList(override.allowedUsers);
   if (override.allowedUsers !== initial.allowedUsers) {
-    const users = splitList(override.allowedUsers);
     // An explicit allowlist owns its list: empty means nobody, not "inherit".
     if (users.length > 0 || group['senders'] === 'allowlist') {
       group['allowedUsers'] = users;
     } else {
       delete group['allowedUsers'];
     }
-  } else if (
-    override.senders !== initial.senders &&
-    group['senders'] === 'allowlist' &&
-    !Array.isArray(group['allowedUsers'])
-  ) {
-    // Choosing an allowlist owns the list even when the text never moved.
-    // Without the key the runtime's `??` hands the channel-wide list back, so
-    // the row's "empty means nobody" would silently keep the wider audience —
-    // the most restrictive action available would be a no-op. Scoped to a
-    // policy the operator actually changed: a row that already stored the
-    // policy with no list legitimately inherits its members, and writing []
-    // there would narrow a channel nobody edited.
-    group['allowedUsers'] = [];
+  } else if (policyChanged) {
+    // The policy moved while the text did not — the default state both of a
+    // freshly added row and of a row being returned to inheritance. Both
+    // directions have to write, or the row's copy describes something the save
+    // did not do. Scoped to a changed policy: a row that already stored the
+    // policy keeps its members, so an untouched save stays a no-op.
+    if (group['senders'] === 'allowlist') {
+      // Without the key the runtime's `??` hands the channel-wide list back,
+      // so "empty means nobody" would silently keep the wider audience.
+      if (!Array.isArray(group['allowedUsers'])) group['allowedUsers'] = [];
+    } else if (users.length === 0) {
+      // `[]` is not nullish, so a list left behind keeps denying everyone
+      // while the row reads "Inherit" and promises the channel-wide list.
+      delete group['allowedUsers'];
+    }
   }
   return group;
 }
@@ -605,7 +613,7 @@ function assignGroups(
     if (key === '*') continue;
     const stored = isRecord(previousGroups[key]) ? previousGroups[key] : {};
     const override = overrides?.[key];
-    groups[key] = override ? mergeGroupOverride(stored, override) : stored;
+    groups[key] = override ? projectRepositoryGroup(stored, override) : stored;
   }
   if (Object.keys(groups).length > 0) {
     config['groups'] = groups;
