@@ -5,6 +5,8 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import stripAnsi from 'strip-ansi';
+import { darkSemanticColors } from './themes/semantic-tokens.js';
 import { StreamingState } from './types.js';
 import {
   aggregateModelTokens,
@@ -22,6 +24,103 @@ import {
 } from './statusLinePresets.js';
 
 describe('statusLinePresets', () => {
+  it('colors every preset by category, leaving the same text when colors are off', () => {
+    const colors = {
+      ...darkSemanticColors,
+      text: {
+        ...darkSemanticColors.text,
+        accent: 'red',
+        link: '#123456',
+        secondary: '',
+      },
+      status: {
+        ...darkSemanticColors.status,
+        success: '#0f0',
+        warning: '#abcdef',
+      },
+    };
+    const data = buildStatusLinePresetData({
+      sessionId: 'session-123',
+      version: '1.2.3',
+      modelDisplayName: 'Model',
+      reasoning: { effort: 'high' },
+      currentDir: '/repo/project',
+      branch: 'pr-123',
+      contextWindowSize: 1000,
+      currentUsage: 250,
+      totalInputTokens: 100,
+      totalOutputTokens: 20,
+      totalLinesAdded: 1,
+      totalLinesRemoved: 2,
+      streamingState: StreamingState.Idle,
+    });
+    const groups = [
+      [
+        [
+          'project-name',
+          'git-branch',
+          'current-dir',
+          'pull-request-number',
+          'branch-changes',
+        ],
+        '0;255;0',
+      ],
+      [['model', 'model-with-reasoning'], '255;0;0'],
+      [
+        [
+          'context-remaining',
+          'context-used',
+          'total-input-tokens',
+          'total-output-tokens',
+          'context-window-size',
+          'used-tokens',
+        ],
+        '18;52;86',
+      ],
+      [['run-state', 'qwen-version', 'session-id'], '171;205;239'],
+    ] as const;
+    expect(groups.flatMap(([items]) => [...items]).sort()).toEqual(
+      [...STATUS_LINE_PRESET_ITEM_IDS].sort(),
+    );
+    for (const [items, rgb] of groups) {
+      for (const item of items) {
+        const config = {
+          type: 'preset' as const,
+          items: [item],
+          useThemeColors: true,
+        };
+        const plain = buildStatusLinePresetLines(
+          { ...config, useThemeColors: false },
+          data,
+          colors,
+        );
+        const colored = buildStatusLinePresetLines(config, data, colors);
+        expect(colored).toEqual([`\x1b[38;2;${rgb}m${plain[0]}\x1b[39m`]);
+        expect(colored.map(stripAnsi)).toEqual(plain);
+      }
+    }
+    const config = {
+      type: 'preset' as const,
+      items: [...STATUS_LINE_PRESET_ITEM_IDS],
+      useThemeColors: true,
+    };
+    const plain = buildStatusLinePresetLines(config, data);
+    expect(
+      buildStatusLinePresetLines(config, data, colors).map(stripAnsi),
+    ).toEqual(plain);
+    const noColor = {
+      ...colors,
+      text: { ...colors.text, accent: '', link: '' },
+      status: { ...colors.status, success: '', warning: '' },
+    };
+    expect(buildStatusLinePresetLines(config, data, noColor)).toEqual(plain);
+    expect(
+      buildStatusLinePresetLines(config, data, {
+        ...colors,
+        status: { ...colors.status, success: '#456789' },
+      })[0],
+    ).toContain('\x1b[38;2;69;103;137m');
+  });
   it('normalizes valid preset configs and orders items by priority', () => {
     expect(
       normalizeStatusLinePresetConfig({

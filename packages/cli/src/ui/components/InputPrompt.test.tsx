@@ -435,6 +435,46 @@ describe('InputPrompt', () => {
     };
   });
 
+  it('keeps the visible input inert while the status line picker owns input', async () => {
+    mockedUseUIState.mockReturnValue({
+      isStatusLineDialogOpen: true,
+      isFeedbackDialogOpen: false,
+      messageQueue: [],
+      pendingLlmHistoryItems: [],
+    } as unknown as ReturnType<typeof useUIState>);
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'inactive-suggestion', value: 'inactive-suggestion' },
+      ],
+    });
+    props.buffer.setText('draft');
+    const onSuggestionsVisibilityChange = vi.fn();
+    const { stdin, lastFrame, unmount } = renderWithProviders(
+      <InputPrompt
+        {...props}
+        focus={false}
+        onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
+      />,
+    );
+    await wait();
+    act(() => {
+      stdin.write(' ');
+      stdin.write('\u001b[A');
+      stdin.write('\u001b[200~pasted\u001b[201~');
+      stdin.write('\r');
+    });
+    await wait();
+    expect(props.buffer.text).toBe('draft');
+    expect(props.buffer.insert).not.toHaveBeenCalled();
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
+    expect(lastFrame()).not.toContain('inactive-suggestion');
+    expect(onSuggestionsVisibilityChange).toHaveBeenLastCalledWith(false);
+    unmount();
+  });
+
   it('stashes non-empty input on Ctrl+S', async () => {
     props.buffer.setText('draft prompt');
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);

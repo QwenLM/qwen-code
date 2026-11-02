@@ -29,6 +29,7 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useAgentViewState } from '../contexts/AgentViewContext.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { StreamingState } from '../types.js';
+import { STATUS_LINE_COMPOSER_ROWS } from '../status-line-model.js';
 import { getStickyTodoMaxVisibleItemsForMode } from '../utils/todoSnapshot.js';
 import {
   getDialogMaxHeight,
@@ -61,7 +62,13 @@ export const DefaultAppLayout: React.FC = () => {
     uiState.terminalHeight,
     uiState.staticExtraHeight,
   );
-  const dialogHeight = uiState.constrainHeight ? dialogMaxHeight : undefined;
+  const dialogHeight = uiState.constrainHeight
+    ? Math.max(
+        1,
+        dialogMaxHeight -
+          (uiState.isStatusLineDialogOpen ? STATUS_LINE_COMPOSER_ROWS : 0),
+      )
+    : undefined;
   // The /btw answer viewport only exists in VP mode. Its ScrollableList arms
   // SGR mouse tracking (bypassVpGate), which must not happen on the non-VP
   // main screen where the terminal keeps native scrollback — so the row budget
@@ -143,8 +150,10 @@ export const DefaultAppLayout: React.FC = () => {
                     />
                   </Box>
                 )}
-                <Composer footerRef={footerRef} />
               </>
+            )}
+            {(!uiState.dialogsVisible || uiState.isStatusLineDialogOpen) && (
+              <Composer footerRef={footerRef} />
             )}
             <ExitWarning />
             {/*

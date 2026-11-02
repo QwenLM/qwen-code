@@ -1065,9 +1065,17 @@ describe('OpenTuiApp shell wiring', () => {
       request: { dialog: 'statusline' },
     };
     await submit('/statusline');
-    expect(mocks.state.dialogProps?.['statusLineState']).toMatchObject({
-      sessionStats: current,
-      branchName: 'current-branch',
+    expect(screen.getByText('footer')).toBeTruthy();
+    expect(mocks.state.inputProps?.['focus']).toBe(false);
+    const onPreviewChange = mocks.state.dialogProps?.[
+      'onStatusLinePreviewChange'
+    ] as (config: { type: 'preset'; items: string[] }) => void;
+    await act(async () =>
+      onPreviewChange({ type: 'preset', items: ['model'] }),
+    );
+    expect(mocks.state.statusLineState?.statusLinePreviewConfig).toEqual({
+      type: 'preset',
+      items: ['model'],
     });
   });
 

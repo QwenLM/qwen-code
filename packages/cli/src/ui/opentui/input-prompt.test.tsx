@@ -56,6 +56,9 @@ import {
 
 interface FakeEditor {
   plainText: string;
+  focusable: boolean;
+  focus(): void;
+  blur(): void;
   width: number;
   cursorOffset: number;
   handleKeyPress(key: KeyEvent): boolean;
@@ -154,6 +157,9 @@ const mocks = vi.hoisted(() => {
         setColFromDisplay(offset);
       },
       width: 78,
+      focusable: true,
+      focus: vi.fn(),
+      blur: vi.fn(),
       handleKeyPress: vi.fn<(key: KeyEvent) => boolean>(() => true),
       getSelection: () => null,
       clearSelection: vi.fn(),
@@ -826,7 +832,7 @@ describe('OpenTuiInputPrompt raw Backspace wiring', () => {
   });
 
   it('consumes nothing while unfocused', async () => {
-    render(
+    const view = render(
       <OpenTuiInputPrompt
         onSubmit={() => true}
         userMessages={[]}
@@ -837,6 +843,13 @@ describe('OpenTuiInputPrompt raw Backspace wiring', () => {
     expect(await pressRaw('\x1b[127u')).toBe(false);
     const editor = currentEditor();
     expect(editor.deleteCharBackwardCalls).toBe(0);
+    expect(mocks.state.textareaProps?.['focused']).toBe(false);
+    expect(editor.focusable).toBe(false);
+    view.rerender(
+      <OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />,
+    );
+    expect(mocks.state.textareaProps?.['focused']).toBe(true);
+    expect(editor.focusable).toBe(true);
   });
 });
 

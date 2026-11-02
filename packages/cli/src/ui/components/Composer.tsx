@@ -32,6 +32,7 @@ export const Composer = ({ footerRef }: ComposerProps) => {
   const isScreenReaderEnabled = useIsScreenReaderEnabled();
   const uiState = useUIState();
   const uiActions = useUIActions();
+  const showInput = uiState.isInputActive || uiState.isStatusLineDialogOpen;
   const { vimEnabled } = useVimModeState();
   const modBand = useModBand(config);
 
@@ -126,7 +127,7 @@ export const Composer = ({ footerRef }: ComposerProps) => {
         />
       )}
 
-      {uiState.isInputActive && (
+      {showInput && (
         <InputPrompt
           buffer={uiState.buffer}
           pendingPastes={uiState.pendingPastes}
@@ -148,7 +149,7 @@ export const Composer = ({ footerRef }: ComposerProps) => {
           showShortcuts={showShortcuts}
           onSuggestionsVisibilityChange={setShowSuggestions}
           onTabConsumerChange={handleTabConsumerChange}
-          focus={true}
+          focus={!uiState.isStatusLineDialogOpen}
           vimHandleInput={uiActions.vimHandleInput}
           isEmbeddedShellFocused={uiState.embeddedShellFocused}
           placeholder={
@@ -168,9 +169,9 @@ export const Composer = ({ footerRef }: ComposerProps) => {
       {/* The footer is the only production consumer of useConfigInitMessage,
           which returns a message exactly while initialization is pending — so
           it has to mount on that window too, or startup shows no progress at
-          all. InputPrompt stays gated on isInputActive alone. */}
-      {(uiState.isInputActive || !uiState.isConfigInitialized) &&
-        !showSuggestions &&
+          all. The status-line picker also keeps its inactive input visible. */}
+      {(showInput || !uiState.isConfigInitialized) &&
+        (!showSuggestions || uiState.isStatusLineDialogOpen) &&
         (showShortcuts ? (
           <KeyboardShortcuts />
         ) : (

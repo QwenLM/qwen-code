@@ -66,6 +66,7 @@ export interface UIState {
   isStatusLineDialogOpen: boolean;
   statusLineSettingsVersion?: number;
   statusLineConfigOverride?: StatusLinePresetConfig;
+  statusLinePreviewConfig?: StatusLinePresetConfig;
   isMemoryDialogOpen: boolean;
   isSkillReviewDialogOpen: boolean;
   /** Pending auto-skills awaiting confirmation, plus their owning task id. */

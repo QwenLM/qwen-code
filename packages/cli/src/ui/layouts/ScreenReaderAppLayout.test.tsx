@@ -98,6 +98,16 @@ function frameHeight(frame: string): number {
 }
 
 describe('ScreenReaderAppLayout', () => {
+  it('keeps the composer and footer while configuring the status line', () => {
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      dialogsVisible: true,
+      isStatusLineDialogOpen: true,
+    });
+    expect(lastFrame()).toContain('Composer');
+    expect(lastFrame()).toContain('Footer');
+    expect(lastFrame()).toContain('DialogManager');
+  });
   beforeEach(() => {
     dialogManagerMockState.lineCount = 1;
   });

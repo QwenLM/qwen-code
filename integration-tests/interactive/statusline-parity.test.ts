@@ -355,10 +355,9 @@ describe.skipIf(process.platform === 'win32')(
             await selected('total-input-tokens', false);
             await press(' ');
             await selected('total-input-tokens', true);
-            await visible('Preview', 'preview');
-            const preview = (await current().viewport())
-              .split('Preview')
-              .at(-1);
+            await visible('0 total in', 'preview');
+            const preview = await current().viewport();
+            expect(preview).not.toContain('Preview');
             expect(preview).toContain('statusline-model');
             expect(preview).toContain('0 total in');
             await press('\r');

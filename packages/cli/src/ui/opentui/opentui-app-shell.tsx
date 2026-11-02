@@ -58,6 +58,8 @@ import type { SessionStatsState } from '../contexts/SessionContext.js';
 import { useWorktreeSession } from '../hooks/useWorktreeSession.js';
 import { useGitBranchName } from '../hooks/useGitBranchName.js';
 import { useStatusLineState } from '../hooks/useStatusLine.js';
+import type { StatusLinePresetConfig } from '../statusLinePresets.js';
+import { STATUS_LINE_COMPOSER_ROWS } from '../status-line-model.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 import {
   MessageType,
@@ -335,6 +337,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const [dialog, setDialog] = useState<OpenTuiDialogRequest | null>(
     props.initialDialog ?? null,
   );
+  const isStatusLineDialogOpen = dialog?.dialog === 'statusline';
+  const [statusLinePreviewConfig, setStatusLinePreviewConfig] =
+    useState<StatusLinePresetConfig>();
   const [noticeText, setNoticeText] = useState<string | null>(null);
   const [commandList, setCommandList] = useState<readonly SlashCommand[]>(
     commands ?? [],
@@ -363,7 +368,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // dialog ink stretches to fill the viewport stays short.
   const dialogRegionHeight = getDialogMaxHeight(
     terminalHeight,
-    STATIC_EXTRA_HEIGHT,
+    STATIC_EXTRA_HEIGHT +
+      (isStatusLineDialogOpen ? STATUS_LINE_COMPOSER_ROWS : 0),
   );
   const toggleShellMode = useCallback(
     () => setShellModeActive((active) => !active),
@@ -993,6 +999,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const [currentModel, setCurrentModel] = useState(() => config.getModel());
   useEffect(() => config.onModelChange(setCurrentModel), [config]);
   const statusLineState = {
+    statusLinePreviewConfig: isStatusLineDialogOpen
+      ? statusLinePreviewConfig
+      : undefined,
     sessionStats: props.sessionStats ?? getSessionStats(),
     currentModel,
     branchName,
@@ -1624,122 +1633,130 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 }
               />
             )
-          ) : dialog ? (
-            // ink's layout wraps every popup in a two-column margin and caps its
-            // width, so a dialog's border runs from column 2 to column 97 instead
-            // of spanning the terminal. The confirmations stay outside: their
-            // body reads the terminal width to estimate line wrapping.
-            //
-            // The keys on this branch and the composer's are load-bearing: both
-            // are a `<box>` in the same slot, so without them React reuses one
-            // instance and diffs props — and @opentui's margin/width setters
-            // ignore the `null` its reconciler passes for a removed prop, leaving
-            // the previous branch's layout stuck on the node.
-            <box
-              key="dialog-area"
-              flexDirection="column"
-              marginLeft={2}
-              width={dialogAreaWidth(terminalWidth)}
-              height={dialogRegionHeight}
-              overflow="hidden"
-            >
-              <OpenTuiDialogMount
-                extensionRefreshState={extensionRefreshState}
-                key={dialog.dialog}
-                request={dialog}
-                host={host}
-                config={config}
-                settings={settings}
-                commands={commandList}
-                onClose={() => setDialog(null)}
-                notify={notify}
-                fillInput={fillComposer}
-                onSelectSetting={handleSelectSetting}
-                onRestartRequest={() =>
-                  applyOutcome({ kind: 'quit', messages: [] })
-                }
-                onApprovalModeChanged={adoptApprovalMode}
-                availableTerminalHeight={dialogRegionHeight}
-                statusLineState={statusLineState}
-                rewindTurns={rewindBoundaryHistory(
-                  props.historyItems ?? [],
-                ).flatMap((boundary) => {
-                  const item = props.historyItems?.[boundary.id];
-                  return item?.kind === 'user' && isRewindableUserTurn(boundary)
-                    ? [item]
-                    : [];
-                })}
-                onRewind={(turn, option) => rewind(turn.id, option)}
-              />
-            </box>
           ) : (
-            <box key="composer" flexDirection="column" marginTop={1}>
-              <OpenTuiLoadingIndicator
-                streaming={Boolean(streaming) && !shellFocused}
-                streamingCharsRef={streamingCharsRef}
-                isReceivingContent={isReceivingContent}
-                showPhrase={showLoadingPhrases}
-              />
-              <OpenTuiQueuedMessageDisplay messageQueue={displayedQueue} />
-              <OpenTuiModBand
-                band={modBand}
-                maxRows={modBandMaxRows(terminalHeight)}
-              />
-              <OpenTuiInputPrompt
-                onSubmit={onSubmit}
-                onNotice={notify}
-                voice={{
-                  settings,
-                  voiceMicWarnedStatusRef,
-                  addItem: (item, at) => host.addItem(item, at),
-                }}
-                preferredEditor={settings.merged.general?.preferredEditor}
-                topRightLabel={host.sessionName ?? undefined}
-                userMessages={userMessages}
-                config={config}
-                focus={!shellFocused}
-                onShellKey={handleShellKey}
-                onShellPaste={handleShellPaste}
-                streaming={streaming}
-                onInterrupt={onInterrupt}
-                onRetry={
-                  props.onRetryPrompt
-                    ? () => {
-                        if (shellControllersRef.current.size > 0) return;
-                        if (gateway.isBusy()) {
-                          notify('A slash command is already running.');
-                          return;
-                        }
-                        props.onRetryPrompt?.();
-                      }
-                    : undefined
-                }
-                onRewind={() => {
-                  if (
-                    !config.getIdeMode() &&
-                    props.historyItems?.some((item) => item.kind === 'user')
-                  )
-                    setDialog({ dialog: 'rewind' });
-                }}
-                onCancelCommand={() => {
-                  if (!gateway.isBusy()) return false;
-                  gateway.cancel();
-                  return true;
-                }}
-                approvalMode={currentApprovalMode}
-                queueLength={queueLength}
-                onPopQueue={popQueue}
-                composerHandle={props.composerHandle}
-                vim={props.vim}
-                promptSuggestion={promptSuggestion}
-                onPromptSuggestionDismiss={onPromptSuggestionDismiss}
-                onPromptSuggestionAbort={onPromptSuggestionAbort}
-                shellModeActive={shellModeActive}
-                onToggleShellMode={toggleShellMode}
-                onSuggestionsVisibilityChange={onSuggestionsVisibilityChange}
-                onCycleApprovalMode={cycleApprovalMode}
-              />
-            </box>
+            <>
+              {dialog && (
+                // ink's layout wraps every popup in a two-column margin and caps its
+                // width, so a dialog's border runs from column 2 to column 97 instead
+                // of spanning the terminal. The confirmations stay outside: their
+                // body reads the terminal width to estimate line wrapping.
+                //
+                // The keys on this branch and the composer's are load-bearing: both
+                // are a `<box>` in the same slot, so without them React reuses one
+                // instance and diffs props — and @opentui's margin/width setters
+                // ignore the `null` its reconciler passes for a removed prop, leaving
+                // the previous branch's layout stuck on the node.
+                <box
+                  key="dialog-area"
+                  flexDirection="column"
+                  marginLeft={2}
+                  width={dialogAreaWidth(terminalWidth)}
+                  height={dialogRegionHeight}
+                  overflow="hidden"
+                >
+                  <OpenTuiDialogMount
+                    extensionRefreshState={extensionRefreshState}
+                    key={dialog.dialog}
+                    request={dialog}
+                    host={host}
+                    config={config}
+                    settings={settings}
+                    commands={commandList}
+                    onClose={() => setDialog(null)}
+                    notify={notify}
+                    fillInput={fillComposer}
+                    onSelectSetting={handleSelectSetting}
+                    onRestartRequest={() =>
+                      applyOutcome({ kind: 'quit', messages: [] })
+                    }
+                    onApprovalModeChanged={adoptApprovalMode}
+                    availableTerminalHeight={dialogRegionHeight}
+                    onStatusLinePreviewChange={setStatusLinePreviewConfig}
+                    rewindTurns={rewindBoundaryHistory(
+                      props.historyItems ?? [],
+                    ).flatMap((boundary) => {
+                      const item = props.historyItems?.[boundary.id];
+                      return item?.kind === 'user' &&
+                        isRewindableUserTurn(boundary)
+                        ? [item]
+                        : [];
+                    })}
+                    onRewind={(turn, option) => rewind(turn.id, option)}
+                  />
+                </box>
+              )}
+              {(!dialog || isStatusLineDialogOpen) && (
+                <box key="composer" flexDirection="column" marginTop={1}>
+                  <OpenTuiLoadingIndicator
+                    streaming={Boolean(streaming) && !shellFocused}
+                    streamingCharsRef={streamingCharsRef}
+                    isReceivingContent={isReceivingContent}
+                    showPhrase={showLoadingPhrases}
+                  />
+                  <OpenTuiQueuedMessageDisplay messageQueue={displayedQueue} />
+                  <OpenTuiModBand
+                    band={modBand}
+                    maxRows={modBandMaxRows(terminalHeight)}
+                  />
+                  <OpenTuiInputPrompt
+                    onSubmit={onSubmit}
+                    onNotice={notify}
+                    voice={{
+                      settings,
+                      voiceMicWarnedStatusRef,
+                      addItem: (item, at) => host.addItem(item, at),
+                    }}
+                    preferredEditor={settings.merged.general?.preferredEditor}
+                    topRightLabel={host.sessionName ?? undefined}
+                    userMessages={userMessages}
+                    config={config}
+                    focus={!shellFocused && !dialog}
+                    onShellKey={handleShellKey}
+                    onShellPaste={handleShellPaste}
+                    streaming={streaming}
+                    onInterrupt={onInterrupt}
+                    onRetry={
+                      props.onRetryPrompt
+                        ? () => {
+                            if (shellControllersRef.current.size > 0) return;
+                            if (gateway.isBusy()) {
+                              notify('A slash command is already running.');
+                              return;
+                            }
+                            props.onRetryPrompt?.();
+                          }
+                        : undefined
+                    }
+                    onRewind={() => {
+                      if (
+                        !config.getIdeMode() &&
+                        props.historyItems?.some((item) => item.kind === 'user')
+                      )
+                        setDialog({ dialog: 'rewind' });
+                    }}
+                    onCancelCommand={() => {
+                      if (!gateway.isBusy()) return false;
+                      gateway.cancel();
+                      return true;
+                    }}
+                    approvalMode={currentApprovalMode}
+                    queueLength={queueLength}
+                    onPopQueue={popQueue}
+                    composerHandle={props.composerHandle}
+                    vim={props.vim}
+                    promptSuggestion={promptSuggestion}
+                    onPromptSuggestionDismiss={onPromptSuggestionDismiss}
+                    onPromptSuggestionAbort={onPromptSuggestionAbort}
+                    shellModeActive={shellModeActive}
+                    onToggleShellMode={toggleShellMode}
+                    onSuggestionsVisibilityChange={
+                      onSuggestionsVisibilityChange
+                    }
+                    onCycleApprovalMode={cycleApprovalMode}
+                  />
+                </box>
+              )}
+            </>
           )}
           {/* An armed quit warning forces the footer to mount: a dialog unmounts
             the composer, so nothing intercepts Ctrl+C and the app-level guard
@@ -1747,11 +1764,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             the user that a second press exits. With the warning set the footer
             returns just that row, so nothing else appears. */}
           {exitHint ||
-          (!dialog &&
+          ((!dialog || isStatusLineDialogOpen) &&
             !activeModal &&
             !activeToolCall &&
             !mcpApproval.isMcpApprovalDialogOpen &&
-            !showSuggestions) ? (
+            (!showSuggestions || isStatusLineDialogOpen)) ? (
             <OpenTuiFooter
               config={config}
               settings={settings}

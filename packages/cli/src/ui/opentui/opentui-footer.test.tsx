@@ -109,9 +109,9 @@ import {
 } from './opentui-footer.js';
 import {
   buildStatusLinePresetLines,
+  buildStatusLinePresetData,
   DEFAULT_STATUS_LINE_PRESET_CONFIG,
 } from '../statusLinePresets.js';
-import { getPreviewData } from '../status-line-model.js';
 import { StreamingState } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { C } from './theme.js';
@@ -153,9 +153,20 @@ function Footer(
   const statusLine = props.statusLine ?? {
     lines: buildStatusLinePresetLines(
       DEFAULT_STATUS_LINE_PRESET_CONFIG,
-      getPreviewData(props.config, {
-        sessionStats,
-        branchName: mocks.state.gitBranch,
+      buildStatusLinePresetData({
+        sessionId: sessionStats.sessionId,
+        version: props.config.getCliVersion(),
+        modelDisplayName: props.config.getModelDisplayName(),
+        reasoning: props.config.getContentGeneratorConfig()?.reasoning,
+        currentDir: props.config.getTargetDir(),
+        branch: mocks.state.gitBranch,
+        contextWindowSize:
+          props.config.getContentGeneratorConfig()?.contextWindowSize ?? 0,
+        currentUsage: sessionStats.lastPromptTokenCount,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        totalLinesAdded: sessionStats.metrics.files.totalLinesAdded,
+        totalLinesRemoved: sessionStats.metrics.files.totalLinesRemoved,
         streamingState: props.streaming
           ? StreamingState.Responding
           : StreamingState.Idle,
@@ -512,16 +523,25 @@ describe('OpenTuiFooter', () => {
     expect(container.textContent).toContain('YOLO mode');
   });
 
-  it('paints the status row with the accent colour ink’s Footer uses', () => {
-    const { container } = render(
-      <Footer config={fakeConfig()} streaming={false} />,
-    );
-    expect(container.textContent).toContain('qwen3-coder-plus');
-    expect(mocks.styleText).toHaveBeenCalledWith(
-      expect.stringContaining('qwen3-coder-plus'),
-      { color: C.accent, dim: false },
-    );
-  });
+  it.each(['\x1b[38;2;12;34;56mModel\x1b[39m', 'NoColor Model'])(
+    'leaves semantic and NoColor styling to the shared preset output: %s',
+    (line) => {
+      const { container } = render(
+        <Footer
+          config={fakeConfig()}
+          streaming={false}
+          statusLine={{
+            lines: [line],
+            useThemeColors: true,
+            respectUserColors: false,
+            hideContextIndicator: true,
+          }}
+        />,
+      );
+      expect(container.textContent).toContain('Model');
+      expect(mocks.styleText).toHaveBeenCalledWith(line, { dim: false });
+    },
+  );
 
   it.each([
     [ApprovalMode.PLAN, 'plan mode', C.green],

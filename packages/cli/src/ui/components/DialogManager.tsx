@@ -61,6 +61,7 @@ import { BackgroundTasksDialog } from './background-view/BackgroundTasksDialog.j
 import { useBackgroundTaskViewState } from '../contexts/BackgroundTaskViewContext.js';
 import { t } from '../../i18n/index.js';
 import { getDialogMaxHeight } from '../utils/layoutUtils.js';
+import { STATUS_LINE_COMPOSER_ROWS } from '../status-line-model.js';
 import { getReasoningEffortsForConfig } from '../../acp-integration/model-configuration.js';
 
 interface DialogManagerProps {
@@ -323,11 +324,14 @@ export const DialogManager = ({
       <StatusLineDialog
         settings={settings}
         config={config}
-        uiState={uiState}
         addItem={addItem}
         onSaved={uiActions.notifyStatusLineSettingsChanged}
+        onPreviewChange={uiActions.setStatusLinePreviewConfig}
         onClose={uiActions.closeStatusLineDialog}
-        availableTerminalHeight={listDialogHeight}
+        availableTerminalHeight={Math.max(
+          1,
+          listDialogHeight - STATUS_LINE_COMPOSER_ROWS,
+        )}
       />
     );
   }

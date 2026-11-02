@@ -37,9 +37,9 @@ The easiest way to configure a status line is the `/statusline` command. It open
 /statusline
 ```
 
-This opens the preset mode configurator. Use arrow keys to navigate, space to toggle items, and enter to confirm. Your selection is saved to settings automatically.
+This opens the preset mode configurator above the input area. Use arrow keys to navigate and space to toggle items or theme colors. The real footer updates immediately, using the same width, wrapping and two-row limit as the saved status line. The input remains visible but inactive while configuring. Enter saves your selection; Esc cancels and restores the saved status line (if a search is active, the first Esc clears it).
 
-When fewer than 16 rows are available, the dialog switches to a compact list-only layout without search or preview.
+When fewer than 13 rows are available to the picker, it switches to a compact list-only layout without search. The real footer preview remains visible.
 
 You can also give `/statusline` specific instructions to have it generate a command-mode configuration:
 
@@ -386,7 +386,7 @@ Then reference it in settings:
 **Preset mode only:**
 
 - **No external dependencies**: Preset items are computed internally — no shell commands, no `jq`, no timeouts.
-- **Theme integration**: When `useThemeColors` is `true` (default), the status line text uses the active `/theme` color. When `false`, dimmed footer styling is applied.
+- **Theme integration**: When `useThemeColors` is `true` (default), project/Git items use the active theme's success color, model/reasoning items its accent color, context/token metrics its link color, and session metadata its warning color. Separators stay neutral. When `false`, dimmed footer styling is applied without these semantic colors.
 - **PR lookup**: The `pull-request-number` item runs `gh pr view` in the background (2s timeout). It only triggers when the branch changes, not on every update.
 
 ## Troubleshooting

@@ -4,13 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { SettingScope, type LoadedSettings } from '../config/settings.js';
-import type { StatusLineState } from './hooks/useStatusLine.js';
 import type { MultiSelectItem } from './components/shared/MultiSelect.js';
 import {
-  aggregateModelTokens,
-  buildStatusLinePresetData,
   DEFAULT_STATUS_LINE_PRESET_CONFIG,
   normalizeStatusLinePresetConfig,
   orderStatusLinePresetItems,
@@ -26,8 +22,9 @@ type StatusLineOption =
 
 export const THEME_COLORS_KEY = 'theme-colors';
 const DESCRIPTION_COLUMN = 24;
-// border + paddingY + title + subtitle + search + margins + preview + footer
-export const STATUS_LINE_DIALOG_FIXED_ROWS = 15;
+// border + paddingY + title + subtitle + search + margins + footer
+export const STATUS_LINE_DIALOG_FIXED_ROWS = 12;
+export const STATUS_LINE_COMPOSER_ROWS = 7;
 
 export const STATUS_LINE_OPTIONS: Array<MultiSelectItem<StatusLineOption>> = [
   {
@@ -61,13 +58,19 @@ export function buildInitialSelectedKeys(settings: LoadedSettings): string[] {
 
 export function buildConfigFromKeys(
   keys: readonly string[],
+  settings: LoadedSettings,
 ): StatusLinePresetConfig {
   const selected = new Set(keys);
+  const old = settings.forScope(getEffectiveStatusLineScope(settings)).settings
+    .ui?.statusLine;
 
   return {
     type: 'preset',
     useThemeColors: selected.has(THEME_COLORS_KEY),
     items: orderStatusLinePresetItems(keys),
+    ...(typeof old?.hideContextIndicator === 'boolean'
+      ? { hideContextIndicator: old.hideContextIndicator }
+      : {}),
   };
 }
 
@@ -84,33 +87,4 @@ export function getEffectiveStatusLineScope(
     return SettingScope.Workspace;
   }
   return SettingScope.User;
-}
-
-export function getPreviewData(
-  config: Config,
-  uiState: Pick<
-    StatusLineState,
-    'sessionStats' | 'branchName' | 'streamingState'
-  >,
-) {
-  const stats = uiState.sessionStats;
-  const metrics = stats.metrics;
-  const { totalInputTokens, totalOutputTokens } = aggregateModelTokens(metrics);
-  const contentGeneratorConfig = config.getContentGeneratorConfig();
-
-  return buildStatusLinePresetData({
-    sessionId: stats.sessionId,
-    version: config.getCliVersion(),
-    modelDisplayName: config.getModelDisplayName(),
-    reasoning: contentGeneratorConfig?.reasoning,
-    currentDir: config.getTargetDir(),
-    branch: uiState.branchName,
-    contextWindowSize: contentGeneratorConfig?.contextWindowSize || 0,
-    currentUsage: stats.lastPromptTokenCount,
-    totalInputTokens,
-    totalOutputTokens,
-    totalLinesAdded: metrics.files.totalLinesAdded,
-    totalLinesRemoved: metrics.files.totalLinesRemoved,
-    streamingState: uiState.streamingState,
-  });
 }

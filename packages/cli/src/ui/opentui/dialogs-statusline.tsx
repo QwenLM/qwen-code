@@ -6,21 +6,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
-import type { StatusLineState } from '../hooks/useStatusLine.js';
 import {
   buildInitialSelectedKeys,
   buildConfigFromKeys,
   getEffectiveStatusLineScope,
-  getPreviewData,
   STATUS_LINE_OPTIONS,
   STATUS_LINE_DIALOG_FIXED_ROWS,
 } from '../status-line-model.js';
-import { buildStatusLinePresetLines } from '../statusLinePresets.js';
+import type { StatusLinePresetConfig } from '../statusLinePresets.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import { truncateToWidth } from '../utils/textUtils.js';
 import {
@@ -36,16 +34,16 @@ import { C } from './theme.js';
 export function OpenTuiStatusLineDialog({
   config,
   settings,
-  state,
   addItem,
   onClose,
+  onPreviewChange,
   availableTerminalHeight = 18,
 }: {
   config: Config;
   settings: LoadedSettings;
-  state?: StatusLineState;
   addItem: UseHistoryManagerReturn['addItem'];
   onClose: () => void;
+  onPreviewChange?: (config: StatusLinePresetConfig | undefined) => void;
   availableTerminalHeight?: number;
 }) {
   const { width } = useTerminalDimensions();
@@ -69,10 +67,14 @@ export function OpenTuiStatusLineDialog({
             `${item.label} ${item.key}`.toLowerCase().includes(search),
         );
   }, [query, full]);
-  const preset = useMemo(() => buildConfigFromKeys(selected), [selected]);
-  const preview = state
-    ? buildStatusLinePresetLines(preset, getPreviewData(config, state))
-    : [];
+  const preset = useMemo(
+    () => buildConfigFromKeys(selected, settings),
+    [selected, settings],
+  );
+  useEffect(() => {
+    onPreviewChange?.(preset);
+  }, [onPreviewChange, preset]);
+  useEffect(() => () => onPreviewChange?.(undefined), [onPreviewChange]);
   const maxItemsToShow = Math.max(
     1,
     Math.min(
@@ -84,13 +86,7 @@ export function OpenTuiStatusLineDialog({
   );
   const save = () => {
     const scope = getEffectiveStatusLineScope(settings);
-    const old = settings.forScope(scope).settings.ui?.statusLine;
-    const saved = {
-      ...buildConfigFromKeys(selectedRef.current),
-      ...(typeof old?.hideContextIndicator === 'boolean'
-        ? { hideContextIndicator: old.hideContextIndicator }
-        : {}),
-    };
+    const saved = buildConfigFromKeys(selectedRef.current, settings);
     settings.setValue(scope, 'ui.statusLine', saved);
     const feedback: HistoryItemWithoutId & Record<string, unknown> = {
       type: MessageType.INFO,
@@ -209,27 +205,6 @@ export function OpenTuiStatusLineDialog({
       </box>
       {full && (
         <>
-          <box marginTop={1} flexDirection="column">
-            <text fg={C.dim}>{truncateToWidth('Preview', budget)}</text>
-            {preview.length ? (
-              preview.map((line, index) => (
-                <text
-                  key={index}
-                  fg={preset.useThemeColors ? C.accent : undefined}
-                  attributes={preset.useThemeColors ? 0 : 2}
-                >
-                  {truncateToWidth(line, budget)}
-                </text>
-              ))
-            ) : (
-              <text fg={C.dim}>
-                {truncateToWidth(
-                  'Select at least one item to show a status line.',
-                  budget,
-                )}
-              </text>
-            )}
-          </box>
           <box marginTop={1}>
             <text fg={C.dim}>
               {truncateToWidth(

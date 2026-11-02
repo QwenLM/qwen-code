@@ -122,7 +122,10 @@ import {
 } from './dialogs-stats-skills.js';
 import { OpenTuiThemeDialog } from './dialogs-theme.js';
 
-const SETTINGS = { merged: {} } as unknown as LoadedSettings;
+const SETTINGS = {
+  merged: {},
+  forScope: () => ({ settings: {} }),
+} as unknown as LoadedSettings;
 
 /** The layout primitives the jsx mock captured on the element. */
 function layoutOf(node: Element | null | undefined): Record<string, unknown> {

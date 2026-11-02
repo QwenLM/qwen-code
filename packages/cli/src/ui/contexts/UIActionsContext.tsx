@@ -54,6 +54,9 @@ export interface UIActions {
   closeSettingsDialog: () => void;
   closeStatusLineDialog: () => void;
   notifyStatusLineSettingsChanged: (config: StatusLinePresetConfig) => void;
+  setStatusLinePreviewConfig: (
+    config: StatusLinePresetConfig | undefined,
+  ) => void;
   closeMemoryDialog: () => void;
   closeModelDialog: () => void;
   openModelDialog: (options?: {

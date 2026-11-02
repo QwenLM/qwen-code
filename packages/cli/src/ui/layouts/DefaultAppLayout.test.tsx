@@ -129,6 +129,25 @@ function frameHeight(frame: string): number {
 }
 
 describe('DefaultAppLayout', () => {
+  it('keeps the composer below the status line picker but not other dialogs', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      dialogsVisible: true,
+      isStatusLineDialogOpen: true,
+    });
+    const output = lastFrame() ?? '';
+    expect(output).toContain('Composer');
+    expect(output.indexOf('DialogManager')).toBeLessThan(
+      output.indexOf('Composer'),
+    );
+    expect(
+      renderLayout({ ...baseUIState, dialogsVisible: true }).lastFrame(),
+    ).not.toContain('Composer');
+  });
   beforeEach(() => {
     dialogManagerMockState.lineCount = 1;
   });

@@ -34,8 +34,8 @@ import { dialogAreaWidth } from '../src/ui/opentui/dialogs-shared.js';
 import { applyOpenTuiTheme } from '../src/ui/opentui/theme.js';
 import { getActiveOpenTuiTheme } from '../src/ui/opentui/theme-parity.js';
 import { theme } from '../src/ui/semantic-colors.js';
-import { StreamingState } from '../src/ui/types.js';
 import type { StatusLineState } from '../src/ui/hooks/useStatusLine.js';
+import type { StatusLinePresetConfig } from '../src/ui/statusLinePresets.js';
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
 async function scenario(
@@ -144,13 +144,6 @@ const stats = {
   lastPromptTokenCount: 250,
   metrics: { models: {}, files: { totalLinesAdded: 0, totalLinesRemoved: 0 } },
 } as StatusLineState['sessionStats'];
-const state: StatusLineState = {
-  sessionStats: stats,
-  currentModel: 'u3-native-model',
-  branchName: 'main',
-  activeWorktree: null,
-  streamingState: StreamingState.Idle,
-};
 function configFor(record: (v: unknown) => void = () => {}) {
   return {
     getTargetDir: () => '/owned/project',
@@ -367,17 +360,14 @@ await scenario(
         },
       };
       const s = await mount(<OpenTuiFooter {...props} />, 80, 12);
+      const unstyled = await mount(<text>P</text>, 80, 12);
       assert.deepEqual(rgb(span(s, 'F').fg), [12, 34, 56]);
       assert.equal(
         Boolean(span(s, 'P').attributes & TextAttributes.DIM),
         !respectUserColors && !useThemeColors,
       );
       assert.deepEqual(rgb(span(s, 'R').fg), rgb(span(s, 'P').fg));
-      if (useThemeColors)
-        assert.deepEqual(
-          rgb(span(s, 'P').fg),
-          rgb(RGBA.fromHex(theme.text.accent)),
-        );
+      assert.deepEqual(rgb(span(s, 'P').fg), rgb(span(unstyled, 'P').fg));
     }
     const long = '甲🙂 '.repeat(80) + 'TAIL_NOT_ON_FIRST_TWO_ROWS';
     for (const [width, height] of [
@@ -464,11 +454,14 @@ await scenario(
       added: unknown[] = [],
       recorded: unknown[] = [];
     let closed = 0;
+    let preview: StatusLinePresetConfig | undefined;
     const s = await mount(
       <DialogRegion
         settings={settings}
         config={configFor((v) => recorded.push(v))}
-        state={state}
+        onPreviewChange={(value) => {
+          preview = value;
+        }}
         addItem={(v) => {
           added.push(v);
           return 1;
@@ -486,7 +479,8 @@ await scenario(
     assert.ok(!frame(s).includes('git-branch'));
     await key(s, ' ');
     checked(s, 'total-input-tokens', true);
-    assert.ok(frame(s).includes('0 total in'));
+    assert.ok(preview?.items.includes('total-input-tokens'));
+    assert.ok(!frame(s).includes('Preview'));
     await key(s, 'ESCAPE');
     assert.equal(closed, 0);
     assert.ok(frame(s).includes('git-branch'));
@@ -519,7 +513,6 @@ await scenario(
       <DialogRegion
         settings={settings}
         config={configFor()}
-        state={state}
         addItem={() => {
           throw new Error('cancel must not add feedback');
         }}
@@ -571,7 +564,6 @@ for (const [label, populated, trusted, expected] of [
       <DialogRegion
         settings={settings}
         config={configFor((v) => recorded.push(v))}
-        state={state}
         addItem={(v) => {
           added.push(v);
           return 1;
@@ -615,7 +607,6 @@ await scenario(
       <DialogRegion
         settings={settings}
         config={configFor()}
-        state={state}
         addItem={() => 1}
         onClose={() => {
           closed++;
@@ -635,8 +626,8 @@ await scenario(
       await act(async () => s.resize(width, region + 4));
       await idle(s);
       regionGeometry(s, region);
-      assert.equal(frame(s).includes('Type to search'), region >= 16);
-      if (region >= 16) {
+      assert.equal(frame(s).includes('Type to search'), region >= 13);
+      if (region >= 13) {
         assert.ok(frame(s).includes('> identifier'));
         assert.ok(frame(s).includes('session-id'));
       }

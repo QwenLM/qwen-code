@@ -17,6 +17,7 @@ import { StickyTodoList } from '../components/StickyTodoList.js';
 import { BtwMessage } from '../components/messages/BtwMessage.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { StreamingState } from '../types.js';
+import { STATUS_LINE_COMPOSER_ROWS } from '../status-line-model.js';
 import { getStickyTodoMaxVisibleItemsForMode } from '../utils/todoSnapshot.js';
 import { getDialogMaxHeight } from '../utils/layoutUtils.js';
 
@@ -31,7 +32,13 @@ export const ScreenReaderAppLayout: React.FC = () => {
     uiState.terminalHeight,
     uiState.staticExtraHeight,
   );
-  const dialogHeight = uiState.constrainHeight ? dialogMaxHeight : undefined;
+  const dialogHeight = uiState.constrainHeight
+    ? Math.max(
+        1,
+        dialogMaxHeight -
+          (uiState.isStatusLineDialogOpen ? STATUS_LINE_COMPOSER_ROWS : 0),
+      )
+    : undefined;
   const shouldShowStickyTodos =
     uiState.stickyTodos !== null &&
     !uiState.dialogsVisible &&
@@ -79,8 +86,11 @@ export const ScreenReaderAppLayout: React.FC = () => {
               />
             </Box>
           )}
-          <Composer />
         </>
+      )}
+
+      {(!uiState.dialogsVisible || uiState.isStatusLineDialogOpen) && (
+        <Composer />
       )}
 
       <ExitWarning />

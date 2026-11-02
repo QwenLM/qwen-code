@@ -39,7 +39,7 @@ import type {
 import type { LoadedSettings, SettingScope } from '../../config/settings.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import { reloadPluginsRuntime } from '../../config/extension-runtime-reload.js';
-import type { StatusLineState } from '../hooks/useStatusLine.js';
+import type { StatusLinePresetConfig } from '../statusLinePresets.js';
 import type { SlashCommand } from '../commands/types.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
 import type { OpenTuiAppHost } from './opentui-host.js';
@@ -144,7 +144,9 @@ export interface OpenTuiDialogMountProps {
   onRestartRequest?: () => void;
   /** Notifies the shell that the approval mode changed (spinner/prompt sync). */
   onApprovalModeChanged?: (mode: ApprovalMode) => void;
-  statusLineState?: StatusLineState;
+  onStatusLinePreviewChange?: (
+    config: StatusLinePresetConfig | undefined,
+  ) => void;
   rewindTurns?: readonly RewindTurn[];
   onRewind?: (turn: RewindTurn, option: RestoreOption) => Promise<void>;
   /** Row budget of the popup region, handed to every dialog leg — the legs
@@ -430,7 +432,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
         <OpenTuiStatusLineDialog
           settings={settings}
           config={config}
-          state={props.statusLineState}
+          onPreviewChange={props.onStatusLinePreviewChange}
           addItem={host.addItem}
           onClose={onClose}
           availableTerminalHeight={props.availableTerminalHeight}
