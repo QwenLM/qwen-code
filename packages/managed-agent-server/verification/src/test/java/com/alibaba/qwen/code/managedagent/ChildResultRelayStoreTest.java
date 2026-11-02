@@ -267,6 +267,50 @@ class ChildResultRelayStoreTest {
                 .claimedBy()).isEqualTo("owner-a");
     }
 
+    // FG10b: classification may commit between the acceptance and the
+    // parent's consuming revision, writing the mirror `pending`; the
+    // consumption commit then corrects that row rather than leaving it
+    // claiming the result was never consumed.
+    @Test
+    void correctsAClassifiedMirrorOnConsumption() {
+        long now = 600_000L;
+        String session = UUID.randomUUID().toString();
+        insertRecordRow("scope-m", session, "run-m", "child_agent",
+                "accepted", "pending");
+        insertRecordRow("scope-m", session, "run-keep", "child_agent",
+                "accepted", "pending");
+        for (String run : List.of("run-m", "run-keep")) {
+            relayStore.classify(relayStore.claim(TENANT, session, run,
+                    "key-" + run, "owner", now + 30_000, now), "owner",
+                    "done", null, now);
+        }
+        assertThat(deliveryRow(session, "run-m"))
+                .isEqualTo("delivered/accepted/pending");
+        relayStore.markConsumed(TENANT, session, "run-m", now + 1_000);
+        assertThat(deliveryRow(session, "run-m"))
+                .isEqualTo("delivered/accepted/consumed");
+        assertThat(deliveryRow(session, "run-keep"))
+                .as("another run's mirror is untouched")
+                .isEqualTo("delivered/accepted/pending");
+        // A consumption that commits before classification writes no row:
+        // the later classification reads the record and mirrors it.
+        relayStore.markConsumed(TENANT, session, "run-absent", now + 1_000);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_delivery"
+                        + " WHERE tenant_id = ? AND delivery_kind ="
+                        + " 'CHILD_RESULT' AND delivery_id = ?", Integer.class,
+                TENANT, "run-absent")).isZero();
+    }
+
+    private String deliveryRow(String session, String run) {
+        return jdbc.queryForObject("SELECT CONCAT(transport_state, '/',"
+                        + " reception_state, '/', consumption_state) FROM"
+                        + " ma_delivery WHERE tenant_id = ? AND delivery_kind ="
+                        + " 'CHILD_RESULT' AND source_scope_key = ? AND"
+                        + " delivery_id = ?", String.class, TENANT,
+                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore
+                        .sessionScopeKey(TENANT, session), run);
+    }
+
     private void insertRecordRow(String scopeKey, String sessionId,
             String recordId, String kind, String deliveryState,
             String taskState) {
