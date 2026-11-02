@@ -4444,33 +4444,33 @@ const EN: Messages = {
   'channels.editor.field.github.reasonFilter.option.mention':
     'mention — the bot is @mentioned',
   'channels.editor.field.github.reasonFilter.option.review_requested':
-    'review_requested — the bot is asked to review a pull request',
+    'review_requested — the bot, or a team it belongs to, was asked to review a pull request',
   'channels.editor.field.github.reasonFilter.option.assign':
-    'assign — an issue or pull request is assigned to the bot',
+    'assign — the bot was assigned to the issue',
   'channels.editor.field.github.reasonFilter.option.author':
-    'author — new activity on a thread the bot wrote',
+    'author — the bot created the thread',
   'channels.editor.field.github.reasonFilter.option.comment':
-    'comment — a new comment on a subscribed thread',
+    'comment — the bot commented on the thread',
   'channels.editor.field.github.reasonFilter.option.ci_activity':
-    'ci_activity — CI and check-run results change',
+    'ci_activity — a workflow run the bot triggered completed',
   'channels.editor.field.github.reasonFilter.option.manual':
-    'manual — subscribed or marked unread by hand',
+    'manual — the bot subscribed to the thread from an issue or pull request',
   'channels.editor.field.github.reasonFilter.option.state_change':
-    'state_change — an issue or pull request is closed or merged',
+    'state_change — the bot changed the thread state, such as closing an issue',
   'channels.editor.field.github.reasonFilter.option.subscribed':
-    'subscribed — any update on a watched thread',
+    'subscribed — the bot is watching the repository',
   'channels.editor.field.github.reasonFilter.option.team_mention':
     'team_mention — a team the bot belongs to is @mentioned',
   'channels.editor.field.github.reasonFilter.option.security_alert':
-    'security_alert — a repository security alert',
+    'security_alert — GitHub found a security vulnerability in the repository',
   'channels.editor.field.github.reasonFilter.option.approval_requested':
-    'approval_requested — a deployment or workflow approval is requested',
+    'approval_requested — the bot was asked to review and approve a deployment',
   'channels.editor.field.github.reasonFilter.option.invitation':
-    'invitation — a repository or team invitation',
+    'invitation — the bot accepted an invitation to contribute to the repository',
   'channels.editor.field.github.reasonFilter.option.member_feature_requested':
-    'member_feature_requested — a member feature request',
+    'member_feature_requested — organization members asked to enable a feature such as Copilot',
   'channels.editor.field.github.reasonFilter.option.security_advisory_credit':
-    'security_advisory_credit — a security advisory credit',
+    'security_advisory_credit — the bot was credited for contributing to a security advisory',
   'channels.editor.field.gitlab.token': 'Personal Access Token',
   'channels.editor.field.gitlab.token.description':
     'PAT with "read_api" + "api" scopes',
@@ -4648,6 +4648,8 @@ const EN: Messages = {
     'Enter a group ID other than __proto__, constructor, or prototype.',
   'channels.editor.validation.invalidRepoId':
     'Enter each repository as owner/repo.',
+  'channels.editor.validation.conflictingRepoAliases':
+    'settings.json lists one repository twice with different settings, spelled differently (for example Owner/repo and owner/repo). Remove one of the entries before saving.',
   'channels.editor.validation.invalidOption':
     "Remove values that aren't in the allowed list.",
   'channels.editor.validation.number': 'Enter a valid number.',
@@ -8810,33 +8812,33 @@ const ZH: Messages = {
   'channels.editor.field.github.reasonFilter.option.mention':
     'mention — 有人在评论或正文中 @ 了机器人',
   'channels.editor.field.github.reasonFilter.option.review_requested':
-    'review_requested — 机器人被请求评审 PR',
+    'review_requested — 机器人或其所在团队被请求评审 PR',
   'channels.editor.field.github.reasonFilter.option.assign':
-    'assign — issue 或 PR 被指派给机器人',
+    'assign — 机器人被指派到该 issue',
   'channels.editor.field.github.reasonFilter.option.author':
-    'author — 机器人发起的线程有新活动',
+    'author — 该线程由机器人创建',
   'channels.editor.field.github.reasonFilter.option.comment':
-    'comment — 已订阅线程出现新评论',
+    'comment — 机器人在该线程里评论过',
   'channels.editor.field.github.reasonFilter.option.ci_activity':
-    'ci_activity — CI 与检查结果发生变化',
+    'ci_activity — 机器人触发的工作流运行已完成',
   'channels.editor.field.github.reasonFilter.option.manual':
-    'manual — 手动订阅或标记为未读',
+    'manual — 机器人在 issue 或 PR 上订阅了该线程',
   'channels.editor.field.github.reasonFilter.option.state_change':
-    'state_change — issue 或 PR 被关闭、合并',
+    'state_change — 机器人改变了线程状态，例如关闭 issue',
   'channels.editor.field.github.reasonFilter.option.subscribed':
-    'subscribed — 关注线程的任何更新',
+    'subscribed — 机器人正在关注该仓库',
   'channels.editor.field.github.reasonFilter.option.team_mention':
     'team_mention — 机器人所在团队被 @',
   'channels.editor.field.github.reasonFilter.option.security_alert':
-    'security_alert — 仓库出现安全告警',
+    'security_alert — GitHub 在仓库中发现了安全漏洞',
   'channels.editor.field.github.reasonFilter.option.approval_requested':
-    'approval_requested — 需要审批部署或工作流',
+    'approval_requested — 机器人被请求审核并批准部署',
   'channels.editor.field.github.reasonFilter.option.invitation':
-    'invitation — 收到仓库或团队邀请',
+    'invitation — 机器人接受了参与该仓库的邀请',
   'channels.editor.field.github.reasonFilter.option.member_feature_requested':
-    'member_feature_requested — 成员功能请求',
+    'member_feature_requested — 组织成员请求启用 Copilot 等功能',
   'channels.editor.field.github.reasonFilter.option.security_advisory_credit':
-    'security_advisory_credit — 安全公告致谢',
+    'security_advisory_credit — 机器人因参与安全公告而被致谢',
   'channels.editor.field.gitlab.token': '个人访问令牌',
   'channels.editor.field.gitlab.token.description':
     '需要 "read_api" + "api" 权限的 PAT',
@@ -9005,6 +9007,8 @@ const ZH: Messages = {
   'channels.editor.validation.invalidGroupId':
     '群聊 ID 不能是 __proto__、constructor 或 prototype。',
   'channels.editor.validation.invalidRepoId': '仓库需写成 owner/repo 形式。',
+  'channels.editor.validation.conflictingRepoAliases':
+    'settings.json 里同一个仓库以不同大小写写了两次且设置不同（例如 Owner/repo 与 owner/repo）。请先删掉其中一条再保存。',
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.number': '请输入有效数字。',
   'channels.editor.validation.outOfRange': (v) =>

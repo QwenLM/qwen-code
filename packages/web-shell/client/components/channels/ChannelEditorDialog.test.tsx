@@ -1205,9 +1205,9 @@ describe('ChannelEditorDialog', () => {
     );
     expect(boxes.map((box) => box.closest('label')?.textContent)).toEqual([
       'mention — the bot is @mentioned',
-      'review_requested — the bot is asked to review a pull request',
-      'ci_activity — CI and check-run results change',
-      'comment — a new comment on a subscribed thread',
+      'review_requested — the bot, or a team it belongs to, was asked to review a pull request',
+      'ci_activity — a workflow run the bot triggered completed',
+      'comment — the bot commented on the thread',
     ]);
 
     await act(async () => {
@@ -1216,7 +1216,7 @@ describe('ChannelEditorDialog', () => {
     });
     for (const label of [
       'mention — the bot is @mentioned',
-      'ci_activity — CI and check-run results change',
+      'ci_activity — a workflow run the bot triggered completed',
     ]) {
       await act(async () => {
         Array.from(
@@ -1271,9 +1271,7 @@ describe('ChannelEditorDialog', () => {
     const byLabel = new Map(
       boxes.map((box) => [box.closest('label')?.textContent, box.checked]),
     );
-    expect(byLabel.get('comment — a new comment on a subscribed thread')).toBe(
-      true,
-    );
+    expect(byLabel.get('comment — the bot commented on the thread')).toBe(true);
     expect(byLabel.get('mention — the bot is @mentioned')).toBe(false);
   });
 
@@ -1329,6 +1327,127 @@ describe('ChannelEditorDialog', () => {
     expect(document.body.textContent).toContain(
       'Local gh authentication is selected. The token cannot be edited here,',
     );
+  });
+
+  it('keeps the stored token when local gh authentication is switched back off', async () => {
+    // The switch is a preference. Turning it on queues the token for removal
+    // because a token outranks gh; turning it back off must undo that, or the
+    // operator is locked out of saving until they retype a PAT.
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: { type: 'github', groupPolicy: 'open', useLocalGh: false },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, instance, onSave });
+
+    const toggle = document.querySelector<HTMLButtonElement>(
+      'button[role="switch"]',
+    );
+    await act(async () => {
+      toggle!.click();
+    });
+    await act(async () => {
+      toggle!.click();
+    });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(document.body.textContent).not.toContain(
+      'Enter a token or enable local GitHub CLI authentication.',
+    );
+    expect(onSave).toHaveBeenCalledWith(
+      'github-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({ useLocalGh: false }),
+        secrets: { token: { operation: 'preserve' } },
+      }),
+    );
+  });
+
+  it('clears a stored token when local gh authentication is switched on', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: { type: 'github', groupPolicy: 'open', useLocalGh: false },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, instance, onSave });
+
+    const toggle = document.querySelector<HTMLButtonElement>(
+      'button[role="switch"]',
+    );
+    await act(async () => {
+      toggle!.click();
+    });
+
+    // The stored credential cannot be re-opened for editing while gh is
+    // selected, otherwise Replace would silently outrank the switch again.
+    for (const label of ['Keep', 'Replace', 'Clear']) {
+      const button = Array.from(document.querySelectorAll('button')).find(
+        (item) => item.textContent?.trim() === label,
+      );
+      expect(button).toBeDefined();
+      expect((button as HTMLButtonElement).disabled).toBe(true);
+    }
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledWith(
+      'github-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({ useLocalGh: true }),
+        secrets: { token: { operation: 'clear' } },
+      }),
+    );
+  });
+
+  it('refuses to collapse repository aliases that carry different settings', async () => {
+    // GitHub treats both spellings as one repository, but the runtime resolves
+    // an exact key first. Collapsing them would keep the empty entry and widen
+    // the sender policy on a save the operator meant as a no-op.
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'allowlist',
+        groups: {
+          'QwenLM/qwen-code': { senders: 'allowlist', allowedUsers: ['alice'] },
+          'qwenlm/qwen-code': {},
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, instance, onSave });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(document.body.textContent).toContain(
+      'settings.json lists one repository twice with different settings',
+    );
+    expect(onSave).not.toHaveBeenCalled();
   });
 
   it('separates connection and notification fields from credentials', async () => {

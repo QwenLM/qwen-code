@@ -45,6 +45,7 @@ export type ChannelEditorValidationCode =
   | 'invalidGroupId'
   | 'invalidOption'
   | 'invalidRepoId'
+  | 'conflictingRepoAliases'
   | 'number'
   | 'outOfRange'
   | 'policy';
@@ -231,7 +232,7 @@ export function createChannelEditorDraft(
     // so re-saving an older mixed-case allowlist migrates it instead of
     // rewriting the same spelling back.
     allowedGroupIds: repositoryOnly
-      ? configuredGroups.toLowerCase()
+      ? [...new Set(toList(configuredGroups.toLowerCase()))].join(', ')
       : configuredGroups,
     groupSenders: configuredGroupSenders(instance),
     groupAllowedUsers: configuredGroupAllowedUsers(instance),
@@ -268,6 +269,7 @@ export function validateChannelEditorDraft(
   descriptor: DaemonChannelTypeDescriptor,
   draft: ChannelEditorDraft,
   existingNames: readonly string[],
+  instance?: DaemonChannelInstanceSnapshot,
 ): ChannelEditorValidationErrors {
   const errors: ChannelEditorValidationErrors = {};
   const name = draft.name.trim();
@@ -335,14 +337,46 @@ export function validateChannelEditorDraft(
   }
   if (
     isRepositoryOnlyChannelType(descriptor.type) &&
-    String(draft.values['groupPolicy'] ?? '') === 'allowlist' &&
-    splitList(draft.allowedGroupIds).some(
-      (groupId) => !REPOSITORY_FULL_NAME_RE.test(groupId),
-    )
+    String(draft.values['groupPolicy'] ?? '') === 'allowlist'
   ) {
-    errors['allowedGroupIds'] = 'invalidRepoId';
+    if (
+      splitList(draft.allowedGroupIds).some(
+        (groupId) => !REPOSITORY_FULL_NAME_RE.test(groupId),
+      )
+    ) {
+      errors['allowedGroupIds'] = 'invalidRepoId';
+    }
+    if (hasConflictingRepositoryAliases(instance)) {
+      // Collapsing these keys would keep only one of two different sender
+      // policies, and the runtime prefers an exact key — so a no-op save could
+      // widen access. Make the operator resolve it instead of choosing for them.
+      errors['allowedGroupIds'] = 'conflictingRepoAliases';
+    }
   }
   return errors;
+}
+
+/**
+ * Whether the stored allowlist holds two spellings of one repository that
+ * carry different settings. GitHub treats them as the same repository, but
+ * the runtime resolves an exact key first, so they are not interchangeable.
+ */
+function hasConflictingRepositoryAliases(
+  instance?: DaemonChannelInstanceSnapshot,
+): boolean {
+  const groups = instance?.config['groups'];
+  if (!isRecord(groups)) return false;
+  const shapes = new Map<string, Set<string>>();
+  for (const [groupId, group] of Object.entries(groups)) {
+    if (groupId === '*') continue;
+    const key = groupId.toLowerCase();
+    const shape = JSON.stringify(group ?? null);
+    shapes.set(key, (shapes.get(key) ?? new Set<string>()).add(shape));
+  }
+  for (const variants of shapes.values()) {
+    if (variants.size > 1) return true;
+  }
+  return false;
 }
 
 function assignField(

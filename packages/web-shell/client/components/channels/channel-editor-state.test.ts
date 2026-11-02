@@ -1272,6 +1272,56 @@ describe('Repository-only channel access config', () => {
     }
   });
 
+  it('refuses to save when stored repository aliases carry different settings', () => {
+    // Both spellings are one repository to GitHub, but the runtime resolves an
+    // exact key first. Collapsing them would keep the empty entry and drop the
+    // sender restriction on a save the operator meant as a no-op.
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'allowlist',
+        groups: {
+          'QwenLM/qwen-code': { senders: 'allowlist', allowedUsers: ['alice'] },
+          'qwenlm/qwen-code': {},
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITHUB, instance);
+
+    expect(draft.allowedGroupIds).toBe('qwenlm/qwen-code');
+    expect(validateChannelEditorDraft(GITHUB, draft, [], instance)).toEqual({
+      allowedGroupIds: 'conflictingRepoAliases',
+    });
+  });
+
+  it('collapses repository aliases that carry identical settings', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'allowlist',
+        groups: {
+          'QwenLM/qwen-code': { senders: 'allowlist', allowedUsers: ['alice'] },
+          'qwenlm/qwen-code': { senders: 'allowlist', allowedUsers: ['alice'] },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITHUB, instance);
+
+    expect(validateChannelEditorDraft(GITHUB, draft, [], instance)).toEqual({});
+    const request = buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance);
+    expect(request.config['groups']).toEqual({
+      'qwenlm/qwen-code': { senders: 'allowlist', allowedUsers: ['alice'] },
+    });
+  });
+
   it('keeps per-repository settings when the allowlist case changes', () => {
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'release-bot',

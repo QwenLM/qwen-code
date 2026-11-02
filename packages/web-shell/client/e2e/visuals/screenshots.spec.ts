@@ -1478,6 +1478,15 @@ for (const theme of THEMES) {
         }),
       ).toBeChecked({ checked: false });
       await captureScreenshot(page, `github-channel-editor-${theme}`);
+      // The dialog body scrolls, and the checklist sits below the fold at this
+      // viewport. Capture it separately and pin that it is fully on screen, so
+      // the published picture cannot quietly omit the feature it documents.
+      await page
+        .getByText('Reason Filter', { exact: true })
+        .first()
+        .scrollIntoViewIfNeeded();
+      await expect(reasonFilter).toBeInViewport({ ratio: 1 });
+      await captureScreenshot(page, `github-channel-editor-reasons-${theme}`);
       await page.getByLabel('Instance name').fill('github-bot');
       await page.getByRole('button', { name: 'Save' }).click();
       await expect(

@@ -351,6 +351,8 @@ export function ChannelEditorDialog({
       return t('channels.editor.validation.invalidGroupId');
     if (code === 'invalidRepoId')
       return t('channels.editor.validation.invalidRepoId');
+    if (code === 'conflictingRepoAliases')
+      return t('channels.editor.validation.conflictingRepoAliases');
     if (code === 'invalidOption')
       return t('channels.editor.validation.invalidOption');
     if (code === 'number') return t('channels.editor.validation.number');
@@ -372,6 +374,7 @@ export function ChannelEditorDialog({
       descriptor,
       draft,
       existingNames,
+      instance,
     );
     if (Object.keys(validation).length > 0) {
       setErrors(
@@ -558,6 +561,10 @@ export function ChannelEditorDialog({
             // A stored token outranks local gh auth; clear it so the switch
             // actually takes effect when the draft is saved.
             if (hasToken) secrets['token'] = { operation: 'clear' };
+          } else if (secrets['token']?.operation === 'clear') {
+            // The switch is a preference: flipping it back must not leave the
+            // draft demanding a credential the operator never chose to delete.
+            secrets['token'] = { operation: 'preserve' };
           }
           return {
             ...current,
