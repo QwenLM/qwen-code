@@ -1,5 +1,4 @@
 import { createRoot } from 'react-dom/client';
-import { installWebShellShadowStyles } from './shadowDom';
 import {
   ManagedAgentWebShell,
   type ManagedAgentWebShellProps,
@@ -16,11 +15,6 @@ export function renderManagedAgentWebShell(
   unmount(): void;
 } {
   const root = createRoot(container);
-  const rootNode = container.getRootNode();
-  const removeStyles =
-    rootNode instanceof ShadowRoot
-      ? installWebShellShadowStyles(rootNode)
-      : undefined;
   const update = (nextProps: ManagedAgentWebShellProps) => {
     root.render(<ManagedAgentWebShell {...nextProps} />);
   };
@@ -29,7 +23,6 @@ export function renderManagedAgentWebShell(
     update,
     unmount() {
       root.unmount();
-      removeStyles?.();
     },
   };
 }

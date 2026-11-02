@@ -796,13 +796,15 @@ function ManagedSessionsContent({
     return () => abort.abort();
   }, [pendingKey]);
 
-  // Failure and discard notices describe the conversation they came from, so a
-  // session switch drops them. The list error shares this slot: switching hides
-  // it without a retry, because the list effect does not depend on sessionId.
   useEffect(() => {
+    if (!hostSessionOnly) return;
+    // host-session-only: failure and discard notices describe the conversation
+    // they came from, so a session switch drops them. The list error shares
+    // this slot — switching hides it without a retry because the list effect
+    // does not depend on sessionId.
     setError(undefined);
     setDiscarded(false);
-  }, [provider, sessionId]);
+  }, [provider, sessionId, hostSessionOnly]);
 
   // The Discard button unmounts itself, dropping focus to <body>: land it on
   // the composer that just got the draft back. The move must wait for the
