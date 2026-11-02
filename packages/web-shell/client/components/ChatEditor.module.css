@@ -3016,8 +3016,21 @@
 }
 
 .editorShell[data-web-shell-mobile-composer] .toolbarRight {
+  gap: 0;
   margin-left: auto;
   margin-right: 0;
+}
+
+.editorShell[data-web-shell-mobile-composer] .toolbarLeft {
+  gap: 0;
+}
+
+.editorShell[data-web-shell-mobile-composer] .toolBtn {
+  justify-content: center;
+}
+
+.editorShell[data-web-shell-mobile-composer] .contextUsageBtn {
+  padding: 0;
 }
 
 .mobileEditingActions,
@@ -3029,6 +3042,9 @@
 }
 
 .mobileContextRow {
+  min-width: 44px;
+  min-height: 44px;
+  flex: 1;
   flex-wrap: wrap;
 }
 
@@ -3047,12 +3063,12 @@
   margin-top: -8px;
 }
 
-/* Pulled up under the context row it would cover the row's touch targets. */
-.mobileContextRow + .mobileEditingActions {
+.mobileEditingActions:has(.mobileContextRow) {
+  align-items: flex-start;
   margin-top: 0;
 }
 
-.mobileEditingActions svg {
+.mobileEditingActions > button > svg {
   width: 18px;
   height: 18px;
 }
