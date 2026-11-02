@@ -40,6 +40,12 @@ export type ChannelEventType = (typeof CHANNEL_EVENT_TYPES)[number];
 export const CHANNEL_EVENT_MAX_TEXT = 200;
 export const CHANNEL_EVENT_MAX_DETAIL_KEYS = 12;
 export const CHANNEL_EVENT_MAX_READ = 500;
+/**
+ * A Channel identity is matched against the name the management API accepted,
+ * which allows up to 255 UTF-8 bytes. Code points never exceed bytes, so this
+ * cap keeps every legal name intact; only the UI shortens it for display.
+ */
+const CHANNEL_EVENT_MAX_NAME = 255;
 const CHANNEL_EVENT_MAX_FILE_BYTES = 1024 * 1024;
 const CHANNEL_EVENT_READ_TAIL_BYTES = 2 * 1024 * 1024;
 const CHANNEL_EVENT_MAX_FILES = 32;
@@ -134,7 +140,7 @@ export function normalizeChannelEventRecord(
   }
   const raw = value as Record<string, unknown>;
   const at = text(raw['at'], 40);
-  const channel = text(raw['channel'], 80);
+  const channel = text(raw['channel'], CHANNEL_EVENT_MAX_NAME);
   const outcome = text(raw['outcome'], 64);
   const type = raw['type'];
   if (
@@ -183,15 +189,19 @@ export function channelEventScopeDir(cwd: string): string {
   return join(getGlobalQwenDir(), 'channels', getWorkspaceScopeDirName(cwd));
 }
 
-export function channelEventFilePath(channelName: string, cwd: string): string {
+function channelEventFilePrefix(channelName: string): string {
   const encodedName = channelName.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 200);
   const nameHash = createHash('sha256')
     .update(channelName)
     .digest('hex')
     .slice(0, 16);
+  return `${encodedName}-${nameHash}-`;
+}
+
+export function channelEventFilePath(channelName: string, cwd: string): string {
   return join(
     channelEventScopeDir(cwd),
-    `${encodedName}-${nameHash}-${EVENT_FILE_SUFFIX}`,
+    `${channelEventFilePrefix(channelName)}${EVENT_FILE_SUFFIX}`,
   );
 }
 
@@ -291,14 +301,22 @@ function readTail(path: string, maxBytes: number): string[] {
   }
 }
 
-function eventFiles(scopeDir: string): string[] {
+function eventFiles(scopeDir: string, channels?: readonly string[]): string[] {
   try {
+    // Narrow to the requested identities before the read cap: otherwise 32
+    // busier peers (rotated files count too) would make an explicitly asked
+    // for, quieter Channel's retained history unreachable.
+    const prefixes = channels?.map(channelEventFilePrefix);
     const files = readdirSync(scopeDir)
-      .filter(
-        (name) =>
-          name.endsWith(`-${EVENT_FILE_SUFFIX}`) ||
-          name.endsWith(`-${EVENT_FILE_SUFFIX}.1`),
-      )
+      .filter((name) => {
+        if (
+          !name.endsWith(`-${EVENT_FILE_SUFFIX}`) &&
+          !name.endsWith(`-${EVENT_FILE_SUFFIX}.1`)
+        ) {
+          return false;
+        }
+        return !prefixes || prefixes.some((prefix) => name.startsWith(prefix));
+      })
       .map((name) => join(scopeDir, name));
     if (files.length <= CHANNEL_EVENT_MAX_FILES) return files;
     // A workspace with many Channels must not turn one request into an
@@ -338,7 +356,7 @@ export function readChannelEvents(
   const events: ChannelEventRecord[] = [];
 
   for (const scopeDir of query.scopeDirs) {
-    for (const file of eventFiles(scopeDir)) {
+    for (const file of eventFiles(scopeDir, query.channels)) {
       for (const line of readTail(file, CHANNEL_EVENT_READ_TAIL_BYTES)) {
         let parsed: unknown;
         try {

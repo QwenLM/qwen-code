@@ -76,7 +76,7 @@ Record:
 | Field         | Meaning                                                               |
 | ------------- | --------------------------------------------------------------------- |
 | `at`          | ISO timestamp                                                         |
-| `channel`     | Channel instance name                                                 |
+| `channel`     | Channel instance name, kept in full (see limits below)                |
 | `type`        | `inbound` / `outbound` / `task` / `poll`                              |
 | `outcome`     | `accepted` / `skipped` / `posted` / `failed` / `ok` / a task state    |
 | `reason`      | machine reason code for skips (`sender_denied`, `reason_filter`, ...) |
@@ -91,9 +91,11 @@ Record:
 | `error`       | sanitized single-line error, capped at 200 characters                 |
 | `detail`      | flat primitive map, at most 12 keys                                   |
 
-Limits: every string is capped at 200 characters, `detail` values are capped at
-200 characters, and a record is rejected when it exceeds those limits rather
-than truncated silently.
+Limits: free-text fields and `detail` values are capped at 200 characters. The
+Channel identity is the exception: the management API accepts names up to 255
+UTF-8 bytes, and code points never exceed bytes, so the identity is kept up to
+255 code points — every legal name survives intact and stays matchable by the
+`channel` filter. Only the UI shortens it for display.
 
 The file rotates to `<name>.1` when an append would exceed 1 MiB; the previous
 `.1` is replaced. Directory mode is `0700`, file mode `0600`. Every write
@@ -117,7 +119,9 @@ handling.
 
 `PollingChannelBase` gains a `setPollEventDetail` seam so an adapter can attach
 its own counters (GitHub reports how many notifications a poll returned)
-without the base class knowing about them.
+without the base class knowing about them. The base class clears the field
+before the poll and consumes it after that poll settles, so an event never
+carries the previous poll's counters against the current timestamp.
 
 ### 3. Daemon route
 
@@ -133,20 +137,28 @@ Response: `{ "events": [...], "truncated": boolean }`, `Cache-Control:
 no-store`, the same trust and client checks as the other workspace Channel
 routes.
 
-The route never accepts a path from the request. Candidate scope directories
-come from the resolved runtime's workspace cwd plus the resolved `cwd` of every
-Channel instance the workspace's management service lists, and each candidate
-is re-derived through `getWorkspaceScopeDirName`, clamped to the workspace.
-Reads are bounded: at most the last 2 MiB of each journal file (current and
-`.1`), at most 32 journal files per request, at most 500 records returned.
+The route never accepts a path from the request. The scope directory is
+derived from the resolved runtime's workspace cwd through
+`getWorkspaceScopeDirName`; a managed Channel's working directory must
+canonicalize to that same workspace, so its journal lives there. Reads are
+bounded: at most the last 2 MiB of each journal file (current and `.1`), at most
+32 journal files per request, at most 500 records returned. A `channel` filter
+narrows the candidate files by their name-derived identity **before** the
+32-file cap, so an explicitly requested, quieter Channel stays reachable even
+when busier peers have newer files.
 
 ### 4. Web Shell
 
 - `useChannelEvents` polls the route while the page is mounted (5 s), and the
   page also offers a manual refresh.
-- `ChannelEventsPage` renders a newest-first timeline with a Channel filter, a
-  type filter, and a row per event: time, Channel, type, outcome, target
-  (`owner/repo#12`), actor, reason or trigger kind, duration, and error.
+- `ChannelEventsPage` renders a newest-first timeline with a workspace
+  selector, a Channel filter, a type filter, and a row per event: time, Channel,
+  type, outcome, target (`owner/repo#12`), actor, reason or trigger kind,
+  duration, and error. The workspace selector lists the registered, non-live
+  workspaces exactly as the management page does, because the provider's cwd is
+  the daemon-wide primary workspace and a Channel started in a secondary
+  workspace would otherwise be unreachable. Changing the workspace resets the
+  Channel filter.
 - It is a standalone page: `activePanel` value `channel-events`, URL
   `/channel-events`, and a sidebar primary-nav item `channelEvents`.
 - It is gated by the `channel_management` capability and a trusted workspace,

@@ -103,12 +103,16 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
     const signal = this.abortController.signal;
     while (this.running && !signal.aborted) {
       const startedAt = Date.now();
-      const detail = this.pollEventDetail;
+      // The adapter populates the detail while its poll runs, so it is reset
+      // here and consumed after the poll settles — reading it up front would
+      // record the previous poll's counters against this poll's timestamp.
       this.pollEventDetail = undefined;
       try {
         await this.pollOnce();
         this.saveCursor();
         this.consecutiveErrors = 0;
+        const detail = this.pollEventDetail;
+        this.pollEventDetail = undefined;
         this.recordChannelEvent({
           type: 'poll',
           outcome: 'ok',
@@ -121,6 +125,8 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
           INITIAL_BACKOFF * 2 ** (this.consecutiveErrors - 1),
           MAX_BACKOFF,
         );
+        const detail = this.pollEventDetail;
+        this.pollEventDetail = undefined;
         process.stderr.write(
           `[Channel:${this.name}] poll error (attempt ${this.consecutiveErrors}), backing off ${backoff}ms: ${err}\n`,
         );
@@ -130,11 +136,11 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
           durationMs: Date.now() - startedAt,
           error: err instanceof Error ? err.message : String(err),
           detail: {
+            ...(detail ?? {}),
             consecutiveErrors: this.consecutiveErrors,
             backoffMs: backoff,
           },
         });
-        this.pollEventDetail = undefined;
         await this.abortableSleep(backoff);
         continue;
       }

@@ -48,7 +48,7 @@
 | 字段          | 含义                                                           |
 | ------------- | -------------------------------------------------------------- |
 | `at`          | ISO 时间戳                                                     |
-| `channel`     | 渠道实例名                                                     |
+| `channel`     | 渠道实例名，完整保留（见下方上限）                             |
 | `type`        | `inbound` / `outbound` / `task` / `poll`                       |
 | `outcome`     | `accepted` / `skipped` / `posted` / `failed` / `ok` / 任务状态 |
 | `reason`      | 跳过原因的机器码（`sender_denied`、`reason_filter` 等）        |
@@ -63,7 +63,7 @@
 | `error`       | 单行化错误信息，上限 200 字符                                  |
 | `detail`      | 扁平原始类型映射，最多 12 个键                                 |
 
-上限：所有字符串截断到 200 字符，`detail` 的值同样 200 字符；超出上限的记录直接拒绝写入，而不是静默截断。
+上限：自由文本字段与 `detail` 的值截断到 200 字符。渠道标识是例外：管理接口接受最长 255 UTF-8 字节的名字，而码点数不会超过字节数，因此标识保留到 255 个码点——任何合法名字都完整保留，并且仍能被 `channel` 过滤匹配。只有界面在展示时缩短它。
 
 追加会超过 1 MiB 时轮转为 `<name>.1`，旧的 `.1` 被替换。目录权限 `0700`，文件权限 `0600`。任何写失败都吞掉并只打一行 stderr：诊断设施绝不能打断消息处理。
 
@@ -82,7 +82,7 @@
 | `GithubAdapter.transitionInboundTask`                          | `task` / `<state>`，带 `attempts` 与 `error`                                         |
 | `GithubAdapter.recordPublicationAudit`                         | `outbound` / `<outcome>`（审计文件继续保留）                                         |
 
-`PollingChannelBase` 增加 `setPollEventDetail` 挂点，适配器可以挂自己的计数（GitHub 报告本次轮询取到多少条通知），基类不需要知道这些字段。
+`PollingChannelBase` 增加 `setPollEventDetail` 挂点，适配器可以挂自己的计数（GitHub 报告本次轮询取到多少条通知），基类不需要知道这些字段。基类在轮询开始前清空该字段，并在本次轮询结束后才消费它，因此事件绝不会把上一次轮询的计数记到本次的时间戳上。
 
 ### 3. daemon 路由
 
@@ -95,12 +95,12 @@ GET /workspaces/:workspace/channels/events
 
 响应：`{ "events": [...], "truncated": boolean }`，`Cache-Control: no-store`，并沿用其他工作区渠道路由的信任与客户端校验。
 
-路由从不接受请求给出的路径。候选作用域目录来自解析后运行时的 workspace cwd，以及该工作区管理服务列出的每个渠道实例解析后的 `cwd`，每个候选都重新经过 `getWorkspaceScopeDirName` 处理并夹在工作区内。读取有上限：每个日志文件（当前与 `.1`）最多读尾部 2 MiB，每次请求最多读 32 个日志文件，最多返回 500 条记录。
+路由从不接受请求给出的路径。作用域目录由解析后运行时的 workspace cwd 经 `getWorkspaceScopeDirName` 推导；受管渠道的工作目录必须规范化到同一个工作区，因此它的日志就在那里。读取有上限：每个日志文件（当前与 `.1`）最多读尾部 2 MiB，每次请求最多读 32 个日志文件，最多返回 500 条记录。`channel` 过滤会先按名字推导出的标识收窄候选文件，**再**套用 32 个文件的上限，因此即使更繁忙的同伴有更新的文件，被显式请求的安静渠道仍然可达。
 
 ### 4. Web Shell
 
 - `useChannelEvents` 在页面挂载期间轮询该路由（5 秒），页面另提供手动刷新。
-- `ChannelEventsPage` 渲染按时间倒序的时间线，带渠道过滤、类型过滤，每行显示：时间、渠道、类型、结果、目标（`owner/repo#12`）、操作者、原因或触发类型、耗时、错误。
+- `ChannelEventsPage` 渲染按时间倒序的时间线，带工作区选择器、渠道过滤、类型过滤，每行显示：时间、渠道、类型、结果、目标（`owner/repo#12`）、操作者、原因或触发类型、耗时、错误。工作区选择器与管理页一样列出已注册的非 live 工作区，因为 provider 的 cwd 是 daemon 全局的主工作区，否则在次工作区启动的渠道将无法查看。切换工作区会重置渠道过滤。
 - 它是独立页面：`activePanel` 取值 `channel-events`，URL 为 `/channel-events`，侧边栏主导航项为 `channelEvents`。
 - 由 `channel_management` 能力位与受信任工作区门禁，与管理页一致。
 

@@ -12,6 +12,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
+// jsdom lacks PointerEvent and pointer capture; radix Select needs both to
+// open from a pointerdown (mirrors the sidebar and overview panel tests).
+if (!globalThis.PointerEvent) {
+  globalThis.PointerEvent = MouseEvent as typeof PointerEvent;
+}
+if (!Element.prototype.hasPointerCapture) {
+  Element.prototype.hasPointerCapture = () => false;
+}
+
 const { eventsState, eventsMock, useChannelsMock, workspaceState } = vi.hoisted(
   () => ({
     eventsState: {
@@ -31,6 +40,14 @@ const { eventsState, eventsMock, useChannelsMock, workspaceState } = vi.hoisted(
         workspaceCwd: '/workspace/demo',
         capabilities: {
           features: ['channel_management'] as string[],
+          workspaces: undefined as
+            | Array<{
+                id: string;
+                cwd: string;
+                primary: boolean;
+                trusted: boolean;
+              }>
+            | undefined,
         },
       },
     },
@@ -65,6 +82,7 @@ beforeEach(() => {
   eventsMock.mockClear();
   useChannelsMock.mockClear();
   workspaceState.current.capabilities.features = ['channel_management'];
+  workspaceState.current.capabilities.workspaces = undefined;
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -93,6 +111,19 @@ async function click(label: string) {
   await act(async () => {
     button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   });
+}
+
+// Radix Select opens on pointerdown and commits on click; a native click alone
+// is not enough in jsdom (mirrors the overview panel's test helper).
+function pointerClick(element: HTMLElement): void {
+  element.dispatchEvent(
+    new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+  );
+  element.dispatchEvent(
+    new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+  );
+  element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+  element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 }
 
 describe('ChannelEventsPage', () => {
@@ -168,6 +199,40 @@ describe('ChannelEventsPage', () => {
     );
     expect(eventsMock).toHaveBeenLastCalledWith(
       expect.objectContaining({ enabled: false }),
+    );
+  });
+
+  it('reads the selected workspace, not only the primary one', async () => {
+    workspaceState.current.capabilities.workspaces = [
+      { id: 'primary', cwd: '/work/alpha', primary: true, trusted: true },
+      { id: 'secondary', cwd: '/work/beta', primary: false, trusted: true },
+    ];
+    await renderPage();
+
+    expect(eventsMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ workspaceCwd: '/work/alpha' }),
+    );
+
+    const trigger = container.querySelector<HTMLElement>(
+      'button[aria-label="Workspace"]',
+    );
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      pointerClick(trigger!);
+    });
+    const option = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((item) => item.textContent?.trim() === 'beta');
+    expect(option).toBeDefined();
+    await act(async () => {
+      pointerClick(option!);
+    });
+
+    expect(eventsMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ workspaceCwd: '/work/beta' }),
+    );
+    expect(useChannelsMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ workspaceCwd: '/work/beta' }),
     );
   });
 });

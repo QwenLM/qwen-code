@@ -4,13 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useMemo, useState, type Ref } from 'react';
+import { useEffect, useMemo, useState, type Ref } from 'react';
 import {
   ActivityIcon,
   AlertCircleIcon,
   ArrowLeftIcon,
   RefreshCwIcon,
 } from 'lucide-react';
+import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
 import {
   useChannelEvents,
   useChannels,
@@ -18,6 +19,7 @@ import {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
+import { workspaceLabel } from '../../utils/workspace';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -68,9 +70,41 @@ export function ChannelEventsPage({
   const workspace = useWorkspace();
   const supportsChannelEvents =
     workspace.capabilities?.features.includes('channel_management') === true;
-  const workspaceCwd = workspace.workspaceCwd;
+  // The provider's cwd is the daemon-wide primary workspace, so a Channel
+  // started in a registered secondary workspace needs its own selection here
+  // — the same one the management page offers.
+  const registeredWorkspaces = useMemo<DaemonWorkspaceCapability[]>(() => {
+    const listed = (workspace.capabilities?.workspaces ?? []).filter(
+      (entry) => entry.kind !== 'live',
+    );
+    if (listed.length > 0) return listed;
+    if (!workspace.workspaceCwd) return [];
+    return [
+      {
+        id: 'primary',
+        cwd: workspace.workspaceCwd,
+        primary: true,
+        trusted: true,
+      },
+    ];
+  }, [workspace.capabilities?.workspaces, workspace.workspaceCwd]);
+  const defaultWorkspace =
+    registeredWorkspaces.find((entry) => entry.primary) ??
+    registeredWorkspaces.find((entry) => entry.trusted) ??
+    registeredWorkspaces[0];
+  const [selectedWorkspaceCwd, setSelectedWorkspaceCwd] = useState<
+    string | undefined
+  >();
+  const activeWorkspace =
+    registeredWorkspaces.find((entry) => entry.cwd === selectedWorkspaceCwd) ??
+    defaultWorkspace;
+  const workspaceCwd = activeWorkspace?.cwd;
   const [channel, setChannel] = useState<string>(ALL_CHANNELS);
   const [type, setType] = useState<EventTypeFilter>('all');
+
+  useEffect(() => {
+    setChannel(ALL_CHANNELS);
+  }, [workspaceCwd]);
 
   const { data, loading, error, reload } = useChannelEvents({
     enabled: supportsChannelEvents && Boolean(workspaceCwd),
@@ -141,6 +175,33 @@ export function ChannelEventsPage({
           <>
             <div className={styles.toolbar}>
               <div className={styles.filters}>
+                {registeredWorkspaces.length > 0 && (
+                  <Select
+                    value={workspaceCwd ?? ''}
+                    onValueChange={setSelectedWorkspaceCwd}
+                  >
+                    <SelectTrigger
+                      className={styles.channelSelect}
+                      aria-label={t('channels.workspace.label')}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {registeredWorkspaces.map((entry) => (
+                        <SelectItem
+                          key={entry.id}
+                          value={entry.cwd}
+                          disabled={!entry.trusted}
+                        >
+                          {workspaceLabel(entry)}
+                          {entry.primary
+                            ? ` · ${t('channels.workspace.primary')}`
+                            : ''}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
                 <Select value={channel} onValueChange={setChannel}>
                   <SelectTrigger
                     className={styles.channelSelect}

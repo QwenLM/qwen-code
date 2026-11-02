@@ -164,6 +164,59 @@ describe('channel events journal', () => {
     expect(events.length).toBeLessThanOrEqual(32);
   });
 
+  it('keeps an explicitly requested Channel reachable past the file cap', () => {
+    appendChannelEvent('requested', cwd, {
+      at: new Date(2026, 0, 1, 0, 0, 0).toISOString(),
+      type: 'poll',
+      outcome: 'ok',
+    });
+    for (let index = 0; index < 32; index += 1) {
+      appendChannelEvent(`peer-${index}`, cwd, {
+        at: new Date(2026, 0, 2, 0, 0, index).toISOString(),
+        type: 'poll',
+        outcome: 'ok',
+      });
+    }
+
+    const { events } = readChannelEvents({
+      scopeDirs: [channelEventScopeDir(cwd)],
+      channels: ['requested'],
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.channel).toBe('requested');
+  });
+
+  it('preserves a full legal Channel name for display and filtering', () => {
+    const longName = 'c'.repeat(100);
+    appendChannelEvent(longName, cwd, { type: 'poll', outcome: 'ok' });
+
+    const all = readChannelEvents({
+      scopeDirs: [channelEventScopeDir(cwd)],
+    });
+    expect(all.events[0]?.channel).toBe(longName);
+
+    const filtered = readChannelEvents({
+      scopeDirs: [channelEventScopeDir(cwd)],
+      channels: [longName],
+    });
+    expect(filtered.events).toHaveLength(1);
+  });
+
+  it('keeps names that share a long prefix distinguishable', () => {
+    const prefix = 'd'.repeat(90);
+    appendChannelEvent(`${prefix}-alpha`, cwd, { type: 'poll', outcome: 'ok' });
+    appendChannelEvent(`${prefix}-beta`, cwd, { type: 'poll', outcome: 'ok' });
+
+    const { events } = readChannelEvents({
+      scopeDirs: [channelEventScopeDir(cwd)],
+      channels: [`${prefix}-alpha`],
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.channel).toBe(`${prefix}-alpha`);
+  });
+
   it('rotates once the journal reaches its size cap', () => {
     const path = channelEventFilePath('bot', cwd);
     mkdirSync(dirname(path), { recursive: true });
