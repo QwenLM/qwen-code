@@ -347,6 +347,8 @@ Every round of the turn, its tool-result requests and continuations included, ca
 
 The model has started once the round's request reached history, read from the chat's push count; a runtime continuation is marked delivered then, before the client can finish the turn.
 
+Input a round took as its response finished is answered within the turn, as today. So when the Todo Stop Guard gives way to such input, ACP ends the round's signal instead of letting the client finish the Goal turn, and the next round answers the input under the same permit. Once the Stop hook's cap has paused the Goal, a round that still answers input taken then runs outside the Goal.
+
 The core changes of this step: `userTurnRecordedByHost` also covers a `Goal` round, whose message the host recorded, and a stop policy's continuation keeps the Goal fields of its send, so it runs under the same permit.
 
 ## Migration

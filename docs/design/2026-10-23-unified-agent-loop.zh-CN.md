@@ -347,6 +347,8 @@ PR 2c-3 让 ACP 的 Goal 轮次使用共享模型轮、共享工具批和 client
 
 模型轮的请求进入历史后，就算模型已经开始，这由 chat 的推送计数判断；runtime 续写也在这时标记为已送达，早于 client 可能结束这一轮的时刻。
 
+模型轮在响应结束时取到的输入，和现在一样在这个轮次内答复。因此 Todo Stop Guard 为这样的输入让位时，ACP 结束这个模型轮的 signal，而不是让 client 结束这个 Goal 轮次，下一个模型轮在同一个 permit 下答复这条输入。Stop hook 达到上限、Goal 已经暂停之后，仍要答复已取到输入的模型轮在 Goal 之外运行。
+
 这一步对 core 的改动：`userTurnRecordedByHost` 也覆盖 `Goal` 模型轮，表示宿主已经记录了它的消息；stop policy 的续发请求保留原请求的 Goal 字段，因此在同一个 permit 下运行。
 
 ## 迁移计划

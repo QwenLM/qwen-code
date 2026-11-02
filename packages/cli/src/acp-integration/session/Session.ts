@@ -576,6 +576,10 @@ const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
 // to send now reaches the model; the turn itself goes on (see
 // `#openResponseInterrupt`).
 const MID_TURN_INPUT_ABORT_REASON = 'qwen:mid-turn-input';
+// Ends a shared round whose response already finished, so the client leaves
+// the turn to the session, which goes on to answer the input the round took
+// (see `#openResponseInterrupt`).
+const MID_TURN_INPUT_KEPT_ABORT_REASON = 'qwen:mid-turn-input-kept';
 /** The failure a Goal turn stopped by loop protection pauses with. */
 const GOAL_LOOP_STOP_FAILURE = 'loop detected';
 const GOAL_HELD_RECOVERY_COMMANDS =
@@ -7838,6 +7842,13 @@ export class Session implements SessionContext {
             let emitResponseUsage = async () => {};
             // Input the round's response took, which the round answers next.
             let roundTookInput = async () => false;
+            // Keeps the turn with the session once its round's response
+            // finished, to answer the input the round took.
+            let roundKeepTurnForInput = () => {};
+            // The client paused the Goal and released the turn's permit when
+            // the Stop hook reached its cap. A round that still answers input
+            // taken then runs outside the Goal.
+            let goalPermitReleasedByClient = false;
             let toolLoopState = createDaemonToolLoopState(
               channelTurn ? 'off' : this.repeatedToolFailureGuardMode,
             );
@@ -7849,19 +7860,42 @@ export class Session implements SessionContext {
             let stopHookCapped = false;
             // The shared round's stop point is the client's: the Stop hook,
             // then the Todo Stop Guard.
-            const stopPolicies = sharedModelRound
+            const todoStopGuardPolicy = sharedModelRound
+              ? this.#todoStopGuardStopPolicy(
+                  () => emitResponseUsage(),
+                  () => roundTookInput(),
+                  resetToolLoopState,
+                  () => {
+                    stopHookCapped = true;
+                    if (goalTurn) goalPermitReleasedByClient = true;
+                  },
+                  // A Goal proposal is not settled from a turn that gave
+                  // way, as the session's own Stop loop blocks it.
+                  () => this.#blockGoalProposalSettlement(responseCapture),
+                )
+              : undefined;
+            const stopPolicies = todoStopGuardPolicy
               ? [
-                  this.#todoStopGuardStopPolicy(
-                    () => emitResponseUsage(),
-                    () => roundTookInput(),
-                    resetToolLoopState,
-                    () => {
-                      stopHookCapped = true;
-                    },
-                    // A Goal proposal is not settled from a turn that gave
-                    // way, as the session's own Stop loop blocks it.
-                    () => this.#blockGoalProposalSettlement(responseCapture),
-                  ),
+                  goalTurn
+                    ? {
+                        ...todoStopGuardPolicy,
+                        // A Goal turn that took input goes on to answer it
+                        // under the same permit, so the client must not
+                        // finish the turn at this stop: the round ends, and
+                        // the turn stays with the session.
+                        continueAt: async (stop: {
+                          promptId: string;
+                          signal: AbortSignal;
+                        }) => {
+                          const parts =
+                            await todoStopGuardPolicy.continueAt(stop);
+                          if (!parts?.length && (await roundTookInput())) {
+                            roundKeepTurnForInput();
+                          }
+                          return parts;
+                        },
+                      }
+                    : todoStopGuardPolicy,
                 ]
               : undefined;
             // Whether the client ran the turn's memory tasks, which it does
@@ -8147,6 +8181,7 @@ export class Session implements SessionContext {
                     usageMetadata = null;
                   };
                   roundTookInput = responseInterrupt.hasTakenInput;
+                  roundKeepTurnForInput = responseInterrupt.keepTurnForInput;
                   // Open from the send, as `watch` is open once the request is
                   // out: input sent before the model answers cuts the wait.
                   responseInterrupt.begin();
@@ -8206,6 +8241,7 @@ export class Session implements SessionContext {
                             userTurnRecordedByHost: true,
                           }),
                           ...(goalTurn &&
+                            !goalPermitReleasedByClient &&
                             this.#sharedGoalRoundOptions(
                               goalTurn,
                               responseInterrupt.signal,
@@ -11680,6 +11716,11 @@ export class Session implements SessionContext {
     ) => Promise<Content | null>;
     /** Whether input was taken that `takeInput` will answer. */
     hasTakenInput: () => Promise<boolean>;
+    /**
+     * Ends the round's signal without cutting its response, which already
+     * finished: the turn goes on to answer the input taken.
+     */
+    keepTurnForInput: () => void;
   } {
     if (!enabled) {
       return {
@@ -11689,9 +11730,13 @@ export class Session implements SessionContext {
         end: () => {},
         takeInput: async () => null,
         hasTakenInput: async () => false,
+        keepTurnForInput: () => {},
       };
     }
     const controller = new AbortController();
+    // Not a cut: the input is answered as received while the model
+    // responded, not as having interrupted it.
+    const kept = new AbortController();
     // Captured in the turn's context; send-now requests arrive outside it.
     const promptId = this.#midTurnDrainPromptId();
     let open = false;
@@ -11763,7 +11808,7 @@ export class Session implements SessionContext {
     };
     const interrupted = () => controller.signal.aborted && !turnSignal.aborted;
     return {
-      signal: AbortSignal.any([turnSignal, controller.signal]),
+      signal: AbortSignal.any([turnSignal, controller.signal, kept.signal]),
       begin,
       end,
       async *watch(stream) {
@@ -11783,6 +11828,11 @@ export class Session implements SessionContext {
       hasTakenInput: async () => {
         if (this.earlyMidTurnDrain) await this.earlyMidTurnDrain;
         return tookInput && !turnSignal.aborted;
+      },
+      keepTurnForInput: () => {
+        if (tookInput && !turnSignal.aborted) {
+          kept.abort(MID_TURN_INPUT_KEPT_ABORT_REASON);
+        }
       },
       takeInput: async (onFullTurnModel) => {
         if (this.earlyMidTurnDrain) await this.earlyMidTurnDrain;
