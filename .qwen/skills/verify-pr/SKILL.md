@@ -20,8 +20,10 @@ Two entry paths share the contract below.
   supplies `$QWEN_VERIFY_CONTEXT`, an already-built tree and the time budget,
   and publishes the report. There is nothing to prepare.
 - **Maintainer round on a workstation** — `/verify-pr <n>`, starting with
-  `node scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>` (the
-  preflight requires the repository explicitly; `origin` is not a fallback).
+  `cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>`
+  (the trusted copy, with the PR clone only as its
+  cwd; see the container recipe below). The preflight requires the repository
+  explicitly; `origin` is not a fallback.
   It writes the round's coordinates (`repo`, `pr`, `baseRefOid`, `headRefOid`)
   to `context.json` and refuses a tree that is not a clean checkout of the PR
   head — when it passes, the current tree is the head side of the A/B, so stay
@@ -146,8 +148,8 @@ profiles, or `gh` token. Do not run it in an ordinary working copy on a
 maintainer's machine; if that isolation is unavailable, ask the maintainer to
 trigger the sandboxed `@qwen-code /verify` lane instead.
 
-Run `node scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>` on the host
-before anything else: it fetches the metadata snapshot, resolves and verifies
+Run `cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>`
+on the host before anything else: it fetches the metadata snapshot, resolves and verifies
 both OIDs against this clone, refuses a tree that is not a clean, fully
 materialised checkout of the PR head (a wrong HEAD names the `git checkout`
 to run; uncommitted changes name the entries and a stash form that clears
@@ -159,7 +161,8 @@ creates `tmp/pr<n>-verify-<ts>/` with a `context.json` holding `repo`, `pr`,
 It does not gate on them — resolving metadata
 needs `gh`, which the boundary excludes, so this path always runs on the host.
 The boundary check belongs inside: run
-`node scripts/verify-pr-prepare.mjs --require-isolation` as the round's first
+`node /trusted-scripts/verify-pr-prepare.mjs --require-isolation` (the trusted
+copy mounted read-only) as the round's first
 command there, and treat exit 4 as "this is not a boundary". A container
 marker alone does not pass: the CLI's own Docker/Podman launcher mounts
 `~/.config/gcloud`, the ADC file and every model API key it can see, so the
@@ -215,29 +218,40 @@ stripping. The CI lane deliberately keeps its own inline copy.
 Two checkouts are involved, and they are not interchangeable:
 
 - `<trusted-clone>` — a checkout of `main` (or another trusted revision) that
-  the PR cannot write. The proxy and the checker always run from here.
+  the PR cannot write. Every script the round runs on the host or inside the
+  boundary comes from here.
 - `<pr-clone>` — a **standalone** clone checked out at the PR head. The round
   runs here, so its `.git` lives inside the tree; a linked worktree's gitfile
-  points at an absolute host path the container cannot see. Prepare runs here
-  on the host and refuses any other HEAD.
+  points at an absolute host path the container cannot see. Prepare is given
+  this tree as its cwd and refuses any other HEAD.
 
-Never start the key-holding proxy or the post-round checker from
-`<pr-clone>`: a PR can rewrite a script in its own tree, and those two steps
-run with the real key and the maintainer's `gh` access.
+Never execute a script from `<pr-clone>`: the proxy, the prepare preflight,
+the credential scan, the isolation gate and the checker all come from
+`<trusted-clone>`. A PR can rewrite a script in its own tree, and these steps
+run with the real key, the maintainer's `gh` access, or the authority to
+certify the round.
 
-1. **Prepare on the host, then copy the full snapshot out of the tree:**
+1. **Prepare from the trusted copy with the PR clone as its cwd**, then copy
+   the full snapshot out of the tree and base-pin `.qwen`:
 
    ```bash
-   node <pr-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>
-   mkdir -p ~/.cache/qwen-verify/pr<n>
-   cp <pr-clone>/tmp/verify-context/pr<n>.json \
-     ~/.cache/qwen-verify/pr<n>/pr.json
+   cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>
+   mkdir -p ~/.cache/qwen-verify/pr<n>/qwen-base
+   cp <pr-clone>/tmp/verify-context/pr<n>.json ~/.cache/qwen-verify/pr<n>/pr.json
+   BASE_OID="$(node -e 'const fs=require("node:fs"); console.log(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).baseRefOid)' ~/.cache/qwen-verify/pr<n>/pr.json)"
+   git -C <pr-clone> archive "$BASE_OID" -- .qwen \
+     | tar -x -C ~/.cache/qwen-verify/pr<n>/qwen-base
    ```
 
-   The artifact directory's `context.json` carries only the four coordinates;
-   the round reads the full gh snapshot (title, body, author, commits) from
+   prepare resolves the tree from its cwd, so the trusted copy runs with
+   `cwd=<pr-clone>` and still verifies that this tree is the PR head. The
+   artifact directory's `context.json` carries only the four coordinates; the
+   round reads the full gh snapshot (title, body, author, commits) from
    `$QWEN_VERIFY_CONTEXT`. The host copy is also what pins the expected head
    after the round, because PR code can rewrite anything inside `<pr-clone>`.
+   Mounting the base commit's `.qwen` over the tree (step 3) keeps the
+   round's instructions and project settings out of PR control, as the CI
+   lane's base-pin does.
 
 2. **Start the proxy from the trusted checkout, in the background**, with the
    key read rather than typed onto the command line (a literal assignment
@@ -250,12 +264,16 @@ run with the real key and the maintainer's `gh` access.
      node <trusted-clone>/scripts/verify-pr-model-proxy.mjs \
        --listen <bridge-ip> > ~/.cache/qwen-verify/pr<n>/proxy.json 2>&1 &
    echo $! > ~/.cache/qwen-verify/pr<n>/proxy.pid
+   chmod 600 ~/.cache/qwen-verify/pr<n>/proxy.json
+   export QWEN_VERIFY_PROXY_TOKEN="$(node -e 'const fs=require("node:fs"); console.log(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).token)' ~/.cache/qwen-verify/pr<n>/proxy.json)"
    ```
 
    Bind the Docker bridge address, not `127.0.0.1` — a container cannot reach
    the host's loopback. The bearer check stays mandatory: the port is visible
    to every container on the bridge. Keep the proxy running for the whole
-   round and stop it at the end — it holds the real key.
+   round and stop it at the end — it holds the real key. The per-run token is
+   read from the file into the environment, never typed; Docker copies it with
+   the bare `-e` below.
 
 3. **Start the boundary as a named, detached container** so every later step
    can be issued without a TTY:
@@ -264,9 +282,11 @@ run with the real key and the maintainer's `gh` access.
    docker run -d --rm --name qwen-verify-<n> \
      --user "$(id -u):$(id -g)" -e HOME=/tmp/qwen-home \
      -v <pr-clone>:/work \
+     -v <trusted-clone>/scripts:/trusted-scripts:ro \
+     -v ~/.cache/qwen-verify/pr<n>/qwen-base/.qwen:/work/.qwen:ro \
      -v ~/.cache/qwen-verify/pr<n>:/verify-context:ro \
      -e QWEN_VERIFY_CONTEXT=/verify-context/pr.json \
-     -e QWEN_VERIFY_PROXY_TOKEN=<token> \
+     -e QWEN_VERIFY_PROXY_TOKEN \
      -w /work node:22-bookworm sleep infinity
    ```
 
@@ -299,41 +319,47 @@ run with the real key and the maintainer's `gh` access.
    JSON
    ```
 
-5. **Attest inside, after a check — never on the `docker run` line.** The
-   gate only sees known credential names and home paths, and gitignored files
-   in the round tree are invisible to its clean-tree check, so review the
-   mount list and reject credential-shaped ignored entries at any depth first:
+5. **Attest inside, after trusted checks — never on the `docker run` line.**
+   The gate only sees known credential names and home paths, and gitignored
+   files are invisible to its clean-tree check, so scan for project
+   credential files and run the gate from the trusted copies first:
 
    ```bash
    docker exec -i qwen-verify-<n> bash -lc '
      set -e
-     credentials="$(git -C /work status --porcelain --ignored -- \
-       ":(glob)**/.env" ":(glob)**/.env.*" ":(glob)**/*.env" \
-       ":(glob)**/*.pem" ":(glob)**/*.key" ":(glob)**/credentials*" \
-       ":(glob)**/.npmrc" ":(glob)**/.netrc")"
-     test -z "$credentials" ||
-       { printf "%s\n" "$credentials"; exit 1; }
+     node /trusted-scripts/verify-pr-credential-scan.mjs /work
      export QWEN_VERIFY_CREDENTIAL_FREE=1
-     node /work/scripts/verify-pr-prepare.mjs --require-isolation
+     node /trusted-scripts/verify-pr-prepare.mjs --require-isolation
    '
    ```
 
-   Exit 4 means this is not a boundary: stop and run nothing else.
+   The scan names credential-shaped ignored files (nested ones included) while
+   leaving installed dependencies and build output alone. Exit 4 means this is
+   not a boundary: stop and run nothing else.
 
 6. **Run the round inside**, installing the CLI into the fresh home because
-   the container is not root. The round's engine is the released CLI; the PR
-   clone supplies the workspace skill and code. To run the tree's own CLI
-   instead, build it and install `/work` into the same prefix:
+   the container is not root. Each `docker exec` is a new shell, so the
+   attestation is passed to the shell that starts the round; it stays off the
+   `docker run` line. The round's engine is the released CLI; the PR clone
+   supplies the workspace skill and code:
 
    ```bash
-   docker exec -i qwen-verify-<n> bash -lc '
+   docker exec -i -e QWEN_VERIFY_CREDENTIAL_FREE=1 qwen-verify-<n> bash -lc '
      set -e
      export PATH="$HOME/.local/bin:$PATH"
      npm install -g --prefix "$HOME/.local" @qwen-code/qwen-code
-     # build the tree as the local install strategy requires, then:
      qwen --auth-type openai --approval-mode yolo \
        --prompt "/verify-pr <n> --repo <owner>/<repo>"
    '
+   ```
+
+   To run the tree's own CLI instead, replace the install line with a build
+   and a local install after resolving the dependencies:
+
+   ```bash
+   corepack pnpm install --frozen-lockfile
+   npm run build && npm run bundle
+   npm install -g --prefix "$HOME/.local" /work
    ```
 
 7. **After the round, check and clean up from the host.** The checker and its
@@ -344,6 +370,7 @@ run with the real key and the maintainer's `gh` access.
      --context ~/.cache/qwen-verify/pr<n>/pr.json <round-dir>
    docker rm -f qwen-verify-<n>
    kill "$(cat ~/.cache/qwen-verify/pr<n>/proxy.pid)"
+   rm -f ~/.cache/qwen-verify/pr<n>/proxy.json ~/.cache/qwen-verify/pr<n>/proxy.pid
    ```
 
    `<round-dir>` is `<pr-clone>/tmp/pr<n>-verify-<ts>`. Publishing still

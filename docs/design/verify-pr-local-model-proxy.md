@@ -39,23 +39,31 @@ A host-side relay plus a recipe that names its trust boundaries.
   relays only the exact `${basePath}/chat/completions` path. Clients present a
   per-run bearer token (`QWEN_VERIFY_PROXY_TOKEN`); the proxy swaps it for the
   real key upstream. A nonce-echoing health endpoint distinguishes the process
-  from a squatter. Hop-by-hop request headers and the upstream
-  `content-encoding` are stripped. The idle watchdog is per-chunk, matches the
+  from a squatter. Hop-by-hop request headers — both the fixed set and any
+  name a `Connection` header nominates — and the upstream `content-encoding`
+  are stripped. The idle watchdog is per-chunk, matches the
   qwen client's own 240 s stream tolerance, stays quiet while the downstream is
   paused, and re-arms on drain; a disconnect before upstream headers aborts
   the fetch instead of paying for a completion nobody reads.
-- The recipe uses two checkouts. `<trusted-clone>` runs the proxy and the
-  post-round checker; `<pr-clone>` is a standalone clone at the PR head that
-  the container mounts. A linked worktree is rejected by construction because
-  its gitfile points outside the mount.
+- The recipe uses two checkouts. `<trusted-clone>` supplies every script the
+  round runs, including the prepare preflight, the credential scan, the
+  isolation gate and the post-round checker; `<pr-clone>` is a standalone
+  clone at the PR head that the container mounts and that prepare is given as
+  its cwd. A linked worktree is rejected by construction because its gitfile
+  points outside the mount.
 - The container is named and detached (`sleep infinity` plus `docker exec`),
-  runs as the host uid with `HOME=/tmp/qwen-home`, mounts the full snapshot
-  from a host copy outside the tree, and sets the credential-free attestation
-  inside only after rejecting credential-shaped ignored entries at any depth
-  (`.env`/`*.env`/`*.pem`/`*.key`/`credentials*`/`.npmrc`/`.netrc`). The CLI
-  installs into the fresh home, so nothing in the tree becomes root-owned; the
-  round's engine is the released CLI unless the tree's own build is installed
-  over it.
+  runs as the host uid with `HOME=/tmp/qwen-home`, mounts the base commit's
+  `.qwen` read-only over the tree so the round's instructions and project
+  settings cannot come from the PR, and mounts the full snapshot from a host
+  copy outside the tree. The per-run proxy token is exported from the proxy's
+  JSON file rather than typed, so it stays out of shell history. The
+  credential-free attestation is passed to the shell that starts the round,
+  after `verify-pr-credential-scan.mjs` (trusted copy) rejects
+  credential-shaped ignored files; that scan lists ignored files one by one
+  and leaves `node_modules`/`dist` alone, so a built tree is not refused. The
+  CLI installs into the fresh home, so nothing in the tree becomes
+  root-owned; the round's engine is the released CLI unless the tree's own
+  build is installed over it.
 - The round reads `$QWEN_VERIFY_CONTEXT` from the full snapshot. After the
   round, the checker runs from `<trusted-clone>` with `--context <host copy>`,
   so a writable artifact `context.json` cannot pin its own expected head.
@@ -82,13 +90,21 @@ the real key.
 ## Acceptance
 
 - Proxies: bearer rejection, exact path allowlist, base-path prefixing,
-  real-key injection, hop-by-hop stripping with a chunked body, a gzip upstream
-  body with the header stripped, pre-header disconnect abort,
-  paused-downstream survival, slow-but-healthy streams, upstream reset
-  survival, IPv6 listen formatting, and the CLI's JSON coordinates.
+  real-key injection, hop-by-hop stripping with a chunked body (fixed set and
+  `Connection`-nominated names), a gzip upstream body with the header
+  stripped, pre-header disconnect abort, paused-downstream survival,
+  slow-but-healthy streams, upstream reset survival, IPv6 listen formatting,
+  and the CLI's JSON coordinates.
+- Credential scan: a nested ignored `.env`, `*.pem`, `credentials*`, `.npmrc`
+  or `.netrc` is refused; an installed `node_modules` tree and `dist/` are
+  not; a missing `--ignored` mode or a dropped pattern turns its test red.
 - Checker: `--context` overrides the writable artifact copy, refuses an
-  unusable snapshot instead of falling back, and keeps its existing exit
-  codes.
+  unusable snapshot instead of falling back (with a usable writable copy
+  seeded), and keeps its existing exit codes.
+- Recipe: every script names the trusted checkout, the base commit's `.qwen`
+  is mounted read-only, both credentials come from files rather than command
+  lines, and the attestation is on the round's shell but not the `docker run`
+  line; reverting any of those turns a recipe pin red.
 - Mutation evidence: removing each of those guards turns its pin red.
 - A real Docker smoke covers the gate passing with `QWEN_VERIFY_PROXY_TOKEN`,
   the gate refusing `OPENAI_API_KEY`, and a container request reaching a mock

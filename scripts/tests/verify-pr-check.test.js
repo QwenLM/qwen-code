@@ -792,6 +792,12 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
 
   it('refuses an unusable --context instead of falling back', () => {
     const dir = makeArtifactDir(validFiles(), ['01-ab-cells.png']);
+    // Seed a usable writable copy: a fallback regression would exit 0 here
+    // and print its head source, so the exit-1 assertion pins the property.
+    writeFileSync(
+      join(dir, 'context.json'),
+      JSON.stringify({ headRefOid: HEAD }),
+    );
     const empty = join(tmpdir(), `verify-pr-host-empty-${Date.now()}.json`);
     tmpDirs.push(empty);
     writeFileSync(empty, '{}');

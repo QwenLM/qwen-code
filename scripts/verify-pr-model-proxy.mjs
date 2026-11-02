@@ -189,6 +189,13 @@ export function createModelProxy({
 
       const headers = new Headers(req.headers);
       for (const name of STRIPPED_REQUEST_HEADERS) headers.delete(name);
+      // RFC 7230 §6.1: a header nominated by Connection is hop-by-hop too,
+      // so a client cannot smuggle one through under an unlisted name.
+      const nominated = String(req.headers.connection ?? '')
+        .split(',')
+        .map((name) => name.trim().toLowerCase())
+        .filter(Boolean);
+      for (const name of nominated) headers.delete(name);
       headers.set('authorization', `Bearer ${apiKey}`);
 
       const init = { method: req.method, headers };

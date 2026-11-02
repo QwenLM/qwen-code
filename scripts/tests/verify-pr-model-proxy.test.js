@@ -245,6 +245,7 @@ describe('verify-pr-model-proxy', () => {
           headers: {
             authorization: `Bearer ${TOKEN}`,
             connection: 'x-client-hop',
+            'x-client-hop': 'client-secret',
             'proxy-authorization': 'Basic client-proxy-secret',
             'transfer-encoding': 'chunked',
             expect: '100-continue',
@@ -266,6 +267,7 @@ describe('verify-pr-model-proxy', () => {
     expect(seen.authorization).toBe(`Bearer ${REAL_KEY}`);
     expect(seen.headers['proxy-authorization']).toBeUndefined();
     expect(seen.headers.expect).toBeUndefined();
+    expect(seen.headers['x-client-hop']).toBeUndefined();
     expect(seen.headers.connection).not.toBe('x-client-hop');
   });
 
@@ -535,41 +537,76 @@ describe('local container recipe pins', () => {
     'utf8',
   );
 
-  it('runs the key-holding proxy and the checker from a trusted checkout', () => {
+  it('runs every round script from the trusted checkout', () => {
+    expect(skill).toContain(
+      'cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs',
+    );
+    expect(skill).toContain(
+      'node /trusted-scripts/verify-pr-prepare.mjs --require-isolation',
+    );
+    expect(skill).toContain(
+      'node /trusted-scripts/verify-pr-credential-scan.mjs /work',
+    );
     expect(skill).toContain(
       'node <trusted-clone>/scripts/verify-pr-model-proxy.mjs',
     );
-    expect(skill).toContain('node <trusted-clone>/scripts/verify-pr-check.mjs');
+    // Enumerate the checker call sites: the preamble also names the trusted
+    // path, so a single positive assertion cannot detect step 7 reverting to
+    // <pr-clone>/scripts.
+    const checkerCalls = [
+      ...skill.matchAll(/node (\S+)\/scripts\/verify-pr-check\.mjs/g),
+    ].map((match) => match[1]);
+    expect(checkerCalls.length).toBeGreaterThanOrEqual(3);
+    for (const prefix of checkerCalls) expect(prefix).toBe('<trusted-clone>');
     expect(skill).not.toMatch(
-      /node scripts\/verify-pr-(model-proxy|check)\.mjs/,
+      /node <pr-clone>\/scripts\/verify-pr-(prepare|check|model-proxy)/,
+    );
+    expect(skill).not.toMatch(
+      /node scripts\/verify-pr-(prepare|check|model-proxy)\.mjs/,
+    );
+  });
+
+  it('base-pins the round instructions and mounts them read-only', () => {
+    expect(skill).toContain('git -C <pr-clone> archive "$BASE_OID" -- .qwen');
+    expect(skill).toContain(
+      '-v ~/.cache/qwen-verify/pr<n>/qwen-base/.qwen:/work/.qwen:ro',
     );
   });
 
   it('mounts the round tree writable and the metadata snapshot read-only', () => {
     expect(skill).toContain('-v <pr-clone>:/work');
+    expect(skill).toContain('-v <trusted-clone>/scripts:/trusted-scripts:ro');
     expect(skill).toContain('-v ~/.cache/qwen-verify/pr<n>:/verify-context:ro');
     expect(skill).toContain('QWEN_VERIFY_CONTEXT=/verify-context/pr.json');
   });
 
-  it('reads the real key instead of putting it on a command line', () => {
+  it('reads both credentials instead of putting them on a command line', () => {
     expect(skill).toContain("read -rsp 'REVIEW_OPENAI_API_KEY: '");
     expect(skill).not.toContain('REVIEW_OPENAI_API_KEY=<real-key>');
+    expect(skill).toContain('QWEN_VERIFY_PROXY_TOKEN="$(node -e');
+    expect(skill).toContain('chmod 600');
+    expect(skill).toMatch(/-e QWEN_VERIFY_PROXY_TOKEN[ \t]*\\?\n/);
+    expect(skill).not.toContain('-e QWEN_VERIFY_PROXY_TOKEN=<token>');
   });
 
-  it('keeps the attestation off the docker run line and behind a check', () => {
-    const dockerRun = skill.split('docker run -d')[1]?.split('```')[0] ?? '';
-    expect(dockerRun).not.toContain('QWEN_VERIFY_CREDENTIAL_FREE');
-    // Any depth, not only a root .env: a nested secrets/.env must be caught.
-    expect(skill).toContain(':(glob)**/.env');
-    expect(skill).toContain(':(glob)**/*.pem');
-    expect(skill).toContain(':(glob)**/credentials*');
-    expect(skill).not.toMatch(/--ignored -- \.env\b/);
-    expect(skill).toContain('export QWEN_VERIFY_CREDENTIAL_FREE=1');
+  it('keeps the attestation off the docker run line and on the round shell', () => {
+    const dockerRunMatch = skill.match(/docker run -d[\s\S]*?```/);
+    expect(dockerRunMatch).not.toBeNull();
+    expect(dockerRunMatch[0]).not.toContain('QWEN_VERIFY_CREDENTIAL_FREE');
+    // A fresh docker exec is a new shell: the round's shell must carry the
+    // attestation or its first isolation check exits 4.
+    expect(skill).toContain(
+      'docker exec -i -e QWEN_VERIFY_CREDENTIAL_FREE=1 qwen-verify-<n>',
+    );
+    const roundBlock = skill.split('qwen --auth-type openai')[0].split('```');
+    expect(roundBlock.at(-1)).toContain('QWEN_VERIFY_CREDENTIAL_FREE');
+    expect(skill).toContain('verify-pr-credential-scan.mjs /work');
   });
 
-  it('names the released CLI as the engine and offers the tree build', () => {
+  it('names the released CLI as the engine and gives the tree-build route', () => {
     expect(skill).toContain("The round's engine is the released CLI");
-    expect(skill).toContain('install `/work` into the same prefix');
+    expect(skill).toContain('npm run build && npm run bundle');
+    expect(skill).toContain('npm install -g --prefix "$HOME/.local" /work');
   });
 
   it('pins the checker head from the host snapshot', () => {
