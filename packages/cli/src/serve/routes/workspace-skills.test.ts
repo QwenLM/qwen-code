@@ -760,6 +760,74 @@ describe('workspace Skill management routes', () => {
     );
   });
 
+  it('serializes aliased workspace and global installs on one directory', async () => {
+    const harness = createHarness();
+    const previousQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = '/workspace/.qwen';
+    let release!: () => void;
+    const pause = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const firstEntered = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let active = 0;
+    let maxActive = 0;
+    harness.installWorkspaceSkill.mockImplementation(
+      async (...args: unknown[]) => {
+        const install = args[1] as { name: string; scope: string };
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        if (install.scope === 'workspace') {
+          entered();
+          await pause;
+        }
+        active -= 1;
+        return {
+          skillName: install.name,
+          scope: install.scope,
+          installedPath: '/workspace/.qwen/skills/demo-skill/SKILL.md',
+        };
+      },
+    );
+    try {
+      const first = Promise.resolve(
+        request(harness.app)
+          .post('/workspace/skills/install')
+          .send({
+            name: 'demo-skill',
+            scope: 'workspace',
+            source: { type: 'folder', path: '/tmp/demo-skill' },
+          }),
+      );
+      await firstEntered;
+      const second = Promise.resolve(
+        request(harness.app)
+          .post('/workspace/skills/install')
+          .send({
+            name: 'demo-skill',
+            scope: 'global',
+            source: { type: 'folder', path: '/tmp/demo-skill' },
+          }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(maxActive).toBe(1);
+      release();
+      const [firstResponse, secondResponse] = await Promise.all([
+        first,
+        second,
+      ]);
+      expect(firstResponse.status).toBe(200);
+      expect(secondResponse.status).toBe(200);
+      expect(maxActive).toBe(1);
+    } finally {
+      release();
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+    }
+  });
+
   it('invalidates config status after qualified legacy mutations', async () => {
     const harness = createHarness();
 

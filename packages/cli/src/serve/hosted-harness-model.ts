@@ -260,6 +260,18 @@ export async function runHostedHarnessTextTurn(input: {
   prompt: string;
   attachmentParts?: readonly Part[];
   promptId: string;
+  userMessages?: {
+    claim(): Promise<
+      ReadonlyArray<{
+        id: string;
+        parts: Part[];
+        text: string;
+        attachments?: Part[];
+      }>
+    >;
+    commit(id: string, parts: Part[]): Promise<void>;
+    commitAssistant(parts: Part[], model: string): Promise<void>;
+  };
   signal: AbortSignal;
   resumeFromToolResults?: readonly Part[];
   initialRound?: number;
@@ -291,7 +303,9 @@ export async function runHostedHarnessTextTurn(input: {
         | 'setToolOutputBudget'
         | 'capturesChildModelRoute'
         | 'setChildModelRoute'
+        | 'setChildModelResolver'
         | 'planModeInstructions'
+        | 'todoInstructions'
       >
     >;
   workspaceContext?: { read(): string | undefined };
@@ -299,6 +313,7 @@ export async function runHostedHarnessTextTurn(input: {
   modelSelection?: HostedModelSelection;
   publicChildModelRoute?: PublicChildModelRoute;
   agentInstructions?: string;
+  extensionInstructions?: string;
   skills?: HostedSkillCatalog;
   textDeltas?: HostedHarnessTextDeltas;
   completeFinalOutput?: (
@@ -318,6 +333,8 @@ export async function runHostedHarnessTextTurn(input: {
     safeMode: true,
     chatRecording: false,
     sessionId: input.sessionId,
+    // The Hosted store owns this ID, independently of local transcripts.
+    sessionIdGenerated: true,
   } as CliArgs;
   const config = await loadCliConfig(
     settings.merged,
@@ -334,17 +351,6 @@ export async function runHostedHarnessTextTurn(input: {
   const outputBudget = config.getToolOutputBatchBudget?.();
   if (outputBudget !== undefined)
     input.toolTurn?.setToolOutputBudget?.(outputBudget);
-  const contextWithInstructions = (context: string | undefined) =>
-    [
-      input.agentInstructions
-        ? `# Agent instructions\n\n${input.agentInstructions}`
-        : undefined,
-      input.skills?.instructions(),
-      input.toolTurn?.planModeInstructions?.(),
-      context,
-    ]
-      .filter(Boolean)
-      .join('\n\n');
   const model = input.modelSelection
     ? { id: input.modelSelection.modelId }
     : input.agentDefinition?.model;
@@ -361,30 +367,32 @@ export async function runHostedHarnessTextTurn(input: {
     // Config falls back to its own generator until authentication fills this frame.
     const view = {} as RuntimeContentGeneratorView;
     return runWithRuntimeContentGenerator(view, () =>
-      runPreparedHostedHarnessTextTurn(
-        input,
-        config,
-        model,
-        contextWithInstructions,
-        view,
-      ),
+      runPreparedHostedHarnessTextTurn(input, config, model, view),
     );
   }
-  return runPreparedHostedHarnessTextTurn(
-    input,
-    config,
-    model,
-    contextWithInstructions,
-  );
+  return runPreparedHostedHarnessTextTurn(input, config, model);
 }
 
 async function runPreparedHostedHarnessTextTurn(
   input: Parameters<typeof runHostedHarnessTextTurn>[0],
   config: Awaited<ReturnType<typeof loadCliConfig>>,
   model: HostedAgentDefinition['model'] | undefined,
-  contextWithInstructions: (context: string | undefined) => string,
   runtimeView?: RuntimeContentGeneratorView,
 ): Promise<HostedHarnessModelResult> {
+  let todoContext = await input.toolTurn?.todoInstructions?.();
+  const contextWithInstructions = (context: string | undefined) =>
+    [
+      input.agentInstructions
+        ? `# Agent instructions\n\n${input.agentInstructions}`
+        : undefined,
+      input.extensionInstructions,
+      input.skills?.instructions(),
+      input.toolTurn?.planModeInstructions?.(),
+      todoContext,
+      context,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
   let runPromptHook: HostedPromptHookRunner | undefined;
   let modelReady = false;
   let historyReady = false;
@@ -497,7 +505,7 @@ async function runPreparedHostedHarnessTextTurn(
     await input.hooks?.ensureReady(input.signal);
     // Seed instructions when memory reload is skipped; restore them after
     // initialize() when its hierarchical memory refresh replaces user memory.
-    if (input.agentInstructions || input.skills)
+    if (input.agentInstructions || input.extensionInstructions || input.skills)
       config.setUserMemory(
         contextWithInstructions(input.workspaceContext?.read()),
       );
@@ -514,7 +522,11 @@ async function runPreparedHostedHarnessTextTurn(
     const authType = config.getModelsConfig().getCurrentAuthType();
     if (!authType)
       throw new Error('Hosted Harness model authentication is unavailable.');
-    if (input.agentInstructions || input.skills) {
+    if (
+      input.agentInstructions ||
+      input.extensionInstructions ||
+      input.skills
+    ) {
       config.setUserMemory(
         contextWithInstructions(input.workspaceContext?.read()),
       );
@@ -622,6 +634,31 @@ async function runPreparedHostedHarnessTextTurn(
             }
           : {}),
       });
+      input.toolTurn.setChildModelResolver?.(async (selector) => {
+        const resolved = await config
+          .getBaseLlmClient()
+          .resolveForModel(selector, { failClosed: true });
+        const selected = resolved.contentGeneratorConfig;
+        if (!selected.authType) throw new HostedModelUnavailableError();
+        return {
+          modelId: resolved.model,
+          route: {
+            authType: selected.authType,
+            endpointDigest: createHash('sha256')
+              .update(selected.baseUrl ?? '')
+              .digest('hex'),
+            providerPin: llmPreparedProviderPin(selected),
+            origin: {
+              modelId: config.getModel(),
+              authType: active.authType!,
+              endpointDigest: createHash('sha256')
+                .update(active.baseUrl ?? '')
+                .digest('hex'),
+              providerPin: llmPreparedProviderPin(active),
+            },
+          },
+        };
+      });
     };
     if (
       [...initialMessages, ...(input.resumeModel?.prepared.history ?? [])].some(
@@ -633,7 +670,7 @@ async function runPreparedHostedHarnessTextTurn(
       config.getEffectiveInputModalities().image !== true
     )
       throw new HostedImageInputUnsupportedError();
-    if (input.agentInstructions || input.skills)
+    if (input.agentInstructions || input.extensionInstructions || input.skills)
       await config.getLlmClient().refreshSystemInstruction();
     await input.modelScope?.bindBudget(config.getTurnBudget(), input.prompt);
     runPromptHook = input.modelScope
@@ -868,7 +905,7 @@ async function runPreparedHostedHarnessTextTurn(
       const calls: ToolCallRequestInfo[] = selectedSkills.map((skill) => ({
         callId: randomUUID(),
         name: 'skill',
-        args: { skill },
+        args: { skill, ...input.skills?.userArguments(skill, effectivePrompt) },
         isClientInitiated: true,
         origin: { kind: 'client' },
         prompt_id: input.promptId,
@@ -895,6 +932,48 @@ async function runPreparedHostedHarnessTextTurn(
     let preparedRecovery = input.resumeModel?.prepared;
     let stopHookActive =
       (await input.hooks?.wasStopBlocked(input.promptId)) ?? false;
+    let guidanceRequest = false;
+    const drainUserMessages = async (
+      includeRequest: boolean,
+    ): Promise<boolean> => {
+      if (!input.userMessages || preparedRecovery) return false;
+      input.signal.throwIfAborted();
+      const messages = await input.userMessages.claim();
+      if (!messages.length) return false;
+      const additions: Content[] = [];
+      for (const message of messages) {
+        input.signal.throwIfAborted();
+        let parts = message.parts;
+        const submit = await fire(HookEventName.UserPromptSubmit, message.id, {
+          prompt: message.text,
+          submitted_prompt: message.text,
+        });
+        if (submit?.shouldStopExecution() || submit?.isBlockingDecision())
+          throw new Error('Hook blocked queued user input.');
+        const updated = submit?.hookSpecificOutput?.['updatedPrompt'];
+        const context = submit?.getAdditionalContext();
+        if (typeof updated === 'string' || context) {
+          parts = [
+            {
+              text: `${typeof updated === 'string' ? updated : message.text}${context ? `\n${context}` : ''}`,
+            },
+            ...(message.attachments ?? parts.filter((part) => !part.text)),
+          ];
+        }
+        await input.userMessages.commit(message.id, parts);
+        additions.push({ role: 'user', parts });
+      }
+      client
+        .getChat()
+        .setHistory([
+          ...client.getHistory(),
+          ...(includeRequest ? [{ role: 'user', parts: request }] : []),
+          ...additions.slice(0, -1),
+        ]);
+      request = additions.at(-1)!.parts!;
+      guidanceRequest = true;
+      return true;
+    };
     const maxRounds = config.getMaxSessionTurns();
     for (
       let round = input.resumeModel?.round ?? input.initialRound ?? 0;
@@ -911,6 +990,7 @@ async function runPreparedHostedHarnessTextTurn(
       }
       if (maxRounds > 0 && round >= maxRounds)
         throw new HostedModelRoundLimitError();
+      await drainUserMessages(true);
       const declarations =
         (await input.toolTurn?.declarations(input.signal)) ?? [];
       client
@@ -919,6 +999,7 @@ async function runPreparedHostedHarnessTextTurn(
           declarations.length ? [{ functionDeclarations: declarations }] : [],
         );
       if (!preparedRecovery) {
+        todoContext = await input.toolTurn?.todoInstructions?.();
         const toolNames = new Set(
           declarations
             .map(({ name }) => name)
@@ -1011,7 +1092,7 @@ async function runPreparedHostedHarnessTextTurn(
             )
           : client.sendMessageStream(request, input.signal, input.promptId, {
               type:
-                round === 0 && !pendingToolResults
+                guidanceRequest || (round === 0 && !pendingToolResults)
                   ? SendMessageType.UserQuery
                   : SendMessageType.ToolResult,
               // Published deltas cannot be un-glued after the fact: a cut that
@@ -1025,6 +1106,7 @@ async function runPreparedHostedHarnessTextTurn(
                 : {}),
             });
         preparedRecovery = undefined;
+        guidanceRequest = false;
         for await (const event of stream) {
           if (event.type === LlmEventType.Content) {
             text += event.value;
@@ -1111,6 +1193,7 @@ async function runPreparedHostedHarnessTextTurn(
           input.toolTurn &&
           pendingToolResults &&
           !input.hooks &&
+          !input.userMessages &&
           calls.length === 0
         ) {
           const output = client.getHistory().at(-1);
@@ -1183,6 +1266,27 @@ async function runPreparedHostedHarnessTextTurn(
       if (output?.role !== 'model' || !output.parts)
         throw new Error('Hosted model output is unavailable.');
       const parts = structuredClone(output.parts);
+      if (calls.length === 0 && input.userMessages) {
+        const waiting =
+          maxRounds > 0 && round + 1 >= maxRounds
+            ? []
+            : await input.userMessages.claim();
+        if (waiting.length) {
+          await input.userMessages.commitAssistant(
+            suppressDisplay ? [] : parts,
+            config.getModel(),
+          );
+          // Keep the final assistant record ahead of newly admitted guidance.
+          const original = input.userMessages;
+          input.userMessages = { ...original, claim: async () => waiting };
+          try {
+            await drainUserMessages(false);
+          } finally {
+            input.userMessages = original;
+          }
+          continue;
+        }
+      }
       if (!input.toolTurn)
         return {
           text,

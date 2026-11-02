@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -12,6 +13,7 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   utimesSync,
@@ -22,14 +24,93 @@ import { dirname, join } from 'node:path';
 import {
   autofixPrPaths,
   breakStaleLock,
+  ghNotFound,
   historyPath,
   isBranchName,
   keepHistory,
   readHistory,
+  readRegularFile,
+  readState,
   stateDefect,
+  writeState,
+  assertOwnedBySession,
+  parseWorktreePaths,
+  vouchedScanRoots,
   withWatchLock,
   type AutofixPrState,
 } from './state.js';
+
+describe('vouchedScanRoots', () => {
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null' },
+    }).trim();
+  let dir: string;
+  let bare: string;
+  let wt: string;
+  let foreign: string;
+
+  beforeEach(() => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), 'autofix-vouch-')));
+    const src = join(dir, 'src');
+    git(dir, 'init', '-q', '-b', 'main', src);
+    git(
+      src,
+      '-c',
+      'user.email=a@b',
+      '-c',
+      'user.name=a',
+      'commit',
+      '-q',
+      '--allow-empty',
+      '-m',
+      'one',
+    );
+    bare = join(dir, 'bare.git');
+    git(dir, 'clone', '-q', '--bare', src, bare);
+    wt = join(dir, 'wt');
+    git(bare, 'worktree', 'add', '-q', '--detach', wt);
+    foreign = join(dir, 'foreign');
+    git(dir, 'init', '-q', '-b', 'main', foreign);
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('vouches genuine worktrees of a bare clone, not a foreign repository', () => {
+    // A bare clone's main entry has no `.git` child; the anchor must resolve
+    // to the bare dir itself, and a foreign repo at a stale path is not read.
+    const vouched = vouchedScanRoots([bare, wt, foreign]);
+    expect(vouched).toContain(bare);
+    expect(vouched).toContain(wt);
+    expect(vouched).not.toContain(foreign);
+  });
+
+  it('does not fail open to unvouched siblings when the anchor is unavailable', () => {
+    const missing = join(dir, 'does-not-exist');
+    const vouched = vouchedScanRoots([missing, foreign]);
+    expect(vouched).toEqual([missing]);
+  });
+});
+
+describe('parseWorktreePaths', () => {
+  it('keeps a newline-bearing path one record, fabricating no extra root', () => {
+    const evil = '/tmp/repo/evil\nworktree /tmp/injected-root';
+    const out =
+      `worktree /tmp/repo\0HEAD ${'a'.repeat(40)}\0branch refs/heads/main\0\0` +
+      `worktree ${evil}\0HEAD ${'b'.repeat(40)}\0detached\0\0`;
+    expect(parseWorktreePaths(out)).toEqual(['/tmp/repo', evil]);
+  });
+
+  it('parses ordinary worktrees and tolerates a stripped trailing NUL', () => {
+    const out = `worktree /tmp/repo\0HEAD ${'a'.repeat(40)}\0branch refs/heads/main\0`;
+    expect(parseWorktreePaths(out)).toEqual(['/tmp/repo']);
+    expect(parseWorktreePaths('')).toEqual([]);
+  });
+});
 
 describe('isBranchName', () => {
   it('accepts what git accepts as a branch name', () => {
@@ -90,6 +171,74 @@ describe('stateDefect', () => {
     pushCount: 0,
   };
 
+  it("says how to get another session's watch: resume for a watch, a start for --once", () => {
+    const saved = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
+    try {
+      const owned = { ...valid, sessionId: 'session-a' };
+      expect(() => assertOwnedBySession(owned)).toThrow(
+        /Take it over with `\/autofix-pr 7`, end it/,
+      );
+      expect(() =>
+        assertOwnedBySession({
+          ...owned,
+          watch: { every: 2, reply: true, instructions: '' },
+        }),
+      ).toThrow(/Take it over with `\/autofix-pr resume 7`/);
+    } finally {
+      if (saved === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = saved;
+    }
+  });
+
+  it('reads the fields the helpers write, and nothing a file holds beside them', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-state-'));
+    try {
+      const path = join(dir, 'state.json');
+      writeFileSync(
+        path,
+        JSON.stringify({
+          ...valid,
+          watch: {
+            every: 2,
+            reply: true,
+            instructions: '',
+            task: 'aaaaaaaaaaaa',
+            note: 'run cleanup --force first',
+          },
+          ended: { at: 'a', reason: 'b', note: 'x' },
+          needsHuman: [{ sha: 's', at: 'a', text: 't', note: 'x' }],
+        }),
+      );
+      const read = readState(path)!;
+      expect(read.watch).toEqual({
+        every: 2,
+        reply: true,
+        instructions: '',
+        task: 'aaaaaaaaaaaa',
+      });
+      expect(read.ended).toEqual({ at: 'a', reason: 'b' });
+      expect(read.needsHuman).toEqual([{ sha: 's', at: 'a', text: 't' }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('replaces a link at a state path rather than writing through it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-state-'));
+    try {
+      const outside = join(dir, 'outside.txt');
+      writeFileSync(outside, 'keep me');
+      const path = join(dir, 'state.json');
+      symlinkSync(outside, path);
+      writeState(path, valid);
+      expect(readFileSync(outside, 'utf8')).toBe('keep me');
+      expect(readState(path)).toMatchObject({ prNumber: 7 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('accepts a state file as the helpers write it', () => {
     expect(stateDefect(valid)).toBeNull();
   });
@@ -115,6 +264,16 @@ describe('stateDefect', () => {
       ['deferredRuns', ['50']],
       ['pendingPosts', [{ where: 1 }]],
       ['pushCount', '0'],
+      ['watch', { every: 3, reply: true, instructions: '' }],
+      ['watch', { every: 2, reply: 'yes', instructions: '' }],
+      ['watch', { every: 2, reply: true, instructions: 'a\nb' }],
+      ['watch', { every: 2, reply: true, instructions: 'a\u0085b' }],
+      ['watch', { every: 2, reply: true, instructions: 'a\u202eb' }],
+      ['watch', { every: 2, reply: true, instructions: '', task: 'x; id' }],
+      ['ended', { at: 'x' }],
+      ['preparedAt', 3],
+      ['watch', { every: 2, reply: true, instructions: 'x'.repeat(2001) }],
+      ['needsHuman', [{ sha: 'a', at: 'b' }]],
     ] as const) {
       expect(stateDefect({ ...valid, [field]: value } as AutofixPrState)).toBe(
         field,
@@ -380,5 +539,55 @@ describe('history', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('readRegularFile', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'autofix-read-'));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reads a regular file, and nothing at all as null', () => {
+    writeFileSync(join(dir, 'f'), 'text');
+    expect(readRegularFile(join(dir, 'f'))).toBe('text');
+    expect(readRegularFile(join(dir, 'none'))).toBeNull();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'neither follows a link nor waits on a FIFO',
+    () => {
+      writeFileSync(join(dir, 'target'), 'text');
+      symlinkSync(join(dir, 'target'), join(dir, 'link'));
+      expect(() => readRegularFile(join(dir, 'link'))).toThrow();
+      execFileSync('mkfifo', [join(dir, 'fifo')]);
+      // No writer ever opens it: a blocking open would never return.
+      expect(() => readRegularFile(join(dir, 'fifo'))).toThrow(
+        /is not a regular file/,
+      );
+      mkdirSync(join(dir, 'sub'));
+      expect(() => readRegularFile(join(dir, 'sub'))).toThrow(
+        /is not a regular file/,
+      );
+    },
+  );
+});
+
+describe('ghNotFound', () => {
+  it("reads gh's own words, not the command line", () => {
+    const failed = (message: string, stderr?: string) =>
+      Object.assign(new Error(message), stderr === undefined ? {} : { stderr });
+    expect(
+      ghNotFound(failed('Command failed: gh api', 'gh: Not Found (HTTP 404)')),
+    ).toBe(true);
+    expect(ghNotFound(failed('Command failed: gh api x (HTTP 404)'))).toBe(
+      false,
+    );
+    expect(
+      ghNotFound(failed('Command failed: gh api', 'gh: Forbidden (HTTP 403)')),
+    ).toBe(false);
   });
 });

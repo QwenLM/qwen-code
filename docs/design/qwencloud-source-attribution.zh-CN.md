@@ -57,7 +57,7 @@
 - **第一方取值优先。** `customHeaders` 中同名的项（不区分大小写）会被移除，所以来源标识既不会被覆盖，也不会重复发送。移除时刻意不给提示：这是文档化的策略、没有开关，请求本身照常成功。
 - **运行时身份。** 三条调用链都传入已有的 `Config.getChannel()` 值。仅 `desktop` 映射为 `qwen-code-desktop`；CLI、daemon、ACP、其他集成及未设置的 channel 均映射为 `qwen-code-cli`。Desktop 启动器已有 channel 传递，包括由 ACP channel fallback 解析的 Tauri 标记。派生 agent Config 会继承该值，嵌套 agent 和模型覆盖也一样。无需新增环境检测或身份状态。
 - **不加配置项。** 取值由端点和运行时 channel 推导，没有需要用户配置的内容。现有遥测和隐私开关行为保持不变。
-- **单一 leaf 模块。** `packages/core/src/core/dashscope-source-config.ts` 不依赖任何模块，并维护 `QWENCLOUD_MAAS_HOSTS`（由 DashScope provider 再导出），provider、Responses 链路和 WebSearch 都可以引用它，不会形成循环依赖。这个 leaf 不是两个 host 字符串的唯一副本：`telemetry/gen-ai-provider.ts` 仍按自己的字面量分类，`core/reasoning-overrides.ts` 用一段内联正则。本 PR 不做合并——两个文件都不在本次改动范围内——但 leaf 已经消掉了 `gen-ai-provider.ts` 注释里所说的循环依赖，合并因此成了一个普通的后续项。`providers/presets/` 下的四个 preset base URL 也内嵌同一批 host，并有测试把它们钉在 `SITE_CHANNELS` 上。
+- **单一 leaf 模块。** `packages/core/src/core/dashscope-source-config.ts` 不依赖任何模块，并维护 `QWENCLOUD_MAAS_HOSTS`（由 DashScope provider 再导出），provider、Responses 链路和 WebSearch 都可以引用它，不会形成循环依赖。该 leaf 是两个 host 字符串的唯一副本：`telemetry/gen-ai-provider.ts` 和 `core/reasoning-overrides.ts` 都改为引用 `QWENCLOUD_MAAS_HOSTS`，不再重复字面量（#15107）。这个引用之所以安全，正是因为 leaf 自身没有任何 import，无法经 provider 层绕回成环。两个消费方都保留各自的 host-or-subdomain 准入判断，不走 `buildDashScopeSourceConfig`——后者的精确匹配只覆盖裸 host 与 `token-plan.` 两种形态。`providers/presets/` 下的四个 preset base URL 也内嵌同一批 host，并有测试把它们钉在 `SITE_CHANNELS` 上。
 - **按配置的 host 判断，而非运行时 host。** 判断依据是配置的 `baseUrl`。Qwen OAuth 会在运行时替换客户端的端点，但它配置的 `baseUrl` 是无法解析的占位符 `DYNAMIC_QWEN_OAUTH_BASE_URL`，因此永远不会带上来源标识；有测试固定这一点。
 
 ## 不在范围内

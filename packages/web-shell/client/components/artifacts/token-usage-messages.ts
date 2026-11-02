@@ -12,11 +12,10 @@ export const TOKEN_USAGE_MESSAGES_EN: Record<string, TokenUsageMessage> = {
   'tokenUsage.total': 'Total tokens',
   'tokenUsage.shareTooltip': (v) => `Token share: ${v?.percent ?? '0.0'}%`,
   'tokenUsage.avgLatency': 'Avg latency',
-  'tokenUsage.firstTokenLatency': (v) =>
-    `First-token latency ${v?.duration ?? ''}`,
-  'tokenUsage.generationTime': (v) => `Generation ${v?.duration ?? ''}`,
-  'tokenUsage.outputSpeed': (v) => `Output speed ${v?.rate ?? ''} tok/s`,
-  'tokenUsage.modelApiMeta': (v) => `${v?.model ?? ''}: Requests · Avg latency`,
+  'tokenUsage.firstToken': 'First token',
+  'tokenUsage.generation': 'Generation',
+  'tokenUsage.outputSpeed': 'Output speed',
+  'tokenUsage.tokensPerSecond': (v) => `${v?.rate ?? ''} tok/s`,
   'tokenUsage.valueWithRate': (v) =>
     `${v?.count ?? 0} (${v?.percent ?? '0.0'}%)`,
   'tokenUsage.cached': 'Cache',
@@ -43,6 +42,15 @@ export const TOKEN_USAGE_MESSAGES_EN: Record<string, TokenUsageMessage> = {
     `${v?.count ?? 0} calls · ${v?.rate ?? 0}% ok · ${v?.duration ?? ''}`,
   'tokenUsage.tools': 'Tools',
   'tokenUsage.updatedAt': (v) => `Updated ${v?.time ?? ''}`,
+  'tokenUsage.successRate': 'Success rate',
+  'tokenUsage.successRateHint':
+    'API calls that returned without an error. Each retry counts as a call.',
+  'tokenUsage.successDetail': (v) =>
+    String(v?.failed ?? '0') === '0'
+      ? `All ${v?.requests ?? 0} requests succeeded`
+      : `${v?.failed} of ${v?.requests ?? 0} requests failed`,
+  'tokenUsage.firstTokenDetail': (v) => `First token avg ${v?.duration ?? ''}`,
+  'tokenUsage.modelSharesLabel': 'Token share by model',
   'tokenUsage.unavailable': 'Token usage is unavailable for this session.',
 };
 
@@ -50,10 +58,10 @@ export const TOKEN_USAGE_MESSAGES_ZH: Record<string, TokenUsageMessage> = {
   'tokenUsage.total': '总 Token',
   'tokenUsage.shareTooltip': (v) => `Token 占比：${v?.percent ?? '0.0'}%`,
   'tokenUsage.avgLatency': '平均延迟',
-  'tokenUsage.firstTokenLatency': (v) => `首 token 延迟 ${v?.duration ?? ''}`,
-  'tokenUsage.generationTime': (v) => `生成 ${v?.duration ?? ''}`,
-  'tokenUsage.outputSpeed': (v) => `输出速度 ${v?.rate ?? ''} tok/s`,
-  'tokenUsage.modelApiMeta': (v) => `${v?.model ?? ''}：请求 · 平均延迟`,
+  'tokenUsage.firstToken': '首 token',
+  'tokenUsage.generation': '生成',
+  'tokenUsage.outputSpeed': '输出速度',
+  'tokenUsage.tokensPerSecond': (v) => `${v?.rate ?? ''} tok/s`,
   'tokenUsage.valueWithRate': (v) =>
     `${v?.count ?? 0}（${v?.percent ?? '0.0'}%）`,
   'tokenUsage.cached': '缓存',
@@ -80,5 +88,13 @@ export const TOKEN_USAGE_MESSAGES_ZH: Record<string, TokenUsageMessage> = {
     `${v?.count ?? 0} 次 · 成功率 ${v?.rate ?? 0}% · ${v?.duration ?? ''}`,
   'tokenUsage.tools': '工具',
   'tokenUsage.updatedAt': (v) => `更新于 ${v?.time ?? ''}`,
+  'tokenUsage.successRate': '成功率',
+  'tokenUsage.successRateHint': '未报错的 API 调用占比，每次重试单独计数。',
+  'tokenUsage.successDetail': (v) =>
+    String(v?.failed ?? '0') === '0'
+      ? `${v?.requests ?? 0} 次请求全部成功`
+      : `${v?.requests ?? 0} 次请求中 ${v?.failed} 次失败`,
+  'tokenUsage.firstTokenDetail': (v) => `首 token 平均 ${v?.duration ?? ''}`,
+  'tokenUsage.modelSharesLabel': '各模型 Token 占比',
   'tokenUsage.unavailable': '当前会话无法读取 Token 消耗。',
 };

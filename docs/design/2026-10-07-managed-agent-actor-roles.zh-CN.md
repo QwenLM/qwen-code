@@ -2,6 +2,8 @@
 
 [English](2026-10-07-managed-agent-actor-roles.md) | [简体中文](2026-10-07-managed-agent-actor-roles.zh-CN.md)
 
+当前状态：下文 cwd 提交路由及 `SESSION_CWD_CHANGE` 条目描述历史角色矩阵。新建目录切换准入已退役；已有操作的查询及清算保留。参见[退役设计](2026-10-26-retire-managed-cwd-change.zh-CN.md)。
+
 议题：#13535（R1 actor 角色，R2 隔离验收）。上层：#12380 生产启用。词表来源：#12867 第 10 节（`reader`、`operator`、`owner`；无读权限返回 `404`，有读无操作权限返回 `403`；幂等域包含 actor —— D4 已在操作台账落地这一部分；submitter 族的命令键仍是 `(tenant_id, operation, idempotency_key)`，其 actor 限定跟进为 #13619）。本设计回答 #12867 的开放问题 Q4（角色从哪里来），并定义 surface 注册表及其构建门禁。
 
 核实基点：`main` = `ac497aeed9`（比 issue 点名的 `b585508733` 基线新一个提交；增量是本模块之外的 TUI 改动）。

@@ -20,3 +20,13 @@ export function isSlowTestHost(): boolean {
   }
   return os.loadavg()[0] >= os.availableParallelism() * 0.5;
 }
+
+/**
+ * Picks a timeout budget: the fast value on an idle host, the slow value on a
+ * shared or saturated one. The hosted approval suites wait on a chain of
+ * fsync-backed durable writes that can outlast a fixed budget under CI
+ * contention (#15176).
+ */
+export function slowHostBudgetMs(fastMs: number, slowMs: number): number {
+  return isSlowTestHost() ? slowMs : fastMs;
+}

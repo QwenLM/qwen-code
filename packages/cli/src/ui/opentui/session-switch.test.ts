@@ -126,6 +126,7 @@ function createFakeConfig(options?: {
     getSessionService: () => ({
       loadSession: async () => emptySession(),
       forkSession: async () => {},
+      findSessionTitlesByPrefix: async () => [],
       renameSession: async () => true,
       removeSession: async () => true,
     }),
@@ -231,7 +232,21 @@ describe('handleResumeSession', () => {
       failClientInitialize: true,
     });
     const host = createFakeHost(config);
+    const snapshot = {
+      requested: true,
+      recorded: true,
+      pending: false,
+      turns: 4,
+      announced: true,
+      available: true,
+    };
+    const restoreMode = vi.fn();
+    Object.assign(config, {
+      captureWorkflowModeState: () => snapshot,
+      restoreWorkflowModeState: restoreMode,
+    });
     await handleResumeSession(host, 'target-session');
+    expect(restoreMode).toHaveBeenCalledExactlyOnceWith(snapshot);
 
     // Forward swap happened, then the rollback restored the old session.
     expect(calls.startNewSession.map(([id]) => id)).toEqual([
@@ -250,6 +265,46 @@ describe('handleResumeSession', () => {
       expect.any(Number),
     );
   });
+
+  it.each(['resume', 'branch'] as const)(
+    'waits for the mode snapshot before %s and restores it on failure',
+    async (operation) => {
+      const { config, calls } = createFakeConfig({
+        failClientInitialize: true,
+      });
+      const host = createFakeHost(config);
+      const snapshot = {
+        requested: true,
+        recorded: true,
+        pending: true,
+        turns: 0,
+      };
+      let finish!: () => void;
+      const held = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const restore = vi.fn();
+      Object.assign(config, {
+        captureWorkflowModeState: async () => {
+          expect(calls.swapBegin).toBe(1);
+          await held;
+          return snapshot;
+        },
+        restoreWorkflowModeState: restore,
+      });
+      const pending =
+        operation === 'resume'
+          ? handleResumeSession(host, 'target-session')
+          : handleBranchSession(host);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const swapsBeforeSnapshot = calls.startNewSession.length;
+      finish();
+      await pending;
+      expect(swapsBeforeSnapshot).toBe(0);
+      expect(restore).toHaveBeenCalledExactlyOnceWith(snapshot);
+      expect(calls.swapAbort).toBe(1);
+    },
+  );
 
   it('revokes tools before init and restores a fresh owner after failed resume rolls back', async () => {
     const { config, calls } = createFakeConfig();

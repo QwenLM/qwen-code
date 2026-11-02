@@ -5,7 +5,7 @@
  */
 
 import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { parse } from 'yaml';
@@ -45,8 +45,10 @@ import scriptsTestsConfig from './vitest.config.js';
 // witness pins the flag in every guarded config so removing it from any
 // one of them fails the scripts suite on every platform.
 type ExemptionConfig = {
+  root?: string;
   test?: {
     dangerouslyIgnoreUnhandledErrors?: boolean;
+    outputFile?: { junit?: string };
     testTimeout?: number;
     pool?: 'threads' | 'forks' | 'vmThreads';
     poolOptions?: { threads?: { maxThreads?: number } };
@@ -91,6 +93,27 @@ describe('unhandled-error exemption on the platform lanes', () => {
       );
     });
   }
+});
+
+describe('JUnit report upload paths', () => {
+  const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+  const junitConfigs = Object.entries(configs).filter(
+    ([, config]) => config.test?.outputFile?.junit,
+  );
+
+  it.each(junitConfigs)(
+    '%s writes inside the package upload glob',
+    (name, config) => {
+      expect(
+        resolve(
+          repoRoot,
+          name,
+          config.root ?? '.',
+          config.test!.outputFile!.junit!,
+        ),
+      ).toBe(resolve(repoRoot, name, 'junit.xml'));
+    },
+  );
 });
 
 // Every workspace that `npm run test:ci --workspaces` runs lands on the same
@@ -462,12 +485,18 @@ describe('autofix gate load clamps', () => {
 });
 
 describe('bundle-guard timeout ceiling', () => {
-  it('keeps the bundle-guard timeout ceiling in packages/vscode-ide-companion', async () => {
+  it('keeps the bundle-guard timeout ceiling and worker cap in packages/vscode-ide-companion', async () => {
     // The config reads RUNNER_NAME at import time, so re-import it under
-    // each stub to pin both branches, not only the ambient one.
-    for (const [runnerName, expected] of [
-      ['ecs-qwen-parity', 60_000],
-      ['ubuntu-latest-runner', 15_000],
+    // each stub to pin both branches, not only the ambient one; the unset
+    // arm also catches a ternary that treats a missing variable as pool.
+    // maxWorkers is the default for runs carrying no VITEST_MAX_THREADS —
+    // CI lanes export it and vitest resolves it before config.maxWorkers —
+    // and must stay undefined off the pool so a flat '25%' cannot cap
+    // developer machines.
+    for (const [runnerName, expectedTimeout, expectedWorkers] of [
+      ['ecs-qwen-parity', 60_000, '25%'],
+      ['ubuntu-latest-runner', 15_000, undefined],
+      [undefined, 15_000, undefined],
     ] as const) {
       vi.stubEnv('RUNNER_NAME', runnerName);
       vi.resetModules();
@@ -475,7 +504,10 @@ describe('bundle-guard timeout ceiling', () => {
         '../../packages/vscode-ide-companion/vitest.config.js'
       );
       expect(mod.default.test?.testTimeout, `RUNNER_NAME=${runnerName}`).toBe(
-        expected,
+        expectedTimeout,
+      );
+      expect(mod.default.test?.maxWorkers, `RUNNER_NAME=${runnerName}`).toBe(
+        expectedWorkers,
       );
       vi.unstubAllEnvs();
     }

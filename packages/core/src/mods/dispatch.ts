@@ -11,6 +11,7 @@ import {
   validToolResult,
   validToolCheck,
 } from './tool-events.js';
+import { INVALIDATABLE_EVENTS, validateRenderTree } from './render-tree.js';
 
 export const MOD_METHODS = [
   'clock.now',
@@ -25,6 +26,8 @@ export const MOD_METHODS = [
   'session.turns',
   'session.usage',
   'session.version',
+  'turn.abort',
+  'ui.invalidate',
   'ui.log',
 ] as const;
 export const MOD_EVENTS = [
@@ -45,8 +48,17 @@ export const MOD_EVENTS = [
   'session.version',
   'tool.call',
   'tool.check',
+  'turn.abort',
+  'turn.complete',
+  'turn.start',
+  'ui.invalidate',
   'ui.log',
+  'ui.render',
 ] as const;
+// Events a host raises only where it draws: the load request names the sites.
+export const MOD_HOST_EVENTS: readonly ModEvent[] = ['ui.render'];
+// `$` methods that read rather than dispatch, so no hook hears them.
+export const MOD_READS = ['ui.resolve'] as const;
 export type ModEvent = (typeof MOD_EVENTS)[number];
 export type ModMethod = (typeof MOD_METHODS)[number];
 export const isModMethod = (name: string): name is ModMethod =>
@@ -68,6 +80,8 @@ const only = (value: ModInput, keys: readonly string[]) =>
 const text = (value: unknown) => typeof value === 'string';
 const amount = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0;
+const count = (value: unknown): value is number =>
+  Number.isSafeInteger(value) && Number(value) >= 0;
 const SURFACES: readonly unknown[] = [
   'terminal',
   'desktop',
@@ -150,27 +164,100 @@ export function validateInput(
   } else if (event === 'clock.sleep') {
     if (!only(value, ['ms']) || !amount(value['ms']))
       throw new Error('Mod sleep needs a non-negative number of milliseconds.');
+  } else if (event === 'turn.abort') {
+    if (!only(value, ['turnId']) || !text(value['turnId']))
+      throw new Error(
+        'Mod turn.abort takes { turnId } (the id turn.start carried).',
+      );
+  } else if (event === 'ui.invalidate') {
+    if (
+      !only(value, ['event']) ||
+      !(INVALIDATABLE_EVENTS as readonly unknown[]).includes(value['event'])
+    )
+      throw new Error(
+        'Mod ui.invalidate takes ui.render or a cached-answer event.',
+      );
+  } else if (event === 'ui.render') {
+    validateRenderInput(value, original);
   } else if (!isDeepStrictEqual(value, original))
     throw new Error('Mod hook changed pinned event fields.');
   if (Buffer.byteLength(JSON.stringify(value)) > MOD_MAX_BYTES)
     throw new Error('Mod event is too large.');
 }
 
-export function validateResult(event: ModEvent, value: unknown): void {
+// The envelope and `props.view` are pinned; the other props keep their kind.
+function validateRenderInput(value: ModInput, original: ModInput): void {
+  const props = value['props'];
+  const before = original['props'] as ModInput;
+  for (const key of ['surface', 'component', 'requestId', 'viewport'])
+    if (!isDeepStrictEqual(value[key], original[key]))
+      throw new Error('Mod hook changed pinned event fields.');
+  if (
+    !only(value, ['surface', 'component', 'requestId', 'viewport', 'props']) ||
+    !record(props) ||
+    !isDeepStrictEqual(Object.keys(props).sort(), Object.keys(before).sort()) ||
+    !isDeepStrictEqual(props['view'], before['view'])
+  )
+    throw new Error('Mod hook changed pinned event fields.');
+  for (const key of Object.keys(before)) {
+    const kindOf = (item: unknown) =>
+      item === null ? 'null' : Array.isArray(item) ? 'array' : typeof item;
+    if (kindOf(props[key]) !== kindOf(before[key]))
+      throw new Error(
+        `Mod ui.render props.${key} is ${kindOf(props[key])}, not ${kindOf(before[key])}.`,
+      );
+  }
+}
+
+/** A hook's tree that does not validate, in Claude Code's words. */
+export class ModRenderShapeError extends Error {
+  constructor(component: string, reason: string) {
+    super(`returned the wrong shape (a tree ${component} refuses: ${reason})`);
+  }
+}
+
+// The engine events whose answer is the one field core echoes back.
+const ECHOES: Partial<Record<ModEvent, string>> = {
+  'session.start': 'cwd',
+  'session.end': 'sessionId',
+  'turn.start': 'turnId',
+};
+
+export function validateResult(
+  event: ModEvent,
+  value: unknown,
+  input?: ModInput,
+): void {
+  if (event === 'ui.render') {
+    try {
+      validateRenderTree(value);
+    } catch (error) {
+      throw new ModRenderShapeError(
+        String(input?.['component'] ?? 'the site'),
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    return;
+  }
   if (!record(value)) throw new Error('Invalid Mod ' + event + ' result.');
   let valid: boolean;
+  const echoed = ECHOES[event];
   if (event === 'tool.call') valid = validToolResult(value);
   else if (event === 'tool.check') valid = validToolCheck(value);
   else if (event === 'command.run')
     valid =
       Object.keys(value).every((key) => key === 'text') &&
       (value['text'] === undefined || typeof value['text'] === 'string');
-  else if (event === 'session.start' || event === 'session.end') {
-    const key = event === 'session.start' ? 'cwd' : 'sessionId';
+  else if (echoed)
     valid =
-      Object.keys(value).every((k) => k === key) &&
-      typeof value[key] === 'string';
-  } else {
+      Object.keys(value).every((key) => key === echoed) &&
+      typeof value[echoed] === 'string';
+  else if (event === 'turn.complete')
+    valid =
+      only(value, ['text', 'usage']) &&
+      text(value['text']) &&
+      (value['usage'] === undefined || validTurnUsage(value['usage']));
+  else {
     valid =
       Object.keys(value).every((key) => key === 'deny' || key === 'value') &&
       (!('deny' in value) ||
@@ -214,6 +301,22 @@ function validUsage(value: unknown): boolean {
   );
 }
 
+const TURN_TOKENS = [
+  'input_tokens',
+  'output_tokens',
+  'cache_read_input_tokens',
+  'cache_creation_input_tokens',
+] as const;
+
+function validTurnUsage(value: unknown): boolean {
+  return (
+    record(value) &&
+    only(value, [...TURN_TOKENS, 'model']) &&
+    TURN_TOKENS.every((key) => count(value[key])) &&
+    text(value['model'])
+  );
+}
+
 // The answers an API event may carry as `{value}`, in Claude Code's shapes.
 const API_VALUES: Partial<Record<ModEvent, (value: unknown) => boolean>> = {
   'clock.now': amount,
@@ -227,10 +330,12 @@ const API_VALUES: Partial<Record<ModEvent, (value: unknown) => boolean>> = {
   'session.surface': (value) => value === null || SURFACES.includes(value),
   'session.surfaces': (value) =>
     Array.isArray(value) && value.every((item) => SURFACES.includes(item)),
-  'session.turns': (value) => Number.isSafeInteger(value) && Number(value) >= 0,
+  'session.turns': count,
   'session.usage': validUsage,
   'session.version': (value) =>
     record(value) && typeof value['version'] === 'string',
+  'turn.abort': (value) => value === undefined,
+  'ui.invalidate': (value) => value === undefined,
 };
 
 export class ModTimeoutError extends Error {

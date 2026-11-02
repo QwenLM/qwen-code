@@ -14,11 +14,13 @@ import {
   maybeOpenWebShellBrowser,
   serveCommand,
   validateManagedLocalFlags,
+  validateManagedWebFlags,
 } from './serve.js';
 
 const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
 const mockShouldLaunchBrowser = vi.hoisted(() => vi.fn(() => true));
 const mockRunQwenServe = vi.hoisted(() => vi.fn());
+const mockRunManagedWebServe = vi.hoisted(() => vi.fn());
 const mockApplyOpenWithAuth = vi.hoisted(() =>
   vi.fn((options: { token?: string }) => {
     options.token ??= 'generated-token';
@@ -47,6 +49,9 @@ vi.mock('qrcode-terminal', () => ({ default: mockQr }));
 vi.mock('../serve/run-qwen-serve.js', () => ({
   runQwenServe: mockRunQwenServe,
 }));
+vi.mock('../serve/managed-web-serve.js', () => ({
+  runManagedWebServe: mockRunManagedWebServe,
+}));
 vi.mock('../serve/open-with-auth.js', () => ({
   applyOpenWithAuth: mockApplyOpenWithAuth,
 }));
@@ -58,6 +63,68 @@ function buildParser(): Argv {
 }
 
 describe('serve command args', () => {
+  it('parses and isolates the Managed Web gateway deployment options', () => {
+    const parsed = buildParser().parseSync(
+      '--managed-web-config /etc/qwen-web/gateway.json --hostname 0.0.0.0 --port 4171 --allow-origin https://managed.example',
+    );
+    expect(parsed['managed-web-config']).toBe('/etc/qwen-web/gateway.json');
+    expect(parsed['allow-origin']).toEqual(['https://managed.example']);
+    expect(() => buildParser().parseSync('--managed-web-config')).toThrow(
+      /Not enough arguments/u,
+    );
+    expect(() =>
+      validateManagedWebFlags([
+        '--managed-web-config=x',
+        '--hostname',
+        '0.0.0.0',
+        '--require-auth',
+      ]),
+    ).not.toThrow();
+    for (const flag of [
+      '--managed',
+      '--workspace=/run/secrets',
+      '--profile=hosted-harness',
+      '--enable-session-shell',
+      '--channel=telegram',
+      '--no-require-auth',
+      '--open',
+    ]) {
+      expect(() =>
+        validateManagedWebFlags(['--managed-web-config=x', flag]),
+      ).toThrow('not supported with --managed-web-config');
+    }
+  });
+
+  it('dispatches the gateway without starting the ordinary daemon', async () => {
+    mockRunManagedWebServe.mockResolvedValueOnce({
+      url: 'http://0.0.0.0:4171',
+      finished: new Promise(() => {}),
+    });
+    mockRunQwenServe.mockClear();
+    const argv = buildParser().parseSync(
+      '--managed-web-config /etc/qwen-web/gateway.json --hostname 0.0.0.0 --port 4171',
+    );
+    void serveCommand.handler!(
+      argv as Parameters<NonNullable<typeof serveCommand.handler>>[0],
+    );
+    await vi.waitFor(() => expect(mockRunManagedWebServe).toHaveBeenCalled());
+    expect(mockRunManagedWebServe).toHaveBeenLastCalledWith({
+      configFile: '/etc/qwen-web/gateway.json',
+      hostname: '0.0.0.0',
+      port: 4171,
+      token: undefined,
+      allowOrigins: undefined,
+    });
+    expect(mockRunQwenServe).not.toHaveBeenCalled();
+  });
+
+  it('keeps a dash-leading numeric gateway token as an option value', () => {
+    const token = '-1234567890123456789012345678901234567890';
+    const args = ['--managed-web-config=x', '--token', token];
+    expect(buildParser().parseSync(args)['token']).toBe(token);
+    expect(() => validateManagedWebFlags(args)).not.toThrow();
+  });
+
   it('refuses flags whose ordinary-daemon behavior is unavailable in Managed mode', () => {
     expect(() =>
       validateManagedLocalFlags(['--managed', '--port=0', '--no-open']),
@@ -107,7 +174,7 @@ describe('serve command args', () => {
     );
     expect(help).toContain(
       squash(
-        '--managed-runtime-broker-token Private Broker credential for --profile hosted-harness; required together with URL for Workspace tool turns. Falls back to QWEN_MANAGED_RUNTIME_BROKER_TOKEN. --',
+        '--managed-runtime-broker-token Private Broker credential for --profile hosted-harness; required together with URL for Workspace tool turns. Falls back to QWEN_MANAGED_RUNTIME_BROKER_TOKEN; prefer the variable, since this option puts the credential in the process list. --',
       ),
     );
     expect(help).not.toContain('ReservedBroker');
@@ -996,6 +1063,71 @@ describe('serve rate limit env parsing', () => {
       handler(argv as Parameters<typeof handler>[0]),
     ).rejects.toThrow('process.exit(1) called');
     expect(mockRunQwenServe).not.toHaveBeenCalled();
+  });
+
+  it('takes the Broker pair from the environment and removes it', async () => {
+    process.env['QWEN_MANAGED_RUNTIME_BROKER_URL'] = 'http://127.0.0.1:4182';
+    process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'] = 'env-broker-secret';
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    // The runtime snapshots process.env for every process it starts, so the
+    // pair must already be gone when it begins.
+    let brokerEnvAtRuntimeStart: Array<string | undefined> = [];
+    mockRunQwenServe.mockImplementationOnce(async () => {
+      brokerEnvAtRuntimeStart = [
+        process.env['QWEN_MANAGED_RUNTIME_BROKER_URL'],
+        process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'],
+      ];
+      return { url: 'http://127.0.0.1:4170/', webShellMounted: false };
+    });
+
+    await startServeHandlerWithArgs('--profile hosted-harness --no-web');
+
+    expect(brokerEnvAtRuntimeStart).toEqual([undefined, undefined]);
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).toMatchObject({
+      managedRuntimeBrokerUrl: 'http://127.0.0.1:4182',
+      managedRuntimeBrokerToken: 'env-broker-secret',
+    });
+    expect(process.env['QWEN_MANAGED_RUNTIME_BROKER_URL']).toBeUndefined();
+    expect(process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN']).toBeUndefined();
+    expect(stderrWrites.join('')).not.toContain(
+      '--managed-runtime-broker-token',
+    );
+  });
+
+  it('prefers the Broker options and warns about the token on the command line', async () => {
+    process.env['QWEN_MANAGED_RUNTIME_BROKER_URL'] = 'http://127.0.0.1:4182';
+    process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'] = 'env-broker-secret';
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      '--profile hosted-harness --no-web' +
+        ' --managed-runtime-broker-url http://127.0.0.1:4200' +
+        ' --managed-runtime-broker-token flag-broker-secret',
+    );
+
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).toMatchObject({
+      managedRuntimeBrokerUrl: 'http://127.0.0.1:4200',
+      managedRuntimeBrokerToken: 'flag-broker-secret',
+    });
+    // The unused environment copy is removed too.
+    expect(process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN']).toBeUndefined();
+    const stderr = stderrWrites.join('');
+    expect(stderr).toContain(
+      'qwen serve: --managed-runtime-broker-token is visible in the process command line; prefer the QWEN_MANAGED_RUNTIME_BROKER_TOKEN env var.',
+    );
+    expect(stderr).not.toContain('flag-broker-secret');
   });
 });
 

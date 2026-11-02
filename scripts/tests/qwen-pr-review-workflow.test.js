@@ -40,6 +40,18 @@ const botLogin =
     .jobs['review-config'].steps.find((s) => s.name === 'Set review constants')
     ?.run.match(/bot_login=([A-Za-z0-9-]+)/)?.[1] ?? '';
 
+// The supersede kill dir is minted under RUNNER_TEMP with a fixed prefix and
+// never exported (R4-1), so the replay's forge stub can only DISCOVER it by
+// listing that prefix. The two literals live in different files; renaming one
+// side alone leaves the stub globbing nothing, the forged kill record never
+// lands, and the refusal replay goes vacuously green. Derive the production
+// prefix from the workflow text and pin the stub glob to it (the supersede
+// suite asserts the pair).
+const supersedeKillDirPrefix =
+  workflow.match(/SUPERSEDE_KILL_DIR="[^\n]*?\/tmp\}\/([^."]+)\.XXXXXX/)?.[1] ??
+  '';
+const forgedKillDirGlob = `"\${RUNNER_TEMP}"/qwen-review-supersede-kill.*`;
+
 // Capability probe, not a platform check: the FIFO wedge tests need
 // mkfifo(1). vitest.config excludes win32 only, so the merge_group/schedule
 // gated test_macos lane runs this suite too, and a host without mkfifo
@@ -488,7 +500,9 @@ function runScenario(
         // the stub DISCOVERS it by listing (no derivation), plants the kill
         // record plus SUPERSEDE_FILE, and dies non-retryably (a fatal
         // skips the retry reset that clears plants).
-        '  supersede_forged_kill_record) for d in "${RUNNER_TEMP}"/qwen-review-supersede-kill.*; do if [ -d "$d" ]; then printf "head-b" > "$d/killed"; fi; done; printf "head-b" > "$SUPERSEDE_FILE"; exit 3 ;;',
+        '  supersede_forged_kill_record) for d in ' +
+          forgedKillDirGlob +
+          '; do if [ -d "$d" ]; then printf "head-b" > "$d/killed"; fi; done; printf "head-b" > "$SUPERSEDE_FILE"; exit 3 ;;',
         '  retry_watcher_relaunch) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; else i=0; until [ -f "$SUPERSEDE_FILE" ] || [ "$i" -ge 200 ]; do /bin/sleep 0.05; i=$((i+1)); done; r success false "[API Error: 503 upstream overloaded]"; fi ;;',
         '  retry_clears_stale_signals) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; else { [ -f "$SUPERSEDE_FILE" ] && echo present || echo absent; } >> "$OBS"; r success false "ok"; fi ;;',
         '  compose_latch_reset) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; : > "$SALVAGE_DIR/compose-seen"; else { [ -f "$SALVAGE_DIR/compose-seen" ] && echo present || echo absent; } >> "$OBS"; r success false "[API Error: 503 upstream overloaded]"; fi ;;',
@@ -4753,6 +4767,19 @@ describe('review supersede salvage (#10110)', () => {
     );
   });
 
+  it('discovers the kill dir with the prefix the workflow mints', () => {
+    // The kill dir is never exported, so the replayed agent can only reach
+    // it by DISCOVERING it: the forge stub lists RUNNER_TEMP for the prefix
+    // production mints. Rename either literal alone and the glob matches
+    // nothing — the forged record never lands, and the refusal replay below
+    // still passes without exercising the refusal. Pin the stub glob to the
+    // prefix derived from the workflow text so that one-sided edit is red.
+    expect(supersedeKillDirPrefix).not.toBe('');
+    expect(forgedKillDirGlob).toBe(
+      `"\${RUNNER_TEMP}"/${supersedeKillDirPrefix}.*`,
+    );
+  });
+
   it('never arms the watcher in a replay even if the environment exports AUTO_REVIEW', () => {
     // runScenario spreads the parent environment and the extraction window
     // contains the arming: without the false pin, an inherited
@@ -6921,7 +6948,7 @@ describe('review supersede salvage (#10110)', () => {
   });
 
   it('exports the salvage-post contract to the agent only where the watcher arms (shape)', () => {
-    // R32-2: the skill's anchorsAtRisk=true rule restarts unless the
+    // R32-2: the skill's anchorsAtRisk=true rule re-anchors unless the
     // environment carries the CI salvage contract; the export sits inside
     // the AUTO_REVIEW-gated arming block, so an explicit run (no watcher,
     // any marker forged) never carries it. Cross-pinned with
@@ -7422,4 +7449,172 @@ describe('review supersede salvage (#10110)', () => {
       );
     },
   );
+});
+
+describe('review model canary routing', () => {
+  const run = runReviewStep();
+
+  it('wires the three model variables instead of pinning OPENAI_MODEL', () => {
+    const step = parse(workflow).jobs['review-pr'].steps.find(
+      (s) => s.name === 'Run review',
+    );
+    expect(step.env.REVIEW_MODEL_DEFAULT).toBe(
+      '${{ vars.QWEN_PR_REVIEW_MODEL }}',
+    );
+    expect(step.env.REVIEW_MODEL_CANARY).toBe(
+      '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY }}',
+    );
+    expect(step.env.REVIEW_MODEL_CANARY_PERCENT).toBe(
+      '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY_PERCENT }}',
+    );
+    // The env no longer carries the model itself: a literal there would make
+    // every split a workflow edit, which is the thing a rollout must not need.
+    expect(step.env.OPENAI_MODEL).toBeUndefined();
+
+    // Selection runs before --model is built, and the run announces its
+    // cohort: the model is recorded nowhere else a later comparison could
+    // read it, so without the notice a rollout leaves no trace of which model
+    // served a given review.
+    const select = run.indexOf('OPENAI_MODEL="$(review_model_for_bucket');
+    expect(select).toBeGreaterThan(-1);
+    expect(select).toBeLessThan(run.indexOf('MODEL_ARGS=()'));
+    expect(run.indexOf('::notice title=Review model::')).toBeGreaterThan(
+      select,
+    );
+  });
+
+  it('buckets by PR number and stays inside the configured percent', () => {
+    // The router delegates its clamp to canary_percent_effective, so executing
+    // either needs both. js-yaml has stripped the block scalar's indentation,
+    // so both closing braces sit at column 0.
+    const fn = run.match(
+      /canary_percent_effective\(\) \{[\s\S]*?review_model_for_bucket\(\) \{[\s\S]*?\n\}/,
+    )?.[0];
+    expect(fn).toBeTruthy();
+    const pick = (defaultModel, canaryModel, percent, pr) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -euo pipefail\n${fn}\nreview_model_for_bucket '${defaultModel}' '${canaryModel}' '${percent}' '${pr}'`,
+        ],
+        { encoding: 'utf8' },
+      ).trim();
+
+    // Off unless a percent is set: merging this changes nothing, which is
+    // what makes the rollout a variable change and its revert one too.
+    for (const percent of ['', '0', 'abc']) {
+      expect(pick('main', 'canary', percent, '12345')).toBe('main');
+    }
+    // No canary model, no split, however high the percent goes.
+    expect(pick('main', '', '100', '12345')).toBe('main');
+    expect(pick('main', 'canary', '100', '12345')).toBe('canary');
+
+    // Whole buckets only, measured as an effect: at 10%, sweep the full
+    // bucket range and pin exactly which PRs are selected. This dominates a
+    // single boundary pair, and two identical calls are self-equality.
+    const canaried = execFileSync(
+      'bash',
+      [
+        '-c',
+        `set -euo pipefail\n${fn}\nfor pr in {12300..12399}; do if [ "$(review_model_for_bucket main canary 10 "$pr")" = canary ]; then echo "$pr"; fi; done`,
+      ],
+      { encoding: 'utf8' },
+    )
+      .trim()
+      .split('\n');
+    expect(canaried).toEqual(
+      Array.from({ length: 10 }, (_, i) => String(12300 + i)),
+    );
+
+    // Repository-variable typos fail toward off, never toward full rollout.
+    // One row per clamp step; deleting that step alone flips its row. The
+    // 20-digit value is the digit bound's: bash wraps it to 50.
+    expect(pick('main', 'canary', '08', '12307')).toBe('canary');
+    expect(pick('main', 'canary', '0050', '12325')).toBe('canary');
+    expect(pick('main', 'canary', '250', '12399')).toBe('main');
+    expect(pick('main', 'canary', '18446744073709551666', '12300')).toBe(
+      'main',
+    );
+
+    // A PR number that cannot be read keeps the default rather than guessing.
+    expect(pick('main', 'canary', '100', '')).toBe('main');
+    expect(pick('main', 'canary', '100', 'x123')).toBe('main');
+  });
+
+  // The rows above supply their own positional arguments, so they cannot see
+  // the four the workflow actually passes: transposing the default and canary
+  // arguments inverts the rollout, and swapping PR_NUMBER for a per-run value
+  // loses the bucket entirely — both with every row above still green. Slice
+  // the real block (helper, router, trim, call site, notice, MODEL_ARGS) and
+  // execute it with the values the step's `env:` supplies.
+  it('routes and reports at the real call site, not a paraphrase of it', () => {
+    const start = run.indexOf('canary_percent_effective() {');
+    const notice = run.indexOf('echo "::notice title=Review model::');
+    const args = run.indexOf('MODEL_ARGS=()', notice);
+    const end = run.indexOf('\nfi', args) + '\nfi'.length;
+    expect(start).toBeGreaterThan(-1);
+    expect(notice).toBeGreaterThan(start);
+    expect(args).toBeGreaterThan(notice);
+    expect(end).toBeGreaterThan(args);
+    const block = run.slice(start, end);
+
+    // GITHUB_RUN_ID is pinned so the fourth argument cannot be swapped for a
+    // per-run value unnoticed: 9999999 % 100 = 99 is outside every percent a
+    // case below configures, so such a swap routes to the default model.
+    const serve = (canary, percent, pr) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -euo pipefail\n${block}\nprintf '%s' "$OPENAI_MODEL|${'${MODEL_ARGS[*]-}'}"`,
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            REVIEW_MODEL_DEFAULT: 'default-model',
+            REVIEW_MODEL_CANARY: canary,
+            REVIEW_MODEL_CANARY_PERCENT: percent,
+            PR_NUMBER: pr,
+            GITHUB_RUN_ID: '9999999',
+          },
+        },
+      );
+
+    // 12309 % 100 = 9 is inside a 10% split; 12310 % 100 = 10 is not. The
+    // notice's model field is anchored — a bare 'canary' check is satisfied
+    // by the percent suffix even when the model field is wrong.
+    expect(serve('canary-model', '10', '12309')).toBe(
+      '::notice title=Review model::canary-model (PR #12309, canary 10%)\n' +
+        'canary-model|--model canary-model',
+    );
+    expect(serve('canary-model', '10', '12310')).toBe(
+      '::notice title=Review model::default-model (PR #12310, canary 10%)\n' +
+        'default-model|--model default-model',
+    );
+
+    // The notice reports the percent the router APPLIED, not the configured
+    // one. Both of these clamp to off, so the raw variable would announce a
+    // canary cohort that never ran — '10 ' is the silent spelling, since
+    // nothing about `canary 10 %` looks malformed.
+    for (const percent of ['250', '10 ']) {
+      expect(serve('canary-model', percent, '12309')).toBe(
+        `::notice title=Review model::default-model (PR #12309, canary 0%)\n` +
+          'default-model|--model default-model',
+      );
+    }
+
+    // A padded canary name must not reach --model verbatim: the provider
+    // rejects it and that failure is terminal for the whole cohort. Trimming
+    // still leaves whitespace-only meaning "no split", not an invented one.
+    expect(serve(' canary-model ', '100', '12345')).toBe(
+      '::notice title=Review model::canary-model (PR #12345, canary 100%)\n' +
+        'canary-model|--model canary-model',
+    );
+    expect(serve('   ', '100', '12345')).toBe(
+      '::notice title=Review model::default-model (PR #12345, canary 100%)\n' +
+        'default-model|--model default-model',
+    );
+  });
 });

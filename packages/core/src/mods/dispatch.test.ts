@@ -695,6 +695,8 @@ describe('Mod API event shapes', () => {
     ['session.usage', { ...usage, context: {} }, false],
     ['session.usage', { ...usage, rateLimits: [{ kind: 'x' }] }, false],
     ['session.usage', { ...usage, cost: { usd: -1 } }, false],
+    ['turn.abort', undefined, true],
+    ['turn.abort', true, false],
   ] as const)('checks a %s answer of %j', (event, value, valid) => {
     const check = () => validateResult(event, { value });
     if (valid) expect(check).not.toThrow();
@@ -712,10 +714,56 @@ describe('Mod API event shapes', () => {
     ['session.usage', { mode: 'full' }, false],
     ['session.id', {}, true],
     ['session.id', { force: true }, false],
+    ['turn.abort', { turnId: 'turn-1' }, true],
+    ['turn.abort', {}, false],
+    ['turn.abort', { turnId: 1 }, false],
+    ['turn.abort', { turnId: 'turn-1', reason: 'x' }, false],
   ] as const)('checks %s arguments %j', (event, value, valid) => {
     const check = () => validateInput(event, value, {});
     if (valid) expect(check).not.toThrow();
     else expect(check).toThrow();
+  });
+
+  const turnUsage = {
+    input_tokens: 1,
+    output_tokens: 2,
+    cache_read_input_tokens: 3,
+    cache_creation_input_tokens: 0,
+    model: 'qwen-max',
+  };
+  it.each([
+    ['turn.start', { turnId: 'turn-1' }, true],
+    ['turn.start', { turnId: 'turn-1', text: 'x' }, false],
+    ['turn.start', {}, false],
+    ['turn.complete', { text: '' }, true],
+    ['turn.complete', { text: 'TL;DR', usage: turnUsage }, true],
+    ['turn.complete', { text: 'x', extra: 1 }, false],
+    ['turn.complete', { usage: turnUsage }, false],
+    ['turn.complete', { text: 'x', usage: { ...turnUsage, model: 1 } }, false],
+    [
+      'turn.complete',
+      { text: 'x', usage: { ...turnUsage, output_tokens: 1.5 } },
+      false,
+    ],
+    [
+      'turn.complete',
+      { text: 'x', usage: { ...turnUsage, cache_read_input_tokens: -1 } },
+      false,
+    ],
+  ] as const)('checks a %s result of %j', (event, value, valid) => {
+    const check = () => validateResult(event, value);
+    if (valid) expect(check).not.toThrow();
+    else expect(check).toThrow('Unsupported ' + event + ' result fields.');
+  });
+
+  it('pins the turn events against a rewritten input', () => {
+    const start = { text: 'Fix it', turnId: 'turn-1' };
+    expect(() =>
+      validateInput('turn.start', { ...start }, start),
+    ).not.toThrow();
+    expect(() =>
+      validateInput('turn.start', { ...start, text: 'other' }, start),
+    ).toThrow('Mod hook changed pinned event fields.');
   });
 });
 

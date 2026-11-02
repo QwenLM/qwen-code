@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { EXTRACT_NOOP_SKIP_TURNS_ENV } from '@qwen-code/qwen-code-core/memory/extract-cadence.js';
 import {
   acquireInheritedLoaderEnvScrub,
   clearLoaderKeyRejectionReporterIfCurrent,
@@ -61,6 +62,16 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   it('keeps ACP repeated-tool-failure rollout policy operator-owned', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
       ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
+    );
+  });
+
+  // The extraction-cadence experiment (#13004) is default-off, and its gate
+  // reads process.env on every call: a repo-shipped .env that set it would
+  // switch the experiment on for every session in that repository without an
+  // operator opt-in and change what the paired runs measure.
+  it('keeps the extraction-cadence experiment operator-owned', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      EXTRACT_NOOP_SKIP_TURNS_ENV,
     );
   });
 
@@ -439,6 +450,9 @@ describe('isLoaderEnvKey', () => {
     expect(isLoaderEnvKey('npm_config_node-options')).toBe(true);
     expect(isLoaderEnvKey('NPM_CONFIG_NODE-OPTIONS')).toBe(true);
     expect(isLoaderEnvKey('Node_Options')).toBe(true);
+    expect(isLoaderEnvKey('BUN_OPTIONS')).toBe(true);
+    expect(isLoaderEnvKey('bun_options')).toBe(true);
+    expect(isLoaderEnvKey('BUN_OPTIONS_EXTRA')).toBe(false);
     expect(isLoaderEnvKey('ld_preload')).toBe(true);
     expect(isLoaderEnvKey('npm_config_registry')).toBe(false);
     expect(isLoaderEnvKey('PATH')).toBe(false);
@@ -525,6 +539,7 @@ describe('scrubInheritedLoaderEnv', () => {
   it('removes every loader-affecting key and keeps the rest', () => {
     const env: NodeJS.ProcessEnv = {
       NODE_OPTIONS: '--import file:///other-checkout/register.mjs',
+      BUN_OPTIONS: '--preload /other-checkout/hook.mjs',
       npm_config_node_options: '--import file:///other-checkout/hook.mjs',
       npm_config_userconfig: '/other-checkout/.npmrc',
       NODE_PATH: '/other-checkout/node_modules',
@@ -555,6 +570,7 @@ describe('scrubInheritedLoaderEnv', () => {
     // keys that were actually present.
     expect(removedKeys).toEqual([
       'NODE_OPTIONS',
+      'BUN_OPTIONS',
       'npm_config_node_options',
       'npm_config_userconfig',
       'NODE_PATH',
@@ -622,6 +638,7 @@ describe('scrubInheritedLoaderEnv', () => {
   it('pins the exact loader-key list so silent edits fail', () => {
     expect([...INHERITED_LOADER_ENV_KEYS].sort()).toEqual([
       'BASH_ENV',
+      'BUN_OPTIONS',
       'DYLD_INSERT_LIBRARIES',
       'LD_AUDIT',
       'LD_PRELOAD',

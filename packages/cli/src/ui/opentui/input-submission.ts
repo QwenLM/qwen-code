@@ -5,7 +5,11 @@
  */
 
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
-import { restorePasteDraft } from '../utils/paste-placeholders.js';
+import {
+  CLIPBOARD_PASTE_FRAMING,
+  framePasteExpansion,
+  restorePasteDraft,
+} from '../utils/paste-placeholders.js';
 
 export interface OpenTuiRestoredDraft {
   readonly modelText: string;
@@ -65,6 +69,22 @@ export function restoreInputSubmissions(
   const submittedPrompt = drafts
     .map((draft) => draft.submittedPrompt)
     .join(separator);
+  let hasFramedPaste = false;
+  const framingSuffix = `\n${CLIPBOARD_PASTE_FRAMING}`;
+  const modelText = drafts
+    .map((draft) => {
+      const text = draft.modelText;
+      if (
+        draft.pasteExpansions?.size &&
+        text.endsWith(framingSuffix) &&
+        framePasteExpansion(draft.displayText, draft.pasteExpansions) === text
+      ) {
+        hasFramedPaste = true;
+        return text.slice(0, -framingSuffix.length);
+      }
+      return text;
+    })
+    .join(separator);
   return {
     text: displayText,
     imagePaths: entries.flatMap((entry) => entry.imagePaths ?? []),
@@ -72,7 +92,7 @@ export function restoreInputSubmissions(
     deferUntilIdle: entries.every((entry) => entry.deferUntilIdle),
     restoredDraft: {
       displayText,
-      modelText: drafts.map((draft) => draft.modelText).join(separator),
+      modelText: hasFramedPaste ? modelText + framingSuffix : modelText,
       submittedPrompt,
       hasUnknownInput: drafts.some((draft) => draft.hasUnknownInput),
       ...(humanTexts.length

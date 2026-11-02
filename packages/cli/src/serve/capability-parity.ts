@@ -121,14 +121,16 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   session_attachment_list: NO_MANAGED_EQUIVALENT(
     'no Managed attachment listing',
   ),
-  session_mid_turn_message_mutation: NO_MANAGED_EQUIVALENT(
-    'no Managed mid-turn message queue',
-  ),
-  session_mid_turn_message_query: NO_MANAGED_EQUIVALENT(
-    'no Managed mid-turn message queue',
-  ),
+  session_mid_turn_message_mutation: {
+    standing: 'managed',
+    evidence: 'surface:USER_MESSAGE_COMMAND',
+  },
+  session_mid_turn_message_query: {
+    standing: 'managed',
+    evidence: 'surface:USER_MESSAGE_QUERY',
+  },
   session_mid_turn_send_now: NO_MANAGED_EQUIVALENT(
-    'no Managed mid-turn message queue',
+    'Managed consumes queued guidance automatically at safe model boundaries',
   ),
   session_cancel: { standing: 'managed', evidence: 'surface:TURN_CANCEL' },
   session_events: { standing: 'managed', evidence: 'surface:TAIL_EVENTS' },
@@ -141,6 +143,12 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     standing: 'managed',
     evidence: 'surface:ARTIFACT_GET',
   },
+  workspace_artifact_library: NO_MANAGED_EQUIVALENT(
+    'no Managed workspace-wide artifact query or explicit-pair batch removal',
+  ),
+  workspace_artifact_library_stream: NO_MANAGED_EQUIVALENT(
+    'no Managed progressive workspace artifact query with session summaries',
+  ),
   session_sources: NO_MANAGED_EQUIVALENT('no Managed session source list'),
   slow_client_warning: LEGACY_ONLY(
     'SSE backpressure is a legacy transport knob',
@@ -228,6 +236,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   scheduled_task_gate: NO_MANAGED_EQUIVALENT(
     'no scheduled-task gate in Managed automations',
   ),
+  autofix_pr_watches: NO_MANAGED_EQUIVALENT(
+    'no /autofix-pr watch in a Managed workspace',
+  ),
   session_monitor_tool_correlation: {
     standing: 'managed',
     evidence: 'tool:monitor',
@@ -305,7 +316,10 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     standing: 'managed',
     evidence: 'tool:write_file,tool:edit',
   },
-  workspace_file_upload: NO_MANAGED_EQUIVALENT('no Managed file upload route'),
+  workspace_file_upload: {
+    standing: 'managed',
+    evidence: 'surface:WORKSPACE_FILES_UPLOAD',
+  },
   workspace_file_delete: NO_MANAGED_EQUIVALENT('no Managed file delete route'),
   workspace_directory_create: NO_MANAGED_EQUIVALENT(
     'no Managed directory create route',
@@ -328,10 +342,10 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed session refresh route',
   ),
   extension_batch_activation_v2: NO_MANAGED_EQUIVALENT(
-    'no Managed extension management route',
+    'Managed packages use a separate Session-pinned lifecycle contract',
   ),
   extension_activation_explicit_refresh: NO_MANAGED_EQUIVALENT(
-    'no Managed extension management route',
+    'Managed packages use a separate Session-pinned lifecycle contract',
   ),
   workspace_skill_manage: NO_MANAGED_EQUIVALENT(
     'no Managed skill management route',
@@ -375,6 +389,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed stateless generation route',
   ),
   session_btw: NO_MANAGED_EQUIVALENT('no Managed side-question route'),
+  session_btw_stream: NO_MANAGED_EQUIVALENT(
+    'no Managed streaming side-question route',
+  ),
   session_shell_command: {
     standing: 'managed',
     evidence: 'tool:run_shell_command',
@@ -408,7 +425,7 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_hooks: { standing: 'managed', evidence: 'surface:HOOK_CATALOG' },
   session_hooks: { standing: 'managed', evidence: 'surface:HOOK_CATALOG' },
   workspace_extensions: NO_MANAGED_EQUIVALENT(
-    'no Managed extension management route',
+    'Managed packages use a separate Session-pinned lifecycle contract',
   ),
   session_branch: NO_MANAGED_EQUIVALENT('no Managed branch route'),
   session_branch_worktree: NO_MANAGED_EQUIVALENT('no Managed branch route'),
@@ -454,8 +471,14 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     standing: 'managed',
     evidence: 'surface:WORKSPACE_CREATE',
   },
+  git_workspace_clone: NO_MANAGED_EQUIVALENT(
+    'the Managed workspace creation surface only creates empty directories',
+  ),
   workspace_runtime_removal: NO_MANAGED_EQUIVALENT(
     'no Managed Workspace removal route',
+  ),
+  workspace_directories: NO_MANAGED_EQUIVALENT(
+    'a Managed Workspace exposes one root; there is no extra-directory list',
   ),
   native_directory_picker: LEGACY_ONLY(
     'a daemon-host dialog; Managed has none',
@@ -479,19 +502,19 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'issue #15075: no Managed memory CRUD',
   ),
   extension_management_v2: NO_MANAGED_EQUIVALENT(
-    'no Managed extension management route',
+    'Managed packages use a separate Session-pinned lifecycle contract',
   ),
   extension_list_details: NO_MANAGED_EQUIVALENT(
-    'no Managed extension management route',
+    'Managed packages use a separate Session-pinned lifecycle contract',
   ),
   extension_state: NO_MANAGED_EQUIVALENT(
-    'no Managed extension management route',
+    'Managed packages use a separate Session-pinned lifecycle contract',
   ),
   extension_git_credentials: NO_MANAGED_EQUIVALENT(
-    'no Managed extension management route',
+    'Managed packages use a separate Session-pinned lifecycle contract',
   ),
   extension_local_path_install: NO_MANAGED_EQUIVALENT(
-    'no Managed extension management route',
+    'Managed packages use a separate Session-pinned lifecycle contract',
   ),
   workspace_persisted_transcript: {
     standing: 'managed',
@@ -505,6 +528,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed archived export route',
   ),
   workspace_session_live_state: NO_MANAGED_EQUIVALENT(
+    'no Managed live-state snapshot',
+  ),
+  workspace_session_live_state_batch: NO_MANAGED_EQUIVALENT(
     'no Managed live-state snapshot',
   ),
   workspace_session_metadata: NO_MANAGED_EQUIVALENT(
@@ -544,7 +570,6 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'SESSION_GET',
   'SESSION_RENAME',
   'SESSION_DELETE',
-  'SESSION_CWD_CHANGE',
   'SESSION_OPERATION_GET',
   'SESSION_MODELS',
   'SESSION_MCP',
@@ -562,6 +587,7 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'WORKSPACE_DIRECTORY_CHECK',
   'WORKSPACE_FILES_QUERY',
   'WORKSPACE_FILES_READ',
+  'WORKSPACE_FILES_UPLOAD_QUERY',
   // Tenant resources and admission the daemon has no counterpart for.
   'AGENT_DEFINITION_GET',
   'AGENT_DEFINITION_UPDATE',
@@ -573,6 +599,8 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'AUTOMATION_UPDATE',
   'CHANNEL_DELIVERY_LIST',
   'RUNTIME_NODE_LIST',
+  // Loopback operator registration has no client capability.
+  'EXTERNAL_STORAGE_REGISTER',
   // Internal writer and publication routes: between the control plane and its
   // own stores, behind writer credentials, never a client capability.
   'PUB_ADMISSION_PREPARE',
@@ -589,11 +617,15 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'PUB_STREAM_PREFIX',
   'PUB_STREAM_SEAL',
   'STORE_APPROVAL_QUERY',
+  'STORE_USER_MESSAGE_CLAIM',
   'STORE_EXECUTION_AUTHORIZE',
   'STORE_LIFECYCLE_AUTHORIZE',
   'STORE_RECOVERY_BLOCK',
   'STORE_RESOURCE_GET',
   'STORE_RESTORE',
+  'STORE_SNAPSHOT_GET',
+  'STORE_SNAPSHOT_PAGES',
+  'STORE_SNAPSHOT_PUBLISH',
   'STORE_TOOL_RESULT_PUBLISH',
   'STORE_TRANSACTION_COMMIT',
   'STORE_TRANSACTION_LIST',
@@ -609,16 +641,26 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
  * column checked — a route added or removed without a decision fails the
  * suite — while the signal stays visible to whoever reads the matrix.
  *
- * Each label is a route pair on the public and the WebShell surface:
+ * The extension labels describe the Managed package lifecycle, whose
+ * Session-pinned contract differs from the daemon's extension APIs.
  * `SESSION_CONTEXT_COMPRESSION` compresses a Session's context,
  * `SESSION_RECOVERY_QUERY` reads a Session's recovery state and
- * `SESSION_RECOVERY_RECHECK` re-runs its recovery checks. The daemon
- * advertises no tag for any of the three.
+ * `SESSION_RECOVERY_RECHECK` re-runs its recovery checks.
  */
 export const MANAGED_ONLY_REPORTED: readonly string[] = [
+  'EXTENSION_ARCHIVE',
+  'EXTENSION_CONFIG_APPLY',
+  'EXTENSION_CONFIG_GET',
+  'EXTENSION_GET',
+  'EXTENSION_LIST',
+  'EXTENSION_OPERATION',
+  'EXTENSION_PUBLISH',
+  'EXTENSION_SETTINGS_GET',
+  'EXTENSION_SETTINGS_SET',
   'SESSION_CONTEXT_COMPRESSION',
   'SESSION_RECOVERY_QUERY',
   'SESSION_RECOVERY_RECHECK',
+  'SESSION_WORKTREE',
 ];
 
 /**

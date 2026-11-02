@@ -31,10 +31,14 @@ import {
   type Snapshot,
 } from './snapshot.js';
 import {
+  MAX_NEEDS_HUMAN,
   REPLY_MARKER,
-  assertOwnedBySession,
+  assertWatching,
+  isRegularFile,
+  TASK_OPTION,
+  taskArg,
   autofixPrPaths,
-  repoRoot,
+  resolveWatchRoot,
   requireState,
   withWatchLock,
   writeState,
@@ -42,14 +46,19 @@ import {
   type AutofixPrState,
   type PendingPost,
 } from './state.js';
+import { assertNoFixInFlight, fixSnapshotPath } from './fix.js';
 
 /** GitHub refuses a comment body longer than this. */
 const MAX_BODY_CHARS = 65_536;
 
+/** Longest `needsHuman` line kept; a longer one is cut. */
+const MAX_NEEDS_HUMAN_CHARS = 300;
+
 export interface ReplyPlan {
   /** Replies to review threads, by the thread's first comment. */
   replies?: Array<{ replyTo: number; body: string; handled: string[] }>;
-  /** The round's PR comment: what the push addressed and how it was verified. */
+  /** The round's PR comment: what the push addressed and how it was
+   * verified, or — with nothing pushed — what blocks it and needs a person. */
   summary?: { body: string; handled?: string[] } | null;
   /** Comments handled without a reply of their own. */
   handled?: string[];
@@ -57,6 +66,8 @@ export interface ReplyPlan {
   handledChecks?: string[];
   /** The head's merge conflict was left for a human. */
   handledConflict?: boolean;
+  /** One line per item the round left for a person, for `status`. */
+  needsHuman?: string[];
 }
 
 export interface ReplyOutcome {
@@ -115,6 +126,7 @@ export function parsePlan(raw: unknown): Required<ReplyPlan> {
     'handled',
     'handledChecks',
     'handledConflict',
+    'needsHuman',
   ]);
   const unknown = Object.keys(plan).filter((key) => !known.has(key));
   if (unknown.length > 0) {
@@ -188,6 +200,19 @@ export function parsePlan(raw: unknown): Required<ReplyPlan> {
     handled,
     handledChecks: stringList(plan['handledChecks'], 'handledChecks'),
     handledConflict: conflict === true,
+    // Shown in a list, one line each.
+    needsHuman: stringList(plan['needsHuman'], 'needsHuman').map((text) => {
+      // By code point, so a cut never splits a surrogate pair.
+      const line = [
+        ...text
+          .replace(/\p{Cf}/gu, '')
+          .replace(/[\s\p{Cc}]+/gu, ' ')
+          .trim(),
+      ];
+      return line.length > MAX_NEEDS_HUMAN_CHARS
+        ? `${line.slice(0, MAX_NEEDS_HUMAN_CHARS - 1).join('')}…`
+        : line.join('');
+    }),
   };
 }
 
@@ -204,6 +229,8 @@ function keyHead(key: string): string | null {
  * the head carries.
  */
 function snapshotChecks(path: string): Set<string> {
+  // A FIFO in its place would block, the lock held.
+  if (!isRegularFile(path)) return new Set();
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8'));
@@ -301,11 +328,13 @@ export interface ReplyArgs {
   planPath: string;
   /** `--no-post`: record what was handled, post nothing (`--no-reply`). */
   post: boolean;
+  /** The scheduled task that woke the round. */
+  task?: string;
 }
 
 export function runReply(args: ReplyArgs): ReplyOutcome {
   const plan = parsePlan(JSON.parse(readFileSync(args.planPath, 'utf8')));
-  const paths = autofixPrPaths(repoRoot(), args.pr);
+  const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
   return withWatchLock(paths, args.pr, () => replyLocked(args, plan, paths));
 }
 
@@ -315,7 +344,15 @@ function replyLocked(
   paths: AutofixPrPaths,
 ): ReplyOutcome {
   let state = requireState(paths.statePath, args.pr);
-  assertOwnedBySession(state);
+  assertWatching(state, args.task);
+  assertNoFixInFlight(paths, args.pr);
+  // The option the watch was started with holds for its rounds, whatever
+  // a round's turn remembers of it; a `--once` round has options of its own.
+  if (args.post && args.task !== undefined && state.watch?.reply === false) {
+    throw new Error(
+      `PR #${args.pr}'s watch was started with --no-reply: run reply with --no-post.`,
+    );
+  }
   setGhHost(state.host);
   ensureAuthenticated();
   // Every bot thread the plan may name was asked about by the round's
@@ -344,6 +381,7 @@ function replyLocked(
     const postedIds: string[] = [];
     const handledIds: string[] = [];
     let summarized: string | null = null;
+    let summarizedBlocked: string[] | null = null;
     for (const intent of state.pendingPosts ?? []) {
       const nodes =
         intent.where === 'summary'
@@ -361,7 +399,12 @@ function replyLocked(
       handledIds.push(...intent.handled);
       // The head the summary reported, not the current one: a later push
       // still needs a summary of its own.
-      if (intent.where === 'summary') summarized = intent.sha;
+      if (intent.where === 'summary') {
+        summarized = intent.sha;
+        // What that summary reported, from its own intent: a later plan's
+        // items are not covered by it.
+        summarizedBlocked = intent.needsHuman ?? [];
+      }
       adopted += 1;
     }
     record({
@@ -371,6 +414,25 @@ function replyLocked(
       ],
       pendingPosts: [],
       ...(summarized ? { summarizedSha: summarized } : {}),
+      ...(summarized !== null && summarizedBlocked !== null
+        ? {
+            reportedNeedsHuman: {
+              sha: summarized,
+              // A union, not a replacement: an earlier round may already have
+              // reported other items on this head, and adopting this summary
+              // must not make those reportable again. Another head's record
+              // is not merged — it is superseded.
+              texts: [
+                ...new Set([
+                  ...(state.reportedNeedsHuman?.sha === summarized
+                    ? state.reportedNeedsHuman.texts
+                    : []),
+                  ...summarizedBlocked,
+                ]),
+              ],
+            },
+          }
+        : {}),
     });
   }
 
@@ -417,7 +479,13 @@ function replyLocked(
   // pushed while it ran — is history: prepared snapshots read only the
   // current head, so it is not recorded.
   const knownChecks = new Set(state.handledChecks ?? []);
-  const roundChecks = snapshotChecks(paths.snapshotPath);
+  // The round of a background fix claimed its snapshot under another
+  // name, and no round prepared one since.
+  const roundChecks = snapshotChecks(
+    isRegularFile(paths.snapshotPath)
+      ? paths.snapshotPath
+      : fixSnapshotPath(paths, args.pr),
+  );
   const held = heldKeys(pr, state);
   const currentChecks: string[] = [];
   let ignoredChecks = 0;
@@ -452,6 +520,41 @@ function replyLocked(
     currentChecks.push(key);
   }
 
+  // Kept per head, newest last: a later round answers new events only, so
+  // what an earlier one left stays listed until the watch ends. Recorded
+  // before anything is posted: a reply that reaches the PR marks its
+  // comments handled at once, and a round after a later failure would not
+  // see them again.
+  const now = new Date().toISOString();
+  const freshNeedsHuman = [...new Set(plan.needsHuman)].filter(
+    (text) =>
+      text !== '' &&
+      !(state.needsHuman ?? []).some(
+        (item) => item.sha === head && item.text === text,
+      ),
+  );
+  const needsHuman = [
+    ...(state.needsHuman ?? []),
+    ...freshNeedsHuman.map((text) => ({ sha: head, at: now, text })),
+  ].slice(-MAX_NEEDS_HUMAN);
+  if (needsHuman.length > 0) record({ needsHuman });
+
+  // What this plan asks to report, against what a summary that reached the PR
+  // already reported on this head. Deliberately not `freshNeedsHuman`: the
+  // record above consumes that before any POST, so a run whose summary never
+  // arrived would find nothing left to report when it is run again.
+  const planNeedsHuman = [...new Set(plan.needsHuman)].filter(
+    (text) => text !== '',
+  );
+  const reportedBlocked = new Set(
+    state.reportedNeedsHuman?.sha === head
+      ? state.reportedNeedsHuman.texts
+      : [],
+  );
+  const unreportedNeedsHuman = planNeedsHuman.filter(
+    (text) => !reportedBlocked.has(text),
+  );
+
   const outcome: ReplyOutcome = {
     posted: [],
     skipped,
@@ -475,12 +578,16 @@ function replyLocked(
     handled: string[],
     path: string,
     body: string,
+    needsHuman?: string[],
   ) => {
     const intent: PendingPost = {
       where,
       handled,
       bodyHash: bodyHash(body),
       sha: head,
+      // What a summary reports, so a run that finds it on the PR after losing
+      // its answer marks exactly these as reported.
+      ...(needsHuman && needsHuman.length > 0 ? { needsHuman } : {}),
     };
     record({ pendingPosts: [...(state.pendingPosts ?? []), intent] });
     const posted = postComment(path, body);
@@ -520,7 +627,11 @@ function replyLocked(
   }
 
   // A summary is posted once: one that handles comments, while any of them
-  // is still open; one that only reports a push, once per head.
+  // is still open; one that answers none, once per head. A round that leaves
+  // something for a person which no delivered summary has reported gets one
+  // whatever was posted on this head before, so a blocked round is not silent
+  // where an earlier one already reported — and a report that never reached
+  // the PR is still due when the plan is run again.
   const summary = plan.summary;
   const summaryHandled = (summary?.handled ?? []).filter((id) => !done.has(id));
   // A head this watch pushed and has not summarized needs its summary even
@@ -529,9 +640,10 @@ function replyLocked(
     state.pushedShas.includes(head) && state.summarizedSha !== head;
   const summaryDue =
     summary !== null &&
-    ((summary.handled ?? []).length > 0
-      ? summaryHandled.length > 0 || pushUnsummarized
-      : state.summarizedSha !== head);
+    (unreportedNeedsHuman.length > 0 ||
+      ((summary.handled ?? []).length > 0
+        ? summaryHandled.length > 0 || pushUnsummarized
+        : state.summarizedSha !== head));
   if (summary && summaryDue) {
     // Its comments are recorded with it. `--no-post` records the same,
     // posting nothing.
@@ -541,6 +653,7 @@ function replyLocked(
           summaryHandled,
           `${base}/issues/${args.pr}/comments`,
           summary.body,
+          planNeedsHuman,
         )
       : null;
     record({
@@ -552,6 +665,17 @@ function replyLocked(
         ...addHandled(summaryHandled),
       ],
       summarizedSha: head,
+      // Only now, with the summary posted (or recorded for a watch that posts
+      // nothing), are its items reported: a failed POST above leaves this
+      // untouched, so the next run still owes the PR its report.
+      ...(planNeedsHuman.length > 0
+        ? {
+            reportedNeedsHuman: {
+              sha: head,
+              texts: [...new Set([...reportedBlocked, ...planNeedsHuman])],
+            },
+          }
+        : {}),
       ...(result ? { pendingPosts: result.settled } : {}),
     });
     if (result) outcome.posted.push({ kind: 'summary', ...result.posted });
@@ -599,7 +723,8 @@ export const replyCommand: CommandModule = {
         default: true,
         describe:
           'Post the replies and the summary; --no-post only records what was handled',
-      }),
+      })
+      .option('task', TASK_OPTION),
   handler: (argv) => {
     writeStdoutLine(
       JSON.stringify(
@@ -607,6 +732,7 @@ export const replyCommand: CommandModule = {
           pr: Number(argv['pr']),
           planPath: String(argv['plan']),
           post: Boolean(argv['post']),
+          task: taskArg(argv),
         }),
       ),
     );
