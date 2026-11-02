@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { LocalShellCaptureRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
+import { formatRecordArtifactReminder } from '@qwen-code/qwen-code-core/tools/artifact/workspace-auto-record.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { AnyDeclarativeTool } from '@qwen-code/qwen-code-core/tools/tools.js';
 import {
@@ -74,6 +75,27 @@ vi.mock(
         fetch: globalThis.fetch,
       }),
     };
+  },
+);
+
+// Records each call into the Bash parser module so a test can pin a Shell
+// path that should never load the parser. Calls pass through unchanged.
+const bashParserCalls = vi.hoisted(() => [] as string[]);
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/shellAstParser.js',
+  async (importOriginal) => {
+    const actual = await importOriginal<Record<string, unknown>>();
+    return Object.fromEntries(
+      Object.entries(actual).map(([name, value]) => [
+        name,
+        typeof value === 'function'
+          ? (...args: unknown[]) => {
+              bashParserCalls.push(name);
+              return (value as (...callArgs: unknown[]) => unknown)(...args);
+            }
+          : value,
+      ]),
+    );
   },
 );
 
@@ -2606,6 +2628,7 @@ describe.skipIf(process.platform === 'win32')(
           workspace,
           'session-artifact',
         );
+        bashParserCalls.length = 0;
         const text = await resultText(exec, 'shell', 'run_shell_command', {
           command: 'echo hello > notes.md',
         });
@@ -2613,26 +2636,35 @@ describe.skipIf(process.platform === 'win32')(
           'hello\n',
         );
         expect(text).not.toContain('record_artifact');
+        // The reminder was the only reason this path parsed the command, and
+        // loading the parser is what grows each resident Worker.
+        expect(bashParserCalls).toEqual([]);
         await exec.close();
       },
     );
 
     it.each(['', '1'])(
-      'does not claim a written Markdown file was recorded (QWEN_CODE_ENABLE_ARTIFACT=%j)',
+      'does not claim a written or edited Markdown file was recorded (QWEN_CODE_ENABLE_ARTIFACT=%j)',
       async (flag) => {
         vi.stubEnv('QWEN_CODE_ENABLE_ARTIFACT', flag);
         const exec = ManagedToolExecutor.forWorkspace(
           workspace,
           'session-artifact',
         );
-        const text = await resultText(exec, 'write', 'write_file', {
-          file_path: path.join(workspace, 'report.md'),
+        const file = path.join(workspace, 'report.md');
+        const written = await resultText(exec, 'write', 'write_file', {
+          file_path: file,
           content: '# Report\n',
         });
-        expect(await readFile(path.join(workspace, 'report.md'), 'utf8')).toBe(
-          '# Report\n',
-        );
-        expect(text).not.toContain('recorded as a workspace artifact');
+        const edited = await resultText(exec, 'edit', 'edit', {
+          file_path: file,
+          old_string: '# Report',
+          new_string: '# Final report',
+        });
+        expect(await readFile(file, 'utf8')).toBe('# Final report\n');
+        const claim = formatRecordArtifactReminder('report.md');
+        expect(written).not.toContain(claim);
+        expect(edited).not.toContain(claim);
         await exec.close();
       },
     );
