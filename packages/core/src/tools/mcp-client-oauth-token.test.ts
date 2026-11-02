@@ -38,7 +38,7 @@ const HOUR_MS = 60 * 60 * 1000;
 
 type TransportInternals = Transport & {
   _fetch: typeof fetch;
-  _requestInit?: { headers?: Record<string, string> };
+  _requestInit?: { headers?: Record<string, string>; redirect?: string };
 };
 
 /**
@@ -636,6 +636,76 @@ describe('createTransport OAuth bearer token per request', () => {
     } finally {
       await transport.close();
     }
+  });
+
+  // MCP client 2.4.0 resolves a same-origin 30x in its own layer, against
+  // `requestInit.redirect`, outside the bearer wrapper. An OAuth-only server has
+  // no configured headers and the bearer is not in `requestInit`, so the refusal
+  // has to follow from the wrapper being installed, not from the headers.
+  describe('Agent Plugin redirect refusal for OAuth-only servers', () => {
+    const configs = {
+      'oauth.enabled': { oauth: { enabled: true, clientId: 'client-id' } },
+      'stored credentials': {},
+    };
+
+    for (const [path, extra] of Object.entries(configs)) {
+      it(`refuses redirects on ${path} without any configured header`, async () => {
+        stubAuthorizationServer();
+        const transport = await transportFor({
+          httpUrl: 'https://mcp.example/mcp',
+          agentPluginV1: true,
+          ...extra,
+        });
+
+        expect(transport._requestInit?.headers).toBeUndefined();
+        expect(transport._requestInit?.redirect).toBe('manual');
+      });
+
+      it(`does not set the refusal on ${path} for a non-Agent-Plugin server`, async () => {
+        stubAuthorizationServer();
+        const transport = await transportFor({
+          httpUrl: 'https://mcp.example/mcp',
+          ...extra,
+        });
+
+        expect(transport._requestInit).toBeUndefined();
+      });
+    }
+
+    it('keeps the refusal while the token cannot be obtained', async () => {
+      stubAuthorizationServer();
+      const transport = await transportFor({
+        httpUrl: 'https://mcp.example/mcp',
+        agentPluginV1: true,
+        oauth: { enabled: true, clientId: 'client-id' },
+      });
+
+      storage.creds = null;
+      vi.setSystemTime(Date.now() + 2 * HOUR_MS);
+
+      expect(transport._requestInit?.redirect).toBe('manual');
+    });
+
+    it('does not replay the bearer to another path of the same origin', async () => {
+      stubAuthorizationServer();
+      const urls: string[] = [];
+      _setMcpFetchForTest((async (input: unknown) => {
+        urls.push(String(input));
+        return new Response(null, {
+          status: 307,
+          headers: { location: 'https://mcp.example/elsewhere' },
+        });
+      }) as unknown as typeof fetch);
+      const transport = await transportFor({
+        httpUrl: 'https://mcp.example/mcp',
+        agentPluginV1: true,
+        oauth: { enabled: true, clientId: 'client-id' },
+      });
+
+      await send(transport).catch(() => undefined);
+
+      expect(urls).toEqual(['https://mcp.example/mcp']);
+    });
   });
 
   it('keeps the headers of a Request passed as the fetch input', async () => {

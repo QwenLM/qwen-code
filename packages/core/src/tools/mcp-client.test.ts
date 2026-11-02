@@ -746,6 +746,44 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       );
     });
 
+    // The retry transport carries only the OAuth bearer, which the fetch
+    // wrapper adds; the redirect refusal must not depend on configured headers.
+    it('refuses redirects on the OAuth retry transport of an Agent Plugin server with no headers', async () => {
+      const { connect } = setupHttpOAuthRetry(
+        new Error('HTTP 401 Unauthorized'),
+      );
+      stubGlobalFetch(401);
+
+      await expect(
+        connectToMcpServer(
+          'http-server',
+          { httpUrl: 'http://test-server/mcp', agentPluginV1: true },
+          false,
+          workspace(),
+        ),
+      ).resolves.toBeDefined();
+
+      const oauthTransport = connect.mock.calls[1][0] as {
+        _requestInit?: { headers?: unknown; redirect?: string };
+      };
+      expect(oauthTransport._requestInit?.headers).toBeUndefined();
+      expect(oauthTransport._requestInit?.redirect).toBe('manual');
+    });
+
+    it('leaves redirects alone on the OAuth retry transport of a plain server', async () => {
+      const { connect } = setupHttpOAuthRetry(
+        new Error('HTTP 401 Unauthorized'),
+      );
+      stubGlobalFetch(401);
+
+      await expect(connectHttp()).resolves.toBeDefined();
+
+      const oauthTransport = connect.mock.calls[1][0] as {
+        _requestInit?: unknown;
+      };
+      expect(oauthTransport._requestInit).toBeUndefined();
+    });
+
     it('retries SSE connections after OAuth discovery with the token on each request', async () => {
       const connect = mockConnect(
         vi

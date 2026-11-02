@@ -293,14 +293,38 @@ function isStreamableHttpGetSseRequest(init?: RequestInit): boolean {
  */
 function agentPluginForbidsRedirect(
   mcpServerConfig: MCPServerConfig | undefined,
-  headers: Headers | undefined,
+  hasAuthorization: boolean,
 ): boolean {
   return (
     mcpServerConfig?.agentPluginV1 === true &&
     ((mcpServerConfig.headers !== undefined &&
       Object.keys(mcpServerConfig.headers).length > 0) ||
-      headers?.has('authorization') === true)
+      hasAuthorization)
   );
+}
+
+/**
+ * The `requestInit` of a Streamable HTTP transport: the configured headers,
+ * plus the redirect refusal the SDK needs. The OAuth bearer is not in the
+ * headers (`withBearerToken` adds it per request), so whether it will be
+ * present is passed in. That is a property of the transport, not of this
+ * request's token: a wrapper that finds no token must still refuse a redirect
+ * rather than leave the decision to whether a refresh happened to succeed.
+ *
+ * @returns `undefined` when there is nothing to set
+ */
+function streamableHttpRequestInit(
+  mcpServerConfig: MCPServerConfig,
+  bearerWrapperInstalled: boolean,
+): RequestInit | undefined {
+  const requestInit: RequestInit = {};
+  if (mcpServerConfig.headers) {
+    requestInit.headers = mcpServerConfig.headers;
+  }
+  if (agentPluginForbidsRedirect(mcpServerConfig, bearerWrapperInstalled)) {
+    requestInit.redirect = 'manual';
+  }
+  return Object.keys(requestInit).length > 0 ? requestInit : undefined;
 }
 
 /**
@@ -330,7 +354,7 @@ export function createStreamableHttpCompatibilityFetch(
     );
     const stopAgentPluginRedirect = agentPluginForbidsRedirect(
       mcpServerConfig,
-      requestHeaders,
+      requestHeaders.has('authorization'),
     );
     const effectiveInit = stopAgentPluginRedirect
       ? { ...init, redirect: 'manual' as const }
@@ -1508,9 +1532,6 @@ async function createTransportWithOAuth(
   getToken: BearerTokenGetter,
 ): Promise<StreamableHTTPClientTransport | SSEClientTransport | null> {
   try {
-    const requestInit = mcpServerConfig.headers
-      ? { headers: mcpServerConfig.headers }
-      : undefined;
     if (mcpServerConfig.httpUrl) {
       // Create HTTP transport with OAuth token
       const oauthTransportOptions: StreamableHTTPClientTransportOptions = {
@@ -1518,7 +1539,7 @@ async function createTransportWithOAuth(
           createMcpStreamableHttpFetch(mcpServerName, mcpServerConfig),
           getToken,
         ),
-        requestInit,
+        requestInit: streamableHttpRequestInit(mcpServerConfig, true),
       };
 
       return new StreamableHTTPClientTransport(
@@ -1529,7 +1550,9 @@ async function createTransportWithOAuth(
       // Create SSE transport with OAuth token in Authorization header
       return new SSEClientTransport(new URL(mcpServerConfig.url), {
         fetch: withBearerToken((input, init) => fetch(input, init), getToken),
-        requestInit,
+        requestInit: mcpServerConfig.headers
+          ? { headers: mcpServerConfig.headers }
+          : undefined,
       });
     }
 
@@ -2886,31 +2909,22 @@ export async function createTransport(
       mcpServerName,
       mcpServerConfig,
     );
+    const bearerWrapperInstalled = Boolean(
+      hasOAuthConfig && accessToken && getToken,
+    );
     const transportOptions: StreamableHTTPClientTransportOptions = {
       // The OAuth token, if any, is set per request by the fetch wrapper.
       fetch:
-        hasOAuthConfig && accessToken && getToken
+        bearerWrapperInstalled && getToken
           ? withBearerToken(baseFetch, getToken)
           : baseFetch,
-    };
-
-    if (mcpServerConfig.headers) {
-      transportOptions.requestInit = {
-        headers: mcpServerConfig.headers,
-      };
-    }
-
-    // The compatibility fetch answers the request it issues, but the SDK
-    // resolves a redirect before that, against this field.
-    if (
-      transportOptions.requestInit &&
-      agentPluginForbidsRedirect(
+      // The compatibility fetch answers the request it issues, but the SDK
+      // resolves a redirect before that, against `requestInit.redirect`.
+      requestInit: streamableHttpRequestInit(
         mcpServerConfig,
-        new Headers(transportOptions.requestInit.headers as HeadersInit),
-      )
-    ) {
-      transportOptions.requestInit.redirect = 'manual';
-    }
+        bearerWrapperInstalled,
+      ),
+    };
 
     return new StreamableHTTPClientTransport(
       new URL(mcpServerConfig.httpUrl),
