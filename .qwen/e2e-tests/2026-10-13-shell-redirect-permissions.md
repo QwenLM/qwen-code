@@ -25,7 +25,13 @@ Verify that a `Bash(...)` allow rule cannot run a file access past a `Read`, `Ed
 
 1. Set `.qwen/settings.json` to `{"permissions": {"allow": ["Bash(ls *)", "Bash(echo *)"], "deny": ["Write"]}}`.
 2. Ask the agent to run `ls -la 2>&1` and `echo hi > /dev/null`.
-3. Both run without a denial. On the merge base both are denied as writes.
+3. Both run without a denial. On the released `qwen` 0.24.6 both are denied as writes; current main already runs `ls -la 2>&1` (#15681) and still denies `echo hi > /dev/null`.
+
+## Nothing inside a test or a substitution is hidden
+
+1. Set `.qwen/settings.json` to `{"permissions": {"allow": ["Bash(*)"], "deny": ["Edit(protected.txt)"]}}`.
+2. Ask the agent to run `[[ -n $(printf X > protected.txt) ]]` and `'if' [[ 1 > protected.txt ]]`.
+3. Both are denied with a message that names `Edit(protected.txt)`, and `protected.txt` is not created, as on main.
 
 ## Automated Run
 

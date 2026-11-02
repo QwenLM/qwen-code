@@ -1148,7 +1148,7 @@ function findOperatorBoundaries(
       }
       // `>|` is the clobber-override redirection, not a pipe. An escaped or
       // quoted `>` is plain text, so the `|` after it is still a pipe.
-      if (op === '|' && lastBareGreaterThan === i - 1) {
+      if (op === '|' && i > 0 && lastBareGreaterThan === i - 1) {
         continue;
       }
       boundaries.push({ start: i, end: i + op.length, operator: op });

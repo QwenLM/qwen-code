@@ -579,11 +579,11 @@ describe('extractShellOperations', () => {
     expectSorted(command, []);
   });
 
-  // A quoted `>` is not a redirect, so `2">"&1` is not fd duplication; bash
-  // reads the unquoted `&` as "run in background", and the check keeps the
-  // literal write.
+  // A quoted `>` is not a redirect, so `2">"&1` is not fd duplication
+  // either: bash reads the unquoted `&` as "run in background" and opens no
+  // file, as for any quoted `>`.
   it('2">"&1 is not fd duplication', () => {
-    expect(ops('printf X 2">"&1')).toContainEqual(write(`${CWD}/&1`));
+    expect(ops('printf X 2">"&1')).toEqual([]);
   });
 
   // A quoted or escaped `-` is part of the file name: `>&"-x"` writes `-x`.
@@ -916,6 +916,29 @@ describe('redirect grammar', () => {
       [write(`${CWD}/f`)],
     ],
     ['`[[` without `]]` hides no redirect', '[[ x >f', [write(`${CWD}/f`)]],
+    // A quoted character is never shell syntax.
+    [
+      'a quoted `&` before an operator is an argument, not its fd',
+      'rm "&">f',
+      [edit(`${CWD}/&`), write(`${CWD}/f`)],
+    ],
+    ['a quoted `|` ends the operator', 'printf X >"|"x', [write(`${CWD}/|x`)]],
+    [
+      'a quoted leading `(` is part of the name',
+      "cat '(a).txt'",
+      [read(`${CWD}/(a).txt`)],
+    ],
+    // The word after `>&` reads the same with or without blanks.
+    [
+      'a spaced close passes the rest of its word on',
+      'rm >& -protected.txt',
+      [edit(`${CWD}/protected.txt`), write(`${CWD}/&-protected.txt`)],
+    ],
+    [
+      'a spaced `>&` with a quoted `-` names a file',
+      'echo x >& "-x"',
+      [write(`${CWD}/-x`)],
+    ],
   ])('%s', (_title, command, expected) => {
     expect(ops(command)).toEqual(expected);
   });
@@ -1053,7 +1076,65 @@ describe('prefix command options', () => {
       `env -C sub -S 'cat .env'`,
       [read('/repo/sub/.env')],
     ],
+    [
+      'a chained `env -C` resolves from the one before it',
+      'env -C sub env -C sub cat .env',
+      [read('/repo/sub/sub/.env')],
+    ],
+    [
+      '`env -S` keeps a `NAME=VALUE` after the string as an argument',
+      'env -S cat a=b',
+      [read('/repo/a=b')],
+    ],
+    [
+      'an empty quoted option value is still a word',
+      "sudo -S -p '' cat .env",
+      [read('/repo/.env')],
+    ],
+    [
+      '`bash -lc` behind a prefix is unwrapped',
+      `sudo bash -lc 'cat .env'`,
+      [read('/repo/.env')],
+    ],
+    [
+      '`cd` keeps its redirections',
+      'cd sub 2> err.txt && cat .env',
+      [write('/repo/err.txt'), read('/repo/sub/.env')],
+    ],
   ])('%s', (_title, command, expected) => {
     expect(across(command)).toEqual(expected);
   });
+
+  it('keeps a directory known only at run time unknown for a relative one after it', () => {
+    expect(across('env -C "$X" env -C sub cat .env')).toEqual([
+      { ...read('/repo/sub/.env'), cwdUnknown: true, pathMayDependOnCwd: true },
+    ]);
+  });
+
+  it('knows the directory again after an absolute `env -C`', () => {
+    expect(across('env -C "$X" env -C /abs cat .env')).toEqual([
+      read('/abs/.env'),
+    ]);
+  });
+
+  it('still splits a pipe at the start of a command', () => {
+    expect(across('| cat .env')).toEqual([read('/repo/.env')]);
+  });
+
+  it('returns for more operations or options than a call takes arguments', () => {
+    expect(across(`cat ${'>a'.repeat(130000)}`)).toHaveLength(130000);
+    expect(across(`sudo -${'E'.repeat(130000)} cat .env`)).toEqual([
+      read('/repo/.env'),
+    ]);
+  });
+
+  // Prefixes are peeled in a loop: a long chain must not overflow the stack.
+  it.each(['sudo ', 'env ', 'sudo -u root '])(
+    'a chain of 20000 `%s` prefixes returns',
+    (unit) => {
+      expect(across(`${unit.repeat(20000)}cat .env`)).toEqual([
+        read('/repo/.env'),
+      ]);
+    },
+  );
 });
