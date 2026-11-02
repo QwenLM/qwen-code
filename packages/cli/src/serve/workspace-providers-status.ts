@@ -11,7 +11,10 @@ import {
   ModelsConfig,
   tokenLimit,
 } from '@qwen-code/qwen-code-core';
-import { resolveReasoningCapabilities } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
+import {
+  captureReasoningSnapshot,
+  resolveReasoningForModel,
+} from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
 import type {
   AuthType,
   ContentGeneratorConfig,
@@ -129,9 +132,9 @@ function buildWorkspaceProvidersStatus(
           : (modelsConfig.getResolvedModel(currentAuth, currentModelId)
               ?.registryBaseUrl ?? null)
         : undefined;
-    const modelOptions = buildAcpModelOptions(
-      modelsConfig.getAllConfiguredModels(),
-    );
+    const models = modelsConfig.getAllConfiguredModels();
+    const modelOptions = buildAcpModelOptions(models);
+    const reasoningSnapshot = captureReasoningSnapshot(models);
     const currentAcpModelId = hasCurrentModel
       ? getCurrentAcpModelId(
           modelOptions,
@@ -179,10 +182,12 @@ function buildWorkspaceProvidersStatus(
         model: model.id,
         authType: model.authType,
         baseUrl: resolved?.baseUrl,
+        reasoningSnapshot,
+        reasoningRouteBaseUrl: model.registryBaseUrl ?? null,
       };
       const configOptions = buildModelReasoningRoutePreview(
         generation,
-        resolveReasoningCapabilities(generation, model.capabilities?.reasoning),
+        resolveReasoningForModel(undefined, generation),
         settings.model?.reasoningEffort,
         modelId.startsWith(ACP_ROUTE_ID_PREFIX),
       );

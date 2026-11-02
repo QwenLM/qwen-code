@@ -322,6 +322,12 @@ export class SkillManager {
       );
 
       for (const skill of levelSkills) {
+        if (
+          level === 'bundled' &&
+          skill.name === 'generated-ui' &&
+          !this.config.isSkillEnabled(skill)
+        )
+          continue;
         // Skip if we've already seen this name (precedence: project > user > extension > bundled)
         if (seenNames.has(skill.name)) {
           debugLogger.debug(
@@ -1082,6 +1088,16 @@ export class SkillManager {
         'bundled',
         onDiscoveryError,
       );
+      const generatedUiDir = this.config.getBundledGeneratedUiSkillsDir?.();
+      if (generatedUiDir) {
+        skills.push(
+          ...(await this.loadSkillsFromDir(
+            generatedUiDir,
+            'bundled',
+            onDiscoveryError,
+          )),
+        );
+      }
       debugLogger.debug(`Loaded ${skills.length} bundled skills`);
       return skills;
     }
@@ -1245,7 +1261,15 @@ export class SkillManager {
     const levelSkills = this.skillsCache?.get(level) || [];
 
     // Find the skill with matching name
-    return levelSkills.find((skill) => skill.name === name) || null;
+    return (
+      levelSkills.find(
+        (skill) =>
+          skill.name === name &&
+          (level !== 'bundled' ||
+            name !== 'generated-ui' ||
+            this.config.isSkillEnabled(skill)),
+      ) || null
+    );
   }
 
   /**

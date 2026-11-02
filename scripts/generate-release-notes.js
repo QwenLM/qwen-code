@@ -544,6 +544,16 @@ export async function generateAiContent(
   complete,
   { batchSize = 8, maxConsecutiveBatchFailures = 3 } = {},
 ) {
+  if (
+    !Number.isInteger(batchSize) ||
+    batchSize < 1 ||
+    !Number.isInteger(maxConsecutiveBatchFailures) ||
+    maxConsecutiveBatchFailures < 1
+  ) {
+    throw new RangeError(
+      'Batch size and failure limit must be positive integers.',
+    );
+  }
   const summaries = new Map();
   const summariesZh = new Map();
   const warnings = [];
@@ -551,66 +561,87 @@ export async function generateAiContent(
   let consecutiveBatchFailures = 0;
   let circuitOpen = false;
 
-  for (let index = 0; index < entries.length; index += batchSize) {
-    const batch = entries.slice(index, index + batchSize);
+  for (let index = 0; index < entries.length; ) {
     if (circuitOpen) {
-      for (const entry of batch) {
+      for (const entry of entries.slice(index)) {
         summaries.set(entry.number, entry.title);
       }
-      continue;
+      break;
     }
-    try {
-      const response = parseModelJson(
-        await complete({
-          kind: 'summaries',
-          entries: batch.map(compactEntry),
-        }),
-      );
-      const items = indexSummaryBatch(batch, response);
-      for (const entry of batch) {
-        const item = items.get(entry.number) || {};
-        try {
-          summaries.set(
-            entry.number,
-            validateModelText(
-              item.summary,
-              `Summary for pull request ${entry.number}`,
-              SUMMARY_MAX_LENGTH,
-            ),
-          );
-        } catch (error) {
-          warnings.push(
-            `Summary fallback for #${entry.number}: ${error.message}`,
-          );
+    // Settle a bounded wave, then validate in input order so latency cannot
+    // change the consecutive-failure circuit breaker or warning order.
+    const waveSize = Math.min(
+      3,
+      maxConsecutiveBatchFailures - consecutiveBatchFailures,
+    );
+    const batches = [];
+    for (let slot = 0; slot < waveSize && index < entries.length; slot += 1) {
+      batches.push(entries.slice(index, index + batchSize));
+      index += batchSize;
+    }
+    const responses = await Promise.allSettled(
+      batches.map(async (batch) =>
+        parseModelJson(
+          await complete({
+            kind: 'summaries',
+            entries: batch.map(compactEntry),
+          }),
+        ),
+      ),
+    );
+    for (const [batchIndex, batch] of batches.entries()) {
+      try {
+        const result = responses[batchIndex];
+        if (result.status === 'rejected') {
+          throw result.reason;
+        }
+        const response = result.value;
+        const items = indexSummaryBatch(batch, response);
+        for (const entry of batch) {
+          const item = items.get(entry.number) || {};
+          try {
+            summaries.set(
+              entry.number,
+              validateModelText(
+                item.summary,
+                `Summary for pull request ${entry.number}`,
+                SUMMARY_MAX_LENGTH,
+              ),
+            );
+          } catch (error) {
+            warnings.push(
+              `Summary fallback for #${entry.number}: ${error.message}`,
+            );
+            summaries.set(entry.number, entry.title);
+          }
+          try {
+            summariesZh.set(
+              entry.number,
+              validateModelText(
+                item.summaryZh,
+                `Chinese summary for pull request ${entry.number}`,
+                ZH_SUMMARY_MAX_LENGTH,
+              ),
+            );
+          } catch {
+            zhSummaryFallbacks += 1;
+          }
+        }
+        consecutiveBatchFailures = 0;
+      } catch (error) {
+        consecutiveBatchFailures += 1;
+        warnings.push(`Summary batch fallback: ${error.message}`);
+        for (const entry of batch) {
           summaries.set(entry.number, entry.title);
         }
-        try {
-          summariesZh.set(
-            entry.number,
-            validateModelText(
-              item.summaryZh,
-              `Chinese summary for pull request ${entry.number}`,
-              ZH_SUMMARY_MAX_LENGTH,
-            ),
+        if (consecutiveBatchFailures >= maxConsecutiveBatchFailures) {
+          // The model side is down, not slow: stop paying per remaining batch
+          // and fall back wholesale instead of pretending otherwise.
+          circuitOpen = true;
+          warnings.push(
+            `Summary batches stopped after ${consecutiveBatchFailures} consecutive failures; remaining entries use pull-request titles.`,
           );
-        } catch {
-          zhSummaryFallbacks += 1;
         }
-      }
-      consecutiveBatchFailures = 0;
-    } catch (error) {
-      consecutiveBatchFailures += 1;
-      warnings.push(`Summary batch fallback: ${error.message}`);
-      for (const entry of batch) {
-        summaries.set(entry.number, entry.title);
-      }
-      if (consecutiveBatchFailures >= maxConsecutiveBatchFailures) {
-        // The model side is down, not slow: stop paying per remaining batch
-        // and fall back wholesale instead of pretending otherwise.
-        circuitOpen = true;
-        warnings.push(
-          `Summary batches stopped after ${consecutiveBatchFailures} consecutive failures; remaining entries use pull-request titles.`,
-        );
       }
     }
   }

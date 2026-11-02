@@ -8,6 +8,10 @@
 // The key serves as both the translation key and the default English text
 
 export default {
+  'Generated UI': 'Generated UI',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.',
+
   'Cannot disable an extension-provided MCP server here.':
     'Cannot disable an extension-provided MCP server here.',
   'Cleared authentication for "{{name}}".':
@@ -214,6 +218,7 @@ export default {
   'toolDisplayName.CronCreate': 'toolDisplayName.CronCreate',
   'toolDisplayName.CronList': 'toolDisplayName.CronList',
   'toolDisplayName.CronDelete': 'toolDisplayName.CronDelete',
+  'toolDisplayName.AutofixPr': 'toolDisplayName.AutofixPr',
   'toolDisplayName.LoopWakeup': 'toolDisplayName.LoopWakeup',
   'toolDisplayName.CreateSubSession': 'toolDisplayName.CreateSubSession',
   'toolDisplayName.ListAgents': 'toolDisplayName.ListAgents',
@@ -755,6 +760,9 @@ export default {
   // Settings Labels
   // ============================================================================
   'Code Mode Only (Experimental)': 'Code Mode Only (Experimental)',
+  'Mods (Experimental)': 'Mods (Experimental)',
+  'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.':
+    'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.',
   'Vim Mode': 'Vim Mode',
   'Attribution: commit': 'Attribution: commit',
   'Terminal Bell Notification': 'Terminal Bell Notification',
@@ -2459,6 +2467,8 @@ export default {
   'System prompt': 'System prompt',
   'Built-in tools': 'Built-in tools',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Instruction files',
+  'Auto memory': 'Auto memory',
   'Memory files': 'Memory files',
   Skills: 'Skills',
   Messages: 'Messages',
@@ -2780,6 +2790,8 @@ export default {
   out: 'out',
 
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.',
   'Check for Qwen Code updates and install if available':
     'Check for Qwen Code updates and install if available',
   'Qwen Code update available! {{current}} → {{latest}}':

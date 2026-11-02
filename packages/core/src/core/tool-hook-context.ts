@@ -5,6 +5,10 @@
  */
 
 import type { Part } from '@google/genai';
+import {
+  getToolOutputRecovery,
+  setToolOutputRecovery,
+} from '../tools/tool-output-recovery.js';
 
 export const TOOL_HOOK_CONTEXT_TRUNCATION_NOTICE =
   '\n[hook additional context truncated]';
@@ -92,7 +96,7 @@ export function appendTextToFunctionResponse(part: Part, text: string): Part {
     currentText = JSON.stringify(output) ?? '';
   }
 
-  return {
+  const updated: Part = {
     ...part,
     functionResponse: {
       ...functionResponse,
@@ -102,4 +106,7 @@ export function appendTextToFunctionResponse(part: Part, text: string): Part {
       },
     },
   };
+  const recovery = getToolOutputRecovery(part);
+  if (recovery) setToolOutputRecovery(updated, recovery);
+  return updated;
 }

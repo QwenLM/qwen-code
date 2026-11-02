@@ -187,6 +187,7 @@ function makeWorkspaceService(label: string): DaemonWorkspaceService {
       serverName,
       restarted: true,
     })),
+    reloadModelProviders: vi.fn(async () => ({ status: 'applied' as const })),
     reload: vi.fn(async (ctx) => ({
       workspaceCwd: ctx.workspaceCwd,
       env: { reloaded: false },
@@ -1445,6 +1446,66 @@ describe('workspace-qualified core REST', () => {
       await expect(
         fsp.stat(path.join(h.primaryCwd, 'c.bin')),
       ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('reloads models only in the selected runtime without broadcasting settings', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const res = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/models/reload`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({});
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ status: 'applied' });
+      expect(
+        h.secondaryWorkspaceService.reloadModelProviders,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({ workspaceCwd: h.secondaryCwd }),
+      );
+      expect(h.secondaryWorkspaceService.reload).not.toHaveBeenCalled();
+      expect(h.primaryBridge.invokeWorkspaceCommand).not.toHaveBeenCalled();
+      expect(h.primaryBridge.publishWorkspaceEvent).not.toHaveBeenCalled();
+      expect(h.secondaryBridge.publishWorkspaceEvent).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    'untrusted',
+    'unknown',
+    'draining',
+    'unauthenticated',
+    'invalid-client',
+  ])('rejects %s model reload without primary fallback', async (state) => {
+    const h = await makeHarness({
+      token: 'secret',
+      secondaryTrusted: state !== 'untrusted',
+    });
+    try {
+      if (state === 'draining')
+        h.workspaceRegistry.beginDrain(
+          h.workspaceRegistry.getByWorkspaceId(h.secondaryId)!,
+        );
+      const selector = state === 'unknown' ? 'missing' : h.secondaryId;
+      const req = request(h.app)
+        .post(`/workspaces/${encodeURIComponent(selector)}/models/reload`)
+        .set('Host', host());
+      if (state !== 'unauthenticated')
+        req.set('Authorization', 'Bearer secret');
+      if (state === 'invalid-client')
+        req.set('X-Qwen-Client-Id', 'unknown-client');
+      const res = await req.send({});
+      expect(res.status).toBeGreaterThanOrEqual(400);
+      expect(
+        h.secondaryWorkspaceService.reloadModelProviders,
+      ).not.toHaveBeenCalled();
+      expect(h.primaryBridge.invokeWorkspaceCommand).not.toHaveBeenCalled();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }

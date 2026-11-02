@@ -49,7 +49,6 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
     style,
     baseUrl,
     credentials,
-    environmentId,
     fetch: fetchImpl,
     getHeaders,
     agentId,
@@ -79,7 +78,6 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
       createJavaManagedAgentProvider({
         baseUrl,
         credentials,
-        environmentId,
         fetch: !hasFetch
           ? undefined
           : (...args) => (callbacksRef.current.fetchImpl ?? fetch)(...args),
@@ -99,7 +97,6 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
     [
       baseUrl,
       credentials,
-      environmentId,
       agentId,
       productScope,
       enableWorkspaceBinding,

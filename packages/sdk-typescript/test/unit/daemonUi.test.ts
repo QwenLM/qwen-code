@@ -31,6 +31,22 @@ import type {
 } from '../../src/daemon/ui/index.js';
 
 describe('daemon UI normalizer and transcript reducer', () => {
+  it('treats config option updates as state metadata rather than chat or progress', () => {
+    expect(
+      normalizeDaemonEvent({
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session',
+          update: {
+            sessionUpdate: 'config_option_update',
+            configOptions: [{ id: 'workflow_mode', currentValue: 'on' }],
+          },
+        },
+      }),
+    ).toEqual([]);
+  });
+
   it('retains tool prompt ownership after byte eviction and journal-only replay', () => {
     const event = {
       v: 1 as const,
@@ -2549,6 +2565,96 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('keeps the loop detector and its reason on loop-detected turn errors', () => {
+    const turnError = {
+      id: 48,
+      v: 1,
+      type: 'turn_error',
+      data: {
+        sessionId: 'session-1',
+        message: 'Tool-call loop protection stopped this turn.',
+        code: 'LOOP_DETECTED',
+        errorKind: 'loop_detected',
+        loopType: 'turn_tool_call_cap',
+        loopReason: 'explicit_cap',
+        toolCallCount: 4,
+        toolCallLimit: 3,
+        promptId: 'prompt-1',
+      },
+    } as const;
+    const loop = {
+      loopType: 'turn_tool_call_cap',
+      loopReason: 'explicit_cap',
+      toolCallCount: 4,
+      toolCallLimit: 3,
+    };
+
+    expect(normalizeDaemonEvent(turnError)).toMatchObject([
+      { type: 'error', errorKind: 'loop_detected', loop },
+    ]);
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 100 }),
+      normalizeDaemonEvent(turnError),
+      { now: 101 },
+    );
+    expect(state.blocks).toMatchObject([
+      { kind: 'error', errorKind: 'loop_detected', loop },
+    ]);
+  });
+
+  it('keeps a loop type without numbers and drops malformed ones', () => {
+    const [event] = normalizeDaemonEvent({
+      id: 49,
+      v: 1,
+      type: 'turn_error',
+      data: {
+        sessionId: 'session-1',
+        message: 'stopped',
+        errorKind: 'loop_detected',
+        loopType: 'invalid_tool_params_stagnation',
+        toolCallCount: 'many',
+      },
+    });
+
+    expect(event).toMatchObject({
+      loop: { loopType: 'invalid_tool_params_stagnation' },
+    });
+    expect(
+      event && 'loop' in event ? event.loop : undefined,
+    ).not.toHaveProperty('toolCallCount');
+  });
+
+  it('adds no loop detail to turn errors that name no detector', () => {
+    const [event] = normalizeDaemonEvent({
+      id: 50,
+      v: 1,
+      type: 'turn_error',
+      data: {
+        sessionId: 'session-1',
+        message: 'stopped',
+        errorKind: 'loop_detected',
+      },
+    });
+
+    expect(event).not.toHaveProperty('loop');
+  });
+
+  it('adds no loop detail to turn errors of another kind', () => {
+    const [event] = normalizeDaemonEvent({
+      id: 51,
+      v: 1,
+      type: 'turn_error',
+      data: {
+        sessionId: 'session-1',
+        message: 'stream ended',
+        errorKind: 'model_stream_interrupted',
+        loopType: 'turn_tool_call_cap',
+      },
+    });
+
+    expect(event).not.toHaveProperty('loop');
+  });
+
   it('keeps older daemon terminated turn error text unchanged', () => {
     expect(
       normalizeDaemonEvent({
@@ -2624,10 +2730,23 @@ describe('daemon UI normalizer and transcript reducer', () => {
           data: { queueSize: 200, maxQueued: 256 },
         }),
       ).toEqual([]);
-      expect(warn).toHaveBeenCalledWith('[daemon-ui] SSE stream is lagging', {
-        queueSize: 200,
-        maxQueued: 256,
-      });
+      expect(warn).toHaveBeenCalledWith(
+        '[daemon-ui] SSE stream is lagging',
+        '{\n  "queueSize": 200,\n  "maxQueued": 256\n}',
+      );
+      warn.mockClear();
+      expect(
+        normalizeDaemonEvent({
+          id: 54,
+          v: 1,
+          type: 'slow_client_warning',
+          data: '\x1b[2J\x1b]52;c;SGVsbG8=\x07queue lag',
+        }),
+      ).toEqual([]);
+      expect(warn).toHaveBeenCalledWith(
+        '[daemon-ui] SSE stream is lagging',
+        'queue lag',
+      );
     } finally {
       warn.mockRestore();
     }

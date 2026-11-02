@@ -77,6 +77,66 @@ function makeTool(overrides: Partial<ACPToolCall> = {}): ACPToolCall {
   };
 }
 
+describe('ReadFile output availability', () => {
+  it.each(['failed', 'completed'] as const)(
+    'labels missing %s read details',
+    (status) => {
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'ReadFile',
+          status,
+        }),
+        { forceExpanded: true },
+      );
+      expect(container.textContent).toContain(
+        'Output is unavailable for this tool call.',
+      );
+    },
+  );
+
+  it('distinguishes an explicitly empty read from missing output', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        rawOutput: '',
+      }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('No output');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+
+  it('keeps waiting for an active read without output', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'ReadFile', status: 'in_progress' }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('Waiting for output…');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+
+  it('recognizes a recorded empty text block', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        content: [{ type: 'content', content: { type: 'text', text: '' } }],
+      }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('No output');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+
+  it('keeps an opaque recorded result distinct from missing output', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'ReadFile', rawOutput: { type: 'structured' } }),
+      { forceExpanded: true },
+    );
+    expect(container.textContent).toContain('No output');
+    expect(container.textContent).not.toContain('unavailable');
+  });
+});
+
 function renderToolLine(
   tool: ACPToolCall,
   props: Partial<Parameters<typeof ToolLine>[0]> = {},
@@ -945,6 +1005,32 @@ describe('tool row rendering', () => {
     expect(container.querySelector('[data-workflow-summary]')).not.toBeNull();
     expect(container.textContent).toContain('Architecture Agent');
   });
+
+  it.each([
+    ['custom_tool', 'First line.\n' + 'Bounded exported answer. '.repeat(8)],
+    [
+      'tool_call',
+      JSON.stringify({
+        schemaVersion: 1,
+        documentId: `g1_${'a'.repeat(64)}`,
+        title: 'Capacity estimate',
+        summary:
+          'Four workers at 25 requests/s give 100 requests/s. Adjust inputs locally.',
+      }),
+    ],
+  ])(
+    'keeps the full safe %s text preview visible in document mode',
+    (toolName, text) => {
+      const container = renderToolGroup(
+        [makeTool({ toolName, status: 'completed', rawOutput: text })],
+        {},
+        undefined,
+        'document',
+      );
+      expect(container.textContent).toContain(text);
+      expect(container.querySelector('iframe')).toBeNull();
+    },
+  );
 
   it('keeps grouped tools and thoughts fully expanded in document mode', () => {
     const container = renderToolGroup(

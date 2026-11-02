@@ -16,7 +16,7 @@ This page collects every setting that affects the `qwen serve` daemon and its ad
 | `--require-auth`                              | boolean                      | `false`                                                                           | Extends bearer auth to loopback and `/health`. Boot refuses to start when no token source resolves, which after the non-loopback generation step means a **loopback** bind: on a non-loopback bind the generated ephemeral token satisfies the flag, so its "no configured secret, no daemon" fail-fast is loopback-only. Loopback token sources are `--token`, `QWEN_SERVER_TOKEN`, and `--open-with-auth`.                                                                                                                                                                                                                                                                                                                                |
 | `--workspace <dir>`                           | absolute path / repeatable   | `process.cwd()`                                                                   | Startup workspace runtime; repeat to register additional isolated runtimes. The first is primary. Every value must be absolute and a directory; canonicalized at boot.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `--memory-project-scope <mode>`               | `git-root` / `workspace`     | `workspace`                                                                       | Project-memory partitioning. `workspace` isolates by exact workspace directory; `git-root` is the legacy compatibility scope shared by workspaces at the same Git root. Overrides `QWEN_CODE_MEMORY_PROJECT_SCOPE`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `--max-sessions <n>`                          | number                       | `32`                                                                              | Per-workspace active session cap. `0` / `Infinity` means unlimited; `NaN` / negative values throw.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `--max-sessions <n>`                          | number                       | `32`                                                                              | Per-workspace active session cap. `0` / `Infinity` means unlimited; `NaN` / negative values throw. A passed flag beats `serve.maxSessions` (user, system, and system-defaults scopes only), which beats the default; an invalid setting is reported and ignored.                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `--max-total-sessions <n>`                    | number                       | `800`, or derived at capacity 25 or less                                          | Daemon-wide active session cap. When omitted, it is 800 at registration capacities above 25 (including the default 256), even with one workspace. At capacities of 25 or less it is derived once from the per-workspace cap and the startup/restored workspace count, and one such workspace is unlimited. `0` / `Infinity` means unlimited.                                                                                                                                                                                                                                                                                                                                                                                                |
 | `--max-pending-prompts-per-session <n>`       | number                       | `5`                                                                               | Accepted but pending/running prompt cap per session. Excess prompt returns 503. `0` / `Infinity` means unlimited; negative or non-integer values throw.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `--max-connections <n>`                       | number                       | `256`                                                                             | HTTP listener `server.maxConnections`; `0` / `Infinity` means unlimited.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
@@ -162,15 +162,20 @@ The daemon constructs each workspace runtime from that workspace's merged settin
 ## Web Shell workspace creation deadlines
 
 In the common case, workspace creation makes a capability preflight on a cold or
-expired cache, followed by session creation. Each request has its own default
-30-second timeout, including response-body consumption. Web Shell allows 75
-seconds for the combined creation action, covering these two request budgets
-plus 15 seconds of headroom. A 20-second preflight followed by a 15-second create
-therefore succeeds without configuration changes. A concurrent capability refresh
-can supersede the preflight and extend the chain; the action may then time out
-before creation settles even when each request stays within its own deadline.
+expired cache, followed by session creation. The preflight keeps the SDK's
+generic 30-second timeout, including response-body consumption. The create
+request is instead sized from the session budget the daemon advertises:
+`limits.sessionRestoreTimeoutMs` plus 10 seconds of client headroom, floored at
+that same 30 seconds so a short restore pin cannot shorten a create, and 70
+seconds when no budget has been read yet. Web Shell derives the combined
+creation action limit from the same advertised budget — one preflight plus one
+create plus 15 seconds of headroom, which is 115 seconds against the default
+60-second budget. A 20-second preflight followed by a 15-second create therefore
+succeeds without configuration changes. A concurrent capability refresh can
+supersede the preflight and extend the chain; the action may then time out before
+creation settles even when each request stays within its own deadline.
 
-The 75-second limit also bounds transports that do not settle after SDK
+That derived limit also bounds transports that do not settle after SDK
 cancellation. It limits the action's wait rather than guaranteeing transport
 cancellation; successful results arriving after that limit are detached. Both
 initial workspace creation and creation with an existing session use this limit.
@@ -178,7 +183,14 @@ SDK standalone creation, other actions, and post-creation callbacks retain their
 existing deadlines.
 
 Increasing `--initialize-timeout-ms` does not raise the SDK request timeout for
-the capability preflight or the create request. Load/resume follows the separate
+the capability preflight, which stays on the generic 30-second deadline. It does
+raise the create and worktree-reset deadline whenever it raises the advertised
+budget: the daemon advertises that budget as `limits.sessionRestoreTimeoutMs`
+and the SDK sizes both from it. An explicit `--session-restore-timeout-ms` wins
+outright and leaves the create deadline at its 30-second floor, an initialize
+value at or below the 60000 default raises nothing, and a client that has not
+read capabilities uses the 70-second default, since worktree reset performs no
+preflight of its own. Load/resume follows the separate
 [restore timeout contract](../../design/2026-08-07-safe-session-restore-timeout.md#timeout-contract):
 automatic SDK derivation requires a cached server restore budget; without one it
 falls back to 70 seconds. Explicit request or client timeouts override that
@@ -192,9 +204,10 @@ do not expose this option. See the
 [Web Shell timeout reference](../../../packages/web-shell/README.md#workspace-会话创建超时)
 for creation and callback limits.
 
-The following controlled HTTP test shows the previous 30-second action deadline
-and the 75-second deadline with identical response delays. It exercises the
-actual SDK and workspace actions, not a rendered Web Shell or real daemon.
+The following controlled HTTP test predates the derived limit: it compares the
+original 30-second action deadline with the fixed 75-second one under identical
+response delays. It exercises the actual SDK and workspace actions, not a
+rendered Web Shell or real daemon.
 
 ![Controlled HTTP workspace creation before and after the deadline change](./assets/workspace-create-timeout.png)
 

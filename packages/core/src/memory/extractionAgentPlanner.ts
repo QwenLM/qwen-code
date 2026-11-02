@@ -28,6 +28,7 @@ import {
   type ScannedAutoMemoryDocument,
 } from './structured-scan.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
 import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
 import {
@@ -81,6 +82,7 @@ export interface AutoMemoryExtractionExecutionResult {
   touchedUserScope: boolean;
   systemMessage?: string;
   hasToolActivity: boolean;
+  extractorEngaged?: boolean;
 }
 
 /**
@@ -297,10 +299,102 @@ function touchedTopicsFromFilePaths(
   };
 }
 
+/**
+ * #13004: the parked skipped slice and the captured tail both come from the
+ * same live history, and the tail usually still holds the slice — the skip
+ * window (≤ half the tail) makes that the common case, not the exception.
+ * Concatenating both then forks those turns twice. The slice is raw while the
+ * tail is curated and slimmed, so coverage cannot come from raw offsets or
+ * whole-entry equality. The caller slims the slice exactly as the capture
+ * does, and coverage is proved over each side's flattened part sequence —
+ * curation merges adjacent user entries but never rewrites their parts:
+ *
+ * - The tail may begin before the slice (the close-flush shape, where the
+ *   tail is the whole short history): the whole slice then appears as one
+ *   contiguous run inside the tail, so drop it entirely.
+ * - The tail may begin inside the slice: a suffix of the slice, starting at
+ *   one of its entries, is then the tail's prefix; the whole overlap must
+ *   match, so a single repeated value cannot cut turns the tail never held.
+ *
+ * When neither proof holds (curation dropped an invalid model turn inside the
+ * slice), the slice passes through whole — a duplicate, never a loss.
+ */
+function uncoveredParkedPrefix(
+  skippedHistory: Content[],
+  capturedTail: Content[],
+): Content[] {
+  if (skippedHistory.length === 0 || capturedTail.length === 0) {
+    return skippedHistory;
+  }
+  // Texts, tool names, tool arguments and media payloads survive the
+  // capture's shallow copy unchanged. A part with none of them has no stable
+  // key and blocks every
+  // proof it falls in, failing safe toward a duplicate. Arguments keep the
+  // key injective: two `read_file` calls on different paths are not the same
+  // turn.
+  const partKey = (part: NonNullable<Content['parts']>[number]): string => {
+    if (typeof part.text === 'string') return `text:${part.text}`;
+    if (part.functionCall) {
+      return `call:${part.functionCall.name ?? ''}:${JSON.stringify(
+        part.functionCall.args ?? null,
+      )}`;
+    }
+    if (part.functionResponse) {
+      return `response:${part.functionResponse.name ?? ''}:${
+        part.functionResponse.id ?? ''
+      }`;
+    }
+    if (part.inlineData) {
+      return `media:${part.inlineData.mimeType ?? ''}:${part.inlineData.data ?? ''}`;
+    }
+    if (part.fileData) {
+      return `file:${part.fileData.mimeType ?? ''}:${part.fileData.fileUri ?? ''}`;
+    }
+    return '';
+  };
+  const flatten = (entries: Content[]) => {
+    const keys: string[] = [];
+    const entryStarts: number[] = [];
+    for (const entry of entries) {
+      entryStarts.push(keys.length);
+      for (const part of entry.parts ?? []) {
+        const key = partKey(part);
+        keys.push(key === '' ? '' : `${entry.role ?? ''}|${key}`);
+      }
+    }
+    return { keys, entryStarts };
+  };
+  const slice = flatten(skippedHistory);
+  const tail = flatten(capturedTail).keys;
+  const runMatches = (from: number, tailStart: number, count: number) => {
+    for (let k = 0; k < count; k++) {
+      const key = slice.keys[from + k];
+      if (key === '' || key !== tail[tailStart + k]) return false;
+    }
+    return true;
+  };
+
+  const count = slice.keys.length;
+  for (let start = 0; count > 0 && start + count <= tail.length; start++) {
+    if (runMatches(0, start, count)) return [];
+  }
+  for (let i = skippedHistory.length - 1; i >= 1; i--) {
+    const from = slice.entryStarts[i];
+    const overlap = count - from;
+    if (overlap > 0 && overlap <= tail.length && runMatches(from, 0, overlap)) {
+      return skippedHistory.slice(0, i);
+    }
+  }
+  return skippedHistory;
+}
+
 export async function runAutoMemoryExtractionByAgent(
   config: Config,
   projectRoot: string,
+  skippedHistory: Content[] = [],
+  abortSignal?: AbortSignal,
 ): Promise<AutoMemoryExtractionExecutionResult> {
+  abortSignal?.throwIfAborted();
   const cacheSafe = getCacheSafeParams(config.getSessionId());
   if (!cacheSafe) {
     throw new Error(
@@ -308,7 +402,17 @@ export async function runAutoMemoryExtractionByAgent(
         'extraction must run after a completed main turn.',
     );
   }
-  const extraHistory = buildAgentHistory(cacheSafe.history);
+  // Render the parked slice as the capture rendered the tail: the same
+  // placeholders keep stripped media from shipping again, and let media
+  // entries prove coverage.
+  const parked = slimCompactionInput(
+    skippedHistory,
+    config.getEffectiveInputModalities(),
+  ).slimmedHistory;
+  const extraHistory = buildAgentHistory([
+    ...uncoveredParkedPrefix(parked, cacheSafe.history),
+    ...cacheSafe.history,
+  ]);
 
   const { topicSummaries, keywordVocabularySnapshot } =
     await buildExistingMemoryContext(projectRoot);
@@ -346,6 +450,7 @@ export async function runAutoMemoryExtractionByAgent(
       ToolNames.EDIT,
     ],
     extraHistory,
+    abortSignal,
   });
 
   if (result.status !== 'completed') {
@@ -357,12 +462,17 @@ export async function runAutoMemoryExtractionByAgent(
 
   const { topics, touchedProjectScope, touchedUserScope } =
     touchedTopicsFromFilePaths(result.filesWritten ?? [], projectRoot);
+  const accessed = touchedTopicsFromFilePaths(
+    [...(result.filesRead ?? []), ...(result.filesWritten ?? [])],
+    projectRoot,
+  );
 
   return {
     touchedTopics: topics,
     touchedProjectScope,
     touchedUserScope,
     hasToolActivity: result.filesTouched.length > 0,
+    extractorEngaged: accessed.touchedProjectScope || accessed.touchedUserScope,
     systemMessage:
       topics.length > 0
         ? `Managed auto-memory updated: ${topics.map((t) => `${t}.md`).join(', ')}`

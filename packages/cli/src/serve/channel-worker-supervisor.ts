@@ -13,6 +13,7 @@ import type { ServeChannelSelection } from './types.js';
 import {
   CHANNEL_DAEMON_WORKER_SENTINEL,
   CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS,
+  MANAGED_RUNTIME_BROKER_TOKEN_ENV,
   QWEN_DAEMON_TOKEN_ENV,
   QWEN_DAEMON_URL_ENV,
   QWEN_DAEMON_WORKSPACE_ENV,
@@ -662,6 +663,7 @@ function createWorkerEnv(opts: {
   delete env[QWEN_SERVER_TOKEN_ENV];
   delete env[QWEN_DAEMON_TOKEN_ENV];
   delete env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
+  delete env[MANAGED_RUNTIME_BROKER_TOKEN_ENV];
   if (opts.daemonToken) {
     env[QWEN_DAEMON_TOKEN_ENV] = opts.daemonToken;
   }

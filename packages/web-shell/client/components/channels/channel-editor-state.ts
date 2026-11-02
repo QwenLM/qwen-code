@@ -11,6 +11,7 @@ import type {
   DaemonChannelTypeDescriptor,
   DaemonChannelUpsertRequest,
 } from '@qwen-code/sdk/daemon';
+import { isRepositoryOnlyChannelType } from './channel-platform';
 
 export type ChannelPrivatePolicy =
   | 'disabled'
@@ -43,6 +44,8 @@ export type ChannelEditorValidationCode =
   | 'invalid'
   | 'invalidGroupId'
   | 'invalidOption'
+  | 'invalidRepoId'
+  | 'conflictingRepoAliases'
   | 'number'
   | 'outOfRange'
   | 'policy';
@@ -53,6 +56,21 @@ export type ChannelEditorValidationErrors = Record<
 >;
 
 const UNSAFE_OBJECT_KEYS = ['__proto__', 'constructor', 'prototype'];
+
+/** Access fields that only gate direct messages, which repository-only channels never receive. */
+export const PRIVATE_ONLY_FIELD_KEYS = new Set([
+  'privatePolicy',
+  'allowedUsers',
+]);
+
+const REPOSITORY_FULL_NAME_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+export function toList(value: string): string[] {
+  return value
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
 
 export function hasDescriptorPrivatePolicy(
   descriptor: DaemonChannelTypeDescriptor,
@@ -138,6 +156,16 @@ function initialFieldValue(
   }
   if (field.kind === 'enum') {
     if (typeof value === 'string' && value) return value;
+    // A multiSession channel only supports scope 'user' (the store resolves it
+    // the same way when the field is absent). Pre-filling the plugin's
+    // non-user default here would submit that default verbatim and the store
+    // would reject every save of an existing multiSession instance.
+    if (
+      field.key === 'sessionScope' &&
+      instance?.config['multiSession'] === true
+    ) {
+      return 'user';
+    }
     if (instance) {
       if (field.key === 'privatePolicy')
         return configuredPrivatePolicy(instance);
@@ -180,6 +208,17 @@ export function createChannelEditorDraft(
   const configuredPolicy = instance
     ? configuredPrivatePolicy(instance)
     : 'pairing';
+  const repositoryOnly = isRepositoryOnlyChannelType(descriptor.type);
+  if (
+    repositoryOnly &&
+    values['useLocalGh'] === true &&
+    instance?.secrets['token']?.present
+  ) {
+    // A stored token outranks local gh auth, so keeping it would silently
+    // defeat the authentication method this channel has selected.
+    secrets['token'] = { operation: 'clear' };
+  }
+  const configuredGroups = configuredGroupIds(instance);
   return {
     name: instance?.name ?? '',
     values,
@@ -189,7 +228,12 @@ export function createChannelEditorDraft(
       : ['disabled', 'allowlist', 'pairing', 'open'].includes(configuredPolicy)
         ? (configuredPolicy as ChannelPrivatePolicy)
         : '',
-    allowedGroupIds: configuredGroupIds(instance),
+    // Show repository IDs in the canonical lower-case form the editor writes,
+    // so re-saving an older mixed-case allowlist migrates it instead of
+    // rewriting the same spelling back.
+    allowedGroupIds: repositoryOnly
+      ? [...new Set(toList(configuredGroups.toLowerCase()))].join(', ')
+      : configuredGroups,
     groupSenders: configuredGroupSenders(instance),
     groupAllowedUsers: configuredGroupAllowedUsers(instance),
   };
@@ -225,6 +269,7 @@ export function validateChannelEditorDraft(
   descriptor: DaemonChannelTypeDescriptor,
   draft: ChannelEditorDraft,
   existingNames: readonly string[],
+  instance?: DaemonChannelInstanceSnapshot,
 ): ChannelEditorValidationErrors {
   const errors: ChannelEditorValidationErrors = {};
   const name = draft.name.trim();
@@ -275,7 +320,11 @@ export function validateChannelEditorDraft(
       errors['token'] = 'credential';
     }
   }
-  if (!draft.privatePolicy && !hasDescriptorPrivatePolicy(descriptor)) {
+  if (
+    !isRepositoryOnlyChannelType(descriptor.type) &&
+    !draft.privatePolicy &&
+    !hasDescriptorPrivatePolicy(descriptor)
+  ) {
     errors['privatePolicy'] = 'policy';
   }
   if (
@@ -286,7 +335,69 @@ export function validateChannelEditorDraft(
   ) {
     errors['allowedGroupIds'] = 'invalidGroupId';
   }
+  if (
+    isRepositoryOnlyChannelType(descriptor.type) &&
+    String(draft.values['groupPolicy'] ?? '') === 'allowlist'
+  ) {
+    if (
+      splitList(draft.allowedGroupIds).some(
+        (groupId) => !REPOSITORY_FULL_NAME_RE.test(groupId),
+      )
+    ) {
+      errors['allowedGroupIds'] = 'invalidRepoId';
+    }
+    if (hasConflictingRepositoryAliases(instance)) {
+      // Collapsing these keys would keep only one of two different sender
+      // policies, and the runtime prefers an exact key — so a no-op save could
+      // widen access. Make the operator resolve it instead of choosing for them.
+      errors['allowedGroupIds'] = 'conflictingRepoAliases';
+    }
+  }
   return errors;
+}
+
+/**
+ * Whether the stored allowlist holds two spellings of one repository that
+ * carry different settings. GitHub treats them as the same repository, but
+ * the runtime resolves an exact key first, so they are not interchangeable.
+ */
+function hasConflictingRepositoryAliases(
+  instance?: DaemonChannelInstanceSnapshot,
+): boolean {
+  const groups = instance?.config['groups'];
+  if (!isRecord(groups)) return false;
+  const shapes = new Map<string, Set<string>>();
+  for (const [groupId, group] of Object.entries(groups)) {
+    if (groupId === '*') continue;
+    const key = groupId.toLowerCase();
+    const shape = canonicalGroupShape(group);
+    shapes.set(key, (shapes.get(key) ?? new Set<string>()).add(shape));
+  }
+  for (const variants of shapes.values()) {
+    if (variants.size > 1) return true;
+  }
+  return false;
+}
+
+/**
+ * Compare group settings by meaning, not by JSON text: key order carries no
+ * meaning, and the only list a group holds is an allowlist, whose order does
+ * not matter either. Comparing the raw text would report two identical
+ * entries written in a different order as a conflict and block an unrelated
+ * save.
+ */
+function canonicalGroupShape(value: unknown): string {
+  if (Array.isArray(value)) {
+    return JSON.stringify(value.map(canonicalGroupShape).sort());
+  }
+  if (isRecord(value)) {
+    return JSON.stringify(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, canonicalGroupShape(value[key])]),
+    );
+  }
+  return JSON.stringify(value ?? null);
 }
 
 function assignField(
@@ -346,32 +457,36 @@ function assignField(
 }
 
 function splitList(value: string): string[] {
-  return [
-    ...new Set(
-      value
-        .split(',')
-        .map((item) => item.trim())
-        .filter(Boolean),
-    ),
-  ];
+  return [...new Set(toList(value))];
 }
 
 function assignGroups(
   config: Record<string, unknown>,
   allowedGroupIds: string,
   instance?: DaemonChannelInstanceSnapshot,
+  normalizeKeys = false,
 ): void {
   const previous = instance?.config['groups'];
-  const previousGroups = isRecord(previous) ? previous : {};
+  const storedGroups = isRecord(previous) ? previous : {};
+  // Repository IDs are case-insensitive. Store the canonical lower-case key
+  // and look the previous per-repository settings up under it, so retyping the
+  // case does not silently drop that repository's sender policy.
+  const previousGroups = normalizeKeys
+    ? Object.fromEntries(
+        Object.entries(storedGroups).map(([key, value]) => [
+          key.toLowerCase(),
+          value,
+        ]),
+      )
+    : storedGroups;
   const groups: Record<string, unknown> = {};
   if (isRecord(previousGroups['*'])) {
     groups['*'] = previousGroups['*'];
   }
   for (const groupId of splitList(allowedGroupIds)) {
-    if (groupId === '*') continue;
-    groups[groupId] = isRecord(previousGroups[groupId])
-      ? previousGroups[groupId]
-      : {};
+    const key = normalizeKeys ? groupId.toLowerCase() : groupId;
+    if (key === '*') continue;
+    groups[key] = isRecord(previousGroups[key]) ? previousGroups[key] : {};
   }
   if (Object.keys(groups).length > 0) {
     config['groups'] = groups;
@@ -426,9 +541,11 @@ export function buildChannelUpsertRequest(
     ...(instance?.config ?? {}),
     type: descriptor.type,
   };
+  const repositoryOnly = isRepositoryOnlyChannelType(descriptor.type);
   const secrets: Record<string, DaemonChannelSecretUpdate> = {};
   for (const field of descriptor.fields) {
     if (field.kind === 'object') continue;
+    if (repositoryOnly && PRIVATE_ONLY_FIELD_KEYS.has(field.key)) continue;
     if (field.kind === 'secret') {
       const secret = draft.secrets[field.key] ?? { operation: 'preserve' };
       secrets[field.key] =
@@ -441,12 +558,18 @@ export function buildChannelUpsertRequest(
     }
     assignField(config, field, draft.values[field.key]);
   }
-  if (!hasDescriptorPrivatePolicy(descriptor)) {
+  if (repositoryOnly) {
+    // The editor used to persist the injected private-access defaults here
+    // even though these channels never read them, and the pairing panel would
+    // then present the stale user list as an authoritative allowlist. Drop the
+    // whole set on the next save; the effective list lives under `groups`.
+    for (const key of PRIVATE_ONLY_FIELD_KEYS) delete config[key];
+  } else if (!hasDescriptorPrivatePolicy(descriptor)) {
     config['privatePolicy'] = draft.privatePolicy;
   }
   if (hasDescriptorGroupPolicy(descriptor)) {
     if (config['groupPolicy'] === 'allowlist') {
-      assignGroups(config, draft.allowedGroupIds, instance);
+      assignGroups(config, draft.allowedGroupIds, instance, repositoryOnly);
     } else if (instance?.config['groupPolicy'] === 'allowlist') {
       removeGroupAllowlistMembership(config, instance);
     }

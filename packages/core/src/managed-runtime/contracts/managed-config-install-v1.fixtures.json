@@ -1,0 +1,526 @@
+{
+  "schemaVersion": 1,
+  "valid": [
+    {
+      "name": "nullable_preparing",
+      "content": {
+        "kind": "hosted-extension-config",
+        "formatVersion": 1,
+        "command": {
+          "operationId": "11111111-1111-4111-8111-111111111111",
+          "actorKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "expectedRevision": 0,
+          "extensions": []
+        },
+        "mode": "apply",
+        "phaseOperationId": "11111111-1111-4111-8111-111111111111",
+        "configRevision": 1,
+        "previousConfigRevision": 0,
+        "phase": "preparing",
+        "previousBundleRef": null,
+        "restoresBundleRef": null,
+        "bundleRef": null,
+        "rootSnapshotRef": {
+          "resourceId": "root",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "stageAckRefs": [],
+        "enableAckRefs": [],
+        "error": null
+      }
+    },
+    {
+      "name": "prepared",
+      "content": {
+        "kind": "hosted-extension-config",
+        "formatVersion": 1,
+        "command": {
+          "operationId": "11111111-1111-4111-8111-111111111111",
+          "actorKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "expectedRevision": 0,
+          "extensions": []
+        },
+        "mode": "apply",
+        "phaseOperationId": "11111111-1111-4111-8111-111111111111",
+        "configRevision": 1,
+        "previousConfigRevision": 0,
+        "phase": "prepared",
+        "previousBundleRef": null,
+        "restoresBundleRef": null,
+        "bundleRef": {
+          "resourceId": "bundle",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "rootSnapshotRef": {
+          "resourceId": "root",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "stageAckRefs": [
+          {
+            "resourceId": "hstage",
+            "kind": "managed-test",
+            "schemaVersion": 1,
+            "byteLength": 2,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          {
+            "resourceId": "rstage",
+            "kind": "managed-test",
+            "schemaVersion": 1,
+            "byteLength": 2,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "enableAckRefs": [],
+        "error": null
+      }
+    },
+    {
+      "name": "active",
+      "content": {
+        "kind": "hosted-extension-config",
+        "formatVersion": 1,
+        "command": {
+          "operationId": "11111111-1111-4111-8111-111111111111",
+          "actorKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "expectedRevision": 0,
+          "extensions": []
+        },
+        "mode": "apply",
+        "phaseOperationId": "11111111-1111-4111-8111-111111111111",
+        "configRevision": 1,
+        "previousConfigRevision": 0,
+        "phase": "active",
+        "previousBundleRef": null,
+        "restoresBundleRef": null,
+        "bundleRef": {
+          "resourceId": "bundle",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "rootSnapshotRef": {
+          "resourceId": "root",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "stageAckRefs": [
+          {
+            "resourceId": "hstage",
+            "kind": "managed-test",
+            "schemaVersion": 1,
+            "byteLength": 2,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          {
+            "resourceId": "rstage",
+            "kind": "managed-test",
+            "schemaVersion": 1,
+            "byteLength": 2,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "enableAckRefs": [
+          {
+            "resourceId": "henable",
+            "kind": "managed-test",
+            "schemaVersion": 1,
+            "byteLength": 2,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          {
+            "resourceId": "renable",
+            "kind": "managed-test",
+            "schemaVersion": 1,
+            "byteLength": 2,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "error": null
+      }
+    },
+    {
+      "name": "separate_mcp_token",
+      "content": {
+        "kind": "hosted-extension-config",
+        "formatVersion": 1,
+        "command": {
+          "operationId": "11111111-1111-4111-8111-111111111111",
+          "actorKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "expectedRevision": 0,
+          "extensions": [],
+          "mcpChange": {
+            "action": "disable",
+            "serverId": "base",
+            "expectedRevision": 7,
+            "servers": [
+              {
+                "serverId": "base",
+                "serverRevision": 2,
+                "definitionDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "state": "disabled"
+              }
+            ]
+          }
+        },
+        "mode": "apply",
+        "phaseOperationId": "11111111-1111-4111-8111-111111111111",
+        "configRevision": 1,
+        "previousConfigRevision": 0,
+        "phase": "preparing",
+        "previousBundleRef": null,
+        "restoresBundleRef": null,
+        "bundleRef": null,
+        "rootSnapshotRef": {
+          "resourceId": "root",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "stageAckRefs": [],
+        "enableAckRefs": [],
+        "error": null
+      }
+    },
+    {
+      "name": "committed",
+      "content": {
+        "kind": "hosted-extension-config",
+        "formatVersion": 1,
+        "command": {
+          "operationId": "11111111-1111-4111-8111-111111111111",
+          "actorKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "expectedRevision": 0,
+          "extensions": []
+        },
+        "mode": "apply",
+        "phaseOperationId": "11111111-1111-4111-8111-111111111111",
+        "configRevision": 1,
+        "previousConfigRevision": 0,
+        "phase": "committed",
+        "previousBundleRef": null,
+        "restoresBundleRef": null,
+        "bundleRef": {
+          "resourceId": "bundle",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "rootSnapshotRef": {
+          "resourceId": "root",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "stageAckRefs": [
+          {
+            "resourceId": "hstage",
+            "kind": "managed-test",
+            "schemaVersion": 1,
+            "byteLength": 2,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          {
+            "resourceId": "rstage",
+            "kind": "managed-test",
+            "schemaVersion": 1,
+            "byteLength": 2,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "enableAckRefs": [],
+        "error": null
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "committed_missing_stage",
+      "content": {
+        "kind": "hosted-extension-config",
+        "formatVersion": 1,
+        "command": {
+          "operationId": "11111111-1111-4111-8111-111111111111",
+          "actorKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "expectedRevision": 0,
+          "extensions": []
+        },
+        "mode": "apply",
+        "phaseOperationId": "11111111-1111-4111-8111-111111111111",
+        "configRevision": 1,
+        "previousConfigRevision": 0,
+        "phase": "committed",
+        "previousBundleRef": null,
+        "restoresBundleRef": null,
+        "bundleRef": {
+          "resourceId": "bundle",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "rootSnapshotRef": {
+          "resourceId": "root",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "stageAckRefs": [],
+        "enableAckRefs": [],
+        "error": null
+      }
+    },
+    {
+      "name": "prepared_null_bundle",
+      "content": {
+        "kind": "hosted-extension-config",
+        "formatVersion": 1,
+        "command": {
+          "operationId": "11111111-1111-4111-8111-111111111111",
+          "actorKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "expectedRevision": 0,
+          "extensions": []
+        },
+        "mode": "apply",
+        "phaseOperationId": "11111111-1111-4111-8111-111111111111",
+        "configRevision": 1,
+        "previousConfigRevision": 0,
+        "phase": "prepared",
+        "previousBundleRef": null,
+        "restoresBundleRef": null,
+        "bundleRef": null,
+        "rootSnapshotRef": {
+          "resourceId": "root",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "stageAckRefs": [
+          {
+            "resourceId": "hstage",
+            "kind": "managed-test",
+            "schemaVersion": 1,
+            "byteLength": 2,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          {
+            "resourceId": "rstage",
+            "kind": "managed-test",
+            "schemaVersion": 1,
+            "byteLength": 2,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "enableAckRefs": [],
+        "error": null
+      }
+    },
+    {
+      "name": "active_missing_enable",
+      "content": {
+        "kind": "hosted-extension-config",
+        "formatVersion": 1,
+        "command": {
+          "operationId": "11111111-1111-4111-8111-111111111111",
+          "actorKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "expectedRevision": 0,
+          "extensions": []
+        },
+        "mode": "apply",
+        "phaseOperationId": "11111111-1111-4111-8111-111111111111",
+        "configRevision": 1,
+        "previousConfigRevision": 0,
+        "phase": "active",
+        "previousBundleRef": null,
+        "restoresBundleRef": null,
+        "bundleRef": {
+          "resourceId": "bundle",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "rootSnapshotRef": {
+          "resourceId": "root",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "stageAckRefs": [
+          {
+            "resourceId": "hstage",
+            "kind": "managed-test",
+            "schemaVersion": 1,
+            "byteLength": 2,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          {
+            "resourceId": "rstage",
+            "kind": "managed-test",
+            "schemaVersion": 1,
+            "byteLength": 2,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "enableAckRefs": [],
+        "error": null
+      }
+    },
+    {
+      "name": "secret_field",
+      "content": {
+        "kind": "hosted-extension-config",
+        "formatVersion": 1,
+        "command": {
+          "operationId": "11111111-1111-4111-8111-111111111111",
+          "actorKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "expectedRevision": 0,
+          "extensions": []
+        },
+        "mode": "apply",
+        "phaseOperationId": "11111111-1111-4111-8111-111111111111",
+        "configRevision": 1,
+        "previousConfigRevision": 0,
+        "phase": "preparing",
+        "previousBundleRef": null,
+        "restoresBundleRef": null,
+        "bundleRef": null,
+        "rootSnapshotRef": {
+          "resourceId": "root",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "stageAckRefs": [],
+        "enableAckRefs": [],
+        "error": null,
+        "settings": {
+          "token": "must_not_persist"
+        }
+      }
+    },
+    {
+      "name": "pin_missing_digest",
+      "content": {
+        "kind": "hosted-extension-config",
+        "formatVersion": 1,
+        "command": {
+          "operationId": "11111111-1111-4111-8111-111111111111",
+          "actorKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "expectedRevision": 0,
+          "extensions": [
+            {
+              "extensionId": "sample",
+              "packageRevision": 1
+            }
+          ]
+        },
+        "mode": "apply",
+        "phaseOperationId": "11111111-1111-4111-8111-111111111111",
+        "configRevision": 1,
+        "previousConfigRevision": 0,
+        "phase": "preparing",
+        "previousBundleRef": null,
+        "restoresBundleRef": null,
+        "bundleRef": null,
+        "rootSnapshotRef": {
+          "resourceId": "root",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "stageAckRefs": [],
+        "enableAckRefs": [],
+        "error": null
+      }
+    }
+  ],
+  "legacy": [
+    {
+      "name": "mcp_v1_unchanged",
+      "content": {
+        "kind": "hosted-mcp-settings",
+        "formatVersion": 1,
+        "command": {
+          "operationId": "11111111-1111-4111-8111-111111111111",
+          "actorKey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "action": "disable",
+          "serverId": "base",
+          "expectedRevision": 7
+        },
+        "servers": [
+          {
+            "serverId": "base",
+            "serverRevision": 2,
+            "definitionDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "state": "disabled"
+          }
+        ]
+      }
+    }
+  ],
+  "successors": [
+    {
+      "name": "initial_prepare",
+      "previous": null,
+      "next": "nullable_preparing",
+      "valid": true
+    },
+    {
+      "name": "stage",
+      "previous": "nullable_preparing",
+      "next": "prepared",
+      "valid": true
+    },
+    {
+      "name": "commit",
+      "previous": "prepared",
+      "next": "committed",
+      "valid": true
+    },
+    {
+      "name": "enable",
+      "previous": "committed",
+      "next": "active",
+      "valid": true
+    },
+    {
+      "name": "cannot_skip_commit",
+      "previous": "prepared",
+      "next": "active",
+      "valid": false
+    },
+    {
+      "name": "cannot_repeat_active",
+      "previous": "active",
+      "next": "active",
+      "valid": false
+    }
+  ],
+  "phaseOperationIds": [
+    {
+      "operationId": "11111111-1111-4111-8111-111111111111",
+      "expected": "a6204ca0-0013-58fe-8c73-2e92f96c3a7a"
+    }
+  ]
+}
