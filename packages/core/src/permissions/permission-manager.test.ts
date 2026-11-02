@@ -2854,6 +2854,20 @@ describe('PermissionManager', () => {
       }
     });
 
+    it('escapes whitespace controls instead of dropping them', () => {
+      const rawWithControls = 'Bash(evil\n>\tspoof\r!';
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        parseRules([rawWithControls]);
+        expect(warn).toHaveBeenCalledTimes(1);
+        const [message] = warn.mock.calls[0]!;
+        expect(String(message)).toContain('evil\\n>\\tspoof\\r!');
+        expect(String(message)).not.toContain(rawWithControls);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
     // `stripAnsiAndControl` covers C0/C1 but not the Unicode format
     // characters that reorder a row. A deny rule carrying a trailing RLO is
     // malformed, so this warning fires for exactly the rule the operator most

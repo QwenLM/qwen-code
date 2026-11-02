@@ -132,6 +132,7 @@ export const MUST_TRANSLATE_KEYS = [
   'Token Trend',
   'In/Out',
   'Unset',
+  '(invalid: not applied)',
   'Update requires sudo. Please run:',
   'Standalone install detected. Please rerun the standalone installer to update:',
 ] as const;

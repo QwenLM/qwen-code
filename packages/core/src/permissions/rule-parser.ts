@@ -7,6 +7,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { stripVTControlCharacters } from 'node:util';
 import picomatch from 'picomatch';
 import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -15,7 +16,6 @@ import {
   normalizeMcpToolName,
 } from '../utils/tool-name-utils.js';
 import { isNodeError } from '../utils/errors.js';
-import { stripAnsiAndControl } from '../utils/textUtils.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
 
@@ -578,21 +578,26 @@ export function parseRule(raw: string): PermissionRule {
  * default runs, so the same reason `tools.eager` reports its unusable entries
  * applies here.
  *
- * The raw rule is printed through `stripAnsiAndControl` and then the Unicode
- * format characters that reorder a rendered row: it arrives from settings
- * files and from tool calls, so it is untrusted text headed for the
- * operator's terminal. `stripAnsiAndControl` covers C0/C1 and the ANSI
- * sequences; the bidi overrides are the separate pass the rest of the code
- * base already treats as required for terminal output, and this message is
- * the one place an operator reads a rule that protects nothing.
+ * The raw rule is stripped of ANSI/VT sequences and bidi formatting marks.
+ * Residual control characters are rendered as visible escapes so whitespace
+ * still identifies the original rule without reaching the operator's terminal.
  */
 
 // U+061C, U+200E/U+200F, the explicit embeddings and overrides (U+202A-U+202E)
 // and the isolates (U+2066-U+2069). Same set managed-automation-operations
 // strips before framing a run for a terminal.
 const BIDI_MARKS = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 export function warnDroppedPermissionRule(raw: string, kind?: string): void {
-  const printable = stripAnsiAndControl(raw).replace(BIDI_MARKS, "");
+  const printable = stripVTControlCharacters(raw)
+    .replace(BIDI_MARKS, '')
+    .replace(CONTROL_CHARS, (char) => {
+      if (char === '\n') return '\\n';
+      if (char === '\t') return '\\t';
+      if (char === '\r') return '\\r';
+      return `\\x${char.charCodeAt(0).toString(16).padStart(2, '0')}`;
+    });
   const message =
     `[permissions] ignoring malformed ${kind ? `${kind} ` : ''}rule ` +
     `(unbalanced parentheses): ${printable} — it matches nothing, so it ` +
@@ -612,9 +617,6 @@ export function parseRules(raws: string[]): PermissionRule[] {
     .map(parseRule)
     .map((r) => {
       if (r.invalid) {
-        debugLogger.warn(
-          `Ignoring malformed rule (unbalanced parentheses): ${r.raw}`,
-        );
         warnDroppedPermissionRule(r.raw);
       }
       return r;

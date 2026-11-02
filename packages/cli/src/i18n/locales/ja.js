@@ -1115,6 +1115,7 @@ export default {
   'User settings': 'ユーザー設定',
   'Saved in at ~/.qwen/settings.json': '~/.qwen/settings.json に保存',
   'Add a new rule…': '新しいルールを追加…',
+  '(invalid: not applied)': '（無効：未適用）',
   'Add {{type}} permission rule': '{{type}} permission rule を追加',
   'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
     'permission rules はツール名で、オプションで括弧内に指定子を付けます。',

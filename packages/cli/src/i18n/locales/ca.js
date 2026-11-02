@@ -1393,6 +1393,7 @@ export default {
   'User settings': "Configuració d'usuari",
   'Saved in at ~/.qwen/settings.json': 'Desat a ~/.qwen/settings.json',
   'Add a new rule…': 'Afegeix una nova regla…',
+  '(invalid: not applied)': '(no vàlida: no aplicada)',
   'Add {{type}} permission rule': 'Afegeix la regla de permís {{type}}',
   'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
     "Les regles de permís són un nom d'eina, seguit opcionalment d'un especificador entre parèntesis.",
