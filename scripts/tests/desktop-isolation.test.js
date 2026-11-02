@@ -84,8 +84,15 @@ describe('desktop rpm build-root dependencies', () => {
     const source = install.run;
     const download = source.match(/curl[^\n]+ '(https:\/\/[^']+)'/);
     expect(download).not.toBeNull();
+    // Re-derive both literals from the real RPM (`sha256sum <rpm>`) whenever
+    // the versioned filename moves; nothing offline can prove they agree.
+    expect(download[1]).toBe(
+      'https://dl.fedoraproject.org/pub/epel/10/Everything/x86_64/Packages/e/epel-release-10-9.el10_3.noarch.rpm',
+    );
+    expect(source).toContain(
+      'f567aa5c3cde55f579ba5c41c79df97da692a391efddd14b123a4eec0824fbc0',
+    );
     const filename = new URL(download[1]).pathname.split('/').pop();
-    expect(filename).toMatch(/^epel-release-10-\d+\.el10_\d+\.noarch\.rpm$/);
     expect(source).toContain(`epel_rpm="$RUNNER_TEMP/${filename}"`);
     expect(source).toMatch(
       /echo '[0-9a-f]{64} {2}'"\$epel_rpm" \| sha256sum -c -/,

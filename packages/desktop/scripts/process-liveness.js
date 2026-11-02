@@ -11,7 +11,9 @@ export function isProcessAlive(
   try {
     kill(pid, 0);
   } catch (error) {
-    return error?.code === 'EPERM';
+    // EPERM/EACCES: it exists under another owner. Mirrors the canonical
+    // packages/core/src/utils/process-liveness.ts; keep both in sync.
+    return error?.code === 'EPERM' || error?.code === 'EACCES';
   }
   if (platform !== 'linux') return true;
   try {
