@@ -8,7 +8,6 @@ import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import {
-  isSubscriptionEntryEnabled,
   subscriptionAuthorizationUrl,
   useSubscription,
 } from './use-subscription.js';
@@ -57,8 +56,8 @@ const device = {
 beforeEach(() => {
   vi.useFakeTimers();
   vi.resetAllMocks();
-  vi.stubEnv('DEV', true);
-  process.env['DEV'] = 'true';
+  vi.stubEnv('DEV', false);
+  delete process.env['DEV'];
   vi.stubEnv('QWEN_HOME', '/tmp/subscription-hook-test');
   vi.stubEnv('QWEN_OAUTH_BASE_URL', 'https://pre-auth.qwen.ai');
   vi.stubEnv('QWEN_OAUTH_CLIENT_ID', 'qwen-code-cli');
@@ -75,15 +74,6 @@ const flush = async () => {
     await Promise.resolve();
   });
 };
-
-it('shows the development entry before OAuth is configured', () => {
-  expect(isSubscriptionEntryEnabled()).toBe(true);
-  vi.stubEnv('QWEN_OAUTH_BASE_URL', undefined);
-  expect(isSubscriptionEntryEnabled()).toBe(true);
-  vi.stubEnv('QWEN_OAUTH_BASE_URL', 'https://pre-auth.qwen.ai');
-  process.env['DEV'] = 'false';
-  expect(isSubscriptionEntryEnabled()).toBe(false);
-});
 
 it('starts OAuth without environment configuration', async () => {
   vi.stubEnv('QWEN_OAUTH_BASE_URL', undefined);

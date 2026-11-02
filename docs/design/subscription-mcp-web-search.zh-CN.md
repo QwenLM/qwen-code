@@ -14,7 +14,7 @@
 
 为 `WebSearchBackendConfig` 增加会员分支，并通过现有 MCP SDK 的 Streamable HTTP transport 实现小型后端。每次搜索创建独立客户端，初始化、发现 `web_search`、传入 `query` 调用，并在 `finally` 关闭。沿用服务端默认结果数量。合并返回文本块，仅从返回内容提取 HTTP(S) 链接作为未打开来源；引用规则、输出截断、权限及每会话次数限制继续由现有工具处理。超过 500 字符的查询及不支持或错误响应返回安全错误文案。
 
-搜索使用自动配置时，仅在开发环境且当前鉴权为 `qwen-subscription` 时选择该后端。显式禁用，以及显式指定其他搜索模型或端点的配置，保留原有含义。鉴权切换成功后同步工具注册，覆盖已初始化的会话，并保留 bare、安全模式、Managed Runtime、子代理和权限边界。
+搜索使用自动配置时，当前鉴权为 `qwen-subscription` 即选择该后端，无需 DEV。显式禁用，以及显式指定其他搜索模型或端点的配置，保留原有含义。鉴权切换成功后同步工具注册，覆盖已初始化的会话，并保留 bare、安全模式、Managed Runtime、子代理和权限边界。
 
 每次 HTTP 请求都通过 `QwenSubscriptionSession.getAccessToken` 取 Token。固定完整 URL、拒绝重定向、复用运行时代理和会话 fetch 选项，合并调用取消与搜索总超时，并在 HTTP 401 时最多刷新一次。不把 Token 存入配置，也不暴露原始鉴权或传输错误。短生命周期客户端避免共用 MCP 池及跨工作区 transport 状态。
 

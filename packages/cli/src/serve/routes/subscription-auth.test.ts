@@ -48,8 +48,8 @@ function makeApp(onSignedOut?: () => Promise<void>) {
 const base = '/auth/subscription';
 beforeEach(() => {
   vi.resetAllMocks();
-  vi.stubEnv('DEV', true);
-  process.env['DEV'] = 'true';
+  vi.stubEnv('DEV', false);
+  delete process.env['DEV'];
   vi.stubEnv('QWEN_OAUTH_BASE_URL', 'https://pre-auth.qwen.ai');
   mocks.userInfo.mockResolvedValue(null);
   mocks.signIn.mockImplementation(() => new Promise(() => {}));
@@ -91,14 +91,21 @@ describe('process-global Subscription routes', () => {
       Array.from({ length: 4 }, () => [{ strict: true }]),
     );
   });
-  it('keeps the capability development-only', async () => {
-    process.env['DEV'] = 'false';
-    const { get, post } = makeApp();
-    expect((await get(base)).body).toEqual({ enabled: false });
-    expect((await post(`${base}/flows`)).status).toBe(404);
-    expect(mocks.userInfo).not.toHaveBeenCalled();
-  });
-  it('enables development login without OAuth environment configuration', async () => {
+  it.each([undefined, 'false', 'true'])(
+    'enables login when DEV=%s',
+    async (dev) => {
+      vi.stubEnv('DEV', false);
+      if (dev === undefined) delete process.env['DEV'];
+      else process.env['DEV'] = dev;
+      const { get, post } = makeApp();
+      expect((await get(base)).body).toEqual({
+        enabled: true,
+        plansUrl: 'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
+      });
+      expect((await post(`${base}/flows`)).status).toBe(201);
+    },
+  );
+  it('enables login without OAuth environment configuration', async () => {
     vi.stubEnv('QWEN_OAUTH_BASE_URL', undefined);
     vi.stubEnv('QWEN_OAUTH_CLIENT_ID', undefined);
     vi.stubEnv('QWEN_HOME', undefined);

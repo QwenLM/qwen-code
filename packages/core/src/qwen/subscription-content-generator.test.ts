@@ -65,8 +65,8 @@ beforeEach(async () => {
   vi.clearAllMocks();
   fetchMock.mockReset();
   session.getAccessToken.mockReset();
-  vi.stubEnv('DEV', true);
-  process.env['DEV'] = 'true';
+  vi.stubEnv('DEV', false);
+  delete process.env['DEV'];
   vi.stubGlobal('fetch', fetchMock);
   session.getAccessToken.mockResolvedValue('synthetic-access');
   await preloadRuntimeFetchModule();
@@ -336,16 +336,31 @@ it('does not replay a second 401', async () => {
   expect(fetchMock).toHaveBeenCalledTimes(2);
 });
 
-it('rejects production, gateway overrides before reading credentials', () => {
+it('rejects gateway overrides before reading credentials', () => {
   expect(() => generator({ baseUrl: 'https://other.example/v1' })).toThrow(
     'Unsupported',
   );
-  vi.stubEnv('DEV', false);
-  process.env['DEV'] = 'false';
-  expect(() => generator()).toThrow('development');
   expect(session.getAccessToken).not.toHaveBeenCalled();
   expect(fetchMock).not.toHaveBeenCalled();
 });
+
+it.each([undefined, 'false', 'true'])(
+  'sends authenticated inference when DEV=%s',
+  async (dev) => {
+    vi.stubEnv('DEV', false);
+    if (dev === undefined) delete process.env['DEV'];
+    else process.env['DEV'] = dev;
+    fetchMock.mockResolvedValue(completion());
+    const result = await generator().generateContent(request, 'prompt');
+    expect(result.candidates?.[0]?.content?.parts).toContainEqual({
+      text: 'OK',
+    });
+    expect(session.getAccessToken).toHaveBeenCalledOnce();
+    expect(
+      new Headers(fetchMock.mock.calls[0][1]?.headers).get('Authorization'),
+    ).toBe('Bearer synthetic-access');
+  },
+);
 
 it('allows a served per-request model without a client allowlist', async () => {
   fetchMock.mockResolvedValue(completion());

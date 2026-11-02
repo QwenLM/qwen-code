@@ -117,7 +117,7 @@ describe('activate', () => {
 
   it.each([
     [vscode.ExtensionMode.Development, true],
-    [vscode.ExtensionMode.Production, false],
+    [vscode.ExtensionMode.Production, true],
   ] as const)(
     'sets subscription command visibility at cold activation for mode %s',
     async (extensionMode, enabled) => {

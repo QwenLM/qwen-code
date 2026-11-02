@@ -1,16 +1,16 @@
 # Authentication
 
-Qwen Code's `/auth` menu supports the following sign-in methods. Qwen account sign-in is currently available only in development builds. Pick the option that matches your account or API key:
+Qwen Code's `/auth` menu supports the following sign-in methods. Pick the option that matches your account or API key:
 
-- **Qwen Account with Subscription (development preview)**: sign in and authorize in your browser with an active Plus or Pro membership. No API key is required.
+- **Qwen Account with Subscription (preproduction preview)**: sign in and authorize in your browser with an active Plus or Pro membership. No API key is required.
 - **QwenCloud**: official recommended setup. Opens a sub-menu with **Token Plan** (subscription with a monthly Credit quota · dedicated endpoint, Personal and Team editions) or **Standard API Key** (pay-as-you-go). You then pick the platform explicitly — **China — 千问AI平台** or **International — QwenCloud** — so the UI language never decides your endpoint. Both access methods also enable the built-in [`web_search` tool](../../developers/tools/web-search.md) with no extra setup.
 - **Alibaba ModelStudio**: opens a sub-menu with **Coding Plan** (for individual developers · weekly quota included), **Token Plan** (for teams and companies · usage-based billing with a dedicated endpoint), or **Standard API Key** (connect with an existing ModelStudio API key). Token Plan and Standard API Key also enable the built-in [`web_search` tool](../../developers/tools/web-search.md) with no extra setup. Saved ModelStudio credentials, endpoints and models keep working unchanged.
 - **Third-party Providers**: choose a built-in provider and connect with an API key (DeepSeek, Grok, MiniMax, Z.AI, Kimi, Idealab, ModelScope, OpenRouter, Requesty).
 - **Custom Provider**: manually connect a local server, proxy, or unsupported provider — supports OpenAI, Anthropic, Gemini, and other compatible endpoints.
 
-## Qwen Account with Subscription (development preview)
+## Qwen Account with Subscription (preproduction preview)
 
-This integration is currently available in development builds connected to the preproduction service. It is not yet enabled in normal releases. In a `qwen-code` source checkout, `npm run dev` sets the existing `DEV=true` development flag automatically; it is not an OAuth parameter. VS Code and Desktop development hosts must use a rebuilt local daemon with the same development environment.
+Builds containing this integration connect to the preproduction service and enable Qwen account sign-in without setting `DEV=true`. This includes the CLI, VS Code extension and Desktop installers. Rebuild each client's bundled daemon to include these changes, and restart any existing daemon. Production service rollout still requires confirmed production endpoints.
 
 Choose **Qwen Account with Subscription** in `/auth`, or in the graphical authentication dialog. Qwen Code opens your browser to sign in and authorize the device. If the browser does not open, use the displayed link. An active **Plus or Pro** membership is required; the discontinued free Qwen OAuth allowance is not restored.
 
@@ -18,11 +18,11 @@ Free and Go accounts are directed to the dedicated Qwen Code plans page. Qwen Co
 
 Available models come from the subscription service without a client model allowlist. On first connection, Qwen Code selects a default from the returned model list. If Qwen Subscription is already the selected authentication method, Qwen Code keeps the saved model while it remains available. Use `/model` in the CLI or the model selector and refresh action in VS Code/Desktop. Network, server or empty-response discovery failures may use the last successfully loaded list; without a cache, retry loading. HTTP 403 displays the service's error description and does not return cached models. No model list is fabricated. If your selected model is no longer available, choose another model rather than expecting an automatic switch.
 
-Local clients using the same effective Qwen configuration directory can reuse saved credentials. Remote or isolated daemons may use a different directory. Credentials refresh automatically where possible; sign in again if the session can no longer be refreshed. Development subscription sessions also enable built-in `web_search` through the staging MCP service using the current login token. No separate search key is needed; explicit search settings and permissions still apply. See [Web Search](../../developers/tools/web-search.md).
+Local clients using the same effective Qwen configuration directory can reuse saved credentials. Remote or isolated daemons may use a different directory. Credentials refresh automatically where possible; sign in again if the session can no longer be refreshed. Subscription sessions also enable built-in `web_search` through the staging MCP service using the current login token. No separate search key is needed; explicit search settings and permissions still apply. See [Web Search](../../developers/tools/web-search.md).
 
 ### Sign out or switch accounts
 
-To switch Qwen accounts in the development terminal, run `/logout`, then select **Qwen Account with Subscription** in the authentication picker and authorize the intended account in your browser. Logout removes the local membership credentials and revokes the refresh token. If remote revocation fails, local logout still takes effect and a warning is shown. Wait for the current response to finish before logging out. API-key configurations are preserved; use `/auth` to switch to an API-key provider without logging out of your membership account.
+To switch Qwen accounts in the terminal, run `/logout`, then select **Qwen Account with Subscription** in the authentication picker and authorize the intended account in your browser. Logout removes the local membership credentials and revokes the refresh token. If remote revocation fails, local logout still takes effect and a warning is shown. Wait for the current response to finish before logging out. API-key configurations are preserved; use `/auth` to switch to an API-key provider without logging out of your membership account.
 
 ## ☁️ Option 1: QwenCloud
 
@@ -454,7 +454,7 @@ qwen --model "qwen3.5-plus"
 
 ## Migrating from legacy free Qwen OAuth
 
-The legacy free Qwen OAuth allowance was discontinued on 2026-04-15. In development builds, use **Qwen Account with Subscription** with an active Plus or Pro membership; this does not restore the old free allowance. For normal releases, use QwenCloud, Alibaba ModelStudio, or another API-key provider through `/auth`.
+The legacy free Qwen OAuth allowance was discontinued on 2026-04-15. Use **Qwen Account with Subscription** with an active Plus or Pro membership in builds containing the preproduction integration; this does not restore the old free allowance. QwenCloud, Alibaba ModelStudio and other API-key providers remain available through `/auth`.
 
 For CI and other headless environments, configure an API-key provider instead of relying on interactive browser authorization.
 

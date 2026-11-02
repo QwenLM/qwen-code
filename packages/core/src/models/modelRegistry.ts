@@ -227,9 +227,7 @@ export class ModelRegistry {
 
     // Always register qwen-oauth models (hard-coded, cannot be overridden)
     this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
-    if (process.env['DEV'] === 'true') {
-      this.setSubscriptionModels(readCachedSubscriptionModels());
-    }
+    this.setSubscriptionModels(readCachedSubscriptionModels());
 
     // Register user-configured models for other providers
     this.registerProvidersConfig(modelProvidersConfig);

@@ -1,8 +1,8 @@
 # Model Providers
 
-## Qwen Subscription models (development preview)
+## Qwen Subscription models (preproduction preview)
 
-[Qwen Account with Subscription](./auth.md#qwen-account-with-subscription-development-preview) loads its model list from the membership service. These models do not require API keys or manual `modelProviders` entries. `/model` refreshes the list in the CLI; VS Code/Desktop reuse their model selector and refresh action. Network, server or empty-response failures may use the last successful list. HTTP 403 displays the service's error description and does not return cached models. An unavailable selected model must be reselected, without silent fallback. The legacy OAuth catalog described below is separate.
+[Qwen Account with Subscription](./auth.md#qwen-account-with-subscription-preproduction-preview) loads its model list from the membership service. These models do not require API keys or manual `modelProviders` entries. `/model` refreshes the list in the CLI; VS Code/Desktop reuse their model selector and refresh action. Network, server or empty-response failures may use the last successful list. HTTP 403 displays the service's error description and does not return cached models. An unavailable selected model must be reselected, without silent fallback. The legacy OAuth catalog described below is separate.
 
 On first connection, Qwen Code selects a default from the returned model list. If Qwen Subscription is already the selected authentication method, Qwen Code keeps the saved model while it remains available.
 
@@ -704,7 +704,7 @@ The effective auth/model/credential values are chosen per field using the follow
 | Settings (`settings.json`) | `security.auth.selectedType`        | `model.name`                                    | `security.auth.apiKey`                            | `security.auth.baseUrl`                            | —                      | —                                 |
 | Default / computed         | Falls back to `AuthType.QWEN_OAUTH` | Built-in default (OpenAI ⇒ `qwen3.5-plus`)      | —                                                 | —                                                  | —                      | `Config.getProxy()` if configured |
 
-\*When present, CLI auth flags override settings. Otherwise, `security.auth.selectedType` or the implicit default determine the auth type. See [Authentication](./auth.md) for sign-in methods and the development-only Qwen Subscription option. The discontinued free Qwen OAuth provider is retained for existing configurations.
+\*When present, CLI auth flags override settings. Otherwise, `security.auth.selectedType` or the implicit default determine the auth type. See [Authentication](./auth.md) for sign-in methods and the preproduction Qwen Subscription option. The discontinued free Qwen OAuth provider is retained for existing configurations.
 
 > [!note]
 >

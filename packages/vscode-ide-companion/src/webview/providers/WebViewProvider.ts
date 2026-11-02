@@ -932,8 +932,7 @@ export class WebViewProvider {
       await this.messageHandler.route({
         type: 'auth',
         data: {
-          subscriptionEnabled:
-            this.context.extensionMode === vscode.ExtensionMode.Development,
+          subscriptionEnabled: true,
         },
       });
     } finally {
@@ -1252,9 +1251,7 @@ export class WebViewProvider {
                 .route({
                   type: 'auth',
                   data: {
-                    subscriptionEnabled:
-                      this.context.extensionMode ===
-                      vscode.ExtensionMode.Development,
+                    subscriptionEnabled: true,
                   },
                 })
                 .finally(() => {
@@ -2217,8 +2214,7 @@ export class WebViewProvider {
             ...runtime,
             baseUrl: webviewBaseUrl,
             clientId: this.daemonClientId,
-            subscriptionEnabled:
-              this.context.extensionMode === vscode.ExtensionMode.Development,
+            subscriptionEnabled: true,
             workspaceCwd: canonicalWorkspaceCwd,
             // The daemon matches workspaces by canonical path, but every
             // `activeEditorChanged` sender posts VS Code's raw

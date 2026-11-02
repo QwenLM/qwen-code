@@ -89,9 +89,6 @@ export function createSubscriptionContentGenerator(
   config: ContentGeneratorConfig,
   cliConfig: Config,
 ): ContentGenerator {
-  if (process.env['DEV'] !== 'true') {
-    throw new Error('Qwen Subscription is only available in development.');
-  }
   if (
     config.baseUrl !== undefined &&
     config.baseUrl !== QWEN_SUBSCRIPTION_BASE_URL

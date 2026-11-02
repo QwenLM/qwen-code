@@ -533,20 +533,16 @@ describe('validateAuthMethod', () => {
   });
 });
 
-describe('Qwen Subscription development authentication', () => {
+describe('Qwen Subscription authentication', () => {
   afterEach(() => vi.unstubAllEnvs());
 
-  it('accepts subscription auth in development without an API key', () => {
-    vi.stubEnv('DEV', true);
-    process.env['DEV'] = 'true';
-    expect(validateAuthMethod('qwen-subscription')).toBeNull();
-  });
-
-  it('rejects the preproduction provider in a release process', () => {
-    vi.stubEnv('DEV', false);
-    process.env['DEV'] = 'false';
-    expect(validateAuthMethod('qwen-subscription')).toBe(
-      'Qwen Subscription is only available in development mode.',
-    );
-  });
+  it.each([undefined, 'false', 'true'])(
+    'accepts subscription auth without an API key when DEV=%s',
+    (dev) => {
+      vi.stubEnv('DEV', false);
+      if (dev === undefined) delete process.env['DEV'];
+      else process.env['DEV'] = dev;
+      expect(validateAuthMethod('qwen-subscription')).toBeNull();
+    },
+  );
 });

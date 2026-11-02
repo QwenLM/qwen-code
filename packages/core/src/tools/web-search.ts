@@ -447,10 +447,7 @@ function resolveAutoBackend(
   config: Config,
   settings: WebSearchSettings | undefined,
 ): WebSearchGateResult {
-  if (
-    process.env['DEV'] === 'true' &&
-    config.getCurrentAuthType() === AuthType.QWEN_SUBSCRIPTION
-  ) {
+  if (config.getCurrentAuthType() === AuthType.QWEN_SUBSCRIPTION) {
     return {
       ok: true,
       backend: {

@@ -32,7 +32,6 @@ import type { ProviderConfig } from '@qwen-code/qwen-code-core/providers/types.j
 import { useProviderSetupFlow } from './useProviderSetupFlow.js';
 import { ProviderSetupSteps } from './ProviderSetupSteps.js';
 import { SubscriptionDialog } from './SubscriptionDialog.js';
-import { isSubscriptionEntryEnabled } from './use-subscription.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -241,22 +240,19 @@ export function AuthDialog(): React.JSX.Element {
   } = useUIActions();
   const config = useConfig();
   const settings = useSettings();
-  const subscriptionEnabled = isSubscriptionEntryEnabled();
-  const mainItems = subscriptionEnabled
-    ? [
-        {
-          key: 'QWEN_SUBSCRIPTION',
-          title: t('Qwen Account with Subscription'),
-          isNew: true,
-          label: t('Qwen Account with Subscription'),
-          description: t(
-            'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai',
-          ),
-          value: 'QWEN_SUBSCRIPTION' as MainOption,
-        },
-        ...MAIN_ITEMS,
-      ]
-    : MAIN_ITEMS;
+  const mainItems = [
+    {
+      key: 'QWEN_SUBSCRIPTION',
+      title: t('Qwen Account with Subscription'),
+      isNew: true,
+      label: t('Qwen Account with Subscription'),
+      description: t(
+        'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai',
+      ),
+      value: 'QWEN_SUBSCRIPTION' as MainOption,
+    },
+    ...MAIN_ITEMS,
+  ];
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
@@ -388,12 +384,11 @@ export function AuthDialog(): React.JSX.Element {
   // (resolveMetadataKey returns config.id for *any* provider with a static
   // models[], so it can't be used to detect "Alibaba" specifically.)
   const defaultMainIndex = useMemo(() => {
-    const offset = subscriptionEnabled ? 1 : 0;
-    if (matchedProvider?.uiGroup === 'third-party') return 2 + offset;
-    if (matchedProvider?.uiGroup === 'custom') return 3 + offset;
-    if (matchedProvider?.uiGroup === 'alibaba') return 1 + offset;
+    if (matchedProvider?.uiGroup === 'third-party') return 3;
+    if (matchedProvider?.uiGroup === 'custom') return 4;
+    if (matchedProvider?.uiGroup === 'alibaba') return 2;
     return 0;
-  }, [matchedProvider, subscriptionEnabled]);
+  }, [matchedProvider]);
 
   // -- Handlers -------------------------------------------------------------
 
@@ -483,7 +478,7 @@ export function AuthDialog(): React.JSX.Element {
 
   // -- Render ---------------------------------------------------------------
 
-  if (viewLevel === 'subscription' && subscriptionEnabled) {
+  if (viewLevel === 'subscription') {
     return (
       <SubscriptionDialog
         onBack={goBack}

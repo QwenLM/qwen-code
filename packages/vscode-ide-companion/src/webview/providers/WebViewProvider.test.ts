@@ -587,6 +587,25 @@ describe('WebViewProvider.attachToView', () => {
     ).mockResolvedValue(undefined);
   });
 
+  it.each([vscode.ExtensionMode.Production, vscode.ExtensionMode.Development])(
+    'offers subscription authentication in extension mode %s',
+    async (extensionMode) => {
+      const { provider } = await setupAttachedProvider({
+        context: { subscriptions: [], extensionMode },
+      });
+      await provider.startInteractiveAuth();
+      const { route } = (
+        provider as unknown as {
+          messageHandler: { route: ReturnType<typeof vi.fn> };
+        }
+      ).messageHandler;
+      expect(route).toHaveBeenCalledWith({
+        type: 'auth',
+        data: { subscriptionEnabled: true },
+      });
+    },
+  );
+
   it('configures sidebar views with workspace/temp roots and resolves image paths through the attached webview', async () => {
     let messageHandler:
       | ((message: { type: string; data?: unknown }) => Promise<void>)
@@ -2811,6 +2830,31 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
       },
     );
   });
+
+  it.each([vscode.ExtensionMode.Production, vscode.ExtensionMode.Development])(
+    'bootstraps subscription commands in extension mode %s',
+    async (extensionMode) => {
+      const context = {
+        subscriptions: [],
+        extensionMode,
+        workspaceState: {
+          get: vi.fn(() => undefined),
+          update: vi.fn().mockResolvedValue(undefined),
+        },
+      };
+      const setup = await setupAttachedProvider({
+        captureMessageHandler: true,
+        context,
+      });
+      await setup.messageHandler?.({ type: 'webShellReady' });
+      expect(setup.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'webShellBootstrap',
+          data: expect.objectContaining({ subscriptionEnabled: true }),
+        }),
+      );
+    },
+  );
 
   it('canonicalizes a symlinked workspace before bootstrapping the daemon', async () => {
     await withSymlinkedWorkspace(async ({ alias, canonical }) => {

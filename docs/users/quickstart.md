@@ -1,6 +1,6 @@
 # Quickstart
 
-**Development preview:** [Qwen Account with Subscription](./configuration/auth.md#qwen-account-with-subscription-development-preview) adds browser sign-in for Plus/Pro members in enabled development builds. Normal releases continue to use the providers below.
+**Preproduction preview:** [Qwen Account with Subscription](./configuration/auth.md#qwen-account-with-subscription-preproduction-preview) adds browser sign-in for Plus/Pro members in builds containing this integration, without requiring `DEV=true`. The providers below remain available.
 
 > 👏 Welcome to Qwen Code!
 
@@ -12,7 +12,7 @@ Make sure you have:
 
 - A **terminal** or command prompt open
 - A code project to work with
-- An API key or Token Plan subscription from 千问AI平台 / QwenCloud ([China](https://platform.qianwenai.com/docs/developer-guides/administration/api-keys) / [International](https://docs.qwencloud.com/developer-guides/administration/api-keys)) — the recommended setup — or an API key from Alibaba Cloud ModelStudio ([Beijing](https://bailian.console.aliyun.com/) / [intl](https://modelstudio.console.alibabacloud.com/)), or an Alibaba Cloud Token Plan ([Beijing](https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3028856) / [intl](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model)) subscription, or an active Plus/Pro Qwen account when using an enabled development build
+- An API key or Token Plan subscription from 千问AI平台 / QwenCloud ([China](https://platform.qianwenai.com/docs/developer-guides/administration/api-keys) / [International](https://docs.qwencloud.com/developer-guides/administration/api-keys)) — the recommended setup — or an API key from Alibaba Cloud ModelStudio ([Beijing](https://bailian.console.aliyun.com/) / [intl](https://modelstudio.console.alibabacloud.com/)), or an Alibaba Cloud Token Plan ([Beijing](https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3028856) / [intl](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model)) subscription, or an active Plus/Pro Qwen account in a build containing the preproduction subscription integration
 
 ## Step 1: Install Qwen Code
 
@@ -70,7 +70,7 @@ qwen
 
 The first-run menu lets you choose a sign-in method or connect a model provider:
 
-- **Qwen Account with Subscription (development preview)** — in enabled development builds, sign in and authorize in your browser with an active Plus or Pro account. No API key is required. See [Authentication](./configuration/auth.md#qwen-account-with-subscription-development-preview).
+- **Qwen Account with Subscription (preproduction preview)** — sign in and authorize in your browser with an active Plus or Pro account. No API key or development environment variable is required. See [Authentication](./configuration/auth.md#qwen-account-with-subscription-preproduction-preview).
 
 - **QwenCloud** — the recommended API-key setup. Opens a sub-menu:
   - **Token Plan**: subscription with a monthly Credit quota on a dedicated endpoint (Personal and Team editions).

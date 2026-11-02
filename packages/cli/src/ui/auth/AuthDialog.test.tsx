@@ -18,7 +18,7 @@ import { UIStateContext } from '../contexts/UIStateContext.js';
 import { UIActionsContext } from '../contexts/UIActionsContext.js';
 import type { UIState } from '../contexts/UIStateContext.js';
 import type { UIActions } from '../contexts/UIActionsContext.js';
-import { setLanguageAsync } from '../../i18n/index.js';
+import { setLanguageAsync, t } from '../../i18n/index.js';
 
 const discoverProviderModelsMock = vi.hoisted(() =>
   vi.fn().mockResolvedValue(null),
@@ -212,13 +212,19 @@ const moveDownAndWaitForSelection = async (
 
 const QWENCLOUD_MAIN_LABEL = 'QwenCloud';
 
-// \u5343\u95eeAI\u5e73\u53f0 / QwenCloud is the first top-level entry; Alibaba
-// ModelStudio now sits one step below it.
+const selectQwenCloud = async (
+  stdin: { write: (s: string) => void },
+  lastFrame: () => string | undefined,
+) => {
+  await waitForSelectedOption(lastFrame, t('Qwen Account with Subscription'));
+  await moveDownAndWaitForSelection(stdin, lastFrame, QWENCLOUD_MAIN_LABEL);
+};
+
 const selectAlibabaModelStudio = async (
   stdin: { write: (s: string) => void },
   lastFrame: () => string | undefined,
 ) => {
-  await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
+  await selectQwenCloud(stdin, lastFrame);
   await moveDownAndWaitForSelection(stdin, lastFrame, 'Alibaba ModelStudio');
 };
 
@@ -385,7 +391,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         expect(selectedLine?.replaceAll('│', '').trim()).toBe(`› ${label}`);
       };
 
-      await waitForSelectedOption(lastFrame, 'QwenCloud');
+      await selectQwenCloud(stdin, lastFrame);
       expectReadableSelection('QwenCloud');
       for (const label of [
         'Alibaba ModelStudio',
@@ -474,7 +480,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         { settings, config },
       );
 
-      await waitForSelectedOption(lastFrame, 'QwenCloud');
+      await waitForSelectedOption(lastFrame, 'Qwen Account with Subscription');
 
       const frame = lastFrame() ?? '';
       expect(frame).toContain('QwenCloud');
@@ -716,8 +722,8 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       const { lastFrame } = renderAuthDialog(settings);
 
       // QWEN OAuth no longer has a UI entry; the dialog falls back to the
-      // default first option, QwenCloud.
-      expectSelectedOption(lastFrame(), QWENCLOUD_MAIN_LABEL);
+      // default first option, Qwen Account with Subscription.
+      expectSelectedOption(lastFrame(), 'Qwen Account with Subscription');
       expect(lastFrame()).toContain('Alibaba ModelStudio');
     });
 
@@ -757,8 +763,8 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // Default is QwenCloud (first option).
-      expectSelectedOption(lastFrame(), QWENCLOUD_MAIN_LABEL);
+      // Default is Qwen Account with Subscription (first option).
+      expectSelectedOption(lastFrame(), 'Qwen Account with Subscription');
       expect(lastFrame()).toContain('Alibaba ModelStudio');
     });
 
@@ -801,8 +807,8 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       const { lastFrame } = renderAuthDialog(settings);
 
       // Since the auth dialog doesn't show QWEN_DEFAULT_AUTH_TYPE errors anymore,
-      // it will just show the default first option, QwenCloud.
-      expectSelectedOption(lastFrame(), QWENCLOUD_MAIN_LABEL);
+      // it will just show the default first option, Qwen Account with Subscription.
+      expectSelectedOption(lastFrame(), 'Qwen Account with Subscription');
       expect(lastFrame()).toContain('Alibaba ModelStudio');
     });
   });
@@ -858,7 +864,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         { closeAuthDialog },
         undefined, // config.getAuthType() returns undefined
       );
-      await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
+      await waitForSelectedOption(lastFrame, 'Qwen Account with Subscription');
 
       // Simulate pressing escape key
       stdin.write('\u001b'); // ESC key
@@ -902,7 +908,10 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         { closeAuthDialog },
       );
       try {
-        await waitForSelectedOption(ui.lastFrame, QWENCLOUD_MAIN_LABEL);
+        await waitForSelectedOption(
+          ui.lastFrame,
+          'Qwen Account with Subscription',
+        );
         ui.stdin.write('\u001b');
         await vi.waitFor(() => expect(closeAuthDialog).toHaveBeenCalledOnce());
         expect(ui.lastFrame()).not.toContain('You must connect a provider');
@@ -1097,14 +1106,9 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         const { stdin, lastFrame, unmount } =
           renderAuthDialog(createSettings());
 
-        await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
-        while (
-          !lastFrame()?.match(
-            new RegExp(`›\\s*(?:\\d+\\.\\s*)?${escapeRegExp(testCase.label)}`),
-          )
-        ) {
-          stdin.write('\u001b[B');
-          await wait();
+        await selectQwenCloud(stdin, lastFrame);
+        for (const option of cases.slice(1, cases.indexOf(testCase) + 1)) {
+          await moveDownAndWaitForSelection(stdin, lastFrame, option.label);
         }
         await pressEnterAndWaitFor(stdin, lastFrame, testCase.childTitle);
         stdin.write('\u001b');
@@ -1771,7 +1775,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
       try {
-        await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
+        await selectQwenCloud(stdin, lastFrame);
         stdin.write('\r');
         await waitForSelectedOption(lastFrame, 'Token Plan');
         // The sub-menu heading comes from VIEW_TITLES, unlike the flowTitle path
@@ -1832,7 +1836,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
+      await selectQwenCloud(stdin, lastFrame);
       stdin.write('\r');
 
       await vi.waitFor(
@@ -2337,11 +2341,11 @@ describe('AuthDialog Custom API Key Wizard', { timeout: 15000 }, () => {
   );
 });
 
-describe('development subscription entry', () => {
+describe('subscription entry', () => {
   let originalEnv: NodeJS.ProcessEnv;
   beforeEach(() => {
     originalEnv = { ...process.env };
-    process.env['DEV'] = 'true';
+    delete process.env['DEV'];
     process.env['QWEN_OAUTH_BASE_URL'] = 'https://pre-auth.qwen.ai';
     vi.clearAllMocks();
   });
@@ -2417,7 +2421,7 @@ describe('development subscription entry', () => {
     }
   });
 
-  it('shows the entry in plain development without OAuth configuration', () => {
+  it('shows the entry without development or OAuth configuration', () => {
     delete process.env['QWEN_OAUTH_BASE_URL'];
     const { lastFrame, unmount } = renderAuthDialog(settings());
     expect(lastFrame()).toContain('Qwen Account with Subscription');
@@ -2449,10 +2453,14 @@ describe('development subscription entry', () => {
     }
   });
 
-  it('hides the subscription entry outside development', () => {
-    delete process.env['DEV'];
-    const { lastFrame, unmount } = renderAuthDialog(settings());
-    expect(lastFrame()).not.toContain('Qwen Account with Subscription');
-    unmount();
-  });
+  it.each([undefined, 'false', 'true'])(
+    'shows the subscription entry when DEV=%s',
+    (dev) => {
+      if (dev === undefined) delete process.env['DEV'];
+      else process.env['DEV'] = dev;
+      const { lastFrame, unmount } = renderAuthDialog(settings());
+      expect(lastFrame()).toContain('Qwen Account with Subscription');
+      unmount();
+    },
+  );
 });

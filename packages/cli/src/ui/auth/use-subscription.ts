@@ -24,10 +24,6 @@ import {
 import { openBrowserSecurely } from '@qwen-code/qwen-code-core/utils/secure-browser-launcher.js';
 import { t } from '../../i18n/index.js';
 
-export function isSubscriptionEntryEnabled(): boolean {
-  return process.env['DEV'] === 'true';
-}
-
 export function subscriptionAuthorizationUrl(
   device: SubscriptionDeviceAuthorization,
 ): string {

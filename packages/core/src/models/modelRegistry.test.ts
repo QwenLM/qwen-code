@@ -1094,20 +1094,29 @@ describe('providerProtocol mapping (custom provider ids)', () => {
 describe('Qwen Subscription model registry', () => {
   afterEach(() => vi.unstubAllEnvs());
 
-  it.each(['false', ''])('hides the fixed model when DEV=%s', (dev) => {
-    vi.stubEnv('DEV', false);
-    process.env['DEV'] = dev;
-    const registry = new ModelRegistry({
-      'qwen-subscription': [{ id: QWEN_SUBSCRIPTION_MODEL }],
-    });
-    expect(registry.getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)).toEqual(
-      [],
-    );
-  });
+  it.each([undefined, 'false', 'true'])(
+    'loads cached models when DEV=%s',
+    (dev) => {
+      vi.stubEnv('DEV', false);
+      if (dev === undefined) delete process.env['DEV'];
+      else process.env['DEV'] = dev;
+      const registry = new ModelRegistry({
+        'qwen-subscription': [{ id: QWEN_SUBSCRIPTION_MODEL }],
+      });
+      expect(registry.getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)).toEqual(
+        [
+          expect.objectContaining({
+            id: QWEN_SUBSCRIPTION_MODEL,
+            baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+          }),
+        ],
+      );
+    },
+  );
 
-  it('loads cached development models without assumed gateway capabilities', () => {
-    vi.stubEnv('DEV', true);
-    process.env['DEV'] = 'true';
+  it('loads cached models without assumed gateway capabilities', () => {
+    vi.stubEnv('DEV', false);
+    delete process.env['DEV'];
     vi.mocked(readCachedSubscriptionModels).mockReturnValueOnce([
       'qwen3.8-max',
       'future-model',

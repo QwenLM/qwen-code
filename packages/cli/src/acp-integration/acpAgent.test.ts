@@ -35579,7 +35579,7 @@ describe('sessionLanguage multi-session propagation', () => {
     expect(cfg2.switchModel).not.toHaveBeenCalled();
 
     const previousDev = process.env['DEV'];
-    process.env['DEV'] = 'true';
+    delete process.env['DEV'];
     mergedSettings = {
       modelProviders: providerConfig,
       providerProtocol: { idealab: 'openai' },

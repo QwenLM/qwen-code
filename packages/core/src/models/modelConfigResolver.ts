@@ -160,11 +160,6 @@ export function resolveModelConfig(
   const sources: ConfigSources = {};
 
   if (authType === AuthType.QWEN_SUBSCRIPTION) {
-    if (process.env['DEV'] !== 'true') {
-      throw new Error(
-        'Qwen Subscription is only available in development mode.',
-      );
-    }
     if (
       (cli?.baseUrl && cli.baseUrl !== QWEN_SUBSCRIPTION_BASE_URL) ||
       (modelProvider &&

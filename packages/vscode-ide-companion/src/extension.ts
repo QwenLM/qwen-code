@@ -115,7 +115,7 @@ export async function activate(context: vscode.ExtensionContext) {
   await vscode.commands.executeCommand(
     'setContext',
     'qwen-code.subscriptionEnabled',
-    context.extensionMode === vscode.ExtensionMode.Development,
+    true,
   );
   outputChannel = vscode.window.createOutputChannel('Qwen Code Companion');
   createLogger(outputChannel, redactLogCredentials);

@@ -1,15 +1,15 @@
 # Web Search
 
-Development builds (`npm run dev`) support built-in search after Qwen Plus/Pro subscription login. They use the staging MCP service at `https://pre-api.qwen.ai/api/v1/mcp/web_search` with the current device access token; no separate search key or `mcpServers` configuration is needed. CLI, VS Code and Desktop share this Core implementation. Subscription search is not enabled in normal releases.
+Builds containing the Qwen subscription integration support built-in search after Qwen Plus/Pro login, without requiring `DEV=true`. They use the staging MCP service at `https://pre-api.qwen.ai/api/v1/mcp/web_search` with the current device access token; no separate search key or `mcpServers` configuration is needed. CLI, VS Code and Desktop share this Core implementation.
 
 Qwen Code provides web search two ways:
 
-1. **Built-in `web_search` tool** — backed by DashScope Responses search or, in development subscription sessions, the Qwen MCP search service. On by default at startup for supported ModelStudio and OpenAI-compatible DashScope configurations; no extra provider or MCP setup.
+1. **Built-in `web_search` tool** — backed by DashScope Responses search or, in subscription sessions, the Qwen MCP search service. On by default at startup for supported ModelStudio and OpenAI-compatible DashScope configurations; no extra provider or MCP setup.
 2. **MCP (Model Context Protocol) integrations** — connect any external search service (Tavily, GLM, and others). Use this when your provider cannot back the built-in tool.
 
 ## Built-in `web_search`
 
-For DashScope, the built-in tool issues a self-contained search request to a small auxiliary model with server-side `web_search` (and `web_extractor`) tools. For development subscription sessions, it calls the MCP `web_search` tool with the query, preserves the service default result count, and returns result text with source URLs. Subscription queries have a 500-character limit; `webExtractor` applies only to DashScope.
+For DashScope, the built-in tool issues a self-contained search request to a small auxiliary model with server-side `web_search` (and `web_extractor`) tools. For subscription sessions, it calls the MCP `web_search` tool with the query, preserves the service default result count, and returns result text with source URLs. Subscription queries have a 500-character limit; `webExtractor` applies only to DashScope.
 
 ### When it turns on by itself
 
@@ -17,7 +17,7 @@ If you configured nothing under `tools.webSearch`, the tool registers whenever t
 
 | How you signed in                                                                                                          | Built-in search                                 |
 | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| Qwen Plus/Pro subscription in development                                                                                  | on — staging MCP service                        |
+| Qwen Plus/Pro subscription                                                                                                 | on — staging MCP service                        |
 | Alibaba ModelStudio → **Standard API Key**                                                                                 | on                                              |
 | Alibaba ModelStudio → **Token Plan**                                                                                       | on                                              |
 | Alibaba ModelStudio → **Coding Plan**                                                                                      | off — its endpoint is not verified for this API |
@@ -96,7 +96,7 @@ still surfaces as a startup notice.
 
 Notes:
 
-- For explicit DashScope search, the selector must resolve to a DashScope-compatible `modelProviders` entry carrying a direct API key via `envKey`. Your main model can be any provider. The discontinued free Qwen OAuth provider cannot back this path; development subscription search uses the separate MCP backend described above.
+- For explicit DashScope search, the selector must resolve to a DashScope-compatible `modelProviders` entry carrying a direct API key via `envKey`. Your main model can be any provider. The discontinued free Qwen OAuth provider cannot back this path; subscription search uses the separate MCP backend described above.
 - Search registration is re-evaluated after successful authentication changes. Subscription login activates it in the current session without restarting. Explicit disabling, bare/safe mode and tool permission rules still apply. An explicit alternate search model or endpoint retains precedence over subscription search.
 - Automatic host detection intentionally accepts only known DashScope regional hosts, Model Studio and QwenCloud MaaS hosts (including their `token-plan.` subscription subdomains), and internal Alibaba hosts. Generic `*.alicloudapi.com` gateways, `DASHSCOPE_PROXY_BASE_URL` and any host you only added to `allowedHosts` are excluded from that automatic path, because it runs without your involvement and would otherwise hand your main provider's key to a host nobody declared. For a gateway you do declare, list it in `tools.webSearch.allowedHosts` and point `WEB_SEARCH_BASE_URL` (or a `modelProviders` entry) at it.
 - If enabled explicitly but misconfigured, the tool stays off and a startup notice explains which condition failed. Automatic activation never emits a notice.

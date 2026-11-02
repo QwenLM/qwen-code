@@ -32,8 +32,8 @@ vi.mock('../../config/settings.js', async (original) => ({
   loadSettings: mocks.loadSettings,
 }));
 beforeEach(() => {
-  vi.stubEnv('DEV', true);
-  process.env['DEV'] = 'true';
+  vi.stubEnv('DEV', false);
+  delete process.env['DEV'];
   mocks.userInfo.mockReset().mockResolvedValue({ member_type: 'pro' });
   mocks.models
     .mockReset()
@@ -237,18 +237,8 @@ it('does not fall back for an unknown or untrusted workspace', async () => {
   expect(persistSettings).not.toHaveBeenCalled();
   expect(mocks.userInfo).not.toHaveBeenCalled();
 });
-it('respects the development gate and enforced authentication policy', async () => {
+it('respects enforced authentication policy without DEV', async () => {
   const { app, persistSettings } = setup();
-  vi.stubEnv('DEV', false);
-  process.env['DEV'] = 'false';
-  expect(
-    (await request(app).post('/workspaces/secondary/auth/subscription')).status,
-  ).toBe(404);
-  vi.stubEnv('DEV', true);
-  process.env['DEV'] = 'true';
-  mocks.models
-    .mockReset()
-    .mockResolvedValue({ models: ['qwen3.8-max'], cached: false });
   mocks.loadSettings.mockReturnValue({
     merged: { security: { auth: { enforcedType: 'openai' } } },
   });

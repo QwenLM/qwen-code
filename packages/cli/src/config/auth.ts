@@ -281,9 +281,7 @@ export function validateAuthMethod(
   loadEnvironment(settings.merged);
 
   if (authMethod === AuthType.QWEN_SUBSCRIPTION) {
-    return process.env['DEV'] === 'true'
-      ? null
-      : 'Qwen Subscription is only available in development mode.';
+    return null;
   }
 
   if (

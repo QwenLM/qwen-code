@@ -40,8 +40,8 @@ function config() {
   } as unknown as Config;
 }
 beforeEach(() => {
-  vi.stubEnv('DEV', true);
-  process.env['DEV'] = 'true';
+  vi.stubEnv('DEV', false);
+  delete process.env['DEV'];
   mocks.userInfo.mockReset().mockResolvedValue({ member_type: 'pro' });
   mocks.apply.mockReset().mockResolvedValue(undefined);
   mocks.createAdapter.mockReset().mockReturnValue(mocks.adapter);
@@ -130,14 +130,7 @@ it('selects a server model without a fixed allowlist and preserves an existing c
   ).rejects.toThrow('Run /model');
   expect(mocks.apply).toHaveBeenCalledTimes(2);
 });
-it('honors the development and authentication policy gates', async () => {
-  vi.stubEnv('DEV', false);
-  process.env['DEV'] = 'false';
-  await expect(
-    activateSubscription(settings, config(), new AbortController().signal),
-  ).rejects.toThrow('unavailable');
-  vi.stubEnv('DEV', true);
-  process.env['DEV'] = 'true';
+it('honors the authentication policy without DEV', async () => {
   const restricted = {
     isTrusted: true,
     merged: { security: { auth: { enforcedType: 'openai' } } },

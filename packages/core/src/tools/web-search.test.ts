@@ -556,38 +556,32 @@ describe('evaluateWebSearchGate', () => {
 });
 
 describe('subscription web search gate', () => {
-  it('uses membership credentials in development without a separate search key', () => {
-    vi.stubEnv('DEV', true);
-    process.env['DEV'] = 'true';
-    expect(
-      evaluateWebSearchGate(
-        makeConfig({
-          settings: undefined,
-          primaryAuthType: AuthType.QWEN_SUBSCRIPTION,
-        }),
-      ),
-    ).toEqual({
-      ok: true,
-      backend: {
-        kind: 'qwen-subscription',
-        timeoutMs: DEFAULT_WEB_SEARCH_TIMEOUT_MS,
-      },
-    });
-  });
-
-  it('does not enable the staging backend outside development', () => {
-    vi.stubEnv('DEV', false);
-    expect(
-      rejectedFor({
-        settings: undefined,
-        primaryAuthType: AuthType.QWEN_SUBSCRIPTION,
-      }).silent,
-    ).toBe(true);
-  });
+  it.each([undefined, 'false', 'true'])(
+    'uses membership credentials without a separate search key when DEV=%s',
+    (dev) => {
+      vi.stubEnv('DEV', false);
+      if (dev === undefined) delete process.env['DEV'];
+      else process.env['DEV'] = dev;
+      expect(
+        evaluateWebSearchGate(
+          makeConfig({
+            settings: undefined,
+            primaryAuthType: AuthType.QWEN_SUBSCRIPTION,
+          }),
+        ),
+      ).toEqual({
+        ok: true,
+        backend: {
+          kind: 'qwen-subscription',
+          timeoutMs: DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+        },
+      });
+    },
+  );
 
   it('respects explicit disabling and a separate DashScope search configuration', () => {
-    vi.stubEnv('DEV', true);
-    process.env['DEV'] = 'true';
+    vi.stubEnv('DEV', false);
+    delete process.env['DEV'];
     vi.stubEnv(TEST_ENV_KEY, 'sk-search');
     expect(
       rejectedFor({

@@ -44,10 +44,6 @@ export function registerWorkspaceSubscriptionRoutes(
     '/workspaces/:workspace/auth/subscription',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      if (process.env['DEV'] !== 'true') {
-        res.status(404).json({ code: 'subscription_unavailable' });
-        return;
-      }
       const runtime = resolveWorkspaceRuntimeFromParam(
         deps.workspaceRegistry,
         req,

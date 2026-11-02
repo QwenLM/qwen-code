@@ -66,9 +66,8 @@ export function registerSubscriptionAuthRoutes(
   mutate: (opts?: { strict?: boolean }) => RequestHandler,
   onSignedOut?: () => Promise<void>,
 ): () => void {
-  const enabled = process.env['DEV'] === 'true';
   const { webOrigin } = getQwenOAuthConfig();
-  const plansUrl = enabled ? getQwenSubscriptionPlansUrl() : undefined;
+  const plansUrl = getQwenSubscriptionPlansUrl();
   const flows = new Map<
     string,
     {
@@ -81,7 +80,7 @@ export function registerSubscriptionAuthRoutes(
   let disposed = false;
   let signingOut = false;
   const allowed: RequestHandler = (_req, res, next) => {
-    if (!enabled || disposed) {
+    if (disposed) {
       res.status(404).json({ code: 'subscription_unavailable' });
       return;
     }
@@ -97,8 +96,8 @@ export function registerSubscriptionAuthRoutes(
 
   app.get('/auth/subscription', (_req, res) => {
     res.json({
-      enabled: enabled && !disposed,
-      ...(plansUrl ? { plansUrl } : {}),
+      enabled: !disposed,
+      plansUrl,
     });
   });
   app.post(

@@ -20,9 +20,6 @@ export async function activateSubscription(
   signal: AbortSignal,
 ): Promise<SubscriptionUserInfo> {
   signal.throwIfAborted();
-  if (process.env['DEV'] !== 'true') {
-    throw new Error('Qwen Subscription is unavailable.');
-  }
   if (!settings.isTrusted) {
     throw new Error('Workspace is not trusted.');
   }

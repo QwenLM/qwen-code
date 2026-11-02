@@ -101,10 +101,7 @@ import {
 import { clampDialogHeight } from '../utils/layoutUtils.js';
 import { C } from './theme.js';
 import { copyToClipboard } from '../utils/commandUtils.js';
-import {
-  useSubscription,
-  isSubscriptionEntryEnabled,
-} from '../auth/use-subscription.js';
+import { useSubscription } from '../auth/use-subscription.js';
 import type { HistoryItemInfo } from '../types.js';
 import { subscriptionSuccessMessage } from '../auth/subscription-success.js';
 import { activateSubscription } from '../auth/activate-subscription.js';
@@ -1532,21 +1529,18 @@ function AuthDialogFlow({
   const [errorMessage, setErrorMessage] = useState<string | null>(
     initialError ?? null,
   );
-  const subscriptionEnabled = isSubscriptionEntryEnabled();
-  const mainItems: RadioItem[] = subscriptionEnabled
-    ? [
-        {
-          key: 'QWEN_SUBSCRIPTION',
-          label: t('Qwen Account with Subscription'),
-          isNew: true,
-          description: t(
-            'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai',
-          ),
-          value: 'QWEN_SUBSCRIPTION',
-        },
-        ...MAIN_ITEMS,
-      ]
-    : MAIN_ITEMS;
+  const mainItems: RadioItem[] = [
+    {
+      key: 'QWEN_SUBSCRIPTION',
+      label: t('Qwen Account with Subscription'),
+      isNew: true,
+      description: t(
+        'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai',
+      ),
+      value: 'QWEN_SUBSCRIPTION',
+    },
+    ...MAIN_ITEMS,
+  ];
 
   // Every text field latches itself shut on the Enter that submits it, and only
   // a mount-key change clears that latch. On the last step the submit is async,
@@ -1737,12 +1731,11 @@ function AuthDialogFlow({
   );
   // Land on the tab matching the active provider's uiGroup (ink parity).
   const defaultMainIndex = useMemo(() => {
-    const offset = subscriptionEnabled ? 1 : 0;
-    if (matchedProvider?.uiGroup === 'third-party') return 2 + offset;
-    if (matchedProvider?.uiGroup === 'custom') return 3 + offset;
-    if (matchedProvider?.uiGroup === 'alibaba') return 1 + offset;
+    if (matchedProvider?.uiGroup === 'third-party') return 3;
+    if (matchedProvider?.uiGroup === 'custom') return 4;
+    if (matchedProvider?.uiGroup === 'alibaba') return 2;
     return 0;
-  }, [matchedProvider, subscriptionEnabled]);
+  }, [matchedProvider]);
 
   // -- Main menu select -------------------------------------------------------
 
@@ -1983,7 +1976,7 @@ function AuthDialogFlow({
 
   // -- Render -------------------------------------------------------------------
 
-  if (viewLevel === 'subscription' && subscriptionEnabled) {
+  if (viewLevel === 'subscription') {
     return (
       <SubscriptionView
         availableTerminalHeight={availableTerminalHeight}

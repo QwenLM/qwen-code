@@ -15476,7 +15476,6 @@ class QwenAgent implements Agent {
         await reloadConfig(this.config, 'bootstrap');
         if (
           reloadRevision === this.modelProviderReloadRevision &&
-          process.env['DEV'] === 'true' &&
           merged.security?.auth?.selectedType === AuthType.QWEN_SUBSCRIPTION &&
           subscriptionModels?.includes(
             merged.model?.name ?? this.config.getModel(),

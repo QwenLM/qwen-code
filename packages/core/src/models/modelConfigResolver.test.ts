@@ -782,13 +782,17 @@ describe('modelConfigResolver', () => {
 describe('Qwen Subscription model resolution', () => {
   afterEach(() => vi.unstubAllEnvs());
 
-  it('disables preproduction inference outside development mode', () => {
-    vi.stubEnv('DEV', false);
-    process.env['DEV'] = 'false';
-    expect(() => resolve({ authType: AuthType.QWEN_SUBSCRIPTION })).toThrow(
-      'only available in development mode',
-    );
-  });
+  it.each([undefined, 'false', 'true'])(
+    'resolves the subscription gateway when DEV=%s',
+    (dev) => {
+      vi.stubEnv('DEV', false);
+      if (dev === undefined) delete process.env['DEV'];
+      else process.env['DEV'] = dev;
+      expect(resolve({ authType: AuthType.QWEN_SUBSCRIPTION }).config).toEqual(
+        expect.objectContaining({ baseUrl: QWEN_SUBSCRIPTION_BASE_URL }),
+      );
+    },
+  );
 
   it('uses only the subscription credential source and gateway after another provider', () => {
     vi.stubEnv('DEV', true);

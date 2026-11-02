@@ -318,6 +318,7 @@ async function runCustomProviderFlow(): Promise<{
   await press('down');
   await press('down');
   await press('down');
+  await press('down');
   await press('return'); // main: CUSTOM_PROVIDER → provider-setup (protocol)
   await press('return'); // protocol: OpenAI-compatible → API selection
   await press('return'); // API: Chat Completions → baseUrl input
@@ -339,6 +340,7 @@ async function runCustomProviderFlow(): Promise<{
 async function runPresetFlowToTerminalModels(): Promise<void> {
   renderDialog();
   await press('down');
+  await press('down');
   await press('down'); // main: THIRD_PARTY_PROVIDERS
   await press('return'); // → thirdparty-select, DeepSeek on top
   await press('return'); // DeepSeek → apiKey
@@ -357,9 +359,10 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     core.logAuth.mockReset();
   });
 
-  it('renders the main menu with the four top-level options', () => {
+  it('renders the main menu with the five top-level options', () => {
     renderDialog();
     expect(screen.getByText('Connect a Provider')).toBeTruthy();
+    expect(screen.getByText('Qwen Account with Subscription')).toBeTruthy();
     expect(screen.getByText('QwenCloud')).toBeTruthy();
     expect(screen.getByText('Alibaba ModelStudio')).toBeTruthy();
     expect(screen.getByText('Third-party Providers')).toBeTruthy();
@@ -393,6 +396,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
 
   it('returns to the main menu before dismissing a command-opened dialog', async () => {
     const { onClose } = renderDialog({ openedViaCommand: true });
+    await press('down');
     await press('return');
     await pressEsc();
     expect(onClose).not.toHaveBeenCalled();
@@ -426,6 +430,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
   it('navigates main → sub-menu and back with Esc', async () => {
     const { onClose } = renderDialog();
     await press('down');
+    await press('down');
     await press('return'); // main: Alibaba ModelStudio → alibaba-select
     expect(
       screen.getByText('Alibaba ModelStudio · Access Method'),
@@ -442,11 +447,11 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
       handler(baseKeyEvent({ name: 'down', sequence: '\x1b[B' }));
       handler(baseKeyEvent({ name: 'down', sequence: '\x1b[B' }));
       handler(baseKeyEvent({ name: 'down', sequence: '\x1b[B' }));
+      handler(baseKeyEvent({ name: 'down', sequence: '\x1b[B' }));
       handler(baseKeyEvent({ name: 'return', sequence: '\r' }));
     });
-    // Three downs land on Custom Provider. The cursor the handler was registered
-    // with still pointed at QwenCloud, whose Enter opens the access-method
-    // sub-menu instead.
+    // Four downs land on Custom Provider. The cursor the handler was registered
+    // with still pointed at the subscription entry.
     expect(screen.getByText('OpenAI-compatible')).toBeTruthy();
     expect(screen.queryByText(/Access Method/)).toBeNull();
   });
@@ -468,8 +473,9 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     await press('down');
     await press('down');
     await press('down');
+    await press('down');
     await press('return');
-    expect(screen.getByText('QwenCloud · Access Method')).toBeTruthy();
+    expect(screen.getByText('Waiting for sign-in…')).toBeTruthy();
   });
 
   it('keeps authentication open when only service models were saved', async () => {
@@ -526,6 +532,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     await press('down');
     await press('down');
     await press('down');
+    await press('down');
     await press('return');
     expect(screen.getByText('OpenAI-compatible')).toBeTruthy();
     expect(screen.queryByText('OpenAI Responses')).toBeNull();
@@ -575,6 +582,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     await press('down');
     await press('down');
     await press('down');
+    await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
     await press('return'); // protocol: OpenAI-compatible → API
     // The parity RadioList gives the marker its own cell, so read it off the row.
@@ -606,6 +614,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     await press('down');
     await press('down');
     await press('down');
+    await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
     await press('return'); // protocol: OpenAI-compatible → API selection
     await press('return'); // API: Chat Completions → baseUrl input
@@ -623,6 +632,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
 
   it("renders ink's no-recommendations branch for a provider without models", async () => {
     renderDialog();
+    await press('down');
     await press('down');
     await press('down');
     await press('down');
@@ -717,6 +727,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     await setLanguageAsync('zh');
     try {
       renderDialog();
+      await press('down');
       await press('return'); // main: QwenCloud → qwencloud-select
       expect(screen.getByText('千问AI平台 · 接入方式')).toBeTruthy();
       await press('return'); // Token Plan → provider-setup
@@ -731,6 +742,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
 
   it('shows Token Plan and Standard API Key in QwenCloud sub-menu but not Coding Plan (T3+T4)', async () => {
     renderDialog();
+    await press('down');
     await press('return'); // main: QwenCloud → qwencloud-select
     expect(screen.getByText('Token Plan')).toBeTruthy();
     expect(screen.getByText('Standard API Key')).toBeTruthy();
@@ -753,6 +765,7 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
     await press('down');
     await press('down');
     await press('down');
+    await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
     await press('return'); // protocol: OpenAI-compatible → API selection
     await press('return'); // API: Chat Completions → baseUrl input
@@ -763,6 +776,7 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
   /** Walk the wizard up to the base-URL input step. */
   async function runToBaseUrlInput(): Promise<void> {
     renderDialog();
+    await press('down');
     await press('down');
     await press('down');
     await press('down');
@@ -1049,6 +1063,7 @@ describe('caret editing in dialog text fields (#107)', () => {
     await press('down');
     await press('down');
     await press('down');
+    await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
     await press('return'); // protocol: OpenAI-compatible → API selection
     await press('return'); // API: Chat Completions → baseUrl input
@@ -1299,6 +1314,7 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
   async function runToModelsStep(availableTerminalHeight?: number) {
     const dialog = renderDialog({ availableTerminalHeight });
     await press('down');
+    await press('down');
     await press('down'); // main: THIRD_PARTY_PROVIDERS
     await press('return'); // → thirdparty-select, DeepSeek on top
     await press('return'); // DeepSeek → apiKey
@@ -1460,6 +1476,7 @@ describe('the wizard frame keeps its natural height', () => {
     // row the cursor names.
     renderDialog({ availableTerminalHeight: 13 });
     await press('down');
+    await press('down');
     await press('down'); // main: THIRD_PARTY_PROVIDERS
     await press('return'); // → thirdparty-select
     expect(screen.getByText('DeepSeek API Key')).toBeTruthy();
@@ -1486,13 +1503,14 @@ describe('the wizard frame keeps its natural height', () => {
     // wizard stays usable.
     const { rerenderAt } = renderDialog({ availableTerminalHeight: 13 });
     expect(screen.getByText(/Terms of Services/)).toBeTruthy();
-    expect(screen.getByText('QwenCloud')).toBeTruthy();
+    expect(screen.getByText('Qwen Account with Subscription')).toBeTruthy();
 
     rerenderAt(12);
     expect(screen.queryByText(/Terms of Services/)).toBeNull();
+    expect(screen.getByText('Qwen Account with Subscription')).toBeTruthy();
     expect(screen.getByText('QwenCloud')).toBeTruthy();
-    expect(screen.getByText('Alibaba ModelStudio')).toBeTruthy();
 
+    await press('down');
     await press('down');
     await press('down'); // main: THIRD_PARTY_PROVIDERS — a painted row
     await press('return');
@@ -1507,11 +1525,11 @@ describe('the wizard frame keeps its natural height', () => {
     // the painted row.
     const { onClose } = renderDialog({ availableTerminalHeight: 7 });
     expect(screen.getByText('Connect a Provider')).toBeTruthy();
-    expect(screen.getByText('QwenCloud')).toBeTruthy();
-    expect(screen.queryByText('Alibaba ModelStudio')).toBeNull();
+    expect(screen.getByText('Qwen Account with Subscription')).toBeTruthy();
+    expect(screen.queryByText('QwenCloud')).toBeNull();
 
     await press('return');
-    expect(screen.getByText('QwenCloud · Access Method')).toBeTruthy();
+    expect(screen.getByText('Waiting for sign-in…')).toBeTruthy();
 
     await pressEsc(); // a sub-view's Esc is goBack, unchanged
     expect(screen.getByText('Connect a Provider')).toBeTruthy();
@@ -1552,6 +1570,7 @@ describe('the wizard frame keeps its natural height', () => {
     mocks.state.width = 38;
     renderDialog({ availableTerminalHeight: 14 });
     await press('down');
+    await press('down');
     await press('down'); // main: THIRD_PARTY_PROVIDERS
     await press('return'); // → thirdparty-select
     expect(screen.getByText('Third-party Providers · Provider')).toBeTruthy();
@@ -1564,6 +1583,7 @@ describe('the wizard frame keeps its natural height', () => {
     // region 9 leaves one row — less than a provider row's three — so
     // nothing paints, and the arrows and Enter address nothing.
     const { rerenderAt } = renderDialog({ availableTerminalHeight: 13 });
+    await press('down');
     await press('down');
     await press('down');
     await press('return'); // → thirdparty-select
@@ -1590,6 +1610,7 @@ describe('wire-API step cursor out of one read (#207)', () => {
 
   it('saves the wire API the arrow of the same read moved to', async () => {
     renderDialog();
+    await press('down');
     await press('down');
     await press('down');
     await press('down');
@@ -1627,8 +1648,8 @@ describe('real subscription entry', () => {
     mocks.state.pasteHandlers.length = 0;
     mocks.state.width = 100;
     vi.clearAllMocks();
-    vi.stubEnv('DEV', true);
-    process.env['DEV'] = 'true';
+    vi.stubEnv('DEV', false);
+    delete process.env['DEV'];
     vi.stubEnv('QWEN_OAUTH_BASE_URL', 'https://pre-auth.qwen.ai');
     subscription.state = { status: 'waiting' };
     subscription.canCheckAgain = false;
