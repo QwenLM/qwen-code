@@ -2232,7 +2232,7 @@ printf '%s\\n' '{"jobs":[]}'
       // The annotation read is per check-run id taken from the jobs payload's
       // own check_run_url, and the match is the same grep the PR scan uses.
       expect(infraScript).toContain(
-        'jq -r \'.jobs[] | select(.conclusion == "failure") | select(([(.steps // [])[] | select(.conclusion == "failure") | .name] | map(select(. == "Report the tier result" or . == "Require every macOS test group to pass")) | length) == 0) | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv\'',
+        'jq -r \'.jobs[] | select(.conclusion == "failure") | select(([(.steps // [])[] | select(.conclusion == "failure") | .name] | map(select(. == "Report the tier result" or . == "Require every macOS test group to pass" or . == "Require the build and every Linux test shard to pass")) | length) == 0) | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv\'',
       );
       expect(infraScript).toContain(
         'gh api --paginate "repos/${REPO}/check-runs/${check_run_id}/annotations"',
@@ -2361,12 +2361,17 @@ printf '%s\\n' '{"jobs":[]}'
       expect(out).toContain('infra_only=true');
     });
 
-    it.each([
-      ['No space left on device', 'true'],
-      ['AssertionError: expected the daemon to answer', 'false'],
-    ])(
-      'classifies the shard behind a failed macOS aggregate: %s',
-      (message, expected) => {
+    it.each(
+      [
+        ['macOS', 'Require every macOS test group to pass'],
+        ['Linux', 'Require the build and every Linux test shard to pass'],
+      ].flatMap(([lane, gate]) => [
+        [lane, gate, 'No space left on device', 'true'],
+        [lane, gate, 'AssertionError: expected the daemon to answer', 'false'],
+      ]),
+    )(
+      'classifies the shard behind a failed %s aggregate (%s): %s',
+      (_lane, gate, message, expected) => {
         const out = classify(
           [
             failedJob(1001, 9001, [
@@ -2374,7 +2379,7 @@ printf '%s\\n' '{"jobs":[]}'
             ]),
             failedJob(1002, 9002, [
               {
-                name: 'Require every macOS test group to pass',
+                name: gate,
                 conclusion: 'failure',
               },
             ]),

@@ -40,7 +40,13 @@ const failureIssue = parse(
 // `on:` parses as the boolean true in YAML 1.1.
 const triggers = ci[true] ?? ci['on'];
 const LANES = ['test_macos_shards', 'test_windows'];
-const PUSH_JOBS = ['classify_pr', 'test', 'lint_and_static'];
+const PUSH_JOBS = [
+  'classify_pr',
+  'test_build',
+  'test',
+  'test_ubuntu',
+  'lint_and_static',
+];
 const condOf = (job) => String(ci.jobs[job].if ?? '');
 
 describe('complete macOS test groups', () => {
@@ -216,9 +222,12 @@ describe('raw JUnit report retention', () => {
     (event, repo, name) => {
       expect(upload.if).toContain('always()');
       expect(evaluate(upload.if, event, repo, 'false', 'full')).toBe(true);
-      expect(evaluate(upload.with.name, event, repo, 'false', 'full')).toBe(
-        name,
-      );
+      // Each shard uploads under its own name: upload-artifact v4+ rejects
+      // a duplicate within the run.
+      const shardSuffix = '-shard-${{ matrix.shard }}';
+      expect(upload.with.name.endsWith(shardSuffix)).toBe(true);
+      const prefix = upload.with.name.slice(0, -shardSuffix.length);
+      expect(evaluate(prefix, event, repo, 'false', 'full')).toBe(name);
       expect(evaluate(upload.if, event, repo, 'true', 'full')).toBe(false);
       expect(evaluate(upload.if, event, repo, 'false', 'web-shell-only')).toBe(
         false,
@@ -288,11 +297,32 @@ const runnerOn = (job, runner) => {
 };
 
 it('gives the shared Linux test lane one ceiling on both pools', () => {
-  // The full suite outgrew 60 minutes on hosted runners too: on 2026-10-17,
+  // The unsharded suite outgrew 60 minutes on hosted runners: on 2026-10-17,
   // 17 of the 30 hosted runs that ended on their own were cancelled at 60.
-  expect(timeoutMinutesOn('test', ECS_RUNNER)).toBe(120);
-  expect(timeoutMinutesOn('test', HOSTED_RUNNER)).toBe(120);
-  expect(timeoutMinutesOn('test', '')).toBe(120);
+  // Each shard runs an eighth of it, beside one build of the tree.
+  for (const runner of [ECS_RUNNER, HOSTED_RUNNER, '']) {
+    expect(timeoutMinutesOn('test_build', runner)).toBe(45);
+    expect(timeoutMinutesOn('test', runner)).toBe(60);
+  }
+  expect(ci.jobs.test.strategy['fail-fast']).toBe(false);
+  expect(ci.jobs.test.strategy.matrix.shard).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+});
+
+it('reports the required Linux check only when the build and every shard pass', () => {
+  const gate = ci.jobs.test_ubuntu;
+  expect(gate.name).toBe('Test (ubuntu-latest, Node 22.x)');
+  expect(gate.needs).toEqual(['test_build', 'test']);
+  expect(condOf('test_ubuntu')).toBe(condOf('test'));
+  expect(gate.steps[0].run).toBe(
+    'test "$BUILD_RESULT" = success && test "$SHARDS_RESULT" = success',
+  );
+  // The shard count in the step's --shard has to match the matrix.
+  const run = ci.jobs.test.steps.find(
+    (step) => step.name === 'Run tests and generate reports',
+  );
+  expect(run.env.UNIT_TEST_SHARD).toBe(
+    `\${{ matrix.shard }}/${ci.jobs.test.strategy.matrix.shard.length}`,
+  );
 });
 
 it('keeps the no-AK gate above its dependency-install budget on ECS', () => {
@@ -673,7 +703,9 @@ describe('post-merge push lane', () => {
       new Map(
         (ci.jobs[job].steps ?? []).map((s) => {
           const { name: _artifactName, ...restWith } = s.with ?? {};
-          if (job === 'lint_and_static' && s.name === 'Install dependencies') {
+          // Both install without the prepare build: lint needs none, and
+          // the test shards unpack the one test_build made.
+          if (job !== 'test_build' && s.name === 'Install dependencies') {
             expect(s.env).toEqual({
               QWEN_SKIP_PREPARE: '1',
               QWEN_SKIP_NOTICE_GENERATION: '1',
@@ -689,6 +721,16 @@ describe('post-merge push lane', () => {
       );
     const t = byName('test');
     const l = byName('lint_and_static');
+    // test_build carries the test shards' whole prelude, up to the install.
+    const b = byName('test_build');
+    const buildShared = [...b.keys()].filter((n) => t.has(n));
+    expect(buildShared.length).toBeGreaterThanOrEqual(15);
+    for (const n of buildShared) {
+      if (n === 'Install dependencies') continue;
+      expect(b.get(n), `step "${n}" drifted between test_build and test`).toBe(
+        t.get(n),
+      );
+    }
     // The serializer is the guard's eyes: both sides of every comparison below
     // flow through it, so a regression that drops nested fields compares `{}`
     // to `{}` and the drift loop reports green — the exact array-replacer blind

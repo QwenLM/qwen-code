@@ -84,6 +84,13 @@ workspaces' suites and `npm run test:scripts:unit` at half the cap, at least 1,
 so at its peak the step runs the cap plus that half. On GitHub-hosted runners
 the side lane's Vitest runs use 2 workers.
 
+The step runs in eight shards (`Linux unit tests (shard N/8)`), each passing
+`--shard=N/8` to every one of those Vitest runs. The shards apply the cap on
+their own too, so the pool sees up to eight such steps at once. They install
+without the `prepare` build and unpack the tree `test_build` built once.
+`Test (ubuntu-latest, Node 22.x)` passes only when the build and every shard
+pass.
+
 ### Related variables outside test execution
 
 `release.yml` also exposes `QWEN_RELEASE_STATIC_TIMEOUT_MINUTES` (default `60`,

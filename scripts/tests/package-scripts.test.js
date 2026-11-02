@@ -1227,9 +1227,12 @@ describe('package scripts', () => {
     // 'off' must omit the flag rather than pass --retry=0, which would
     // outrank a workspace's own config-level retry (sdk-typescript).
     expect(step).toContain('[ "${VITEST_RETRY}" != \'off\' ]');
-    expect(step).toContain('retry_arg=(--retry="${VITEST_RETRY}")');
-    // The step hands the flag to the lane script, which passes it to all
-    // three of its Vitest runs: the CLI and core suites in the main lane, and
+    expect(step).toContain(
+      'retry_arg=(--shard="${UNIT_TEST_SHARD}" --passWithNoTests)',
+    );
+    expect(step).toContain('retry_arg+=(--retry="${VITEST_RETRY}")');
+    // The step hands the shard and the retry to the lane script, which
+    // passes them to all three of its Vitest runs: the CLI and core suites in the main lane, and
     // the other workspaces and scripts/tests in the side lane.
     expect(step).toContain(
       '.github/scripts/ci/run-unit-test-lanes.sh "${retry_arg[@]}"',
@@ -1405,6 +1408,7 @@ describe('package scripts', () => {
             sideLog = '',
             killed = false,
             nested = false,
+            skipStandalone = '',
           } = {},
         ) => {
           const calls = path.join(dir, `${name}.calls`);
@@ -1424,6 +1428,9 @@ describe('package scripts', () => {
               // In CI this suite runs inside the side lane, whose own log
               // ci.yml names here: never write to it.
               SIDE_LANE_LOG: sideLog,
+              // ci.yml sets it on every shard but the first, this suite's
+              // own run included: the passing case needs it unset.
+              QWEN_CI_SKIP_STANDALONE_RUNTIMES: skipStandalone,
               LANES: lanes,
               STUB_CALLS: calls,
               STUB_WORKSPACES: pkgGet,
@@ -1464,6 +1471,13 @@ describe('package scripts', () => {
         const order = (calls, line) => calls.indexOf(line);
         expect(order(passing.calls, sideWorkspaces)).toBeLessThan(
           order(passing.calls, standalone),
+        );
+
+        // Every shard but one leaves the standalone regression out.
+        const otherShard = run('other-shard', { skipStandalone: '1' });
+        expect(otherShard.rc).toBe('0');
+        expect([...otherShard.calls].sort()).toEqual(
+          [mainSuites, sideWorkspaces, scriptsUnit].sort(),
         );
         expect(order(passing.calls, standalone)).toBeLessThan(
           order(passing.calls, scriptsUnit),
