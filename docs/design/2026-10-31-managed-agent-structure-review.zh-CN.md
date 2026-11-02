@@ -180,10 +180,10 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
    （`MessageMaterializer`、`ReplayFloorAdvancer`、`ManagedToolResultStore`）、
    Turn 执行（`SessionWorktreeService`）。其余消费方多数跨角色，或把
    store 透传给多角色依赖（Harness 与 broker 装配），继续
-   使用组合接口。另有四个单角色消费方暂缓迁移、仍用组合接口，在此
-   记录供 P1 跟进：`ChildWorkspaceService`、`WorkspaceRuntimeResolver`、
-   `ManagedAutomationService`（查询）与 `TaskCancelCoordinator`（生命
-   周期）——它们的 `this(...)` 是本类构造委托而非透传。
+   使用组合接口。另有四个单角色消费方起初因 `this(...)` 是本类构造
+   委托而非透传而暂缓，现已一并收窄：`ChildWorkspaceService`、
+   `WorkspaceRuntimeResolver`、`ManagedAutomationService` 改用
+   `SessionQueryStore`，`TaskCancelCoordinator` 改用 `SessionLifecycleStore`。
    `AcceptanceEvidence.settle` 现已直接接收 `SessionLifecycleStore`，
    `OperationReconciler` 也因此收窄。更窄的注入会随 P1 沿同一
    条缝拆分实现而进一步扩散。先接口隔离，后实现拆分（P1）。
