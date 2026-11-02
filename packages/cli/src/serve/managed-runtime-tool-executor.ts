@@ -2810,6 +2810,10 @@ export function createManagedToolSet(
     // elsewhere.
     todoWriteEnabled: true,
   });
+  // These tools have no record_artifact and their results carry no artifact
+  // metadata to the host, whatever the env flags say. Off, a Shell call also
+  // no longer parses its command only to decide on that reminder.
+  config.isRecordArtifactEnabled = () => false;
   registerSessionProjectDir(sessionId, config.storage.getProjectDir());
   return {
     sessionId,

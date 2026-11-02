@@ -2551,6 +2551,94 @@ describe('todo_write in the Worker', () => {
   });
 });
 
+// A Hosted Session declares no record_artifact and the Worker forwards no
+// artifact metadata, so no Worker result may ask the model to record one.
+describe.skipIf(process.platform === 'win32')(
+  'record_artifact guidance in the Worker',
+  () => {
+    let workspace: string;
+    let runtimeDir: string;
+
+    function reference(callId: string, input: unknown): ManagedToolReference {
+      return {
+        sessionId: 'session-artifact',
+        promptId: 'prompt-artifact',
+        callId,
+        argsDigest: managedToolDigest(input as Record<string, unknown>),
+      };
+    }
+
+    async function resultText(
+      exec: ManagedToolExecutor,
+      callId: string,
+      toolName: string,
+      input: Record<string, unknown>,
+    ): Promise<string> {
+      const result = await exec.execute(
+        reference(callId, input),
+        toolName,
+        input,
+      );
+      expect(result.executionStatus).toBe('success');
+      return (result.responseParts as Array<{ text?: string }>)
+        .map((part) => part.text ?? '')
+        .join('');
+    }
+
+    beforeEach(async () => {
+      workspace = await mkdtemp(path.join(tmpdir(), 'qwen-artifact-'));
+      runtimeDir = await mkdtemp(path.join(tmpdir(), 'qwen-artifact-runtime-'));
+      Storage.setRuntimeBaseDir(runtimeDir);
+    });
+
+    afterEach(async () => {
+      vi.unstubAllEnvs();
+      Storage.setRuntimeBaseDir(undefined);
+      await rm(workspace, { recursive: true, force: true });
+      await rm(runtimeDir, { recursive: true, force: true });
+    });
+
+    it.each(['', '1'])(
+      'leaves it out of a Shell result that wrote a file (QWEN_CODE_ENABLE_ARTIFACT=%j)',
+      async (flag) => {
+        vi.stubEnv('QWEN_CODE_ENABLE_ARTIFACT', flag);
+        const exec = ManagedToolExecutor.forWorkspace(
+          workspace,
+          'session-artifact',
+        );
+        const text = await resultText(exec, 'shell', 'run_shell_command', {
+          command: 'echo hello > notes.md',
+        });
+        expect(await readFile(path.join(workspace, 'notes.md'), 'utf8')).toBe(
+          'hello\n',
+        );
+        expect(text).not.toContain('record_artifact');
+        await exec.close();
+      },
+    );
+
+    it.each(['', '1'])(
+      'does not claim a written Markdown file was recorded (QWEN_CODE_ENABLE_ARTIFACT=%j)',
+      async (flag) => {
+        vi.stubEnv('QWEN_CODE_ENABLE_ARTIFACT', flag);
+        const exec = ManagedToolExecutor.forWorkspace(
+          workspace,
+          'session-artifact',
+        );
+        const text = await resultText(exec, 'write', 'write_file', {
+          file_path: path.join(workspace, 'report.md'),
+          content: '# Report\n',
+        });
+        expect(await readFile(path.join(workspace, 'report.md'), 'utf8')).toBe(
+          '# Report\n',
+        );
+        expect(text).not.toContain('recorded as a workspace artifact');
+        await exec.close();
+      },
+    );
+  },
+);
+
 // The route-level fixtures cannot express these geometries (a Session root is
 // always a deep unique tmpdir path), so the anchoring invariants are pinned
 // against the function directly.
