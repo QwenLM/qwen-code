@@ -6859,7 +6859,7 @@ describe('runNonInteractive', () => {
         mockLlmClient.sendMessageStream.mock.calls[0];
       expect(request).toEqual([{ text: `FIX IT\n${image}` }]);
       expect(options).toMatchObject({
-        submittedPrompt: `FIX IT\n${image}`,
+        submittedPrompt: 'FIX IT',
         humanInput: { text: 'FIX IT' },
       });
       expect(startTurn.mock.calls[0][0]).toBe('FIX IT');
@@ -6901,6 +6901,37 @@ describe('runNonInteractive', () => {
         }
       },
     );
+
+    it('raises no prompt.submit for a message no person typed or without text', async () => {
+      setupMetricsMock();
+      const { submitPrompt } = installModTurn();
+      mockLlmClient.sendMessageStream.mockImplementation(() =>
+        createStreamFromEvents([]),
+      );
+      const result = '{"type":"tool_result","tool_use_id":"t1"}';
+
+      await runNonInteractive(mockConfig, mockSettings, result, 'tool', {
+        promptParts: { text: '', blocks: [result] },
+        fromTool: true,
+      });
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        `Done\n${result}`,
+        'tool-text',
+        {
+          promptParts: { text: 'Done', blocks: [result] },
+          fromTool: true,
+        },
+      );
+      const image = '{"type":"image"}';
+      await runNonInteractive(mockConfig, mockSettings, image, 'image', {
+        promptParts: { text: '', blocks: [image] },
+      });
+
+      expect(submitPrompt).not.toHaveBeenCalled();
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(3);
+    });
 
     it('raises no prompt.submit for a slash command or a notification', async () => {
       setupMetricsMock();

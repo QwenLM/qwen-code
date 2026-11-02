@@ -786,6 +786,32 @@ describe('runNonInteractiveStreamJson', () => {
     expect(second[4]).not.toHaveProperty('promptParts');
   });
 
+  it('marks a message that answers a tool call as one no person typed', async () => {
+    const result = createUserMessage('');
+    result.message.content = [
+      { type: 'tool_result', tool_use_id: 't1', content: 'ok' },
+    ] as CLIUserMessage['message']['content'];
+    const scoped = createUserMessage('Go on');
+    scoped.parent_tool_use_id = 't1';
+    const typed = createUserMessage('Hello');
+    mockInputReader.read = async function* () {
+      for (const message of [result, scoped, typed]) {
+        const calls = runNonInteractiveMock.mock.calls.length;
+        yield message;
+        await vi.waitFor(() =>
+          expect(runNonInteractiveMock).toHaveBeenCalledTimes(calls + 1),
+        );
+      }
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    const [first, second, third] = runNonInteractiveMock.mock.calls;
+    expect(first[4].fromTool).toBe(true);
+    expect(second[4].fromTool).toBe(true);
+    expect(third[4]).not.toHaveProperty('fromTool');
+  });
+
   it('seeds the promptId counter past turns the resumed transcript claims', async () => {
     // A resumed headless chain reuses the session id, so restarting the
     // counter at 1 would re-mint ids the previous run already persisted —

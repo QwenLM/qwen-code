@@ -717,6 +717,16 @@ describe('Mod session ownership', () => {
     );
   });
 
+  it('drops a prompt the hooks rewrote to nothing', async () => {
+    const { session, runtime } = await loadPrompts();
+    for (const text of ['', ' \n ']) {
+      runtime.submitPrompt.mockResolvedValueOnce({ text, context: ['note'] });
+      expect(await session.submitPrompt('hi', turnSignal)).toEqual({
+        drop: 'Prompt dropped by a hook: it left the prompt empty',
+      });
+    }
+  });
+
   it('says why a prompt was dropped, in one line of 4,096 characters', async () => {
     const { session, runtime } = await loadPrompts();
     runtime.submitPrompt.mockResolvedValueOnce({

@@ -435,6 +435,11 @@ export interface RunNonInteractiveOptions {
    * other blocks as `input` serializes them, which follow a rewritten text.
    */
   promptParts?: { text: string; blocks: string[] };
+  /**
+   * An SDK message no person typed: it carries tool blocks or answers a tool
+   * call. The Mods' prompt.submit hooks do not hear it.
+   */
+  fromTool?: boolean;
   modSession?: ModSession;
   abortController?: AbortController;
   adapter?: JsonOutputAdapterInterface;
@@ -1410,13 +1415,15 @@ export async function runNonInteractive(
         }
 
         if (!slashHandled) {
+          // The hooks hear what was typed, not the serialized blocks.
+          const heard = options.promptParts?.text ?? input;
           if (
             modSession &&
+            !options.fromTool &&
+            heard.trim() &&
             (options.sendMessageType ?? SendMessageType.UserQuery) ===
               SendMessageType.UserQuery
           ) {
-            // The hooks hear what was typed, not the serialized blocks.
-            const heard = options.promptParts?.text ?? input;
             let submitted: Awaited<ReturnType<ModSession['submitPrompt']>>;
             try {
               submitted = await modSession.submitPrompt(
@@ -1443,8 +1450,8 @@ export async function runNonInteractive(
               prompt = options.promptParts
                 ? [rewrittenText, ...options.promptParts.blocks].join('\n')
                 : rewrittenText;
-              // The transcript shows the prompt the model reads.
-              submittedPrompt = prompt;
+              // The transcript shows the text, as it does without a rewrite.
+              submittedPrompt = rewrittenText;
             }
             promptContext = submitted.context;
           }

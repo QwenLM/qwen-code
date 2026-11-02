@@ -754,7 +754,12 @@ export class ModSession implements ICommandLoader {
     });
     this.toolQueue = task.catch(() => {});
     const result = await task;
-    if (!('drop' in result)) return result;
+    if (!('drop' in result)) {
+      // A rewrite to nothing would send the model an empty prompt.
+      if (!result.text.trim() && text.trim())
+        return { drop: 'Prompt dropped by a hook: it left the prompt empty' };
+      return result;
+    }
     if (!result.byHook) return { drop: `Prompt not submitted: ${result.drop}` };
     // A drop's reason is one line, kept to its first 4,096 characters.
     const reason = (this.terminal ? sanitizeTerminalLine : stripAnsiAndControl)(

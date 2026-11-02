@@ -561,6 +561,7 @@ class Session {
       await runNonInteractive(this.config, this.settings, input, promptId, {
         ...(humanInput ? { humanInput } : {}),
         ...(promptParts ? { promptParts } : {}),
+        ...(isToolMessage(userMessage) ? { fromTool: true } : {}),
         modSession: this.modSession,
         abortController: turnAbortController,
         adapter: this.outputAdapter,
@@ -1109,6 +1110,25 @@ class Session {
       this.cleanupSignalHandlers();
     }
   }
+}
+
+/**
+ * Whether a user message answers a tool call or carries tool blocks, so no
+ * person typed it.
+ */
+function isToolMessage(message: CLIUserMessage): boolean {
+  if (message.parent_tool_use_id != null) return true;
+  const content = message.message.content;
+  return (
+    Array.isArray(content) &&
+    content.some(
+      (block) =>
+        !!block &&
+        typeof block === 'object' &&
+        'type' in block &&
+        (block.type === 'tool_result' || block.type === 'tool_use'),
+    )
+  );
 }
 
 /**
