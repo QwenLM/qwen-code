@@ -74,23 +74,28 @@ class HostedMcpRestartFaultGatesIT {
     // Per-case evidence letter: FG12c keeps its directory, FG12d's release
     // cell lands under its own so the two letters' artefacts never mix.
     private String caseLetter;
-    private static final Map<String, String> CASE_LETTERS = Map.of(
-            "harnessKillDuringConfigureResolvesThroughStatusOnMySql",
-            "fg12c",
-            "harnessKillDuringOperationLooksUpTheOriginalInvokeOnMySql",
-            "fg12c",
-            "workerKillWhileIdleNeverMintsAFreshOwnerOnMySql", "fg12c",
-            "workerKillDuringOperationSettlesOutcomeUnknownOnMySql", "fg12c",
-            "stdioKillDuringRequestSettlesOutcomeUnknownOnMySql", "fg12c",
-            "harnessKillDuringReleaseResumesTheOriginalReleaseOnMySql",
-            "fg12d",
-            "firstReleaseRefusedBeforeForwardingResumesUnderTheSameId",
-            "fg12d",
-            "firstReleaseRefusedWithTwoServersReleasesBothOnMySql",
-            "fg12d",
-            "cancelBeforeDispatchIsNotStartedProvenOnMySql", "fg12d",
-            "ownerReleaseRefusedThenSpringRestartReleasesTheHolderOnMySql",
-            "fg12d");
+    private static final Map<String, String> CASE_LETTERS = Map.ofEntries(
+            Map.entry("harnessKillDuringConfigureResolvesThroughStatusOnMySql",
+                    "fg12c"),
+            Map.entry("harnessKillDuringOperationLooksUpTheOriginalInvokeOnMySql",
+                    "fg12c"),
+            Map.entry("workerKillWhileIdleNeverMintsAFreshOwnerOnMySql",
+                    "fg12c"),
+            Map.entry("workerKillDuringOperationSettlesOutcomeUnknownOnMySql",
+                    "fg12c"),
+            Map.entry("stdioKillDuringRequestSettlesOutcomeUnknownOnMySql",
+                    "fg12c"),
+            Map.entry("detachRefusedWhileToolResultUnknownOnMySql", "fg12d"),
+            Map.entry("harnessKillDuringReleaseResumesTheOriginalReleaseOnMySql",
+                    "fg12d"),
+            Map.entry("firstReleaseRefusedBeforeForwardingResumesUnderTheSameId",
+                    "fg12d"),
+            Map.entry("firstReleaseRefusedWithTwoServersReleasesBothOnMySql",
+                    "fg12d"),
+            Map.entry("cancelBeforeDispatchIsNotStartedProvenOnMySql",
+                    "fg12d"),
+            Map.entry("ownerReleaseRefusedThenSpringRestartReleasesTheHolderOnMySql",
+                    "fg12d"));
     private static final String TOKEN = "extension-process-fixture-token";
     private static final String CAPABILITY = "sha256:" + "a".repeat(64);
     private final ObjectMapper json = new ObjectMapper();
@@ -662,6 +667,45 @@ class HostedMcpRestartFaultGatesIT {
         assertThat(effects("resource_read")).doesNotContain("ext://hold");
         assertThat(controls("mcp-invoke")).hasSize(1);
         assertThat(fixtureEvents("mcp.start")).hasSize(1);
+        pending.cancel(true);
+    }
+
+    // FG12d (issue #14447): a tool result is unknown, so detach must refuse
+    // before it releases anything. The Session stays attached and the
+    // operation stays recovery_blocked; a later generation owns the only
+    // conclusive answer for its original id.
+    @Test
+    @Timeout(600)
+    void detachRefusedWhileToolResultUnknownOnMySql() throws Exception {
+        SessionRef session = createSession();
+        baseline(session);
+        String operation = uuid();
+        Future<JsonNode> pending = caseExecutor.submit(
+                () -> privateRequest("POST", "/session/" + session.id()
+                        + "/mcp/operations", Map.of("operationId", operation,
+                        "serverId", "fixture", "request", Map.of("kind",
+                                "resource_read", "uri", "ext://hold")),
+                        session, 202));
+        waitFor(() -> assertThat(fixtureEvents("mcp.hold")).hasSize(1));
+        kill(fixturePid());
+        waitFor(() -> assertThat(operations(session.id()).getLast()
+                .path("run").path("execution").asText())
+                .isEqualTo("outcome_unknown"));
+        assertThat(operations(session.id()).getLast().path("run").path("state")
+                .asText()).isEqualTo("recovery_blocked");
+        HttpResponse<String> detach = rawRequest("POST",
+                "/session/" + session.id() + "/detach", "{}",
+                session.clientId());
+        assertThat(detach.statusCode()).as("detach: %s", detach.body())
+                .isIn(409, 503);
+        JsonNode refusal = json.readTree(detach.body());
+        assertThat(refusal.path("error").asText(
+                refusal.path("code").asText()))
+                .isIn("hosted_turn_active", "managed_session_close_failed",
+                        "hosted_mcp_recovery_required");
+        assertThat(controls("mcp-release")).isEmpty();
+        assertThat(operations(session.id()).getLast().path("run").path("execution")
+                .asText()).isEqualTo("outcome_unknown");
         pending.cancel(true);
     }
 
