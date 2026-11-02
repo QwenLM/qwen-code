@@ -66,6 +66,23 @@ describe('normalize', () => {
     expect(normalize('qwen2.5-coder:32b')).toBe('qwen2.5-coder');
     expect(normalize('llama3.1:8b-instruct-q4_k_m')).toBe('llama3.1');
     expect(normalize('qwen2.5-coder:latest')).toBe('qwen2.5-coder');
+    // Hugging Face GGUF repos pulled through Ollama carry a bare
+    // quantization tag and a `-GGUF` repo suffix.
+    expect(
+      normalize('hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M'),
+    ).toBe('qwen3-coder-30b-a3b-instruct');
+    expect(normalize('hf.co/Qwen/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q8_0')).toBe(
+      'qwen3-coder-30b-a3b-instruct',
+    );
+    expect(
+      normalize('hf.co/bartowski/Qwen2.5-Coder-32B-Instruct-GGUF:IQ4_XS'),
+    ).toBe('qwen2.5-coder-32b-instruct');
+    expect(
+      normalize('hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:UD-Q4_K_XL'),
+    ).toBe('qwen3-coder-30b-a3b-instruct');
+    expect(
+      normalize('hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:BF16'),
+    ).toBe('qwen3-coder-30b-a3b-instruct');
   });
 
   it('should collapse whitespace to a single hyphen', () => {
@@ -438,6 +455,10 @@ describe('variant-tagged model ids', () => {
       ['openai/gpt-5:free', 'openai/gpt-5'],
       ['qwen2.5-coder:32b', 'qwen2.5-coder'],
       ['qwen3-coder-plus:nitro', 'qwen3-coder-plus'],
+      [
+        'hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M',
+        'qwen3-coder-30b-a3b-instruct',
+      ],
     ] as Array<[string, string]>) {
       expect(tokenLimit(tagged)).toBe(tokenLimit(bare));
       expect(tokenLimit(tagged, 'output')).toBe(tokenLimit(bare, 'output'));
@@ -451,6 +472,9 @@ describe('variant-tagged model ids', () => {
     expect(tokenLimit('google/gemini-2.5-pro:online')).toBe(1_000_000);
     expect(tokenLimit('openai/gpt-5:free')).toBe(272_000);
     expect(tokenLimit('qwen2.5-coder:32b')).toBe(262_144);
+    expect(
+      tokenLimit('hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M'),
+    ).toBe(262_144);
   });
 
   it('still keeps the right half of a prefixed id', () => {
