@@ -342,6 +342,13 @@ export class JavaManagedAgentClient {
     return this.post('/transcript/query', request, signal);
   }
 
+  getRecentTranscriptItems(
+    request: Schemas['WebShellExportRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellExportPage']> {
+    return this.post('/transcript/items/query', request, signal);
+  }
+
   createSession(
     request: Schemas['WebShellCreateRequest'],
     signal?: AbortSignal,

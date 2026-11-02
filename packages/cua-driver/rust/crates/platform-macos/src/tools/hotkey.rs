@@ -325,7 +325,8 @@ impl Tool for HotkeyTool {
                     .as_deref()
                     .is_some_and(crate::browser::BrowserJs::supports)
                     && !crate::browser::electron_js::ElectronJs::is_electron(pid);
-                if native {
+                // Modal panels handle their own shortcuts while the app menu is disabled.
+                if native && !crate::ax::dialogs::dialog_window_ids(pid).contains(&wid) {
                     let result = tokio::task::spawn_blocking(move || {
                         super::menu_equivalent::find(pid, &combo)
                             .map(|item| super::menu_equivalent::run(pid, wid, item, save))
@@ -473,7 +474,21 @@ impl Tool for HotkeyTool {
                             if let Some(wid) = window_id {
                                 crate::input::skylight::prepare_background_keyboard(pid, wid)?;
                             }
-                            crate::input::keyboard::hotkey(pid, &key, &m)
+                            let recipient =
+                                if crate::input::keyboard::uses_application_keyboard_target(
+                                    false, &m,
+                                ) {
+                                    pid
+                                } else {
+                                    unsafe {
+                                        crate::ax::exact_target::keyboard_recipient_pid(
+                                            pid,
+                                            window_id,
+                                            element_ptr,
+                                        )
+                                    }?
+                                };
+                            crate::input::keyboard::hotkey(recipient, &key, &m)
                         }
                         _ => crate::input::keyboard::hotkey(pid, &key, &m),
                     }

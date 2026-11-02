@@ -59,7 +59,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Without a cursor, a Session that has a Snapshot returns all of its Items, the events up to the Snapshot other than turn.accepted, item.output_text.delta, item.reasoning.delta, item.tool_call.updated and item.tool_result.updated, which the Items already hold, and every event after it. Otherwise, and for an olderCursor, limit bounds the page of events. */
+        /** @description Requires current Session read authorization. Read the most recent limit current message Items and selected bounded Turn control events; olderCursor pages toward older Items. Bodies and statuses remain live. The response coveredSequence and lastSequence both identify actual message projection coverage for SSE continuation, never an unmaterialized event tail. No persisted conversation snapshot or whole-history replay is read. Projection rebuild invalidates cursors. If projection coverage is below the replay floor, return retryable message_projection_pending. */
         post: operations["webShellTranscript"];
         delete?: never;
         options?: never;
@@ -76,7 +76,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description POST SSE consumed through fetch response.body. An afterSequence strictly below the durable replay floor ends the stream with one agent.session.resync_required frame. Projection rebuilds preserve that floor and the current immutable Snapshot. On the resync frame, reload the transcript and resume after its lastSequence. */
+        /** @description POST SSE consumed through fetch response.body. An afterSequence strictly below the durable replay floor ends the stream with one agent.session.resync_required frame. Projection rebuilds preserve that floor and invalidate message-page cursors. On the resync frame, reload the transcript and resume after its lastSequence. */
         post: operations["webShellStreamEvents"];
         delete?: never;
         options?: never;
@@ -805,8 +805,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Read one immutable public Session snapshot page for reading exports
-         * @description Requires current Session read authorization on every page. Reuses the public item snapshot cursor, whose subsequent pages retain the original snapshot version and watermark. No private journal, Runtime or storage credentials are returned. The client waits for a snapshot covering its captured Session watermark before using its first page.
+         * Read one current Session message page for exports
+         * @description Requires current Session read authorization on every page. Read current message bodies forward within the first request sequence membership bound. snapshotThroughSequence retains its wire name for that fixed bound and does not change between pages. Content and status may change; no frozen snapshot version or cursor retention is provided. An initial projection behind committed events returns retryable message_projection_pending instead of silently exporting incomplete history. No private journal, Runtime or storage credentials are returned. A projection-generation change returns 409 message_projection_changed; discard the cursor and restart this read.
          */
         post: operations["webShellExportSession"];
         delete?: never;
@@ -1127,6 +1127,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/transcript/items/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Read recent current Session Items and page toward older Items
+         * @description Requires current Session read authorization on every page. Read at most limit recent current message Items in chronological order; nextCursor continues toward older Items in the initial sequence membership range. snapshotThroughSequence names that fixed membership upper bound, while bodies and statuses remain live. Cursors bind scope, backward direction and projection generation. Rebuild invalidates the cursor. No snapshot copies are generated and no live tail is scanned; transcript reads provide actual projection coverage for SSE handoff. Projection coverage below the replay floor returns retryable message_projection_pending.
+         */
+        post: operations["webShellRecentTranscriptItems"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1434,11 +1454,17 @@ export interface components {
         WebShellTranscript: {
             items: components["schemas"]["WebShellItem"][];
             events: components["schemas"]["WebShellEvent"][];
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Actual message projection coverage of this read; resume SSE after this sequence.
+             */
             coveredSequence: number;
             olderCursor?: string | null;
             hasMore: boolean;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Actual message projection coverage for SSE handoff, equal to coveredSequence; unmaterialized tail events are delivered by SSE.
+             */
             lastSequence: number;
         };
         WebShellContentPart: {
@@ -1501,7 +1527,10 @@ export interface components {
             sessionId: string;
             /** Format: int64 */
             replayFloorSequence: number;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Retained wire name for current message projection coverage; no persisted conversation snapshot is implied.
+             */
             snapshotThroughSequence: number;
             /** @constant */
             action: "reload_snapshot";
@@ -2387,7 +2416,10 @@ export interface components {
             items: components["schemas"]["WebShellItem"][];
             nextCursor?: string | null;
             hasMore: boolean;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Fixed first-request sequence membership upper bound. Bodies and statuses are read live on every page; this does not identify a retained content version.
+             */
             snapshotThroughSequence: number;
         };
         WebShellExportRequest: {
@@ -2703,15 +2735,6 @@ export interface components {
                 "application/json": components["schemas"]["ErrorEnvelope"];
             };
         };
-        /** @description Replay cursor is older than the retained replay floor. */
-        CursorExpired: {
-            headers: {
-                [name: string]: unknown;
-            };
-            content: {
-                "application/json": components["schemas"]["ErrorEnvelope"];
-            };
-        };
         /** @description Task event cursor is strictly below the task's durable retention floor, which survives an empty retained set; equality is valid. The envelope's replay_floor_sequence and snapshot_through_sequence stay absent because task cursors are opaque. */
         TaskCursorExpired: {
             headers: {
@@ -2723,6 +2746,42 @@ export interface components {
         };
         /** @description A dependency such as the Hosted Harness is unavailable; retry later. */
         Unavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorEnvelope"];
+            };
+        };
+        /** @description 409 message_projection_changed: the message projection generation changed. Discard the message cursor and restart this read; this is not replay-floor cursor expiration. */
+        MessageProjectionChanged: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorEnvelope"];
+            };
+        };
+        /** @description 413 message_page_too_large: selected message bodies or Turn control events exceed the response byte budget. Reducing limit can help a multi-Item page, but a single oversized Item cannot be returned even with limit=1. Signed POST requests may also return payload_too_large when their request body exceeds the configured signed-body limit. */
+        MessagePageTooLarge: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorEnvelope"];
+            };
+        };
+        /** @description 400 invalid_message_cursor for malformed, wrong-scope, wrong-direction or out-of-range message cursors; invalid_limit outside 1..100; invalid_event_cursor for a negative numeric after. */
+        InvalidMessagePage: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorEnvelope"];
+            };
+        };
+        /** @description 503 message_projection_pending: projection coverage is below the replay floor, or the initial forward read is behind committed events. Retry after message projection catches up. */
+        MessageProjectionPending: {
             headers: {
                 [name: string]: unknown;
             };
@@ -2857,11 +2916,13 @@ export interface operations {
                     "application/json": components["schemas"]["WebShellTranscript"];
                 };
             };
-            400: components["responses"]["BadRequest"];
+            400: components["responses"]["InvalidMessagePage"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            413: components["responses"]["PayloadTooLarge"];
+            409: components["responses"]["MessageProjectionChanged"];
+            413: components["responses"]["MessagePageTooLarge"];
+            503: components["responses"]["MessageProjectionPending"];
         };
     };
     webShellStreamEvents: {
@@ -4343,7 +4404,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Immutable public item snapshot page. */
+            /** @description Chronological page of current message Items within the initial sequence membership range; content remains live. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4352,12 +4413,13 @@ export interface operations {
                     "application/json": components["schemas"]["WebShellExportPage"];
                 };
             };
-            400: components["responses"]["BadRequest"];
+            400: components["responses"]["InvalidMessagePage"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            409: components["responses"]["CursorExpired"];
-            413: components["responses"]["PayloadTooLarge"];
+            409: components["responses"]["MessageProjectionChanged"];
+            413: components["responses"]["MessagePageTooLarge"];
+            503: components["responses"]["MessageProjectionPending"];
         };
     };
     webShellQueryUserMessages: {
@@ -4965,6 +5027,37 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+        };
+    };
+    webShellRecentTranscriptItems: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellExportRequest"];
+            };
+        };
+        responses: {
+            /** @description Bounded recent current message Item page. Items are chronological within each page. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellExportPage"];
+                };
+            };
+            400: components["responses"]["InvalidMessagePage"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["MessageProjectionChanged"];
+            413: components["responses"]["MessagePageTooLarge"];
+            503: components["responses"]["MessageProjectionPending"];
         };
     };
 }

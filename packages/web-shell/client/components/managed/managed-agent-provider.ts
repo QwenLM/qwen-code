@@ -258,7 +258,7 @@ export interface ManagedAgentSessionEvent {
   turnId: string;
   data?: unknown;
   /**
-   * Projected from a durable snapshot item rather than a raw event. The
+   * Projected from a materialized Item rather than a raw event. The
    * server can retract its items (reconciliation), after which these
    * projections must not survive a resync.
    */
@@ -269,6 +269,7 @@ export interface ManagedAgentSessionTranscript {
   events: ManagedAgentSessionEvent[];
   olderCursor?: string;
   lastEventId: number;
+  history?: 'items';
 }
 
 export interface ManagedAgentTurnAdmission {
@@ -376,6 +377,7 @@ export interface ManagedAgentProvider {
     sessionId: string,
     options: ManagedAgentRequestOptions & { cursor?: string },
   ): Promise<ManagedExportPage>;
+  readonly exportConsistency?: 'live';
   readonly storageKey: string;
   readonly canCancel: boolean;
   /** Present when the provider can filter the complete Session history by title. */

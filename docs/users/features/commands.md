@@ -789,7 +789,12 @@ front-end, a relay), and `headless` or `serve` for a session another
 program drives. Several `serve` or `headless` rows can share one PID: a
 `qwen --acp` child hosts all its sessions in one process — `serve` when
 the daemon spawned it, `headless` when a client is driving it directly —
-and each of them registers separately. It is a self-report, like NAME and DIRECTORY: every field
+and each of them registers separately when peer messaging is active. A hosted
+session does not register here when its own environment puts it in bare or
+safe mode. A daemon's `--bare` does not reach the sessions it hosts
+(`QWEN_CODE_SIMPLE` is scrubbed from the child environment); an inherited
+`QWEN_CODE_SAFE_MODE` does, keeping those hosted sessions out of this listing. It is a
+self-report, like NAME and DIRECTORY: every field
 here was written by the process it describes, and nothing about what a
 session is allowed to do depends on it. An Agent View record marked
 `managed` uses `managed` for KIND and `-` for PID and AGE. It remains a
@@ -837,17 +842,23 @@ qwen sessions ps --json | jq -r .cwd
 ## 6. Messaging Another Running Session
 
 Two interactive sessions on the same machine can send each other
-messages. The feature is **on by default**: a session is discoverable by
-the other sessions of the same user on the machine, and what they send
+messages. The feature is **on by default**, but `--bare` and `--safe-mode`
+disable it regardless of the setting. With a listening inbox, a session is
+discoverable by the other sessions of the same user on the machine, and what they send
 it goes through the review rules below before its model sees any of it.
-To keep a session invisible and unreachable, turn it off in
+To disable peer discovery and messaging, turn it off in
 `settings.json` and restart:
 
 ```json
 { "agents": { "crossSessionMessaging": false } }
 ```
 
-With it on, the model in one session can discover the others with
+An interactive session with peer messaging disabled can still appear in
+`qwen sessions ps`, but has no `ipcPath` and is not a reachable peer in
+`list_agents`. The OpenTUI interface does not bind a peer inbox either;
+enabling the setting alone does not make it messageable.
+
+With messaging active, the model in one session can discover the others with
 `list_agents` — each appears under `sessions` with the `name` that
 `qwen sessions ps --json` records (the table view may truncate long
 names) — and address one with `send_message` using

@@ -81,7 +81,7 @@ An occupied public port follows the ordinary daemon's bounded nearby-port
 retry; use the browser address printed by the launcher.
 
 This one command starts both the ordinary daemon and Managed Agent. The same
-WebShell lists ordinary and Managed workspaces and sessions together under Projects, with a Managed label on Managed workspaces and no execution-mode tabs. New task follows the selected workspace or conversation. Local sessions use
+WebShell lists ordinary and Managed workspaces and sessions together under Workspaces, with a Managed label on Managed workspaces and no execution-mode tabs. New session follows the selected workspace or conversation. Local sessions use
 the directory where you ran the command, while Managed sessions use their
 application-created Workspaces or explicitly imported local projects. Both use
 the same authenticated browser origin;
@@ -89,7 +89,7 @@ you do not need a second daemon command or browser page.
 
 In **Add workspace**, choose **Local (daemon)** or **Managed (Managed Agent)**
 before submitting. The choice defaults to the current conversation's service.
-Workspace rows and **New task** show that service, and new tasks inherit the
+Workspace rows and **New session** show that service, and new sessions inherit the
 selected workspace. The daemon's existing SSH workspace support remains
 available; Managed SSH registration is not integrated into this shared dialog.
 
@@ -174,7 +174,7 @@ mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install
 mvn -f packages/managed-agent-server/pom.xml verify
 npm run package:managed-runtime -- \
   --target darwin-arm64 \
-  --server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
+  --server-jar packages/managed-agent-server/server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   --jre-home /verified/java-21-home \
   --out-dir /output/managed-runtime
 ```
@@ -182,7 +182,7 @@ npm run package:managed-runtime -- \
 The runtime builder only needs the matching server JAR, Java runtime and CLI
 version from this checkout. It does not require built CLI assets or a Node
 archive. By default it writes to
-`packages/managed-agent-server/target/managed-runtime`, outside the CLI's
+`packages/managed-agent-server/server/target/managed-runtime`, outside the CLI's
 `dist/` assets. It emits the runtime archive and a per-archive `.sha256` file. The
 normal CLI is built/released separately.
 
@@ -192,7 +192,7 @@ instead of `--jre-home`:
 ```sh
 npm run package:managed-runtime -- \
   --target darwin-arm64 \
-  --server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
+  --server-jar packages/managed-agent-server/server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   --without-jre \
   --out-dir /output/managed-runtime
 ```
@@ -204,7 +204,7 @@ The lightweight builder needs no Java input. For an optional complete distributi
 npm run package:standalone -- \
   --target darwin-arm64 \
   --node-archive /verified/node-v22-darwin-arm64.tar.gz \
-  --managed-server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
+  --managed-server-jar packages/managed-agent-server/server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   --managed-jre-home /verified/java-21-home \
   --out-dir /output/managed-local
 ```
