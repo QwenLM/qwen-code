@@ -1054,6 +1054,13 @@ jobs:
           REVIEW_MODEL_DEFAULT: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           REVIEW_MODEL_CANARY: '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY }}'
           REVIEW_MODEL_CANARY_PERCENT: '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY_PERCENT }}'
+          # The canary cohort may also carry its own endpoint: a second
+          # gateway with its own quota, or a provider the default gateway
+          # does not serve. The pair is all-or-nothing — a URL without its
+          # own key would send the default key to another provider, so the
+          # override below refuses that shape and keeps the default cohort.
+          REVIEW_BASE_URL_CANARY: '${{ vars.QWEN_PR_REVIEW_BASE_URL_CANARY }}'
+          REVIEW_API_KEY_CANARY: '${{ secrets.REVIEW_OPENAI_API_KEY_CANARY }}'
           QWEN_PR_REVIEW_EFFORT: '${{ vars.QWEN_PR_REVIEW_EFFORT }}'
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
           REVIEW_MODE: '${{ steps.context.outputs.review_mode }}'
@@ -1733,13 +1740,44 @@ jobs:
             "${REVIEW_MODEL_DEFAULT:-}" "$REVIEW_MODEL_CANARY" \
             "$CANARY_PERCENT_EFFECTIVE" "${PR_NUMBER:-}")"
           export OPENAI_MODEL
+
+          # The canary cohort may carry its own endpoint as well as its own
+          # model: REVIEW_BASE_URL_CANARY/REVIEW_API_KEY_CANARY move the
+          # canary's traffic onto a second gateway so its quota is isolated
+          # from the default cohort's. The pair is all-or-nothing — a URL
+          # without its own key would send the default key to another
+          # provider — and an unparseable URL routes nowhere, so both shapes
+          # degrade to the default cohort, the same direction every canary
+          # misconfiguration takes.
+          REVIEW_BASE_URL_CANARY="${REVIEW_BASE_URL_CANARY:-}"
+          REVIEW_BASE_URL_CANARY="${REVIEW_BASE_URL_CANARY#"${REVIEW_BASE_URL_CANARY%%[![:space:]]*}"}"
+          REVIEW_BASE_URL_CANARY="${REVIEW_BASE_URL_CANARY%"${REVIEW_BASE_URL_CANARY##*[![:space:]]}"}"
+          REVIEW_COHORT=default
+          if [ -n "$REVIEW_MODEL_CANARY" ] &&
+            [ "${OPENAI_MODEL:-}" = "$REVIEW_MODEL_CANARY" ] &&
+            [ "$OPENAI_MODEL" != "${REVIEW_MODEL_DEFAULT:-}" ]; then
+            REVIEW_COHORT=canary
+          fi
+          if [ "$REVIEW_COHORT" = canary ] && [ -n "$REVIEW_BASE_URL_CANARY" ]; then
+            if [ -n "${REVIEW_API_KEY_CANARY:-}" ] &&
+              node -e 'try{if(!new URL(process.env.REVIEW_BASE_URL_CANARY).host)process.exit(1)}catch{process.exit(1)}' 2>/dev/null; then
+              OPENAI_BASE_URL="$REVIEW_BASE_URL_CANARY"
+              OPENAI_API_KEY="$REVIEW_API_KEY_CANARY"
+              export OPENAI_BASE_URL OPENAI_API_KEY
+            else
+              echo "::warning::canary endpoint unusable (REVIEW_OPENAI_API_KEY_CANARY missing or QWEN_PR_REVIEW_BASE_URL_CANARY unparseable); falling back to the default cohort."
+              OPENAI_MODEL="${REVIEW_MODEL_DEFAULT:-}"
+              REVIEW_COHORT=default
+              export OPENAI_MODEL
+            fi
+          fi
           # The run's own record of which cohort served this review: the model
           # is not carried anywhere else a later comparison could read it (the
           # cost ledger has tokens, not a model), so a rollout that cannot be
           # told apart afterwards is unmeasurable. Both fields are the resolved
           # ones — the raw percent would certify a cohort the router clamped
           # away.
-          echo "::notice title=Review model::${OPENAI_MODEL:-<CLI default>} (PR #${PR_NUMBER:-?}, canary ${CANARY_PERCENT_EFFECTIVE}%)"
+          echo "::notice title=Review model::${OPENAI_MODEL:-<CLI default>} (PR #${PR_NUMBER:-?}, canary ${CANARY_PERCENT_EFFECTIVE}%, cohort ${REVIEW_COHORT})"
 
           MODEL_ARGS=()
           if [ -n "${OPENAI_MODEL:-}" ]; then
