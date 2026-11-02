@@ -572,6 +572,37 @@ describe('createTransport OAuth bearer token per request', () => {
     expect(storage.deleteCredentials).not.toHaveBeenCalled();
   });
 
+  it('adopts a refresh that finishes after the wait, without waiting out the retry delay', async () => {
+    vi.useRealTimers();
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    const authServer =
+      stubAuthorizationServer().handler.getMockImplementation()!;
+    // Answers 7s in: after the 5s wait, before the 10s request bound.
+    const tokenRequest = vi.fn(async (url: string, init?: RequestInit) => {
+      await new Promise((resolve) => setTimeout(resolve, 7000));
+      return authServer(url, init);
+    });
+    vi.stubGlobal('fetch', tokenRequest);
+    const sent = stubMcpNetwork();
+    const transport = await transportFor({
+      httpUrl: 'https://mcp.example/mcp',
+    });
+
+    vi.setSystemTime(Date.now() + 56 * 60 * 1000);
+    const dueRequest = send(transport);
+    await vi.advanceTimersByTimeAsync(5000);
+    await dueRequest;
+    expect(sent.at(-1)?.authorization).toBe('Bearer access-0');
+
+    // The refresh completes while the cache is backing off for 30s. The old
+    // token may be revoked by now, so the next request must not reuse it.
+    await vi.advanceTimersByTimeAsync(2100);
+    expect(storage.saveToken).toHaveBeenCalledOnce();
+    await send(transport);
+    expect(sent.at(-1)?.authorization).toBe('Bearer access-1');
+    expect(tokenRequest).toHaveBeenCalledOnce();
+  });
+
   it('never asks again for a token without an expiry', async () => {
     const { handler } = stubAuthorizationServer();
     const sent = stubMcpNetwork();
@@ -672,8 +703,19 @@ describe('createTransport OAuth bearer token per request', () => {
       });
     }
 
-    it('keeps the refusal while the token cannot be obtained', async () => {
+    // The refusal must not depend on whether this request found a token: with
+    // none, the compatibility fetch sees no Authorization header and leaves the
+    // decision to what the SDK was told at construction.
+    it('refuses a redirect on a request sent after the token became unobtainable', async () => {
       stubAuthorizationServer();
+      const seen: Array<{ url: string; redirect?: RequestRedirect }> = [];
+      _setMcpFetchForTest((async (input: unknown, init?: RequestInit) => {
+        seen.push({ url: String(input), redirect: init?.redirect });
+        return new Response(null, {
+          status: 307,
+          headers: { location: 'https://mcp.example/elsewhere' },
+        });
+      }) as unknown as typeof fetch);
       const transport = await transportFor({
         httpUrl: 'https://mcp.example/mcp',
         agentPluginV1: true,
@@ -682,15 +724,21 @@ describe('createTransport OAuth bearer token per request', () => {
 
       storage.creds = null;
       vi.setSystemTime(Date.now() + 2 * HOUR_MS);
+      await send(transport).catch(() => undefined);
 
-      expect(transport._requestInit?.redirect).toBe('manual');
+      expect(seen).toEqual([
+        { url: 'https://mcp.example/mcp', redirect: 'manual' },
+      ]);
     });
 
     it('does not replay the bearer to another path of the same origin', async () => {
       stubAuthorizationServer();
-      const urls: string[] = [];
-      _setMcpFetchForTest((async (input: unknown) => {
-        urls.push(String(input));
+      const hops: Array<{ url: string; authorization: string | null }> = [];
+      _setMcpFetchForTest((async (input: unknown, init?: RequestInit) => {
+        hops.push({
+          url: String(input),
+          authorization: new Headers(init?.headers).get('authorization'),
+        });
         return new Response(null, {
           status: 307,
           headers: { location: 'https://mcp.example/elsewhere' },
@@ -704,7 +752,10 @@ describe('createTransport OAuth bearer token per request', () => {
 
       await send(transport).catch(() => undefined);
 
-      expect(urls).toEqual(['https://mcp.example/mcp']);
+      // The bearer went out on the first hop, and there was no second one.
+      expect(hops).toEqual([
+        { url: 'https://mcp.example/mcp', authorization: 'Bearer access-0' },
+      ]);
     });
   });
 

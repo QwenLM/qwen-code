@@ -493,24 +493,46 @@ function createBearerTokenGetter(
 ): BearerTokenGetter {
   let cached = initialToken;
   let dueAt = refreshAfter(cached);
+  const adopt = (fresh: OAuthToken) => {
+    cached = fresh;
+    dueAt = refreshAfter(fresh);
+  };
+  // A read that outlived the wait still lands in the shared storage, and the
+  // server may have revoked the old token by then: pick the result up here
+  // rather than keep sending the old one until the retry delay is over. A
+  // failed read changes nothing, and a result that is not newer than the cache
+  // (another request got there first) is dropped.
+  const adoptLate = (fresh: OAuthToken | null) => {
+    if (
+      fresh &&
+      (fresh.expiresAt ?? Infinity) > (cached?.expiresAt ?? Infinity)
+    ) {
+      adopt(fresh);
+    }
+  };
   return async () => {
     if (Date.now() >= dueAt) {
       let timer: NodeJS.Timeout | undefined;
       try {
-        // The token endpoint fetch has no timeout of its own; the shared read
-        // keeps running after we stop waiting for it.
+        const read = authProvider.getValidOAuthToken(
+          mcpServerName,
+          oauthConfig,
+        );
+        // The shared read keeps running after we stop waiting for it. Its
+        // token endpoint request is bounded (10s, oauth-provider.ts), but a
+        // request that holds a usable cached token should not sit that long
+        // on it, so waiting has a shorter cap of its own.
         const fresh = await Promise.race([
-          authProvider.getValidOAuthToken(mcpServerName, oauthConfig),
+          read,
           new Promise<never>((_, reject) => {
-            timer = setTimeout(
-              () => reject(new Error('token refresh timed out')),
-              OAUTH_REFRESH_WAIT_MS,
-            );
+            timer = setTimeout(() => {
+              read.then(adoptLate, () => undefined);
+              reject(new Error('token refresh timed out'));
+            }, OAUTH_REFRESH_WAIT_MS);
           }),
         ]);
         if (fresh) {
-          cached = fresh;
-          dueAt = refreshAfter(fresh);
+          adopt(fresh);
           return fresh.accessToken;
         }
       } catch (error) {
