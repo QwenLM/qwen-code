@@ -12,7 +12,7 @@ export const MANAGED_AGENT_PATHS = [
   /^packages\/core\/src\/managed-runtime\//,
   /^integration-tests\/helpers\/hosted-/,
   /^integration-tests\/vitest\.hosted\.config\.ts$/,
-  /^scripts\/(run-managed-agent-server-e2e\.ts|run-java-daemon-sdk-e2e\.ts|check-failsafe-reports\.js|check-flyway-migrations\.js|build-managed-agent-runtime\.mjs|managed-runtime-backends\.mjs|package-managed-agent-reference\.mjs|rocketmq-lite-broker\.sh)$/,
+  /^scripts\/(run-managed-agent-server-e2e\.ts|run-java-daemon-sdk-e2e\.ts|check-failsafe-reports\.js|check-flyway-migrations\.js|rocketmq-lite-broker\.sh)$/,
   /^\.github\/workflows\/(sdk-java|managed-agent-gate)\.yml$/,
   /^\.github\/scripts\/managed-agent-gate-scope\.mjs$/,
 ];

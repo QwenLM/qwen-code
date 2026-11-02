@@ -42,27 +42,6 @@ const step = (block, name) => {
 };
 
 describe('SDK Java self-hosted workflow guards', () => {
-  it('verifies seven real Runtime distributions on Java 21 and preserves evidence', () => {
-    const distributions = step(
-      workflow,
-      'Verify Runtime distribution backends',
-    );
-    expect(distributions).toContain(
-      "matrix.os == 'ubuntu-latest' && matrix.java == '21'",
-    );
-    expect(distributions).toContain(
-      'for backends in external kubernetes local ssh static local,ssh full; do',
-    );
-    expect(distributions).toContain(
-      'node scripts/build-managed-agent-runtime.mjs --backends="$backends" --verify',
-    );
-    expect(distributions).toContain('ManagedAgentPackagingIT.xml');
-    expect(distributions).toContain("runner.environment == 'self-hosted'");
-    expect(step(workflow, 'Upload Runtime distribution evidence')).toContain(
-      'runtime-distributions/',
-    );
-  });
-
   it('runs both ordinary dependency host modes from the verified local reactor', () => {
     const steps = parse(workflow).jobs['mysql-integration'].steps;
     const verify = steps.find((candidate) =>

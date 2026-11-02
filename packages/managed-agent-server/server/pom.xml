@@ -10,7 +10,6 @@
     <name>Qwen Managed Agent Server</name>
     <properties>
         <managed.module.root>${project.basedir}/..</managed.module.root>
-        <spring-boot.excludes>org.projectlombok:lombok</spring-boot.excludes>
     </properties>
     <dependencies>
         <dependency>
@@ -279,14 +278,7 @@
                             <goal>jar</goal>
                         </goals>
                         <configuration>
-                            <classifier>${managed.exec.classifier}</classifier>
-                            <forceCreation>true</forceCreation>
-                            <archive>
-                                <manifestEntries>
-                                    <Qwen-Runtime-Backends>${managed.runtime.backends}</Qwen-Runtime-Backends>
-                                    <Qwen-Runtime-Variant>${managed.runtime.variant}</Qwen-Runtime-Variant>
-                                </manifestEntries>
-                            </archive>
+                            <classifier>exec</classifier>
                         </configuration>
                     </execution>
                 </executions>
@@ -294,11 +286,19 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
                 <executions>
                     <execution>
                         <id>repackage</id>
                         <configuration>
-                            <classifier>${managed.exec.classifier}</classifier>
+                            <classifier>exec</classifier>
                             <mainClass>com.alibaba.qwen.code.managedagent.ManagedAgentServerApplication</mainClass>
                         </configuration>
                     </execution>

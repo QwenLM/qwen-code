@@ -3,68 +3,36 @@ package com.alibaba.qwen.code.managedagent;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import java.util.jar.JarFile;
+import java.util.jar.JarInputStream;
+import java.util.zip.ZipFile;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class ManagedAgentPackagingIT {
-    private static final List<String> BACKENDS = List.of("external", "kubernetes", "local", "ssh", "static");
-
     @TempDir
     Path directory;
     @Test
     void standaloneArtifactsIncludeConfigurationWhileLibraryDoesNot() throws Exception {
         String prefix = System.getProperty("managed.artifact.directory") + "/qwen-managed-agent-server-" + System.getProperty("managed.artifact.version");
-        try (var library = new JarFile(Path.of(prefix + ".jar").toFile())) {
+        try (var library = new ZipFile(Path.of(prefix + ".jar").toFile())) {
             assertThat(library.getEntry("application.yml")).isNull();
             assertThat(library.getEntry("application-managed-local.yml")).isNull();
-            assertThat(library.getManifest().getMainAttributes().getValue("Qwen-Runtime-Variant")).isNull();
         }
-        var classifiers = new ArrayList<>(List.of(classifier()));
-        if (Boolean.getBoolean("managed.operator.tools.enabled")) {
-            classifiers.addAll(List.of("workspace-bundle", "workspace-migration", "workspace-maintenance-recovery",
-                    "csi-session", "csi-runtime", "operator-recovery"));
-        }
+        var classifiers = Boolean.getBoolean("managed.operator.tools.enabled")
+                ? List.of("exec", "workspace-bundle", "workspace-migration", "workspace-maintenance-recovery",
+                        "csi-session", "csi-runtime", "operator-recovery") : List.of("exec");
         for (String classifier : classifiers) {
-            try (var executable = new JarFile(Path.of(prefix + "-" + classifier + ".jar").toFile())) {
+            try (var executable = new ZipFile(Path.of(prefix + "-" + classifier + ".jar").toFile())) {
                 assertThat(executable.getEntry("BOOT-INF/classes/application.yml")).as(classifier).isNotNull();
                 assertThat(executable.getEntry("BOOT-INF/classes/application-managed-local.yml")).as(classifier).isNotNull();
-                assertThat(executable.getEntry("BOOT-INF/classes/META-INF/spring-configuration-metadata.json")).isNotNull();
-                if (classifier.equals(classifier())) {
-                    assertThat(executable.getManifest().getMainAttributes().getValue("Qwen-Runtime-Backends"))
-                            .isEqualTo(String.join(",", selected()));
-                    assertThat(executable.getManifest().getMainAttributes().getValue("Qwen-Runtime-Variant"))
-                            .isEqualTo(System.getProperty("managed.runtime.variant"));
-                }
-                for (String backend : BACKENDS) {
-                    String module = "runtime-" + backend;
-                    var entry = executable.getEntry("BOOT-INF/lib/qwen-managed-agent-" + module + "-"
-                            + System.getProperty("managed.artifact.version") + ".jar");
-                    if (!selected().contains(backend)) {
-                        assertThat(entry).as(classifier + " excluded " + module).isNull();
-                        continue;
-                    }
-                    assertThat(entry).as(classifier + " " + module).isNotNull();
-                    boolean registered = false;
-                    try (var nested = new java.util.jar.JarInputStream(executable.getInputStream(entry))) {
-                        java.util.jar.JarEntry resource;
-                        while ((resource = nested.getNextJarEntry()) != null) {
-                            if (resource.getName().equals("META-INF/services/com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory")) {
-                                assertThat(new String(nested.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8))
-                                        .contains("RuntimeProviderFactory");
-                                registered = true;
-                            }
-                        }
-                    }
-                    assertThat(registered).as("provider registration in " + module).isTrue();
-                }
+                assertThat(executable.getEntry("BOOT-INF/classes/META-INF/spring-configuration-metadata.json")).as(classifier).isNotNull();
                 assertThat(executable.stream().map(entry -> entry.getName()))
                         .as(classifier + " runtime libraries")
                         .noneMatch(name -> name.startsWith("BOOT-INF/lib/lombok-"));
@@ -73,44 +41,34 @@ class ManagedAgentPackagingIT {
     }
 
     @Test
-    void executableDiscoversOnlyItsPackagedProvidersAndBootsWithoutTheBroker() throws Exception {
-        Path probe = directory.resolve("probe");
-        Path target = probe.resolve("com/alibaba/qwen/code/managedagent/RuntimeArtifactProbe.class");
-        Files.createDirectories(target.getParent());
-        try (var source = RuntimeArtifactProbe.class.getResourceAsStream("RuntimeArtifactProbe.class")) {
-            Files.copy(source, target);
-        }
-        Path log = directory.resolve("providers.log");
-        var command = new ArrayList<>(List.of(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-                "-Dloader.main=" + RuntimeArtifactProbe.class.getName(), "-Dloader.path=" + probe.toUri(),
-                "-cp", executable().toString(), "org.springframework.boot.loader.launch.PropertiesLauncher",
-                String.join(",", selected())));
-        for (String backend : BACKENDS) {
-            if (!selected().contains(backend)) {
-                Path classes = Path.of("..", "runtime-" + backend, "target", "classes");
-                try (var files = Files.walk(classes)) {
-                    files.filter(file -> file.toString().endsWith(".class"))
-                            .map(file -> classes.relativize(file).toString().replace(java.io.File.separatorChar, '.'))
-                            .map(name -> name.substring(0, name.length() - ".class".length())).forEach(command::add);
+    void defaultExecutableIncludesAllBackendRegistrations() throws Exception {
+        Path jar = Path.of(System.getProperty("managed.artifact.directory"), "qwen-managed-agent-server-"
+                + System.getProperty("managed.artifact.version") + "-exec.jar");
+        try (var executable = new ZipFile(jar.toFile())) {
+            for (var backend : Map.of("external", "external.ExternalRuntimeProviderFactory",
+                    "kubernetes", "kubernetes.KubernetesRuntimeProviderFactory", "local", "local.LocalRuntimeProviderFactory",
+                    "ssh", "ssh.SshRuntimeProviderFactory", "static", "staticruntime.StaticRuntimeProviderFactory").entrySet()) {
+                var entry = executable.getEntry("BOOT-INF/lib/qwen-managed-agent-runtime-" + backend.getKey() + "-"
+                        + System.getProperty("managed.artifact.version") + ".jar");
+                assertThat(entry).as(backend.getKey()).isNotNull();
+                String registration = null;
+                try (var nested = new JarInputStream(executable.getInputStream(entry))) {
+                    java.util.jar.JarEntry resource;
+                    while ((resource = nested.getNextJarEntry()) != null) {
+                        if (resource.getName().equals("META-INF/services/com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory")) {
+                            registration = new String(nested.readAllBytes(), StandardCharsets.UTF_8).trim();
+                        }
+                    }
                 }
-            }
-        }
-        var process = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(log.toFile()).start();
-        try {
-            assertThat(process.waitFor(60, TimeUnit.SECONDS)).isTrue();
-            assertThat(process.exitValue()).as(Files.readString(log)).isZero();
-            assertThat(Files.readString(log)).contains("Runtime providers: " + String.join(",", selected()),
-                    "Disabled Runtime application started");
-        } finally {
-            if (process.isAlive()) {
-                process.destroyForcibly();
+                assertThat(registration).as(backend.getKey()).isEqualTo("com.alibaba.qwen.code.runtimebroker.provisioning." + backend.getValue());
             }
         }
     }
 
     @Test
     void retirementLauncherLoadsFromExecutableJar() throws Exception {
-        Path jar = executable();
+        Path jar = Path.of(System.getProperty("managed.artifact.directory") + "/qwen-managed-agent-server-" + System.getProperty("managed.artifact.version")
+                + "-exec.jar").toAbsolutePath();
         Path log = directory.resolve("retirement.log");
         Process process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
                 "-Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.ResidentWorkspaceRetirementMain",
@@ -130,20 +88,12 @@ class ManagedAgentPackagingIT {
 
     @Test
     void operatorRecoveryReadsDocumentedEnvironment() throws Exception {
-        assumeTrue(selected().contains("local"));
-        Path jar = executable();
+        assumeTrue(Boolean.getBoolean("managed.operator.tools.enabled"));
+        Path jar = Path.of(System.getProperty("managed.artifact.directory") + "/qwen-managed-agent-server-" + System.getProperty("managed.artifact.version")
+                + "-operator-recovery.jar").toAbsolutePath();
         Path log = directory.resolve("operator.log");
-        var command = new ArrayList<>(List.of(Path.of(System.getProperty("java.home"), "bin", "java").toString()));
-        if (Boolean.getBoolean("managed.operator.tools.enabled")) {
-            Path operator = jar.resolveSibling("qwen-managed-agent-server-" + System.getProperty("managed.artifact.version")
-                    + "-operator-recovery.jar");
-            command.addAll(List.of("-jar", operator.toString()));
-        } else {
-            command.addAll(List.of("-Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.WorkspaceRecoveryCommand",
-                    "-cp", jar.toString(), "org.springframework.boot.loader.launch.PropertiesLauncher"));
-        }
-        command.addAll(List.of("inspect", "unused", "1"));
-        var builder = new ProcessBuilder(command)
+        var builder = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-jar", jar.toString(), "inspect", "unused", "1")
                 .redirectErrorStream(true).redirectOutput(log.toFile());
         builder.environment().put("SPRING_DATASOURCE_URL", "jdbc:h2:mem:packaging");
         builder.environment().put("SPRING_DATASOURCE_USERNAME", "sa");
@@ -163,18 +113,5 @@ class ManagedAgentPackagingIT {
                 process.destroyForcibly();
             }
         }
-    }
-
-    private static List<String> selected() {
-        return Arrays.asList(System.getProperty("managed.runtime.backends").split(","));
-    }
-
-    private static String classifier() {
-        return System.getProperty("managed.exec.classifier");
-    }
-
-    private static Path executable() {
-        return Path.of(System.getProperty("managed.artifact.directory"), "qwen-managed-agent-server-"
-                + System.getProperty("managed.artifact.version") + "-" + classifier() + ".jar").toAbsolutePath();
     }
 }

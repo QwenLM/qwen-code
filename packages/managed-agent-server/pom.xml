@@ -32,9 +32,6 @@
     </developers>
     <properties>
         <java.version>21</java.version>
-        <managed.runtime.backends>external,kubernetes,local,ssh,static</managed.runtime.backends>
-        <managed.runtime.variant>full</managed.runtime.variant>
-        <managed.exec.classifier>exec</managed.exec.classifier>
         <managed.operator-tools.attach>true</managed.operator-tools.attach>
         <managed.operator-tools.jar.phase>package</managed.operator-tools.jar.phase>
         <managed.operator-tools.skip>false</managed.operator-tools.skip>

@@ -22,7 +22,6 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { runtimeArchiveFixture } from './fixtures/runtime-archive.mjs';
 
 import {
   accountCanEnter,
@@ -39,14 +38,13 @@ import {
   DOCUMENTATION,
   createReferenceDistribution,
   shippedDocumentLinks,
-  supportedOperators,
 } from '../package-managed-agent-reference.mjs';
 
 function mainSource(main) {
   return `packages/managed-agent-server/server/src/main/java/${main.replaceAll('.', '/')}.java`;
 }
 
-async function fixture(root, backends = 'full') {
+async function fixture(root) {
   const files = {
     'package.json': JSON.stringify({
       version: '1.2.3',
@@ -67,8 +65,6 @@ async function fixture(root, backends = 'full') {
     'packages/managed-agent-server/distribution/config/application.example.yml':
       'template\n',
     'packages/managed-agent-server/distribution/systemd/qwen-managed-agent-server.service':
-      '[Service]\nKillMode=process\n',
-    'packages/managed-agent-server/distribution/systemd/qwen-managed-agent-manual.service':
       '[Service]\nKillMode=process\n',
     'packages/managed-agent-server/distribution/systemd/qwen-hosted-harness.service':
       'ExecStart=qwen serve --profile hosted-harness --no-web\n',
@@ -118,135 +114,7 @@ async function fixture(root, backends = 'full') {
     await mkdir(path.dirname(file), { recursive: true });
     await writeFile(file, contents);
   }
-  const { runtimeSelection } = await import('../managed-runtime-backends.mjs');
-  const selection = runtimeSelection(backends);
-  await runtimeArchiveFixture(
-    path.join(
-      root,
-      `packages/managed-agent-server/server/target/qwen-managed-agent-server-0.4.0-alpha-${selection.classifier}.jar`,
-    ),
-    backends,
-  );
-  for (const backend of [...selection.backends, 'local-ssh']) {
-    await writeFile(
-      path.join(
-        root,
-        `packages/managed-agent-server/distribution/config/runtime-${backend}.example.yml`,
-      ),
-      `provisioner: ${backend}\n`,
-    );
-  }
 }
-
-test('reduced archives preserve common admin branches without full artifacts or automation', async () => {
-  const temporary = await mkdtemp(
-    path.join(os.tmpdir(), 'qwen-reference-reduced-'),
-  );
-  try {
-    const root = path.join(temporary, 'repo');
-    await fixture(root, 'ssh');
-    const result = await createReferenceDistribution({
-      repoRoot: root,
-      outputDirectory: path.join(temporary, 'release'),
-      version: '0.1.0-alpha.1',
-      sourceRevision: 'a'.repeat(40),
-      backends: 'ssh',
-    });
-    assert.equal(
-      path.basename(result.archive),
-      'qwen-managed-agent-reference-0.1.0-alpha.1-ssh.tar.gz',
-    );
-    assert.ok(result.detachedChecksums.endsWith('-ssh.SHA256SUMS.txt'));
-    assert.deepEqual(result.manifest.runtimeDistribution.backends, ['ssh']);
-    assert.equal(result.manifest.name, 'qwen-managed-agent-reference-ssh');
-    assert.equal(result.manifest.components.length, 1);
-    const extracted = path.join(temporary, 'extracted');
-    await mkdir(extracted);
-    execFileSync('tar', ['-xzf', result.archive, '-C', extracted]);
-    const bundle = path.join(
-      extracted,
-      'qwen-managed-agent-reference-0.1.0-alpha.1-ssh',
-    );
-    const entries = execFileSync('tar', ['-tzf', result.archive], {
-      encoding: 'utf8',
-    });
-    assert.doesNotMatch(
-      entries,
-      /operator-recovery|bin\/qwen-managed-agent-bootstrap|bin\/qwen-managed-agent-upgrade/,
-    );
-    const admin = path.join(bundle, 'bin/qwen-managed-agent-admin');
-    const help = execFileSync(admin, ['help'], { encoding: 'utf8' });
-    assert.match(help, /resident-retirement/);
-    assert.match(help, /Unavailable in this distribution: serve/);
-    assert.doesNotMatch(help, /operator-recovery|csi-protection/);
-    const stub = path.join(temporary, 'stub');
-    await mkdir(stub);
-    await writeFile(path.join(stub, 'java'), '#!/bin/sh\nexit 99\n');
-    await chmod(path.join(stub, 'java'), 0o755);
-    for (const args of [
-      ['csi-runtime', 'serve'],
-      ['resident-retirement', 'delete-pod'],
-      ['workspace-migration', 'retire'],
-    ]) {
-      assert.throws(
-        () =>
-          execFileSync(admin, args, {
-            encoding: 'utf8',
-            env: { ...process.env, PATH: `${stub}:${process.env.PATH}` },
-          }),
-        (error) =>
-          error.status === 2 &&
-          String(error.stderr).includes('not included in this distribution'),
-      );
-    }
-    const commands = supportedOperators(['ssh']);
-    assert.deepEqual(
-      commands.find(({ command }) => command === 'csi-runtime')
-        .unavailableActions,
-      ['serve'],
-    );
-    assert.deepEqual(
-      commands.find(({ command }) => command === 'resident-retirement')
-        .unavailableActions,
-      ['delete-pod', 'prepare-reclamation', 'reclaim'],
-    );
-  } finally {
-    await rm(temporary, { recursive: true, force: true });
-  }
-});
-
-test('Local+SSH archives select the combined enabled configuration', async () => {
-  const temporary = await mkdtemp(
-    path.join(os.tmpdir(), 'qwen-reference-local-ssh-'),
-  );
-  try {
-    const root = path.join(temporary, 'repo');
-    await fixture(root, 'local,ssh');
-    const result = await createReferenceDistribution({
-      repoRoot: root,
-      outputDirectory: path.join(temporary, 'release'),
-      version: '0.1.0-alpha.1',
-      sourceRevision: 'a'.repeat(40),
-      backends: 'ssh,local',
-    });
-    assert.deepEqual(result.manifest.runtimeDistribution.backends, [
-      'local',
-      'ssh',
-    ]);
-    const sample = execFileSync(
-      'tar',
-      [
-        '-xOzf',
-        result.archive,
-        'qwen-managed-agent-reference-0.1.0-alpha.1-local-ssh/config/application.example.yml',
-      ],
-      { encoding: 'utf8' },
-    );
-    assert.equal(sample, 'provisioner: local-ssh\n');
-  } finally {
-    await rm(temporary, { recursive: true, force: true });
-  }
-});
 
 test('packages an independently verifiable reference distribution', async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'qwen-reference-'));

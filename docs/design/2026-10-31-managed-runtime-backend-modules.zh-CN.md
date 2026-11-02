@@ -1,136 +1,70 @@
-# Managed Runtime 后端独立模块
+# Managed Runtime 后端模块
 
 [English](2026-10-31-managed-runtime-backend-modules.md) | [简体中文](2026-10-31-managed-runtime-backend-modules.zh-CN.md)
 
-状态：已实现，验收待完成。2026-11-02 已整合 main `73474ef094ea1c6bb2a95a9a2a33a28b0ec58e9e`，保留已有 [Local/External provider 实现](2026-10-31-managed-runtime-provider-plugins.zh-CN.md)及 main 的 Store 构造注入改动。原有共享本地 Java 验证预算已消耗 599.048/600 秒，本次扩展不重置预算。此前 Local/External 结果不能证明修订后的 SPI、装配或打包正确；新增 Java 测试和七种可执行变体均待 CI 验证。
+状态：已实现，Java 验收待完成。基于 main `73474ef094ea1c6bb2a95a9a2a33a28b0ec58e9e`，包含其中的 Store 构造注入改动。2026-11-02 将范围收敛为可独立引用的 Maven 后端及其装配。既有共享本地 Java 验证预算已消耗 599.048/600 秒；此前 Local/External 结果不能证明修订后的 SPI 和模块图正确。
 
 ## 目标与边界
 
-交付五个可独立选择的 Maven JAR，以及只包含所选后端实现的可执行分发。后端在构建时选择。支持 SSH-only、Kubernetes-only、Local-only 和 Local+SSH 配置，保留默认完整分发。在产物中包含多个后端，不代表开放任意并行组合或回退。
+#15871 之后，后端实现仍共用 adapters 产物，server 装配直接构造实现，SSH 还依赖 Local provider。将 Local、SSH、Kubernetes、External 和 Static 拆为独立 Maven 产物，使其他服务能引用 server 并显式安装所需后端。保留默认完整可执行包和运维分发。
 
-保留持久化 provider kind、配置键、存储身份、协议字节、SQL 权威与退休授权。本次不开放 Kubernetes scratch、不改变 Session/Turn 预热、不在运行时下载 JAR，也不支持热替换。首次使用才启动 Worker/Pod 仍作为独立变更。数据库、Harness、消息及其他共享依赖不额外裁剪。
-
-拆分前，server 直接构造 SSH、Static 和常驻 Kubernetes 实现；SSH 装配要求先有 Local 基础 provider，本地文件交换也借用了 SSH 进程辅助代码。本次移除这些编译依赖，并处理三个装配缺口：历史操作绕过当前后端选择、Spring 启动失败后 SSH 连接未释放、SSH-only 解析回退到历史 Local 目录。
+后端是否可用由应用可信 classpath 决定，启用哪个后端由现有配置决定。不引入实时 JAR 加载、自动下载或不可信插件隔离。选择性独立构建、变体归档、部署示例及其 CI 矩阵后置。Kubernetes scratch、Session/Turn 预热调整，以及进一步裁剪数据库/Harness/消息依赖不在本次范围内。
 
 ## 模块边界
 
-全部模块仍平铺在 `packages/managed-agent-server` 下，沿用同一个父版本与发布流程。
+模块保持为同级 reactor 子模块，统一父版本和发布流程。每个生产 Java package 只有一个产物所有者；包私有测试随实现移动。
 
-| 模块                 | 职责                                                       | 内部依赖                                      |
-| -------------------- | ---------------------------------------------------------- | --------------------------------------------- |
-| `contracts`          | Runtime 接口、配置、身份以及构造/访问端口                  | 无                                            |
-| `runtime-local`      | Local Worker、本地持久状态、工厂与离线恢复                 | `contracts`、`runtime-http`、`runtime-host`   |
-| `runtime-ssh`        | SSH Worker、连接/隧道与工厂                                | `contracts`、`runtime-http`、`runtime-host`   |
-| `runtime-kubernetes` | Kubernetes 客户端、常驻/CSI 供给、保护与回收证据           | `contracts`、`runtime-http`                   |
-| `runtime-external`   | External Runtime 客户端、scratch/workspace provider 与工厂 | `contracts`、`runtime-http`                   |
-| `runtime-static`     | 预配置 endpoint/lease 与工厂                               | `contracts`                                   |
-| `runtime-http`       | 公共 HTTP transport                                        | `contracts`                                   |
-| `runtime-host`       | 有界进程/文件交换以及宿主身份/状态工具                     | `contracts`                                   |
-| `runtime-broker`     | lease/执行协调与不依赖后端的路由组合                       | `contracts`                                   |
-| `adapters`           | Harness、文件系统及其他非 provider 适配器                  | 共享模块，不依赖后端实现                      |
-| `server`             | 选择、权威存储装配、HTTP 与运维入口                        | 应用/共享模块，五个 optional runtime 后端依赖 |
+| 模块                 | 职责                                                   | 内部依赖                                    |
+| -------------------- | ------------------------------------------------------ | ------------------------------------------- |
+| `contracts`          | Runtime 配置、身份及构造/访问接口                      | 无                                          |
+| `runtime-local`      | 本地 Worker、持久状态、工厂及离线恢复                  | `contracts`、`runtime-http`、`runtime-host` |
+| `runtime-ssh`        | SSH Worker、连接/隧道及工厂                            | `contracts`、`runtime-http`、`runtime-host` |
+| `runtime-kubernetes` | Kubernetes 客户端、常驻/CSI 供给、保护及回收           | `contracts`、`runtime-http`                 |
+| `runtime-external`   | 外部 Runtime 客户端、scratch/workspace provider 及工厂 | `contracts`、`runtime-http`                 |
+| `runtime-static`     | 预配置 endpoint/lease 及工厂                           | `contracts`                                 |
+| `runtime-http`       | 公共 HTTP transport                                    | `contracts`                                 |
+| `runtime-host`       | 共享进程/文件交换及主机身份/状态工具                   | `contracts`                                 |
+| `runtime-broker`     | lease/执行协调及与具体后端无关的路由                   | `contracts`                                 |
+| `adapters`           | Harness、文件系统及其他非 provider 适配器              | 共享模块；不含后端实现                      |
+| `server`             | 选择、SQL 权威装配、HTTP 及运维入口                    | 应用/共享模块；五个 optional runtime 后端   |
+| `verification`       | 测试及独立 classpath/嵌入夹具；不发布                  | 全部生产模块                                |
 
-```mermaid
-flowchart TD
-    server[server: 选择与装配] --> contracts[contracts: Runtime 与存储端口]
-    server --> persistence[persistence: SQL 权威]
-    server --> broker[runtime-broker: 协调与路由]
-    server -. 可执行包所选依赖 .-> local[runtime-local]
-    server -. 可执行包所选依赖 .-> ssh[runtime-ssh]
-    server -. 可执行包所选依赖 .-> kubernetes[runtime-kubernetes]
-    server -. 可执行包所选依赖 .-> external[runtime-external]
-    server -. 可执行包所选依赖 .-> static[runtime-static]
-    local --> contracts
-    ssh --> contracts
-    kubernetes --> contracts
-    external --> contracts
-    static --> contracts
-```
-
-五个后端产物互不依赖。[RoutingRuntimeProvisioner](../../packages/managed-agent-server/runtime-broker/src/main/java/com/alibaba/qwen/code/runtimebroker/routing/RoutingRuntimeProvisioner.java) 属于 `runtime-broker`。[HostCommandRunner](../../packages/managed-agent-server/runtime-host/src/main/java/com/alibaba/qwen/code/runtimebroker/host/HostCommandRunner.java) 和 [WorkspaceFileProcess](../../packages/managed-agent-server/runtime-host/src/main/java/com/alibaba/qwen/code/runtimebroker/host/WorkspaceFileProcess.java) 属于 `runtime-host`；这些共享代码不代表安装了 Local 后端。
-
-Kubernetes 的七个类一起移入 `com.alibaba.qwen.code.runtimebroker.provisioning.kubernetes`：`KubernetesRuntimeProvisioner`、`KubernetesHttpRuntimeClient`、`KubernetesCsiLogReader`、`WorkspaceCsiRuntimeProvisioner`、`WorkspaceCsiResourceGuard`、`ResidentWorkspaceProvisioner`、`ResidentWorkspaceReclamation`。只为 `kubernetes-workspace` 注册工厂；`kubernetes-scratch` 仍不注册，`kubernetes` 仍拒绝。SSH 和 Static 分别使用独立的 `.provisioning.ssh`、`.provisioning.staticruntime` 包。依赖包内构造器的测试随实现移动。
-
-SQL Store、预留事务、`ResidentWorkspaceRetirementService`、公共身份/profile 语义及共享 CSI application-store bean 保持原有层归属。Kubernetes Harness discovery 仍是独立的 Harness 职责。新模块直接声明所用 Commons 库，并接入 Checkstyle、SpotBugs、源码/Javadoc 发布及聚合验证。
+五个后端互不依赖。路由属于 `runtime-broker`；Local 与 SSH 共用的进程/文件交换属于 `runtime-host`，不会安装 Local provider。SQL 存储、预留事务、退休授权及共享 CSI application-store 装配保留在原层。Kubernetes Harness 发现仍是独立的 Harness 职责。新模块直接声明使用的库，并接入既有编译、架构、Checkstyle、SpotBugs、源码/Javadoc 及聚合覆盖率检查。
 
 ## 工厂与依赖契约
 
-每个后端发布 `META-INF/services/com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory`。`RuntimeProviderRegistry` 发现工厂，拒绝重复/保留 kind，校验所选工厂，并检查返回 provider 的 kind。工厂构造与 kind 发现不得分配资源，校验阶段只检查配置。
+每个后端通过 `META-INF/services` 注册 `RuntimeProviderFactory`。注册表拒绝重复/保留 kind，检查选中工厂并核对返回 provider 的 kind。工厂构造与发现不分配资源；validation 只检查配置。预检保留公共监听、凭据及 Workspace 检查，再委派后端诊断。远程后端不要求本机 Workspace 目录。保留原 Local 可执行文件/状态检查和 External workspace 警告。
 
-内部创建签名为 `create(settings, transport, dependencies)`。[RuntimeProviderDependencies](../../packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/runtimebroker/spi/RuntimeProviderDependencies.java) 只暴露四个具名端口：
+创建接口为 `create(settings, transport, dependencies)`。`RuntimeProviderDependencies` 只有四个具名接口：`bindings()` 提供原 Broker 仓储，`externalStorage()` 延迟提供 SQL 存储适配器，`csiReservations()` 提供原数据源/事务权威，`ssh()` 提供借用的节点/存储查询和连接。各后端只获取所需接口。Kubernetes 在构造预留存储前保留 JDBC 仓储、数据源身份、事务管理器及 Workspace 执行检查。
 
-| 端口                | 所选使用方              | 所有权                             |
-| ------------------- | ----------------------- | ---------------------------------- |
-| `bindings()`        | Kubernetes 常驻供给     | 原 Broker repository               |
-| `externalStorage()` | External workspace 供给 | 原 SQL 存储适配器，只在请求时构造  |
-| `csiReservations()` | Kubernetes 常驻供给     | 原数据源/事务权威，只在请求时构造  |
-| `ssh()`             | SSH 供给                | 借用的节点查询、存储查询及共享连接 |
+已发现的 SSH 工厂通过 `SshRuntimeSupport` 提供连接构造；Kubernetes 工厂通过 `KubernetesRuntimeSupport` 和类型明确的 `WorkspaceCsiRuntimeSpec` 提供运维/客户端/保护构造。这些是同一工厂的能力，不增加第二套发现机制。内部 SPI 和已移动的实现 import 需要按同版本重新编译。持久化 kind、身份字节、SQL schema、协议及恢复算法不变。只注册 `kubernetes-workspace`；`kubernetes-scratch` 仍未注册，`kubernetes` 仍被拒绝。
 
-不可用端口明确失败。Local、Static 与 External scratch 不获取无关端口。Kubernetes 创建在取得预留接口前，检查原 JDBC repository、数据源、事务管理器及 Workspace 执行权威。预留 Store 继续校验数据源身份并持有事务。
-
-已发现的 SSH 工厂同时实现 `SshRuntimeSupport`，负责构造连接。Kubernetes 工厂实现 `KubernetesRuntimeSupport`，负责客户端构造、运维 Runtime 构造和保护对象渲染。这些都是同一个工厂的能力，不增加另一套发现机制或 service locator。运维构造使用已有契约以及类型明确的 `WorkspaceCsiRuntimeSpec`。
-
-SPI 属于内部接口：全部后端产物必须以相同版本重编译。不为旧创建签名提供兼容桥接。持久化 kind 及数据库/协议格式不变。
+其他可信 provider 可以实现契约、注册工厂并使用 `provider-options`，无需增加 server 选择分支；它必须遵守既有 fencing、身份和 HTTP 契约。发现成功不能证明可恢复已有资源，原持久化检查仍具有决定权。
 
 ## 选择、准入与资源生命周期
 
-[RuntimeBackendSelection](../../packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/runtimebroker/spi/RuntimeBackendSelection.java) 在发现机制之外计算实际启用的后端集合：
+`RuntimeBackendSelection` 在分配资源前计算启用集合。Broker 停用时集合为空，不发现工厂、不创建连接。SSH 主后端要求配置节点，只选择 SSH。Local 主后端配置节点时选择 Local+SSH；其他主后端与节点组合提前拒绝。其余情况只启用主后端。所有选中工厂及配置均在创建客户端、连接或 Worker 状态前检查。
 
-- Broker 停用：空集合，不发现工厂，不创建 SSH 连接。
-- SSH 主后端：必须配置 SSH nodes，只选择 SSH。
-- Local 主后端且配置 SSH nodes：选择 Local 和 SSH。
-- 其他主后端与 SSH nodes 组合：创建资源前拒绝。
-- 其余情况：只选择主后端。
+SSH-only 不构造 Local provider/状态或路由包装。Local+SSH 保留共享 endpoint resolver 及原节点身份，Local delegate 使用直接 HTTP transport。SSH-only 拒绝未绑定 Session 的执行、Local workspace 设置和历史 Local 路径解析。Static 保留目录预检；Kubernetes 保留凭据、常驻注册及物理退休授权。
 
-先完成配置与所有所选工厂的存在性校验，再创建连接、客户端、Worker 状态或 provider。SSH-only 不要求或构造 Local 状态、Local provider 和路由包装。Local+SSH 保留共享 endpoint resolver 与原节点身份，Local delegate 使用直接 HTTP transport。SSH-only 拒绝未绑定 Workspace 的 Session 执行和 Local Workspace 配置。Runtime scope、cwd 目标及存储根解析在探测本地路径前拒绝历史 Local binding。
+`ssh.enabled` 继续控制新注册、绑定、Session 和文件访问。设为 false 时，已接纳任务仍可按原节点身份执行、关闭、恢复及进行获准的幂等重放。SSH 不在启用集合时，历史注册仍可查询，但不 claim 或分发任务，暂停的 acceptance 保持 unknown，不改写为 FAILED。
 
-`ssh.enabled` 保留完整准入含义：通过原 Workspace registry 检查控制新注册、新绑定、新 Session 和文件访问。配置了 SSH 后端但此开关为 false 时，已经接纳的执行、关闭、恢复及允许的幂等重放仍可使用原节点身份。SSH 不在启用集合中是另一种状态：未决注册的查询/重放返回原操作，不 claim、不调度；parked acceptance 保持 unknown，不转为失败。
+在线文件上传对账在交换或状态分发前检查已保存目标所属的后端。切到 SSH-only 后，历史 Local 上传保持 pending 和存储占用，不执行已保存的 Local 命令；恢复后端后可继续对账。该限制不禁用独立离线存储维护。
 
-[WorkspaceFileUploadStore](../../packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/WorkspaceFileUploadStore.java) 在在线交换或状态恢复前检查冻结目标要求的后端。切换到 SSH-only 后，历史 Local 上传保持 pending，保留存储 holder，不执行已保存的 Local 命令。恢复原后端后可以继续恢复。该限制不禁用独立的离线 Local 存储维护工具。
+Spring 唯一负责关闭共享 SSH connections bean；provider 与 `SshWorkspaceService` 仅借用，service 只关闭自己的 executor。启动失败与正常关闭均须释放 controller 所有权。工厂关闭部分构造的资源；常驻装配在后续注册失败时关闭此前 delegate。
 
-Spring 通过 `destroyMethod="close"` 唯一拥有 SSH connections bean。`SshWorkspaceService` 和 SSH provider 只借用连接，service 只关闭自己的 executor。Spring 清理同时覆盖正常关闭和 service 构造前的启动失败。Provider 工厂清理部分构造资源；常驻装配在后续 registration 失败时关闭已构造的 delegate。测试必须证明启动失败后同一 JVM 可以重新取得 SSH controller lock。
+## Maven 引用与运维
 
-Static 保留本地 Workspace 和状态目录预检。Kubernetes 保留凭据/路径校验、常驻注册及物理退休授权。这些变更都不取消自动预热。
+server 声明五个 `optional`、`runtime` 依赖。library 使用方不会传递引入任何后端，需要显式添加同版本的所选后端产物。例如，Kubernetes 使用方引用普通 server 和 `qwen-managed-agent-runtime-kubernetes`；Local+SSH 使用方引用对应的两个产物。Broker 停用时无需后端。安装多个产物不代表允许任意组合或回退。
 
-## 构建与分发
+独立应用构建仍包含五个后端。保留固定 `exec` classifier、现有运维 classifier 及 Central 发布策略、应用 YAML/配置元数据和 Lombok 排除。普通 library 不含独立应用 YAML。保持参考打包器及发布名称不变，不增加后端选择器或变体元数据。CI 仅更新模块相关的 Maven 缓存排除及配套元测试。
 
-server POM 固定声明五个后端为 `optional`、`runtime` 依赖。不引入五组后端依赖 profile。[构建选择器](../../scripts/build-managed-agent-runtime.mjs) 设置统一的 [Spring Boot 坐标排除集合](https://docs.spring.io/spring-boot/3.5/maven-plugin/packaging.html#packaging.repackage-goal.parameter-details.excludes)，包含原有 Lombok 排除项。构建机仍可能解析全部五个坐标；部署的 `BOOT-INF/lib` 必须精确包含所选后端产物。选择器检查成品归档，拒绝元数据与内容不一致。
+运维按 action 获取能力：缺少 Kubernetes 时拒绝 CSI `serve`、保护渲染和物理退休，但保留 CSI `text`/`retire` 及纯 SQL 的 resident `inspect`/`begin`。依赖 Local 的恢复在持久化副作用前要求 Local。在线校验属于正常配置及显式预检，不放入纯 SQL 维护上下文使用的共享 properties 初始化。缺少能力时不回退到其他后端。
 
-选择器接受 `--backends=full`、单后端或逗号分隔组合。未知/空名称失败。名称去重并排序（`external,kubernetes,local,ssh,static`），完整集合规范化为 `full`。
+## 验证与剩余风险
 
-```bash
-node scripts/build-managed-agent-runtime.mjs --backends=kubernetes
-node scripts/build-managed-agent-runtime.mjs --backends=ssh
-node scripts/build-managed-agent-runtime.mjs --backends=local,ssh --verify
-```
+保留独立编译及字节码依赖检查。隔离 classpath 覆盖无后端、五种单后端、Local+SSH、full 及独立的 contract-only provider；普通 Maven 嵌入夹具检查 optional 后端不会传递泄漏。默认可执行包检查五个 JAR 及服务注册、配置资源和运维启动器。这些检查不宣称交付七种独立分发产品。
 
-`--verify` 增加成品 Java 测试，要求正常的 JDK/Maven 前置条件。共享本地验证预算耗尽后不得运行，CI 为每个变体执行。
+保留未选 provider 初始化、缺失/重复工厂在副作用前拒绝、SSH 准入、pending 上传/注册恢复、启动失败后 controller 锁重新获取及部分构造清理的回归。保留既有完整 unit/H2、Checkstyle、SpotBugs、embedding、MySQL 和 Hosted/fault CI 检查。真实启用的 SSH/Kubernetes 及完整跨平台验收仍是必需项；模拟连接或 H2 不能替代。
 
-完整包使用 classifier `exec`，精简包使用 `exec-<排序后的后端集合>`，例如 `exec-local-ssh`。资源 JAR 和 Boot repackage 使用同一个 classifier。`Qwen-Runtime-Backends`、`Qwen-Runtime-Variant` 只写入该可执行包及发行清单。普通 library JAR/POM 不随变体改变。应用 YAML 和 main 新增的 Spring 配置元数据保留。
-
-[参考分发打包器](../../scripts/package-managed-agent-reference.mjs) 接受同一个 `--backends` 选择器，校验对应可执行包，并在 stage、归档、manifest、校验文件路径中包含变体身份。完整包保留原 operator classifier 与参考自动化，继续服从原 Central-release 策略。精简包只分发主可执行包，运维命令通过现有 admin 的 `PropertiesLauncher` 入口调用。精简包提供所选后端示例、手动 systemd 单元和手动部署说明，省去 full 专用 bootstrap/upgrade 和独立 recovery launcher。不同产品名称阻止完整包 upgrader 把精简归档识别为同一个产品。
-
-运维可用性按 action 校验：缺少 Kubernetes 时，CSI Runtime `serve`、保护对象渲染和物理退休操作在 SQL/客户端副作用前拒绝；CSI `text`/`retire` 和纯 SQL 的 resident `inspect`/`begin` 仍可访问。Local 专用运维操作要求 Local，独立 SQL/离线分支保持原支持范围。缺失能力不回退到其他后端。在线 provider 校验属于 `ManagedAgentConfiguration` 和显式 preflight，不放在 `WorkspaceRecoveryApplication` 也使用的共享 properties 初始化中。维护 context 保留 resident/mapping 和 SQL 检查，不发现在线工厂，只由选中的 action 请求后端能力。
-
-## 验证与验收
-
-实现增加以下测试；本修订的 Java 执行仍待完成：
-
-| 范围           | 必需证据                                                                                                              |
-| -------------- | --------------------------------------------------------------------------------------------------------------------- |
-| 真实缺包       | 五种单后端成品、Local+SSH、full；检查嵌套 JAR、manifest、服务注册，在只使用成品的子进程中逐个尝试加载所有被排除后端类 |
-| 独立装配       | SSH-only 不创建 Local 状态/进程；Local-only 不创建 SSH 连接；Broker 停用不发现工厂；未选工厂不校验、不执行资源 I/O    |
-| 准入与历史操作 | 保留 `ssh.enabled` 拒绝；历史 Local 上传保留 pending/holder；SSH 缺席停止注册/acceptance 调度；恢复原后端后继续操作   |
-| 生命周期       | Spring 在正常/失败启动时释放共享连接；同一 JVM 重新取得锁；provider 部分构造失败清理已分配 delegate                   |
-| 兼容性         | 保留 kind、SQL 权威、CSI 退休和 Static 预检；保持 library JAR optional/内容不变、配置元数据及适用运维分支             |
-| 真实集成       | 真实所选 SSH/Kubernetes 服务、MySQL 并发/恢复、Hosted/fault profile、跨平台检查及完整 CI                              |
-
-`RuntimeProviderPluginsTest` 还编译独立的 contracts-only provider 并检查隔离 classpath，但不能替代七种真实可执行包检查。`ManagedAgentPackagingIT` 用 Broker 停用配置启动产品以验证打包/启动缺包边界，并执行运维分支；它不能证明启用了 SSH 主机或 Kubernetes 集群的真实启动。Mock 连接/SQL 测试不代表真实基础设施验收。
-
-SDK Java workflow 构建、验证并打包全部七种变体，上传 manifest、校验文件和测试报告，保留原完整 unit/H2、Checkstyle、SpotBugs、MySQL、Hosted 和 fault gates。根目录脚本测试在不执行 Java 的情况下检查选择器、归档拒绝、launcher 分支及 workflow 覆盖。各本地结果、失败、跳过和未执行检查记录在 `.qwen/e2e-tests/runtime-provider-plugins.md`，不将旧结果升级为本修订的完整验收。
-
-## 交付与剩余风险
-
-实现按审查顺序推进：对齐 main 并保留 Local/External 改动；引入共享端口/host 工具；拆分 SSH/Static 和独立装配；拆分 Kubernetes/运维构造；增加选择性打包和同步文档。不包含 schema 迁移、公开 API 或预热变更。
-
-主要剩余风险是修订模块图尚未执行 Java 编译与运行验收。原本地预算已关闭，新增 Java 测试、真实变体构建及基础设施检查必须在 CI 通过后才能验收。精简产物不能清理属于已移除后端的工作：排空期间保留原后端，或明确保留其未决操作和存储占用，直到重新部署原后端。
+共享本地预算已关闭，新增及修订后的 Java 测试等待 CI。根目录脚本/工作流测试、格式、链接检查和静态审查覆盖此次收敛；仅当输入未变化时复用此前根目录 build/typecheck/bundle 证据。详细结果保留在 `.qwen/e2e-tests/runtime-provider-plugins.md`。移除后端前应排空其工作，或明确保留 pending 操作及存储占用直到原后端恢复。当前范围没有待用户决定的设计问题。

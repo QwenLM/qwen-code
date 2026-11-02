@@ -491,29 +491,6 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'mvn --batch-mode --no-transfer-progress checkstyle:check'
 
-      - name: 'Verify Runtime distribution backends'
-        if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '21' }}"
-        env:
-          MAVEN_ARGS: "--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml ${{ runner.environment == 'self-hosted' && format('-Dmaven.repo.local={0}/m2-repo', runner.temp) || '' }}"
-        run: |-
-          set -euo pipefail
-          node --test scripts/tests/build-managed-agent-runtime.test.mjs scripts/tests/package-managed-agent-reference.test.mjs
-          mkdir -p "${RUNNER_TEMP}/runtime-distributions"
-          for backends in external kubernetes local ssh static local,ssh full; do
-            node scripts/build-managed-agent-runtime.mjs --backends="$backends" --verify
-            node scripts/package-managed-agent-reference.mjs --backends="$backends" --version=0.1.0-alpha.ci --source-revision="$(git rev-parse HEAD)" --output="${RUNNER_TEMP}/runtime-distributions"
-            cp packages/managed-agent-server/verification/target/surefire-reports/TEST-com.alibaba.qwen.code.managedagent.ManagedAgentPackagingIT.xml "${RUNNER_TEMP}/runtime-distributions/${backends//,/-}-packaging.xml"
-          done
-
-      - name: 'Upload Runtime distribution evidence'
-        if: "${{ always() && matrix.os == 'ubuntu-latest' && matrix.java == '21' }}"
-        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
-        with:
-          name: 'managed-runtime-distributions-java-21'
-          path: '${{ runner.temp }}/runtime-distributions/'
-          if-no-files-found: 'ignore'
-          retention-days: 7
-
       - name: 'Run Managed Agent Server Checkstyle'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '21' }}"
         working-directory: 'packages/managed-agent-server'

@@ -2724,15 +2724,9 @@ describe('managed-agent-server e2e runner', () => {
     const dockerfile = read('packages/managed-agent-server/Dockerfile');
     expect(dockerfile).toContain('qwen-managed-agent-server-*-exec.jar');
     expect(dockerfile).toContain('/tmp/qwen-managed-agent-server.jar');
-    expect(read('packages/managed-agent-server/pom.xml')).toContain(
-      '<managed.exec.classifier>exec</managed.exec.classifier>',
+    expect(read('packages/managed-agent-server/server/pom.xml')).toContain(
+      '<classifier>exec</classifier>',
     );
-    const server = read('packages/managed-agent-server/server/pom.xml');
-    expect(
-      server.match(
-        /<classifier>\$\{managed\.exec\.classifier\}<\/classifier>/g,
-      ),
-    ).toHaveLength(2);
   });
 
   it('unrefs the waitUntil stall timer so a fast success does not idle the runner', () => {

@@ -8,7 +8,7 @@
 [源码布局](2026-10-15-managed-agent-server-layout.zh-CN.md)及
 [Java 包设计](2026-10-19-managed-agent-package-boundaries.zh-CN.md)中的单模块边界。
 
-Local/External 的进一步拆分及更新后的依赖矩阵见 [Runtime provider 插件设计](2026-10-31-managed-runtime-provider-plugins.zh-CN.md)。下表记录 #15871 最初建立的边界。
+五个后端的进一步拆分及更新后的依赖矩阵见 [Runtime 后端模块设计](2026-10-31-managed-runtime-backend-modules.zh-CN.md)。下表记录 #15871 最初建立的边界。
 
 ## 问题与约束
 
