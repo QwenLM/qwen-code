@@ -45,6 +45,14 @@ final class ManagedSchemaCatalog {
                 throw new SQLException("Managed schema requires a dedicated application catalog;"
                         + " system or missing catalog refused before DDL: " + name);
             }
+            try (var statement = connection.prepareStatement("SELECT @@GLOBAL.sql_mode, @@SESSION.sql_mode");
+                    var result = statement.executeQuery()) {
+                if (!result.next() || !strictSqlMode(result.getString(1)) || !strictSqlMode(result.getString(2))) {
+                    throw new SQLException("Managed schema requires strict SQL mode"
+                            + " (STRICT_TRANS_TABLES or STRICT_ALL_TABLES) globally and for the current session;"
+                            + " refused before DDL");
+                }
+            }
             if (isMariaDb(connection)) {
                 try (var statement = connection.prepareStatement(
                         "SELECT @@GLOBAL.check_constraint_checks, @@SESSION.check_constraint_checks");
@@ -56,6 +64,16 @@ final class ManagedSchemaCatalog {
                 }
             }
         }
+    }
+
+    private static boolean strictSqlMode(String modes) {
+        for (String mode : modes.split(",")) {
+            if ("STRICT_TRANS_TABLES".equalsIgnoreCase(mode.trim())
+                    || "STRICT_ALL_TABLES".equalsIgnoreCase(mode.trim())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean isMariaDb(Connection connection) throws SQLException {

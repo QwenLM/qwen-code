@@ -97,15 +97,11 @@ class ManagedSchemaTest {
                 assertTrue(uniqueKeys.values().stream()
                         .anyMatch(columns -> List.copyOf(columns.values()).equals(BUSINESS_KEYS.get(table))),
                         table + " business key " + BUSINESS_KEYS.get(table));
-            }
-            for (var key : Map.of(
-                    "ma_runtime_slot", "request_key",
-                    "ma_runtime_binding", "binding_id",
-                    "ma_tool_execution", "execution_call_id_hash",
-                    "ma_storage_owner", "storage_key").entrySet()) {
-                try (var columns = connection.getMetaData().getColumns(null, null, key.getKey(), key.getValue())) {
-                    assertTrue(columns.next(), key.getKey());
-                    assertEquals(DatabaseMetaData.columnNoNulls, columns.getInt("NULLABLE"), key.getKey());
+                for (String column : BUSINESS_KEYS.get(table)) {
+                    try (var columns = connection.getMetaData().getColumns(null, null, table, column)) {
+                        assertTrue(columns.next(), table + "." + column);
+                        assertEquals(DatabaseMetaData.columnNoNulls, columns.getInt("NULLABLE"), table + "." + column);
+                    }
                 }
             }
             statement.execute("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"

@@ -332,7 +332,16 @@ reclaim anything. If the database check fails, capacity remains skipped.
 MySQL is the supported database family; full integration CI uses MySQL 8.4.
 MariaDB no longer has a CI lane or an ongoing compatibility guarantee.
 Existing dialect handling remains in place; this change does not reject
-connections that previously worked or introduce a catalog migration.
+MariaDB solely by product name or introduce a catalog migration.
+
+MySQL and MariaDB require `STRICT_TRANS_TABLES` or `STRICT_ALL_TABLES` in both
+global and session `sql_mode`. Schema admission and validation reject non-strict
+connections before schema writes. Strict mode prevents ordinary writes to unsigned
+counters from silently clamping negative values to zero; `IGNORE` writes can
+downgrade these errors to warnings. Configure the database defaults and
+every application connection to retain strict mode throughout operation; a
+startup check does not police later administrative or connection-mode changes.
+The application does not change the server's SQL mode.
 
 Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
 process (the credentialed launch is spelled out in the Full WebShell

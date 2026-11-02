@@ -18,6 +18,28 @@ class ManagedSchemaCatalogTest {
     private static final String BODY = "\n    CONSTRAINT ck_probe CHECK (state = 'OK')\n";
 
     @Test
+    void requiresStrictGlobalAndSessionSqlModes() throws Exception {
+        for (String product : new String[] {"MySQL", "MariaDB"}) {
+            try (var data = fixture(false)) {
+                ManagedSchemaCatalog.requireApplicationCatalog(adapted(data, product, "8.4.11", 1, 1,
+                        "NO_ENGINE_SUBSTITUTION,STRICT_TRANS_TABLES", "STRICT_ALL_TABLES"));
+                ManagedSchemaCatalog.requireApplicationCatalog(adapted(data, product, "8.4.11", 1, 1,
+                        "STRICT_ALL_TABLES", "NO_ENGINE_SUBSTITUTION,STRICT_TRANS_TABLES"));
+                for (String[] modes : new String[][] {
+                        {"", "STRICT_TRANS_TABLES"},
+                        {"STRICT_ALL_TABLES", ""},
+                        {"NO_STRICT_TRANS_TABLES", "STRICT_TRANS_TABLES"},
+                        {"STRICT_ALL_TABLES", "STRICT_ALL_TABLES_DISABLED"}}) {
+                    var connection = adapted(data, product, "8.4.11", 1, 1, modes[0], modes[1]);
+                    var error = assertThrows(SQLException.class,
+                            () -> ManagedSchemaCatalog.requireApplicationCatalog(connection));
+                    assertTrue(error.getMessage().contains("requires strict SQL mode"));
+                }
+            }
+        }
+    }
+
+    @Test
     void acceptsMariaDbMetadataWithEitherDriverProductName() throws Exception {
         for (String product : new String[] {"MySQL", "MariaDB"}) {
             try (var data = fixture(false)) {
@@ -227,15 +249,16 @@ class ManagedSchemaCatalogTest {
             statement.execute("INSERT INTO catalog_fixture.check_constraints"
                     + " VALUES ('ck_probe','PUBLIC','(state = ''OK'')')");
         }
-        return adapted(data, "MySQL", "8.4.11", 1, 1);
+        return adapted(data, "MySQL", "8.4.11", 1, 1, "STRICT_TRANS_TABLES", "STRICT_TRANS_TABLES");
     }
 
     private static Connection mariaDb(Connection data, String product, int global, int session) {
-        return adapted(data, product, "10.11.18-MariaDB", global, session);
+        return adapted(data, product, "10.11.18-MariaDB", global, session,
+                "STRICT_TRANS_TABLES", "STRICT_TRANS_TABLES");
     }
 
     private static Connection adapted(Connection data, String product, String version,
-            int global, int session) {
+            int global, int session, String globalMode, String sessionMode) {
         DatabaseMetaData metadata = (DatabaseMetaData) Proxy.newProxyInstance(
                 ManagedSchemaCatalogTest.class.getClassLoader(), new Class<?>[] {DatabaseMetaData.class},
                 (proxy, method, args) -> switch (method.getName()) {
@@ -250,15 +273,19 @@ class ManagedSchemaCatalogTest {
                     }
                     if ("prepareStatement".equals(method.getName())) {
                         String sql = (String) args[0];
-                        args[0] = sql.contains("@@GLOBAL.check_constraint_checks")
-                                ? "SELECT " + global + ", " + session
-                                : sql.startsWith("SELECT TABLE_NAME, ENGINE")
-                                        ? "SELECT TABLE_NAME, CASE WHEN TABLE_NAME='MA_TENANT_GUARD'"
-                                                + " THEN 'MyISAM' ELSE 'InnoDB' END AS ENGINE FROM"
-                                                + " INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?"
-                                        : sql.replace("INFORMATION_SCHEMA.TABLE_CONSTRAINTS", "catalog_fixture.table_constraints")
-                                        .replace("INFORMATION_SCHEMA.CHECK_CONSTRAINTS", "catalog_fixture.check_constraints")
-                                        .replace("INFORMATION_SCHEMA.COLUMNS", "catalog_fixture.columns");
+                        if (sql.contains("@@GLOBAL.sql_mode")) {
+                            args[0] = "SELECT '" + globalMode + "', '" + sessionMode + "'";
+                        } else {
+                            args[0] = sql.contains("@@GLOBAL.check_constraint_checks")
+                                    ? "SELECT " + global + ", " + session
+                                    : sql.startsWith("SELECT TABLE_NAME, ENGINE")
+                                            ? "SELECT TABLE_NAME, CASE WHEN TABLE_NAME='MA_TENANT_GUARD'"
+                                                    + " THEN 'MyISAM' ELSE 'InnoDB' END AS ENGINE FROM"
+                                                    + " INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?"
+                                            : sql.replace("INFORMATION_SCHEMA.TABLE_CONSTRAINTS", "catalog_fixture.table_constraints")
+                                            .replace("INFORMATION_SCHEMA.CHECK_CONSTRAINTS", "catalog_fixture.check_constraints")
+                                            .replace("INFORMATION_SCHEMA.COLUMNS", "catalog_fixture.columns");
+                        }
                     }
                     return invoke(method, data, args);
                 });

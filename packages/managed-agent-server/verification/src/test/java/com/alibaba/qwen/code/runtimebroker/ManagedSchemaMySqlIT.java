@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 
 import javax.sql.DataSource;
 
@@ -60,6 +61,52 @@ class ManagedSchemaMySqlIT {
             }
         }
         return tables;
+    }
+
+    @Test
+    void refusesNonStrictConnectionsAndRejectsNegativeUnsignedWrites() throws Exception {
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase();
+                var connection = database.source().getConnection();
+                var statement = connection.createStatement()) {
+            var source = new SingleConnectionDataSource(connection, true);
+            String originalMode;
+            try (var result = statement.executeQuery("SELECT @@SESSION.sql_mode")) {
+                assertTrue(result.next());
+                originalMode = result.getString(1);
+            }
+            try {
+                statement.execute("SET SESSION sql_mode = ''");
+                var freshError = assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
+                assertTrue(freshError.getCause().getMessage().contains("requires strict SQL mode"));
+                assertTrue(catalogTables(database.source(), connection.getCatalog()).isEmpty());
+                for (String mode : new String[] {"STRICT_TRANS_TABLES", "STRICT_ALL_TABLES"}) {
+                    statement.execute("SET SESSION sql_mode = '" + mode + "'");
+                    ManagedSchema.initialize(source);
+                    statement.execute("INSERT INTO ma_read_lease"
+                            + " (lease_id, tenant_key, session_key, retirement_generation, expires_at)"
+                            + " VALUES ('" + mode + "', REPEAT('a',64), REPEAT('b',64), 7, 1)");
+                    var rangeError = assertThrows(SQLException.class, () -> statement.execute(
+                            "UPDATE ma_read_lease SET retirement_generation = -1 WHERE lease_id = '" + mode + "'"));
+                    assertEquals(1264, rangeError.getErrorCode());
+                    try (var result = statement.executeQuery(
+                            "SELECT retirement_generation FROM ma_read_lease WHERE lease_id = '" + mode + "'")) {
+                        assertTrue(result.next());
+                        assertEquals(7, result.getLong(1));
+                    }
+                }
+                var before = catalogTables(database.source(), connection.getCatalog());
+                statement.execute("SET SESSION sql_mode = ''");
+                assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
+                var validationError = assertThrows(IllegalStateException.class, () -> ManagedSchema.validate(source));
+                assertTrue(validationError.getCause().getMessage().contains("requires strict SQL mode"));
+                assertEquals(before, catalogTables(database.source(), connection.getCatalog()));
+            } finally {
+                try (var restore = connection.prepareStatement("SET SESSION sql_mode = ?")) {
+                    restore.setString(1, originalMode);
+                    restore.execute();
+                }
+            }
+        }
     }
 
     @Test

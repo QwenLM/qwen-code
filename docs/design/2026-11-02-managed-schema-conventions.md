@@ -30,7 +30,10 @@ Reference: the MySQL chapter, printed pages 32–35, in the
 - Use unsigned integer declarations for nonnegative counters, versions,
   generations, sizes, and ordinals. Validate signedness for every integer type on
   MySQL. H2 ignores unsigned storage ranges, so native MySQL evidence remains
-  required.
+  required. Retain the nonnegative CHECK constraints for H2. MySQL and MariaDB
+  require `STRICT_TRANS_TABLES` or `STRICT_ALL_TABLES` in global and session
+  `sql_mode` to reject ordinary out-of-range unsigned writes instead of clamping
+  them; `IGNORE` writes can downgrade these errors to warnings.
 - Name ordinary indexes with `idx_` and unique constraints with `uk_`. MySQL
   always exposes the primary index as `PRIMARY`; the DDL gives its constraint a
   table-specific `pk_` name where supported.
@@ -52,6 +55,10 @@ recreated; no repair, migration, or history rewrite is introduced. Validation
 must reject missing row IDs, incorrect primary or business keys, missing
 auto-increment behavior, changed integer types or signedness, and changed index
 prefixes. It must continue rejecting legacy, partial, and foreign catalogs.
+Shared Server/Broker admission and validation refuse non-strict MySQL or MariaDB
+before schema writes. The database defaults and every application connection
+must retain strict mode during operation; the startup check does not enforce
+later administrative or connection-mode changes, and does not change SQL modes.
 
 ## Verification and acceptance
 
@@ -62,6 +69,9 @@ prefixes. It must continue rejecting legacy, partial, and foreign catalogs.
   write the renamed columns.
 - Check snapshot/projection contracts, schema drift rejection, and relevant
   queue, publication, scheduling, Workspace and Runtime consumers.
+- Reject non-strict global or session modes before initialization or validation,
+  and verify ordinary negative unsigned writes fail under both supported strict modes on
+  MySQL without changing the server's global settings in the test.
 - Run focused local Maven checks within the module's shared validation budget;
   report full-suite and native-process gaps for CI.
 
