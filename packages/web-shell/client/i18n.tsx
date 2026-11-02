@@ -198,6 +198,10 @@ const EN: Messages = {
   'managed.refresh': 'Refresh',
   'managed.empty': 'No managed tasks yet.',
   'managed.loading': 'Loading…',
+  'managed.listLoadFailed': 'Managed sessions could not be loaded.',
+  'managed.listRetry': 'Retry loading sessions',
+  'managed.errorDetails': (v) =>
+    `HTTP ${v?.status ?? ''} · ${v?.code ?? ''}${v?.requestId ? ` · Request ID: ${v.requestId}` : ''}`,
   'managed.todo.loadedWindow': 'From the loaded session transcript.',
   'managed.more': 'Load more',
   'managed.titleSearch': 'Search session titles',
@@ -4777,6 +4781,10 @@ const ZH: Messages = {
   'managed.refresh': '刷新',
   'managed.empty': '暂无托管任务。',
   'managed.loading': '加载中…',
+  'managed.listLoadFailed': '托管会话加载失败。',
+  'managed.listRetry': '重新加载会话',
+  'managed.errorDetails': (v) =>
+    `HTTP ${v?.status ?? ''} · ${v?.code ?? ''}${v?.requestId ? ` · 请求 ID：${v.requestId}` : ''}`,
   'managed.todo.loadedWindow': '来自当前已加载的会话记录。',
   'managed.more': '加载更多',
   'managed.titleSearch': '搜索会话标题',

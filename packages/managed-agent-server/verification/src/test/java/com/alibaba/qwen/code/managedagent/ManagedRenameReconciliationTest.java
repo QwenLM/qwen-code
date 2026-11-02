@@ -99,9 +99,9 @@ class ManagedRenameReconciliationTest {
                 return Instant.ofEpochMilli(now.get());
             }
         };
-        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), clock,
+        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), clock,
                 ignored -> {}, new ManagedWorkspaceRegistry(jdbc),
-                new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         ProxyFactory proxy = new ProxyFactory(store);
         proxy.setInterfaces(AgentStateStore.class);
         proxy.addAdvice(new TransactionInterceptor(

@@ -69,26 +69,28 @@ exclusion; zero `TODO`/`FIXME` markers in production code.
 
 **D1. God classes.** The largest production classes:
 
-| Class                              | Module         | Lines | Notes                                                                                                        |
-| ---------------------------------- | -------------- | ----- | ------------------------------------------------------------------------------------------------------------ |
-| `ManagedAgentStore`                | persistence    | 7,751 | 300+ methods, 7 public setters                                                                               |
-| `RuntimeBrokerService`             | runtime-broker | 6,329 | 230+ methods; cooldown and hold inventory extracted (`ExecutionObservationCooldown`, `RuntimeHoldInventory`) |
-| `ManagedSessionStore`              | persistence    | 3,931 |                                                                                                              |
-| `WorkspaceCsiApplicationInventory` | persistence    | 3,319 |                                                                                                              |
-| `ToolPublicationDataStore`         | persistence    | 2,709 |                                                                                                              |
-| `QwenHostedHarnessConnector`       | adapters       | 2,328 |                                                                                                              |
-| `ManagedAgentService`              | control-plane  | 2,120 |                                                                                                              |
-| `HarnessCoordinator`               | control-plane  | 1,770 |                                                                                                              |
+| Class                              | Module         | Lines | Notes                                                                                                                                                |
+| ---------------------------------- | -------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ManagedAgentStore`                | persistence    | 7,657 | 300+ methods, 7 public setters                                                                                                                       |
+| `RuntimeBrokerService`             | runtime-broker | 4,270 | ~150 methods; binding registry, execution reconciler/recovery/cancellation/dispatcher, support/state, cooldown and hold inventory extracted (see P1) |
+| `ManagedSessionStore`              | persistence    | 3,931 |                                                                                                                                                      |
+| `WorkspaceCsiApplicationInventory` | persistence    | 3,319 |                                                                                                                                                      |
+| `ToolPublicationDataStore`         | persistence    | 2,709 |                                                                                                                                                      |
+| `QwenHostedHarnessConnector`       | adapters       | 2,328 |                                                                                                                                                      |
+| `ManagedAgentService`              | control-plane  | 2,120 |                                                                                                                                                      |
+| `HarnessCoordinator`               | control-plane  | 1,770 |                                                                                                                                                      |
 
 `ManagedAgentStore` mixes session admission, turns, events, item/message
 projection, worktrees, MCP management, definition pins, skills, and extension
 projection. Its 7 public `set*`/`configure*` methods are mutable post-
 construction wiring: the bean can be observed before it is fully assembled.
-`RuntimeBrokerService` mixes provisioning, binding CAS, leases, cancellation,
-recovery scans, and extension commands in a single class; the observation
-cooldown and the tool-hold inventory are the first concerns delegated to
-extracted collaborators (see the P1 extraction slices below). Tests mirror
-the shape: `RuntimeBrokerServiceTest` is 8,002
+`RuntimeBrokerService` originally mixed provisioning, binding CAS, leases,
+cancellation, recovery scans, and extension commands in a single class; the
+P1 extraction slices have since delegated the binding registry, execution
+reconciliation/recovery/cancellation/dispatcher, support/state, observation
+cooldown and tool-hold inventory to nine module-internal collaborators,
+leaving a 4,270-line facade (see the P1 extraction slices below). Tests mirror
+the shape: `RuntimeBrokerServiceTest` is 7,992
 lines and `HarnessCoordinatorTest` is 4,910 lines.
 
 **D2. Telescoping session-creation API.** `insertWorkspaceSessionCommand` has
@@ -236,10 +238,13 @@ cross-cutting "how the system works today" tour.
   `ManagedAgentConfiguration.managedWorktreeFiles()`; the direct calls in
   `VerificationFixtures` are test setup, not production wiring). Converting
   them to constructor `ObjectProvider` injection is a large change to this
-  central 7,700-line class with ~30 test wiring sites, and its correctness
+  central 7,657-line class with ~30 test wiring sites, and its correctness
   depends on Spring runtime assembly that the manual-setter unit tests do
-  not fully exercise; it warrants a dedicated design pass and full
-  integration verification before implementation, not an incremental slice.
+  not fully exercise. The dedicated [constructor-wiring design](2026-11-01-managed-agent-store-wiring.md)
+  covers the required/optional dependencies, the additional lazy record-store
+  field and its Session-store cycle, final references, direct-fixture migration
+  and real Spring context verification. Its implementation is independent
+  of the Broker workflow extraction; full CI qualification remains required.
 - `RuntimeBrokerService`: extract module-internal collaborators for recovery
   scanning, cancellation, tool holds, and observation cooldown; the service
   becomes a facade. The module already exists, so no cross-module contract
@@ -249,30 +254,34 @@ cross-cutting "how the system works today" tour.
   no lifecycle of its own. The tool-hold inventory followed the same day
   (`RuntimeHoldInventory`): the durable pagination and RELEASED filter move
   verbatim, while the service keeps the admission, tenant resolution and
-  error-mapping boundary. Recovery scanning was investigated next and proved
+  error-mapping boundary. Recovery scanning was then investigated and proved
   entangled — `scanExecutions` drives `reconcileInContext`, and the
   background-process settle family owns the `SessionContext` in-memory index
-  and the CAS settle loop — so extracting it now would create a collaborator
-  with a dozen injected callbacks rather than a clean seam; it waits for the
-  reconciliation path to become its own collaborator. Cancellation follows
-  the same rule: extract only where the seam is clean. Known coverage gap
-  carried into the reconciliation slice: the stamp-before-in-flight-slot-drop
-  ordering in `lookupOnce` had no test pinning it at the base. The
+  and the CAS settle loop — so a standalone seam would have needed a dozen
+  injected callbacks. That cluster has since been extracted through the
+  [Runtime Binding Registry](2026-10-31-runtime-binding-registry.md) and the
+  [execution workflow extraction](2026-11-01-runtime-execution-workflows.md):
+  reconciliation, recovery scanning and cancellation now live in
+  `RuntimeExecutionReconciler`, `RuntimeExecutionRecovery` and
+  `RuntimeExecutionCancellation`, so nothing in the cluster is still waiting.
+  Known coverage gap carried into the reconciliation slice: the
+  stamp-before-in-flight-slot-drop ordering in `lookupOnce` had no test pinning
+  it at the base. The
   [workflow extraction](2026-11-01-runtime-execution-workflows.md) now adds a
   deterministic blocked-stamp regression at the reconciler boundary; its
   verification evidence is recorded with that increment.
-- Reconciliation, recovery scanning and cancellation are **not** clean
-  standalone seams (investigated 2026-10-31). Their prerequisite is the
+- Reconciliation, recovery scanning and cancellation were **not** clean
+  standalone seams (investigated 2026-10-31). Their prerequisite was the
   [Runtime Binding Registry](2026-10-31-runtime-binding-registry.md) first
   slice: it owns `liveBindings`, `bindingOperations`, `sessions`, local
   Session contexts and Binding validation/invalidation helpers. The source
-  audit corrects the original three-map sketch: `bindingOperations` must
+  audit corrected the original three-map sketch: `bindingOperations` had to
   move with Binding lifecycle operations, whereas execution-keyed
-  `reconciliations` stays with `ExecutionObservationCooldown` and moves in
+  `reconciliations` stayed with `ExecutionObservationCooldown` and moved in
   the later reconciliation slice. In the Registry slice the service retained
   provisioning, drain, recovery, execution settlement, renewal and scheduler
   lifecycle. This
-  establishes a concrete owner without injecting service callbacks. The M6
+  established a concrete owner without injecting service callbacks. The M6
   stamp-before-slot-removal coverage gap is addressed by the blocked-stamp
   regression in the [execution workflow extraction](2026-11-01-runtime-execution-workflows.md),
   which implements reconciliation, takeover scans and cancellation after
