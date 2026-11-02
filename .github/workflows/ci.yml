@@ -407,8 +407,10 @@ jobs:
   # Test: Node
   #
   # Builds the tree every unit-test shard runs against. The `prepare` build
-  # the full install runs takes most of ten minutes on the shared pool; doing
-  # it once here lets each shard install without it and unpack this archive.
+  # takes most of ten minutes on the shared pool; doing it once here lets
+  # each shard install without it and unpack this archive. A pull request
+  # also starts from the newest cached build and rebuilds only the
+  # workspaces whose inputs changed (scripts/ci-build-cache.mjs).
   test_build:
     name: 'Build unit-test tree (ubuntu-latest, Node 22.x)'
     needs: 'classify_pr'
@@ -654,8 +656,11 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
 
+      # scripts/ci-build-cache.mjs runs the build after the install.
       - name: 'Install dependencies'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        env:
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
           echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}] cpus[$(nproc 2>/dev/null || echo unknown)]" > "$DISK_SAMPLES" 2>/dev/null || true
@@ -677,6 +682,45 @@ jobs:
           cache_dir="${NPM_CONFIG_CACHE:-$(npm config get cache)}"
           echo "npm cache: ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
+
+      - name: 'Hash the build inputs'
+        id: 'build_key'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'echo "key=$(node scripts/ci-build-cache.mjs key)" >> "${GITHUB_OUTPUT}"'
+
+      # A push to main always builds from scratch, so every cache a pull
+      # request starts from is a clean build of main; a pull request whose
+      # restore found nothing saves its own clean build for its next run.
+      - name: 'Restore the build cache'
+        id: 'build_cache'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && github.event_name != 'push' }}"
+        timeout-minutes: 5
+        continue-on-error: true
+        uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '${{ runner.temp }}/qwen-build-cache'
+          key: 'qwen-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.build_key.outputs.key }}'
+          restore-keys: 'qwen-build-v1-${{ runner.os }}-${{ runner.arch }}-'
+
+      - name: 'Build'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'node scripts/ci-build-cache.mjs build "${RUNNER_TEMP}/qwen-build-cache"'
+
+      - name: 'Pack the build cache'
+        id: 'pack_build_cache'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && (github.event_name == 'push' || steps.build_cache.outputs.cache-matched-key == '') }}"
+        run: |-
+          rm -rf "${RUNNER_TEMP}/qwen-build-cache"
+          node scripts/ci-build-cache.mjs pack "${RUNNER_TEMP}/qwen-build-cache"
+
+      - name: 'Save the build cache'
+        if: "${{ steps.pack_build_cache.outcome == 'success' }}"
+        timeout-minutes: 5
+        continue-on-error: true
+        uses: 'actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '${{ runner.temp }}/qwen-build-cache'
+          key: 'qwen-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.build_key.outputs.key }}'
 
       # Everything the build wrote: the ignored, untracked paths outside
       # node_modules, which each shard's own install recreates. The
@@ -2190,9 +2234,30 @@ jobs:
           fi
           bash .github/scripts/ecs-runner/check-font-baseline.sh
 
+      # The install leaves the build to scripts/ci-build-cache.mjs, which
+      # starts from test_build's newest clean build of main where one is
+      # cached and rebuilds only the workspaces whose inputs changed.
       - name: 'Install dependencies'
+        env:
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+
+      - name: 'Hash the build inputs'
+        id: 'build_key'
+        run: 'echo "key=$(node scripts/ci-build-cache.mjs key)" >> "${GITHUB_OUTPUT}"'
+
+      - name: 'Restore the build cache'
+        timeout-minutes: 5
+        continue-on-error: true
+        uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '${{ runner.temp }}/qwen-build-cache'
+          key: 'qwen-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.build_key.outputs.key }}'
+          restore-keys: 'qwen-build-v1-${{ runner.os }}-${{ runner.arch }}-'
+
+      - name: 'Build'
+        run: 'node scripts/ci-build-cache.mjs build "${RUNNER_TEMP}/qwen-build-cache"'
 
       - name: 'Install Playwright Chromium and WebKit (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
