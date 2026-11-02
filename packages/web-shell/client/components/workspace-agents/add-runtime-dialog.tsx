@@ -192,6 +192,55 @@ function CommandLine({ text }: { text: string }) {
 }
 
 /**
+ * A join that went through, as the dialog sees it: whether the computer that
+ * joined saved the connection. A `saveError` means it will not reconnect
+ * after a restart or a workspace reload. `false` is a connect that failed
+ * and was already reported elsewhere; a failed join throws instead.
+ */
+export type RuntimeJoinOutcome = false | { saveError?: string };
+
+/**
+ * Reads a `hosts/connect` answer, which `hosts/remote-connect` passes on. An
+ * older daemon sends no `saved` field; it always claimed the save.
+ */
+export function joinOutcome(answer: unknown): { saveError?: string } {
+  if (
+    typeof answer !== 'object' ||
+    answer === null ||
+    (answer as { saved?: unknown }).saved !== false
+  ) {
+    return {};
+  }
+  const detail = (answer as { saveError?: unknown }).saveError;
+  return { saveError: typeof detail === 'string' ? detail : '' };
+}
+
+/**
+ * The dialog's "I have its address and token" callback over `run`, which
+ * reports a failure itself and resolves false for it.
+ */
+export function connectExistingWith(
+  run: (action: () => Promise<unknown>) => Promise<boolean>,
+  connect: (input: ConnectExistingInput) => Promise<unknown>,
+): (input: ConnectExistingInput) => Promise<RuntimeJoinOutcome> {
+  return async (input) => {
+    let answer: unknown;
+    const ok = await run(async () => {
+      answer = await connect(input);
+      return answer;
+    });
+    return ok && joinOutcome(answer);
+  };
+}
+
+/** The dialog's "Join a coordinator" callback; a failed join throws. */
+export function joinCoordinatorWith(
+  join: (input: JoinCoordinatorInput) => Promise<unknown>,
+): (input: JoinCoordinatorInput) => Promise<RuntimeJoinOutcome> {
+  return async (input) => joinOutcome(await join(input));
+}
+
+/**
  * "Add runtime": hand another machine a one-line command, then wait for it to
  * show up. The dialog notices the new runtime through the same roster poll
  * that updates the Runtime tab, so it flips from waiting to connected by
@@ -214,9 +263,13 @@ export function AddRuntimeDialog({
   serverUrl: string;
   runtimes: readonly RuntimeSummary[];
   onCreateJoinToken: (supersedesHostId?: string) => Promise<JoinToken>;
-  onConnectExisting?: (input: ConnectExistingInput) => Promise<boolean>;
+  onConnectExisting?: (
+    input: ConnectExistingInput,
+  ) => Promise<RuntimeJoinOutcome>;
   /** Joins THIS daemon to another coordinator; absent hides that entry. */
-  onJoinCoordinator?: (input: JoinCoordinatorInput) => Promise<boolean>;
+  onJoinCoordinator?: (
+    input: JoinCoordinatorInput,
+  ) => Promise<RuntimeJoinOutcome>;
   onCreateAgentOn?: (runtimeId: string) => void;
   replacementTarget?: RuntimeSummary;
 }) {
@@ -244,6 +297,12 @@ export function AddRuntimeDialog({
     known: ReadonlySet<string>;
   }>();
   const [error, setError] = useState<string>();
+  // Why the computer that joined could not save the connection, once a join
+  // went through without it: this one ('here') or the remote ('there').
+  const [notSaved, setNotSaved] = useState<{
+    where: 'here' | 'there';
+    error: string;
+  }>();
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const replacementHostId = replacementTarget?.id;
@@ -284,6 +343,7 @@ export function AddRuntimeDialog({
   const generate = async () => {
     setBusy(true);
     setError(undefined);
+    setNotSaved(undefined);
     try {
       if (!safeHost(address)) throw new Error(t('collab.runtime.badAddress'));
       setJoin(await onCreateJoinToken(replacementHostId));
@@ -306,16 +366,22 @@ export function AddRuntimeDialog({
     const data = new FormData(event.currentTarget);
     setBusy(true);
     setError(undefined);
+    setNotSaved(undefined);
     const known = onlineIds(runtimes);
     try {
-      const ok = await onConnectExisting({
+      const outcome = await onConnectExisting({
         remoteUrl: String(data.get('remoteUrl')),
         remoteToken: String(data.get('remoteToken')),
         remoteCwd: String(data.get('remoteCwd')),
         serverUrl: address,
         allowHttp: data.get('allowHttp') === 'on',
       });
-      if (ok) setWatch({ at: Date.now(), known });
+      if (outcome) {
+        setWatch({ at: Date.now(), known });
+        if (outcome.saveError !== undefined) {
+          setNotSaved({ where: 'there', error: outcome.saveError });
+        }
+      }
     } finally {
       setBusy(false);
     }
@@ -330,16 +396,20 @@ export function AddRuntimeDialog({
     }
     setBusy(true);
     setError(undefined);
+    setNotSaved(undefined);
     try {
-      const ok = await onJoinCoordinator({
+      const outcome = await onJoinCoordinator({
         serverUrl: joinTarget.serverUrl,
         workspaceId: joinTarget.workspaceId,
         enrollmentToken: joinToken.trim(),
         allowHttp: joinAllowHttp,
       });
-      if (ok) {
+      if (outcome) {
         setJoined(joinTarget.serverUrl);
         setJoinToken('');
+        if (outcome.saveError !== undefined) {
+          setNotSaved({ where: 'here', error: outcome.saveError });
+        }
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -364,6 +434,7 @@ export function AddRuntimeDialog({
       setJoined(undefined);
       setJoinLink('');
     }
+    if (!next) setNotSaved(undefined);
     onOpenChange(next);
   };
 
@@ -533,7 +604,11 @@ export function AddRuntimeDialog({
                 </div>
               ) : null
             ) : method === 'join' ? (
+              // Its own key, like the form below: both sit in the same
+              // place, and React would otherwise reuse one's inputs for the
+              // other, carrying a typed token into a visible field.
               <form
+                key="join-coordinator"
                 id="join-coordinator"
                 className="flex flex-col gap-3 text-sm"
                 onSubmit={(event) => void submitJoin(event)}
@@ -588,6 +663,7 @@ export function AddRuntimeDialog({
               </form>
             ) : (
               <form
+                key="connect-existing-runtime"
                 id="connect-existing-runtime"
                 className="flex flex-col gap-3 text-sm"
                 onSubmit={(event) => void submitExisting(event)}
@@ -627,6 +703,20 @@ export function AddRuntimeDialog({
           </>
         )}
 
+        {notSaved && (
+          <p
+            role="status"
+            className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-muted-foreground break-words"
+          >
+            {t(
+              notSaved.where === 'here'
+                ? 'collab.runtime.notSavedHere'
+                : 'collab.runtime.notSavedThere',
+              { error: notSaved.error },
+            )}
+          </p>
+        )}
+
         {error && (
           <p role="alert" className="text-sm text-destructive">
             {error}
@@ -656,7 +746,7 @@ export function AddRuntimeDialog({
             </>
           ) : replacementTarget || method === 'command' ? (
             live ? (
-              <Button variant="outline" onClick={() => onOpenChange(false)}>
+              <Button variant="outline" onClick={() => close(false)}>
                 {t('collab.runtime.closeKeepLink')}
               </Button>
             ) : (

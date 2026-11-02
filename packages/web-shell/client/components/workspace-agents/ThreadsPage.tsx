@@ -10,6 +10,7 @@ import {
   type ConnectExistingInput,
   type JoinCoordinatorInput,
   type JoinToken,
+  type RuntimeJoinOutcome,
 } from './add-runtime-dialog';
 import {
   ShareAgentDialog,
@@ -75,9 +76,13 @@ export interface AgentConfigPatch {
 }
 
 export interface ThreadsPageProps {
-  onConnectRemoteHost?: (input: ConnectExistingInput) => Promise<boolean>;
+  onConnectRemoteHost?: (
+    input: ConnectExistingInput,
+  ) => Promise<RuntimeJoinOutcome>;
   /** Joins this daemon to another coordinator as one of its runtimes. */
-  onJoinCoordinator?: (input: JoinCoordinatorInput) => Promise<boolean>;
+  onJoinCoordinator?: (
+    input: JoinCoordinatorInput,
+  ) => Promise<RuntimeJoinOutcome>;
   agents: readonly WorkspaceAgentSummaryView[];
   runtimes?: readonly WorkspaceAgentRuntimeView[];
   view: AgentWorkspaceView;

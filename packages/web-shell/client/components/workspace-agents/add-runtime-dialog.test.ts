@@ -4,11 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
+  connectExistingWith,
   findReplacementRuntime,
   joinCommands,
   joinCoordinatorCommand,
+  joinCoordinatorWith,
+  joinOutcome,
   parseJoinLink,
 } from './add-runtime-dialog';
 import { runtimePrograms } from './agents-view-logic';
@@ -131,5 +134,78 @@ describe('runtimePrograms', () => {
     expect(runtimePrograms({})).toEqual(['qwen']);
     expect(runtimePrograms({ programs: [] })).toEqual([]);
     expect(runtimePrograms({ programs: ['other'] })).toEqual([]);
+  });
+});
+
+describe('joinOutcome', () => {
+  it('reports why a join was not saved, and nothing for a saved one', () => {
+    expect(
+      joinOutcome({ connected: true, saved: false, saveError: 'disk full' }),
+    ).toEqual({ saveError: 'disk full' });
+    expect(joinOutcome({ connected: true, saved: false })).toEqual({
+      saveError: '',
+    });
+    expect(joinOutcome({ connected: true, saved: true })).toEqual({});
+    // An older daemon sends no `saved` field; it always claimed the save.
+    expect(joinOutcome({ connected: true })).toEqual({});
+    expect(joinOutcome(undefined)).toEqual({});
+  });
+});
+
+describe('connectExistingWith', () => {
+  const input = {
+    remoteUrl: 'https://worker.example',
+    remoteToken: 'remote-token',
+    remoteCwd: '/remote',
+    serverUrl: 'https://hub.example:4170',
+    allowHttp: false,
+  };
+
+  it('reads the answer of a connect that went through', async () => {
+    const connect = vi.fn(async () => ({
+      connected: true,
+      saved: false,
+      saveError: 'disk full',
+    }));
+    const run = async (action: () => Promise<unknown>) => {
+      await action();
+      return true;
+    };
+
+    expect(await connectExistingWith(run, connect)(input)).toEqual({
+      saveError: 'disk full',
+    });
+    expect(connect).toHaveBeenCalledWith(input);
+  });
+
+  it('passes on a connect that failed, whatever it answered', async () => {
+    const connect = vi.fn(async () => ({ connected: true, saved: false }));
+    const run = async (action: () => Promise<unknown>) => {
+      await action();
+      return false;
+    };
+
+    expect(await connectExistingWith(run, connect)(input)).toBe(false);
+  });
+});
+
+describe('joinCoordinatorWith', () => {
+  it('reads the answer of a join', async () => {
+    const join = vi.fn(async () => ({
+      connected: true,
+      saved: false,
+      saveError: 'disk full',
+    }));
+    const input = {
+      serverUrl: 'https://hub.example:4170',
+      workspaceId: 'ws_1',
+      enrollmentToken: 'join-token',
+      allowHttp: false,
+    };
+
+    expect(await joinCoordinatorWith(join)(input)).toEqual({
+      saveError: 'disk full',
+    });
+    expect(join).toHaveBeenCalledWith(input);
   });
 });

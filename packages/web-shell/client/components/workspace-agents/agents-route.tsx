@@ -21,6 +21,7 @@ import {
   type WorkspaceAgentRuntimeView,
   type WorkspaceAgentSummaryView,
 } from './ThreadsPage';
+import { connectExistingWith, joinCoordinatorWith } from './add-runtime-dialog';
 import { AgentCreatePage } from '../agents/AgentCreatePage';
 import { useI18n } from '../../i18n';
 import { isAgentCollaborationEnabledForWorkspace } from '../../utils/workspace';
@@ -274,17 +275,12 @@ export function AgentsRoute({
         runtimes={runtimes}
         onConnectRemoteHost={
           connectRemoteHost
-            ? (input) => mutate(() => connectRemoteHost(input))
+            ? connectExistingWith(mutate, connectRemoteHost)
             : undefined
         }
         onJoinCoordinator={
-          joinCoordinator
-            ? async (input) => {
-                // Errors stay in the dialog, beside the link that caused them.
-                await joinCoordinator(input);
-                return true;
-              }
-            : undefined
+          // Errors stay in the dialog, beside the link that caused them.
+          joinCoordinator ? joinCoordinatorWith(joinCoordinator) : undefined
         }
         onMentionAgent={onMentionAgent}
         pending={pending}

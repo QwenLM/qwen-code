@@ -139,6 +139,18 @@ export async function removeAgentHostConnection(
   return removed;
 }
 
+/**
+ * The saved record for this connection, as the restore loop would find it:
+ * read the same way, without the lock, so an unreadable file has none.
+ */
+export async function findAgentHostConnection(
+  target: ConnectionKey,
+): Promise<AgentHostConnectionRecord | undefined> {
+  return (await readAgentHostConnections()).find((entry) =>
+    sameConnection(entry, target),
+  );
+}
+
 const RESTORE_RETRY_MS = 30_000;
 /** How often a restored connection checks that it is still up. */
 const RESTORE_WATCH_MS = 5_000;

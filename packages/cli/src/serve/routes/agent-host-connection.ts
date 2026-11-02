@@ -109,8 +109,9 @@ export function registerAgentHostRuntimeRoutes(
 
   /**
    * `{serverUrl, workspaceId, enrollmentToken, allowHttp?}` →
-   * `{connected: true, workspaceCwd, providers}`. Saved, so the daemon
-   * reconnects after a restart.
+   * `{connected: true, saved, saveError?, workspaceCwd, providers}`. Saved,
+   * so the daemon reconnects after a restart or a workspace reload;
+   * `saved: false` says it will not, and why.
    */
   app.post(`${prefix}/hosts/connect`, mutate(), async (req, res) => {
     const runtime = runtimeFor(req, res);
@@ -146,24 +147,41 @@ export function registerAgentHostRuntimeRoutes(
         allowHttp,
         generationGuard: runtime.generationGuard,
       });
-      const { saveAgentHostConnection } = await import(
+      const { findAgentHostConnection, saveAgentHostConnection } = await import(
         '../agent-host-connections.js'
       );
-      await saveAgentHostConnection({
+      const record = {
         serverUrl: normalizeServerUrl(url, allowHttp),
         workspaceId: input.workspaceId,
         workspaceCwd: runtime.workspaceCwd,
         allowHttp,
-      }).catch((error: unknown) => {
-        // Connected anyway; only the reconnect after a restart is lost.
+      };
+      const saveError = await saveAgentHostConnection(record).then(
+        () => undefined,
+        (error: unknown) =>
+          error instanceof Error ? error.message : String(error),
+      );
+      // Connected anyway; only the reconnect after a restart or a workspace
+      // reload is lost, unless an earlier record for this connection still
+      // stands. The answer stays a success, because the token is spent: a
+      // client that treated this as a failed join would invite a rerun with
+      // that token. (Saving before connecting would make the failure
+      // retryable, but a failed join would then have to undo its record
+      // against a concurrent join or disconnect of the same connection.)
+      const saved =
+        saveError === undefined ||
+        (await findAgentHostConnection(record)) !== undefined;
+      if (saveError !== undefined) {
         writeStderrLine(
-          `qwen serve: could not save the Agent Host connection: ${error instanceof Error ? error.message : String(error)}`,
+          `qwen serve: could not save the Agent Host connection: ${saveError}`,
         );
-      });
+      }
       if (!isCurrent(req, res, runtime)) return;
       const { providers } = await probePrograms();
       res.json({
         connected: true,
+        saved,
+        ...(saved ? {} : { saveError }),
         workspaceCwd: runtime.workspaceCwd,
         providers,
       });
@@ -175,8 +193,8 @@ export function registerAgentHostRuntimeRoutes(
   });
 
   /**
-   * `{serverUrl, workspaceId, allowHttp?}` → `{disconnected}`. Stops the
-   * connection and forgets it. The credential stays (the coordinator
+   * `{serverUrl, workspaceId, allowHttp?}` → `{disconnected}`. Forgets the
+   * connection, then stops it. The credential stays (the coordinator
    * revokes a Host); a later `connect` with a fresh token re-enrolls.
    */
   app.delete(`${prefix}/hosts/connect`, mutate(), async (req, res) => {
@@ -192,19 +210,44 @@ export function registerAgentHostRuntimeRoutes(
       const { normalizeServerUrl, stopAgentHostConnection } = await import(
         '../agent-host-client.js'
       );
-      const { removeAgentHostConnection } = await import(
-        '../agent-host-connections.js'
-      );
+      const { findAgentHostConnection, removeAgentHostConnection } =
+        await import('../agent-host-connections.js');
       const target = {
         serverUrl: normalizeServerUrl(url, allowHttp),
         workspaceId: input.workspaceId,
         workspaceCwd: runtime.workspaceCwd,
         allowHttp,
       };
+      // Forget first. The restore loop reconnects any connection it still
+      // finds saved, so a stop followed by a failed removal would abort the
+      // running turns and then come back a few seconds later.
+      const removed = await removeAgentHostConnection(target).catch(
+        async (error: unknown) => {
+          // A held lock clears soon, and another writer may be about to
+          // change the file: answered as busy below, for the caller to
+          // retry. Past that, a connection with no record (joined at boot,
+          // or a join that was not saved) has nothing for the restore loop
+          // to bring back: stop it anyway, or nothing could. One with a
+          // record is left as it was.
+          if ((error as NodeJS.ErrnoException).code === 'ELOCKED') throw error;
+          if ((await findAgentHostConnection(target)) !== undefined) {
+            throw new Error(
+              `Could not forget the saved connection, so nothing was stopped: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+          return false;
+        },
+      );
       const stopped = stopAgentHostConnection(target);
-      const removed = await removeAgentHostConnection(target);
       res.json({ disconnected: stopped || removed });
     } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ELOCKED') {
+        res.status(503).json({
+          error:
+            'The saved Agent Host connections are busy, so nothing was stopped. Retry the request.',
+        });
+        return;
+      }
       res.status(400).json({
         error: error instanceof Error ? error.message : 'Disconnect failed.',
       });

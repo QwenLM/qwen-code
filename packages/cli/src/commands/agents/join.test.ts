@@ -58,6 +58,51 @@ it('asks the local daemon to connect with the link and token', async () => {
     allowHttp: false,
   });
   expect(out.join('\n')).toContain('qwen, claude');
+  // No `saved` field, as from an older daemon: it always claimed the save.
+  expect(out.join('\n')).toContain('The daemon reconnects after restarts.');
+});
+
+it('warns, and still succeeds, when the daemon could not save the connection', async () => {
+  const { value, out, err } = deps({
+    fetch: vi.fn(async () =>
+      Response.json({
+        connected: true,
+        saved: false,
+        saveError: 'Lock file is already being held',
+        providers: ['qwen'],
+      }),
+    ) as unknown as typeof fetch,
+  });
+
+  const code = await runAgentsJoin(
+    { link: 'https://hub.example:4170/join/ws_1', 'allow-http': false },
+    value,
+  );
+
+  // The token is spent; a failure exit would invite a rerun with it.
+  expect(code).toBe(0);
+  expect(out.join('\n')).toContain('Joined https://hub.example:4170');
+  expect(out.join('\n')).not.toContain('reconnects after restarts');
+  expect(err).toEqual([
+    'Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: Lock file is already being held',
+  ]);
+});
+
+it('says "no detail" when the daemon gives no reason for the failed save', async () => {
+  const { value, err } = deps({
+    fetch: vi.fn(async () =>
+      Response.json({ connected: true, saved: false, saveError: '' }),
+    ) as unknown as typeof fetch,
+  });
+
+  await runAgentsJoin(
+    { link: 'https://hub.example:4170/join/ws_1', 'allow-http': false },
+    value,
+  );
+
+  expect(err).toEqual([
+    'Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: no detail',
+  ]);
 });
 
 it('points at `qwen serve --join` when no daemon is running', async () => {

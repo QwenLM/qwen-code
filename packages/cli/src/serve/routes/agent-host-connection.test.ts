@@ -23,6 +23,7 @@ const {
   stopConnection,
   saveConnection,
   removeConnection,
+  findConnection,
 } = vi.hoisted(() => ({
   issueEnrollment: vi.fn(),
   writeStderrLine: vi.fn(),
@@ -30,6 +31,7 @@ const {
   stopConnection: vi.fn(),
   saveConnection: vi.fn(),
   removeConnection: vi.fn(),
+  findConnection: vi.fn(),
 }));
 vi.mock('@qwen-code/qwen-code-core/agents/workspace-agents/store.js', () => ({
   issueAgentHostEnrollment: issueEnrollment,
@@ -43,6 +45,7 @@ vi.mock('../agent-host-client.js', () => ({
 vi.mock('../agent-host-connections.js', () => ({
   saveAgentHostConnection: saveConnection,
   removeAgentHostConnection: removeConnection,
+  findAgentHostConnection: findConnection,
 }));
 vi.mock('../agent-host-programs.js', () => ({
   getHostProgramProbe: async () => [
@@ -242,8 +245,10 @@ it('connects without a provider and remembers the connection', async () => {
   expect(response.status).toBe(200);
   expect(response.body).toMatchObject({
     connected: true,
+    saved: true,
     providers: ['qwen', 'claude'],
   });
+  expect(response.body).not.toHaveProperty('saveError');
   expect(startConnection).toHaveBeenCalledWith(
     expect.objectContaining({
       serverUrl: 'https://coordinator.example',
@@ -260,6 +265,117 @@ it('connects without a provider and remembers the connection', async () => {
   });
 });
 
+const joined = {
+  serverUrl: 'https://coordinator.example',
+  workspaceId: 'ws_1',
+  workspaceCwd: '/selected',
+  allowHttp: false,
+};
+
+function join() {
+  return request(runtimeApp(selected())).post('/agent/hosts/connect').send({
+    serverUrl: 'https://coordinator.example',
+    workspaceId: 'ws_1',
+    enrollmentToken: 'fresh-token',
+  });
+}
+
+it('reports a join it could not save as connected but not saved', async () => {
+  // The token is spent by now, so this must stay a success: a client told
+  // the join failed would rerun it with the same token.
+  startConnection.mockResolvedValue(undefined);
+  saveConnection.mockRejectedValue(
+    new Error('Lock file is already being held'),
+  );
+  findConnection.mockResolvedValue(undefined);
+
+  const response = await join();
+
+  expect(response.status).toBe(200);
+  expect(response.body).toMatchObject({
+    connected: true,
+    saved: false,
+    saveError: 'Lock file is already being held',
+  });
+  expect(writeStderrLine).toHaveBeenCalledWith(
+    'qwen serve: could not save the Agent Host connection: Lock file is already being held',
+  );
+});
+
+it('reports a join as saved when an earlier record for it still stands', async () => {
+  // A rejoin whose save failed still reconnects after a restart, from the
+  // record the previous join left.
+  startConnection.mockResolvedValue(undefined);
+  saveConnection.mockRejectedValue(new Error('disk full'));
+  findConnection.mockResolvedValue({ ...joined, allowHttp: true });
+
+  const response = await join();
+
+  expect(response.status).toBe(200);
+  expect(response.body).toMatchObject({ connected: true, saved: true });
+  expect(response.body).not.toHaveProperty('saveError');
+  expect(findConnection).toHaveBeenCalledWith(joined);
+  expect(writeStderrLine).toHaveBeenCalledWith(
+    'qwen serve: could not save the Agent Host connection: disk full',
+  );
+});
+
+it('saves nothing for a join that fails', async () => {
+  startConnection.mockRejectedValue(
+    new Error('Invalid or expired Agent Host enrollment token.'),
+  );
+
+  const response = await join();
+
+  expect(response.status).toBe(400);
+  expect(response.body).toEqual({
+    error: 'Invalid or expired Agent Host enrollment token.',
+  });
+  expect(saveConnection).not.toHaveBeenCalled();
+});
+
+it('passes on, unchanged, a remote join that could not be saved', async () => {
+  const runtime = selected();
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            protocol: 2,
+            providers: ['qwen'],
+            connected: true,
+            saved: false,
+            saveError: 'disk full',
+          }),
+        ),
+    ),
+  );
+  issueEnrollment.mockResolvedValue({ token: 'enrollment-token' });
+  const app = express();
+  app.use(express.json());
+  registerAgentHostRemoteConnectRoute(
+    app,
+    '/agent',
+    () => runtime,
+    () => (_req, _res, next) => next(),
+  );
+
+  const response = await request(app).post('/agent/hosts/remote-connect').send({
+    remoteUrl: 'https://worker.example',
+    serverUrl: 'https://coordinator.example',
+    remoteCwd: '/remote',
+    remoteToken: 'remote-token',
+  });
+
+  expect(response.status).toBe(200);
+  expect(response.body).toMatchObject({
+    connected: true,
+    saved: false,
+    saveError: 'disk full',
+  });
+});
+
 it('disconnects and forgets a saved connection', async () => {
   stopConnection.mockReturnValue(false);
   removeConnection.mockResolvedValue(true);
@@ -270,12 +386,89 @@ it('disconnects and forgets a saved connection', async () => {
 
   expect(response.status).toBe(200);
   expect(response.body).toEqual({ disconnected: true });
-  expect(removeConnection).toHaveBeenCalledWith({
-    serverUrl: 'https://coordinator.example',
-    workspaceId: 'ws_1',
-    workspaceCwd: '/selected',
-    allowHttp: false,
+  expect(removeConnection).toHaveBeenCalledWith(joined);
+  expect(stopConnection).toHaveBeenCalledWith(joined);
+  // Forgotten before it is stopped (see the next case).
+  expect(removeConnection.mock.invocationCallOrder[0]).toBeLessThan(
+    stopConnection.mock.invocationCallOrder[0]!,
+  );
+});
+
+function disconnect() {
+  return request(runtimeApp(selected()))
+    .delete('/agent/hosts/connect')
+    .send({ serverUrl: 'https://coordinator.example', workspaceId: 'ws_1' });
+}
+
+it('answers busy, and stops nothing, when the saved connections are locked', async () => {
+  // A held lock clears soon; the file is not read past it, since another
+  // writer may be about to change it.
+  removeConnection.mockRejectedValue(
+    Object.assign(new Error('Lock file is already being held'), {
+      code: 'ELOCKED',
+    }),
+  );
+
+  const response = await disconnect();
+
+  expect(response.status).toBe(503);
+  expect(response.body).toEqual({
+    error:
+      'The saved Agent Host connections are busy, so nothing was stopped. Retry the request.',
   });
+  expect(stopConnection).not.toHaveBeenCalled();
+  expect(findConnection).not.toHaveBeenCalled();
+});
+
+it('leaves the connection as it was when it cannot forget its saved record', async () => {
+  // Stopping it would abort its turns, and the restore loop would
+  // reconnect the record it still finds saved a few seconds later.
+  removeConnection.mockRejectedValue(
+    Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }),
+  );
+  findConnection.mockResolvedValue(joined);
+
+  const response = await disconnect();
+
+  expect(response.status).toBe(400);
+  expect(response.body).toEqual({
+    error:
+      'Could not forget the saved connection, so nothing was stopped: EACCES: permission denied',
+  });
+  expect(stopConnection).not.toHaveBeenCalled();
+});
+
+it.each([true, false])(
+  'stops a connection with no saved record even when the file cannot be written (running: %s)',
+  async (running) => {
+    // Joined at boot, or a join that was not saved: the restore loop has
+    // nothing to bring it back from.
+    removeConnection.mockRejectedValue(
+      Object.assign(new Error('EACCES: permission denied'), {
+        code: 'EACCES',
+      }),
+    );
+    findConnection.mockResolvedValue(undefined);
+    stopConnection.mockReturnValue(running);
+
+    const response = await disconnect();
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ disconnected: running });
+    expect(findConnection).toHaveBeenCalledWith(joined);
+    expect(stopConnection).toHaveBeenCalledWith(joined);
+  },
+);
+
+it('stops a connection whose record was already gone', async () => {
+  removeConnection.mockResolvedValue(false);
+  stopConnection.mockReturnValue(true);
+
+  const response = await disconnect();
+
+  expect(response.status).toBe(200);
+  expect(response.body).toEqual({ disconnected: true });
+  expect(stopConnection).toHaveBeenCalledWith(joined);
 });
 
 it('refuses to pull in a remote that speaks the v1 Host protocol', async () => {

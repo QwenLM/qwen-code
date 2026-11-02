@@ -251,6 +251,10 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
     'That is not a join link. It looks like https://host:4170/join/<workspace>.',
   'collab.runtime.joinConnected': (v) =>
     `This computer joined ${v?.server} as a runtime.`,
+  'collab.runtime.notSavedHere': (v) =>
+    `This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload${v?.error ? `: ${v.error}` : '.'}`,
+  'collab.runtime.notSavedThere': (v) =>
+    `That computer connected, but could not save the connection, so it will not reconnect after a restart or a workspace reload${v?.error ? `: ${v.error}` : '.'}`,
   'collab.runtime.joinCli': 'Or from a terminal on this computer:',
 };
 
@@ -474,5 +478,9 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
     '这不是加入链接，格式应为 https://host:4170/join/<workspace>。',
   'collab.runtime.joinConnected': (v) =>
     `这台电脑已作为 Runtime 加入 ${v?.server}。`,
+  'collab.runtime.notSavedHere': (v) =>
+    `这台电脑已加入，但没能保存这次连接，重启或重新加载工作区后不会自动重连${v?.error ? `：${v.error}` : '。'}`,
+  'collab.runtime.notSavedThere': (v) =>
+    `那台电脑已连接，但没能保存这次连接，重启或重新加载工作区后不会自动重连${v?.error ? `：${v.error}` : '。'}`,
   'collab.runtime.joinCli': '也可以在这台电脑的终端里运行：',
 };

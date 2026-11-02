@@ -13,6 +13,7 @@ import { createWorkspaceGenerationGuard } from './workspace-registry.js';
 import {
   type AgentHostRestoreRuntime,
   agentHostConnectionsPath,
+  findAgentHostConnection,
   readAgentHostConnections,
   removeAgentHostConnection,
   restoreAgentHostConnections,
@@ -70,6 +71,23 @@ it('saves one record per connection, privately, and removes it', async () => {
   expect(await readAgentHostConnections()).toEqual([
     { ...record, workspaceId: 'ws_2' },
   ]);
+});
+
+it('finds a saved connection by its key, reading an unreadable file as none', async () => {
+  expect(await findAgentHostConnection(record)).toBeUndefined();
+  await saveAgentHostConnection(record);
+  // The key leaves `allowHttp` out, as the restore loop's match does.
+  const overHttp = { ...record, allowHttp: true };
+  expect(await findAgentHostConnection(overHttp)).toEqual(record);
+  for (const other of [
+    { ...record, workspaceId: 'ws_2' },
+    { ...record, workspaceCwd: '/other' },
+    { ...record, serverUrl: 'https://elsewhere.example' },
+  ]) {
+    expect(await findAgentHostConnection(other)).toBeUndefined();
+  }
+  await fs.writeFile(agentHostConnectionsPath(), '{not json');
+  expect(await findAgentHostConnection(record)).toBeUndefined();
 });
 
 function runtime(workspaceCwd: string) {

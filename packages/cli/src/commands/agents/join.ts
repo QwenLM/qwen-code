@@ -8,7 +8,8 @@
  * `qwen agents join <link>`: make the running local `qwen serve` join a
  * coordinator as an Agent Host, without restarting it. It calls the daemon's
  * own `POST /workspaces/<cwd>/agent/hosts/connect`; the daemon enrolls,
- * remembers the connection and reconnects after restarts.
+ * remembers the connection and reconnects after restarts. When it cannot
+ * save the connection it still joins, and this says it will not reconnect.
  */
 
 import type { CommandModule } from 'yargs';
@@ -193,6 +194,8 @@ export async function runAgentsJoin(
   const result = (await response.json().catch(() => ({}))) as {
     error?: string;
     connected?: boolean;
+    saved?: boolean;
+    saveError?: string;
     providers?: string[];
   };
   if (!response.ok || !result.connected) {
@@ -211,13 +214,21 @@ export async function runAgentsJoin(
     }
     return 1;
   }
+  // An older daemon does not send `saved`; it always claimed the save.
+  const saved = result.saved !== false;
   deps.out(
     `Joined ${target.serverUrl} as a runtime for workspace ${target.workspaceId}${
       result.providers?.length
         ? ` (programs: ${result.providers.join(', ')})`
         : ''
-    }. The daemon reconnects after restarts.`,
+    }.${saved ? ' The daemon reconnects after restarts.' : ''}`,
   );
+  // Still a successful join: the token is spent, so rerunning with it fails.
+  if (!saved) {
+    deps.err(
+      `Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: ${result.saveError || 'no detail'}`,
+    );
+  }
   return 0;
 }
 
