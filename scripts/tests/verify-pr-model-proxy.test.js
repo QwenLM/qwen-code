@@ -71,9 +71,9 @@ async function startUpstream({
   delayMs = 0,
   chunkDelayMs = 0,
   resetAfterFirstChunk = false,
-  resetDelayMs = 50,
   respectBackpressure = false,
   gzipBody = false,
+  headersOnly = false,
 } = {}) {
   const requests = [];
   const events = [];
@@ -106,11 +106,18 @@ async function startUpstream({
           ),
         });
         events.push('write-head');
+        requests.at(-1).sentContentEncoding = 'gzip';
         res.end(gzipSync(Buffer.from(chunks.join(''))));
         return;
       }
       res.writeHead(status, { 'content-type': 'text/event-stream' });
       events.push('write-head');
+      if (headersOnly) {
+        // Flush so the proxy's fetch resolves on headers; the test is the
+        // first-body idle window, not the pre-header one.
+        res.flushHeaders();
+        return;
+      }
       for (const [index, chunk] of chunks.entries()) {
         if (chunkDelayMs) await sleep(chunkDelayMs);
         if (res.destroyed) {
@@ -124,9 +131,11 @@ async function startUpstream({
           await once(res, 'drain');
         }
         if (resetAfterFirstChunk && index === 0) {
-          await sleep(resetDelayMs);
+          // Register on the socket, not unconditionally: the test asserts
+          // the upstream really reset after headers.
+          res.on('close', () => events.push('upstream-reset'));
+          await sleep(50);
           res.destroy();
-          events.push('upstream-reset');
           return;
         }
       }
@@ -137,9 +146,9 @@ async function startUpstream({
   return { port, requests, events };
 }
 
-async function startProxy(upstream, overrides = {}) {
+async function startProxy(upstream, overrides = {}, basePath = '/v1') {
   const server = createModelProxy({
-    baseUrl: `http://127.0.0.1:${upstream.port}/v1`,
+    baseUrl: `http://127.0.0.1:${upstream.port}${basePath}`,
     apiKey: REAL_KEY,
     token: TOKEN,
     nonce: NONCE,
@@ -195,6 +204,13 @@ describe('verify-pr-model-proxy', () => {
     // /v1/admin/chat/completions.
     const admin = await fetch(`${proxy}/admin/chat/completions`, chatRequest());
     expect(admin.status).toBe(403);
+    // The method half matters on its own: a PUT to the allowed path would
+    // otherwise spend the real key upstream.
+    const put = await fetch(`${proxy}/chat/completions`, {
+      ...chatRequest(),
+      method: 'PUT',
+    });
+    expect(put.status).toBe(403);
     expect(upstream.requests).toHaveLength(0);
   });
 
@@ -226,6 +242,17 @@ describe('verify-pr-model-proxy', () => {
     expect(upstream.requests[0].url).toBe('/v1/chat/completions');
   });
 
+  it('matches the exact path even without a base-path prefix', async () => {
+    const upstream = await startUpstream();
+    const proxy = await startProxy(upstream, {}, '');
+    const admin = await fetch(`${proxy}/admin/chat/completions`, chatRequest());
+    expect(admin.status).toBe(403);
+    expect(upstream.requests).toHaveLength(0);
+    const ok = await fetch(`${proxy}/chat/completions`, chatRequest());
+    expect(ok.status).toBe(200);
+    expect(upstream.requests[0].url).toBe('/chat/completions');
+  });
+
   it('strips the upstream content-encoding instead of forwarding it', async () => {
     const upstream = await startUpstream({
       gzipBody: true,
@@ -234,6 +261,10 @@ describe('verify-pr-model-proxy', () => {
     const proxy = await startProxy(upstream);
     const res = await fetch(`${proxy}/chat/completions`, chatRequest());
     expect(res.status).toBe(200);
+    // The fixture must really have compressed; otherwise this test would
+    // pass against an uncompressed upstream and pin nothing.
+    expect(upstream.requests[0].sentContentEncoding).toBe('gzip');
+    expect(res.headers.get('content-type')).toBe('text/event-stream');
     // undici already decoded the body; forwarding the header would make the
     // client gunzip plain text.
     expect(res.headers.get('content-encoding')).toBeNull();
@@ -278,6 +309,9 @@ describe('verify-pr-model-proxy', () => {
     expect(seen.headers.expect).toBeUndefined();
     expect(seen.headers['x-client-hop']).toBeUndefined();
     expect(seen.headers.connection).not.toBe('x-client-hop');
+    // Passthrough in the positive direction: the relay must keep the
+    // request's content type, not only drop the hop-by-hop names.
+    expect(seen.headers['content-type']).toBe('application/json');
   });
 
   it('propagates an upstream error status and body', async () => {
@@ -299,6 +333,28 @@ describe('verify-pr-model-proxy', () => {
     const proxy = await startProxy({ port }, { idleTimeoutMs: 50 });
     const res = await fetch(`${proxy}/chat/completions`, chatRequest());
     expect(res.status).toBe(504);
+  });
+
+  it('answers 502 and stays alive when the upstream is unreachable', async () => {
+    const proxy = await startProxy({ port: 9 }, {}, '');
+    // Point at a closed port: port 9 is the discard service and is not
+    // listening in this environment, so fetch rejects with ECONNREFUSED.
+    const res = await fetch(`${proxy}/chat/completions`, chatRequest());
+    expect(res.status).toBe(502);
+    const health = await fetch(`${proxy}/__health`);
+    expect(health.status).toBe(200);
+  });
+
+  it('aborts when headers arrive but no body follows', async () => {
+    const upstream = await startUpstream({ headersOnly: true });
+    const proxy = await startProxy(upstream, { idleTimeoutMs: 100 });
+    // The upstream flushes headers, then stalls: the first-body idle window
+    // must tear the stream down instead of letting it hang.
+    await expect(
+      fetch(`${proxy}/chat/completions`, chatRequest()),
+    ).rejects.toThrow();
+    const health = await fetch(`${proxy}/__health`);
+    expect(health.status).toBe(200);
   });
 
   it('refuses to start without the full configuration', () => {
@@ -339,6 +395,35 @@ describe('verify-pr-model-proxy', () => {
     expect(upstream.events).not.toContain('write-head');
   });
 
+  it('aborts the upstream when the client disconnects after headers', async () => {
+    const upstream = await startUpstream({
+      chunks: ['data: first\n\n', 'data: second\n\n', 'data: third\n\n'],
+      chunkDelayMs: 100,
+    });
+    const proxy = await startProxy(upstream, { idleTimeoutMs: 5000 });
+    const { port } = new URL(proxy);
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port,
+        path: '/chat/completions',
+        method: 'POST',
+        headers: { authorization: `Bearer ${TOKEN}` },
+      },
+      (res) => {
+        res.once('data', () => {
+          res.destroy();
+          req.destroy();
+        });
+        res.on('error', () => {});
+      },
+    );
+    req.on('error', () => {});
+    req.end('{}');
+    await waitFor(() => upstream.events.includes('aborted-mid-body'), 3000);
+    expect(upstream.events).toContain('aborted-mid-body');
+  });
+
   it('does not abort a healthy stream while the downstream is paused', async () => {
     const chunks = Array.from(
       { length: 128 },
@@ -374,7 +459,7 @@ describe('verify-pr-model-proxy', () => {
       req.on('error', reject);
       req.end('{}');
     });
-    expect(body).toContain('TAIL-MARKER');
+    expect(body).toBe(chunks.join(''));
   });
 
   it('keeps a slow-but-healthy stream alive past the window', async () => {
@@ -422,14 +507,19 @@ describe('verify-pr-model-proxy', () => {
       );
     });
     const info = JSON.parse(line);
-    await fetch(`http://127.0.0.1:${info.port}/chat/completions`, {
+    // The CLI-generated token is the container's only credential.
+    expect(info.token).toMatch(/^[0-9a-f]{48}$/);
+    const res = await fetch(`http://127.0.0.1:${info.port}/chat/completions`, {
       method: 'POST',
       headers: { authorization: `Bearer ${info.token}` },
       body: '{}',
-    }).catch(() => {});
+    }).catch(() => null);
+    if (res) await res.text().catch(() => {});
+    await waitFor(() => upstream.events.includes('upstream-reset'), 2000);
     await sleep(200);
     // The client may see a torn stream; the proxy process must not die on it.
     expect(child.exitCode).toBeNull();
+    expect(upstream.events).toContain('upstream-reset');
     const health = await fetch(`http://127.0.0.1:${info.port}/__health`);
     expect(health.status).toBe(200);
   });
@@ -465,22 +555,22 @@ describe('proxy defaults and base url formatting', () => {
 
 describe('parseArgs', () => {
   it('defaults to loopback with an ephemeral port', () => {
-    expect(parseArgs([])).toEqual({ listen: '127.0.0.1', port: 0 });
+    expect(parseArgs([])).toEqual({ listen: '127.0.0.1' });
   });
 
-  it('parses --listen and --port', () => {
-    expect(parseArgs(['--listen', '172.17.0.1', '--port', '8080'])).toEqual({
+  it('parses --listen', () => {
+    expect(parseArgs(['--listen', '172.17.0.1'])).toEqual({
       listen: '172.17.0.1',
-      port: 8080,
     });
   });
 
-  it('rejects unknown arguments, missing values and bad ports', () => {
+  it('rejects --port, which the recipe does not use', () => {
+    expect(() => parseArgs(['--port', '8080'])).toThrow('unknown argument');
+  });
+
+  it('rejects unknown arguments and missing values', () => {
     expect(() => parseArgs(['--docker'])).toThrow('unknown argument');
     expect(() => parseArgs(['--listen'])).toThrow('requires a value');
-    expect(() => parseArgs(['--port', 'abc'])).toThrow('--port');
-    expect(() => parseArgs(['--port', '70000'])).toThrow('--port');
-    expect(() => parseArgs(['--port', '-1'])).toThrow('--port');
   });
 });
 
@@ -559,6 +649,10 @@ describe('local container recipe pins', () => {
     expect(skill).toContain(
       'node <trusted-clone>/scripts/verify-pr-model-proxy.mjs',
     );
+    expect(skill).toContain('<trusted-clone>/scripts/verify-pr-guard.mjs');
+    expect(skill).toContain(
+      '`<clone>` below is the trusted checkout the watch scripts run from',
+    );
     // Enumerate the checker call sites: the preamble also names the trusted
     // path, so a single positive assertion cannot detect step 7 reverting to
     // <pr-clone>/scripts.
@@ -568,38 +662,54 @@ describe('local container recipe pins', () => {
     expect(checkerCalls.length).toBeGreaterThanOrEqual(3);
     for (const prefix of checkerCalls) expect(prefix).toBe('<trusted-clone>');
     expect(skill).not.toMatch(
-      /node <pr-clone>\/scripts\/verify-pr-(prepare|check|model-proxy)/,
+      /node <pr-clone>\/scripts\/verify-pr-(prepare|check|model-proxy|guard)/,
     );
     expect(skill).not.toMatch(
-      /node scripts\/verify-pr-(prepare|check|model-proxy)\.mjs/,
+      /node scripts\/verify-pr-(prepare|check|model-proxy|guard)\.mjs/,
     );
   });
 
-  it('base-pins the round instructions and mounts them read-only', () => {
+  it('base-pins `.qwen` and states that root AGENTS/QWEN.md still come from the PR', () => {
     expect(skill).toContain('git -C <pr-clone> archive "$BASE_OID" -- .qwen');
     expect(skill).toContain(
       '-v ~/.cache/qwen-verify/pr<n>/qwen-base/.qwen:/work/.qwen:ro',
     );
+    expect(skill).toContain('`AGENTS.md`/`QWEN.md` do come from the PR clone');
   });
 
   it('mounts the round tree writable and the metadata snapshot read-only', () => {
+    expect(skill).toContain('--user "$(id -u):$(id -g)"');
     expect(skill).toContain('-v <pr-clone>:/work');
     expect(skill).toContain('-v <trusted-clone>/scripts:/trusted-scripts:ro');
     expect(skill).toContain('-v ~/.cache/qwen-verify/pr<n>:/verify-context:ro');
     expect(skill).toContain('QWEN_VERIFY_CONTEXT=/verify-context/pr.json');
   });
 
-  it('reads both credentials instead of putting them on a command line', () => {
-    expect(skill).toContain("read -rsp 'REVIEW_OPENAI_API_KEY: '");
+  it('reads both credentials from files, including without a TTY', () => {
+    expect(skill).toContain('if [ -t 0 ]; then');
+    expect(skill).toContain('REVIEW_OPENAI_KEY_FILE');
     expect(skill).not.toContain('REVIEW_OPENAI_API_KEY=<real-key>');
+    // The proxy owns its copy: later diagnostics must not see the key.
+    expect(skill).toContain('unset REVIEW_OPENAI_API_KEY');
     expect(skill).toContain('QWEN_VERIFY_PROXY_TOKEN="$(node -e');
     expect(skill).toContain('chmod 600');
     // The background process truncates proxy.json before printing; the loop
     // and the non-empty check keep an empty read from reaching Docker.
-    expect(skill).toContain('for _ in $(seq 1 100); do');
+    expect(skill).toContain('for _ in {1..100}; do');
+    expect(skill).not.toContain('$(seq 1 100)');
     expect(skill).toContain('test -n "$QWEN_VERIFY_PROXY_TOKEN"');
+    // The nonce, not just the JSON shape, is checked before use.
+    expect(skill).toContain('/__health');
+    expect(skill).toContain('fetch(`http://${u.hostname}:${u.port}/__health`)');
+    expect(skill).toContain('process.exit(t===j.nonce?0:1)');
+    // Each step is its own shell: the token is re-derived where it is used.
+    const dockerRun =
+      skill.match(/export QWEN_VERIFY_PROXY_TOKEN[\s\S]*?```/)?.[0] ?? '';
+    expect(dockerRun).toContain('proxy.json');
+    expect(dockerRun).toContain('test -n "$QWEN_VERIFY_PROXY_TOKEN"');
     expect(skill).toMatch(/-e QWEN_VERIFY_PROXY_TOKEN[ \t]*\\?\n/);
     expect(skill).not.toContain('-e QWEN_VERIFY_PROXY_TOKEN=<token>');
+    expect(skill).not.toContain('--port');
   });
 
   it('keeps the attestation off the docker run line and on the round shell', () => {
@@ -613,7 +723,10 @@ describe('local container recipe pins', () => {
     );
     const roundBlock = skill.split('qwen --auth-type openai')[0].split('```');
     expect(roundBlock.at(-1)).toContain('QWEN_VERIFY_CREDENTIAL_FREE');
-    expect(skill).toContain('verify-pr-credential-scan.mjs /work');
+    // The credential hit aborts structurally, not via `set -e`.
+    expect(skill).toContain(
+      'node /trusted-scripts/verify-pr-credential-scan.mjs /work || exit 1',
+    );
   });
 
   it('names the released CLI as the engine and gives the tree-build route', () => {
@@ -626,7 +739,12 @@ describe('local container recipe pins', () => {
     expect(skill).toMatch(/nested\s+git repository outright/);
   });
 
-  it('pins the checker head from the host snapshot', () => {
-    expect(skill).toContain('--context ~/.cache/qwen-verify/pr<n>/pr.json');
+  it('snapshots the previous report and pins both checker call sites', () => {
+    expect(skill).toContain('previous-report.md');
+    expect(skill).toContain('issues/<n>/comments');
+    const contextCalls = [
+      ...skill.matchAll(/verify-pr-check\.mjs --context <host snapshot>/g),
+    ];
+    expect(contextCalls.length).toBeGreaterThanOrEqual(2);
   });
 });

@@ -160,10 +160,11 @@ creates `tmp/pr<n>-verify-<ts>/` with a `context.json` holding `repo`, `pr`,
 `baseRefOid` and `headRefOid`, and reports the isolation signals it can see.
 It does not gate on them — resolving metadata
 needs `gh`, which the boundary excludes, so this path always runs on the host.
-The boundary check belongs inside: run
-`node /trusted-scripts/verify-pr-prepare.mjs --require-isolation` (the trusted
-copy mounted read-only) as the round's first
-command there, and treat exit 4 as "this is not a boundary". A container
+The boundary check belongs inside: run the trusted copy of the preflight with
+`--require-isolation` as the round's first command there, and treat exit 4 as
+"this is not a boundary". The Docker recipe below mounts that copy at
+`/trusted-scripts/verify-pr-prepare.mjs`; a VM boundary runs the same file
+from the trusted checkout instead. A container
 marker alone does not pass: the CLI's own Docker/Podman launcher mounts
 `~/.config/gcloud`, the ADC file and every model API key it can see, so the
 check also requires `QWEN_VERIFY_CREDENTIAL_FREE=1` — set it only after
@@ -226,10 +227,10 @@ Two checkouts are involved, and they are not interchangeable:
   this tree as its cwd and refuses any other HEAD.
 
 Never execute a script from `<pr-clone>`: the proxy, the prepare preflight,
-the credential scan, the isolation gate and the checker all come from
-`<trusted-clone>`. A PR can rewrite a script in its own tree, and these steps
-run with the real key, the maintainer's `gh` access, or the authority to
-certify the round.
+the credential scan, the isolation gate, the publish guard and the checker all
+come from `<trusted-clone>`. A PR can rewrite a script in its own tree, and
+these steps run with the real key, the maintainer's `gh` access, or the
+authority to certify the round.
 
 1. **Prepare from the trusted copy with the PR clone as its cwd**, then copy
    the full snapshot out of the tree and base-pin `.qwen`:
@@ -238,6 +239,9 @@ certify the round.
    cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>
    mkdir -p ~/.cache/qwen-verify/pr<n>/qwen-base
    cp <pr-clone>/tmp/verify-context/pr<n>.json ~/.cache/qwen-verify/pr<n>/pr.json
+   gh api "repos/<owner>/<repo>/issues/<n>/comments" --paginate --slurp \
+     --jq 'flatten | map(select(.body | test("Verdict:"))) | last | .body // empty' \
+     > ~/.cache/qwen-verify/pr<n>/previous-report.md
    BASE_OID="$(node -e 'const fs=require("node:fs"); console.log(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).baseRefOid)' ~/.cache/qwen-verify/pr<n>/pr.json)"
    git -C <pr-clone> archive "$BASE_OID" -- .qwen \
      | tar -x -C ~/.cache/qwen-verify/pr<n>/qwen-base
@@ -247,30 +251,46 @@ certify the round.
    `cwd=<pr-clone>` and still verifies that this tree is the PR head. The
    artifact directory's `context.json` carries only the four coordinates; the
    round reads the full gh snapshot (title, body, author, commits) from
-   `$QWEN_VERIFY_CONTEXT`. The host copy is also what pins the expected head
-   after the round, because PR code can rewrite anything inside `<pr-clone>`.
+   `$QWEN_VERIFY_CONTEXT`, and the newest substantive verify comment lands
+   beside it as `previous-report.md` so a follow-up round keeps its
+   carried-forward findings. The host copy is also what pins the expected
+   head after the round, because PR code can rewrite anything inside
+   `<pr-clone>` — including `.git/config`. After a round the clone is
+   PR-controlled: re-clone before another round instead of trusting it
+   again, and note that prepare's host-side git commands disable
+   `core.fsmonitor`, hooks and credential helpers.
    Mounting the base commit's `.qwen` over the tree (step 3) keeps the
    round's instructions and project settings out of PR control, as the CI
-   lane's base-pin does.
+   lane's base-pin does; the root `AGENTS.md`/`QWEN.md` are not covered and
+   still come from the PR clone.
 
 2. **Start the proxy from the trusted checkout, in the background**, with the
    key read rather than typed onto the command line (a literal assignment
-   lands in shell history):
+   lands in shell history). An interactive shell may prompt; an agent's shell
+   has no TTY, so the key comes from `REVIEW_OPENAI_KEY_FILE` (default
+   `~/.config/qwen-verify/review-openai-key`, mode 600):
 
    ```bash
-   read -rsp 'REVIEW_OPENAI_API_KEY: ' REVIEW_OPENAI_API_KEY; echo
+   if [ -t 0 ]; then
+     read -rsp 'REVIEW_OPENAI_API_KEY: ' REVIEW_OPENAI_API_KEY; echo
+   else
+     IFS= read -r REVIEW_OPENAI_API_KEY \
+       < "${REVIEW_OPENAI_KEY_FILE:-$HOME/.config/qwen-verify/review-openai-key}" ||
+       { echo "REVIEW_OPENAI_API_KEY is unset and no key file was readable; set the file named by REVIEW_OPENAI_KEY_FILE" >&2; exit 1; }
+   fi
    export REVIEW_OPENAI_API_KEY
    REVIEW_OPENAI_BASE_URL=<upstream-url> \
      node <trusted-clone>/scripts/verify-pr-model-proxy.mjs \
        --listen <bridge-ip> > ~/.cache/qwen-verify/pr<n>/proxy.json 2>&1 &
    echo $! > ~/.cache/qwen-verify/pr<n>/proxy.pid
-   for _ in $(seq 1 100); do
+   unset REVIEW_OPENAI_API_KEY
+   for _ in {1..100}; do
      node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); if (!j.token) process.exit(1)' ~/.cache/qwen-verify/pr<n>/proxy.json 2>/dev/null && break
      sleep 0.1
    done
    chmod 600 ~/.cache/qwen-verify/pr<n>/proxy.json
-   export QWEN_VERIFY_PROXY_TOKEN="$(node -e 'const fs=require("node:fs"); console.log(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).token)' ~/.cache/qwen-verify/pr<n>/proxy.json)"
-   test -n "$QWEN_VERIFY_PROXY_TOKEN" || { echo "proxy did not become ready"; exit 1; }
+   node -e 'const fs=require("node:fs"); const j=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); const u=new URL(j.baseUrl); fetch(`http://${u.hostname}:${u.port}/__health`).then(r=>r.text()).then(t=>process.exit(t===j.nonce?0:1)).catch(()=>process.exit(1))' ~/.cache/qwen-verify/pr<n>/proxy.json ||
+     { echo "proxy health check failed"; exit 1; }
    ```
 
    Bind the Docker bridge address, not `127.0.0.1` — a container cannot reach
@@ -278,14 +298,18 @@ certify the round.
    to every container on the bridge. Keep the proxy running for the whole
    round and stop it at the end — it holds the real key. The background
    process truncates `proxy.json` before it prints, so the loop waits for a
-   complete line with a token, and the `test -n` catches a read that `export`
-   would otherwise hide. The token is read from the file into the environment,
-   never typed; Docker copies it with the bare `-e` below.
+   complete line with a token; the nonce is checked at the origin because the
+   printed `baseUrl` carries the upstream path prefix. The key is unset as
+   soon as the proxy owns its copy, so later diagnostics cannot leak it, and
+   the token stays in the file rather than this shell.
 
 3. **Start the boundary as a named, detached container** so every later step
-   can be issued without a TTY:
+   can be issued without a TTY. Each step is its own shell: the token is
+   re-derived from `proxy.json` here, not inherited from step 2.
 
    ```bash
+   export QWEN_VERIFY_PROXY_TOKEN="$(node -e 'const fs=require("node:fs"); console.log(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).token)' ~/.cache/qwen-verify/pr<n>/proxy.json)"
+   test -n "$QWEN_VERIFY_PROXY_TOKEN" || { echo "proxy.json has no token" >&2; exit 1; }
    docker run -d --rm --name qwen-verify-<n> \
      --user "$(id -u):$(id -g)" -e HOME=/tmp/qwen-home \
      -v <pr-clone>:/work \
@@ -333,24 +357,27 @@ certify the round.
 
    ```bash
    docker exec -i qwen-verify-<n> bash -lc '
-     set -e
-     node /trusted-scripts/verify-pr-credential-scan.mjs /work
+     node /trusted-scripts/verify-pr-credential-scan.mjs /work || exit 1
      export QWEN_VERIFY_CREDENTIAL_FREE=1
      node /trusted-scripts/verify-pr-prepare.mjs --require-isolation
    '
    ```
 
-   The scan names credential-shaped ignored files (nested ones included),
-   leaves installed dependencies and build output alone, and refuses a nested
-   git repository outright: git does not descend into it, so a credential
-   file inside one would otherwise pass silently. Exit 4 means this is not a
-   boundary: stop and run nothing else.
+   The scan names credential-shaped ignored files (nested ones included) and
+   credential-bearing remote URLs, leaves installed dependencies and build
+   output alone, and refuses a nested git repository outright: git does not
+   descend into it, so a credential file inside one would otherwise pass
+   silently. The abort is structural (`|| exit 1`), not a side effect of
+   `set -e`. Exit 4 means this is not a boundary: stop and run nothing else.
 
 6. **Run the round inside**, installing the CLI into the fresh home because
    the container is not root. Each `docker exec` is a new shell, so the
    attestation is passed to the shell that starts the round; it stays off the
-   `docker run` line. The round's engine is the released CLI; the PR clone
-   supplies the workspace skill and code:
+   `docker run` line. The round's engine is the released CLI, and the PR
+   clone supplies the code under test; the round's instructions come from the
+   base commit's `.qwen` mounted in step 3, not from the PR. Root
+   `AGENTS.md`/`QWEN.md` do come from the PR clone — when the diff touches
+   them, treat the round's context as PR-influenced:
 
    ```bash
    docker exec -i -e QWEN_VERIFY_CREDENTIAL_FREE=1 qwen-verify-<n> bash -lc '
@@ -380,6 +407,7 @@ certify the round.
    docker rm -f qwen-verify-<n>
    kill "$(cat ~/.cache/qwen-verify/pr<n>/proxy.pid)"
    rm -f ~/.cache/qwen-verify/pr<n>/proxy.json ~/.cache/qwen-verify/pr<n>/proxy.pid
+   unset QWEN_VERIFY_PROXY_TOKEN
    ```
 
    `<round-dir>` is `<pr-clone>/tmp/pr<n>-verify-<ts>`. Publishing still
@@ -399,6 +427,9 @@ it through `scripts/verify-pr-watch-gate.mjs` instead of calling the probe
 directly: the probe also reports comments and failed checks, and every
 non-empty gate output starts a turn whether or not the head moved. The wrapper
 forwards only `action: "resync"` (a moved head) and `action: "stop"`.
+
+`<clone>` below is the trusted checkout the watch scripts run from; its main
+worktree holds the probe cursor under `.qwen/tmp/`.
 
 Build the task in this order and stop at the first failure:
 
@@ -632,8 +663,9 @@ GitHub rewrites the six-character escape text for NUL and SOH (a backslash,
 `u`, then `0000` or `0001`) into a caret form, inside code spans and fences
 too.
 
-**Run both halves of that guard through `scripts/verify-pr-guard.mjs`, because
-the hand-run version fails open.** `--pr <n> --repo <owner>/<repo> --snapshot
+**Run both halves of that guard through
+`<trusted-clone>/scripts/verify-pr-guard.mjs`, because the hand-run version
+fails open.** `--pr <n> --repo <owner>/<repo> --snapshot
 <file>` at round start and again before posting, then `--compare --start <a>
 --now <b>`; it exits 1 on anything dirty. A fetch that errors returns no items,
 so "is anything new?" answers "no" and a hand-rolled comparison reads clean —

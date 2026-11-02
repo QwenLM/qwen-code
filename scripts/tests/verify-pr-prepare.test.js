@@ -20,9 +20,11 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  GIT_HARDENING,
   artifactDirName,
   detectCredentialSignals,
   detectIsolation,
+  gitStatusArgs,
   parseArgs,
   parseRepo,
   validateContext,
@@ -213,6 +215,36 @@ describe('detectCredentialSignals', () => {
         '/home/t',
       ),
     ).toEqual(['SANDBOX_MOUNTS']);
+    // The recipe's proxy credential must stay outside the signal set, or a
+    // container round would fail the gate before it starts.
+    expect(
+      detectCredentialSignals(
+        { QWEN_VERIFY_PROXY_TOKEN: 'x' },
+        () => false,
+        '/home/t',
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe('git hardening', () => {
+  it('disables fsmonitor, hooks and credential helpers on every git read', () => {
+    expect(GIT_HARDENING).toEqual([
+      '-c',
+      'core.fsmonitor=false',
+      '-c',
+      'core.hooksPath=/dev/null',
+      '-c',
+      'credential.helper=',
+    ]);
+    expect(gitStatusArgs('/clone')).toEqual([
+      ...GIT_HARDENING,
+      '-C',
+      '/clone',
+      'status',
+      '--porcelain',
+      '--untracked-files=normal',
+    ]);
   });
 });
 

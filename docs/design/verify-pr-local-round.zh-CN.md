@@ -25,7 +25,7 @@
 新增三个独立脚本，并让 skill 在流程需要的位置指向它们，而不是放在文末。
 
 - `scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>` 负责解析坐标：用 lane 相同的字段列表抓取快照、校验两个 OID 在本克隆中存在、拒绝不是 PR head 干净检出的树、创建带 `evidence/` 子目录的产物目录，并报告当前进程能观测到的隔离信号。它不据此设闸：解析元数据需要 `gh`，而 `gh` 与边界互斥，因此这条路径总是在宿主上运行。闸门是 `--require-isolation`，用于在边界内、轮次执行任何东西之前运行。
-- `scripts/verify-pr-check.mjs <dir>` 把发布侧的规则套到本地产物目录：必需文件、四个判定词、为正且自洽的断言三元组、以及不允许带失败断言的 `merge-ready`。报告形态与证据命名只作为警告，因为纯文档轮次没有截图，检查器也无法知道是否跑过 harness。
+- `scripts/verify-pr-check.mjs <dir>` 把发布侧的规则套到本地产物目录：必需文件、四个判定词、为正且自洽的断言三元组、以及不允许带失败断言的 `merge-ready`。报告形态与证据命名只作为警告，因为纯文档轮次没有截图，检查器也无法知道是否跑过 harness。带 `--context <snapshot>` 时期望 head 来自该宿主持有的文件，而不是产物里可写的 `context.json`；不可用快照是硬性 exit 1 而非警告：产物目录可被轮次刚执行的 PR 代码写入。
 - `scripts/verify-pr-guard.mjs` 接管发布前守卫的两个半程。`--pr <n> --repo <owner>/<repo> --snapshot <file>` 抓取 head、PR 状态以及三个评论列表（带 `--paginate`），只有每次调用都成功才写文件。`--compare --start <a> --now <b>` 列出本轮 dirty 的全部原因并退出 1。
 
 检查器在产物契约要求轮次写出的产物上新增三条规则。产物契约里三者都要点名：产物清单没要求的文件，轮次就不会产出，而对一个不存在的文件做检查是静默的。

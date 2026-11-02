@@ -272,6 +272,34 @@ function run(command, args) {
   return spawnSync(command, args, { encoding: 'utf8' });
 }
 
+// The tree under inspection is PR-controlled and can persist hostile git
+// config in .git/config: fsmonitor, hooks and clean filters all execute on an
+// ordinary `git status`. On the host these run as the maintainer, outside the
+// boundary, so every git command disables all three before reading the tree.
+export const GIT_HARDENING = [
+  '-c',
+  'core.fsmonitor=false',
+  '-c',
+  'core.hooksPath=/dev/null',
+  '-c',
+  'credential.helper=',
+];
+
+export function gitStatusArgs(root) {
+  return [
+    ...GIT_HARDENING,
+    '-C',
+    root,
+    'status',
+    '--porcelain',
+    '--untracked-files=normal',
+  ];
+}
+
+function runGit(args) {
+  return run('git', [...GIT_HARDENING, ...args]);
+}
+
 function report(lines) {
   process.stdout.write(`${lines.join('\n')}\n`);
 }
@@ -296,7 +324,7 @@ function main(argv) {
   const { owner, name } = parseRepo(options.repo);
   const slug = `${owner}/${name}`;
 
-  const toplevel = run('git', ['rev-parse', '--show-toplevel']);
+  const toplevel = runGit(['rev-parse', '--show-toplevel']);
   if (toplevel.status !== 0) {
     return fail(3, 'not inside a git worktree — run this from the clone');
   }
@@ -338,7 +366,7 @@ function main(argv) {
   ];
   for (const [label, oid, ref] of probes) {
     if (
-      run('git', ['-C', root, 'cat-file', '-e', `${oid}^{commit}`]).status !== 0
+      runGit(['-C', root, 'cat-file', '-e', `${oid}^{commit}`]).status !== 0
     ) {
       return fail(
         3,
@@ -351,7 +379,7 @@ function main(argv) {
   // than the PR head or an uncommitted change would measure code the report
   // does not name. Checked before the artifact directory exists, so a refusal
   // leaves nothing behind.
-  const treeHead = run('git', ['-C', root, 'rev-parse', 'HEAD']);
+  const treeHead = runGit(['-C', root, 'rev-parse', 'HEAD']);
   if (treeHead.status !== 0) {
     return fail(3, 'could not read HEAD in this clone');
   }
@@ -363,13 +391,7 @@ function main(argv) {
   }
   // Explicit mode: a maintainer's status.showUntrackedFiles=no would otherwise
   // hide the untracked files this check exists to refuse.
-  const dirty = run('git', [
-    '-C',
-    root,
-    'status',
-    '--porcelain',
-    '--untracked-files=normal',
-  ]);
+  const dirty = run('git', gitStatusArgs(root));
   if (dirty.status !== 0) {
     const detail = (dirty.stderr || '').trim() || `exit ${dirty.status}`;
     return fail(3, `could not read the working tree status: ${detail}`);
@@ -387,7 +409,7 @@ function main(argv) {
   // git status trusts the index: skip-worktree / assume-unchanged entries
   // (a sparse checkout sets them en masse) hide tracked divergence from it,
   // so refuse anything that is not a plain cached 'H' entry.
-  const flagged = run('git', ['-C', root, 'ls-files', '-v']);
+  const flagged = runGit(['-C', root, 'ls-files', '-v']);
   if (flagged.status !== 0) {
     const detail = (flagged.stderr || '').trim() || `exit ${flagged.status}`;
     return fail(3, `could not read the index flags: ${detail}`);

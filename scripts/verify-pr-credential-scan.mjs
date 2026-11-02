@@ -38,20 +38,27 @@ import { basename } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
 
 const CREDENTIAL_BASENAME =
-  /^(?:\.env(?:\..*)?|.*\.env|.*\.pem|.*\.key|credentials.*|\.npmrc|\.netrc)$/;
+  /^(?:\.env.*|.*\.env|.*\.env~|.*\.pem|.*\.key|.*\.p12|.*\.pfx|id_rsa.*|id_ed25519.*|.*credentials.*|\.git-credentials|\.npmrc|\.netrc|gha-creds-.*\.json)$/;
 
 // Git applies these pathspecs while enumerating, before any output is
 // buffered: a full ignored listing of an installed checkout is several MB and
 // used to overflow spawnSync's buffer before the JS filter could run.
 const CREDENTIAL_PATHSPECS = [
   ':(glob)**/.env',
-  ':(glob)**/.env.*',
+  ':(glob)**/.env*',
   ':(glob)**/*.env',
+  ':(glob)**/*.env~',
   ':(glob)**/*.pem',
   ':(glob)**/*.key',
-  ':(glob)**/credentials*',
+  ':(glob)**/*.p12',
+  ':(glob)**/*.pfx',
+  ':(glob)**/id_rsa*',
+  ':(glob)**/id_ed25519*',
+  ':(glob)**/*credentials*',
+  ':(glob)**/.git-credentials',
   ':(glob)**/.npmrc',
   ':(glob)**/.netrc',
+  ':(glob)**/gha-creds-*.json',
   ':(exclude,glob)**/node_modules/**',
   ':(exclude,glob)**/dist/**',
 ];
@@ -111,6 +118,36 @@ export function nestedGitRepos(root, { maxBuffer = 8 * 1024 * 1024 } = {}) {
 }
 
 /**
+ * Returns local remote names whose URL embeds a credential. A clone made with
+ * `https://x-access-token:<pat>@…` keeps the PAT in `.git/config`, where no
+ * ignored-file listing reaches it and PR code can read it with `git config`.
+ */
+export function credentialBearingRemotes(
+  root,
+  { maxBuffer = 8 * 1024 * 1024 } = {},
+) {
+  const result = spawnSync(
+    'git',
+    ['-C', root, 'config', '--local', '--get-regexp', '^remote\\..*\\.url$'],
+    { encoding: 'utf8', maxBuffer },
+  );
+  // Exit 1 means the pattern matched nothing; anything else is a real failure.
+  if (result.status === 1) return [];
+  if (result.status !== 0) {
+    throw new Error(
+      `could not read local remotes: ${(result.stderr || '').trim() || 'git failed'}`,
+    );
+  }
+  const hits = [];
+  for (const line of result.stdout.split('\n')) {
+    if (!line) continue;
+    const [key, ...rest] = line.split(' ');
+    if (/\/\/[^/@\s]+:[^/@\s]+@/.test(rest.join(' '))) hits.push(key);
+  }
+  return hits;
+}
+
+/**
  * Returns the ignored credential-shaped files under `root`, sorted. An empty
  * array is the clean state; a git failure is thrown so the caller can refuse
  * rather than treat it as clean, and a nested repository is refused because a
@@ -124,6 +161,12 @@ export function scanIgnoredCredentials(
   if (nested.length > 0) {
     throw new Error(
       `nested git repository under ${nested[0]} — scan that clone separately or remove it`,
+    );
+  }
+  const remotes = credentialBearingRemotes(root, { maxBuffer });
+  if (remotes.length > 0) {
+    throw new Error(
+      `credential-bearing remote URL in ${remotes[0]} — remove the token from .git/config`,
     );
   }
   const result = spawnSync('git', gitScanArgs(root), {

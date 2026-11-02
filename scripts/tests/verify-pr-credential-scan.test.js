@@ -58,10 +58,15 @@ describe('credential basename matching', () => {
       '.env.local',
       'app.env',
       'secrets/prod.env',
+      '.env~',
       'tls.pem',
       'id.key',
+      'auth.p12',
+      'id_rsa',
       'credentials',
       'credentials.json',
+      '.git-credentials',
+      'gha-creds-123.json',
       '.npmrc',
       '.netrc',
     ]) {
@@ -84,6 +89,11 @@ describe('gitScanArgs', () => {
     const args = gitScanArgs('/repo');
     expect(args).toContain(':(glob)**/.env');
     expect(args).toContain(':(glob)**/*.pem');
+    expect(args).toContain(':(glob)**/*.env~');
+    expect(args).toContain(':(glob)**/*.p12');
+    expect(args).toContain(':(glob)**/id_rsa*');
+    expect(args).toContain(':(glob)**/*credentials*');
+    expect(args).toContain(':(glob)**/gha-creds-*.json');
     // Excludes apply at workspace depth, not only the repository root.
     expect(args).toContain(':(exclude,glob)**/node_modules/**');
     expect(args).toContain(':(exclude,glob)**/dist/**');
@@ -93,25 +103,70 @@ describe('gitScanArgs', () => {
 describe('scanIgnoredCredentials', () => {
   it('reports nested and top-level ignored credential files', () => {
     const dir = makeRepo(
-      ['vault/.env', 'secrets/prod.env', 'tls.pem', '.npmrc', '.netrc'],
       [
-        '.env',
+        'vault/.env',
+        'secrets/prod.env',
+        '.env~',
+        '.env.local',
+        'tls.pem',
+        'secrets/id.key',
+        'auth.p12',
+        'id_rsa',
+        'secrets/credentials.json',
+        '.git-credentials',
+        'gha-creds-123.json',
+        '.npmrc',
+        '.netrc',
+      ],
+      [
+        '.env*',
         '*.env',
         '*.pem',
         '*.key',
-        'credentials*',
+        '*.p12',
+        'id_rsa*',
+        '*credentials*',
         '.npmrc',
         '.netrc',
+        'gha-creds-*.json',
         'vault/',
       ],
     );
     expect(scanIgnoredCredentials(dir)).toEqual([
+      '.env.local',
+      '.env~',
+      '.git-credentials',
       '.netrc',
       '.npmrc',
+      'auth.p12',
+      'gha-creds-123.json',
+      'id_rsa',
+      'secrets/credentials.json',
+      'secrets/id.key',
       'secrets/prod.env',
       'tls.pem',
       'vault/.env',
     ]);
+  });
+
+  it('refuses a remote URL that carries a credential', () => {
+    const dir = makeRepo(['src/app.ts'], ['node_modules/']);
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--local',
+        'remote.origin.url',
+        'https://x-access-token:ghp_secret@github.com/o/r.git',
+      ],
+      { cwd: dir, env: gitEnv },
+    );
+    expect(() => scanIgnoredCredentials(dir)).toThrow(
+      /credential-bearing remote URL/,
+    );
+    const result = run(dir);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('credential-bearing remote URL');
   });
 
   it('does not refuse an installed tree or build output at any depth', () => {

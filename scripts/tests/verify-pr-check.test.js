@@ -825,5 +825,15 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
         encoding: 'utf8',
       }).status,
     ).toBe(2);
+    // A forgotten --context turns the snapshot into a second positional:
+    // refuse instead of silently using the artifact's writable copy.
+    const hostSnapshot = join(tmpdir(), `verify-pr-host-${Date.now()}.json`);
+    tmpDirs.push(hostSnapshot);
+    writeFileSync(hostSnapshot, JSON.stringify({ headRefOid: HEAD }));
+    expect(
+      spawnSync(process.execPath, [SCRIPT, dir, hostSnapshot], {
+        encoding: 'utf8',
+      }).status,
+    ).toBe(2);
   });
 });

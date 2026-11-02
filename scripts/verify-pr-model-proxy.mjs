@@ -26,19 +26,26 @@
  *
  * Usage (from a trusted checkout, never the PR-head tree — this process holds
  * the real key and a PR can rewrite a script in its own checkout):
- *   read -rsp 'REVIEW_OPENAI_API_KEY: ' REVIEW_OPENAI_API_KEY; echo
+ *   if [ -t 0 ]; then
+ *     read -rsp 'REVIEW_OPENAI_API_KEY: ' REVIEW_OPENAI_API_KEY; echo
+ *   else
+ *     IFS= read -r REVIEW_OPENAI_API_KEY \
+ *       < ~/.config/qwen-verify/review-openai-key
+ *   fi
  *   export REVIEW_OPENAI_API_KEY
  *   REVIEW_OPENAI_BASE_URL=<url> \
  *     node <trusted-clone>/scripts/verify-pr-model-proxy.mjs \
- *       [--listen <host>] [--port <n>]
+ *       [--listen <host>]
  *
- * Reading the key instead of typing it as an inline assignment keeps it out
- * of shell history, `set -x` traces, and terminal transcripts.
+ * Reading the key from a terminal when one exists and from a file otherwise
+ * keeps it out of shell history (an inline assignment is recorded) and keeps
+ * an agent-driven run, whose shell has no TTY, from blocking on `read`.
  *
  * Options:
  *   --listen <host>  address to bind (default 127.0.0.1; use the Docker
- *                    bridge address, e.g. 172.17.0.1, for container clients)
- *   --port <n>       port to bind (default 0 = ephemeral)
+ *                    bridge address, e.g. 172.17.0.1, for container clients).
+ *                    The port is always ephemeral: a fixed port is a binding
+ *                    race the CI lane avoids too.
  *
  * Environment:
  *   REVIEW_OPENAI_BASE_URL    upstream base URL, may carry a path prefix
@@ -82,23 +89,15 @@ const STRIPPED_REQUEST_HEADERS = [
 ];
 
 export function parseArgs(argv) {
-  const options = { listen: '127.0.0.1', port: 0 };
+  const options = { listen: '127.0.0.1' };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === '--listen' || arg === '--port') {
+    if (arg === '--listen') {
       const value = argv[++i];
       if (value === undefined) {
-        throw new Error(`${arg} requires a value`);
+        throw new Error('--listen requires a value');
       }
-      if (arg === '--listen') {
-        options.listen = value;
-      } else {
-        const port = Number(value);
-        if (!Number.isInteger(port) || port < 0 || port > 65535) {
-          throw new Error(`--port must be an integer in [0, 65535]: ${value}`);
-        }
-        options.port = port;
-      }
+      options.listen = value;
     } else {
       throw new Error(`unknown argument: ${arg}`);
     }
@@ -309,7 +308,7 @@ async function main(argv) {
   const server = createModelProxy({ baseUrl, apiKey, token, nonce });
   await new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(options.port, options.listen, resolve);
+    server.listen(0, options.listen, resolve);
   });
   const { port } = server.address();
   const localBaseUrl = formatLocalBaseUrl(
