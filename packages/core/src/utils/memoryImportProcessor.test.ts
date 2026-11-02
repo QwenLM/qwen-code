@@ -231,7 +231,7 @@ ${body}
         BASE,
       );
       expect(result.content).toContain(
-        '<!-- Import failed: /absolute/path/file.md - Path traversal attempt -->',
+        '<!-- Import failed: /absolute/path/file.md - Path is outside allowed directories -->',
       );
     });
 
@@ -332,7 +332,7 @@ Imported 2
     it('should reject imports outside project root', async () => {
       const result = await inProject('Outside import: @../../../etc/passwd');
       expect(result.content).toContain(
-        '<!-- Import failed: ../../../etc/passwd - Path traversal attempt -->',
+        '<!-- Import failed: ../../../etc/passwd - Path is outside allowed directories -->',
       );
     });
 
@@ -637,7 +637,7 @@ Inner content
       }
     }
 
-    it('should reject paths that escape allowed directories through symbolic links', (ctx) => {
+    it('should reject paths that escape allowed directories through symbolic links', async (ctx) => {
       const fixture = makeSymlinkFixture();
       try {
         if (
@@ -661,6 +661,16 @@ Inner content
             fixture.allowedDir,
           ]),
         ).toBe(false);
+        const { content } = await processImports(
+          '@sym_outside/sensitive.md',
+          fixture.allowedDir,
+          undefined,
+          fixture.allowedDir,
+        );
+        expect(content).toBe(
+          '<!-- Import failed: sym_outside/sensitive.md - Path is outside allowed directories -->',
+        );
+        expect(mockedFs.readFile).not.toHaveBeenCalled();
       } finally {
         fixture.dispose();
       }

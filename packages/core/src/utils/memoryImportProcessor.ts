@@ -398,7 +398,7 @@ export async function processImports(
     }
     // Validate import path to prevent path traversal attacks
     if (!validateImportPath(importPath, basePath, [projectRoot || ''])) {
-      result += `<!-- Import failed: ${importPath} - Path traversal attempt -->`;
+      result += `<!-- Import failed: ${importPath} - Path is outside allowed directories -->`;
       continue;
     }
     const fullPath = path.resolve(basePath, importPath);
@@ -483,9 +483,8 @@ export function validateImportPath(
     return true;
   }
 
-  // Flat mode drops a rejected import without a trace and tree mode labels it a
-  // traversal attempt even when it is a benign link out of the root, so name
-  // both canonical values here to keep the cause diagnosable in either format.
+  // Keep both canonical values in the debug log so a rejected symlink can be
+  // diagnosed without treating an out-of-root target as evidence of an attack.
   logger.warn(
     `Import rejected: ${importPath} -> ${resolvedPath} is outside ${canonicalAllowed.join(', ')}`,
   );

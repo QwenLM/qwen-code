@@ -706,7 +706,7 @@ describe('realpathNearestExisting', () => {
 
   itPosix(
     'applies .. to the expanded intermediate symlink, as the kernel does',
-    () => {
+    async () => {
       // `sub/..` must follow `sub` first: lexically it looks like the link's
       // own directory, but the read lands next to the link's target instead.
       fs.mkdirSync(at('deep', 'inner'), { recursive: true });
@@ -716,6 +716,9 @@ describe('realpathNearestExisting', () => {
       const kernelPath = fs.realpathSync.native(note);
       expect(kernelPath).toBe(at('deep', 'secret.md'));
       expect(realpathNearestExisting(note)).toBe(kernelPath);
+      await expect(realpathNearestExistingAsync(note)).resolves.toBe(
+        kernelPath,
+      );
     },
   );
 });
