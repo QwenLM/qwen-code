@@ -76,7 +76,7 @@ class ManagedModelContextTest {
         };
         jdbc = new ManagedSchemaJdbcTemplate(counted);
         records = new ManagedExtensionRecordStore(jdbc);
-        sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc, records));
+        sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc, records);
         transactions = new TransactionTemplate(new DataSourceTransactionManager(counted));
     }
 
@@ -361,7 +361,7 @@ class ManagedModelContextTest {
             return null;
         }).when(guard).requireContextCompressionCommit(TENANT, "manual", "op_manual");
         records = new ManagedExtensionRecordStore(jdbc, guard);
-        sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc, records));
+        sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc, records);
         var journal = open(TENANT, "manual", true);
         byte[] bytes = "{}".getBytes(StandardCharsets.UTF_8);
         var pinned = ManagedExtensionRecordStoreTest.hookResource("pinned", "managed-message", bytes);
