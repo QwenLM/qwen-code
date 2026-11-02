@@ -25,6 +25,7 @@ import fsPromises, {
   writeFile,
 } from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -2003,6 +2004,22 @@ test('verify says what the health endpoint answered instead of UP', async (t) =>
       `FAIL http://127.0.0.1:18080/actuator/health is not UP: ${answer}`,
     );
   }
+
+  // The runtime's own fetch, at a port nothing listens on.
+  const closed = net.createServer();
+  await new Promise((resolve) => closed.listen(0, '127.0.0.1', resolve));
+  const { port } = closed.address();
+  await new Promise((resolve) => closed.close(resolve));
+  host.resolved = {
+    serverUrl: `http://127.0.0.1:${port}`,
+    healthUrl: `http://127.0.0.1:${port}/actuator/health`,
+  };
+  host.system.fetch = fetch;
+  assert.equal(await host.upgrade('verify'), 1);
+  assert.equal(
+    rowsOf(host.output).health,
+    `FAIL http://127.0.0.1:${port}/actuator/health is not UP: connect ECONNREFUSED 127.0.0.1:${port}`,
+  );
   host.system.fetch = fake;
 });
 
@@ -2220,6 +2237,12 @@ test('start refuses listeners it cannot reach before it starts anything', async 
   assert.match(
     host.output.join('\n'),
     /start refused: The control plane reaches qwen-hosted-harness at "", which is not a URL; correct qwen\.managed-agent\.harness\.base-url\./,
+  );
+  host.resolved = { harnessBaseUrl: 'proxy.test:4170' };
+  assert.equal(await host.upgrade('start'), 1);
+  assert.match(
+    host.output.join('\n'),
+    /start refused: The control plane reaches qwen-hosted-harness at "proxy\.test:4170", which is not an http or https URL; correct qwen\.managed-agent\.harness\.base-url\./,
   );
   // A link-local listener keeps its zone, which no URL can carry.
   const zoned = 'http://[fe80:0:0:0:0:0:0:1%1]';

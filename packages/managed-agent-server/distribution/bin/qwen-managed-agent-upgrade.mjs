@@ -2651,12 +2651,15 @@ async function phaseStart(system, deployment, options) {
     );
   }
   const urls = await listeners(system, deployment, options);
-  let harnessUrl;
-  try {
-    harnessUrl = new URL(urls.harness);
-  } catch {
+  const harnessUrl = URL.canParse(urls.harness)
+    ? new URL(urls.harness)
+    : undefined;
+  // The control plane speaks only http and https to the Harness, which the
+  // preflight would fail after the Harness restarts; and an opaque value such
+  // as proxy.test:8443 names no host to wait on at all.
+  if (!['http:', 'https:'].includes(harnessUrl?.protocol)) {
     throw new Refusal(
-      `The control plane reaches ${harness.name} at ${JSON.stringify(urls.harness)}, which is not a URL; correct qwen.managed-agent.harness.base-url.`,
+      `The control plane reaches ${harness.name} at ${JSON.stringify(urls.harness)}, which is not ${harnessUrl ? 'an http or https URL' : 'a URL'}; correct qwen.managed-agent.harness.base-url.`,
     );
   }
 
