@@ -2947,6 +2947,29 @@ describe('Gemini Client (client.ts)', () => {
         'prompt-retry',
         'prompt-host',
       );
+      vi.mocked(mockConfig.startActiveTodoWorkChain).mockClear();
+
+      await runTurn(
+        SendMessageType.Retry,
+        [{ text: 'hello' }],
+        'prompt-host-retry',
+        { userTurnRecordedByHost: true },
+      );
+
+      // Unless the host started it for the retry.
+      expect(mockConfig.startActiveTodoWorkChain).not.toHaveBeenCalled();
+    });
+
+    it("marks a Retry's request with the identity the host gives it", async () => {
+      await runTurn(SendMessageType.Retry, [{ text: 'hello' }], 'prompt-new', {
+        historyPromptId: 'prompt-original',
+      });
+      await runTurn(SendMessageType.Retry, [{ text: 'hello' }], 'prompt-bare');
+
+      expect(mockTurnConstructorFn.mock.calls.map((args) => args[3])).toEqual([
+        'prompt-original',
+        undefined,
+      ]);
     });
 
     it.each(['agent', 'task'])(
@@ -12858,6 +12881,30 @@ Other open files:
         });
       });
 
+      it("gives a Retry's history identity to its first request only", async () => {
+        installMessageBus(blockStopOnce(), 'Stop');
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const send = vi.spyOn(client, 'sendMessageStream');
+        vi.spyOn(client, 'stripOrphanedUserEntriesFromHistory').mockReturnValue(
+          [],
+        );
+
+        await run([{ text: 'Hi' }], 'prompt-retry-identity', {
+          type: SendMessageType.Retry,
+          historyPromptId: 'prompt-original',
+        });
+
+        expect(mockTurnConstructorFn.mock.calls.map((args) => args[3])).toEqual(
+          ['prompt-original', undefined],
+        );
+        // The Stop hook's continuation carries the send's other options.
+        expect(send.mock.calls[1][3]).toMatchObject({
+          type: SendMessageType.Hook,
+        });
+        expect(send.mock.calls[1][3]?.historyPromptId).toBeUndefined();
+      });
+
       it("keeps the host's steering on a stop policy's continuation", async () => {
         notDoneChat();
         mockTurnRunFn.mockImplementation(() => textTurn('not done'));
@@ -13662,7 +13709,64 @@ Other open files:
           expect(mockTurnRunFn).toHaveBeenCalledOnce();
         });
 
-        it('rejects an admission on a send that is not a UserQuery', async () => {
+        it('applies an admission on a Retry instead of running the hook again', async () => {
+          const bus = promptSubmitBus({ output: undefined });
+          mockTurnRunFn.mockReturnValue(textTurn('ok'));
+          vi.spyOn(
+            client,
+            'stripOrphanedUserEntriesFromHistory',
+          ).mockReturnValue([]);
+          const admission = await client.admitUserPrompt(
+            'try again',
+            'prompt-retried',
+          );
+
+          await admittedSend(
+            admission,
+            'prompt-retried',
+            SendMessageType.Retry,
+          );
+
+          expect(submitCalls(bus)).toHaveLength(1);
+          expect(mockTurnRunFn).toHaveBeenCalledOnce();
+        });
+
+        it('puts back the attempt a Retry stripped when its admission is blocked', async () => {
+          promptSubmitBus({
+            output: { decision: 'block', reason: 'not this one' },
+          });
+          const attempt: Content = {
+            role: 'user',
+            parts: [{ text: 'try again' }],
+          };
+          vi.spyOn(
+            client,
+            'stripOrphanedUserEntriesFromHistory',
+          ).mockReturnValue([attempt]);
+          const addHistory = vi
+            .spyOn(client.getChat(), 'addHistory')
+            .mockImplementation(() => {});
+          const admission = await client.admitUserPrompt(
+            'try again',
+            'prompt-retry-blocked',
+          );
+
+          const events = await admittedSend(
+            admission,
+            'prompt-retry-blocked',
+            SendMessageType.Retry,
+          );
+
+          expect(events).toContainEqual(
+            expect.objectContaining({
+              type: LlmEventType.UserPromptSubmitBlocked,
+            }),
+          );
+          expect(addHistory).toHaveBeenCalledWith(attempt);
+          expect(mockTurnRunFn).not.toHaveBeenCalled();
+        });
+
+        it('rejects an admission on a send that is not a UserQuery or a Retry', async () => {
           promptSubmitBus({ output: undefined });
           const admission = await client.admitUserPrompt(
             '/deploy prod',
