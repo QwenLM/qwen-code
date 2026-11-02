@@ -62,7 +62,7 @@ Managed Agent 服务端从首篇设计（2026-09-19）起，约两个月内长�
 
 | 类                                 | 模块           | 行数  | 备注                                                                                                                               |
 | ---------------------------------- | -------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `ManagedAgentStore`                | persistence    | 7,657 | 300+ 方法，7 个公开 setter                                                                                                         |
+| `ManagedAgentStore`                | persistence    | 7,657 | 300+ 方法；依赖已构造注入并为 final（#16061）                                                                                      |
 | `RuntimeBrokerService`             | runtime-broker | 4,270 | ~150 方法；binding registry、execution reconciler/recovery/cancellation/dispatcher、support/state、冷却与 hold 清单已提取（见 P1） |
 | `ManagedSessionStore`              | persistence    | 3,931 |                                                                                                                                    |
 | `WorkspaceCsiApplicationInventory` | persistence    | 3,319 |                                                                                                                                    |
@@ -72,9 +72,9 @@ Managed Agent 服务端从首篇设计（2026-09-19）起，约两个月内长�
 | `HarnessCoordinator`               | control-plane  | 1,770 |                                                                                                                                    |
 
 `ManagedAgentStore` 混合了会话准入、turn、event、item/message 投影、worktree、
-MCP 管理、definition pin、skills 与 extension 投影。它的 7 个公开
-`set*`/`configure*` 方法是构造后的可变装配：Bean 在完全装配好之前就可能被
-观察到。`RuntimeBrokerService` 原本把 provisioning、绑定 CAS、租约、取消、恢复
+MCP 管理、definition pin、skills 与 extension 投影。它的依赖现已构造注入到
+`final` 字段（#16061），可选协作者用 `@Nullable`、record-store 回环用
+`@Lazy`，Bean 不再可能在半装配状态下被观察到。`RuntimeBrokerService` 原本把 provisioning、绑定 CAS、租约、取消、恢复
 扫描与 extension 命令揉在一个类里；P1 提取切片已把 binding registry、
 execution 对账/恢复/取消/分发、support/state、observation 冷却与 tool hold
 清单委托给九个模块内协作者，留下 4,270 行的门面（见下方 P1 提取切片）。测试
@@ -196,21 +196,20 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
 
 - `ManagedAgentStore`：按聚合拆分——准入/命令、事件与投影、turn/message
   查询、worktree、definition/skills——共享同一个 `JdbcTemplate` 与事务
-  管理器。模块 README 已允许共享连接的 SQL helper 留在同一包。用构造
-  注入替换 7 个公开 setter；真实循环依赖用 `ObjectProvider` 或 `@Lazy`
-  显式表达，而不是可变装配。镜像的测试文件在同一批切片中拆开。setter
-  调研（2026-10-31）：7 个 setter 中 4 个是 Spring
-  `@Autowired(required = false)` 可选依赖注入（`lifecycle`、`definitions`、
-  `sessionWorktrees`、`journalEventTransport`），3 个是必需的普通
-  `@Autowired` 注入（`extensionPackages`、`creationSkills`、`worktreeFiles`
-  ——后者的 bean 由 `ManagedAgentConfiguration.managedWorktreeFiles()`
-  供给；`VerificationFixtures` 里的直接调用是测试装配，不是生产接线）。
-  改为构造 `ObjectProvider` 注入是对这个 7,657 行中心类的大改动，涉及约
-  30 处测试装配点，且其正确性依赖 Spring 运行时装配——手动 setter 的单测
-  无法完全覆盖。[专门的构造装配设计](2026-11-01-managed-agent-store-wiring.zh-CN.md)
+  管理器。模块 README 已允许共享连接的 SQL helper 留在同一包。构造注入
+  前置已完成（#16061）：7 个公开 setter 已被单一 `@Autowired` 构造器取代，
+  持有 `final` 引用，可选协作者用 `@Nullable`、record-store 回环用 `@Lazy`，
+  镜像的 verification 夹具已迁移。setter 调研（2026-10-31，转换前）：7 个
+  setter 中 4 个曾是 Spring `@Autowired(required = false)` 可选依赖注入
+  （`lifecycle`、`definitions`、`sessionWorktrees`、`journalEventTransport`），
+  3 个曾是必需的普通 `@Autowired` 注入（`extensionPackages`、`creationSkills`、
+  `worktreeFiles`——后者的 bean 曾由 `ManagedAgentConfiguration.managedWorktreeFiles()`
+  供给；`VerificationFixtures` 里的直接调用曾是测试装配，不是生产接线）。
+  [专门的构造装配设计](2026-11-01-managed-agent-store-wiring.zh-CN.md)
   覆盖必需/可选依赖、额外的延迟 record-store 字段及其 Session-store 回环、
-  final 引用、直接夹具迁移和真实 Spring context 验证。该实现独立于 Broker
-  流程抽取，完整 CI 验收仍是必要条件。
+  final 引用、直接夹具迁移和真实 Spring context 验证。该实现已在本地落地、
+  聚焦验证通过、完整 CI 验收待定；转换触及这个 7,657 行中心类与约 30 处
+  测试装配点。剩余工作是物理聚合拆分本身，每个聚合独立成切片。
 - `RuntimeBrokerService`：为恢复扫描、取消、tool hold、observation 冷却
   提取模块内协作者；服务本体退为门面。模块已经存在，不需要动任何跨模块
   契约。这是风险最低、可读性收益最高的拆分。observation 冷却是第一条
