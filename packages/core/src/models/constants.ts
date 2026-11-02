@@ -26,6 +26,8 @@ export const MODEL_GENERATION_CONFIG_FIELDS = [
   'retryInitialDelayMs',
   'retryMaxDelayMs',
   'retryErrorCodes',
+  'maxOutputValidationRetries',
+  'outputValidationRetryDisabled',
   'enableCacheControl',
   'enableRequestMetadata',
   'forceGlobalCacheScope',
