@@ -7718,8 +7718,8 @@ describe('review model canary routing', () => {
         'default-model|default|https://default.example.com/v1|default-key',
     );
 
-    // Degenerate config (canary model == default model): buckets are
-    // indistinguishable, so the endpoint override stays off for everyone.
+    // Same model on both cohorts (a pure endpoint quota split): the bucket
+    // decides, names no longer matter. 12309 % 100 = 9 is inside 100%.
     expect(
       serve(
         'same-model',
@@ -7730,7 +7730,23 @@ describe('review model canary routing', () => {
         'same-model',
       ),
     ).toBe(
-      '::notice title=Review model::same-model (PR #12309, canary 100%, cohort default)\n' +
+      '::notice title=Review model::same-model (PR #12309, canary 100%, cohort canary)\n' +
+        'same-model|canary|https://canary.example.com/v1|canary-key',
+    );
+
+    // ...and the same-model split still respects the bucket boundary:
+    // 12310 % 100 = 10 is outside a 10% split, so no override.
+    expect(
+      serve(
+        'same-model',
+        '10',
+        '12310',
+        'https://canary.example.com/v1',
+        'canary-key',
+        'same-model',
+      ),
+    ).toBe(
+      '::notice title=Review model::same-model (PR #12310, canary 10%, cohort default)\n' +
         'same-model|default|https://default.example.com/v1|default-key',
     );
 

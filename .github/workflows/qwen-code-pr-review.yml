@@ -1724,6 +1724,31 @@ jobs:
             fi
           }
 
+          # The endpoint cohort comes from the bucket predicate itself, not
+          # from comparing routed model names: a quota split may run the SAME
+          # model on both endpoints (canary model == default model), and a
+          # name comparison would label every PR "default" and silently
+          # disable the endpoint override. The predicate mirrors the router's
+          # — same clamp, same bucket test — so the two agree whenever the
+          # model names differ.
+          review_cohort_for_bucket() {
+            local canary_model="$1" pr="$3"
+            local percent
+            percent="$(canary_percent_effective "$2")"
+            case "$pr" in
+              ''|*[!0-9]*)
+                echo "default"
+                return 0
+                ;;
+            esac
+            if [ -n "$canary_model" ] && [ "$percent" -gt 0 ] &&
+              [ $((10#$pr % 100)) -lt "$percent" ]; then
+              echo "canary"
+            else
+              echo "default"
+            fi
+          }
+
           # A padded canary name (" qwen3-coder-plus ") would reach --model
           # verbatim, the provider would reject it, and that failure is
           # terminal for the whole cohort on every re-review round — the same
@@ -1752,12 +1777,8 @@ jobs:
           REVIEW_BASE_URL_CANARY="${REVIEW_BASE_URL_CANARY:-}"
           REVIEW_BASE_URL_CANARY="${REVIEW_BASE_URL_CANARY#"${REVIEW_BASE_URL_CANARY%%[![:space:]]*}"}"
           REVIEW_BASE_URL_CANARY="${REVIEW_BASE_URL_CANARY%"${REVIEW_BASE_URL_CANARY##*[![:space:]]}"}"
-          REVIEW_COHORT=default
-          if [ -n "$REVIEW_MODEL_CANARY" ] &&
-            [ "${OPENAI_MODEL:-}" = "$REVIEW_MODEL_CANARY" ] &&
-            [ "$OPENAI_MODEL" != "${REVIEW_MODEL_DEFAULT:-}" ]; then
-            REVIEW_COHORT=canary
-          fi
+          REVIEW_COHORT="$(review_cohort_for_bucket \
+            "$REVIEW_MODEL_CANARY" "$CANARY_PERCENT_EFFECTIVE" "${PR_NUMBER:-}")"
           if [ "$REVIEW_COHORT" = canary ] && [ -n "$REVIEW_BASE_URL_CANARY" ]; then
             if [ -n "${REVIEW_API_KEY_CANARY:-}" ] &&
               node -e 'try{if(!new URL(process.env.REVIEW_BASE_URL_CANARY).host)process.exit(1)}catch{process.exit(1)}' 2>/dev/null; then
