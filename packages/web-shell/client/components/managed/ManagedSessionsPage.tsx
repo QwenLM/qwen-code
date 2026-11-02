@@ -1320,36 +1320,6 @@ function ManagedSessionsContent({
       aria-label={t('managed.sessions')}
       className={`flex min-h-0 flex-col gap-1 overflow-y-auto ${home ? '' : 'max-h-48 md:max-h-none'}`}
     >
-      {listError && (
-        <div
-          role="alert"
-          className="flex flex-wrap items-center gap-2 p-2 text-sm text-destructive"
-        >
-          <span className="min-w-0">
-            <span className="block">{t('managed.listLoadFailed')}</span>
-            {listError.httpError && (
-              <span className="block break-all text-xs">
-                {t('managed.errorDetails', {
-                  status: listError.httpError.status,
-                  code: listError.httpError.code,
-                  requestId: listError.httpError.requestId ?? '',
-                })}
-              </span>
-            )}
-          </span>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={listLoading}
-            onClick={() => {
-              if (listLoaded) void loadMore();
-              else setListRevision((current) => current + 1);
-            }}
-          >
-            {t('managed.listRetry')}
-          </Button>
-        </div>
-      )}
       {!interactive && error && (
         <p role="alert" className="text-sm text-destructive">
           {error}
@@ -1454,6 +1424,36 @@ function ManagedSessionsContent({
             onChange={(event) => setTitleQuery(event.target.value)}
           />
         </label>
+      )}
+      {listError && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center gap-2 p-2 text-sm text-destructive"
+        >
+          <span className="min-w-0">
+            <span className="block">{t('managed.listLoadFailed')}</span>
+            {listError.httpError && (
+              <span className="block break-words text-xs">
+                {t('managed.errorDetails', {
+                  status: listError.httpError.status,
+                  code: listError.httpError.code,
+                  requestId: listError.httpError.requestId ?? '',
+                })}
+              </span>
+            )}
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={listLoading}
+            onClick={() => {
+              if (listLoaded) void loadMore();
+              else setListRevision((current) => current + 1);
+            }}
+          >
+            {t('managed.listRetry')}
+          </Button>
+        </div>
       )}
       {home && provider.workspaceBinding ? (
         <ManagedWorkspaceNavigation
@@ -1728,8 +1728,8 @@ function ManagedSessionsContent({
                 environmentOpen={taskPanelOpen}
                 environmentAvailable={Boolean(
                   provider.tasks &&
-                    (summary.capabilities.tasks ||
-                      taskCancel.pendingTaskIds.length),
+                  (summary.capabilities.tasks ||
+                    taskCancel.pendingTaskIds.length),
                 )}
                 onToggleEnvironment={() =>
                   setTaskPanelSession(taskPanelOpen ? undefined : sessionId)
@@ -2376,9 +2376,9 @@ function ManagedSessionsContent({
                   approvalChange.blocked ||
                   Boolean(
                     sessionId &&
-                      (!summary?.capabilities.canSend ||
-                        recovery.value?.nextTurnAllowed === false) &&
-                      !userMessages.supported,
+                    (!summary?.capabilities.canSend ||
+                      recovery.value?.nextTurnAllowed === false) &&
+                    !userMessages.supported,
                   )
                 }
                 placeholderText={t(
