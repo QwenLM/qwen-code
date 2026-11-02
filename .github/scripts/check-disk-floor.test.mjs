@@ -148,7 +148,9 @@ describe('check-disk-floor', () => {
       assert.ok(breached.stdout.includes(`dir[${osTmp}]`));
       assert.ok(breached.stdout.includes('free inodes'));
 
-      // Deduplication: passing the OS temp dir explicitly checks it once.
+      // Deduplication: passing the OS temp dir explicitly checks it once,
+      // and the sample set is exactly the caller's dirs (an appended-then-
+      // deduped path and a silently-dropped path differ only in set shape).
       const counted = runGate({
         dirs: [dir, osTmp],
         env: {
@@ -162,9 +164,44 @@ describe('check-disk-floor', () => {
         .split('\n')
         .filter((line) => line.startsWith('DISKFLOOR '));
       assert.equal(samples.length, 2);
+      const sampledDirs = samples
+        .map((line) => /dir\[([^\]]+)\]/.exec(line)?.[1])
+        .sort();
+      assert.deepEqual(sampledDirs, [dir, osTmp].sort());
     } finally {
       rmSync(dir, { recursive: true, force: true });
       rmSync(osTmp, { recursive: true, force: true });
     }
+  });
+
+  it('falls back to /tmp when TMPDIR is unset', () => {
+    // The incident fleet's os.tmpdir() is /tmp with TMPDIR unset; the
+    // script's `${TMPDIR:-/tmp}` default must keep gating that path. A
+    // regression to plain `${TMPDIR}` appends nothing there and the incident
+    // class returns with the suite green (mutation-verified).
+    const { TMPDIR, ...envWithoutTmpdir } = process.env;
+    const result = runGate({
+      dirs: [],
+      env: {
+        ...envWithoutTmpdir,
+        GITHUB_WORKSPACE: '.',
+        DISK_FLOOR_MIN_FREE_KB: '1',
+        DISK_FLOOR_MIN_FREE_INODES: '999999999999',
+      },
+    });
+    // /tmp (or its platform symlink target) is appended and breaches the
+    // impossible inode floor. On macOS TMPDIR resolves inside /var/folders,
+    // so assert the appended third sample by count: workspace + RUNNER_TEMP
+    // default + the OS temp default.
+    const samples = result.stdout
+      .split('\n')
+      .filter((line) => line.startsWith('DISKFLOOR '));
+    const appended = samples.filter((line) =>
+      /dir\[(\/tmp|\/var\/folders\/[^\]]+)\]/.test(line),
+    );
+    assert.ok(
+      appended.length >= 1,
+      `expected the /tmp fallback sample, got: ${result.stdout}`,
+    );
   });
 });

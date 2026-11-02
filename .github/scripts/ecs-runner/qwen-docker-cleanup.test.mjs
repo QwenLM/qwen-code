@@ -89,3 +89,16 @@ test('reports cache-prune failure instead of a successful service exit', () => {
   assert.match(result.stderr, /Docker build cache cleanup failed/);
   assert.match(result.calls, /^image prune --all --force/m);
 });
+
+test('installs a one-day /tmp retention policy', () => {
+  // Measured 2026-10-31: CI hosts generate ~120-260k temp files/day, and a
+  // 7d steady state exceeds the ~1M-inode tmpfs ceiling — that is the hz
+  // fleet incident. The installer's conf must pin 1d; a revert ships the
+  // incident again with every test green.
+  const conf = readFileSync(
+    new URL('./qwen-ci-tmp.conf', import.meta.url),
+    'utf8',
+  );
+  assert.match(conf, /^D \/tmp 1777 root root 1d$/m);
+  assert.doesNotMatch(conf, /^D \/tmp 1777 root root 7d$/m);
+});
