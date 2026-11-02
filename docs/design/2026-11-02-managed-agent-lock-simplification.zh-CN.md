@@ -54,7 +54,7 @@ JDBC 记录器观察执行尝试及完成、绑定的身份参数、JDBC 连接�
 
 `StoreLockTrace` 使用固定表名、锁定读取和身份谓词写法，记录 prepared/plain/batch 执行的尝试、成功和失败，复制批次参数，并在事务结束后清除锁证明。记录器不执行任何数据库探测查询。连接 ID 标识借用的 JDBC 连接，并非数据库服务端连接 ID。`StoreLockTraceTest` 还实际执行漏锁、反序、跨连接、提前提交和错误 Session 的 JDBC 反例。
 
-优化次数还匹配 journal 读取器固定的 WHERE 形式。CSI replay 准入使用相同的完整 head 投影和不同的身份谓词，执行必须保留的 authority 复核；该读取仍参与 head 锁序及事务断言，但与优化的 journal 读取分别计数。因此 replay 在同一事务内保留一次 journal head 和一次 authority head 读取。分类回归也验证 authority 读取先于 root 时会被拒绝。
+优化次数还匹配 journal 读取器固定的 WHERE 形式。CSI replay 准入使用相同的完整 head 投影和不同的身份谓词，执行必须保留的 authority 复核；该读取仍参与 head 锁序及事务断言，但与优化的 journal 读取分别计数。replay 在同一事务内保留四次有序 head 访问：优化的 journal head、checkpoint 身份读取、activation authority head，以及第二次 checkpoint 身份读取。两次 checkpoint 探测来自 activation 准入之前及内部的历史验证。分类回归验证两种 authority 投影先于 root 时均被拒绝，并将两者排除在优化的 journal 成本之外。
 
 | 源码分组 / 特殊路径                                       | 场景归属                                                                                               |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
@@ -74,7 +74,7 @@ JDBC 记录器观察执行尝试及完成、绑定的身份参数、JDBC 连接�
 
 使用 JDK 21、隔离 Maven 仓库及模块共享的 600 秒本地验证预算。H2 验证夹具/契约，MySQL 8.4 提供并发证据。完整 verify、Checkstyle、SpotBugs、MySQL、Hosted/fault 和平台资格仍由 CI 门禁承担。跳过或不可用检查记为待完成，不能记作通过。无需生产部署或 schema 迁移；回退本独立改动即可恢复原实现。
 
-原检查器为 3,281 行。替代检查器、JDBC 记录器、负向夹具、Agent/Journal 场景、MySQL 适配测试及两份清单合计 1,511 行；加上现有业务/CSI 测试净增的 125 行，替代验证总计 1,636 行，净减少 1,645 行。计数已包含 633 行清单数据，没有将解析器移至其他文件。
+原检查器为 3,281 行。替代检查器、JDBC 记录器、负向夹具、Agent/Journal 场景、MySQL 适配测试及两份清单合计 1,519 行；加上现有业务/CSI 测试净增的 128 行，替代验证总计 1,647 行，净减少 1,634 行。计数已包含 633 行清单数据，没有将解析器移至其他文件。
 
 ## SQL 实测与验证记录
 
@@ -105,4 +105,6 @@ JDBC 记录器观察执行尝试及完成、绑定的身份参数、JDBC 连接�
 
 CI 随后在 `c6d83e08a268395011c7ceb71a9dcbfe9cf60a67` 上执行了真实 producer 套件：该轮 Java 运行的 6,100 个用例中，新 replay 成本断言有一处失败，另有 17 个用例跳过。轨迹表明锁序及单事务断言通过，但成本分类器把保留的 authority 复核误计为第二次 journal 读取。现已修正分类及 native 预期，未修改生产代码。后续本地 42 个记录器、journal、native-read 和清单用例以及全 reactor Checkstyle 通过。修正版本的真实 producer 场景仍待 CI，本地这轮运行不能证明其成功。
 
-命令从 `packages/managed-agent-server` 运行，通过 `mvn -Dtest=... test checkstyle:check` 选择上列测试类；MySQL 选择额外使用 `-Pmysql-integration -Dmysql.url=... -Dmysql.user=...`。本地 Java 验证共耗时 571.08/600 秒，包含准备、全部失败尝试和 MySQL 清理。共享预算账本和每次尝试的日志位于 `.qwen/investigations/managed-lock-simplification/`。分类修复前已对齐依赖：`git range-diff` 确认 rebase 后实现补丁一致，与已验证修订的对比也确认 persistence 代码、受影响测试源码及锁清单均未变化。保留既有聚焦验证证据和新增分类回归；新基线中的其他集成变化仍由 CI 验证。最终验收仍待上述 CI 门禁。本次改动不包含部署。
+下一轮 CI 在 `d16d1b016b4eac9e4c86fce8a74f12696f6cb582` 上运行 6,101 个用例，一处失败、17 个跳过。新增的 head 总数断言错误地期望两次访问，轨迹显示还保留了两次部分投影的 checkpoint 读取。源码追踪确认 replay 先验证历史，再锁定 activation head 并再次验证历史。native 契约现固定四次查询的顺序及各自投影，不再假设只有两次完整 head 投影。扩展后的 16 个记录器用例及全 reactor Checkstyle 本地通过；生产代码和 SQL 未改，修正后的真实 producer 用例仍待 CI。
+
+命令从 `packages/managed-agent-server` 运行，通过 `mvn -Dtest=... test checkstyle:check` 选择上列测试类；MySQL 选择额外使用 `-Pmysql-integration -Dmysql.url=... -Dmysql.user=...`。本地 Java 验证共耗时 590.38/600 秒，包含准备、全部失败尝试和 MySQL 清理。共享预算账本和每次尝试的日志位于 `.qwen/investigations/managed-lock-simplification/`。分类修复前已对齐依赖：`git range-diff` 确认 rebase 后实现补丁一致，与已验证修订的对比也确认 persistence 代码、受影响测试源码及锁清单均未变化。保留既有聚焦验证证据和新增分类回归；新基线中的其他集成变化仍由 CI 验证。最终验收仍待上述 CI 门禁。本次改动不包含部署。

@@ -146,9 +146,12 @@ class WorkspaceCsiNativeActivationGateTest {
         trace.assertRootBeforeHead("tenant", sessionId);
         trace.assertOneTransaction("tenant", sessionId);
         var replayHeads = trace.successful("tenant", sessionId).stream().filter(StoreLockTrace.Event::head).toList();
-        assertThat(replayHeads).hasSize(2);
+        assertThat(replayHeads).hasSize(4);
+        assertThat(replayHeads.getFirst().mappedHead()).isTrue();
         assertThat(replayHeads.stream().filter(StoreLockTrace.Event::mappedHead)).hasSize(1);
-        assertThat(replayHeads.getLast().sql()).contains("and harness_session_id = ? for update");
+        assertThat(replayHeads.get(1).sql()).isEqualTo(replayHeads.getLast().sql())
+                .startsWith("select latest_checkpoint_resource_id, harness_session_id from ma_session_head ");
+        assertThat(replayHeads.get(2).sql()).contains("and harness_session_id = ? for update");
         assertThat(trace.successful("tenant", sessionId).stream().filter(event -> event.sql()
                 .startsWith("select tenant_id, session_id, csi_guard from ma_session "))).hasSize(1);
     }
