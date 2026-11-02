@@ -286,6 +286,40 @@ class RuntimeExternalWorkspaceDrainTest {
         }
     }
 
+    @Test
+    void restartLostLiveWorkerWithoutReceiptStopsForReceiptAndReleases() {
+        try (var fixture = new Fixture()) {
+            fixture.acquireAndExecute();
+            fixture.service.close();
+            // The restart clears the broker's placements and fences the
+            // still-READY binding LOST (invalidateBinding) with no committed
+            // stop receipt; the worker is alive and its Session row is active.
+            var ready = fixture.bindings.findById("binding");
+            assertEquals(RuntimeBindingRecord.State.READY, ready.getState());
+            assertNull(ready.getDrainReceipt());
+            // invalidateBinding claims the operation before fencing READY to LOST.
+            var claim = fixture.bindings.claimOperation("binding", "broker", Duration.ofMinutes(1));
+            assertNotNull(claim);
+            var fenced = fixture.bindings.compareAndSet(claim, claim.withState(
+                    RuntimeBindingRecord.State.LOST, claim.getLease(), fixture.clock.instant()));
+            assertNotNull(fenced);
+            fixture.bindings.releaseOperation(fenced.getBindingId(), "broker", fenced.getOperationGeneration());
+            assertTrue(fixture.sessions.countActiveByBinding("binding", fenced.getGeneration()) > 0);
+            fixture.service = fixture.newService();
+            fixture.service.requestHarnessDrain("tenant", "harness");
+            fixture.events.clear();
+            // R2-1: the close must stop the live worker for a receipt instead of
+            // refusing before the drain claim and fencing the storage holder.
+            fixture.drain();
+            assertTrue(fixture.events.contains("stop"), "The live worker is stopped for the receipt");
+            assertTrue(fixture.events.contains("cleanup"), "The retired holder is released after the receipt");
+            assertNotNull(fixture.binding().getDrainReceipt());
+            assertEquals(RuntimeBindingRecord.State.RELEASED, fixture.binding().getState());
+            assertEquals(RuntimeSessionRecord.State.RELEASED,
+                    fixture.sessions.findById(fixture.scope, "runtime").getState());
+        }
+    }
+
     private static final class MutableClock extends Clock {
         private Instant now = Instant.parse("2026-10-26T00:00:00Z");
         public ZoneId getZone() { return ZoneOffset.UTC; }

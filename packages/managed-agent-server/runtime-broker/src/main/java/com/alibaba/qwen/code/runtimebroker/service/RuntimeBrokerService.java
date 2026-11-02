@@ -623,8 +623,21 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
             bindingRegistry.releaseOperationQuietly(claimed.getBindingId(), claimed.getOperationGeneration());
             return failed(conflict("workspace_close_identity_unverified", "Original worker stop identity changed"));
         }
-        if ((lost || absence != null) && (executionRepository.hasActiveByBinding(claimed.getBindingId(), claimed.getGeneration())
-                || absence == null && sessionRepository.countActiveByBinding(claimed.getBindingId(), claimed.getGeneration()) != 0)) {
+        boolean activeExecutions = executionRepository.hasActiveByBinding(
+                claimed.getBindingId(), claimed.getGeneration());
+        // A restart-fenced external-workspace binding may still own a live
+        // worker with one stale Session row. The drain below marks it
+        // drain-requested, stops that worker for the persisted receipt and
+        // re-checks for unsettled rows before RELEASED, so refusing here would
+        // only fence the storage holder with no exit. Executions in flight
+        // still refuse: nothing can settle them without their worker.
+        boolean liveWorkerStopRecoverable = lost && absence == null
+                && claimed.getDrainReceipt() == null && !activeExecutions
+                && com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile
+                        .isExternalWorkspaceRequest(claimed.getRequest());
+        if ((lost || absence != null) && !liveWorkerStopRecoverable
+                && (activeExecutions || absence == null && sessionRepository.countActiveByBinding(
+                        claimed.getBindingId(), claimed.getGeneration()) != 0)) {
             bindingRegistry.releaseOperationQuietly(claimed.getBindingId(), claimed.getOperationGeneration());
             return failed(conflict("workspace_close_execution_unsettled", "Lost Runtime resources require recovery"));
         }
@@ -639,7 +652,10 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         renewal.start();
         CompletionStage<Void> result = safeStage(() -> {
             CompletionStage<Void> stopped = CompletableFuture.completedFuture(null);
-            if (draining.getDrainReceipt() != null || absence != null || authority != null) {
+            // A LOST binding has no stop proof yet: stop the worker and commit
+            // its receipt before releasing any row, so the release below runs
+            // on proven retirement instead of a runtime the broker lost track of.
+            if (draining.getDrainReceipt() != null || absence != null || authority != null || lost) {
                 if (authority != null) {
                     bindingRepository.requireHarnessCleanup(draining.getRequest().getScope(), draining.getRequest().getIsolationKey(), authority);
                 }
