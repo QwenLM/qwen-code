@@ -4822,11 +4822,15 @@ describe('ManagedSessionsPage', () => {
         new Error('History unavailable'),
       );
       await render('s1', 'en', provider, undefined, interactive);
-      expect(
-        [...container.querySelectorAll('[role="alert"]')].map(
-          (element) => element.textContent,
-        ),
-      ).toEqual(['Managed sessions could not be loaded.']);
+      // The alert wraps both the sentence and its retry button, so its
+      // textContent carries the button label too; assert the sentence and the
+      // single-alert property separately rather than the concatenation.
+      const alerts = [...container.querySelectorAll('[role="alert"]')];
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]!.textContent).toContain(
+        'Managed sessions could not be loaded.',
+      );
+      expect(alerts[0]!.textContent).not.toContain('History unavailable');
       expect(container.textContent).not.toContain('History unavailable');
       expect(container.querySelector('nav [role="alert"]')).not.toBeNull();
     },
@@ -4874,15 +4878,16 @@ describe('ManagedSessionsPage', () => {
         new JavaManagedAgentHttpError(404, 'session_not_found', detailError),
       );
       await render('s1', 'en', provider, undefined, false);
-      expect(
-        [...container.querySelectorAll('[role="alert"]')]
-          .map((element) => element.textContent)
-          .sort(),
-      ).toEqual(
-        [
-          ...new Set(['Managed sessions could not be loaded.', detailError]),
-        ].sort(),
+      // The list-failure alert also wraps its retry button, so match the
+      // sentences it must carry instead of the concatenated textContent.
+      const alertTexts = [...container.querySelectorAll('[role="alert"]')].map(
+        (element) => element.textContent ?? '',
       );
+      expect(alertTexts).toHaveLength(2);
+      expect(alertTexts.join('\n')).toContain(
+        'Managed sessions could not be loaded.',
+      );
+      expect(alertTexts.join('\n')).toContain(detailError);
     },
   );
 
