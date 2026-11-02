@@ -250,6 +250,36 @@ const MULTILINE_INSTRUCTIONS: DaemonChannelTypeDescriptor = {
   ],
 };
 
+// A non-GitHub channel carrying the connection and routing field keys the
+// section split keys on, so the split is not pinned to the GitHub editor.
+const GITLAB_ROUTING: DaemonChannelTypeDescriptor = {
+  type: 'gitlab',
+  displayName: 'GitLab',
+  manageable: true,
+  fields: [
+    {
+      key: 'token',
+      label: 'Personal Access Token',
+      kind: 'secret',
+    },
+    {
+      key: 'baseUrl',
+      label: 'Instance URL',
+      kind: 'string',
+    },
+    {
+      key: 'defaultMessageRoute',
+      label: 'Default Message Route',
+      kind: 'string',
+    },
+    {
+      key: 'messageRoutes',
+      label: 'Message Routes',
+      kind: 'record',
+    },
+  ],
+};
+
 const INSTANCE: DaemonChannelInstanceSnapshot = {
   name: 'release-bot',
   config: {
@@ -389,6 +419,16 @@ function sectionHeadingOf(element: HTMLElement | null): string | null {
     ?.querySelector('h3')
     ?.textContent?.trim();
   return heading ?? null;
+}
+
+// Record fields render their label without targeting a control, so resolve the
+// section from the label text instead of the control id.
+function sectionHeadingOfLabel(labelText: string): string | null {
+  const label = Array.from(document.querySelectorAll('label')).find((item) =>
+    item.textContent?.includes(labelText),
+  );
+  const heading = label?.closest('section')?.querySelector('h3');
+  return heading?.textContent?.trim() ?? null;
 }
 
 // FieldShell renders the field description as the first <p> inside the field
@@ -1269,6 +1309,19 @@ describe('ChannelEditorDialog', () => {
     );
     expect(inputByLabel('Base URL')?.placeholder).toBe(
       'https://ghe.example.com/api/v3',
+    );
+  });
+
+  it('splits connection and routing fields for a non-GitHub channel', async () => {
+    await renderDialog({ descriptor: GITLAB_ROUTING });
+
+    expect(sectionHeadingOfLabel('Instance URL')).toBe('Connection');
+    expect(sectionHeadingOfLabel('Personal Access Token')).toBe('Credentials');
+    expect(sectionHeadingOfLabel('Message Routes')).toBe(
+      'Notifications and routing',
+    );
+    expect(sectionHeadingOfLabel('Default Message Route')).toBe(
+      'Notifications and routing',
     );
   });
 
