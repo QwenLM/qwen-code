@@ -1617,6 +1617,14 @@ function recordedFor(
 
 export { hostedRuntimeSessionId } from './hosted-workspace-broker.js';
 
+// A3 packaged fault arm: the replacement holds the first sibling approval it
+// asks (the pending sibling after an earlier decided one) so the runner can
+// crash inside the mixed-sibling approval gap. Test-gated, never set in
+// production; read once, fires once per process.
+const holdPendingSiblingSession =
+  process.env['QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL'];
+let holdPendingSiblingFired = false;
+
 export class HostedToolRecoveryRequiredError extends Error {
   constructor(cause: unknown) {
     super(
@@ -1633,6 +1641,26 @@ export class HostedToolRecoveryRequiredError extends Error {
  */
 export const HOSTED_AGENT_WAIT_ABANDONED_TEXT =
   'The turn was cancelled before the child agent finished; the child keeps running and its committed result is retained.';
+
+/**
+ * The tool names whose never-started proof is the child-run ledger
+ * (admitLaunch commits the record before dispatch): one membership fact
+ * for every arm that either reads that ledger or must decline without
+ * it. A future child-run-backed tool joins HERE, never as another
+ * inline two-name literal.
+ */
+export const CHILD_LEDGER_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'agent',
+  'workflow',
+]);
+
+/**
+ * The answer a settlement writes for a child-ledger call it cannot
+ * prove anything about: the ledger is unavailable in this generation,
+ * so the fold names the unknown instead of claiming the call never ran.
+ */
+export const HOSTED_CHILD_LEDGER_UNKNOWN_TEXT =
+  'The child run for this call kept its own ledger, which this recovery does not hold; its outcome is unknown and its record is retained.';
 
 /**
  * The never-admitted answer for a sibling call the dead batch never
@@ -4215,9 +4243,7 @@ export class HostedWorkspaceToolTurn {
           } else if (
             !sharedExtensionWorkspace &&
             !agentBackground &&
-            calls.some(
-              (other) => other.name !== 'agent' && other.name !== 'workflow',
-            )
+            calls.some((other) => !CHILD_LEDGER_TOOL_NAMES.has(other.name))
           ) {
             // The same one-batch candidacy: a sibling outside a child
             // launch holds the mount for exactly the wait the foreground
@@ -4281,9 +4307,7 @@ export class HostedWorkspaceToolTurn {
             validationError = `Hosted workflow run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`;
           } else if (
             !agentBackground &&
-            calls.some(
-              (other) => other.name !== 'agent' && other.name !== 'workflow',
-            )
+            calls.some((other) => !CHILD_LEDGER_TOOL_NAMES.has(other.name))
           ) {
             validationError =
               'Hosted workflow run_in_background=false cannot share a batch with a tool other than agent or workflow; the sibling would hold the Workspace mount the child needs.';
@@ -8896,6 +8920,24 @@ export class HostedWorkspaceToolTurn {
       },
       { turnId: this.promptId, promptId: this.promptId },
     );
+    if (
+      holdPendingSiblingSession ===
+        this.session.authority.sessionHeader.sessionKey.sessionId &&
+      !holdPendingSiblingFired
+    ) {
+      holdPendingSiblingFired = true;
+      writeStderrLineSafe(
+        `qwen serve: E2E holding pending sibling approval for Session ${holdPendingSiblingSession} call ${call.callId}`,
+      );
+      // Reject on abort so a leaked flag cannot park a real Session
+      // un-cancelably; the runner SIGKILLs this generation after the barrier.
+      await new Promise<never>((_resolve, reject) => {
+        const release = (): void =>
+          reject(signal.reason ?? new Error('aborted'));
+        if (signal.aborted) release();
+        else signal.addEventListener('abort', release, { once: true });
+      });
+    }
     await approval.waiters.wait(
       requestId,
       options.expiresAt,

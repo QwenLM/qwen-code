@@ -40,6 +40,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { isValidElement, type ReactNode } from 'react';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -90,6 +91,7 @@ import { projectHistoryToStreamEvents } from './item-projection.js';
 const mocks = vi.hoisted(() => {
   const state = {
     handleResult: undefined as unknown,
+    modBand: undefined as unknown,
     handleResults: [] as unknown[],
     loadCommandsOverride: null as null | (() => Promise<readonly unknown[]>),
     loadRejects: false,
@@ -292,6 +294,21 @@ vi.mock('./opentui-dialog-mount.js', () => ({
     return `dialog:${request.dialog}`;
   },
 }));
+vi.mock('./mod-band.js', () => ({
+  OpenTuiModBand: ({
+    band,
+    maxRows,
+  }: {
+    band?: { tree: { children?: string[] } };
+    maxRows: number;
+  }) =>
+    band ? (
+      <span>{`mod-band:${band.tree.children?.[0]}:${maxRows}`}</span>
+    ) : null,
+}));
+vi.mock('../hooks/use-mod-band.js', () => ({
+  useModBand: () => mocks.state.modBand,
+}));
 vi.mock('./input-prompt.js', () => ({
   OpenTuiInputPrompt: (props: Record<string, unknown>) => {
     mocks.state.inputProps = props;
@@ -328,9 +345,7 @@ vi.mock('./dialogs-confirm.js', () => ({
     return (
       <>
         <span>action-confirm</span>
-        <span>
-          {typeof props['prompt'] === 'string' ? props['prompt'] : null}
-        </span>
+        <span>{props['prompt'] as ReactNode}</span>
       </>
     );
   },
@@ -379,7 +394,9 @@ vi.mock('../hooks/useStatusLine.js', () => ({
   },
 }));
 
+const extensionManager = { setRequestConsent: vi.fn() };
 const CONFIG = {
+  getExtensionManager: () => extensionManager,
   getSessionId: () => 'test-session',
   getContextFilePaths: () => [],
   getAccessibility: () => ({}),
@@ -744,6 +761,33 @@ describe('OpenTuiApp shell wiring', () => {
       }
     },
   );
+
+  it('draws the Mods band above the composer and hides it behind a dialog', async () => {
+    mocks.state.modBand = {
+      tree: { type: 'Text', children: ['forecast'] },
+      owner: 'token-weather',
+      revision: 1,
+    };
+    try {
+      renderApp();
+      await settle();
+      // The band sits between the queued messages and the prompt input.
+      const text = document.body.textContent ?? '';
+      expect(text.indexOf('mod-band:forecast:13')).toBeGreaterThan(-1);
+      expect(text.indexOf('mod-band:forecast:13')).toBeLessThan(
+        text.indexOf('input-prompt'),
+      );
+      mocks.state.handleResult = {
+        kind: 'open_dialog',
+        request: { dialog: 'help' },
+      } satisfies OpenTuiDispatchOutcome;
+      await submit('/help');
+      expect(screen.getByText('dialog:help')).toBeTruthy();
+      expect(screen.queryByText(/mod-band:/)).toBeNull();
+    } finally {
+      mocks.state.modBand = undefined;
+    }
+  });
 
   it('renders the composer inside the error boundary by default', async () => {
     renderApp();
@@ -2587,6 +2631,129 @@ describe('OpenTuiApp shell wiring', () => {
     expect(
       screen.getByText('Session state was not re-keyed for the new session.'),
     ).toBeTruthy();
+  });
+
+  describe('direct extension consent owner', () => {
+    type Consent = Parameters<
+      ReturnType<Config['getExtensionManager']>['setRequestConsent']
+    >[0];
+    const options = (name: string) => ({
+      extensionConfig: { name, version: '1.0.0' },
+      originSource: 'QwenCode' as const,
+    });
+    function owner() {
+      const register = vi.fn<(request: Consent) => void>();
+      const config = {
+        ...CONFIG,
+        getExtensionManager: () => ({ setRequestConsent: register }),
+      } as unknown as Config;
+      return {
+        config,
+        register,
+        request: () => register.mock.calls.at(-1)![0],
+      };
+    }
+    function shell(config: Config, streaming = false) {
+      return (
+        <OpenTuiApp
+          config={config}
+          settings={SETTINGS}
+          logger={null}
+          commands={[]}
+          getSessionStats={getSessionStats}
+          streaming={streaming}
+        />
+      );
+    }
+    const answer = (yes: boolean) =>
+      (mocks.state.actionConfirmProps!['onResolve'] as (yes: boolean) => void)(
+        yes,
+      );
+
+    it('formats direct consent and preserves its pending owner on ordinary rerenders', async () => {
+      const o = owner();
+      const view = render(shell(o.config));
+      await settle();
+      let pending!: Promise<void>;
+      await act(async () => {
+        pending = o.request()(options('owned'));
+      });
+      const prompt = mocks.state.actionConfirmProps!['prompt'];
+      expect(isValidElement(prompt)).toBe(true);
+      if (!isValidElement(prompt))
+        throw new Error('native prompt node missing');
+      // buildJsxRuntime maps native text to span; raw strings still fail above.
+      expect(prompt.type).toBe('span');
+      expect(screen.getByText(/Installing extension "owned"/)).toBeTruthy();
+      view.rerender(shell(o.config, true));
+      await settle();
+      expect(o.register).toHaveBeenCalledTimes(1);
+      expect(screen.getByText(/Installing extension "owned"/)).toBeTruthy();
+      await act(async () => answer(true));
+      await expect(pending).resolves.toBeUndefined();
+    });
+
+    it('keeps independent FIFO Yes and No resolutions', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let first!: Promise<void>;
+      let second!: Promise<void>;
+      await act(async () => {
+        first = o.request()(options('first'));
+        second = o.request()(options('second'));
+      });
+      const rejected = second.catch((error: unknown) => error);
+      expect(screen.getByText(/Installing extension "first"/)).toBeTruthy();
+      expect(screen.queryByText(/Installing extension "second"/)).toBeNull();
+      await act(async () => answer(true));
+      await expect(first).resolves.toBeUndefined();
+      expect(screen.getByText(/Installing extension "second"/)).toBeTruthy();
+      await act(async () => answer(false));
+      await expect(rejected).resolves.toMatchObject({
+        message: expect.stringContaining('Installation cancelled'),
+      });
+    });
+
+    it.each(['replacement', 'unmount'] as const)(
+      'rejects pending and captured stale callbacks on %s',
+      async (change) => {
+        const old = owner();
+        const next = owner();
+        const view = render(shell(old.config));
+        await settle();
+        const captured = old.request();
+        let pending!: Promise<void>;
+        await act(async () => {
+          pending = captured(options('old'));
+        });
+        const rejected = pending.catch((error: unknown) => error);
+        const late = mocks.state.actionConfirmProps!['onResolve'] as (
+          yes: boolean,
+        ) => void;
+        await act(async () => {
+          if (change === 'replacement') view.rerender(shell(next.config));
+          else view.unmount();
+        });
+        await expect(rejected).resolves.toMatchObject({
+          message: expect.stringContaining('Installation cancelled'),
+        });
+        await expect(captured(options('stale'))).rejects.toThrow(
+          'Extension installation cancelled',
+        );
+        await act(async () => late(true));
+        if (change === 'replacement') {
+          expect(screen.queryByText(/Installing extension "old"/)).toBeNull();
+          let fresh!: Promise<void>;
+          await act(async () => {
+            fresh = next.request()(options('new'));
+          });
+          await act(async () => answer(true));
+          await expect(fresh).resolves.toBeUndefined();
+          expect(next.register).toHaveBeenCalledTimes(1);
+        }
+      },
+    );
   });
 
   it('renders the shell confirmation modal and settles with its resolution', async () => {

@@ -15,7 +15,7 @@ proposal #14761. Optional explicit idle retirement is implemented in #14765 and
 described below. This configuration needs no Go toolchain, custom containerd/shim,
 node collector or cold-bootstrap installation.
 
-The [2026-10-24 scope decision](../../docs/design/2026-10-23-csi-evidence-source.md) confirms that complete CSI auditing is not a first-release prerequisite. Session handoff retains the original Pod/PVC; explicit idle retirement retains storage ownership. Platform-managed reclamation and cross-Workspace volume reuse remain follow-up work.
+The [2026-10-24 scope decision](../../docs/design/2026-10-23-csi-evidence-source.md) confirms that complete CSI auditing is not a first-release prerequisite. Session handoff retains the original Pod/PVC; deletion-only idle retirement retains storage ownership. The explicit S2/S3 reclamation and retained-data handoff implementation below requires separate native qualification.
 
 ## Trusted platform and supported storage
 
@@ -51,12 +51,19 @@ not enable CSI execution.
 Render the exact storage/namespace protection objects with the existing Java
 protection operator, passing `<reviewed-registration-json> <policy-name>
 <binding-name>`. This prints a Kubernetes JSON List and
-does not contact the cluster or database. From the server package, invoke the
-built operator with:
+does not contact the cluster or database. From the reference distribution,
+invoke it with:
 
 ```bash
-java -Dloader.main=com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceCsiProtectionMain \
-  -cp target/qwen-managed-agent-server-0.1.0-alpha-csi-runtime.jar \
+bin/qwen-managed-agent-admin csi-protection \
+  /absolute/path/registration.json resident-protection resident-binding
+```
+
+From a module build, run the same entry from the repository root:
+
+```bash
+java -Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.WorkspaceCsiProtectionMain \
+  -cp packages/managed-agent-server/server/target/qwen-managed-agent-server-<version>-exec.jar \
   org.springframework.boot.loader.launch.PropertiesLauncher \
   /absolute/path/registration.json resident-protection resident-binding
 ```
@@ -105,12 +112,20 @@ audit actor with a current Workspace `OWNER` grant:
 ```
 
 The operator must already control the trusted maintenance host and deployment
-credentials; the actor field alone does not authenticate anyone. From the server
-package, use its existing fat jar and configuration:
+credentials; the actor field alone does not authenticate anyone. From the
+reference distribution:
 
 ```bash
-java -Dloader.main=com.alibaba.qwen.code.managedagent.persistence.ResidentWorkspaceRetirementMain \
-  -cp target/qwen-managed-agent-server-0.1.0-alpha.jar \
+bin/qwen-managed-agent-admin resident-retirement \
+  inspect /absolute/path/retirement.json \
+  --spring.config.additional-location=file:/absolute/path/application.yaml
+```
+
+From a module build, run from the repository root with the same arguments:
+
+```bash
+java -Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.ResidentWorkspaceRetirementMain \
+  -cp packages/managed-agent-server/server/target/qwen-managed-agent-server-<version>-exec.jar \
   org.springframework.boot.loader.launch.PropertiesLauncher \
   inspect /absolute/path/retirement.json \
   --spring.config.additional-location=file:/absolute/path/application.yaml
@@ -131,7 +146,7 @@ Background propagation. Credentials remain in the existing API/token/CA settings
 No PVC/PV, Secret or protection object is deleted. Same-version retries read the
 saved result without resending; a new version needs an explicit new invocation,
 with at most eight attempts in total. HTTP replies and Pod absence never release
-the storage or reopen the Workspace. Physical release and reuse are deferred.
+the storage or reopen the Workspace. Reclamation requires the preparation and completion protocol below.
 
 A lost reply can leave `UNKNOWN` even when Kubernetes accepted the deletion.
 Once the original Pod has a `deletionTimestamp` or is missing, a different
@@ -143,6 +158,22 @@ the original Pod still passes every verification check.
 See the complete retirement design in [English](../../docs/design/2026-10-20-k2-physical-retirement-progress.md)
 and [简体中文](../../docs/design/2026-10-20-k2-physical-retirement-progress.zh-CN.md).
 Native ACK retirement qualification remains pending.
+
+## Explicit reclamation and same-tenant data handoff
+
+The [S2/S3 design](../../docs/design/2026-10-27-resident-workspace-reclamation.md) adds a healthy normal cleanup path. Native ACK qualification is pending; do not infer it from the existence of these commands or from the earlier S1 run. Keep the current single-control-plane trust boundary and use a dedicated runtime namespace/PVC. Admission/RBAC must leave only this Managed provisioner able to create Pods using the PVC, with no external controller, Pod creator, PV alias, or administrative storage operation during maintenance and handoff. The existing resource protection does not enforce Pod-creation exclusivity.
+
+The maintenance credential additionally needs Pod `list` and `patch` in the runtime namespace, Node Lease `get` in `kube-node-lease`, and cluster PV/VolumeAttachment `list`. It never patches a node, attachment, PVC or PV. Keep these privileges away from the worker and public caller.
+
+Using the same Java entry point, request and deployment configuration as above:
+
+1. Close all Sessions, then run `begin /absolute/path/retirement.json`. The Workspace remains `DRAINING` throughout retirement and after release.
+2. Read the exact original Pod's current resourceVersion. Run `prepare-reclamation /absolute/path/retirement.json <resourceVersion>` before DELETE. It verifies the original running container, healthy node/boot, Node Lease, original attachment and exclusive physical-volume use, saves the baseline, then conditionally adds the operation's finalizer. Read a fresh resourceVersion afterward.
+3. Run `delete-pod /absolute/path/retirement.json <fresh-resourceVersion>`. It sends the same normal 30-second graceful DELETE and retains its actual response or `UNKNOWN`. Deletion-only operations without preparation cannot be retroactively qualified after the Pod disappears.
+4. Run `reclaim /absolute/path/retirement.json` to observe completion. It requires the retained original Pod and explicitly terminated original container, same node/boot with fresh Ready status and Lease, no remaining node volume use or attachment, and no physical alias or other Pod consumer. While any condition is missing, ownership remains held. After a durable cleanup receipt, it conditionally removes only its finalizer and waits for original Pod absence. It then atomically releases operation/binding/active slot/physical ownership. Run `inspect` after an unknown result; the command is bounded and may need another invocation while the platform finishes.
+5. Only after `RELEASED`, the administrator may replace the sole configured mapping with a new Workspace ID in the same tenant, provision its reviewed saved Workspace metadata and OWNER grant, and restart with the replacement configuration. Retain the original PVC/PV, registration, disk and files. The new request starts at runtime generation 1 and obtains the next physical reservation revision. The old Workspace/request stays fenced; its terminal receipt remains readable with its current OWNER grant even after configuration replacement and later reuse.
+
+The data policy is `retain-same-tenant-admin-handoff/1`. Physical revisions advance through reserved/released cycles without resetting; retained tenant ownership rejects a foreign-tenant alias. There is no automatic assignment, data wipe, force-release override or reopening of the retired Workspace. A node/API partition, identity change, force deletion or missing Pod before a saved cleanup receipt retains ownership. Infrastructure repair alone cannot authorize product release. A receipt assumes the exclusive use boundary remains in force and does not authorize external remounts.
 
 ## Failure handling and acceptance
 

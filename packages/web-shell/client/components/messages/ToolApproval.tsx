@@ -724,8 +724,11 @@ export function ToolApproval({
         <div className={styles.content} data-plan-interactive>
           {diffs.map((block, index) => (
             <div key={index}>
-              <div>{block.path}</div>
-              <DiffView diff={block.diff} />
+              <div>{sanitizeControlChars(block.path ?? '')}</div>
+              <DiffView
+                diff={block.diff}
+                fillScrollRegion={variant === 'floating'}
+              />
             </div>
           ))}
         </div>

@@ -139,7 +139,7 @@ this recovery exception.
 | Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits, described in [Turn events](#turn-events)                                                             |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
 | Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                |
-| Drawing    | `ui.render` for the band above the prompt in the Ink terminal, described in [The band above the prompt](#the-band-above-the-prompt)                                                     |
+| Drawing    | `ui.render` for the band above the prompt in the Ink and OpenTUI terminals, described in [The band above the prompt](#the-band-above-the-prompt)                                        |
 | Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                 |
 
 This is a supported subset, not full compatibility with existing Claude Mods.
@@ -157,7 +157,7 @@ command names are matched against the resulting name.
 ## Middleware and recovery
 
 Patterns select among the engine events `session.start`, `session.end`,
-`command.run`, `tool.call`, `tool.check`, `turn.start`, `turn.complete` and, in the Ink terminal, `ui.render`, and the API event of each supported
+`command.run`, `tool.call`, `tool.check`, `turn.start`, `turn.complete` and, in the Ink and OpenTUI terminals, `ui.render`, and the API event of each supported
 `$` method, which `$.session.version()` lists. Use an exact name, a prefix such as `command.*`,
 `*`, or a single negation such as `!session.*`. The patterns `!*` and `!!...` are
 rejected.
@@ -461,7 +461,7 @@ supports:
 }
 ```
 
-This is a headless run. In the Ink terminal, `events` also lists `ui.render`.
+This is a headless run. In the Ink and OpenTUI terminals, `events` also lists `ui.render`.
 `claudeCode` is the Claude Code release whose event names are recognized,
 `events` lists the events hooks can receive and `methods` the `$` methods a Mod can
 call. A Mod can use it to choose a fallback, such as a command reply where a
@@ -655,9 +655,9 @@ hook that asks for a redraw does not fail where nothing is drawn.
 
 ## The band above the prompt
 
-The Ink terminal raises `ui.render` for Claude Code's `AbovePrompt` site, a band
-between the session survey and the prompt input. OpenTUI and headless runs draw
-no site yet: there a `ui.render` hook is skipped and listed at startup, and
+The Ink and OpenTUI terminals raise `ui.render` for Claude Code's `AbovePrompt`
+site, a band between the session survey and the prompt input. Headless runs
+draw no site: there a `ui.render` hook is skipped and listed at startup, and
 `$.session.version()` leaves it out.
 
 A hook receives Claude Code's input:
@@ -735,6 +735,16 @@ These differ from Claude Code:
   running render waits for it, up to 10 seconds for each `ui.render` hook in
   the chain.
 - Refusal lines go only to the debug log, since Qwen Code has no hot reload.
+- OpenTUI has no session survey, so `hasSurvey` is always `false` there, and
+  `isWorking` stays `false` while a `!` shell command runs. OpenTUI takes
+  colors as hex values, so ANSI color names and `ansi256()` colors draw as
+  fixed values instead of the terminal's palette, and a `borderColor` border
+  draws undimmed under `borderDimColor`. Its text truncates only in the
+  middle, with `...` where Ink draws `…`: `wrap: "middle"` and
+  `"truncate-middle"` draw that way, and the other truncations cut the text
+  off at the right edge without a mark. Its borders have one stroke per axis,
+  so the `arrow` border draws its top arrow on the bottom edge and its left
+  arrow on the right edge.
 
 ## TypeScript, JSX and relative imports
 

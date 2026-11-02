@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -20,6 +21,7 @@ import { dirname, join } from 'node:path';
 import { runStatus } from './status.js';
 import {
   autofixPrPaths,
+  writeAnchor,
   writeGateCursor,
   writeState,
   type AutofixPrState,
@@ -56,6 +58,7 @@ describe('runStatus', () => {
       postedCommentIds: [],
       ...patch,
     });
+    writeAnchor({ host: 'github.com', owner: 'o', repo: 'r' }, pr, repo);
     return paths;
   };
 
@@ -145,6 +148,7 @@ describe('runStatus', () => {
         needsHuman: [item],
         worktreePath: seven.worktreePath,
         worktreeExists: true,
+        inPlace: false,
         // A plain directory, with no gitfile: not a git directory to trust.
         gitTrusted: false,
         // A plain directory: git cannot tell what it holds.
@@ -382,5 +386,475 @@ describe('runStatus', () => {
     expect(outcome.unreadable).toEqual([
       { pr: 8, error: expect.stringMatching(/has an invalid remote/) },
     ]);
+  });
+
+  it('lists a watch rooted in a linked worktree of the clone', () => {
+    // A daemon session prepares its watch under its own worktree; the listing
+    // scans every worktree of the clone, so the main worktree still sees it.
+    const linked = `${repo}-linked`;
+    // This suite's clone has no commit of its own; a worktree needs a HEAD.
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.email=t@example.com',
+        '-c',
+        'user.name=t',
+        'commit',
+        '-q',
+        '--allow-empty',
+        '-m',
+        'base',
+      ],
+      { cwd: repo },
+    );
+    execFileSync('git', ['worktree', 'add', '-q', '--detach', linked], {
+      cwd: repo,
+    });
+    try {
+      const paths = autofixPrPaths(linked, 7);
+      mkdirSync(dirname(paths.statePath), { recursive: true });
+      writeState(paths.statePath, {
+        version: 1,
+        sessionId: 'session-a',
+        host: 'github.com',
+        owner: 'o',
+        repo: 'r',
+        prNumber: 7,
+        remote: 'origin',
+        pushTarget: 'origin',
+        headRefName: 'feat-7',
+        baseRefName: 'main',
+        branch: paths.branch,
+        worktreePath: paths.worktreePath,
+        viewer: 'me',
+        prAuthor: 'me',
+        lastKnownHeadSha: HEAD,
+        pushedShas: [],
+        handledCommentIds: [],
+        postedCommentIds: [],
+      });
+      const { watches } = runStatus({ work: false });
+      expect(watches.map(({ pr }) => pr)).toEqual([7]);
+      expect(watches[0]!.worktreePath).toBe(paths.worktreePath);
+      // An explicit root still scans just that one worktree.
+      expect(runStatus({ root: repo, work: false }).watches).toEqual([]);
+    } finally {
+      execFileSync('git', ['worktree', 'remove', '--force', linked], {
+        cwd: repo,
+      });
+      rmSync(linked, { recursive: true, force: true });
+    }
+  });
+
+  it('prefers the root with a live worktree when a PR has state in two roots', () => {
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.email=t@example.com',
+        '-c',
+        'user.name=t',
+        'commit',
+        '-q',
+        '--allow-empty',
+        '-m',
+        'base',
+      ],
+      { cwd: repo },
+    );
+    const linked = `${repo}-linked`;
+    execFileSync('git', ['worktree', 'add', '-q', '--detach', linked], {
+      cwd: repo,
+    });
+    const live = autofixPrPaths(linked, 7);
+    try {
+      // A stale state file in the main worktree, with no worktree there.
+      write(7);
+      // A live watch in the linked worktree: its branch checked out.
+      execFileSync('git', ['branch', live.branch], { cwd: repo });
+      mkdirSync(dirname(live.worktreePath), { recursive: true });
+      execFileSync(
+        'git',
+        ['worktree', 'add', '-q', live.worktreePath, live.branch],
+        { cwd: repo },
+      );
+      writeState(live.statePath, {
+        version: 1,
+        sessionId: 'session-a',
+        host: 'github.com',
+        owner: 'o',
+        repo: 'r',
+        prNumber: 7,
+        remote: 'origin',
+        pushTarget: 'origin',
+        headRefName: 'feat-7',
+        baseRefName: 'main',
+        branch: live.branch,
+        worktreePath: live.worktreePath,
+        viewer: 'me',
+        prAuthor: 'me',
+        lastKnownHeadSha: HEAD,
+        pushedShas: [],
+        handledCommentIds: [],
+        postedCommentIds: [],
+      });
+      const { watches } = runStatus({ work: false });
+      expect(watches.map(({ pr }) => pr)).toEqual([7]);
+      // The live worktree's root wins over the stale main-worktree state.
+      expect(watches[0]!.worktreePath).toBe(live.worktreePath);
+      expect(watches[0]!.worktreeExists).toBe(true);
+    } finally {
+      execFileSync(
+        'git',
+        ['worktree', 'remove', '--force', live.worktreePath],
+        {
+          cwd: repo,
+        },
+      );
+      execFileSync('git', ['worktree', 'remove', '--force', linked], {
+        cwd: repo,
+      });
+      execFileSync('git', ['branch', '-D', live.branch], { cwd: repo });
+      rmSync(linked, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps listing healthy watches when a sibling worktree has a malformed .qwen/tmp', () => {
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.email=t@example.com',
+        '-c',
+        'user.name=t',
+        'commit',
+        '-q',
+        '--allow-empty',
+        '-m',
+        'base',
+      ],
+      { cwd: repo },
+    );
+    write(7);
+    const sibling = `${repo}-sibling`;
+    execFileSync('git', ['worktree', 'add', '-q', '--detach', sibling], {
+      cwd: repo,
+    });
+    try {
+      // The sibling's `.qwen/tmp` is a regular file, so reading it throws
+      // ENOTDIR. One bad root must not abort the whole clone's listing.
+      mkdirSync(join(sibling, '.qwen'), { recursive: true });
+      writeFileSync(join(sibling, '.qwen', 'tmp'), 'not a directory');
+      const { watches } = runStatus({ work: false });
+      expect(watches.map(({ pr }) => pr)).toEqual([7]);
+    } finally {
+      execFileSync('git', ['worktree', 'remove', '--force', sibling], {
+        cwd: repo,
+      });
+      rmSync(sibling, { recursive: true, force: true });
+    }
+  });
+
+  // The rewritten gitfile and the fsmonitor hook are POSIX spellings.
+  it.skipIf(process.platform === 'win32')(
+    'does not trust a watch nested in a sibling worktree whose gitfile was rewritten',
+    () => {
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'user.email=t@example.com',
+          '-c',
+          'user.name=t',
+          'commit',
+          '-q',
+          '--allow-empty',
+          '-m',
+          'base',
+        ],
+        { cwd: repo },
+      );
+      // A registered sibling worktree of the genuine clone.
+      const sibling = `${repo}-sibling`;
+      execFileSync('git', ['worktree', 'add', '-q', '--detach', sibling], {
+        cwd: repo,
+      });
+      // A replacement repository whose fsmonitor hook writes a marker.
+      const replacement = realpathSync(
+        mkdtempSync(join(tmpdir(), 'autofix-repl-')),
+      );
+      const marker = join(replacement, 'pwned');
+      execFileSync('git', ['init', '-q', '-b', 'main', replacement]);
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'user.email=t@example.com',
+          '-c',
+          'user.name=t',
+          'commit',
+          '-q',
+          '--allow-empty',
+          '-m',
+          'r',
+        ],
+        { cwd: replacement },
+      );
+      const hook = join(replacement, 'fsmonitor.sh');
+      writeFileSync(hook, `#!/bin/sh\ntouch '${marker}'\n`, { mode: 0o755 });
+      execFileSync('git', ['config', 'core.fsmonitor', hook], {
+        cwd: replacement,
+      });
+      try {
+        // A watch worktree of the replacement, nested in the sibling, with a
+        // self-consistent gitfile and a planted state file.
+        const nestedPaths = autofixPrPaths(sibling, 7);
+        mkdirSync(dirname(nestedPaths.worktreePath), { recursive: true });
+        execFileSync(
+          'git',
+          ['worktree', 'add', '-q', '--detach', nestedPaths.worktreePath],
+          { cwd: replacement },
+        );
+        // Rewrite the sibling's gitfile so it vouches for the replacement.
+        writeFileSync(
+          join(sibling, '.git'),
+          `gitdir: ${join(replacement, '.git')}\n`,
+        );
+        writeState(nestedPaths.statePath, {
+          version: 1,
+          sessionId: 'session-a',
+          host: 'github.com',
+          owner: 'o',
+          repo: 'r',
+          prNumber: 7,
+          remote: 'origin',
+          pushTarget: 'origin',
+          headRefName: 'feat-7',
+          baseRefName: 'main',
+          branch: nestedPaths.branch,
+          worktreePath: nestedPaths.worktreePath,
+          viewer: 'me',
+          prAuthor: 'me',
+          lastKnownHeadSha: HEAD,
+          pushedShas: [],
+          handledCommentIds: [],
+          postedCommentIds: [],
+        });
+        // Status from the genuine clone must anchor trust to it, not to the
+        // rewritten sibling: the planted watch is untrusted and its config
+        // (the fsmonitor hook) never runs. Adding the nested worktree above
+        // already checked out through the replacement's hook, so clear the
+        // marker first to isolate what status itself executes.
+        rmSync(marker, { force: true });
+        const { watches } = runStatus({});
+        // The rewritten sibling is not vouched for against the genuine clone,
+        // so its forged watch is not listed at all and its config never runs.
+        expect(watches.some(({ pr }) => pr === 7)).toBe(false);
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        rmSync(sibling, { recursive: true, force: true });
+        rmSync(replacement, { recursive: true, force: true });
+        execFileSync('git', ['worktree', 'prune'], { cwd: repo });
+      }
+    },
+  );
+
+  const commitBase = () =>
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.email=t@example.com',
+        '-c',
+        'user.name=t',
+        'commit',
+        '-q',
+        '--allow-empty',
+        '-m',
+        'base',
+      ],
+      { cwd: repo },
+    );
+  const stateAt = (
+    paths: ReturnType<typeof autofixPrPaths>,
+    pr: number,
+    patch: Partial<AutofixPrState> = {},
+  ) => {
+    mkdirSync(dirname(paths.statePath), { recursive: true });
+    writeState(paths.statePath, {
+      version: 1,
+      sessionId: 'session-a',
+      host: 'github.com',
+      owner: 'o',
+      repo: 'r',
+      prNumber: pr,
+      remote: 'origin',
+      pushTarget: 'origin',
+      headRefName: `feat-${pr}`,
+      baseRefName: 'main',
+      branch: paths.branch,
+      worktreePath: paths.worktreePath,
+      viewer: 'me',
+      prAuthor: 'me',
+      lastKnownHeadSha: HEAD,
+      pushedShas: [],
+      handledCommentIds: [],
+      postedCommentIds: [],
+      ...patch,
+    });
+    writeAnchor({ host: 'github.com', owner: 'o', repo: 'r' }, pr, repo);
+  };
+  const addWatchWorktree = (paths: ReturnType<typeof autofixPrPaths>) => {
+    execFileSync('git', ['branch', paths.branch], { cwd: repo });
+    mkdirSync(dirname(paths.worktreePath), { recursive: true });
+    execFileSync(
+      'git',
+      ['worktree', 'add', '-q', paths.worktreePath, paths.branch],
+      {
+        cwd: repo,
+      },
+    );
+  };
+
+  it('surfaces a read failure of the primary worktree, not an empty listing', () => {
+    mkdirSync(join(repo, '.qwen'), { recursive: true });
+    writeFileSync(join(repo, '.qwen', 'tmp'), 'not a directory');
+    expect(() => runStatus({})).toThrow();
+  });
+
+  it('reports gitTrusted true for a genuine watch rooted in a linked worktree', () => {
+    commitBase();
+    const linked = `${repo}-linked`;
+    execFileSync('git', ['worktree', 'add', '-q', '--detach', linked], {
+      cwd: repo,
+    });
+    const paths = autofixPrPaths(linked, 7);
+    try {
+      addWatchWorktree(paths);
+      stateAt(paths, 7);
+      const { watches } = runStatus({});
+      const watch = watches.find(({ pr }) => pr === 7);
+      expect(watch?.worktreePath).toBe(paths.worktreePath);
+      expect(watch?.gitTrusted).toBe(true);
+    } finally {
+      execFileSync(
+        'git',
+        ['worktree', 'remove', '--force', paths.worktreePath],
+        {
+          cwd: repo,
+        },
+      );
+      execFileSync('git', ['worktree', 'remove', '--force', linked], {
+        cwd: repo,
+      });
+      execFileSync('git', ['branch', '-D', paths.branch], { cwd: repo });
+      rmSync(linked, { recursive: true, force: true });
+    }
+  });
+
+  it('prefers a live main-rooted watch over a stale state file in a linked root', () => {
+    commitBase();
+    const mainPaths = autofixPrPaths(repo, 7);
+    addWatchWorktree(mainPaths);
+    stateAt(mainPaths, 7);
+    const linked = `${repo}-linked`;
+    execFileSync('git', ['worktree', 'add', '-q', '--detach', linked], {
+      cwd: repo,
+    });
+    try {
+      // A stale state file in the linked root, with no worktree there.
+      stateAt(autofixPrPaths(linked, 7), 7);
+      const { watches } = runStatus({ work: false });
+      expect(watches).toHaveLength(1);
+      expect(watches[0]!.worktreePath).toBe(mainPaths.worktreePath);
+      expect(watches[0]!.worktreeExists).toBe(true);
+    } finally {
+      execFileSync(
+        'git',
+        ['worktree', 'remove', '--force', mainPaths.worktreePath],
+        {
+          cwd: repo,
+        },
+      );
+      execFileSync('git', ['worktree', 'remove', '--force', linked], {
+        cwd: repo,
+      });
+      execFileSync('git', ['branch', '-D', mainPaths.branch], { cwd: repo });
+      rmSync(linked, { recursive: true, force: true });
+    }
+  });
+
+  it('does not list a watch forged inside a watch worktree own .qwen/tmp', () => {
+    commitBase();
+    const host = autofixPrPaths(repo, 3);
+    addWatchWorktree(host);
+    try {
+      // A state file force-added inside the watch worktree's own tree.
+      const forged = autofixPrPaths(host.worktreePath, 9);
+      stateAt(forged, 9);
+      const { watches } = runStatus({ work: false });
+      expect(watches.some(({ pr }) => pr === 9)).toBe(false);
+    } finally {
+      execFileSync(
+        'git',
+        ['worktree', 'remove', '--force', host.worktreePath],
+        {
+          cwd: repo,
+        },
+      );
+      execFileSync('git', ['branch', '-D', host.branch], { cwd: repo });
+    }
+  });
+
+  it('does not read a foreign repository occupying a stale worktree entry', () => {
+    commitBase();
+    write(7);
+    const linked = `${repo}-linked`;
+    execFileSync('git', ['worktree', 'add', '-q', '--detach', linked], {
+      cwd: repo,
+    });
+    // Delete the worktree without prune, then check out an unrelated repo at
+    // the same path holding its own watch state.
+    rmSync(linked, { recursive: true, force: true });
+    execFileSync('git', ['init', '-q', '-b', 'main', linked]);
+    stateAt(autofixPrPaths(linked, 9), 9, { repo: 'thing', owner: 'other' });
+    try {
+      const { watches } = runStatus({ work: false });
+      expect(watches.some(({ pr }) => pr === 9)).toBe(false);
+      expect(watches.some(({ pr }) => pr === 7)).toBe(true);
+    } finally {
+      execFileSync('git', ['worktree', 'prune'], { cwd: repo });
+      rmSync(linked, { recursive: true, force: true });
+    }
+  });
+
+  it('reports an in-place watch from the checkout the state names', () => {
+    commitBase();
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repo,
+      encoding: 'utf8',
+    }).trim();
+    // The checkout is the clone's main worktree: a .git directory, which
+    // the in-place trust check accepts and the watch's own .qwen/tmp files
+    // are not the user's work.
+    write(7, {
+      inPlace: true,
+      worktreePath: repo,
+      branch: 'main',
+      headRefName: 'main',
+      lastKnownHeadSha: sha,
+    });
+    expect(runStatus({}).watches[0]).toMatchObject({
+      inPlace: true,
+      worktreePath: repo,
+      worktreeExists: true,
+      gitTrusted: true,
+      worktreeWork: null,
+    });
+    writeFileSync(join(repo, 'dirty.txt'), 'x');
+    expect(runStatus({}).watches[0]!.worktreeWork).toBe(
+      'it has uncommitted changes',
+    );
   });
 });

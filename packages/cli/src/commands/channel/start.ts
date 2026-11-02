@@ -139,6 +139,19 @@ async function writeServiceInfoOrExit(
       writeStderrLine(`Error: ${err.message}`);
       process.exit(1);
     }
+    // A held pidfile lock already states its own recovery window, and the two
+    // identity refusals below are code-less and thrown by module-private
+    // helpers, so each is recognised here and reported as one operator-facing
+    // line instead of falling through to a yargs usage dump and a raw stack.
+    if (
+      err instanceof Error &&
+      ((err as NodeJS.ErrnoException).code === 'ELOCKED' ||
+        err.message.startsWith('Unable to read the process start token') ||
+        err.message.startsWith('Unable to read the PID namespace id'))
+    ) {
+      writeStderrLine(`Error: ${err.message}`);
+      process.exit(1);
+    }
     throw err;
   }
 }

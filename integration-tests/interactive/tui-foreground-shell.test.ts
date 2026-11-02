@@ -561,6 +561,10 @@ shellTest(
             .includes('planmode'),
         'Focused Shift+Tab did not cycle the actual approval footer',
       );
+      await until(
+        () => c.bytes().length >= shiftedInput.length,
+        'Focused Shift+Tab did not reach the PTY',
+      );
       expect(c.bytes()).toBe(shiftedInput);
       expect(c.server.requests).toHaveLength(1);
       c.stage('PTY_PASTE');

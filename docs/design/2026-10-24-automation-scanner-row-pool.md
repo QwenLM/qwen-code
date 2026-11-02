@@ -82,6 +82,16 @@ follow-up if probe durations keep saturating
   funnel, so a Session's executions stay one at a time. Accepted semantics,
   pinned by `twoDefinitionsSharingOneSessionBothFireWhenDueTogether`
   (#15442 verify lane, finding 1).
+- Decision on the shared-Session queue (#15667): the pool does not group rows
+  by Session. The second fire therefore queues behind the first probe inside
+  its own 30 s relay budget and can lose that answer; the occurrence is
+  re-driven with backoff, the Harness still finishes the run, and the re-drive
+  either replays the claimed run or reads the settled receipt back, so nothing
+  runs twice within a revision. In a Harness pool a lost answer can also take
+  that Harness out of selection until its next successful refresh (#15666).
+  Intended, not serialized here: the funnel is shared across nodes and with
+  public relays, so a per-node ordering would not remove the queue. Guidance:
+  give a gated definition whose probe is slow its own Session.
 - One fire can still out-live the 60 s lease while a cold Session loads (up to
   120 s before the relay starts). The fence denies the stale holder's writes,
   the occurrence stays `firing`, and a later tick re-drives it idempotently on

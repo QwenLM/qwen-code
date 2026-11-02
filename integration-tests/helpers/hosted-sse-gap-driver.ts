@@ -304,15 +304,12 @@ try {
       .join(''),
     'FG6e tool finished once.',
   );
-  // Progress frames materialize as transcript items, not transcript events.
-  const itemFrames = new Set([
-    'item.output_text.delta',
-    'item.tool_call.updated',
-  ]);
+  // Message pages carry selected Turn control events; full Session history
+  // and progress frames are checked against the SQL ledger above.
   assert.deepEqual(
     transcript.events,
     webFrames
-      .filter((frame) => !itemFrames.has(frame.event))
+      .filter((frame) => frame.event === 'turn.completed')
       .map((frame) => frame.data),
   );
   assert.equal(
