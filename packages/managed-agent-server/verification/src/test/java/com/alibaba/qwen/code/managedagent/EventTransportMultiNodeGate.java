@@ -86,6 +86,7 @@ public class EventTransportMultiNodeGate {
     private static final String DIGEST = "sha256:" + "a".repeat(64);
     private static final String MODEL = "mq3-fixture-model";
     private static final String WORKSPACE = "mq3-workspace";
+    private static final String ACTOR = "mq3-gate-actor";
     private static final String ORACLE_GROUP = "qwen-transport-gate-oracle";
     private static final String BOOTSTRAP_LITE_TOPIC = "qwen-wake-bootstrap";
     private static final Pattern LISTENING = Pattern.compile(
@@ -768,6 +769,7 @@ public class EventTransportMultiNodeGate {
                     URI.create("http://127.0.0.1:" + node.springPort + path))
                     .timeout(Duration.ofSeconds(20))
                     .header("X-Qwen-Tenant-Id", tenant)
+                    .header("X-Qwen-Actor-Id", ACTOR)
                     .header("Accept", "application/json")
                     .method(method, body == null ? HttpRequest.BodyPublishers.noBody()
                             : HttpRequest.BodyPublishers.ofString(body));
@@ -1324,6 +1326,7 @@ public class EventTransportMultiNodeGate {
             Map<String, String> properties = new LinkedHashMap<>();
             properties.put("server.address", "127.0.0.1");
             properties.put("server.port", Integer.toString(springPort));
+            properties.put("qwen.managed-agent.trusted-actor-header", "X-Qwen-Actor-Id");
             properties.put("spring.datasource.url", databaseUrl);
             properties.put("spring.datasource.username", System.getProperty("mysql.user"));
             properties.put("spring.datasource.password",
