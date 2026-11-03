@@ -46,6 +46,12 @@ agents or run for parents and siblings. Global settings hooks and session-wide
 skill/function hooks retain their existing scope. Project-agent hooks recheck
 the trust of the workspace that supplied the agent before every event.
 
+Project skill and agent frontmatter hooks require **explicit folder trust**:
+enable `security.folderTrust.enabled` in user settings and trust the directory,
+or grant workspace trust through your IDE. Disabling folder trust does not
+authorize frontmatter hooks, including in YOLO mode. Their instructions still
+load. User and bundled frontmatter hooks keep their existing behavior.
+
 Use `SubagentStop` for agent completion; `Stop` is not automatically remapped.
 Move an agent hook to settings if it should observe the whole session.
 
