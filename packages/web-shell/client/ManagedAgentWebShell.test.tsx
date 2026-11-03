@@ -94,6 +94,34 @@ describe('ManagedAgentWebShell', () => {
     expect(container.querySelector('[data-web-shell-root]')).not.toBeNull();
   });
 
+  it('rejects a null base URL, not just an absent one', async () => {
+    // A plain-JS host erases the prop type at runtime: an unresolved config
+    // value arrives as `null`, which would otherwise resolve every request
+    // against `<origin>/null`.
+    const errors: unknown[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args) => {
+      errors.push(args[0]);
+    });
+    try {
+      await act(async () => {
+        root.render(
+          <ManagedAgentWebShell baseUrl={null as unknown as string} />,
+        );
+      });
+    } catch (error) {
+      errors.push(error);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(
+      errors.some(
+        (error) =>
+          error instanceof Error &&
+          error.message.includes('requires `baseUrl`'),
+      ),
+    ).toBe(true);
+  });
+
   it('uses the injected provider and resets host selection when its identity scope changes', async () => {
     const fetchImpl = vi.fn();
     const first = { storageKey: 'tenant-a:actor-a' } as ManagedAgentProvider;

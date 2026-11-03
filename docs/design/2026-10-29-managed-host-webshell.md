@@ -13,7 +13,10 @@ implements transport, authentication, authorization and actual browser acceptanc
 
 `ManagedAgentWebShell` accepts `managedAgentProvider?: ManagedAgentProvider` and
 `hostSessionOnly?: boolean` (default `false`). An injected provider is used
-without constructing the Java provider; omission preserves Java behavior.
+without constructing the Java provider. Omitting the provider is only valid
+together with `baseUrl`: the built-in Java provider is then constructed from it,
+and supplying neither throws during render instead of resolving requests against
+`<origin>/undefined`.
 
 Host-only mode opens only the explicit `sessionId`. Missing IDs render an empty
 conversation region, without listing, choosing or creating Sessions. The internal

@@ -2045,6 +2045,54 @@ describe('ManagedSessionsPage', () => {
     expect(onSelect).toHaveBeenCalledWith('s2', 'ws-2');
   });
 
+  it('ignores a pending record whose workspaceId is not a string', async () => {
+    // Rejecting the tampered record means the page behaves as if nothing was
+    // queued. Restoring it would hand the host a number where `workspaceId?:
+    // string` is contracted and clear the wrong selection.
+    mocks.client.listSessions.mockResolvedValue({ sessions: [summary()] });
+    const key = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}`;
+    sessionStorage.setItem(
+      key,
+      JSON.stringify({
+        idempotencyKey: 'pending-owner-tampered',
+        text: 'queued elsewhere',
+        sessionId: 's2',
+        workspaceId: 7,
+      }),
+    );
+    await render('s1');
+    expect(
+      [...container.querySelectorAll('button')].find(
+        (item) => item.textContent === 'Open the original conversation',
+      ),
+    ).toBeUndefined();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('persists the submitted workspace on the pending record', async () => {
+    // The read side alone is not enough: a filtered, paginated or host-only
+    // page only recovers the workspace from what was written here.
+    mocks.client.getSession.mockResolvedValue(
+      summary('bound', {
+        activeTurnId: undefined,
+        workspace: { workspaceId: 'ws-a', cwdRelative: 'services/api' },
+        capabilities: { canSend: true, canCancel: false, workspaceTurns: true },
+      }),
+    );
+    mocks.client.submitPrompt.mockResolvedValue({
+      sessionId: 'bound',
+      turnId: 'p2',
+    });
+    const saved = vi.spyOn(pendingStorage, 'saveManagedPending');
+    await render('bound');
+    await input('Run it again');
+    await click('Send');
+    const record = saved.mock.calls
+      .map(([, value]) => value)
+      .find((value) => value?.sessionId === 'bound');
+    expect(record).toMatchObject({ sessionId: 'bound', workspaceId: 'ws-a' });
+  });
+
   it.each([
     JSON.stringify({ storage: 'indexeddb', pendingId: 'missing' }),
     '{',

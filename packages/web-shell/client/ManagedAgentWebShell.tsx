@@ -108,8 +108,10 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
   const provider = useMemo(() => {
     if (managedAgentProvider) return managedAgentProvider;
     // `''` is a supported same-origin base (`new URL('', origin)` resolves to
-    // the page origin), so only a missing prop is a configuration error.
-    if (baseUrl === undefined)
+    // the page origin), so only a missing prop is a configuration error. A
+    // plain-JS host can hand over `null` for an unresolved config value, which
+    // would otherwise resolve every request against `<origin>/null`.
+    if (baseUrl == null)
       throw new Error(
         'ManagedAgentWebShell requires `baseUrl` when no `managedAgentProvider` is supplied.',
       );
