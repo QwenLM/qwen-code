@@ -55,7 +55,6 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private final RuntimeBrokerService service;
     private final RuntimeBrokerHttpServer server;
     private final RuntimeRecoveryCoordinator recovery;
-    private final SessionQueryStore store;
     private final WorkspaceRuntimeResolver workspaces;
     private final ChildWorkspaceProvider childWorkspaces;
     private final com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog residents;
@@ -149,7 +148,6 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             org.springframework.jdbc.core.JdbcTemplate jdbc,
             org.springframework.transaction.PlatformTransactionManager manager,
             RuntimeProvisioner residentProvisioner, SshWorkspaceService ssh) {
-        this.store = store;
         this.ssh = ssh;
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
