@@ -11,6 +11,7 @@ import type { DefinitionPin } from '@qwen-code/qwen-code-core/managed-runtime/ma
 import { WorkflowRunner } from '@qwen-code/qwen-code-core/agents/runtime/workflow-runner.js';
 import type { WorkflowRunOutcome } from '@qwen-code/qwen-code-core/agents/runtime/workflow-orchestrator.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
+import type { HostedModelConfigReader } from './hosted-model-config.js';
 import { loadSettings } from '../config/settings.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
@@ -184,6 +185,7 @@ export async function runHostedWorkflowTurn(input: {
   /** The Session's pinned definition: its model governs every agent()
    * dispatch of the run, exactly as it governs the sibling text Turn. */
   readonly agentDefinition?: HostedAgentDefinition;
+  readonly modelConfig?: HostedModelConfigReader;
 }): Promise<HostedHarnessModelResult> {
   // The pin binds the bytes that run: the launch's digest must equal the
   // script's own, or this Turn never starts (decision 2).
@@ -224,6 +226,7 @@ export async function runHostedWorkflowTurn(input: {
   // filesystem metadata and never the Session's Workspace. The sibling text
   // turn replaces that prelude with the Session's own history; these agents
   // have none to replace it with, so they start without it.
+  const sessionModelConfig = await input.modelConfig?.();
   const config = await loadCliConfig(
     {
       ...settings.merged,
@@ -237,9 +240,12 @@ export async function runHostedWorkflowTurn(input: {
     undefined,
     undefined,
     true,
+    sessionModelConfig ? { modelConfiguration: sessionModelConfig } : undefined,
   );
-  const model = input.agentDefinition?.model;
-  await applyHostedModelPin(config, model);
+  const model = sessionModelConfig
+    ? { id: sessionModelConfig.model }
+    : input.agentDefinition?.model;
+  if (!sessionModelConfig) await applyHostedModelPin(config, model);
   try {
     await config.initialize({
       signal: input.signal,

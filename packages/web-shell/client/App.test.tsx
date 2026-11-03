@@ -2446,6 +2446,13 @@ vi.doMock('./components/channels/ChannelsManagerPage', async () => {
       React.createElement('div', { 'data-testid': 'channels-manager-page' }),
   };
 });
+vi.doMock('./components/channels/ChannelEventsPage', async () => {
+  const React = await import('react');
+  return {
+    ChannelEventsPage: () =>
+      React.createElement('div', { 'data-testid': 'channel-events-page' }),
+  };
+});
 vi.doMock('./components/SplitView', async () => {
   const React = await import('react');
   return {
