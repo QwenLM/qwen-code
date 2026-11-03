@@ -241,7 +241,9 @@ export interface ChannelBoundSessions {
    * of the same key, and a retry after a lost acceptance mark or a lost
    * response re-injects nothing. The key's dedupe lifetime is the
    * daemon process — a daemon restart loses the queue with it, making
-   * re-injection the correct recovery there.
+   * re-injection the correct recovery there. The one exception is the
+   * daemon's 1024-session ring cap: a key can be evicted while its queue
+   * is still live, and a retry after such an eviction re-injects.
    */
   deliverPrompt(
     sessionId: string,

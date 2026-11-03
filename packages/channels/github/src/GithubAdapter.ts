@@ -332,6 +332,17 @@ const MAX_BOUND_DEFERRALS = 240;
  */
 const MAX_COLD_EMPTY_PARTIAL_POLLS = 30;
 
+/**
+ * Retention bound under a PERMANENT partial snapshot: prune never runs while
+ * the binding answer is incomplete, so unlisted sessions and unbound PR
+ * entries would otherwise accumulate for the daemon's whole uptime (same
+ * cap discipline as the worker's wake cache). Oldest-first eviction; a
+ * dropped candidate degrades through the documented partial-state paths,
+ * and watch keys carry a detection timestamp so an evicted baseline can
+ * re-fire an event but never dedupe it into an old admission.
+ */
+const MAX_PARTIAL_RETAINED = 1024;
+
 type PrWatchEventType =
   | 'ci_failure'
   | 'merge_conflict'
@@ -371,10 +382,12 @@ interface PrWatchEntry {
   lastCiFetchAt?: number;
   /**
    * Monotonic episode counter. merge_conflict / state_change / head_change
-   * keys identify a transition INSTANCE (watch:<type>:<seq>), not a state
-   * value, so a legitimate recurrence (dirty -> clean -> dirty,
-   * close -> reopen -> close, a SHA revisit) fires again. ci_failure keeps
-   * its per-head SHA key: once per head even across aggregate flapping.
+   * keys identify a transition INSTANCE
+   * (watch:<type>:<pr>:<seq>:<detectedAt>), not a state value, so a
+   * legitimate recurrence (dirty -> clean -> dirty, close -> reopen ->
+   * close, a SHA revisit) fires again. ci_failure keys carry the PR + head
+   * SHA (watch:ci_failure:<pr>:<sha>:<detectedAt>) and match by prefix:
+   * once per head even across aggregate flapping.
    */
   seq?: number;
   /**
@@ -390,10 +403,10 @@ interface PrWatchEntry {
   fired?: string[];
   /**
    * Head SHA whose ci_failure already fired. The fired ring is capped, so
-   * 64 non-ci episodes on a long-lived head can evict the ci_failure:<sha>
-   * key; this pin keeps ci_failure once-per-head even after that eviction
-   * (a flapping aggregate must not re-fire on the same head). Reset when the
-   * head changes.
+   * 64 non-ci episodes on a long-lived head can evict the per-head
+   * ci_failure key; this pin keeps ci_failure once-per-head even after that
+   * eviction (a flapping aggregate must not re-fire on the same head).
+   * Reset when the head changes.
    */
   ciFiredSha?: string;
 }
@@ -2228,11 +2241,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         record.source.messageId === envelope.messageId,
     );
     if (existing) {
-      // A terminal failed/cancelled record must not swallow a legitimately
-      // recurring source key (watch episodes re-fire after their entry was
-      // pruned and reset): replace it with a fresh task. reply_pending is
-      // NOT terminal — a public reply is still awaiting publication, and
-      // replacing it would double-publish.
+      // A terminal failed/cancelled record must not swallow the same key's
+      // surviving pending event (a crash can leave the pending queue and a
+      // terminal attempt of one episode): replace it with a fresh task.
+      // reply_pending is NOT terminal — a public reply is still awaiting
+      // publication, and replacing it would double-publish.
       const terminal =
         existing.state === 'cancelled' ||
         (existing.state === 'failed' &&
@@ -3016,8 +3029,25 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // candidate competes by recency, so a partial answer listing only
         // an older session cannot displace the newer known one.
         const seen = new Set(snapshot.bindings.map((b) => b.sessionId));
+        // A permanent partial must not grow retention without bound: keep
+        // the most recent unlisted sessions and drop the rest (oldest
+        // first). A dropped candidate's events follow the documented
+        // partial-state degradation, never a silent loss.
+        const retained = this.lastBindings.filter(
+          (b) => !seen.has(b.sessionId),
+        );
+        const retainedCapped =
+          retained.length > MAX_PARTIAL_RETAINED
+            ? [...retained]
+                .sort((a, b) =>
+                  (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''),
+                )
+                .slice(0, MAX_PARTIAL_RETAINED)
+            : retained;
+        const retainedIds = new Set(retainedCapped.map((b) => b.sessionId));
         for (const [key, summary] of this.boundSessionByPr) {
           if (seen.has(summary.sessionId)) continue;
+          if (!retainedIds.has(summary.sessionId)) continue;
           const existing = map.get(key);
           if (
             !existing ||
@@ -3026,10 +3056,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             map.set(key, summary);
           }
         }
-        this.lastBindings = [
-          ...snapshot.bindings,
-          ...this.lastBindings.filter((b) => !seen.has(b.sessionId)),
-        ];
+        this.lastBindings = [...snapshot.bindings, ...retainedCapped];
       } else {
         this.lastBindings = snapshot.bindings;
       }
@@ -3229,7 +3256,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // the task with a new id on recovery, and a task-scoped key would let the
     // daemon admit the same event twice. The event key survives task
     // re-creation, so the retry dedupes into the original admission.
-    const idempotencyKey = `github:${envelope.chatId}:${envelope.messageId ?? ''}`;
+    const rawIdempotencyKey = `github:${envelope.chatId}:${envelope.messageId ?? ''}`;
+    // The prompt route caps idempotency keys at 200 characters; a long repo
+    // slug plus a SHA-256 watch key can exceed it and earn a 400 that burns
+    // the retry budget into a dead-letter. Hash the overflow deterministically
+    // so retries of the same event still dedupe.
+    const idempotencyKey =
+      rawIdempotencyKey.length <= 200
+        ? rawIdempotencyKey
+        : `github:h:${createHash('sha256').update(rawIdempotencyKey).digest('hex').slice(0, 40)}`;
     try {
       await boundSessions.deliverPrompt(
         delivery.sessionId,
@@ -3460,10 +3495,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // full candidate set, not the capped watch set, so PRs rotating out of
     // the cap keep their baseline. Never delete an entry that still holds
     // undelivered pending events (a failed claim keeps its queue) OR whose
-    // earlier transition still has a surviving inbound task: pruning resets
-    // the episode counter, and a rebind would re-issue watch:<type>:1,
-    // collide with the old task's source key, and silently consume the new
-    // transition into the old envelope.
+    // earlier transition still has a surviving inbound task: keep the
+    // baseline and ciFiredSha pin while the old transition is in flight so
+    // a rebind does not re-fire the same red head.
     if (!this.lastBindingsPartial) {
       let survivingWatchPrs: Set<string> | undefined;
       try {
@@ -3491,6 +3525,34 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           if (survivingWatchPrs.has(key)) continue;
           delete this.prWatchState.entries[key];
         }
+      }
+    }
+    // The prune above never runs under a permanent partial; cap the entry
+    // map so an unscannable workspace cannot grow it without bound. Evict
+    // the oldest idle entries (no pending events) and surface it: losing a
+    // baseline can re-fire a red head's ci_failure once, but the detection
+    // timestamp in watch keys keeps the re-fire from deduping into an old
+    // admission, so this bounds memory without losing events.
+    const entryKeys = Object.keys(this.prWatchState.entries);
+    if (entryKeys.length > MAX_PARTIAL_RETAINED) {
+      const evictable = entryKeys
+        .filter((key) => !this.prWatchState.entries[key]?.pending?.length)
+        .sort(
+          (a, b) =>
+            (this.prWatchState.entries[a]?.headObservedAt ?? 0) -
+            (this.prWatchState.entries[b]?.headObservedAt ?? 0),
+        );
+      const evictCount = Math.min(
+        evictable.length,
+        entryKeys.length - MAX_PARTIAL_RETAINED,
+      );
+      for (let i = 0; i < evictCount; i++) {
+        delete this.prWatchState.entries[evictable[i]];
+      }
+      if (evictCount > 0) {
+        process.stderr.write(
+          `[Channel:${this.name}] PR watch entry cap exceeded: evicted ${evictCount} idle entries (oldest first) to bound memory under a partial binding snapshot\n`,
+        );
       }
     }
     const watched = [...active.entries()]
@@ -3708,6 +3770,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         : {}),
     };
 
+    // Bake the PR number and detection time into every watch key. The
+    // delivery idempotency key is chatId + messageId only, so without the
+    // PR number two PRs of one repo bound to the same session would issue
+    // identical first-episode keys and the daemon ring would silently
+    // dedupe the second PR's event. The timestamp survives episode-counter
+    // resets (prune, corruption recovery): the daemon ring outlives the
+    // worker, and a re-issued bare seq key would dedupe into the old
+    // admission instead of delivering the new transition.
+    const detectedAt = Date.now();
     for (const event of events) {
       // ci_failure dedupes per head SHA: once per head even when the
       // aggregate flaps back to success and fails again. The other three
@@ -3719,19 +3790,29 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // the documented edge-triggered semantics.
       let dedupeKey: string;
       if (event.type === 'ci_failure') {
-        dedupeKey = `watch:ci_failure:${headSha ?? 'unknown'}`;
+        dedupeKey = `watch:ci_failure:${number}:${headSha ?? 'unknown'}:${detectedAt}`;
       } else {
         next.seq = (next.seq ?? 0) + 1;
-        dedupeKey = `watch:${event.type}:${next.seq}`;
+        dedupeKey = `watch:${event.type}:${number}:${next.seq}:${detectedAt}`;
       }
       // The fired ring is the durable once-per-transition record: inbound
       // tasks are removed on success, so task-level dedupe alone would let
       // a flapping aggregate re-fire the same head after a restart.
-      if (next.fired?.includes(dedupeKey)) continue;
+      // ci_failure matches by PR+SHA PREFIX: the nonce suffix makes every
+      // detection key unique, but once-per-head must survive head changes
+      // (the ciFiredSha pin drops on a head change) and flaps while an
+      // earlier episode is still pending.
+      const ciPrefix =
+        event.type === 'ci_failure'
+          ? `watch:ci_failure:${number}:${headSha ?? 'unknown'}:`
+          : undefined;
+      const recorded = (key: string) =>
+        ciPrefix !== undefined ? key.startsWith(ciPrefix) : key === dedupeKey;
+      if (next.fired?.some(recorded)) continue;
       // The fired ring is capped: 64 non-ci episodes on a long-lived head
-      // can evict the ci_failure:<sha> key. The ciFiredSha pin keeps
-      // ci_failure once-per-head even after that eviction (a flapping
-      // aggregate must not re-fire on the same head).
+      // can evict the ci_failure key. The ciFiredSha pin keeps ci_failure
+      // once-per-head even after that eviction (a flapping aggregate must
+      // not re-fire on the same head).
       if (
         event.type === 'ci_failure' &&
         headSha !== undefined &&
@@ -3739,7 +3820,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       ) {
         continue;
       }
-      if (next.pending?.some((p) => p.key === dedupeKey)) continue;
+      if (next.pending?.some((p) => recorded(p.key))) continue;
       const envelope: Envelope = {
         channelName: this.name,
         senderId: 'github',

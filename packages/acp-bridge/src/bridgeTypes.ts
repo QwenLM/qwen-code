@@ -2166,8 +2166,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * failures — `InvalidClientIdError`, `PromptQueueFullError`, pre-aborted
    * signals, and `SessionNotFoundError` (unknown or closing session) — throw
    * synchronously so HTTP routes can reject before returning 202. A rejected
-   * promise represents a turn that WAS admitted and then failed; callers
-   * must not treat it as an admission failure.
+   * promise normally represents a turn that WAS admitted and then failed.
+   * The pre-enqueue checks that still reject deferred (the reserved
+   * standalone working-directory check and prompt-shape validation) are
+   * admission failures too: `onPromptAdmitted` has not fired for them, and
+   * callers that dedupe retries must drop the idempotency key when a
+   * rejection arrives without the admission signal.
    *
    * Reserved contract (not yet implemented): promptId admission dedup — a
    * `PromptIdConflictError` admission failure class, and a rule that a

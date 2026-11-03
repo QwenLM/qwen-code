@@ -6161,6 +6161,13 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       };
       ch.cursor.dispatchedComments = [];
       ch.cursor.lastProcessedAt = '2026-07-01T00:00:00.000Z';
+      // Observe the re-created task WHILE it is being delivered: after
+      // success the task file is gone, and a sentinel id would make the
+      // different-id assertion trivially true.
+      let secondTaskIdDuringDelivery: string | undefined;
+      boundSessions.deliverPrompt.mockImplementationOnce(async () => {
+        secondTaskIdDuringDelivery = readInboundTasks()[0]?.['id'] as string;
+      });
       mockOctokit.paginate
         .mockResolvedValueOnce([prNotification()])
         .mockResolvedValueOnce([makeComment()]);
@@ -6168,14 +6175,13 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
       const firstKey = boundSessions.deliverPrompt.mock.calls[0]![2];
       const secondKey = boundSessions.deliverPrompt.mock.calls[1]![2];
-      const secondTaskId = existsSync(inboundTaskPath())
-        ? (readInboundTasks()[0]?.['id'] as string)
-        : 'removed-after-success';
       // A new task (different id) must carry the SAME event key so the
       // daemon dedupes the re-injection into the original admission.
       expect(secondKey).toBe(firstKey);
       expect(firstKey).toBe('github:owner/repo:1001');
-      expect(secondTaskId).not.toBe(firstTaskId);
+      expect(secondTaskIdDuringDelivery).toBeDefined();
+      expect(secondTaskIdDuringDelivery).not.toBe(firstTaskId);
+      expect(existsSync(inboundTaskPath())).toBe(false);
     });
 
     it('does not record aggregate dedupe keys when the task claim fails (A-F1)', async () => {
@@ -7657,7 +7663,9 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       };
       expect(
         queued.entries['owner/repo#42']!.pending?.map((p) => p.key),
-      ).toContain('watch:ci_failure:sha-1');
+      ).toContainEqual(
+        expect.stringMatching(/^watch:ci_failure:42:sha-1:\d+$/),
+      );
       spy.mockRestore();
 
       // Restart: the pending event drains and delivers exactly once.
@@ -7701,8 +7709,8 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         'fired'
       ] as string[];
       expect(fired).toEqual([
-        'watch:merge_conflict:1',
-        'watch:merge_conflict:2',
+        expect.stringMatching(/^watch:merge_conflict:42:1:\d+$/),
+        expect.stringMatching(/^watch:merge_conflict:42:2:\d+$/),
       ]);
     });
 
@@ -7765,7 +7773,10 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       const fired = readWatchState().entries['owner/repo#42']![
         'fired'
       ] as string[];
-      expect(fired).toEqual(['watch:state_change:1', 'watch:state_change:2']);
+      expect(fired).toEqual([
+        expect.stringMatching(/^watch:state_change:42:1:\d+$/),
+        expect.stringMatching(/^watch:state_change:42:2:\d+$/),
+      ]);
     });
 
     it('re-fires head_change on a SHA revisit A -> B -> A -> B (F1)', async () => {
@@ -7792,9 +7803,9 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         'fired'
       ] as string[];
       expect(fired).toEqual([
-        'watch:head_change:1',
-        'watch:head_change:2',
-        'watch:head_change:3',
+        expect.stringMatching(/^watch:head_change:42:1:\d+$/),
+        expect.stringMatching(/^watch:head_change:42:2:\d+$/),
+        expect.stringMatching(/^watch:head_change:42:3:\d+$/),
       ]);
     });
 
@@ -7901,11 +7912,27 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       }
     });
 
-    it('replaces a terminal failed task when a watch key re-fires (F6)', async () => {
+    it('replaces a terminal failed task when its pending event drains (F6)', async () => {
       await initChannel(watchConfig, { boundSessions });
-      const envelope = {
-        ...makePendingWatch({ key: 'watch:state_change:1' }).envelope,
-      };
+      // Claim-level replacement keys off the PERSISTED pending key (stable
+      // across restarts). A fresh detection always carries a new detection
+      // timestamp and legitimately owns a new task, so the tombstone path
+      // is driven through the surviving pending queue.
+      const key = 'watch:state_change:42:1:1751446800000';
+      seedWatchState({
+        'owner/repo#42': {
+          headSha: 'sha-1',
+          mergeableState: 'clean',
+          prState: 'closed',
+          fired: [],
+          pending: [
+            makePendingWatch({
+              key,
+              text: 'The PR was closed without merging.',
+            }),
+          ],
+        },
+      });
       writeInboundTasks([
         makeInboundTaskRecord({
           state: 'failed',
@@ -7915,19 +7942,20 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           source: {
             chatId: 'owner/repo',
             threadId: 'pr:42',
-            messageId: 'watch:state_change:1',
+            messageId: key,
           },
-          envelope,
+          envelope: {
+            ...makePendingWatch({
+              key,
+              text: 'The PR was closed without merging.',
+            }).envelope,
+          },
           dedupe: {},
         }),
       ]);
-      mockPull({});
-      mockNotificationsOnce([]);
-      mockChecks([{ status: 'completed', conclusion: 'success' }]);
-      await pollOnce();
-
       mockPull({ state: 'closed', merged: false });
       mockNotificationsOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
       await pollOnce();
 
       expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
@@ -7936,6 +7964,21 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
 
     it('reuses a reply_pending task instead of double-delivering (F6)', async () => {
       await initChannel(watchConfig, { boundSessions });
+      const key = 'watch:state_change:42:1:1751446800000';
+      seedWatchState({
+        'owner/repo#42': {
+          headSha: 'sha-1',
+          mergeableState: 'clean',
+          prState: 'closed',
+          fired: [],
+          pending: [
+            makePendingWatch({
+              key,
+              text: 'The PR was closed without merging.',
+            }),
+          ],
+        },
+      });
       writeInboundTasks([
         makeInboundTaskRecord({
           state: 'reply_pending',
@@ -7944,19 +7987,15 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           source: {
             chatId: 'owner/repo',
             threadId: 'pr:42',
-            messageId: 'watch:state_change:1',
+            messageId: key,
           },
           envelope: undefined,
           dedupe: {},
         }),
       ]);
-      mockPull({});
-      mockNotificationsOnce([]);
-      mockChecks([{ status: 'completed', conclusion: 'success' }]);
-      await pollOnce();
-
       mockPull({ state: 'closed', merged: false });
       mockNotificationsOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
       await pollOnce();
 
       expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
@@ -8490,8 +8529,9 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       await pollOnce();
       expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
 
-      // Flap sha-2 success -> failure: the per-head key must survive eviction
-      // and suppress a re-delivery (a reversed slice would drop it).
+      // Flap sha-2 success -> failure: re-delivery is suppressed (the
+      // ciFiredSha pin and the fired ring's per-head prefix), and the ring
+      // must still retain the per-head key (a reversed slice would drop it).
       mockPull({
         head: { sha: 'sha-2' },
         updated_at: '2026-07-02T10:01:00.000Z',
@@ -8512,7 +8552,9 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         'fired'
       ] as string[];
       expect(ring).toHaveLength(64);
-      expect(ring).toContain('watch:ci_failure:sha-2');
+      expect(ring).toContainEqual(
+        expect.stringMatching(/^watch:ci_failure:42:sha-2:\d+$/),
+      );
     });
 
     it('retargets a lingering pending watch event to the rebound session (P2)', async () => {
@@ -8749,8 +8791,23 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       }
     });
 
-    it('replaces a cancelled watch task when the episode re-fires (H5)', async () => {
+    it('replaces a cancelled watch task when its pending event drains (H5)', async () => {
       await initChannel(watchConfig, { boundSessions });
+      const key = 'watch:state_change:42:1:1751446800000';
+      seedWatchState({
+        'owner/repo#42': {
+          headSha: 'sha-1',
+          mergeableState: 'clean',
+          prState: 'closed',
+          fired: [],
+          pending: [
+            makePendingWatch({
+              key,
+              text: 'The PR was closed without merging.',
+            }),
+          ],
+        },
+      });
       writeInboundTasks([
         makeInboundTaskRecord({
           state: 'cancelled',
@@ -8759,24 +8816,20 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           source: {
             chatId: 'owner/repo',
             threadId: 'pr:42',
-            messageId: 'watch:state_change:1',
+            messageId: key,
           },
           envelope: {
             ...makePendingWatch({
-              key: 'watch:state_change:1',
+              key,
               text: 'The PR was closed without merging.',
             }).envelope,
           },
           dedupe: {},
         }),
       ]);
-      mockPull({});
-      mockNotificationsOnce([]);
-      mockChecks([{ status: 'completed', conclusion: 'success' }]);
-      await pollOnce();
-
       mockPull({ state: 'closed', merged: false });
       mockNotificationsOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
       await pollOnce();
 
       expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
@@ -9148,7 +9201,9 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
       let entry = readWatchState().entries['owner/repo#42']!;
       expect(entry['seq']).toBe(1);
-      expect(entry['fired']).toEqual(['watch:merge_conflict:1']);
+      expect(entry['fired']).toEqual([
+        expect.stringMatching(/^watch:merge_conflict:42:1:\d+$/),
+      ]);
 
       // Fresh channel over the same state directory: the counter carries,
       // so the recurrence gets the NEXT episode key, not a reset one.
@@ -9164,8 +9219,8 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       entry = readWatchState().entries['owner/repo#42']!;
       expect(entry['seq']).toBe(2);
       expect(entry['fired']).toEqual([
-        'watch:merge_conflict:1',
-        'watch:merge_conflict:2',
+        expect.stringMatching(/^watch:merge_conflict:42:1:\d+$/),
+        expect.stringMatching(/^watch:merge_conflict:42:2:\d+$/),
       ]);
     });
 
@@ -9324,7 +9379,7 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       await pollOnce();
 
       // Back to sha-A and red again: ci_failure is once per head SHA, so
-      // the fired ring must still suppress it.
+      // the fired ring's per-head record must still suppress it.
       mockPull({
         head: { sha: 'sha-A' },
         updated_at: '2026-07-02T10:02:00.000Z',
@@ -9335,12 +9390,14 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       ]);
       await pollOnce();
 
-      // Every head change re-fetched CI: the suppression is the fired ring,
-      // not a missed observation.
+      // Every head change re-fetched CI: the suppression is the fired
+      // ring's per-head prefix, not a missed observation.
       expect(mockOctokit.rest.checks.listForRef).toHaveBeenCalledTimes(4);
       expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
-      expect(readWatchState().entries['owner/repo#42']!['fired']).toContain(
-        'watch:ci_failure:sha-A',
+      expect(
+        readWatchState().entries['owner/repo#42']!['fired'],
+      ).toContainEqual(
+        expect.stringMatching(/^watch:ci_failure:42:sha-A:\d+$/),
       );
     });
 
@@ -9368,8 +9425,8 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       );
       expect(prompts[1]).toContain('head moved from sha-B to sha-A');
       expect(readWatchState().entries['owner/repo#42']!['fired']).toEqual([
-        'watch:head_change:1',
-        'watch:head_change:2',
+        expect.stringMatching(/^watch:head_change:42:1:\d+$/),
+        expect.stringMatching(/^watch:head_change:42:2:\d+$/),
       ]);
     });
 
@@ -9733,8 +9790,8 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       await initChannel(watchConfig, { boundSessions });
       // A deferred watch task whose pending event already moved to fired:
       // the entry has no pending, and the PR is unbound in a complete
-      // snapshot — the old prune would delete it, resetting the episode
-      // counter while the old task still owns watch:merge_conflict:1.
+      // snapshot — the old prune would delete it, discarding the baseline
+      // and ciFiredSha pin while the old task is still in flight.
       seedWatchState({
         'owner/repo#42': {
           headSha: 'sha-1',
@@ -9787,8 +9844,8 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       // The entry must survive while the old task is recoverable.
       expect(readWatchState().entries['owner/repo#42']).toBeDefined();
 
-      // Rebind and fire a NEW conflict episode: it must get seq 2, not
-      // collide with the surviving watch:merge_conflict:1 task.
+      // Rebind and fire a NEW conflict episode: it must get seq 2 and a
+      // fresh detection-scoped key while the old task keeps its own.
       boundSessions.listPrBindings.mockResolvedValue({
         bindings: [makeBinding()],
         partial: false,
@@ -9801,18 +9858,265 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       await watch.runPrStateWatch();
       const entry = readWatchState().entries['owner/repo#42']!;
       expect(entry['seq']).toBe(2);
-      expect(entry['fired']).toContain('watch:merge_conflict:2');
+      expect(entry['fired']).toContainEqual(
+        expect.stringMatching(/^watch:merge_conflict:42:2:\d+$/),
+      );
       // The NEW episode owns a distinct task; the old one is not silently
       // reused for the new event.
       const tasks = readInboundTasks();
       expect(tasks.some((t) => t['id'] === 'old-watch-task')).toBe(true);
       expect(
-        tasks.some(
-          (t) =>
-            (t['source'] as Record<string, unknown>)['messageId'] ===
-            'watch:merge_conflict:2',
+        tasks.some((t) =>
+          /^watch:merge_conflict:42:2:\d+$/.test(
+            String((t['source'] as Record<string, unknown>)['messageId']),
+          ),
         ),
       ).toBe(true);
+    });
+
+    it('scopes watch keys by PR so two PRs bound to one session never collide (R2-B1)', async () => {
+      await initChannel(
+        { deliverToBoundSessions: true, prWatchEvents: ['merge_conflict'] },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+              },
+              {
+                number: 43,
+                url: 'https://github.com/owner/repo/pull/43',
+                state: 'open',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      mockPull({});
+      mockNotificationsOnce([]);
+      await pollOnce();
+
+      // Both PRs turn dirty in the SAME poll: parallel episode counters
+      // issue seq 1 for both and one detection timestamp serves the pass,
+      // so only the PR number keeps the daemon idempotency keys apart.
+      mockPull({ mergeable: false, mergeable_state: 'dirty' });
+      mockNotificationsOnce([]);
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+      const keys = boundSessions.deliverPrompt.mock.calls.map(
+        (call) => call[2] as string,
+      );
+      expect(
+        keys.some((k) =>
+          /^github:owner\/repo:watch:merge_conflict:42:1:\d+$/.test(k),
+        ),
+      ).toBe(true);
+      expect(
+        keys.some((k) =>
+          /^github:owner\/repo:watch:merge_conflict:43:1:\d+$/.test(k),
+        ),
+      ).toBe(true);
+      expect(new Set(keys).size).toBe(2);
+    });
+
+    it('issues a fresh watch key after prune resets the episode counter (R2-A1)', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-07-02T09:00:00.000Z'));
+      await initChannel(
+        { deliverToBoundSessions: true, prWatchEvents: ['merge_conflict'] },
+        { boundSessions },
+      );
+      const watch = channel as unknown as {
+        runPrStateWatch: () => Promise<void>;
+        refreshBoundSessions: () => Promise<void>;
+      };
+      await watch.refreshBoundSessions();
+      mockPull({});
+      await watch.runPrStateWatch();
+      mockPull({ mergeable: false, mergeable_state: 'dirty' });
+      await watch.runPrStateWatch();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      const firstKey = boundSessions.deliverPrompt.mock.calls[0]![2] as string;
+      expect(firstKey).toMatch(
+        /^github:owner\/repo:watch:merge_conflict:42:1:\d+$/,
+      );
+
+      // Successful delivery removed the task; a complete empty snapshot
+      // prunes the entry and resets the episode counter.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      await watch.refreshBoundSessions();
+      await watch.runPrStateWatch();
+      expect(readWatchState().entries['owner/repo#42']).toBeUndefined();
+
+      // Rebind at a LATER time and recur: seq restarts at 1, but the
+      // detection timestamp must keep the key distinct from the delivered
+      // episode, or the daemon's long-lived ring would dedupe it away.
+      vi.setSystemTime(new Date('2026-07-02T10:00:00.000Z'));
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [makeBinding()],
+        partial: false,
+      });
+      await watch.refreshBoundSessions();
+      mockPull({});
+      await watch.runPrStateWatch();
+      mockPull({ mergeable: false, mergeable_state: 'dirty' });
+      await watch.runPrStateWatch();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+      const entry = readWatchState().entries['owner/repo#42']!;
+      expect(entry['seq']).toBe(1);
+      const secondKey = boundSessions.deliverPrompt.mock.calls[1]![2] as string;
+      expect(secondKey).toMatch(
+        /^github:owner\/repo:watch:merge_conflict:42:1:\d+$/,
+      );
+      expect(secondKey).not.toBe(firstKey);
+    });
+
+    it('hashes an over-length event key instead of earning a route 400 (R2-A3)', async () => {
+      vi.useFakeTimers();
+      const start = new Date('2026-07-02T09:00:00.000Z').getTime();
+      vi.setSystemTime(start);
+      await initChannel(
+        { deliverToBoundSessions: true, prWatchEvents: ['ci_failure'] },
+        { boundSessions },
+      );
+      const longChatId = `${'o'.repeat(39)}/${'r'.repeat(100)}`;
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            prs: [
+              {
+                number: 42,
+                url: `https://github.com/${longChatId}/pull/42`,
+                state: 'open',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      const headSha = 'a'.repeat(64);
+      mockPull({ head: { sha: headSha } });
+      mockNotificationsOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+
+      vi.setSystemTime(start + 60_000);
+      mockPull({
+        head: { sha: headSha },
+        updated_at: '2026-07-02T09:01:00.000Z',
+      });
+      mockNotificationsOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'failure' }]);
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      const key = boundSessions.deliverPrompt.mock.calls[0]![2] as string;
+      // A 140-char repo slug plus the SHA-256 watch key overflow the
+      // route's 200-char cap; the deterministic hash keeps retries
+      // dedupable instead of burning the failure budget on 400s.
+      const rawKey = `github:${longChatId}:watch:ci_failure:42:${headSha}:${start + 60_000}`;
+      expect(rawKey.length).toBeGreaterThan(200);
+      expect(key).toBe(
+        `github:h:${createHash('sha256').update(rawKey).digest('hex').slice(0, 40)}`,
+      );
+      expect(key.length).toBeLessThanOrEqual(200);
+    });
+
+    it('caps retained bindings and watch entries under a permanent partial (R2-B2)', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      const channelPrivate = channel as unknown as {
+        lastBindings: Array<Record<string, unknown>>;
+        boundSessionByPr: Map<string, Record<string, unknown>>;
+        refreshBoundSessions: () => Promise<void>;
+        runPrStateWatch: () => Promise<void>;
+      };
+      const ts = (i: number) =>
+        new Date(Date.UTC(2026, 6, 2, 0, i)).toISOString();
+      const sessions = Array.from({ length: 1100 }, (_, i) => ({
+        sessionId: `s-${i}`,
+        workspaceCwd: '/tmp/test',
+        updatedAt: ts(i),
+        prs: [
+          {
+            number: i + 1,
+            url: `https://github.com/owner/repo/pull/${i + 1}`,
+            state: 'open',
+          },
+        ],
+      }));
+      channelPrivate.lastBindings = sessions;
+      channelPrivate.boundSessionByPr = new Map(
+        sessions.map((s, i) => [`owner/repo#${i + 1}`, s]),
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: true,
+      });
+      await channelPrivate.refreshBoundSessions();
+      expect(channelPrivate.lastBindings).toHaveLength(1024);
+      expect(
+        channelPrivate.lastBindings.some((b) => b['sessionId'] === 's-1099'),
+      ).toBe(true);
+      expect(
+        channelPrivate.lastBindings.some((b) => b['sessionId'] === 's-0'),
+      ).toBe(false);
+      expect(channelPrivate.boundSessionByPr.has('owner/repo#1100')).toBe(true);
+      expect(channelPrivate.boundSessionByPr.has('owner/repo#1')).toBe(false);
+
+      // The entry map takes the same cap: seed 1030 idle entries plus one
+      // entry OLDER than all of them that still holds a pending event.
+      const entries: Record<string, unknown> = {};
+      for (let i = 0; i < 1030; i++) {
+        entries[`owner/repo#${i + 1}`] = {
+          headSha: 'sha-1',
+          mergeableState: 'clean',
+          prState: 'open',
+          headObservedAt: i,
+          fired: [],
+          pending: [],
+        };
+      }
+      entries['owner/repo#0'] = {
+        headSha: 'sha-1',
+        mergeableState: 'clean',
+        prState: 'open',
+        headObservedAt: -1,
+        fired: [],
+        pending: [makePendingWatch({ issueNumber: 0 })],
+      };
+      seedWatchState(entries);
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        await channelPrivate.runPrStateWatch();
+        expect(
+          stderr.mock.calls.some((call) =>
+            String(call[0]).includes('PR watch entry cap exceeded'),
+          ),
+        ).toBe(true);
+      } finally {
+        stderr.mockRestore();
+      }
+      const state = readWatchState();
+      // 1031 entries against the 1024 cap: the 7 oldest idle entries go;
+      // the pending holder is older than all of them but must survive.
+      expect(Object.keys(state.entries)).toHaveLength(1024);
+      expect(state.entries['owner/repo#0']).toBeDefined();
+      expect(state.entries['owner/repo#1']).toBeUndefined();
+      expect(state.entries['owner/repo#7']).toBeUndefined();
+      expect(state.entries['owner/repo#8']).toBeDefined();
+      expect(state.entries['owner/repo#1030']).toBeDefined();
     });
   });
 });

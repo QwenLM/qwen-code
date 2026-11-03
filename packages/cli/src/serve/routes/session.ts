@@ -8691,6 +8691,13 @@ export function registerSessionRoutes(
         );
 
         let promptPromise: ReturnType<AcpSessionBridge['sendPrompt']>;
+        // Tracks whether the bridge actually enqueued the prompt. The
+        // admission contract throws the common failures synchronously, but
+        // a few pre-enqueue checks still reject deferred (legacy closing
+        // sessions, the reserved standalone working-directory check, prompt
+        // shape validation); the admission signal is the type-agnostic way
+        // to tell those apart from a turn that was admitted and then failed.
+        let promptAdmitted = false;
         try {
           promptPromise = ownerBridge.sendPrompt(
             sessionId,
@@ -8724,7 +8731,10 @@ export function registerSessionRoutes(
                     },
                   }
                 : {}),
-              ...(onPromptAdmitted !== undefined ? { onPromptAdmitted } : {}),
+              onPromptAdmitted: () => {
+                promptAdmitted = true;
+                onPromptAdmitted?.();
+              },
             },
           );
         } catch (err) {
@@ -8759,9 +8769,11 @@ export function registerSessionRoutes(
         }
         res.off('close', onResClose);
         if (idempotencyKey !== undefined) {
-          // Admission succeeded: remember the key BEFORE any await so a
-          // concurrent retry cannot slip past the check above (the whole
-          // check-admit-remember sequence is synchronous).
+          // sendPrompt returned without a synchronous admission throw:
+          // remember the key BEFORE any await so a concurrent retry cannot
+          // slip past the check above (the whole check-admit-remember
+          // sequence is synchronous). A deferred pre-admission rejection
+          // forgets it again in the failure handler below.
           rememberPromptIdempotencyKey(sessionId, idempotencyKey, promptId);
         }
 
@@ -8839,16 +8851,13 @@ export function registerSessionRoutes(
               }
             },
             (err) => {
-              // Defense in depth: the admission contract throws session
-              // not-found/closing synchronously, but a bridge implementation
-              // that still rejects deferred must not leave a phantom key —
-              // the prompt was never enqueued, and a retry deduped into this
-              // non-admission would silently lose the event. Turn failures
-              // (the prompt WAS admitted) keep their key.
-              if (
-                idempotencyKey !== undefined &&
-                err instanceof SessionNotFoundError
-              ) {
+              // A rejection WITHOUT the admission signal means the prompt
+              // was never enqueued (a deferred pre-admission check rejected
+              // it). The remembered key must be removed, or a retry would
+              // dedupe into a phantom admission and silently lose the
+              // event. Turn failures (the prompt WAS admitted) keep their
+              // key.
+              if (idempotencyKey !== undefined && !promptAdmitted) {
                 forgetPromptIdempotencyKey(sessionId, idempotencyKey);
               }
               if (daemonLog) {

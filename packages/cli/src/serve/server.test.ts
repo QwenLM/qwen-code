@@ -20922,6 +20922,71 @@ describe('createServeApp', () => {
       expect(retry.body.deduplicated).toBeUndefined();
     });
 
+    it('forgets the idempotency key on any pre-admission deferred rejection (R2-A2)', async () => {
+      // The standalone working-directory check rejects deferred with a
+      // RequestError, not SessionNotFoundError: the forget must key off the
+      // admission signal, not the error type, or the phantom key survives
+      // and a retry dedupes into a non-admission.
+      const bridge = fakeBridge({
+        promptImpl: () =>
+          Promise.reject(
+            new Error('The standalone working directory is missing.'),
+          ),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const first = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'standalone-key',
+        });
+      expect(first.status).toBe(202);
+      // Let the deferred rejection handler run.
+      await new Promise((r) => setTimeout(r, 20));
+      const retry = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'standalone-key',
+        });
+      expect(retry.body.deduplicated).toBeUndefined();
+      expect(bridge.promptCalls).toHaveLength(2);
+    });
+
+    it('keeps the idempotency key when an admitted turn fails (R2-A2)', async () => {
+      // The admission signal fired: the prompt WAS enqueued and the turn
+      // then failed. Forgetting the key here would let a retry re-inject
+      // the same event as a second turn.
+      const bridge = fakeBridge({
+        promptImpl: (_sessionId, _req, _signal, context) => {
+          context?.onPromptAdmitted?.();
+          return Promise.reject(new Error('turn failed after admission'));
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const first = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'turn-failure-key',
+        });
+      expect(first.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
+      const retry = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'turn-failure-key',
+        });
+      expect(retry.status).toBe(202);
+      expect(retry.body.deduplicated).toBe(true);
+      expect(bridge.promptCalls).toHaveLength(1);
+    });
+
     it('passes client identity and promptId context into bridge.sendPrompt', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(baseOpts, undefined, { bridge });
