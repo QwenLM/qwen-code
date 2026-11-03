@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { chmodSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -40,7 +41,11 @@ const telemetryMocks = vi.hoisted(() => ({
 // Pass-through wrapper so a test can observe state when the dream lock is released.
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...actual, rm: vi.fn(actual.rm) };
+  return {
+    ...actual,
+    rm: vi.fn(actual.rm),
+    writeFile: vi.fn(actual.writeFile),
+  };
 });
 
 vi.mock('../telemetry/index.js', async (importOriginal) => ({
@@ -4363,9 +4368,11 @@ describe('MemoryManager', () => {
           'node:fs/promises',
         )
       ).rm;
-      let markerAtRelease: unknown = 'not-released';
+      let markerAtRelease: unknown;
+      let releaseHookRan = false;
       vi.mocked(fs.rm).mockImplementation(async (p, o) => {
         if (p === lockPath) {
+          releaseHookRan = true;
           markerAtRelease = (await readMeta(tmp.projectRoot))[
             'lastDreamAttemptAt'
           ];
@@ -4381,9 +4388,76 @@ describe('MemoryManager', () => {
           dreamParams('sess-a', APR1_10, 0, 1),
         );
         await first.promise;
+        // The hook must have run, or the marker check below proves nothing.
+        expect(releaseHookRan).toBe(true);
+        expect(markerAtRelease).toBeDefined();
         expect(markerAtRelease).toEqual(expect.any(String));
       } finally {
         vi.mocked(fs.rm).mockImplementation(realRm);
+      }
+    });
+
+    it('retries recording the failure once when the first marker write throws', async () => {
+      const metaDir = path.dirname(getAutoMemoryMetadataPath(tmp.projectRoot));
+      // A read-only directory lets the read succeed and the atomic write fail.
+      vi.mocked(runManagedAutoMemoryDream).mockImplementationOnce(async () => {
+        chmodSync(metaDir, 0o500);
+        throw new Error('dream agent failed');
+      });
+      // Heal the directory as soon as the first failure is logged so the
+      // outer catch's retry can land.
+      debugWarn.mockClear();
+      debugWarn.mockImplementationOnce(() => {
+        chmodSync(metaDir, 0o700);
+      });
+      try {
+        const mgr = new MemoryManager(fiveSessions);
+        const first = await mgr.scheduleDream(
+          dreamParams('sess-a', APR1_10, 0, 1),
+        );
+        await first.promise;
+
+        expect(debugWarn).toHaveBeenCalledWith(
+          expect.stringContaining('Failed to record failed dream attempt'),
+        );
+        expect((await readMeta(tmp.projectRoot))['lastDreamAttemptAt']).toEqual(
+          expect.any(String),
+        );
+      } finally {
+        chmodSync(metaDir, 0o700);
+      }
+    });
+
+    it('still records the failure when the lock cannot be created at all', async () => {
+      const lockPath = getAutoMemoryConsolidationLockPath(tmp.projectRoot);
+      const realWrite = (
+        await vi.importActual<typeof import('node:fs/promises')>(
+          'node:fs/promises',
+        )
+      ).writeFile;
+      vi.mocked(fs.writeFile).mockImplementation(async (p, d, o) => {
+        if (p === lockPath) {
+          throw Object.assign(new Error('permission denied'), {
+            code: 'EACCES',
+          });
+        }
+        return realWrite(p, d, o);
+      });
+      try {
+        const mgr = new MemoryManager(fiveSessions);
+        const first = await mgr.scheduleDream(
+          dreamParams('sess-a', APR1_10, 0, 1),
+        );
+        expect(await first.promise).toMatchObject({
+          status: 'failed',
+          error: 'permission denied',
+        });
+        expect(runManagedAutoMemoryDream).not.toHaveBeenCalled();
+        expect((await readMeta(tmp.projectRoot))['lastDreamAttemptAt']).toEqual(
+          expect.any(String),
+        );
+      } finally {
+        vi.mocked(fs.writeFile).mockImplementation(realWrite);
       }
     });
 

@@ -2547,7 +2547,6 @@ export class MemoryManager {
     // relaunching the same failing dream on every later turn. Best-effort:
     // a metadata error must not replace the original failure.
     const recordFailure = async (): Promise<void> => {
-      failureRecorded = true;
       try {
         // Stamp the failure time in the injected `now` time base plus the real
         // elapsed duration, so a dream that ran long is backed off from when
@@ -2560,6 +2559,9 @@ export class MemoryManager {
         failedMetadata.lastDreamAttemptAt = failedAt;
         failedMetadata.updatedAt = failedAt;
         await writeDreamMetadata(params.projectRoot, failedMetadata);
+        // Only after the write lands: if it threw, the outer catch gets one
+        // more try instead of skipping on a marker that was never written.
+        failureRecorded = true;
       } catch (metaError) {
         const message =
           metaError instanceof Error ? metaError.message : String(metaError);
