@@ -179,4 +179,79 @@ describe('useDaemonChannelEvents', () => {
       vi.useRealTimers();
     }
   });
+
+  it('keeps one polling loop when visibility is restored mid-request', async () => {
+    const setVisibility = (value: DocumentVisibilityState) => {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        get: () => value,
+      });
+    };
+    // Every request stays pending until the test releases it, so a visibility
+    // restore lands in the middle of an in-flight cycle.
+    const pending: Array<{ resolve: (value: DaemonChannelEventList) => void }> =
+      [];
+    actions.listChannelEvents.mockImplementation(() => {
+      const d = deferred<DaemonChannelEventList>();
+      pending.push(d);
+      return d.promise;
+    });
+
+    function TestComponent() {
+      useDaemonChannelEvents({ workspaceCwd: '/workspace-a' });
+      return null;
+    }
+    const release = async () => {
+      const d = pending.shift();
+      expect(d).toBeDefined();
+      await act(async () => {
+        d!.resolve(journal('alpha-bot'));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+    };
+
+    vi.useFakeTimers();
+    setVisibility('visible');
+    try {
+      await act(async () => root.render((<TestComponent />) as ReactNode));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(actions.listChannelEvents).toHaveBeenCalledTimes(1);
+
+      // Three overlapping hide/show cycles while that request is pending. Each
+      // one used to start another run, and every run schedules its own timer.
+      for (let cycle = 0; cycle < 3; cycle += 1) {
+        setVisibility('hidden');
+        await act(async () => {
+          document.dispatchEvent(new Event('visibilitychange'));
+        });
+        setVisibility('visible');
+        await act(async () => {
+          document.dispatchEvent(new Event('visibilitychange'));
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(0);
+        });
+      }
+      expect(actions.listChannelEvents).toHaveBeenCalledTimes(1);
+
+      await release();
+      // One request per interval, not one per overlapping cycle.
+      for (let interval = 0; interval < 3; interval += 1) {
+        const before = actions.listChannelEvents.mock.calls.length;
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(5_000);
+        });
+        expect(actions.listChannelEvents.mock.calls.length - before).toBe(1);
+        await release();
+      }
+      expect(pending).toHaveLength(0);
+    } finally {
+      setVisibility('visible');
+      vi.useRealTimers();
+    }
+  });
 });

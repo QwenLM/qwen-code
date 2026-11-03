@@ -105,6 +105,7 @@ export function useDaemonChannelEvents(
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
+    let inFlight = false;
     let timer = 0;
     const schedule = () => {
       // A forgotten background tab must not keep reading journals on a daemon
@@ -117,7 +118,17 @@ export function useDaemonChannelEvents(
       }, CHANNEL_EVENTS_RELOAD_MS);
     };
     const run = async () => {
-      await reload();
+      // One cycle at a time. Restoring visibility while a request is pending
+      // would otherwise start a second run: both settle, both call schedule(),
+      // and only the last timer handle is kept — the other polls forever, so
+      // ordinary tab switches on a slow response multiply journal reads.
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        await reload();
+      } finally {
+        inFlight = false;
+      }
       if (cancelled) return;
       schedule();
     };

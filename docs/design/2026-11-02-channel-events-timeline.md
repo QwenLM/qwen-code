@@ -177,13 +177,20 @@ must not be the answer when the journal could not be read.
 ### 4. Web Shell
 
 - `useChannelEvents` polls the route while the page is mounted and visible
-  (5 s), pauses while the tab is hidden, and reloads as soon as it becomes
-  visible again; the page also offers a manual refresh. Every snapshot is tagged with the query
-  that produced it (workspace, Channel, types, limit) and mismatched data is
-  masked, the way `useDaemonChannels` does: the underlying resource keeps its
-  previous data while a request is in flight or after it fails, so without the
-  tag the last workspace's rows — and their Channel names in the filter — would
-  show under the newly selected workspace.
+  (5 s), pauses while the tab is hidden, and reloads when it becomes visible
+  again; the page also offers a manual refresh. **Exactly one polling cycle may
+  be in flight**: restoring visibility during a pending request must not start a
+  second one, because both would schedule on settling while only the last timer
+  handle is retained, leaving an orphan that polls forever — ordinary tab
+  switches on a slow response would permanently multiply journal reads. A
+  restore during a pending request therefore lets that request finish and
+  reschedule. Both read paths are time-bounded (the SDK's 30 s fetch default and
+  the action timeout), so the guard cannot stall the loop. Every snapshot is
+  tagged with the query that produced it (workspace, Channel, types, limit) and
+  mismatched data is masked, the way `useDaemonChannels` does: the underlying
+  resource keeps its previous data while a request is in flight or after it
+  fails, so without the tag the last workspace's rows — and their Channel names
+  in the filter — would show under the newly selected workspace.
 - `ChannelEventsPage` renders a newest-first timeline with a workspace
   selector, a Channel filter, a type filter, and a row per event: time, Channel,
   type, outcome, target (`owner/repo#12`), actor, reason or trigger kind,
