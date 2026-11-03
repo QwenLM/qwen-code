@@ -337,6 +337,15 @@ the transcript build-artifact guard rejects that prefix.
     repositories that still carry settings and says how to edit them. Row edits
     made before the switch are projected in that branch too, so the save cannot
     report success while restoring the stored value.
+    That branch runs for every repository-only channel, not only one whose
+    stored policy was `allowlist`: the rows are reachable from any policy, so
+    gating on storage dropped the edits of an operator who switched to
+    Allowlist, narrowed a repository and switched back before saving. It also
+    unions the typed allowlist with the stored keys, because a repository
+    added during that visit exists only in the draft. Conflicting aliases are
+    the exception — one lower-cased draft cannot speak for two spellings that
+    disagree, so both are left exactly as stored and the Allowlist path's
+    conflict error stays the way to resolve them.
 
 ## Constraints
 
@@ -379,7 +388,17 @@ the transcript build-artifact guard rejects that prefix.
   driven through the real save path rather than the projection alone — an
   untouched row reproduces its stored object byte-for-byte, the empty-box hint
   agrees with what that save admits, and no edit widens the admitted set unless
-  the row's own controls asked for it.
+  the row's own controls asked for it. A second sweep crosses the same shapes
+  with the stored and final group policies, because the runtime never consults
+  `groupPolicy` when resolving speakers: a row must write the same entry, and
+  admit the same people, whichever policy the save lands on. It covers a
+  repository that exists only in the draft as well as a stored one.
+- Non-Allowlist saves: a row narrowed during a temporary switch survives on a
+  channel stored Open, a repository added during that visit is written rather
+  than dropped, conflicting aliases are left as stored while the Allowlist
+  path still refuses them, an untouched channel round-trips byte-for-byte,
+  and a chat platform gains no entries from the typed allowlist. Each asserts
+  the admitted set, not only the saved shape.
 - Component: rows appear per allowlisted repository, typing a repository adds a
   row, the speaker input appears when the row's **effective** policy is an
   allowlist — its own or the inherited one — and is hidden when it is `open`,
@@ -418,6 +437,11 @@ the transcript build-artifact guard rejects that prefix.
    with no list reads as inheriting and a stored empty list reads as nobody.
 9. Repositories whose settings outlive a switch away from the allowlist policy
    are named in the editor rather than becoming invisible while still enforced.
+10. A repository narrowed during a temporary switch to Allowlist keeps that
+    narrowing when the save lands on another policy, including on a channel
+    that was never Allowlist and a repository added during the visit;
+    conflicting aliases are left as stored instead of being rewritten from
+    one draft.
 
 ## Open questions
 

@@ -448,6 +448,18 @@ function hasConflictingRepositoryAliases(
 ): boolean {
   const groups = instance?.config['groups'];
   if (!isRecord(groups)) return false;
+  return conflictingRepositoryAliases(groups).size > 0;
+}
+
+/**
+ * The lower-cased ids whose stored spellings disagree about settings. The draft
+ * holds one entry per id, so it cannot say which spelling an edit was meant
+ * for. Validation and the non-Allowlist save path consult this same set: the
+ * first refuses the save, the second leaves both spellings alone.
+ */
+function conflictingRepositoryAliases(
+  groups: Record<string, unknown>,
+): Set<string> {
   const shapes = new Map<string, Set<string>>();
   for (const [groupId, group] of Object.entries(groups)) {
     if (groupId === '*') continue;
@@ -455,10 +467,9 @@ function hasConflictingRepositoryAliases(
     const shape = canonicalGroupShape(group);
     shapes.set(key, (shapes.get(key) ?? new Set<string>()).add(shape));
   }
-  for (const variants of shapes.values()) {
-    if (variants.size > 1) return true;
-  }
-  return false;
+  return new Set(
+    [...shapes].filter(([, variants]) => variants.size > 1).map(([key]) => key),
+  );
 }
 
 /**
@@ -650,20 +661,41 @@ function assignGroupSenders(
 
 function removeGroupAllowlistMembership(
   config: Record<string, unknown>,
-  instance: DaemonChannelInstanceSnapshot,
+  instance: DaemonChannelInstanceSnapshot | undefined,
   overrides?: Record<string, ChannelGroupOverrideDraft>,
+  allowedGroupIds = '',
 ): void {
-  const previous = instance.config['groups'];
+  const previous = instance?.config['groups'];
   const previousGroups = isRecord(previous) ? previous : {};
   // The rows are hidden once the policy leaves Allowlist, but the draft still
   // holds whatever the operator edited before switching, and the runtime keeps
   // resolving these entries under open/pairing. Project the edits here too, or
   // the save reports success while silently restoring the stored value.
+  const entries = new Map<string, unknown>(Object.entries(previousGroups));
+  if (overrides) {
+    // A repository typed while the policy was Allowlist has a draft but no
+    // stored entry. Iterating storage alone drops it, and the repository falls
+    // back to the channel-wide policy it was just narrowed against. Match on
+    // the canonical id so a mixed-case stored spelling is not duplicated.
+    const storedIds = new Set(
+      [...entries.keys()].map((id) => id.toLowerCase()),
+    );
+    for (const groupId of repositoryAllowlistIds(allowedGroupIds)) {
+      if (!storedIds.has(groupId)) entries.set(groupId, {});
+    }
+  }
+  // One lower-cased draft cannot speak for two spellings that disagree:
+  // projecting it onto both hands the last alias's settings to the first and
+  // widens a repository nobody edited. Leave those entries as stored — the
+  // Allowlist path already refuses the save until the operator resolves them.
+  const ambiguous = conflictingRepositoryAliases(previousGroups);
   const groups = Object.fromEntries(
-    Object.entries(previousGroups)
+    [...entries]
       .map(([groupId, groupConfig]): [string, unknown] => {
         const override =
-          groupId === '*' ? undefined : overrides?.[groupId.toLowerCase()];
+          groupId === '*' || ambiguous.has(groupId.toLowerCase())
+            ? undefined
+            : overrides?.[groupId.toLowerCase()];
         return [
           groupId,
           override && isRecord(groupConfig)
@@ -729,11 +761,19 @@ export function buildChannelUpsertRequest(
         repositoryOnly,
         repositoryOnly ? draft.groupOverrides : undefined,
       );
-    } else if (instance?.config['groupPolicy'] === 'allowlist') {
+    } else if (
+      repositoryOnly ||
+      instance?.config['groupPolicy'] === 'allowlist'
+    ) {
+      // Repository rows are reachable from any policy: the operator can switch
+      // to Allowlist, narrow a repository, and switch back before saving. Gating
+      // this on the STORED policy would drop those edits on a channel that was
+      // already Open, while the alert promises they are kept.
       removeGroupAllowlistMembership(
         config,
         instance,
         repositoryOnly ? draft.groupOverrides : undefined,
+        draft.allowedGroupIds,
       );
     }
     assignGroupSenders(config, draft);
