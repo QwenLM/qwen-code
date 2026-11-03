@@ -189,10 +189,12 @@ so the session that follows the PR handles the event with its existing context.
   state. The empty-partial deferral is bounded (30 consecutive polls): after
   that the lane opens, and events whose PR is still absent from the incomplete
   snapshot defer per-event (backpressure above) instead of taking the public
-  path — an incomplete scan never establishes that a PR is unbound. Once a
-  complete snapshot lands, deferred events are re-resolved: delivered
-  privately to a follower, or publicly once the complete snapshot establishes
-  there is none. (2) _Backpressure_: a deferred bound event keeps its own durable
+  path — an incomplete scan never establishes that a PR is unbound. Issue
+  events are never held by the binding scan: bindings are PR-only, so an
+  issue's absence needs no snapshot and it routes publicly at once, even under
+  a permanently partial scan. Once a complete snapshot lands, deferred events
+  are re-resolved: delivered privately to a follower, or publicly once the
+  complete snapshot establishes there is none. (2) _Backpressure_: a deferred bound event keeps its own durable
   retry (previous bullet) while the rest of the channel continues normally.
 - The injected prompt names the comment author and marks truncation
   explicitly at every level: comment content is capped at 6,000 code points

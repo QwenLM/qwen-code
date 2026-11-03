@@ -2138,9 +2138,10 @@ describe('GithubChannel', () => {
       };
       priv.abortableSleep = vi.fn().mockResolvedValue(undefined);
       // mark-read fails (read-only PAT / rate limit): the cursor freezes and
-      // pollOnce rejects at the commit. The per-poll prune must run BEFORE
-      // that throw, or the map grows without bound under the very outage it
-      // is bounded for.
+      // pollOnce rejects at the commit. The per-poll prune runs in a finally
+      // around the commit, so it still runs against the frozen cursor WHEN
+      // that throw rejects the poll — otherwise the map grows without bound
+      // under the very outage it is bounded for.
       mockOctokit.rest.activity.markNotificationsAsRead.mockRejectedValue(
         new Error('read-only PAT'),
       );
@@ -6653,6 +6654,66 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(lines).toHaveLength(1);
       const record = JSON.parse(lines[0]!) as { reason: string };
       expect(record.reason).toContain('binding snapshot never completed');
+    });
+
+    it('routes an issue event publicly under a permanent partial snapshot (R14-B1)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      // A PERMANENT partial (a multi-page scan or a long-lived non-active
+      // workspace) never lands a complete snapshot, so boundSnapshotTrusted
+      // stays false forever. Bindings are PR-only and GitHub's issue/PR
+      // number space is exclusive, so an issue event can never have a bound
+      // target: its absence is provable without any snapshot and it must
+      // not defer (and dead-letter at the horizon) behind the degraded
+      // scan. The partial answer LISTS a PR binder so the lane opens at
+      // once (a non-empty partial is not the cold-empty case).
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            prs: [
+              {
+                number: 1,
+                url: 'https://github.com/owner/repo/pull/1',
+                state: 'open',
+              },
+            ],
+          }),
+        ],
+        partial: true,
+      });
+      // makeNotification() defaults to an ISSUE subject (issues/42).
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      expect(existsSync(inboundTaskPath())).toBe(false);
+      expect(existsSync(boundDeadLetterPath())).toBe(false);
+    });
+
+    it('routes a recovered issue task publicly while the binding refresh keeps failing (R14-B1)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      // The refresh has NEVER succeeded (an old daemon without the route,
+      // rotated credentials): the comment lane stays closed, but persisted
+      // tasks still recover. A targetless ISSUE deferral needs no snapshot
+      // to establish absence — bindings are PR-only — so it routes publicly
+      // instead of deferring again to the horizon.
+      boundSessions.listPrBindings.mockRejectedValue(new Error('daemon cold'));
+      writeInboundTasks([
+        makeInboundTaskRecord({
+          state: 'failed',
+          attempts: 0,
+          deferCount: 5,
+          backpressure: true,
+        }),
+      ]);
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(existsSync(inboundTaskPath())).toBe(false);
+      expect(existsSync(boundDeadLetterPath())).toBe(false);
     });
 
     it('attributes the sender on the mention-lane bound prompt (R1-6)', async () => {

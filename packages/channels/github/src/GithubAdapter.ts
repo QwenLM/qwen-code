@@ -355,7 +355,7 @@ const MAX_BOUND_DEFERRALS = 240;
  * every event publicly and commit the cursor — an irreversible
  * misclassification. The cap keeps a PERMANENTLY empty partial (a workspace
  * that is never active) from freezing the lane forever: once reached, the
- * lane opens and unmatched events take the per-event bounded deferral
+ * lane opens and unmatched PR events take the per-event bounded deferral
  * (MAX_BOUND_DEFERRALS -> dead-letter) instead of the public path.
  */
 const MAX_COLD_EMPTY_PARTIAL_POLLS = 30;
@@ -1830,8 +1830,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // snapshot arrives. Keep deferring while the map is empty and no
     // complete snapshot has ever succeeded — bounded, so a permanently
     // empty partial opens the lane after MAX_COLD_EMPTY_PARTIAL_POLLS
-    // (unmatched events then take the per-event bounded deferral below,
-    // never the silent public path).
+    // (unmatched PR events then take the per-event bounded deferral below,
+    // never the silent public path; issue events route publicly at once —
+    // bindings are PR-only, so their absence needs no snapshot).
     if (
       this.deliverToBoundSessions &&
       !this.boundSnapshotTrusted &&
@@ -2634,18 +2635,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // unbound. So before the first complete snapshot, during any partial
     // answer, and while a refresh is failing, an unmatched PR event defers
     // as backpressure — recoverable, bounded by MAX_BOUND_DEFERRALS, and
-    // re-resolved by recovery once a complete snapshot lands. The
-    // partial/failed-refresh clauses are PR-scoped: bindings are PR-only,
-    // so once the cold-start gate opens an issue event's absence is
-    // provable and must not stall behind a degraded binding scan. Known
+    // re-resolved by recovery once a complete snapshot lands. The WHOLE
+    // absence gate is PR-scoped: bindings are PR-only and GitHub's issue/PR
+    // number space is exclusive, so an issue event can never have a bound
+    // target — its absence is provable without any snapshot, and it must
+    // not stall (or dead-letter) behind a degraded binding scan, including
+    // a permanent partial where a complete snapshot never lands. Known
     // targets (bound tasks) are unaffected and proceed immediately.
     if (
       !bound &&
       !isWatch &&
       this.deliverToBoundSessions &&
+      envelope.threadId?.startsWith('pr:') === true &&
       (!this.boundSnapshotTrusted ||
-        (envelope.threadId?.startsWith('pr:') === true &&
-          (this.boundRefreshFailed || this.lastBindingsPartial)))
+        this.boundRefreshFailed ||
+        this.lastBindingsPartial)
     ) {
       const deferCount = (task.deferCount ?? 0) + 1;
       if (deferCount >= MAX_BOUND_DEFERRALS) {
@@ -3522,7 +3526,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.coldEmptyPartialStreak += 1;
         if (this.coldEmptyPartialStreak === MAX_COLD_EMPTY_PARTIAL_POLLS) {
           process.stderr.write(
-            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: opening the comment lane. Unmatched events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence — verify the daemon's workspaces are active and readable.\n`,
+            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence — verify the daemon's workspaces are active and readable.\n`,
           );
         }
       } else {
