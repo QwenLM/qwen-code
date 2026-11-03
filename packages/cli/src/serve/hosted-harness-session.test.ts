@@ -23880,14 +23880,17 @@ describe('Hosted Harness tool approvals', () => {
         },
       ],
     };
+    const hookOwners: string[] = [];
     vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl').mockImplementation(
-      async (operation) => {
+      async function (this: HostedWorkspaceBroker, operation) {
         if (operation.kind === 'hook-catalog')
           return {
             operationId: operation.operationId,
             state: 'settled',
             catalog,
           };
+        if (operation.kind === 'hook-execute')
+          hookOwners.push(this.runtimeSessionId);
         return {
           operationId: operation.operationId,
           state: 'settled',
@@ -23996,6 +23999,31 @@ describe('Hosted Harness tool approvals', () => {
       revision: 2,
       operation: { state: 'active' },
     });
+    // Pin the rebuild itself, not just "not parked": fire a second Hook and
+    // observe which owner its broker carries. A no-arg handover would keep the
+    // old owner; closing without rebuilding would leave no usable Hook session.
+    const sessionKey = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const ownerFor = (revision: number) =>
+      `extensions-components-${createHash('sha256')
+        .update(JSON.stringify([sessionKey, revision]))
+        .digest('hex')}`;
+    expect(hookOwners[0]).toBe(ownerFor(1));
+    await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
+    )
+      .send({
+        operationId: randomUUID(),
+        event: 'Notification',
+        input: { message: 'after bump', notification_type: 'test' },
+      })
+      .expect(200);
+    expect(hookOwners).toHaveLength(2);
+    expect(hookOwners[1]).toBe(ownerFor(2));
+    expect(hookOwners[1]).not.toBe(hookOwners[0]);
     await authorize(
       supertest(server).post(`/session/${SESSION_ID}/detach`),
     ).expect(204);

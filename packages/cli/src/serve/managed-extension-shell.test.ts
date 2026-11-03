@@ -103,6 +103,54 @@ it('accounts for output emitted before an already-closed child is handed off', a
   expect(capture.finish).toHaveBeenCalledWith('stderr', true);
 });
 
+it('reports preread overflow as a truncated result, not a complete success', async () => {
+  const child = spawn(process.execPath, ['--eval', ''], {
+    stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
+  });
+  await once(child, 'close');
+  const owners = {
+    start: vi.fn(async () => ({
+      ownerId: 'extension-overflow',
+      child,
+      preread: {
+        stdout: [Buffer.from('retained-prefix')],
+        stderr: [],
+        overflow: true,
+      },
+      detachPreread: vi.fn(),
+    })),
+    stop: vi.fn(async () => ({
+      ownerId: 'extension-overflow',
+      sessionId: 'root',
+      configRevision: 1,
+      mode: 'developer-process-group' as const,
+      scope: 'process_group' as const,
+      state: 'stopped' as const,
+    })),
+  } as unknown as ManagedExtensionProcessOwners;
+  const capture = {
+    write: vi.fn(async (_stream: 'stdout' | 'stderr', _chunk: Buffer) => {}),
+    finish: vi.fn(async () => {}),
+    setStarted: vi.fn(),
+    setProcessResult: vi.fn(),
+  };
+  const result = await runManagedExtensionShell(owners, {
+    sessionId: 'root',
+    configRevision: 1,
+    command: 'printf overflow',
+    cwd: process.cwd(),
+    environment: {},
+    signal: new AbortController().signal,
+    capture,
+  });
+  // The overflow flag must fold into the result: bytes dropped past the budget
+  // are reported as truncated, not as a complete success.
+  expect(result.llmContent).toContain('[Output truncated]');
+  expect(capture.setProcessResult).toHaveBeenCalledWith(
+    expect.objectContaining({ outputCaptureLimitExceeded: true }),
+  );
+});
+
 it.skipIf(process.platform !== 'darwin')(
   'buffers command output from spawn so a fast exit cannot discard it',
   async () => {

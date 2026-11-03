@@ -927,6 +927,12 @@ it('still disowns a shared broker while holding the mount', async () => {
   // The no-argument handover keeps the same broker, so the mount stays valid.
   expect(() => hooks.delegateBrokerToMcp()).not.toThrow();
   expect(hooks.broker).toBe(shared);
+  // Disown hands the release to MCP: close must not release the shared broker
+  // again. Without ownsBroker=false, close releases it (a double release).
+  const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+  release.mockClear();
+  await hooks.close();
+  expect(release).not.toHaveBeenCalled();
 });
 
 it('aggregates parallel results in plan order rather than reply order', async () => {
