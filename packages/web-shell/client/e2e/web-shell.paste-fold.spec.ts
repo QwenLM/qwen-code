@@ -73,6 +73,82 @@ function longText(lines: number): string {
   return `${Array.from({ length: lines }, (_, i) => `line ${i}`).join('\n')}\n`;
 }
 
+test('distinguishes copied image URLs from PPT text @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+  const editor = page.locator(COMPOSER_EDITOR);
+
+  for (const text of [
+    'https://example.com/image.png',
+    'PPT editable text\nSecond line',
+  ]) {
+    await editor.evaluate((element, pasted) => {
+      const clipboard = new DataTransfer();
+      const bytes = Uint8Array.from(
+        atob(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=',
+        ),
+        (c) => c.charCodeAt(0),
+      );
+      clipboard.items.add(
+        new File([bytes], 'image.png', { type: 'image/png' }),
+      );
+      clipboard.setData('text/plain', pasted);
+      element.dispatchEvent(
+        new ClipboardEvent('paste', {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: clipboard,
+        }),
+      );
+    }, text);
+    const images = page.locator('[data-web-shell-composer-images] img');
+    if (text.startsWith('https:')) {
+      await expect(images).toHaveCount(1);
+      await expect(editor).not.toContainText(text);
+      await page.screenshot({
+        path: testInfo.outputPath('image-url-paste.png'),
+      });
+      await page
+        .getByRole('button', { name: 'Remove image', exact: true })
+        .click();
+    } else {
+      await expect(editor).toContainText('PPT editable text');
+      await expect(editor).toContainText('Second line');
+      await expect(images).toHaveCount(0);
+    }
+  }
+});
+
+test('warns for an advertised file paste with no available files @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+  await page.locator(COMPOSER_EDITOR).evaluate((element) => {
+    const clipboard = new DataTransfer();
+    Object.defineProperty(clipboard, 'types', { value: ['Files'] });
+    element.dispatchEvent(
+      new ClipboardEvent('paste', {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: clipboard,
+      }),
+    );
+  });
+  await expect(
+    page.getByText('1 file(s) were unavailable and skipped.', { exact: true }),
+  ).toBeVisible();
+  await expect(page.locator('[data-web-shell-composer-images]')).toHaveCount(0);
+  await page.screenshot({
+    path: testInfo.outputPath('unavailable-file-paste.png'),
+  });
+});
+
 test('folds a long paste into a card and keeps the editor empty @paste-fold @smoke', async ({
   page,
 }, testInfo) => {
