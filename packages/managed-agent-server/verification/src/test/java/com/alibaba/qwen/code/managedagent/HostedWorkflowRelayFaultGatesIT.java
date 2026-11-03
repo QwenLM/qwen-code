@@ -804,9 +804,9 @@ class HostedWorkflowRelayFaultGatesIT {
         return attempts == null ? 0 : attempts;
     }
 
-    /** The lead's record witnesses consumption by the wake Turn. The
-     * relay ledger snapshots consumption when it classifies delivery,
-     * which may precede the record's consumed revision. */
+    /** Wait for the lead's consuming revision and the relay ledger's
+     * matching terminal state. Classification can precede consumption;
+     * the consuming revision corrects that mirror in its own commit. */
     private void awaitConsumed(String lead) {
         waiting().atMost(Duration.ofSeconds(150))
                 .pollInterval(Duration.ofSeconds(1)).untilAsserted(() -> {
@@ -817,9 +817,8 @@ class HostedWorkflowRelayFaultGatesIT {
                             .isEqualTo("settled");
                     assertThat(record.path("run").path("delivery")
                             .path("state").asText()).isEqualTo("consumed");
-                    assertThat(childResultRows()).singleElement()
-                            .isIn("delivered/accepted/pending",
-                                    "delivered/accepted/consumed");
+                    assertThat(childResultRows())
+                            .containsExactly("delivered/accepted/consumed");
                 });
     }
 
@@ -855,9 +854,8 @@ class HostedWorkflowRelayFaultGatesIT {
         assertThat(commands).as("each child_run revision committed once")
                 .doesNotHaveDuplicates()
                 .hasSize(5);
-        assertThat(childResultRows()).singleElement()
-                .isIn("delivered/accepted/pending",
-                        "delivered/accepted/consumed");
+        assertThat(childResultRows())
+                .containsExactly("delivered/accepted/consumed");
         List<String> notifications = notifications(lead);
         assertThat(notifications).hasSize(1);
         assertThat(notifications.get(0)).contains(RESULT)
