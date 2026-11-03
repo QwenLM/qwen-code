@@ -169,7 +169,7 @@ class ReplayFloorAdvancerTest {
     }
 
     private String session(String tenant) {
-        return store.insertSessionCommand(tenant, "CREATE_SESSION",
+        return store.insertSessionCommand(tenant, "actor", "CREATE_SESSION",
                 "replay-floor-" + UUID.randomUUID(), "digest", "qwen-code",
                 null, null, List.of(), "payload").sessionId();
     }

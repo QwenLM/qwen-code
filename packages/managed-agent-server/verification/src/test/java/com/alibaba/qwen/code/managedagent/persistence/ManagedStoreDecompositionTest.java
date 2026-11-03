@@ -91,6 +91,10 @@ class ManagedStoreDecompositionTest {
     @Test
     void facadesKeepTheExistingEntryAndTransactionPopulation() {
         assertEntries(ManagedAgentStore.class, """
+                requireSessionOwnership/3:- ownsSession/3:- listOwnedSessions/7:- listSessions/7:-
+                insertSessionCommand/10::REQUIRED:DEFAULT:false insertSessionCommand/11::REQUIRED:DEFAULT:false
+                insertTurnCommand/8::REQUIRED:DEFAULT:false insertCancelCommand/7::REQUIRED:DEFAULT:false
+                beginSessionMutation/8::REQUIRED:DEFAULT:false beginSessionRename/7::REQUIRED:DEFAULT:false
                 findSessionWorktree/2:- findSessionWorktrees/2:- insertSessionCommand/10::REQUIRED:DEFAULT:false
                 insertSessionCommand/11::REQUIRED:DEFAULT:false
                 insertWorkspaceSessionCommand/1::REQUIRED:DEFAULT:false insertInternalTeamLeadSessionCommand/6::REQUIRED:DEFAULT:false findWorkspaceCreateReplay/4:-

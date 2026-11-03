@@ -7,6 +7,7 @@ import ch.qos.logback.core.read.ListAppender;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.EventIdentity;
 import com.alibaba.qwen.code.managedagent.event.MessageMaterializer;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
@@ -52,6 +53,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class MessageProjectionGapHealTest {
     private static final String TENANT = "gap-heal";
+    private static final SessionPrincipal USER = SessionPrincipal.ofUser(TENANT, "actor");
     private final AtomicLong now = new AtomicLong(1_000);
     private JdbcTemplate jdbc;
     private JdbcDataSource dataSource;
@@ -60,7 +62,7 @@ class MessageProjectionGapHealTest {
     @Test
     void aSequenceGapHealsInsteadOfWedgingTheProjection() {
         ManagedAgentStore store = store();
-        String sessionId = store.insertSessionCommand(TENANT,
+        String sessionId = store.insertSessionCommand(TENANT, USER,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
                 List.of(), null).sessionId();
 
@@ -135,7 +137,7 @@ class MessageProjectionGapHealTest {
     @Test
     void theScanHoldsTheSessionRowLockForTheWholeBatch() throws Exception {
         ManagedAgentStore store = store();
-        String sessionId = store.insertSessionCommand(TENANT,
+        String sessionId = store.insertSessionCommand(TENANT, USER,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
                 List.of(), null).sessionId();
         materialize(store, sessionId);
@@ -177,7 +179,7 @@ class MessageProjectionGapHealTest {
     @Test
     void aLostTerminalTurnEventSettlesItsOrphanedItemsAsFailed() {
         ManagedAgentStore store = store();
-        String sessionId = store.insertSessionCommand(TENANT,
+        String sessionId = store.insertSessionCommand(TENANT, USER,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
                 List.of(), null).sessionId();
         materialize(store, sessionId);
@@ -220,7 +222,7 @@ class MessageProjectionGapHealTest {
     @Test
     void aTurnSpanningTheGapStillCompletesItsOwnItems() {
         ManagedAgentStore store = store();
-        String sessionId = store.insertSessionCommand(TENANT,
+        String sessionId = store.insertSessionCommand(TENANT, USER,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
                 List.of(), null).sessionId();
         materialize(store, sessionId);
@@ -253,7 +255,7 @@ class MessageProjectionGapHealTest {
     @Test
     void aCommittedTerminalEventPastTheGapProtectsItsItems() {
         ManagedAgentStore store = store();
-        String sessionId = store.insertSessionCommand(TENANT,
+        String sessionId = store.insertSessionCommand(TENANT, USER,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
                 List.of(), null).sessionId();
         materialize(store, sessionId);
@@ -283,7 +285,7 @@ class MessageProjectionGapHealTest {
     @Test
     void aGapInsideARunningTurnLeavesItsItemsStreaming() {
         ManagedAgentStore store = store();
-        String sessionId = store.insertSessionCommand(TENANT,
+        String sessionId = store.insertSessionCommand(TENANT, USER,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
                 List.of(), null).sessionId();
         materialize(store, sessionId);

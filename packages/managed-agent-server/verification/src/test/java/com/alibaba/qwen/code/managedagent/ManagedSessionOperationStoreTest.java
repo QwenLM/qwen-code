@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationTarget;
@@ -40,6 +41,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class ManagedSessionOperationStoreTest {
     private static final String TENANT = "operation-store";
+    private static final SessionPrincipal USER = SessionPrincipal.ofUser(TENANT, "actor");
     private final AtomicLong now = new AtomicLong(1_000);
     private JdbcTemplate jdbc;
     private JdbcDataSource dataSource;
@@ -47,7 +49,7 @@ class ManagedSessionOperationStoreTest {
     @Test
     void onlyTheNewestClaimCompletesOrRetries() {
         ManagedAgentStore store = store();
-        String sessionId = store.insertSessionCommand(TENANT,
+        String sessionId = store.insertSessionCommand(TENANT, USER,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
                 List.of(), null).sessionId();
         String operationId = store.beginOperation(TENANT, sessionId,
@@ -116,7 +118,7 @@ class ManagedSessionOperationStoreTest {
     @Test
     void aFailedTerminationKeepsTheSessionPendingAndStopsRedriving() {
         ManagedAgentStore store = store();
-        String sessionId = store.insertSessionCommand(TENANT,
+        String sessionId = store.insertSessionCommand(TENANT, USER,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
                 List.of(), null).sessionId();
         String operationId = store.beginOperation(TENANT, sessionId,
@@ -174,7 +176,7 @@ class ManagedSessionOperationStoreTest {
     @Test
     void aFailedTerminationLeavesTheSessionReclosable() {
         ManagedAgentStore store = store();
-        String sessionId = store.insertSessionCommand(TENANT,
+        String sessionId = store.insertSessionCommand(TENANT, USER,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
                 List.of(), null).sessionId();
         String operationId = store.beginOperation(TENANT, sessionId,
@@ -327,7 +329,7 @@ class ManagedSessionOperationStoreTest {
     @Test
     void budgetExemptWaitsDoNotConsumeTheTerminalBudget() {
         ManagedAgentStore store = store();
-        String sessionId = store.insertSessionCommand(TENANT,
+        String sessionId = store.insertSessionCommand(TENANT, USER,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
                 List.of(), null).sessionId();
         String operationId = store.beginOperation(TENANT, sessionId,
@@ -384,7 +386,7 @@ class ManagedSessionOperationStoreTest {
         // was admitted on: a delete admitted on an ACTIVE Session waits on
         // the same live writer and publishes the same recovery_blocked row
         // (review round 6, R6-2).
-        String activeDeleteSession = store.insertSessionCommand(TENANT,
+        String activeDeleteSession = store.insertSessionCommand(TENANT, USER,
                 "CREATE_SESSION", "create-active-delete", "digest",
                 "qwen-code", null, null, List.of(), null).sessionId();
         String deleteId = store.beginOperation(TENANT, activeDeleteSession,
@@ -410,7 +412,7 @@ class ManagedSessionOperationStoreTest {
     @Test
     void blockedActiveDeletionIsRedriven() {
         ManagedAgentStore store = store();
-        String sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION", "create", "digest",
+        String sessionId = store.insertSessionCommand(TENANT, USER, "CREATE_SESSION", "create", "digest",
                 "qwen-code", null, null, List.of(), null).sessionId();
         var admitted = store.beginOperation(TENANT, sessionId, OperationKind.DELETE, "", "delete", "digest");
         assertThat(admitted.operation().sessionStatusBefore()).isEqualTo("ACTIVE");
@@ -435,7 +437,7 @@ class ManagedSessionOperationStoreTest {
     @Test
     void aKeyReusedWithAnotherDigestConflicts() {
         ManagedAgentStore store = store();
-        String sessionId = store.insertSessionCommand(TENANT,
+        String sessionId = store.insertSessionCommand(TENANT, USER,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
                 List.of(), null).sessionId();
         store.beginOperation(TENANT, sessionId, OperationKind.CLOSE, "",
@@ -450,7 +452,7 @@ class ManagedSessionOperationStoreTest {
     @Test
     void unrelatedOperationKindsCannotBeScannedOrClaimed() {
         ManagedAgentStore store = store();
-        String sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION", "create", "digest", "qwen-code",
+        String sessionId = store.insertSessionCommand(TENANT, USER, "CREATE_SESSION", "create", "digest", "qwen-code",
                 null, null, List.of(), null).sessionId();
         String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
         String target = ManagedSchemaKeys.key(sessionId);
@@ -468,7 +470,7 @@ class ManagedSessionOperationStoreTest {
     @Test
     void unknownOutcomeBlocksAdmissionAndAutomaticReplay() {
         ManagedAgentStore store = store();
-        String sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION", "create", "digest", "qwen-code",
+        String sessionId = store.insertSessionCommand(TENANT, USER, "CREATE_SESSION", "create", "digest", "qwen-code",
                 null, null, List.of(), null).sessionId();
         var operation = store.beginOperation(TENANT, sessionId, OperationKind.CLOSE, "", "close", "digest").operation();
         var claim = store.claimOperation(TENANT, sessionId, operation.operationId(), "worker", Duration.ofMinutes(1)).orElseThrow();

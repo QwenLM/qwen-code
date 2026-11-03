@@ -28,17 +28,19 @@ class ManagedSessionHistoryTest {
                         "tenant", id, "qwen-code", i % 2 == 0 ? "ARCHIVED" : "ACTIVE", i,
                         ManagedSchemaKeys.key("tenant"), ManagedSchemaKeys.key(id),
                         com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", id));
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.ownUnboundSession(jdbc, id,
+                        com.alibaba.qwen.code.managedagent.model.SessionPrincipal.ofUser("tenant", "history-reader"));
                 jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, gmt_modified)"
                         + " VALUES (?, ?, 'SESSION', X'', 0)", "tenant", id);
             }
-            var first = store.listSessions("tenant", null, null, null, 1, "archived");
+            var first = store.listSessions("tenant", "history-reader", null, null, 1, "archived");
             assertThat(first.sessions()).extracting(row -> row.sessionId()).containsExactly("session-4");
             assertThat(first.hasMore()).isTrue();
-            var next = store.listSessions("tenant", null, 4L, "session-4", 1, "archived");
+            var next = store.listSessions("tenant", "history-reader", 4L, "session-4", 1, "archived");
             assertThat(next.sessions()).extracting(row -> row.sessionId()).containsExactly("session-2");
             assertThat(next.hasMore()).isFalse();
-            assertThat(store.listSessions("tenant", null, null, null, 100, "unarchived").sessions()).hasSize(3);
-            assertThat(store.listSessions("tenant", null, null, null, 100).sessions()).hasSize(5);
+            assertThat(store.listSessions("tenant", "history-reader", null, null, 100, "unarchived").sessions()).hasSize(3);
+            assertThat(store.listSessions("tenant", "history-reader", null, null, 100).sessions()).hasSize(5);
             var close = store.beginOperation("tenant", "session-1", OperationKind.CLOSE, "", "close", "digest");
             jdbc.update("UPDATE ma_operation SET state='FAILED', failure_code='fixture', gmt_create=0 WHERE operation_id=?",
                     close.operation().operationId());

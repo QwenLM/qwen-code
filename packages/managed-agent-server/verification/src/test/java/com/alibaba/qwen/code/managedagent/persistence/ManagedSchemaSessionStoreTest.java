@@ -297,7 +297,7 @@ public class ManagedSchemaSessionStoreTest {
         var command =
                 tx.execute(
                         status ->
-                                store.beginSessionRename(tenant, "r1", "digest", session, "first"));
+                                store.beginSessionRename(tenant, "r1", "digest", session, "first", "actor"));
         var candidate = store.deliverableRenames(clock.millis()).getFirst();
         var old =
                 tx.execute(
@@ -329,7 +329,7 @@ public class ManagedSchemaSessionStoreTest {
                 tx.execute(
                         status ->
                                 store.beginSessionRename(
-                                        tenant, "r2", "digest2", session, "second"));
+                                        tenant, "r2", "digest2", session, "second", "actor"));
         assertThat(later.renameRevision()).isGreaterThan(command.renameRevision());
         assertThatThrownBy(
                         () ->
@@ -524,7 +524,7 @@ public class ManagedSchemaSessionStoreTest {
                                                 "digest",
                                                 session,
                                                 List.of(),
-                                                "payload"))
+                                                "payload", "actor"))
                         .turnId();
         tx.execute(
                 status -> store.claimTurn(tenant, session, turn, "owner", Duration.ofMinutes(1)));
@@ -632,7 +632,7 @@ public class ManagedSchemaSessionStoreTest {
                                                 "digest",
                                                 session,
                                                 List.of(),
-                                                "payload"))
+                                                "payload", "actor"))
                         .turnId();
         tx.execute(
                 status -> store.claimTurn(tenant, session, turn, "owner", Duration.ofMinutes(1)));

@@ -54,22 +54,22 @@ class ManagedInputAttachmentTest {
         var blocks = List.of(new InputBlock("input_text", "Review"),
                 new InputBlock("input_file", "你好\ncontents", "text/markdown", null, "notes 1.md"),
                 new InputBlock("input_image", null, "image/png", PNG, null));
-        var admission = service.createSession("tenant", "create", "qwen-code", null, null, null, blocks);
+        var admission = service.createSession("tenant", "attachment-user", "create", "qwen-code", null, null, null, blocks);
         var input = store.findTurn("tenant", admission.sessionId(), admission.turnId()).orElseThrow().input();
         assertThat(input).containsExactly(Map.of("type", "text", "text", "Review"),
                 Map.of("type", "resource", "resource", Map.of("uri", "managed-input:///notes%201.md",
                         "mimeType", "text/markdown", "text", "你好\ncontents")),
                 Map.of("type", "image", "data", PNG, "mimeType", "image/png"));
-        var replay = service.createSession("tenant", "create", "qwen-code", null, null, null, blocks);
+        var replay = service.createSession("tenant", "attachment-user", "create", "qwen-code", null, null, null, blocks);
         assertThat(replay.replayed()).isTrue();
         assertThat(replay.turnId()).isEqualTo(admission.turnId());
         store.materializeNextBatch("tenant", admission.sessionId(), 100);
-        var items = service.listPublicItems("tenant", null, admission.sessionId(), 0, 100).data();
+        var items = service.listPublicItems("tenant", "attachment-user", admission.sessionId(), 0, 100).data();
         assertThat(items).singleElement().satisfies(item -> {
             assertThat(item.attributes().get("inputAttachments")).isEqualTo(input);
             assertThat(item.content()).singleElement().satisfies(part -> assertThat(part.text()).isEqualTo("Review"));
         });
-        assertThatThrownBy(() -> service.createSession("tenant", "create", "qwen-code", null, null, null,
+        assertThatThrownBy(() -> service.createSession("tenant", "attachment-user", "create", "qwen-code", null, null, null,
                 List.of(new InputBlock("input_file", "different contents", "text/markdown", null, "notes 1.md"))))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
     }
@@ -81,14 +81,14 @@ class ManagedInputAttachmentTest {
         String data = Base64.getEncoder().encodeToString(bytes);
         var blocks = List.of(new InputBlock("input_text", "Review screenshot"),
                 new InputBlock("input_image", null, "image/png", data, null));
-        var admission = service.createSession("tenant", "large-image", "qwen-code", null, null, null, blocks);
-        var replay = service.createSession("tenant", "large-image", "qwen-code", null, null, null, blocks);
+        var admission = service.createSession("tenant", "attachment-user", "large-image", "qwen-code", null, null, null, blocks);
+        var replay = service.createSession("tenant", "attachment-user", "large-image", "qwen-code", null, null, null, blocks);
         assertThat(replay.replayed()).isTrue();
         assertThat(replay.turnId()).isEqualTo(admission.turnId());
         assertThat(store.findTurn("tenant", admission.sessionId(), admission.turnId()).orElseThrow().input().get(1))
                 .isEqualTo(Map.of("type", "image", "data", data, "mimeType", "image/png"));
         store.materializeNextBatch("tenant", admission.sessionId(), 100);
-        assertThat(service.listPublicItems("tenant", null, admission.sessionId(), 0, 100).data())
+        assertThat(service.listPublicItems("tenant", "attachment-user", admission.sessionId(), 0, 100).data())
                 .singleElement().satisfies(item -> assertThat(item.attributes().get("inputAttachments"))
                         .isEqualTo(store.findTurn("tenant", admission.sessionId(), admission.turnId()).orElseThrow().input()));
     }
@@ -98,16 +98,16 @@ class ManagedInputAttachmentTest {
     void preservesAdditionalImageFormatsThroughAdmissionReplayAndProjection(String mime, String data) {
         String canonicalMime = mime.equals("image/jpg") ? "image/jpeg" : mime;
         var blocks = List.of(new InputBlock("input_image", null, mime, data, null));
-        var admission = service.createSession("tenant", "image-format", "qwen-code", null, null, null, blocks);
+        var admission = service.createSession("tenant", "attachment-user", "image-format", "qwen-code", null, null, null, blocks);
         var expected = List.of(Map.of("type", "image", "data", data, "mimeType", canonicalMime));
         assertThat(store.findTurn("tenant", admission.sessionId(), admission.turnId()).orElseThrow().input())
                 .isEqualTo(expected);
-        var replay = service.createSession("tenant", "image-format", "qwen-code", null, null, null,
+        var replay = service.createSession("tenant", "attachment-user", "image-format", "qwen-code", null, null, null,
                 List.of(new InputBlock("input_image", null, canonicalMime, data, null)));
         assertThat(replay.replayed()).isTrue();
         assertThat(replay.turnId()).isEqualTo(admission.turnId());
         store.materializeNextBatch("tenant", admission.sessionId(), 100);
-        assertThat(service.listPublicItems("tenant", null, admission.sessionId(), 0, 100).data())
+        assertThat(service.listPublicItems("tenant", "attachment-user", admission.sessionId(), 0, 100).data())
                 .singleElement().satisfies(item -> assertThat(item.attributes().get("inputAttachments"))
                         .isEqualTo(expected));
     }
@@ -121,10 +121,10 @@ class ManagedInputAttachmentTest {
 
     @Test
     void acceptsFileOnlyInputAndEnforcesTheWholeEncodedBudget() {
-        var admitted = service.createSession("tenant", "file-only", "qwen-code", null, null, null,
+        var admitted = service.createSession("tenant", "attachment-user", "file-only", "qwen-code", null, null, null,
                 List.of(new InputBlock("input_file", "const x = 1;", "application/octet-stream", null, "script.ts")));
         assertThat(admitted.turnId()).isNotNull();
-        assertThatThrownBy(() -> service.createSession("tenant", "too-large", "qwen-code", null, null, null,
+        assertThatThrownBy(() -> service.createSession("tenant", "attachment-user", "too-large", "qwen-code", null, null, null,
                 List.of(new InputBlock("input_file", "界".repeat(ManagedInputAttachments.MAX_INPUT_BYTES / 3),
                         "text/plain", null, "a.txt"))))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("input_too_large"));
@@ -133,7 +133,7 @@ class ManagedInputAttachmentTest {
     @ParameterizedTest
     @MethodSource("invalidBlocks")
     void refusesUnsupportedShapesBeforeAnyAdmission(InputBlock block) {
-        assertThatThrownBy(() -> service.createSession("tenant", UUID.randomUUID().toString(), "qwen-code",
+        assertThatThrownBy(() -> service.createSession("tenant", "attachment-user", UUID.randomUUID().toString(), "qwen-code",
                 null, null, null, List.of(block))).isInstanceOf(ManagedAgentException.class);
     }
 

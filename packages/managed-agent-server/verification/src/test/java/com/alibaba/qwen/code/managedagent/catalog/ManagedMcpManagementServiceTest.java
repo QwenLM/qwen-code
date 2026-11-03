@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.ManagedMcpManagementCommand;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.ManagedMcpServerPin;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -37,6 +38,10 @@ class ManagedMcpManagementServiceTest {
 
     @BeforeEach
     void setUp() {
+        when(sessions.requireReadableSession(any(SessionPrincipal.class), eq("session"))).thenReturn(session);
+        when(session.tenantId()).thenReturn("tenant");
+        when(session.workspace()).thenReturn(new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
+                "tenant", "workspace", 1, "storage", "project", "config", 1));
         when(session.toolProfile()).thenReturn("hosted-workspace-shell/1");
         when(store.requireMcpManagement(eq("tenant"), anyString(), eq("session"), any())).thenReturn(session);
         when(harness.supportsMcpManagement()).thenReturn(true);
@@ -51,12 +56,15 @@ class ManagedMcpManagementServiceTest {
         service.submit("tenant", "actor", "session", "key", command);
         service.submit("tenant", "actor", "session", "key", command);
         service.submit("tenant", "second", "session", "key", command);
+        service.submit(SessionPrincipal.of("tenant", "actor", "subject-A"), "session", "key", command);
+        service.submit(SessionPrincipal.of("tenant", "actor", "subject-B"), "session", "key", command);
         @SuppressWarnings("unchecked")
         ArgumentCaptor<Map<String, Object>> requests = ArgumentCaptor.forClass(Map.class);
-        verify(harness, org.mockito.Mockito.times(3)).manageMcp(eq("tenant"), eq("session"), requests.capture());
+        verify(harness, org.mockito.Mockito.times(5)).manageMcp(eq("tenant"), eq("session"), requests.capture());
         var values = requests.getAllValues();
         assertThat(values.get(0)).isEqualTo(values.get(1));
         assertThat(values.get(2).get("operationId")).isNotEqualTo(values.get(0).get("operationId"));
+        assertThat(values.stream().map(value -> value.get("operationId")).distinct()).hasSize(4);
         assertThat(values.get(0)).containsOnlyKeys("operationId", "actorKey", "action", "serverId", "expectedRevision", "server");
         assertThat(((Map<?, ?>) values.get(0).get("server")).keySet()).isEqualTo(Set.of("serverId", "serverRevision", "definitionDigest"));
     }
@@ -78,6 +86,14 @@ class ManagedMcpManagementServiceTest {
                 new ManagedAgentException(403, "session_operation_forbidden", "Forbidden"));
         assertThatThrownBy(() -> service.get("tenant", "reader", "session")).isInstanceOf(ManagedAgentException.class);
         verify(harness, never()).mcpManagement(anyString(), anyString());
+        when(store.requireMcpManagement(eq("tenant"), eq("reader"), eq("session"), any())).thenThrow(
+                new ManagedAgentException(403, "session_operation_forbidden", "Forbidden"));
+        assertThatThrownBy(() -> service.submit("tenant", "reader", "session", "key",
+                new ManagedMcpManagementCommand("restart", "docs", 0L, null)))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(403);
+                    assertThat(error.getCode()).isEqualTo("session_operation_forbidden");
+                });
         String operation = "11111111-1111-4111-8111-111111111111";
         when(harness.mcpManagementOperation("tenant", "session", operation)).thenReturn(snapshot());
         assertThat(service.operation("tenant", "actor", "session", operation).path("sessionId").asText()).isEqualTo("session");

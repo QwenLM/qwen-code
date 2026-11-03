@@ -481,6 +481,8 @@ class ManagedArtifactApiIntegrationTest {
     @Test
     void unboundReadableSessionHasNoArtifactCapabilityOrRoutes() throws Exception {
         fixture.jdbc().update("UPDATE ma_session SET workspace_id=NULL, workspace_generation=NULL, workspace_storage_id=NULL, cwd_relative=NULL, context_config_ref=NULL, context_revision=NULL, workspace_config_ref=NULL, workspace_policy_ref=NULL");
+        VerificationFixtures.ownUnboundSession(fixture.jdbc(), "session-1",
+                com.alibaba.qwen.code.managedagent.model.SessionPrincipal.ofUser("tenant-1", "reader"));
         assertThat(sessions.getPublicSession("tenant-1", "reader", "session-1").capabilities().artifacts()).isFalse();
         assertThat(sessions.getWebShellSession("tenant-1", "reader", "session-1").capabilities().artifacts()).isFalse();
         for (String path : new String[] {"/items/" + itemId + "/tool-result", "/artifacts",

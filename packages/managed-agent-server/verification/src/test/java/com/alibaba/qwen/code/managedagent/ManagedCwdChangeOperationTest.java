@@ -373,7 +373,7 @@ class ManagedCwdChangeOperationTest {
         assertThat(settled.completed()).isTrue();
         assertThat(settled.resultContextRevision()).isEqualTo(2);
 
-        String legacyId = fixture.store.insertSessionCommand(TENANT,
+        String legacyId = fixture.store.insertSessionCommand(TENANT, ACTOR,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null,
                 null, List.of(), null).sessionId();
         String closeId = fixture.store.beginOperation(TENANT, legacyId,
@@ -590,7 +590,7 @@ class ManagedCwdChangeOperationTest {
     @Test
     void theTurnBarrierLeavesTheLegacyRouteUntouched() {
         Fixture fixture = fixture(true);
-        String legacyId = fixture.store.insertSessionCommand(TENANT,
+        String legacyId = fixture.store.insertSessionCommand(TENANT, ACTOR,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null,
                 null, List.of(), null).sessionId();
         fixture.insertOperation(legacyId, "action-op", "ACTION_RESPONSE", "RUNNING", "PENDING", null);
@@ -600,7 +600,7 @@ class ManagedCwdChangeOperationTest {
 
         // The workspace==null gate is load-bearing: with a non-action
         // open operation on the unbound Session, a Turn is still admitted.
-        String olderId = fixture.store.insertSessionCommand(TENANT,
+        String olderId = fixture.store.insertSessionCommand(TENANT, ACTOR,
                 "CREATE_SESSION", "create-2", "digest-2", "qwen-code",
                 null, null, List.of(), null).sessionId();
         fixture.insertOperation(olderId, "close-op", "CLOSE", "PENDING", "PENDING", null);

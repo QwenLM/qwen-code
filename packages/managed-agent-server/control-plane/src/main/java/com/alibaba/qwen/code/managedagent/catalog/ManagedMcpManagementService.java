@@ -15,6 +15,7 @@ import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -89,7 +90,7 @@ public class ManagedMcpManagementService {
         Map<String, Object> request = new LinkedHashMap<>();
         try {
             request.put("operationId", UUID.nameUUIDFromBytes(json.writeValueAsBytes(
-                    List.of("managed-mcp-command", principal.tenantId(),
+                    Arrays.asList("managed-mcp-command", principal.tenantId(),
                             principal.userId(), principal.actorSubjectId(),
                             sessionId, idempotencyKey))).toString());
         } catch (com.fasterxml.jackson.core.JsonProcessingException error) {

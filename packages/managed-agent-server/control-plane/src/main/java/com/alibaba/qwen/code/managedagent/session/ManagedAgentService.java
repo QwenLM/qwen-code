@@ -1051,6 +1051,11 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         if (recorded != null && !recorded.sessionId().equals(sessionId)) {
             SessionRecord requested = store.requireSession(tenantId, sessionId);
             inputPolicy.requireSubmitterRole(requested, principal);
+            SessionRecord recordedSession = store.requireSession(tenantId, recorded.sessionId());
+            if (requested.workspace() != null && recordedSession.workspace() != null) {
+                throw new ManagedAgentException(409, "idempotency_conflict",
+                        "The idempotency key was reused with different content.");
+            }
             requireRecordedSessionGrant(recorded, requested, principal);
         }
         if (recorded != null && recorded.sessionId().equals(sessionId)) {

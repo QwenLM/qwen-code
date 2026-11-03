@@ -274,6 +274,11 @@ final class AgentSessionCommands {
         // Tenant and Session locks serialize admission without gap-locking missing index entries.
         Optional<CommandRecord> previous = findCommand(tenantId, "RENAME_SESSION", key, false);
         if (previous.isPresent()) {
+            if (!sessionId.equals(previous.get().sessionId()) && session.workspace() != null
+                    && storeRows.requireSession(tenantId, previous.get().sessionId()).workspace() != null) {
+                throw new ManagedAgentException(409, "idempotency_conflict",
+                        "The idempotency key was reused with different content.");
+            }
             requireMutationReceiptGrant(tenantId, session, previous.get(), actorId, principal);
             if (sessionId.equals(previous.get().sessionId())) {
                 requireRenameReplayOwner(session, previous.get(), actorId, principal);

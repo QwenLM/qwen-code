@@ -31,3 +31,13 @@
 选择 Session 身份归属、外部 materialization/ownership、恢复/回收、外部 drain、shared dispatch、runtime dispatch、provider 装配与 schema 测试。共享十分钟本地 Java 预算内无法运行的 MySQL 8.4 与真实进程恢复证据必须明确保留缺口。完整测试集、Checkstyle 和 SpotBugs 由 CI 执行。
 
 消费方验收还须完成 DataAgent 编译及 Java/MySQL 门禁、最终包结构与 provider 资源校验、部署源码/制品/数据库身份核对、两个只读 Session 共享同一 Worker 并发、取消后继续及关闭一个 Session 不影响另一个。部署和 E2E 状态与源码集成分别报告；失败或无法执行的门禁不代表通过验收。
+
+## 完整测试集的契约核对
+
+既有私有 preview 要求 Session 入口携带可信 principal，并拒绝缺少不可变归属记录的非 Workspace 行。上游测试关于非 Workspace 会话可在租户内匿名访问的假设不代表这份私有契约。成功 fixture 应显式提供已验证用户，保留 Workspace 的 reader/operator 授权；同时断言缺身份 401、外来私有 owner 404，以及真实 owner 的读取和变更成功。不得为满足旧 fixture 恢复历史归属兜底或修改生产鉴权顺序。
+
+完整原生测试还发现一处真实 MCP 回归：生成命令操作身份时把可空的业务主体放入 List.of。使用允许空值的 JDK 列表保留六字段身份元组，无业务主体时仍编码 JSON null；验证普通用户和不同业务主体、相同请求重放，以及 reader 在任何 Harness 提交前收到 403。
+
+资格断言纳入精确新增的 facade 重载、39 张原生表和单独保留的 Flyway 历史表。principal 表属于新增原生能力，不伪造为 63 个历史实体的迁移落点。CI 的 Git 2.39.3 不满足既有 Child Workspace 最低要求，应在 CI 工作目录构建固定版本且核对校验和的 Git 工具，不放宽版本门禁。Node 子进程保持既有截止时间，并在超时诊断中保留子进程输出。完整测试、真实 MySQL 与 Hosted 验收仍分别取证。
+
+Workspace 的 rename key 保持租户范围：operator 对自己可操作的绑定会话使用另一绑定会话已占用的 key，收到 409 idempotency_conflict，不重放、不变更。此情形与非 Workspace 私有 receipt 的归属隔离分开，后者仍向外来 principal 返回 404；同一会话的待完成 rename 仍要求原记录者身份。

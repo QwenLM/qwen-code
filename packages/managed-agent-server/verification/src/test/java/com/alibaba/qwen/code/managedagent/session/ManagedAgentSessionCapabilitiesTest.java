@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionRecovery;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionRecoveryActions;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleOperation;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
@@ -35,6 +36,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class ManagedAgentSessionCapabilitiesTest {
+    private static final SessionPrincipal ACTOR = SessionPrincipal.ofUser("tenant", "actor");
     @ParameterizedTest
     @CsvSource({"false,true", "false,false", "true,true", "true,false"})
     void publicChildRestrictionsComposeWithLifecycleOwnership(boolean child, boolean owner) {
@@ -67,7 +69,7 @@ class ManagedAgentSessionCapabilitiesTest {
                 .thenReturn(owner ? Set.of("session") : Set.of());
         when(store.supportsPlanMode(session)).thenReturn(true);
         when(store.requireSession("tenant", "session")).thenReturn(session);
-        when(store.listSessions("tenant", "actor", null, null, 10, "all"))
+        when(store.listSessions("tenant", ACTOR, null, null, 10, "all", ""))
                 .thenReturn(new SessionPage(List.of(session), false));
         when(store.findChildLineage("tenant", "session"))
                 .thenReturn(child ? new SessionLineage("parent", "parent", "run", 1) : null);
@@ -101,7 +103,7 @@ class ManagedAgentSessionCapabilitiesTest {
         when(store.requireSession("tenant", "session")).thenReturn(session);
         when(store.findLatestLifecycleOperations("tenant", List.of("session")))
                 .thenReturn(Map.of("session", operation));
-        when(recoveries.projection(session, "actor")).thenReturn(recovery);
+        when(recoveries.projection(session, ACTOR)).thenReturn(recovery);
 
         var view = service.getWebShellSession("tenant", "actor", "session");
 
@@ -143,7 +145,7 @@ class ManagedAgentSessionCapabilitiesTest {
         when(store.supportsPlanMode(any()))
                 .thenAnswer(call -> WorkspaceToolProfiles.supportsApprovalSelection(call.getArgument(0)));
         when(store.requireSession("tenant", "excluded")).thenReturn(excluded);
-        when(store.listSessions("tenant", "actor", null, null, 10, "all"))
+        when(store.listSessions("tenant", ACTOR, null, null, 10, "all", ""))
                 .thenReturn(new SessionPage(List.of(supported, excluded), false));
 
         var views = service.listWebShellSessions("tenant", "actor", null, 10).data();
@@ -184,9 +186,7 @@ class ManagedAgentSessionCapabilitiesTest {
                 status, null, null, 0, 0, 0, 1, 1, null, 1, workspace, "default",
                 csi ? CsiFilesRetirementProfile.PROFILE : WorkspaceToolProfiles.FILES);
         when(store.requireSession("tenant", "session")).thenReturn(session);
-        when(store.listSessions("tenant", "actor", null, null, 10))
-                .thenReturn(new SessionPage(List.of(session), false));
-        when(store.listSessions("tenant", "actor", null, null, 10, "all"))
+        when(store.listSessions("tenant", ACTOR, null, null, 10, "all", ""))
                 .thenReturn(new SessionPage(List.of(session), false));
         when(store.findApprovalOwners("tenant", "actor", List.of("session")))
                 .thenReturn(Set.of("session"));

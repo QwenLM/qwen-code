@@ -644,7 +644,9 @@ class WorkspaceCsiSessionMainTest {
                     .sorted(Comparator.comparing(JsonNode::toString)).toList();
             result.put(table, json.valueToTree(rows));
         }
-        assertThat(result).hasSize(39);
+        assertThat(result).containsKeys("ma_session_principal", "flyway_schema_history");
+        assertThat(result).hasSize(
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.TABLES.size() + 1);
         return result;
     }
 

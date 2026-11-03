@@ -252,8 +252,11 @@ class Issue13180HardenedVerificationTest {
                 sign("POST", path, tenant, "intruder", intruderTimestamp,
                         body, intruderKey),
                 intruderKey, body);
-        assertThat(intruder.statusCode()).as(intruder.body()).isEqualTo(403);
-        assertThat(intruder.body()).contains("action_forbidden");
+        assertThat(intruder.statusCode()).as(intruder.body()).isEqualTo(404);
+        assertThat(intruder.body()).contains("session_not_found");
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_session_record"
+                        + " WHERE tenant_id = ? AND session_id = ? AND action_id = ? AND record_kind = 'ACTION'",
+                String.class, tenant, session, actionId)).isEqualTo("requested");
 
         // Fixed behavior: the recorded creator's answer is accepted.
         String ownerTimestamp = now();

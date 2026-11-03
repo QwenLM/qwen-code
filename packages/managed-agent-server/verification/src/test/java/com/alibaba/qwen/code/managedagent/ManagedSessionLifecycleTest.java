@@ -133,7 +133,7 @@ class ManagedSessionLifecycleTest {
         String closeId;
         harness.failCloses(Integer.MAX_VALUE);
         try {
-            closeId = admit(post("/v1/agents/sessions/{id}/close", sessionId),
+            closeId = admit(post("/v1/agents/sessions/{id}/close", sessionId).principal(actor(tenant, "actor-a")),
                     tenant, "close").get("id").asText();
             await().atMost(Duration.ofSeconds(5))
                     .until(() -> attempts(closeId) >= 2);
@@ -166,7 +166,7 @@ class ManagedSessionLifecycleTest {
         runtime.failDrains(Integer.MAX_VALUE);
         String closeId;
         try {
-            closeId = admit(post("/v1/agents/sessions/{id}/close", sessionId),
+            closeId = admit(post("/v1/agents/sessions/{id}/close", sessionId).principal(actor(tenant, "actor-a")),
                     tenant, "close").get("id").asText();
             await().atMost(Duration.ofSeconds(5))
                     .until(() -> attempts(closeId) >= 3);
@@ -175,7 +175,7 @@ class ManagedSessionLifecycleTest {
             assertThat(sessionStatus(tenant, sessionId)).isEqualTo("closing");
             // The Harness is up, so only the sealed Session rejects input.
             mvc.perform(post("/v1/agents/sessions/{id}/events", sessionId)
-                            .header(TENANT, tenant)
+                            .header(TENANT, tenant).principal(actor(tenant, "actor-a"))
                             .header("Idempotency-Key", "sealed")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("""
@@ -205,7 +205,7 @@ class ManagedSessionLifecycleTest {
         harness.setAvailable(false);
         try {
             String closeId = admit(post("/v1/agents/sessions/{id}/close",
-                    unconfigured), tenant, "close").get("id").asText();
+                    unconfigured).principal(actor(tenant, "actor-a")), tenant, "close").get("id").asText();
             assertThat(awaitCompleted(tenant, unconfigured, closeId)
                     .get("admission_stage").asText())
                     .isEqualTo("java_durable");
@@ -219,7 +219,7 @@ class ManagedSessionLifecycleTest {
         // answer confirms nothing.
         String configured = emptySession(tenant);
         String closeId = admit(post("/v1/agents/sessions/{id}/close",
-                configured), tenant, "close").get("id").asText();
+                configured).principal(actor(tenant, "actor-a")), tenant, "close").get("id").asText();
         assertThat(awaitCompleted(tenant, configured, closeId)
                 .get("admission_stage").asText()).isEqualTo("java_durable");
         assertThat(harness.closeCount(configured)).isEqualTo(1);
@@ -239,7 +239,7 @@ class ManagedSessionLifecycleTest {
         harness.answerClosesAs(OTHER_BOOT);
         try {
             String closeId = admit(post("/v1/agents/sessions/{id}/close",
-                    sessionId), tenant, "close").get("id").asText();
+                    sessionId).principal(actor(tenant, "actor-a")), tenant, "close").get("id").asText();
             await().atMost(Duration.ofSeconds(5))
                     .until(() -> attempts(closeId) >= 2);
             assertThat(operation(tenant, sessionId, closeId).get("status")
@@ -274,7 +274,7 @@ class ManagedSessionLifecycleTest {
         harness.answerClosesAs(OTHER_BOOT);
         try {
             String closeId = admit(post("/v1/agents/sessions/{id}/close",
-                    sessionId), tenant, "close").get("id").asText();
+                    sessionId).principal(actor(tenant, "actor-a")), tenant, "close").get("id").asText();
             await().atMost(Duration.ofSeconds(5))
                     .until(() -> attempts(closeId) >= 1);
             assertThat(operation(tenant, sessionId, closeId).get("status")
@@ -301,7 +301,7 @@ class ManagedSessionLifecycleTest {
         harness.answerClosesAs(OTHER_BOOT);
         try {
             String closeId = admit(post("/v1/agents/sessions/{id}/close",
-                    sessionId), tenant, "close").get("id").asText();
+                    sessionId).principal(actor(tenant, "actor-a")), tenant, "close").get("id").asText();
             assertThat(awaitCompleted(tenant, sessionId, closeId)
                     .get("admission_stage").asText())
                     .isEqualTo("java_durable");
@@ -344,11 +344,11 @@ class ManagedSessionLifecycleTest {
         String tenant = tenant();
         String first = emptySession(tenant);
         String second = emptySession(tenant);
-        JsonNode close = admit(post("/v1/agents/sessions/{id}/close", first),
+        JsonNode close = admit(post("/v1/agents/sessions/{id}/close", first).principal(actor(tenant, "actor-a")),
                 tenant, "shared-key");
         String closeId = close.get("id").asText();
         JsonNode webReplay = objectMapper.readTree(mvc.perform(post(
-                        WEB_SHELL + "/sessions/close").header(TENANT, tenant)
+                        WEB_SHELL + "/sessions/close").header(TENANT, tenant).principal(actor(tenant, "actor-a"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"sessionId":"%s","idempotencyKey":"shared-key"}
@@ -359,13 +359,13 @@ class ManagedSessionLifecycleTest {
         assertThat(webReplay.get("replayed").asBoolean()).isTrue();
 
         JsonNode otherSession = admit(post("/v1/agents/sessions/{id}/close",
-                second), tenant, "shared-key");
+                second).principal(actor(tenant, "actor-a")), tenant, "shared-key");
         assertThat(otherSession.get("id").asText()).isNotEqualTo(closeId);
         assertThat(otherSession.get("replayed").asBoolean()).isFalse();
         awaitCompleted(tenant, second, otherSession.get("id").asText());
 
         awaitCompleted(tenant, first, closeId);
-        JsonNode otherKind = admit(delete("/v1/agents/sessions/{id}", first),
+        JsonNode otherKind = admit(delete("/v1/agents/sessions/{id}", first).principal(actor(tenant, "actor-a")),
                 tenant, "shared-key");
         assertThat(otherKind.get("id").asText()).isNotEqualTo(closeId);
         assertThat(otherKind.get("type").asText()).isEqualTo("delete");
@@ -382,14 +382,14 @@ class ManagedSessionLifecycleTest {
         awaitCompleted(tenant, third, actorClose);
         lifecycle(post("/v1/agents/sessions/{id}/close", third)
                 .principal(actor(tenant, "actor-b")), tenant, "actor-key")
-                .andExpect(status().isConflict())
+                .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code")
-                        .value("session_state_conflict"));
+                        .value("session_not_found"));
         lifecycle(post("/v1/agents/sessions/{id}/close", third), tenant,
                 "actor-key")
-                .andExpect(status().isConflict())
+                .andExpect(status().isUnauthorized())
                 .andExpect(jsonPath("$.error.code")
-                        .value("session_state_conflict"));
+                        .value("actor_required"));
         lifecycle(post("/v1/agents/sessions/{id}/close", third)
                 .principal(actor(tenant, "actor-a")), tenant, "actor-key")
                 .andExpect(status().isAccepted())
@@ -403,28 +403,28 @@ class ManagedSessionLifecycleTest {
         String ambiguous = attachedSession(tenant);
         harness.failNextRename();
         mvc.perform(patch("/v1/agents/sessions/{id}", ambiguous)
-                        .header(TENANT, tenant).header("Idempotency-Key", "rename")
+                        .header(TENANT, tenant).principal(actor(tenant, "actor-a")).header("Idempotency-Key", "rename")
                         .contentType(MediaType.APPLICATION_JSON).content("{\"title\":\"pending\"}"))
                 .andExpect(status().isServiceUnavailable());
         int sends = harness.renameCount();
         mvc.perform(patch("/v1/agents/sessions/{id}", ambiguous)
-                        .header(TENANT, tenant).header("Idempotency-Key", "rename")
+                        .header(TENANT, tenant).principal(actor(tenant, "actor-a")).header("Idempotency-Key", "rename")
                         .contentType(MediaType.APPLICATION_JSON).content("{\"title\":\"pending\"}"))
                 .andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("operation_outcome_unknown"));
         assertThat(harness.renameCount()).isEqualTo(sends);
         // The parked title waits for the reconciler and holds no lifecycle
         // hostage (D7-2): the Session still closes, and the title is never
         // sent again.
-        awaitCompleted(tenant, ambiguous, admit(post("/v1/agents/sessions/{id}/close", ambiguous),
+        awaitCompleted(tenant, ambiguous, admit(post("/v1/agents/sessions/{id}/close", ambiguous).principal(actor(tenant, "actor-a")),
                 tenant, "close-ambiguous").get("id").asText());
         assertThat(harness.renameCount()).isEqualTo(sends);
         String sessionId = attachedSession(tenant);
         String closeId;
         harness.setAvailable(false);
         try {
-            closeId = admit(post("/v1/agents/sessions/{id}/close", sessionId),
+            closeId = admit(post("/v1/agents/sessions/{id}/close", sessionId).principal(actor(tenant, "actor-a")),
                     tenant, "close").get("id").asText();
-            lifecycle(delete("/v1/agents/sessions/{id}", sessionId), tenant,
+            lifecycle(delete("/v1/agents/sessions/{id}", sessionId).principal(actor(tenant, "actor-a")), tenant,
                     "delete")
                     .andExpect(status().isConflict())
                     .andExpect(jsonPath("$.error.code")
@@ -453,7 +453,7 @@ class ManagedSessionLifecycleTest {
         try {
             lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
                     .contentType(MediaType.APPLICATION_JSON)
-                    .content("{\"title\":\"offline\"}"), tenant, "offline")
+                    .content("{\"title\":\"offline\"}").principal(actor(tenant, "actor-a")), tenant, "offline")
                     .andExpect(status().isServiceUnavailable())
                     .andExpect(jsonPath("$.error.code")
                             .value("hosted_harness_disabled"));
@@ -462,14 +462,14 @@ class ManagedSessionLifecycleTest {
         }
         lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"title\":\"online\"}"), tenant, "online")
+                .content("{\"title\":\"online\"}").principal(actor(tenant, "actor-a")), tenant, "online")
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.metadata.title").value("online"));
         harness.setAvailable(false);
         try {
             lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
                     .contentType(MediaType.APPLICATION_JSON)
-                    .content("{\"title\":\"online\"}"), tenant, "online")
+                    .content("{\"title\":\"online\"}").principal(actor(tenant, "actor-a")), tenant, "online")
                     .andExpect(status().isOk())
                     .andExpect(header().string("X-Qwen-Idempotent-Replay", "true"));
         } finally {
@@ -503,7 +503,7 @@ class ManagedSessionLifecycleTest {
         store.abandonSessionMutation(tenant, "RENAME_SESSION", "key", sessionId);
         lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"title\":\"renamed\"}"), tenant, "key")
+                .content("{\"title\":\"renamed\"}").principal(actor(tenant, "actor-a")), tenant, "key")
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.metadata.title").value("renamed"))
                 .andExpect(header().string("X-Qwen-Idempotent-Replay", "true"));
@@ -520,7 +520,7 @@ class ManagedSessionLifecycleTest {
         String sessionId = emptySession(tenant);
         lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(java.util.Map.of("title", title))), tenant, "blank")
+                        .content(objectMapper.writeValueAsString(java.util.Map.of("title", title))).principal(actor(tenant, "actor-a")), tenant, "blank")
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("invalid_title"));
         assertThat(store.findCommand(tenant, "RENAME_SESSION", "blank")).isEmpty();
@@ -753,7 +753,7 @@ class ManagedSessionLifecycleTest {
         // still re-drives K1 and wins.
         lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"title\":\"A\"}"), tenant, "k1")
+                .content("{\"title\":\"A\"}").principal(actor(tenant, "actor-a")), tenant, "k1")
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.metadata.title").value("A"));
     }
@@ -823,7 +823,7 @@ class ManagedSessionLifecycleTest {
                 Integer.class, tenant, sessionId)).isEqualTo(2);
         lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"title\":\"A\"}"), tenant, "k1")
+                .content("{\"title\":\"A\"}").principal(actor(tenant, "actor-a")), tenant, "k1")
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.metadata.title").value("A"))
                 .andExpect(header().string("X-Qwen-Idempotent-Replay", "true"));
@@ -965,7 +965,7 @@ class ManagedSessionLifecycleTest {
                         String.class, tenant, "key")).isEqualTo("COMPLETED"));
         lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"title\":\"renamed\"}"), tenant, "key")
+                .content("{\"title\":\"renamed\"}").principal(actor(tenant, "actor-a")), tenant, "key")
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.metadata.title").value("renamed"))
                 .andExpect(header().string("X-Qwen-Idempotent-Replay", "true"));
@@ -1075,12 +1075,12 @@ class ManagedSessionLifecycleTest {
                 + " ma_operation WHERE tenant_id = ? AND session_id"
                 + " = ? AND state IN ('PENDING', 'RUNNING')", Integer.class,
                 tenant, sessionId)).isZero();
-        lifecycle(post("/v1/agents/sessions/{id}/close", sessionId), tenant,
+        lifecycle(post("/v1/agents/sessions/{id}/close", sessionId).principal(actor(tenant, "actor-a")), tenant,
                 "close")
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code")
                         .value("session_operation_active"));
-        lifecycle(delete("/v1/agents/sessions/{id}", sessionId), tenant,
+        lifecycle(delete("/v1/agents/sessions/{id}", sessionId).principal(actor(tenant, "actor-a")), tenant,
                 "delete")
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code")
@@ -1095,18 +1095,18 @@ class ManagedSessionLifecycleTest {
         // The fixture Harness streams one Turn per Session, so the Session
         // that stays takes its first Turn after the delete.
         String kept = emptySession(tenant);
-        String deleteId = admit(delete("/v1/agents/sessions/{id}", deleted),
+        String deleteId = admit(delete("/v1/agents/sessions/{id}", deleted).principal(actor(tenant, "actor-a")),
                 tenant, "delete").get("id").asText();
         assertThat(awaitCompleted(tenant, deleted, deleteId)
                 .get("admission_stage").asText())
                 .isEqualTo("harness_confirmed");
         assertThat(runtime.drained()).contains(deleted).doesNotContain(kept);
         mvc.perform(get("/v1/agents/sessions/{id}/events", deleted)
-                        .header(TENANT, tenant)
+                        .header(TENANT, tenant).principal(actor(tenant, "actor-a"))
                         .accept(MediaType.APPLICATION_JSON))
                 .andExpect(status().isNotFound());
         mvc.perform(post("/v1/agents/sessions/{id}/events", kept)
-                        .header(TENANT, tenant)
+                        .header(TENANT, tenant).principal(actor(tenant, "actor-a"))
                         .header("Idempotency-Key", "still-open")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -1198,7 +1198,7 @@ class ManagedSessionLifecycleTest {
 
     private String emptySession(String tenant) throws Exception {
         return objectMapper.readTree(mvc.perform(post("/v1/agents/sessions")
-                        .header(TENANT, tenant)
+                        .header(TENANT, tenant).principal(actor(tenant, "actor-a"))
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
@@ -1210,7 +1210,7 @@ class ManagedSessionLifecycleTest {
     // A Session whose completed Turn attached it to the Harness.
     private String attachedSession(String tenant) throws Exception {
         String sessionId = objectMapper.readTree(mvc.perform(post(
-                        "/v1/agents/sessions").header(TENANT, tenant)
+                        "/v1/agents/sessions").header(TENANT, tenant).principal(actor(tenant, "actor-a"))
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -1245,7 +1245,7 @@ class ManagedSessionLifecycleTest {
             String operationId) throws Exception {
         return objectMapper.readTree(mvc.perform(get(
                         "/v1/agents/sessions/{id}/operations/{op}", sessionId,
-                        operationId).header(TENANT, tenant))
+                        operationId).header(TENANT, tenant).principal(actor(tenant, "actor-a")))
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString());
     }
@@ -1275,7 +1275,7 @@ class ManagedSessionLifecycleTest {
             throws Exception {
         return objectMapper.readTree(mvc.perform(get(
                         "/v1/agents/sessions/{id}", sessionId)
-                        .header(TENANT, tenant))
+                        .header(TENANT, tenant).principal(actor(tenant, "actor-a")))
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString())
                 .get("status").asText();

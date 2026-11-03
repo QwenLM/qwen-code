@@ -84,7 +84,8 @@ class Issue13180InternalPortTest {
 
         HttpResponse<String> publicApi = call(publicPort,
                 "/v1/agents/sessions", null, null);
-        assertThat(publicApi.statusCode()).as(publicApi.body()).isEqualTo(200);
+        assertThat(publicApi.statusCode()).as(publicApi.body()).isEqualTo(401);
+        assertThat(publicApi.body()).contains("actor_required");
 
         // The charset in Content-Type must not give the surface classifier a
         // different view than the router's fixed UTF-8 decoding.

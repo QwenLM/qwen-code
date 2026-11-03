@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.model.ApiModels;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -172,7 +173,7 @@ class ManagedAgentServiceWorkflowChildTest {
     @Test
     void userTextWithALoneSurrogateIsNormalizedTheSameWay() {
         when(harness.isAvailable()).thenReturn(true);
-        when(store.insertSessionCommand(anyString(), anyString(), anyString(),
+        when(store.insertSessionCommand(anyString(), eq(SessionPrincipal.ofUser(TENANT, "actor")), anyString(),
                 anyString(), anyString(), any(), any(), any(), anyList(),
                 anyString())).thenReturn(new StoreModels.Admission(
                         "session-new", null, false, true));
@@ -184,7 +185,7 @@ class ManagedAgentServiceWorkflowChildTest {
         ArgumentCaptor<List<Map<String, Object>>> input =
                 ArgumentCaptor.forClass(List.class);
         ArgumentCaptor<String> digest = ArgumentCaptor.forClass(String.class);
-        verify(store).insertSessionCommand(anyString(), anyString(),
+        verify(store).insertSessionCommand(anyString(), eq(SessionPrincipal.ofUser(TENANT, "actor")),
                 anyString(), anyString(), anyString(), any(), any(), any(),
                 input.capture(), digest.capture());
         List<Map<String, Object>> inserted = input.getValue();

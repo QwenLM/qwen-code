@@ -1210,16 +1210,15 @@ class ManagedActionsTest {
     @Test
     void hostedSessionsAnswerThroughTheirRecordedCreator() throws Exception {
         String tenant = tenant();
-        String anonymous = hostedSession(tenant, null);
-        ActionJournal open = action(tenant, anonymous,
-                System.currentTimeMillis(), 9007199254740991L);
-        // No recorded creator: the tenant-scoped caller answers, matching
-        // the read semantics of a non-Workspace Session.
-        readAccepted(auth(post(path(anonymous, open.id) + "/responses"),
-                tenant, "anyone")
-                        .header("Idempotency-Key", "open-answer")
+        mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "anonymous-create")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(response("allow")));
+                        .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error.code").value("actor_required"));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ?",
+                Integer.class, tenant)).isZero();
 
         String owned = hostedSession(tenant, "owner");
         ActionJournal journal = action(tenant, owned,
@@ -1229,15 +1228,18 @@ class ManagedActionsTest {
                         .header("Idempotency-Key", "foreign-answer")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(response("allow")))
-                .andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.error.code").value("action_forbidden"));
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("session_not_found"));
         mvc.perform(post(path(owned, journal.id) + "/responses")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "anonymous-answer")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(response("allow")))
-                .andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.error.code").value("action_forbidden"));
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error.code").value("actor_required"));
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_session_record"
+                        + " WHERE tenant_id = ? AND session_id = ? AND action_id = ? AND record_kind = 'ACTION'",
+                String.class, tenant, owned, journal.id)).isEqualTo("requested");
         readAccepted(auth(post(path(owned, journal.id) + "/responses"),
                 tenant, "owner")
                         .header("Idempotency-Key", "owner-answer")
@@ -1293,6 +1295,7 @@ class ManagedActionsTest {
                 readAccepted(
                                 post("/v1/agents/sessions")
                                         .header(TenantContextFilter.HEADER, tenant)
+                                        .principal(VerificationFixtures.actor(tenant, "owner"))
                                         .header("Idempotency-Key", UUID.randomUUID().toString())
                                         .contentType(MediaType.APPLICATION_JSON)
                                         .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))

@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicEvent;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellEvent;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
@@ -563,9 +564,9 @@ class ManagedEventStreamServiceTest {
                 executor, emitter);
         try {
             if (webShell) {
-                service.webShellStream("tenant", null, "session", 0);
+                service.webShellStream("tenant", "actor", "session", 0);
             } else {
-                service.publicStream("tenant", null, "session", 0);
+                service.publicStream("tenant", "actor", "session", 0);
             }
             assertThat(initialRead.await(2, TimeUnit.SECONDS)).isTrue();
             if (!reconcile) {
@@ -636,7 +637,7 @@ class ManagedEventStreamServiceTest {
     void pushesCommittedEventsWithoutWaitingForReconciliation()
             throws Exception {
         ManagedAgentService agentService = mock(ManagedAgentService.class);
-        when(agentService.requireReadableSession("tenant", null, "session"))
+        when(agentService.requireReadableSession(SessionPrincipal.ofUser("tenant", "actor"), "session"))
                 .thenReturn(SESSION);
         CountDownLatch initialRead = new CountDownLatch(1);
         when(agentService.streamEvents(SESSION, 0))
@@ -665,7 +666,7 @@ class ManagedEventStreamServiceTest {
             }
         };
 
-        service.webShellStream("tenant", null, "session", 0);
+        service.webShellStream("tenant", "actor", "session", 0);
         assertThat(initialRead.await(1, TimeUnit.SECONDS)).isTrue();
         eventHub.publish(List.of(record));
 
@@ -678,7 +679,7 @@ class ManagedEventStreamServiceTest {
     @Test
     void treatsClientDisconnectAsACompletedStream() throws Exception {
         ManagedAgentService agentService = mock(ManagedAgentService.class);
-        when(agentService.requireReadableSession("tenant", null, "session"))
+        when(agentService.requireReadableSession(SessionPrincipal.ofUser("tenant", "actor"), "session"))
                 .thenReturn(SESSION);
         when(agentService.streamEvents(SESSION, 0))
                 .thenReturn(List.of());
@@ -694,7 +695,7 @@ class ManagedEventStreamServiceTest {
             }
         };
 
-        service.webShellStream("tenant", null, "session", 0);
+        service.webShellStream("tenant", "actor", "session", 0);
 
         assertThat(emitter.sendAttempt.await(5, TimeUnit.SECONDS)).isTrue();
         executor.shutdown();

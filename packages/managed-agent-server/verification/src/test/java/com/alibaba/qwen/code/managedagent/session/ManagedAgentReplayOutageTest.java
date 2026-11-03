@@ -57,19 +57,19 @@ class ManagedAgentReplayOutageTest {
                 List.of(Map.of("type", "text", "text", "hold"));
         // The recorded create and submit stand in for the 202s whose
         // responses the outage hid from the client.
-        Admission session = store.insertSessionCommand(tenant,
+        Admission session = store.insertSessionCommand(tenant, "actor",
                 "CREATE_SESSION", "outage-create", "digest-create",
                 "qwen-code", null, null, List.of(), null);
         Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "outage-submit", digests.digest(Map.of("sessionId",
                         session.sessionId(), "input", input)),
-                session.sessionId(), input, "payload");
+                session.sessionId(), input, "payload", "actor");
 
         List<InputBlock> blocks = List.of(new InputBlock("text", "hold"));
         int replays = new ManagedAgentProperties().getDispatch()
                 .getMaxPreAdmissionRetries() + 1;
         for (int attempt = 0; attempt < replays; attempt++) {
-            CommandAdmission replayed = service.submitTurn(tenant, null,
+            CommandAdmission replayed = service.submitTurn(tenant, "actor",
                     "outage-submit", session.sessionId(), blocks);
             assertThat(replayed.replayed()).isTrue();
             assertThat(replayed.turnId()).isEqualTo(turn.turnId());

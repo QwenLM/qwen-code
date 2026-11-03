@@ -75,7 +75,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * plus one admitted-shape probe per rule class proving the request reached business logic, fired by
  * a non-owner OPERATOR on the OPERATOR families and by the recorded owner on lifecycle. Twin
  * public/WebShell routes of one capability sit in the same rule class, so the shared expectation
- * table makes twin drift fail. The refusal expectations pinned here are the post-v1.37 matrix.
+ * table makes twin drift fail. Private Sessions require a trusted owner; missing identity answers
+ * 401 and a foreign owner answers 404. Workspace reader/operator grants retain their matrix.
  *
  * <p>The internal probes run two different credentials: the Session-store routes carry the
  * broker-issued writer HMAC (a wrong token is refused at the credential check with 403 {@code
@@ -420,33 +421,25 @@ public class SurfaceAdmissionAcceptanceTest {
                     expect(entry, null, 404, "automation_not_found");
                     expectAdmitted(entry, READER);
                 } else if (entry.capabilities().contains(Capability.SESSION_LIST)) {
-                    // The 200 pins filtering, not just the status: the
-                    // bound row must stay invisible while the legacy rows
-                    // the tenant owns still list — an empty page would
-                    // satisfy the negative half with the filter removed.
                     MvcResult strangers = expect(entry, STRANGER, 200, null);
-                    MvcResult anonymous = expect(entry, null, 200, null);
+                    expect(entry, null, 401, "actor_required");
                     assertThat(strangers.getResponse().getContentAsString())
-                            .as("%s leaks the bound Session to a stranger",
-                                    entry.routeKey())
-                            .doesNotContain(bound)
-                            .as("%s drops the legacy rows for a stranger",
-                                    entry.routeKey())
-                            .contains(legacy);
-                    assertThat(anonymous.getResponse().getContentAsString())
-                            .as("%s leaks the bound Session anonymously",
-                                    entry.routeKey())
-                            .doesNotContain(bound)
-                            .as("%s drops the legacy rows anonymously",
-                                    entry.routeKey())
-                            .contains(legacy);
+                            .as("%s hides bound and privately owned Sessions from a stranger", entry.routeKey())
+                            .doesNotContain(bound, legacy);
+                    MvcResult owner = expect(entry, OWNER, 200, null);
+                    assertThat(owner.getResponse().getContentAsString())
+                            .as("%s retains the owner's admitted Sessions", entry.routeKey())
+                            .contains(bound, legacy);
+                    MvcResult reader = expect(entry, READER, 200, null);
+                    assertThat(reader.getResponse().getContentAsString())
+                            .contains(bound).doesNotContain(legacy);
                 } else {
                     // Every other reader family entry hides a bound
                     // Session below the grant and admits the reader. The
                     // stream would stay open; its public twin carries the
                     // admitted arm.
                     expect(entry, STRANGER, 404, "session_not_found");
-                    expect(entry, null, 404, "session_not_found");
+                    expect(entry, null, 401, "actor_required");
                     if (entry != SurfaceRegistry.WEBSHELL_EVENT_STREAM) {
                         expectAdmitted(entry, READER);
                     }
@@ -491,22 +484,13 @@ public class SurfaceAdmissionAcceptanceTest {
                     expect(entry, OPERATOR, 409, "workspace_unavailable");
                     expect(entry, OWNER_RANK, 409, "workspace_unavailable");
                 }
-                // Anonymous requests follow each operation family's
-                // declared identity and visibility rules.
-                boolean actorRequired = entry.capabilities().contains(Capability.MCP_MANAGEMENT)
-                        || entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE)
-                        || entry.capabilities().contains(Capability.SESSION_CONTEXT_COMPRESSION)
-                        || entry.capabilities().contains(Capability.USER_MESSAGE_QUERY)
-                        || entry.capabilities().contains(Capability.USER_MESSAGE_COMMAND);
-                expect(entry, null, actorRequired ? 401 : 404,
-                        actorRequired
-                                ? "actor_required" : "session_not_found");
+                expect(entry, null, 401, "actor_required");
             }
             case TASK_OPERATOR -> {
                 // The seeded task has settled, so an admitted caller meets
                 // the new-request check of the route itself, never a role.
                 expect(entry, STRANGER, 404, "session_not_found");
-                expect(entry, null, 404, "session_not_found");
+                expect(entry, null, 401, "actor_required");
                 expect(entry, READER, 403, "task_forbidden");
                 expect(entry, OPERATOR, 409, "task_action_unavailable");
                 expect(entry, OWNER_RANK, 409, "task_action_unavailable");
@@ -520,12 +504,7 @@ public class SurfaceAdmissionAcceptanceTest {
                         ? "automation_not_found" : "session_not_found");
                 expect(entry, READER, 403, "session_operation_forbidden");
                 expect(entry, OPERATOR, 403, "session_operation_forbidden");
-                // An anonymous mutation needs an actor: the automation
-                // mutations name it up front (401), while the lifecycle
-                // family stays invisible (404).
-                expect(entry, null, (automationEntry(entry) || entry.capabilities().contains(Capability.SESSION_APPROVAL_CHANGE)) ? 401 : 404,
-                        (automationEntry(entry) || entry.capabilities().contains(Capability.SESSION_APPROVAL_CHANGE)) ? "actor_required"
-                                : "session_not_found");
+                expect(entry, null, 401, "actor_required");
             }
             case WORKSPACE_FILES -> {
                 expect(entry, null, 401, "actor_required");
@@ -617,13 +596,14 @@ public class SurfaceAdmissionAcceptanceTest {
                         .value("workspace_unavailable"));
         jdbc.update("UPDATE ma_workspace SET state = 'ACTIVE'"
                 + " WHERE tenant_id = ? AND workspace_id = X'7773'", tenant);
-        // The legacy arm: no Workspace selection, no actor, admitted.
+        // Even without Workspace selection, a new private Session requires a trusted owner.
         mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", nextKey())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
-                .andExpect(status().isAccepted());
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error.code").value("actor_required"));
     }
 
     // The admitted list probes only prove "not refused": pin that a
@@ -665,9 +645,19 @@ public class SurfaceAdmissionAcceptanceTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"sessionId\":\"" + bound + "\"}"))
                 .andExpect(status().isOk());
-        // The legacy arm is tenant-wide, anonymous callers included.
+        // The non-Workspace Session is private to the same trusted owner.
         mvc.perform(get("/v1/agents/sessions/" + legacy)
                         .header(TenantContextFilter.HEADER, tenant))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error.code").value("actor_required"));
+        mvc.perform(get("/v1/agents/sessions/" + legacy)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, STRANGER)))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("session_not_found"));
+        mvc.perform(get("/v1/agents/sessions/" + legacy)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, OWNER)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id").value(legacy));
     }
@@ -682,6 +672,14 @@ public class SurfaceAdmissionAcceptanceTest {
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", nextKey())
                         .principal(actor(tenant, OPERATOR))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"title\":\"renamed\"}"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("session_not_found"));
+        mvc.perform(patch("/v1/agents/sessions/" + renamed)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", nextKey())
+                        .principal(actor(tenant, OWNER))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\":\"renamed\"}"))
                 .andExpect(status().isOk());
@@ -770,11 +768,20 @@ public class SurfaceAdmissionAcceptanceTest {
                                 + "\"option_id\":\"allow\"}"))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.type").value("action_response"));
-        // The legacy arm of lifecycle is tenant-wide.
+        // A privately owned Session cannot be closed by a tenant peer.
         String extra = createSession(tenant, OWNER, false);
         mvc.perform(post("/api/agent/web-shell/v1/sessions/close")
                         .header(TenantContextFilter.HEADER, tenant)
                         .principal(actor(tenant, STRANGER))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionId\":\"" + extra
+                                + "\",\"idempotencyKey\":\"" + nextKey()
+                                + "\"}"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("session_not_found"));
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/close")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, OWNER))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"sessionId\":\"" + extra
                                 + "\",\"idempotencyKey\":\"" + nextKey()
@@ -935,7 +942,7 @@ public class SurfaceAdmissionAcceptanceTest {
     }
 
     @Test
-    public void actionRespondOnLegacyRefusesTheNonOwnerWithTheFamilyCode() throws Exception {
+    public void actionRespondOnPrivateSessionHidesTheNonOwnersSession() throws Exception {
         mvc.perform(post("/api/agent/web-shell/v1/actions/respond")
                         .header(TenantContextFilter.HEADER, tenant)
                         .principal(actor(tenant, STRANGER))
@@ -946,9 +953,9 @@ public class SurfaceAdmissionAcceptanceTest {
                                 + "\",\"response\":{\"kind\":\"permission\","
                                 + "\"inputRevision\":1,\"policyRevision\":"
                                 + "\"policy\",\"optionId\":\"allow\"}}"))
-                .andExpect(status().isForbidden())
+                .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code")
-                        .value("action_forbidden"));
+                        .value("session_not_found"));
     }
 
     @Test

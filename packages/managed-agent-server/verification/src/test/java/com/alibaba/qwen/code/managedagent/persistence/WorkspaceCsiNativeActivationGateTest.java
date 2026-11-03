@@ -319,7 +319,9 @@ class WorkspaceCsiNativeActivationGateTest {
                     .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
         }
         assertThat(rows).containsKeys("ma_delivery", "ma_session", "ma_session_head", "ma_request_receipt");
-        assertThat(rows).hasSize(39);
+        assertThat(rows).containsKeys("ma_session_principal", "flyway_schema_history");
+        assertThat(rows).hasSize(
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.TABLES.size() + 1);
         return rows;
     }
 

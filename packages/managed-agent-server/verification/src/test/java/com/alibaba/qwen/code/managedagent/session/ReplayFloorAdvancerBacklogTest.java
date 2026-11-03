@@ -43,14 +43,14 @@ class ReplayFloorAdvancerBacklogTest {
         String tenant = "tenant-replay-backlog-" + UUID.randomUUID();
         List<String> quiet = new ArrayList<>();
         for (int index = 0; index < BATCH_LIMIT; index++) {
-            String sessionId = store.insertSessionCommand(tenant,
+            String sessionId = store.insertSessionCommand(tenant, "actor",
                     "CREATE_SESSION", "backlog-" + UUID.randomUUID(),
                     "digest", "qwen-code", null, null, List.of(), "payload")
                     .sessionId();
             append(tenant, sessionId, 5);
             quiet.add(sessionId);
         }
-        String busy = store.insertSessionCommand(tenant, "CREATE_SESSION",
+        String busy = store.insertSessionCommand(tenant, "actor", "CREATE_SESSION",
                 "backlog-busy-" + UUID.randomUUID(), "digest", "qwen-code",
                 null, null, List.of(), "payload").sessionId();
         append(tenant, busy, 5);

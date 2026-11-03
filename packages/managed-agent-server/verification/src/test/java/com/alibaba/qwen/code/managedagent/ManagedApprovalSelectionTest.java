@@ -236,7 +236,7 @@ class ManagedApprovalSelectionTest {
                 .andExpect(jsonPath("$.approvalMode").value("auto-edit"));
         mvc.perform(
                         post(BASE + "/sessions/create")
-                                .header(TenantContextFilter.HEADER, tenant)
+                                .header(TenantContextFilter.HEADER, tenant).principal(actor(tenant))
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content(
                                         "{\"agentId\":\"qwen-code\",\"idempotencyKey\":\"unbound\",\"approvalMode\":\"default\"}"))
@@ -245,7 +245,7 @@ class ManagedApprovalSelectionTest {
         String legacy =
                 mvc.perform(
                                 post(BASE + "/sessions/create")
-                                        .header(TenantContextFilter.HEADER, tenant)
+                                        .header(TenantContextFilter.HEADER, tenant).principal(actor(tenant))
                                         .contentType(MediaType.APPLICATION_JSON)
                                         .content(
                                                 "{\"agentId\":\"qwen-code\",\"idempotencyKey\":\"legacy\"}"))
@@ -256,7 +256,7 @@ class ManagedApprovalSelectionTest {
         String legacyId = json.readTree(legacy).path("sessionId").asText();
         mvc.perform(
                         post(BASE + "/sessions/get")
-                                .header(TenantContextFilter.HEADER, tenant)
+                                .header(TenantContextFilter.HEADER, tenant).principal(actor(tenant))
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content("{\"sessionId\":\"" + legacyId + "\"}"))
                 .andExpect(status().isOk())

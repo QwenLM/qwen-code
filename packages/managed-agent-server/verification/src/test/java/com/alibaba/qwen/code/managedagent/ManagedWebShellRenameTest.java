@@ -48,6 +48,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @Import(ManagedAgentServerIntegrationTest.FixtureConfiguration.class)
 @MockitoBean(types = SessionRenameCoordinator.class)
 class ManagedWebShellRenameTest {
+    private static final String USER = "rename-user";
     private static final String WEB_SHELL = "/api/agent/web-shell/v1";
     private static final String TENANT = TenantContextFilter.HEADER;
 
@@ -176,7 +177,7 @@ class ManagedWebShellRenameTest {
     private String create(String tenant, boolean activeTurn) throws Exception {
         List<Map<String, String>> input = activeTurn ? List.of(Map.of("type", "text", "text", "hold")) : List.of();
         JsonNode response = mapper.readTree(mvc.perform(post(WEB_SHELL + "/sessions/create")
-                        .header(TENANT, tenant).contentType(MediaType.APPLICATION_JSON)
+                        .header(TENANT, tenant).principal(VerificationFixtures.actor(tenant, USER)).contentType(MediaType.APPLICATION_JSON)
                         .content(mapper.writeValueAsString(Map.of("idempotencyKey", UUID.randomUUID().toString(),
                                 "agentId", "qwen-code", "title", "original", "input", input))))
                 .andExpect(status().isAccepted()).andReturn().getResponse().getContentAsString());
@@ -184,12 +185,12 @@ class ManagedWebShellRenameTest {
     }
 
     private ResultActions get(String tenant, String session) throws Exception {
-        return mvc.perform(post(WEB_SHELL + "/sessions/get").header(TENANT, tenant)
+        return mvc.perform(post(WEB_SHELL + "/sessions/get").header(TENANT, tenant).principal(VerificationFixtures.actor(tenant, USER))
                 .contentType(MediaType.APPLICATION_JSON).content(mapper.writeValueAsString(Map.of("sessionId", session))));
     }
 
     private ResultActions rename(String tenant, String session, String key, String title) throws Exception {
-        return mvc.perform(post(WEB_SHELL + "/sessions/rename").header(TENANT, tenant)
+        return mvc.perform(post(WEB_SHELL + "/sessions/rename").header(TENANT, tenant).principal(VerificationFixtures.actor(tenant, USER))
                 .contentType(MediaType.APPLICATION_JSON).content(mapper.writeValueAsString(Map.of("requestId", "rename-trace",
                         "sessionId", session, "idempotencyKey", key, "title", title))));
     }

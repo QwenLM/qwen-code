@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
@@ -33,6 +34,7 @@ import static org.awaitility.Awaitility.await;
 
 class ManagedAgentEventSequenceConcurrencyTest {
     private static final String TENANT = "tenant-sequence";
+    private static final SessionPrincipal USER = SessionPrincipal.ofUser(TENANT, "actor");
     private static final String OWNER = "owner-sequence";
     private static final String EPOCH = "epoch-sequence";
     private JdbcTemplate jdbc;
@@ -134,12 +136,12 @@ class ManagedAgentEventSequenceConcurrencyTest {
 
     private Admission createTurn() {
         Admission turn = transactions.execute(status -> {
-            Admission session = store.insertSessionCommand(TENANT,
+            Admission session = store.insertSessionCommand(TENANT, USER,
                     "CREATE_SESSION", "create", "create-digest", "qwen-code",
                     "1", null, List.of(), null);
             Admission admitted = store.insertTurnCommand(TENANT,
                     "SUBMIT_TURN", "submit", "submit-digest", session.sessionId(),
-                    List.of(Map.of("type", "text", "text", "hello")), "payload");
+                    List.of(Map.of("type", "text", "text", "hello")), "payload", USER);
             assertThat(store.claimTurn(TENANT, session.sessionId(),
                     admitted.turnId(), OWNER, Duration.ofMinutes(1))).isPresent();
             store.recordAdmission(TENANT, session.sessionId(), admitted.turnId(),

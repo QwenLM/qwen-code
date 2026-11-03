@@ -330,23 +330,23 @@ class ManagedTurnQueryTest {
         turn(tenant, sessionId, "turn_a1", "COMPLETED", 1_000, 2_000L, null);
         for (String limit : List.of("0", "101", "-1")) {
             error(mvc.perform(get("/v1/agents/sessions/{id}/turns", sessionId)
-                    .header(TENANT, tenant).param("limit", limit)), 400,
+                    .header(TENANT, tenant).principal(actor(tenant, "actor-a")).param("limit", limit)), 400,
                     "invalid_limit");
         }
         // A limit that is not a 32-bit integer never reaches the range
         // check.
         for (String limit : List.of("abc", "2147483648")) {
             error(mvc.perform(get("/v1/agents/sessions/{id}/turns", sessionId)
-                    .header(TENANT, tenant).param("limit", limit)), 400,
+                    .header(TENANT, tenant).principal(actor(tenant, "actor-a")).param("limit", limit)), 400,
                     "invalid_request");
         }
         // A request is validated before its Session is looked up.
         String unknown = UUID.randomUUID().toString();
         error(mvc.perform(get("/v1/agents/sessions/{id}/turns", unknown)
-                .header(TENANT, tenant).param("limit", "0")), 400,
+                .header(TENANT, tenant).principal(actor(tenant, "actor-a")).param("limit", "0")), 400,
                 "invalid_limit");
         error(mvc.perform(get("/v1/agents/sessions/{id}/turns", unknown)
-                .header(TENANT, tenant).param("cursor", "bad")), 400,
+                .header(TENANT, tenant).principal(actor(tenant, "actor-a")).param("cursor", "bad")), 400,
                 "invalid_cursor");
         error(turnRead(tenant, unknown, "t".repeat(65)), 400,
                 "invalid_request");
@@ -356,11 +356,11 @@ class ManagedTurnQueryTest {
                 "01:turn_a1", "9999999999999999999:turn_a1",
                 "5000:turn a1", "5000:" + "t".repeat(65))) {
             error(mvc.perform(get("/v1/agents/sessions/{id}/turns", sessionId)
-                    .header(TENANT, tenant).param("cursor", cursor(raw))),
+                    .header(TENANT, tenant).principal(actor(tenant, "actor-a")).param("cursor", cursor(raw))),
                     400, "invalid_cursor");
         }
         error(mvc.perform(get("/v1/agents/sessions/{id}/turns", sessionId)
-                .header(TENANT, tenant).param("cursor", "not base64!")), 400,
+                .header(TENANT, tenant).principal(actor(tenant, "actor-a")).param("cursor", "not base64!")), 400,
                 "invalid_cursor");
         assertThat(list(tenant, sessionId,
                 cursor(Long.MAX_VALUE + ":turn_z"), null).get("data"))
@@ -396,7 +396,7 @@ class ManagedTurnQueryTest {
                 "turn_not_found");
         String otherTenant = tenant + "-other";
         error(mvc.perform(get("/v1/agents/sessions/{id}/turns", sessionId)
-                .header(TENANT, otherTenant)), 404, "session_not_found");
+                .header(TENANT, otherTenant).principal(actor(otherTenant, "actor-a"))), 404, "session_not_found");
         error(turnRead(otherTenant, sessionId, "turn_own"), 404,
                 "session_not_found");
         error(turnRead(tenant, sessionId, "t".repeat(64)), 404,
@@ -413,7 +413,7 @@ class ManagedTurnQueryTest {
                 "turn_not_found");
         String unknown = UUID.randomUUID().toString();
         error(mvc.perform(get("/v1/agents/sessions/{id}/turns", unknown)
-                .header(TENANT, tenant)), 404, "session_not_found");
+                .header(TENANT, tenant).principal(actor(tenant, "actor-a"))), 404, "session_not_found");
         error(turnRead(tenant, unknown, "turn_own"), 404, "session_not_found");
 
         jdbc.update("UPDATE ma_session SET status = 'ARCHIVED'"
@@ -423,7 +423,7 @@ class ManagedTurnQueryTest {
                         + " deleted_at = 1 WHERE tenant_id = ? AND"
                         + " session_id = ?", tenant, sessionId);
         error(mvc.perform(get("/v1/agents/sessions/{id}/turns", sessionId)
-                .header(TENANT, tenant)), 404, "session_not_found");
+                .header(TENANT, tenant).principal(actor(tenant, "actor-a"))), 404, "session_not_found");
         error(turnRead(tenant, sessionId, "turn_own"), 404, "session_not_found");
     }
 
@@ -476,7 +476,7 @@ class ManagedTurnQueryTest {
             String limit) throws Exception {
         MockHttpServletRequestBuilder request = get(
                 "/v1/agents/sessions/{id}/turns", sessionId)
-                .header(TENANT, tenant);
+                .header(TENANT, tenant).principal(actor(tenant, "actor-a"));
         if (cursor != null) {
             request.param("cursor", cursor);
         }
@@ -491,7 +491,7 @@ class ManagedTurnQueryTest {
     private ResultActions turnRead(String tenant, String sessionId,
             String turnId) throws Exception {
         return mvc.perform(get("/v1/agents/sessions/{id}/turns/{turn}",
-                sessionId, turnId).header(TENANT, tenant));
+                sessionId, turnId).header(TENANT, tenant).principal(actor(tenant, "actor-a")));
     }
 
     private static void error(ResultActions result, int status, String code)
@@ -515,7 +515,7 @@ class ManagedTurnQueryTest {
 
     private String emptySession(String tenant) throws Exception {
         return objectMapper.readTree(mvc.perform(post("/v1/agents/sessions")
-                        .header(TENANT, tenant)
+                        .header(TENANT, tenant).principal(actor(tenant, "actor-a"))
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))

@@ -7,6 +7,30 @@ import java.nio.file.Path;
 public final class VerificationFixtures {
     private VerificationFixtures() { }
 
+    public static com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor actor(String tenant, String user) {
+        return actor(com.alibaba.qwen.code.managedagent.model.SessionPrincipal.ofUser(tenant, user));
+    }
+
+    public static com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor actor(
+            com.alibaba.qwen.code.managedagent.model.SessionPrincipal principal) {
+        return new com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor() {
+            public String tenantId() { return principal.tenantId(); }
+            public String actorId() { return principal.userId(); }
+            public String actorSubjectId() { return principal.actorSubjectId(); }
+            public String getName() { return principal.userId(); }
+        };
+    }
+
+    public static void ownUnboundSession(org.springframework.jdbc.core.JdbcTemplate jdbc, String session,
+            com.alibaba.qwen.code.managedagent.model.SessionPrincipal principal) {
+        org.assertj.core.api.Assertions.assertThat(jdbc.update("INSERT INTO ma_session_principal"
+                + " (tenant_id,session_id,version,user_id,actor_present,actor_subject_id,gmt_create)"
+                + " SELECT tenant_id,session_id,1,?,?,?,gmt_create FROM ma_session"
+                + " WHERE tenant_id=? AND session_id=? AND workspace_id IS NULL",
+                principal.userId(), principal.actorPresent(), principal.actorSubjectId(),
+                principal.tenantId(), session)).isEqualTo(1);
+    }
+
     public static Path moduleRoot() {
         return Path.of(System.getProperty("managed.module.root", "..")).toAbsolutePath().normalize();
     }

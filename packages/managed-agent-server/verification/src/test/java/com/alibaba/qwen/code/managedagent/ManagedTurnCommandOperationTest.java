@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.HarnessEvent;
@@ -49,6 +50,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class ManagedTurnCommandOperationTest {
     static final String TENANT = "turn-command-tenant";
+    private static final SessionPrincipal USER = SessionPrincipal.ofUser(TENANT, "actor");
     static final String OWNER = "dispatcher";
     static final List<Map<String, Object>> INPUT = List.of(Map.of(
             "type", "text", "text", "hello"));
@@ -90,7 +92,7 @@ class ManagedTurnCommandOperationTest {
         store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), clock,
                 ignored -> {}, new ManagedWorkspaceRegistry(jdbc),
                 new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION",
+        sessionId = store.insertSessionCommand(TENANT, USER, "CREATE_SESSION",
                 "create", "digest", "qwen-code", null, null, List.of(), null)
                 .sessionId();
     }

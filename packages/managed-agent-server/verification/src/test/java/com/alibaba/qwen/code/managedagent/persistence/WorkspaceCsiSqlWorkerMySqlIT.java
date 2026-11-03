@@ -405,7 +405,8 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                 }
                 child = new ProcessBuilder("node", producer.toString(), input.toString(), directory.toString())
                         .directory(root.toFile()).redirectErrorStream(true).redirectOutput(directory.resolve("node.log").toFile()).start();
-                assertThat(child.waitFor(120, TimeUnit.SECONDS)).as("Owned Node chain timed out").isTrue();
+                assertThat(child.waitFor(120, TimeUnit.SECONDS)).as("Owned Node chain timed out: %s",
+                        Files.readString(directory.resolve("node.log"))).isTrue();
                 assertThat(child.exitValue()).as(Files.readString(directory.resolve("node.log"))).isZero();
                 var result = JSON.readTree(directory.resolve("result.json").toFile());
                 assertThat(result.path("completedTurns").asInt()).isEqualTo(2);
@@ -476,7 +477,8 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                     }
                 }
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?"
-                        + " AND table_type = 'BASE TABLE'", Integer.class, schema)).isEqualTo(39);
+                        + " AND table_type = 'BASE TABLE'", Integer.class, schema)).isEqualTo(
+                                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.TABLES.size() + 1);
                 verify(provisioner).ensureResource(any(), any(), any());
                 verify(provisioner).provision(any(), any());
                 String evidence = System.getProperty("csi.acceptance.evidence");

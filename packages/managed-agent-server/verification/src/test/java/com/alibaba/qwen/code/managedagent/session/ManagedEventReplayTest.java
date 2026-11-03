@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.session;
 
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionResyncRequired;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellResyncRequired;
@@ -61,6 +62,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 // printing handler would walk the same headers.
 @AutoConfigureMockMvc(print = MockMvcPrint.NONE)
 class ManagedEventReplayTest {
+    private static final String USER = "event-reader";
     private static final String TENANT = TenantContextFilter.HEADER;
     private static final Pattern ID = Pattern.compile("(?m)^id:(\\d+)$");
     // More events than SessionEventHub buffers for one Session.
@@ -100,7 +102,7 @@ class ManagedEventReplayTest {
         int pages = 0;
         do {
             page = EventStreams.json(objectMapper,
-                    mvc.perform(EventStreams.events(tenant, sessionId)
+                    mvc.perform(events(tenant, sessionId)
                             .param("after", cursor).param("limit", "7"))
                     .andReturn().getResponse());
             pages++;
@@ -115,10 +117,10 @@ class ManagedEventReplayTest {
         assertThat(sequences)
                 .containsExactlyElementsOf(EventStreams.range(1, last));
         assertThat(page.get("next_cursor").isNull()).isTrue();
-        assertThat(mvc.perform(EventStreams.events(tenant, sessionId)
+        assertThat(mvc.perform(events(tenant, sessionId)
                         .param("limit", "1000"))
                 .andReturn().getResponse().getStatus()).isEqualTo(200);
-        MockHttpServletResponse tooMany = mvc.perform(EventStreams.events(
+        MockHttpServletResponse tooMany = mvc.perform(events(
                         tenant, sessionId).param("limit", "1001"))
                 .andReturn().getResponse();
         assertThat(tooMany.getStatus()).isEqualTo(400);
@@ -132,7 +134,7 @@ class ManagedEventReplayTest {
         String tenant = tenant();
         String sessionId = session(tenant);
         long caughtUp = append(tenant, sessionId, 250);
-        MockHttpServletResponse stream = mvc.perform(EventStreams.events(
+        MockHttpServletResponse stream = mvc.perform(events(
                         tenant, sessionId)
                         .param("stream", "true").param("after", "5")
                         .header("Last-Event-ID", "120")
@@ -158,7 +160,7 @@ class ManagedEventReplayTest {
         append(tenant, sessionId, 150);
         CompletableFuture<Long> writer = CompletableFuture.supplyAsync(
                 () -> append(tenant, sessionId, 300));
-        MockHttpServletResponse stream = mvc.perform(EventStreams.events(
+        MockHttpServletResponse stream = mvc.perform(events(
                         tenant, sessionId)
                         .param("stream", "true")
                         .accept(MediaType.TEXT_EVENT_STREAM))
@@ -261,7 +263,7 @@ class ManagedEventReplayTest {
         assertThat(store.advanceReplayFloor(tenant, sessionId, 1))
                 .isEqualTo(window);
 
-        MockHttpServletResponse expired = mvc.perform(EventStreams.events(
+        MockHttpServletResponse expired = mvc.perform(events(
                         tenant, sessionId)
                         .param("after", Long.toString(floor - 1)))
                 .andReturn().getResponse();
@@ -275,7 +277,7 @@ class ManagedEventReplayTest {
                 .isEqualTo(floor);
         assertThat(error.get("request_id").asText())
                 .isEqualTo(expired.getHeader("X-Request-Id"));
-        assertThat(mvc.perform(EventStreams.events(tenant, sessionId)
+        assertThat(mvc.perform(events(tenant, sessionId)
                         .param("after", Long.toString(floor)))
                 .andReturn().getResponse().getStatus()).isEqualTo(200);
         assertThat(EventStreams.json(objectMapper,
@@ -285,7 +287,7 @@ class ManagedEventReplayTest {
                 .get("replay_floor_sequence").asLong()).isEqualTo(floor);
 
         MockHttpServletResponse publicStream = mvc.perform(
-                EventStreams.events(tenant, sessionId)
+                events(tenant, sessionId)
                         .param("stream", "true")
                         .accept(MediaType.TEXT_EVENT_STREAM))
                 .andReturn().getResponse();
@@ -332,9 +334,9 @@ class ManagedEventReplayTest {
     private static void open(ManagedEventStreamService streams,
             boolean webShell, String tenant, String sessionId) {
         if (webShell) {
-            streams.webShellStream(tenant, null, sessionId, RESUME_AFTER);
+            streams.webShellStream(tenant, USER, sessionId, RESUME_AFTER);
         } else {
-            streams.publicStream(tenant, null, sessionId, RESUME_AFTER);
+            streams.publicStream(tenant, USER, sessionId, RESUME_AFTER);
         }
     }
 
@@ -347,8 +349,13 @@ class ManagedEventReplayTest {
         return store.advanceReplayFloor(tenant, sessionId, floor);
     }
 
+    private org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder events(
+            String tenant, String session) {
+        return EventStreams.events(tenant, session).principal(VerificationFixtures.actor(tenant, USER));
+    }
+
     private String session(String tenant) {
-        return store.insertSessionCommand(tenant, "CREATE_SESSION",
+        return store.insertSessionCommand(tenant, USER, "CREATE_SESSION",
                 "replay-" + UUID.randomUUID(), "digest", "qwen-code", null,
                 null, List.of(), "payload").sessionId();
     }

@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -19,6 +20,7 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ManagedSessionOwnerTest {
     @Test
@@ -75,12 +77,19 @@ class ManagedSessionOwnerTest {
                 + " = creator_actor_key AND creator_actor_key IS NOT NULL",
                 Integer.class)).isEqualTo(2);
 
-        store.insertSessionCommand("tenant", "CREATE_SESSION", "anonymous",
-                "digest-anonymous", "qwen-code", null, null, List.of(),
-                null);
+        assertThatThrownBy(() -> store.insertSessionCommand("tenant", "CREATE_SESSION", "anonymous",
+                "digest-anonymous", "qwen-code", null, null, List.of(), null))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(401);
+                    assertThat(error.getCode()).isEqualTo("actor_required");
+                });
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Integer.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_principal", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE idempotency_key = ?",
+                Integer.class, "anonymous")).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                 + " ma_session WHERE owner_actor_key IS NULL"
                 + " AND creator_actor_key IS NULL", Integer.class))
-                .isEqualTo(1);
+                .isZero();
     }
 }

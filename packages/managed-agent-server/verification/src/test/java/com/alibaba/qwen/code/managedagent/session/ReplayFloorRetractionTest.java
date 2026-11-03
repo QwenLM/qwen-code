@@ -56,7 +56,7 @@ class ReplayFloorRetractionTest {
                         "digest-turn",
                         session,
                         List.of(),
-                        "payload-turn");
+                        "payload-turn", "actor");
         String owner = "owner";
         assertThat(store.claimTurn(tenant, session, turn.turnId(), owner, Duration.ofMinutes(1)))
                 .isPresent();
@@ -183,7 +183,7 @@ class ReplayFloorRetractionTest {
                                 "digest",
                                 session,
                                 List.of(),
-                                "payload")
+                                "payload", "actor")
                         .turnId();
         store.claimTurn(tenant, session, turn, "owner", Duration.ofMinutes(1));
         store.appendPublicEventIfAbsent(
@@ -271,7 +271,7 @@ class ReplayFloorRetractionTest {
                     false, "race-" + index);
         }
         store.materializeNextBatch(tenant, session, 100);
-        var initial = service.transcript(tenant, null, session, null, 2);
+        var initial = service.transcript(tenant, "actor", session, null, 2);
         assertThat(initial.items()).hasSize(2);
         assertThat(initial.hasMore()).isTrue();
         store.appendPublicEventIfAbsent(tenant, session, "turn",
@@ -290,7 +290,7 @@ class ReplayFloorRetractionTest {
                     ManagedEventStreamService.RESYNC, session, window.floorSequence(),
                     window.snapshotThroughSequence(), ManagedEventStreamService.RESYNC_ACTION));
         }
-        var reloaded = service.transcript(tenant, null, session, null, 2);
+        var reloaded = service.transcript(tenant, "actor", session, null, 2);
         assertThat(reloaded.lastSequence()).isEqualTo(window.snapshotThroughSequence());
         assertThat(reloaded.coveredSequence()).isEqualTo(reloaded.lastSequence());
         assertThat(reloaded.items()).extracting(item -> item.itemId()).contains("latest");
@@ -299,7 +299,7 @@ class ReplayFloorRetractionTest {
                 false, "race-newer");
         store.materializeNextBatch(tenant, session, 100);
         long currentCoverage = store.findMessageCoveredSequences(tenant, List.of(session)).get(session);
-        var older = service.transcript(tenant, null, session, reloaded.olderCursor(), 2);
+        var older = service.transcript(tenant, "actor", session, reloaded.olderCursor(), 2);
         assertThat(currentCoverage).isGreaterThan(reloaded.coveredSequence());
         assertThat(older.coveredSequence()).isEqualTo(currentCoverage);
         assertThat(older.lastSequence()).isEqualTo(currentCoverage);
@@ -308,7 +308,7 @@ class ReplayFloorRetractionTest {
 
     private String session(String tenant) {
         return store.insertSessionCommand(
-                        tenant,
+                        tenant, "actor",
                         "CREATE_SESSION",
                         UUID.randomUUID().toString(),
                         "digest",

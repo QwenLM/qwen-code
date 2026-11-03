@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationComma
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore.TaskCancelOutcome;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
@@ -53,6 +54,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class ManagedTaskCancelOperationTest {
     private static final String TENANT = "cancel-tenant";
+    private static final SessionPrincipal USER = SessionPrincipal.ofUser(TENANT, "actor");
     private static final String ACTOR_DIGEST = "digest-of-actor";
     private static final String RUNNING_CHILD = "task_" + "a".repeat(64);
     private static final String SETTLED_CHILD = "task_" + "b".repeat(64);
@@ -93,7 +95,7 @@ class ManagedTaskCancelOperationTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), clock,
                 ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION", "create", "digest", "qwen-code",
+        sessionId = store.insertSessionCommand(TENANT, USER, "CREATE_SESSION", "create", "digest", "qwen-code",
                 null, null, List.of(), null).sessionId();
         task(RUNNING_CHILD, "child_run", "child_agent", "running");
         task(SETTLED_CHILD, "child_run", "child_agent", "completed");
@@ -488,10 +490,10 @@ class ManagedTaskCancelOperationTest {
         String liveKey = "child-stop sha256:" + "1".repeat(64);
         String endedKey = "child-stop sha256:" + "2".repeat(64);
         assertThat(store.insertCancelCommand(TENANT, "CANCEL_TURN", liveKey,
-                "digest-live", sessionId, "turn-live").commandEffect())
+                "digest-live", sessionId, "turn-live", USER).commandEffect())
                 .isTrue();
         assertThat(store.insertCancelCommand(TENANT, "CANCEL_TURN",
-                endedKey, "digest-ended", sessionId, "turn-ended")
+                endedKey, "digest-ended", sessionId, "turn-ended", USER)
                 .commandEffect()).isFalse();
         assertThat(relay.turnCancelRequested(TENANT, sessionId, "turn-live"))
                 .isTrue();
