@@ -254,6 +254,9 @@ final class WorkspaceCsiApplicationInventory {
                     + "writer_token_hash:CHAR,activation_epoch:BIGINT,latest_checkpoint_resource_id:VARBINARY,"
                     + "record_encoding:VARCHAR,record_bytes:MEDIUMBLOB,byte_length:BIGINT,record_digest:CHAR,"
                     + "activation_lease_until:BIGINT,activation_renewal_seq:BIGINT,gmt_create:BIGINT"),
+            declaration("ma_session_principal", "tenant_id,session_id",
+                    "tenant_id:VARBINARY,session_id:VARBINARY,version:BIGINT,user_id:VARBINARY,actor_present:BOOLEAN,"
+                    + "actor_subject_id:VARBINARY,gmt_create:BIGINT"),
             declaration("ma_session_record", "session_scope_key,record_key",
                     "session_scope_key:CHAR,record_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,"
                     + "session_id:VARBINARY,domain:VARCHAR,record_id:VARBINARY,operation_hash:CHAR,revision:BIGINT,"
@@ -2189,7 +2192,7 @@ final class WorkspaceCsiApplicationInventory {
                 case "ma_session" -> query(table, "tenant_id=T&session_id=sessions", "runtime_request_key=requests",
                         "tenant_id=T&parent_session_id=sessions", "tenant_id=T&root_session_id=sessions");
                 case "ma_session_head" -> query(table, "tenant_key=BT&harness_key=BS", "tenant_id=T&session_id=sessions");
-                case "ma_public_event", "ma_turn", "ma_session_record", "ma_user_message",
+                case "ma_public_event", "ma_turn", "ma_session_principal", "ma_session_record", "ma_user_message",
                         "ma_user_message_command", "ma_user_message_queue" ->
                         query(table, "tenant_id=T&session_id=sessions");
                 case "ma_event_stream" -> query(table, "tenant_id=T&session_id=sessions", "artifact_refs_resource_key=resourceKeys");

@@ -788,7 +788,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
         assertThat(snapshot.tables()).hasSize(com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.TABLES.size());
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(809);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(816);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -800,6 +800,44 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(snapshot.table("ma_tenant_guard").rows()).hasSize(2);
         assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session_head")
                 && blocker.code().equals("missing_or_extra_original"));
+    }
+
+    @Test
+    void sessionPrincipalsRemainScopedAndRoundTripWithoutAdmittingThemToTheCsiLane() throws Exception {
+        byte[] user = "user\u0000用户".getBytes(StandardCharsets.UTF_8);
+        byte[] subject = "actor\u0000业务".getBytes(StandardCharsets.UTF_8);
+        String insert = "INSERT INTO ma_session_principal (tenant_id,session_id,version,user_id,actor_present,"
+                + "actor_subject_id,gmt_create) VALUES (?,?,1,?,?,?,1)";
+        jdbc.update(insert, "tenant", "unrelated-session", user, false, null);
+        jdbc.update(insert, "foreign", session, user, false, null);
+        for (boolean actorPresent : List.of(false, true)) {
+            jdbc.update(insert, "tenant", session, user, actorPresent, actorPresent ? subject : null);
+            var observed = inspect();
+            var principals = observed.table("ma_session_principal");
+            assertThat(principals.primaryKey()).containsExactly("tenant_id", "session_id");
+            assertThat(principals.columns()).extracting(WorkspaceCsiApplicationInventory.Column::name)
+                    .containsExactly("tenant_id", "session_id", "version", "user_id", "actor_present",
+                            "actor_subject_id", "gmt_create");
+            assertThat(principals.rows()).hasSize(1);
+            var row = principals.rows().getFirst();
+            assertThat(row.membership()).isEqualTo(WorkspaceCsiApplicationInventory.Membership.ORIGINAL);
+            assertThat(row.binary("user_id")).isEqualTo(user);
+            assertThat(row.bool("actor_present")).isEqualTo(actorPresent);
+            assertThat(row.binary("actor_subject_id")).isEqualTo(actorPresent ? subject : null);
+            assertThat(observed.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session_principal")
+                    && blocker.code().equals("unsupported_first_lane"));
+
+            var expected = historicalKeys();
+            var restored = WorkspaceCsiApplicationInventory.restoreCanonical(expected.bytes());
+            assertThat(restored.table("ma_session_principal").rows().getFirst().bytes()).isEqualTo(row.bytes());
+            var queries = new java.util.ArrayList<String>();
+            var current = readKeys(restored, queries);
+            assertThat(current.blockers()).isEmpty();
+            assertThat(current.bytes()).isEqualTo(restored.bytes());
+            assertThat(queries).anyMatch(sql -> sql.startsWith("SELECT t.* FROM ma_session_principal t WHERE")
+                    && sql.contains("tenant_id = ? AND session_id = ?"));
+            jdbc.update("DELETE FROM ma_session_principal WHERE tenant_id=? AND session_id=?", "tenant", session);
+        }
     }
 
     @Test
