@@ -1,9 +1,5 @@
 # Visual Studio Code
 
-## Qwen Subscription preproduction preview
-
-Builds containing the subscription integration offer **Qwen Account with Subscription** without requiring a development extension host or `DEV=true` in the local daemon. Authorize in the browser with an active Plus/Pro account, then choose models through the existing selector. Network, server or empty-response failures may use the previous list; without a cache, retry loading. HTTP 403 displays the service's error description without returning cached models. The integration uses preproduction services and still requires native-host acceptance. See [Authentication](./configuration/auth.md).
-
 > The VS Code extension (Beta) lets you see Qwen's changes in real-time through a native graphical interface integrated directly into your IDE, making it easier to access and interact with Qwen Code.
 
 <br/>
