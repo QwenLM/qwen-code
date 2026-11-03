@@ -2482,10 +2482,10 @@ function skipAmendPrefixes(tokens: string[]): string[] {
   return tokens.slice(index);
 }
 
-function isGitAmendInvocation(tokens: string[]): boolean {
-  if (amendExecutableBasename(tokens[0] ?? '') !== 'git') return false;
+function isGitAmendInvocationAt(tokens: string[], start: number): boolean {
+  if (amendExecutableBasename(tokens[start] ?? '') !== 'git') return false;
 
-  let index = 1;
+  let index = start + 1;
   while (index < tokens.length) {
     const token = tokens[index]!;
     if (token === '--') {
@@ -2504,13 +2504,108 @@ function isGitAmendInvocation(tokens: string[]): boolean {
   for (index++; index < tokens.length; index++) {
     const token = tokens[index]!;
     if (token === '--') return false;
-    if (token === '--amend' || token.startsWith('--amend=')) return true;
+    // A word boundary ends the flag, so `--amend` stays an amend when bash
+    // glues a redirect (`--amend>log`), a parameter expansion (`--amend$(…)`)
+    // or a brace range (`--amend{,}`) onto it. `--amendx` / `--amend-foo` are
+    // rejected by git itself and stay unrecognised.
+    if (/^--amend(?![A-Za-z-])/.test(token)) return true;
 
     const consumesNext =
       AMEND_COMMIT_FLAGS_WITH_VALUE.test(token) && index + 1 < tokens.length;
     if (consumesNext) index++;
   }
   return false;
+}
+
+// Declared literally rather than spread from SHELLS_READING_STDIN, which is
+// defined further down the module and would be in its temporal dead zone here.
+const AMEND_SHELL_PROGRAMS = new Set([
+  'bash',
+  'sh',
+  'zsh',
+  'dash',
+  'ksh',
+  'ash',
+  'fish',
+  'su',
+]);
+
+/** A pipeline whose consumer is a shell, which reads its program from stdin. */
+const PIPES_INTO_SHELL = /\|\s*(?:[^\s|;&]*\/)?(?:ba|z|da|fi|k|a)?sh\b/;
+
+/** The `-c` payload of a shell token, if it carries one (`-c`, `-lc`, `-ec`). */
+function shellDashCPayload(tokens: string[], index: number): string | null {
+  for (let inner = index + 1; inner < tokens.length; inner++) {
+    const token = tokens[inner]!;
+    if (token === '-' || !token.startsWith('-')) break;
+    if (/^-[A-Za-z]*c/.test(token)) return tokens[inner + 1] ?? null;
+  }
+  return null;
+}
+
+/**
+ * Programs the token scan cannot turn into a command, plus the ones it can.
+ *
+ * `commandContainsGitAmend` is the deterministic AUTO-mode gate, so a construct
+ * it cannot positively classify has to answer "amend" rather than "not an
+ * amend". The list is grouped by construct rather than by spelling: a `-c`
+ * payload and an `env -S` value are extracted and analysed, while a shell fed
+ * by an executor or by data the model never reads fails closed.
+ */
+function nestedAmendPayloads(tokens: string[]): {
+  payloads: string[];
+  unclassifiable: boolean;
+} {
+  const payloads: string[] = [];
+  let unclassifiable = false;
+
+  for (let index = 0; index < tokens.length; index++) {
+    const program = amendExecutableBasename(tokens[index]!);
+
+    if (program === 'env') {
+      for (let inner = index + 1; inner < tokens.length; inner++) {
+        const flag = tokens[inner]!;
+        if (!flag.startsWith('-')) break;
+        if (flag === '-S' || flag === '--split-string') {
+          const value = tokens[inner + 1];
+          if (value === undefined) unclassifiable = true;
+          else payloads.push(value);
+          break;
+        }
+        if (flag.startsWith('--split-string=')) {
+          payloads.push(flag.slice('--split-string='.length));
+          break;
+        }
+      }
+      continue;
+    }
+
+    // An executor that launches a shell runs a program this scan never sees.
+    // `sh -c '…'` is covered by the shell branch below; a bare shell is not.
+    if (program === 'xargs' || program === 'find') {
+      const launchesShell = tokens
+        .slice(index + 1)
+        .some((token) =>
+          AMEND_SHELL_PROGRAMS.has(amendExecutableBasename(token)),
+        );
+      if (
+        launchesShell &&
+        !tokens.some((token) => /^-[A-Za-z]*c/.test(token))
+      ) {
+        unclassifiable = true;
+      }
+      continue;
+    }
+
+    if (!AMEND_SHELL_PROGRAMS.has(program)) continue;
+    const payload = shellDashCPayload(tokens, index);
+    if (payload !== null) payloads.push(payload);
+  }
+
+  // `${IFS}` splits a word into argv entries the tokenizer keeps glued together.
+  if (tokens.some((token) => /\$\{?IFS\b/.test(token))) unclassifiable = true;
+
+  return { payloads, unclassifiable };
 }
 
 function tokensContainGitAmend(segment: string, depth: number): boolean {
@@ -2524,6 +2619,15 @@ function tokensContainGitAmend(segment: string, depth: number): boolean {
     return commandContainsGitAmendAtDepth(unwrapped, depth + 1);
   }
 
+  // Wrappers embedding the command behind a flag value (`env -S '…'`) are
+  // consumed by skipAmendPrefixes before the scan sees them, so read the
+  // payloads off the untouched token stream.
+  const nested = nestedAmendPayloads(tokenize(segment));
+  for (const payload of nested.payloads) {
+    if (commandContainsGitAmendAtDepth(payload, depth + 1)) return true;
+  }
+  if (nested.unclassifiable) return true;
+
   const tokens = skipAmendPrefixes(tokenize(segment));
   if (tokens.length === 0) return false;
 
@@ -2531,7 +2635,7 @@ function tokensContainGitAmend(segment: string, depth: number): boolean {
     return commandContainsGitAmendAtDepth(tokens.slice(1).join(' '), depth + 1);
   }
 
-  if (isGitAmendInvocation(tokens)) return true;
+  if (isGitAmendInvocationAt(tokens, 0)) return true;
 
   // Wrappers that embed their command as a token subsequence rather than as a
   // prefix: `xargs git commit --amend`, `find . -exec git commit --amend …`,
@@ -2539,10 +2643,30 @@ function tokensContainGitAmend(segment: string, depth: number): boolean {
   // is not at index 0. Try every offset so those are seen without teaching this
   // function each wrapper. Quoted mentions stay inert because they arrive as a
   // single token, and `-m --amend` stays inert because the invocation check
-  // consumes flag values.
+  // consumes flag values. The basename prefilter keeps this linear: the scan
+  // runs for every shell tool call before the classifier, and copying the token
+  // tail at each offset made a 40k-token command take seconds.
   for (let offset = 1; offset < tokens.length; offset++) {
-    if (isGitAmendInvocation(tokens.slice(offset))) return true;
+    if (amendExecutableBasename(tokens[offset]!) !== 'git') continue;
+    if (isGitAmendInvocationAt(tokens, offset)) return true;
   }
+
+  // Constructs whose payload this scan does not turn into a token sequence.
+  // The extracted ones are analysed above; the rest fail closed, because in
+  // AUTO mode this function is the gate that decides whether a real amend runs.
+
+  // A process substitution always runs its body, and a here-string is only
+  // handed to a shell — neither appears in the token stream.
+  if (/[<>]\(/.test(segment)) return true;
+  if (
+    segment.includes('<<<') &&
+    tokens.some((token) =>
+      AMEND_SHELL_PROGRAMS.has(amendExecutableBasename(token)),
+    )
+  ) {
+    return true;
+  }
+
   return false;
 }
 
@@ -2730,6 +2854,13 @@ function commandContainsGitAmendAtDepth(
       if (commandContainsGitAmendAtDepth(body, depth + 1)) return true;
     }
   }
+
+  // A pipe into a shell hands that shell a program through stdin. The segment
+  // split drops the producer's text and keeps only the bare shell, so neither
+  // side can be classified from tokens — fail closed rather than answer "not an
+  // amend" for `echo "git commit --amend" | bash`.
+  if (PIPES_INTO_SHELL.test(command)) return true;
+
   for (const { command: segment } of splitCompoundCommandSegments(
     stripHeredocBodies(command),
   )) {

@@ -227,6 +227,28 @@ describe('isDestructiveCommand — git commit --amend', () => {
     // (#13570 review).
     `echo "don't $(git commit --amend --no-edit)"`,
     `x="it's $(git commit --amend)"`,
+    // `>` is a word boundary, so bash leaves the token `--amend>amend.log`;
+    // matching the flag by exact equality missed a bare amend (#13570 review).
+    'git commit --amend>amend.log',
+    'git commit --amend</dev/null',
+    'git commit --amend>>amend.log',
+    'git commit --amend{,} --no-edit',
+    'git commit --amend$(true)',
+    // Constructs the token scan cannot classify fail closed: a wrapper the
+    // module does not unwrap in place, a `-c`/`--split-string` payload, a
+    // shell fed by a here-string or an executor, and `${IFS}` word splitting.
+    "sudo bash -c 'git commit --amend --no-edit'",
+    "env FOO=1 bash -c 'git commit --amend --no-edit'",
+    "timeout 10 bash -c 'git commit --amend --no-edit'",
+    "dash -c 'git commit --amend --no-edit'",
+    "fish -c 'git commit --amend --no-edit'",
+    "env -S 'git commit --amend --no-edit'",
+    "bash <<< 'git commit --amend --no-edit'",
+    `echo "git commit --amend --no-edit" | bash`,
+    "xargs -I{} sh -c 'git commit --amend --no-edit'",
+    `find . -exec sh -c 'git commit --amend --no-edit' \\;`,
+    'cat <(git commit --amend --no-edit)',
+    'git${IFS}commit${IFS}--amend --no-edit',
   ])('blocks amend through an execution wrapper: %s', (command) => {
     expectBlocked(command, 'amend the commit', 'amend');
   });
