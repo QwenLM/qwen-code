@@ -6645,6 +6645,72 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(ch.cursor.dispatchedComments).toContain('C_1002');
     });
 
+    it('consumes a failed_ambiguous audit verdict at dispatch, unlike a definite failed (R7-C2)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      const auditPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-audit.jsonl',
+      );
+      mkdirSync(dirname(auditPath), { recursive: true });
+      const row = (sourceMessageId: string, outcome: string) =>
+        JSON.stringify({
+          outcome,
+          repository: 'owner/repo',
+          threadId: 'pr:42',
+          sourceMessageId,
+        });
+      // 1001: posting -> definite failed -> failed_ambiguous (the retry's
+      // write MAY have landed) must stay consumed — the reader, not just
+      // the writer, has to honor the ambiguous verdict as the LAST outcome,
+      // or the stale definite-failed verdict reopens the double-publish
+      // window. 1002: posting -> definite failed stays retryable (contrast).
+      writeFileSync(
+        auditPath,
+        `${row('1001', 'posting')}\n${row('1001', 'failed')}\n${row('1001', 'failed_ambiguous')}\n${row('1002', 'posting')}\n${row('1002', 'failed')}\n`,
+        'utf-8',
+      );
+      const prSubject = {
+        title: 'Test PR',
+        url: 'https://api.github.com/repos/owner/repo/pulls/42',
+        type: 'PullRequest',
+      };
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({ reason: 'mention', subject: prSubject }),
+        ])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(existsSync(inboundTaskPath())).toBe(false);
+      const ch = channel as unknown as {
+        cursor: { dispatchedComments?: string[] };
+      };
+      expect(ch.cursor.dispatchedComments).toContain('C_1001');
+
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'mention',
+            updated_at: '2026-07-02T11:00:00.000Z',
+            subject: prSubject,
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({
+            id: 1002,
+            node_id: 'C_1002',
+            created_at: '2026-07-02T10:30:00.000Z',
+            updated_at: '2026-07-02T10:30:00.000Z',
+          }),
+        ]);
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+    });
+
     it('defers the gone-session public fallback under a partial snapshot (R5-A3)', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });
       boundSessions.listPrBindings
