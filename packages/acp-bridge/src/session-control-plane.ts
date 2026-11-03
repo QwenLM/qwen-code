@@ -1690,6 +1690,12 @@ const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
   'auth_device_flow_authorized',
   'auth_device_flow_failed',
   'auth_device_flow_cancelled',
+  // Mid-turn provider recovery progress (#12020): the frames journal no turn
+  // content, so a retry scheduled during an automatic turn's backoff must not
+  // count as newer content that defeats the refresh-append of a pending
+  // `turn_error` terminal.
+  'retry_scheduled',
+  'model_fallback',
 ]);
 
 /**

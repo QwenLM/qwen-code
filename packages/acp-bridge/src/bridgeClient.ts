@@ -31,7 +31,11 @@ import type { BridgeEvent, EventBus } from './eventBus.js';
 // Wire constants shared with the child-side caller (`Session.ts`) and, for the
 // SSE event type, the SDK validator + browser consumer — single sources of truth
 // so a rename can't silently break the protocol.
-import { MID_TURN_MESSAGE_INJECTED_EVENT } from './daemonEventTypes.js';
+import {
+  MID_TURN_MESSAGE_INJECTED_EVENT,
+  RETRY_SCHEDULED_EVENT,
+  MODEL_FALLBACK_EVENT,
+} from './daemonEventTypes.js';
 import {
   parseBackgroundNotificationTurn,
   ACTIVE_WORK_HEARTBEAT_VERSION,
@@ -2566,7 +2570,9 @@ export class BridgeClient implements Client {
    * `qwen/notify/session/artifact-event` (hook artifacts),
    * `qwen/notify/session/terminal-sequence`,
    * `qwen/notify/session/pr-binding` (shell-detected `gh pr create`
-   * bindings — catalog mark only, the child persists the sidecar), and
+   * bindings — catalog mark only, the child persists the sidecar),
+   * `qwen/notify/session/retry` and `qwen/notify/session/model-fallback`
+   * (mid-turn provider recovery progress), and
    * `_qwencode/end_turn` (background-notification and goal turns), and
    * `qwen/notify/session/mcp-changed`,
    * `qwen/notify/session/mcp-budget-event` — each translated into a
@@ -2822,6 +2828,14 @@ export class BridgeClient implements Client {
     }
     if (method === 'qwen/notify/session/mode-update') {
       this.handleInSessionModeUpdate(params);
+      return;
+    }
+    if (method === 'qwen/notify/session/retry') {
+      this.handleRetryScheduled(params);
+      return;
+    }
+    if (method === 'qwen/notify/session/model-fallback') {
+      this.handleModelFallback(params);
       return;
     }
     if (method === 'qwen/notify/session/title-update') {
@@ -3224,6 +3238,76 @@ export class BridgeClient implements Client {
     writeStderrLine(
       `[demux] session=${sessionId} type=current_model_update action=promoted model=${currentModelId}`,
     );
+  }
+
+  /**
+   * Mid-turn provider recovery progress (#12020): the child reports a
+   * scheduled retry or a fallback-model switch, rebroadcast as session-scoped
+   * SSE frames so daemon clients can render the same feedback the CLI shows.
+   * Both are mid-turn by definition, so a missing live entry means the frame
+   * is stale; drop it rather than buffer.
+   */
+  private handleRetryScheduled(params: Record<string, unknown>): void {
+    const sessionId = params['sessionId'];
+    const attempt = params['attempt'];
+    const maxRetries = params['maxRetries'];
+    const delayMs = params['delayMs'];
+    const message = params['message'];
+    const isContinuation = params['isContinuation'];
+    if (
+      typeof sessionId !== 'string' ||
+      typeof attempt !== 'number' ||
+      typeof maxRetries !== 'number' ||
+      typeof delayMs !== 'number' ||
+      (message !== undefined && typeof message !== 'string') ||
+      (isContinuation !== undefined && typeof isContinuation !== 'boolean')
+    ) {
+      return;
+    }
+    const entry = this.resolveEntry(sessionId);
+    if (!entry) return;
+    entry.events.publish({
+      type: RETRY_SCHEDULED_EVENT,
+      ...currentTurnMetadata(entry),
+      data: {
+        sessionId,
+        attempt,
+        maxRetries,
+        delayMs,
+        ...(typeof message === 'string' ? { message } : {}),
+        ...(isContinuation === true ? { isContinuation: true } : {}),
+      },
+    });
+  }
+
+  private handleModelFallback(params: Record<string, unknown>): void {
+    const sessionId = params['sessionId'];
+    const fromModel = params['fromModel'];
+    const toModel = params['toModel'];
+    const statusCode = params['statusCode'];
+    const fallbackIndex = params['fallbackIndex'];
+    if (
+      typeof sessionId !== 'string' ||
+      typeof fromModel !== 'string' ||
+      typeof toModel !== 'string' ||
+      (statusCode !== undefined && typeof statusCode !== 'number') ||
+      typeof fallbackIndex !== 'number'
+    ) {
+      return;
+    }
+    const entry = this.resolveEntry(sessionId);
+    if (!entry) return;
+    entry.events.publish({
+      type: MODEL_FALLBACK_EVENT,
+      ...currentTurnMetadata(entry),
+      data: {
+        sessionId,
+        fromModel,
+        toModel,
+        ...(typeof statusCode === 'number' ? { statusCode } : {}),
+        fallbackIndex,
+      },
+    });
   }
 
   /**

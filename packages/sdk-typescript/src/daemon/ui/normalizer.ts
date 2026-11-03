@@ -235,6 +235,15 @@ export function normalizeDaemonEvent(
         );
       }
       return [];
+    case 'retry_scheduled':
+    case 'model_fallback':
+      // Mid-turn provider recovery progress (#12020). The daemon emits these
+      // so clients that render progress (Web Shell, the CLI's own listener)
+      // can show the backoff; this transcript reducer has no view state for
+      // them, and routing them to the unrecognized_event debug block would
+      // reset `activeUserBlockId` and burn the bounded diagnostics
+      // sidechannel, so they normalize to nothing.
+      return [];
     case 'stream_error': {
       const errorKind = asDaemonErrorKind(getString(event.data, 'errorKind'));
       return [
