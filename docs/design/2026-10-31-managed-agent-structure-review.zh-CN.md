@@ -168,7 +168,7 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
    `AgentStateStore` 保留为继承它们的组合接口，实现与测试继续使用完整
    表面，嵌套 record/常量经继承解析（嵌套类型的 import 必须写拥有它的
    角色）。角色组合 pin 保证组合接口自身为空、不拥有任何表面。消费方
-   审计（调用级，评审后更正）：22 个单角色消费方已直接注入其角色——
+   审计（调用级，评审后更正）：23 个单角色消费方已直接注入其角色——
    生命周期（`RenameEvidence`、`TurnInputEvidence`、
    `ChildLifecycleAdmissions`、`ActionResponseCoordinator`、
    `ContextCompressionCoordinator`、`ContextCompressionService`、
@@ -176,14 +176,14 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
    （`ManagedRuntimeCoordinator`、
    `SessionRecoveryService`、`ManagedExtensionCommandVerifier`、
    `ManagedSessionStore`、`ChildWorkspaceService`、`WorkspaceRuntimeResolver`、
-   `ManagedAutomationService`）、策略（`ManagedMcpManagementService`、
+   `ManagedAutomationService`、`EmbeddedRuntimeBroker`）、策略（`ManagedMcpManagementService`、
    `ManagedExtensionManagementService`）、事件投影
    （`MessageMaterializer`、`ReplayFloorAdvancer`、`ManagedToolResultStore`）、
    Turn 执行（`SessionWorktreeService`）。其余消费方多数跨角色，或把
    store 透传给多角色依赖，继续使用组合接口。broker 装配已不在其列：
    `EmbeddedRuntimeBroker` 只把 store 转发给 `WorkspaceRuntimeResolver` 与
-   `ManagedRuntimeCoordinator`，二者都收 `SessionQueryStore`，故它本身也是
-   同样收窄的候选。其中四个——`ChildWorkspaceService`、
+   `ManagedRuntimeCoordinator`，二者都收 `SessionQueryStore`，它本身现已注入
+   `SessionQueryStore`。其中四个——`ChildWorkspaceService`、
    `WorkspaceRuntimeResolver`、`ManagedAutomationService`、
    `TaskCancelCoordinator`——起初因 `this(...)` 是本类构造委托而非透传
    而暂缓，已在 #15962 的后续中收窄。
