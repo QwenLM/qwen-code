@@ -36,7 +36,7 @@ The browser never edits your configuration: to add, change or remove a hook, edi
 
 Reloading requires this explicit menu-open action: saving a file, pulling changes or switching branches does not automatically arm new hook commands. The non-interactive `/hooks list` only displays the registry currently loaded by that process; it does not reload settings. In an interactive terminal, `/hooks list` opens the same menu as `/hooks`.
 
-This reload covers hook definitions, not hook controls or HTTP security settings. Changes to `disableAllHooks`, `stopHookBlockingCap`, `security.allowedHttpHookUrls` and `security.allowPrivateNetworkHooks` still require a restart. Hooks registered at runtime by skills or the SDK are not affected. Project hooks from a project's `.qwen/settings.json` load only with **explicit folder trust**: enable `security.folderTrust.enabled` in user settings and trust the directory, or grant workspace trust through your IDE. A disabled folder-trust feature does not authorize them. When hooks are turned off by `disableAllHooks`, `--safe-mode` or `--bare`, none load and the browser says so at the top.
+This reload covers hook definitions, not hook controls or HTTP security settings. Changes to `disableAllHooks`, `stopHookBlockingCap`, `security.allowedHttpHookUrls` and `security.allowPrivateNetworkHooks` still require a restart. Hooks registered at runtime by skills or the SDK are not affected. In interactive sessions, project hooks from a project's `.qwen/settings.json` load only with **explicit folder trust**: enable `security.folderTrust.enabled` in user settings and trust the directory, or grant workspace trust through your IDE. A disabled folder-trust feature does not authorize them; when they are withheld the session shows a startup warning. In non-interactive sessions (`--prompt`/`-p`, piped stdin, ACP/SDK embeddings) folder trust is implicit — the caller chose the directory and there is no prompt surface — so project hooks load as before; only run non-interactive sessions in directories you trust. When hooks are turned off by `disableAllHooks`, `--safe-mode` or `--bare`, none load and the browser says so at the top.
 
 ### Agent frontmatter scope
 
@@ -1626,7 +1626,8 @@ fi
 ### Security Model
 
 - Hooks run in the user's environment with user privileges
-- Project-level hooks require explicit folder trust (enable `security.folderTrust.enabled` and trust the folder, or grant IDE workspace trust)
+- Interactive sessions: project-level hooks require explicit folder trust (enable `security.folderTrust.enabled` and trust the folder, or grant IDE workspace trust)
+- Non-interactive sessions (`-p`, piped stdin, ACP/SDK): folder trust is implicit; only use directories you trust
 - Timeouts prevent hanging hooks (default: 60 seconds for command hooks)
 
 ## Best Practices

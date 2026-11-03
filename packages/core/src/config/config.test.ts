@@ -1239,7 +1239,7 @@ describe('Server Config (config.ts)', () => {
       ],
       [
         'replaces project hooks without leaking them into user hooks',
-        { folderTrust: true, trustedFolder: true },
+        { interactive: true, folderTrust: true, trustedFolder: true },
         { projectHooks },
         undefined,
         projectHooks,
@@ -1271,9 +1271,13 @@ describe('Server Config (config.ts)', () => {
     });
 
     it.each([false, undefined])(
-      'keeps the project hook gate when folder trust is %s',
+      'keeps the interactive project hook gate when folder trust is %s',
       (trustedFolder) => {
-        const config = makeConfig({ folderTrust: true, trustedFolder });
+        const config = makeConfig({
+          interactive: true,
+          folderTrust: true,
+          trustedFolder,
+        });
 
         config.setHooksFromSettings({ userHooks, projectHooks });
 
@@ -1414,6 +1418,7 @@ describe('Server Config (config.ts)', () => {
 
     it('loads system hooks in an untrusted folder, where project hooks are withheld', () => {
       const config = makeConfig({
+        interactive: true,
         trustedFolder: false,
         systemHooks,
         projectHooks,
@@ -1436,9 +1441,13 @@ describe('Server Config (config.ts)', () => {
         true,
       ],
     ] as Array<[string, Partial<ConfigParameters>, boolean]>)(
-      'gates settings-file project hooks when %s',
+      'gates interactive settings-file project hooks when %s',
       (_label, trust, explicit) => {
-        const config = makeConfig({ ...trust, projectHooks });
+        const config = makeConfig({
+          interactive: true,
+          ...trust,
+          projectHooks,
+        });
 
         expect(config.getProjectHooks()).toEqual(
           explicit ? projectHooks : undefined,
@@ -1447,11 +1456,40 @@ describe('Server Config (config.ts)', () => {
       },
     );
 
+    it.each([
+      ['the trust feature is off', {}],
+      ['the feature is on but the folder is undecided', { folderTrust: true }],
+      [
+        'the folder is explicitly untrusted',
+        { folderTrust: true, trustedFolder: false },
+      ],
+    ] as Array<[string, Partial<ConfigParameters>]>)(
+      'loads project hooks in non-interactive sessions when %s (implicit trust)',
+      (_label, trust) => {
+        const config = makeConfig({
+          interactive: false,
+          ...trust,
+          projectHooks,
+        });
+
+        expect(config.getProjectHooks()).toEqual(projectHooks);
+      },
+    );
+
+    it('still withholds project hooks in non-interactive safe and bare modes', () => {
+      expect(
+        makeConfig({ safeMode: true, projectHooks }).getProjectHooks(),
+      ).toBeUndefined();
+      expect(
+        makeConfig({ bareMode: true, projectHooks }).getProjectHooks(),
+      ).toBeUndefined();
+    });
+
     it('loads project hooks with IDE-granted trust even while the feature is off', () => {
       ideContextStore.clear();
       ideContextStore.set({ workspaceState: { isTrusted: true } });
       try {
-        const config = makeConfig({ projectHooks });
+        const config = makeConfig({ interactive: true, projectHooks });
         expect(config.getProjectHooks()).toEqual(projectHooks);
       } finally {
         ideContextStore.clear();

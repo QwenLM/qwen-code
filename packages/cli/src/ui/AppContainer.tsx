@@ -1977,6 +1977,32 @@ export const AppContainer = (props: AppContainerProps) => {
     });
   }, [addHistoryItem, config]);
 
+  useEffect(() => {
+    // Surface the fail-closed project-hook gate instead of letting hooks
+    // stop silently after the explicit-trust requirement.
+    if (
+      !config.isInteractive() ||
+      config.isExplicitlyTrustedFolder() ||
+      config.getBareMode() ||
+      config.isSafeMode()
+    ) {
+      return;
+    }
+    const projectHooks = settings.workspace.settings.hooks;
+    if (!projectHooks || Object.keys(projectHooks).length === 0) return;
+    addHistoryItem(
+      {
+        type: MessageType.WARNING,
+        text: t(
+          'Project hooks in .qwen/settings.json were not loaded: this folder is not explicitly trusted. Enable security.folderTrust.enabled and trust the folder to run them.',
+        ),
+      },
+      Date.now(),
+    );
+    // Startup notice only; later trust changes take effect on restart/reload.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config]);
+
   const clearPendingStateRef = useRef<() => void>(() => {});
   const clearPendingStateFromRef = useCallback(
     () => clearPendingStateRef.current(),

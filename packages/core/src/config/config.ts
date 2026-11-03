@@ -11767,9 +11767,12 @@ export class Config {
     if (this.getBareMode() || this.isSafeMode()) {
       return undefined;
     }
-    // Repo-supplied hooks need explicit trust: a disabled folder-trust
-    // feature must not silently authorize them.
-    if (!this.isExplicitlyTrustedFolder()) {
+    // Interactive sessions need explicit trust for repo-supplied hooks: a
+    // disabled folder-trust feature must not silently authorize them.
+    // Non-interactive invocations (`-p`, piped stdin, ACP/SDK embeddings)
+    // treat trust as implicit — the caller chose the directory and there is
+    // no prompt surface; only run them in directories you trust.
+    if (this.isInteractive() && !this.isExplicitlyTrustedFolder()) {
       return undefined;
     }
     // The legacy merged `hooks` stands in only when no scope was supplied.
