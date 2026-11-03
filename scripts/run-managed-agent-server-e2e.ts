@@ -710,6 +710,25 @@ function assertCommandRewriteDurableHook(
     );
 }
 
+function assertCommandRewriteDecision(
+  decision: {
+    optionId: string;
+    inputRevision: number;
+    policyRevision: string;
+  },
+  options: { inputRevision: number; policyRevision: string },
+  actionId: string,
+): void {
+  if (
+    decision.optionId !== 'allow' ||
+    decision.inputRevision !== options.inputRevision ||
+    decision.policyRevision !== options.policyRevision
+  )
+    throw new Error(
+      `A3 command decision differs from the chosen option: ${JSON.stringify({ actionId, decision })}`,
+    );
+}
+
 function assertCommandRewriteCrashBarrier(
   evidence: CommandRewriteEvidence,
   identity: CommandRewriteIdentity,
@@ -4916,14 +4935,7 @@ try {
             inputRevision: number;
             policyRevision: string;
           };
-          if (
-            decision.optionId !== 'allow' ||
-            decision.inputRevision !== options.inputRevision ||
-            decision.policyRevision !== options.policyRevision
-          )
-            throw new Error(
-              `A3 command decision differs from the chosen option: ${JSON.stringify(decision)}`,
-            );
+          assertCommandRewriteDecision(decision, options, actionId);
         }
         saveEvidence('command-rewrite-result.json', evidence);
         approvalResultJson = JSON.stringify(

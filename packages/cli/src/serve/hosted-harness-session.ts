@@ -7193,11 +7193,16 @@ export function registerHostedHarnessSessionRoutes(
         }
       }
       let resumeApproval: RestoredHostedApprovalContinuation | undefined;
+      // The extensions arm still demands an explicit, non-lifecycle takeover:
+      // a bare or lifecycle load must keep refusing with 409, never drive a
+      // parked Turn. It drops only the !session.hooks conjunct of `takeover`,
+      // which would otherwise make the arm unreachable for an extensions
+      // Session that also carries a Hook catalog.
       if (
         unsettled &&
         session.toolProfile &&
         ((takeover && !session.hooks && !session.mcp) ||
-          session.extensions?.enabled) &&
+          (takeoverFlags && !lifecycle && session.extensions?.enabled)) &&
         brokerOptions
       ) {
         const verdict = await managed.authority.harnessRunAuthorization();

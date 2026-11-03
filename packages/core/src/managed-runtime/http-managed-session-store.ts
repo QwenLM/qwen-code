@@ -439,8 +439,16 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
       // inspectable by dropping the dangling page ref from the walk
       // without registering it — adding it would fire the enumeration
       // check below for exactly the snapshots this keeps readable
-      // (#13930 R1-43).
-      if (ref.kind === MANAGED_TOOL_RESULT_KINDS.page) continue;
+      // (#13930 R1-43). The same backward-compatibility applies to the
+      // extension bundle's contributions child: a snapshot committed
+      // before that closure edge shipped recorded the bundle but never
+      // its contributions, so an absent contributions ref degrades
+      // instead of condemning the whole snapshot (R3-1).
+      if (
+        ref.kind === MANAGED_TOOL_RESULT_KINDS.page ||
+        ref.kind === 'managed-extension-contributions'
+      )
+        continue;
       throw corrupt('snapshot resource is missing.');
     }
     if (resourceRevisions.get(ref.resourceId)![0] > revision) {
@@ -1495,6 +1503,14 @@ class ManagedSessionStoreHttpClient {
           declared.push(...collectNestedResourceRefs(resource, body));
         }
         for (const resource of declared) {
+          // A bundle committed before the contributions closure edge shipped
+          // names a contributions child the snapshot never staged; degrade
+          // exactly like the inspection walk instead of condemning it (R3-1).
+          if (
+            resource.kind === 'managed-extension-contributions' &&
+            !resources.has(resource.resourceId)
+          )
+            continue;
           if (!isDeepStrictEqual(resources.get(resource.resourceId), resource))
             throw corrupt(
               'native resource dependency is missing or conflicting.',

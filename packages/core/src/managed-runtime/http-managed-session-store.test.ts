@@ -6097,6 +6097,132 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('still inspects a snapshot whose bundle names an unstaged contributions child (R3-1)', async () => {
+    // A bundle committed before the contributions closure edge shipped names
+    // a contributions child the store never uploaded. The read-side walk drops
+    // the dangling contributions ref instead of ruling the whole snapshot
+    // corrupt — remove the tolerance and the construction below throws.
+    const server = new FakeManagedSessionStore();
+    const { session } = await bootStoresAndSession(server);
+    try {
+      const contributionsRef = await session.resources.publish(
+        'managed-extension-contributions',
+        Buffer.from(JSON.stringify({ parts: [] }), 'utf8'),
+      );
+      const bundleRef = await session.resources.publish(
+        'managed-extension-config-bundle',
+        Buffer.from(
+          JSON.stringify({ packages: [{ contributionsRef }] }),
+          'utf8',
+        ),
+      );
+      const outcomeRef = await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}', 'utf8'),
+      );
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'recordToolResult',
+          commandId: 'receipt-bundle',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'a'.repeat(64),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'receipt:bundle',
+          sessionKey: SESSION_KEY,
+          kind: 'tool.receipt',
+          occurredAt: 1,
+          payload: {
+            executionCallId: 'execution-bundle',
+            toolOutcomeRef: outcomeRef,
+            resultRef: null,
+            resources: [bundleRef],
+            historyRevision: sequence,
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+      // Build the snapshot rows exactly the way the writer shipped them,
+      // then drop the contributions body — the pre-closure-edge shape.
+      const transactions = server.commits.map((commit, index) => ({
+        ...commit,
+        journalRevision: index + 1,
+        recordEncoding: 'identity',
+        byteLength: Buffer.from(String(commit['recordBytesBase64']), 'base64')
+          .length,
+      }));
+      const resources = [] as Array<{
+        ref: ManagedSessionDurableRef;
+        bytesBase64: string;
+        referencedRevisions: number[];
+      }>;
+      for (const [index, commit] of server.commits.entries()) {
+        for (const raw of commit['resources'] as ManagedSessionDurableRef[]) {
+          const ref = {
+            resourceId: raw.resourceId,
+            kind: raw.kind,
+            schemaVersion: raw.schemaVersion,
+            byteLength: raw.byteLength,
+            digest: raw.digest,
+          };
+          resources.push({
+            ref,
+            bytesBase64: (await session.resources.read(ref)).toString('base64'),
+            referencedRevisions: [index + 1],
+          });
+        }
+      }
+      const snapshotInput = {
+        format: 'qwen-csi-receipt-checkpoint-snapshot/1',
+        sessionKey: SESSION_KEY,
+        head: {
+          state: 'ACTIVE',
+          storageVersion: 1,
+          writerGeneration: 1,
+          journalRevision: transactions.length,
+          committedSequence: session.authority.committedSequence,
+          lastCommitDigest: session.authority.commitProof.committedPrefixHash,
+          activationEpoch: session.activation.epoch,
+          latestCheckpointResourceId: null,
+          compactedThroughRevision: 0,
+          recoveryStatus: 'READY',
+          recoveryDetailCode: null,
+        },
+        transactions,
+        resources,
+      };
+      const snapshot = readOnlyManagedSessionSnapshot({
+        ...snapshotInput,
+        resources: snapshotInput.resources.filter(
+          ({ ref }) => ref.resourceId !== contributionsRef.resourceId,
+        ),
+      });
+      expect(await snapshot.resources.read(bundleRef)).toEqual(
+        await session.resources.read(bundleRef),
+      );
+      // Reading the absent contributions honestly reports its absence; the
+      // load just no longer condemns the entire snapshot for it.
+      await expect(snapshot.resources.read(contributionsRef)).rejects.toThrow(
+        'snapshot resource is missing.',
+      );
+      // The tolerance is contributions-scoped: the bundle itself is a direct
+      // reference of the receipt event, so dropping it is condemned by the
+      // direct-reference guard before the walk ever runs.
+      expect(() =>
+        readOnlyManagedSessionSnapshot({
+          ...snapshotInput,
+          resources: snapshotInput.resources.filter(
+            ({ ref }) => ref.resourceId !== bundleRef.resourceId,
+          ),
+        }),
+      ).toThrow('snapshot direct resource reference is missing.');
+    } finally {
+      await session.close();
+    }
+  });
+
   function nativeSnapshotFixture(
     server: FakeManagedSessionStore,
     coverage: number,

@@ -527,6 +527,7 @@ describe('managed-agent-server e2e runner', () => {
         'assertCommandRewriteStages',
         'assertCommandRewriteReceipts',
         'assertCommandRewriteDurableHook',
+        'assertCommandRewriteDecision',
         'commandRewritePhysicalHookCount',
         'commandRewriteExpectedCommand',
         'commandRewriteReceiptFingerprint',
@@ -535,7 +536,7 @@ describe('managed-agent-server e2e runner', () => {
         'commandRewriteRewrittenSecond',
         'commandRewriteExtensionId',
       ],
-      'assertCommandRewriteCrashBarrier, assertCommandRewriteFinalEvidence, commandRewriteReceiptFingerprint',
+      'assertCommandRewriteCrashBarrier, assertCommandRewriteFinalEvidence, assertCommandRewriteDecision, commandRewriteReceiptFingerprint',
       'createHash',
     )(createHash);
 
@@ -692,6 +693,47 @@ describe('managed-agent-server e2e runner', () => {
     expect(() =>
       assertions.assertCommandRewriteFinalEvidence(final, identity),
     ).not.toThrow();
+  });
+
+  it('holds the restored A3 command decision to the answered option (R2-3)', () => {
+    const assertions = commandRewriteAssertions();
+    const options = { inputRevision: 2, policyRevision: 'policy-1' };
+    const decision = {
+      optionId: 'allow',
+      inputRevision: 2,
+      policyRevision: 'policy-1',
+    };
+    expect(() =>
+      assertions.assertCommandRewriteDecision(
+        decision,
+        options,
+        'command_approval_1',
+      ),
+    ).not.toThrow();
+    // A decision bound to a different input revision answered a different
+    // step; a different option or policy revision is equally not the Allow
+    // the browser gave. Each must red the read-back.
+    expect(() =>
+      assertions.assertCommandRewriteDecision(
+        { ...decision, inputRevision: 3 },
+        options,
+        'command_approval_1',
+      ),
+    ).toThrow(/A3 command decision differs from the chosen option/);
+    expect(() =>
+      assertions.assertCommandRewriteDecision(
+        { ...decision, optionId: 'deny' },
+        options,
+        'command_approval_1',
+      ),
+    ).toThrow(/A3 command decision differs from the chosen option/);
+    expect(() =>
+      assertions.assertCommandRewriteDecision(
+        { ...decision, policyRevision: 'policy-2' },
+        options,
+        'command_approval_1',
+      ),
+    ).toThrow(/A3 command decision differs from the chosen option/);
   });
 
   it.each([
