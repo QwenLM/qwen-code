@@ -92,7 +92,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
-import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
+import {
+  getInteractiveModSession,
+  MODS_FAILED_TO_INITIALIZE,
+} from '../../services/interactive-mod-session.js';
 import type { ModTurn } from '../../services/mod-session.js';
 import type {
   HistoryItem,
@@ -4005,7 +4008,7 @@ export const useLlmStream = (
           addItem(
             {
               type: MessageType.ERROR,
-              text: 'Mods failed to initialize. Fix the Mod configuration and restart. /help and /quit remain available.',
+              text: MODS_FAILED_TO_INITIALIZE,
             },
             Date.now(),
           );

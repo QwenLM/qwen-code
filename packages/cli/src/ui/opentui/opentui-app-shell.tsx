@@ -87,6 +87,7 @@ import type {
 } from './live-turn.js';
 import {
   restoreInputSubmissions,
+  returnToComposer,
   type OpenTuiInputSubmission,
   type OpenTuiCancelSettled,
   type OpenTuiComposerSlot,
@@ -1455,6 +1456,13 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           }
           if (settlement.outcome === false) continue;
           const outcome = settlement.outcome;
+          if (outcome.kind === 'refused') {
+            // A queued `?`-form input the Mods refused, or one cancelled while
+            // they heard it, has left the composer, so it goes back there.
+            if (props.composerHandle)
+              returnToComposer(props.composerHandle, { text: entry.text });
+            continue;
+          }
           applyOutcome(outcome);
           // A submit_prompt outcome starts a turn and an open_dialog outcome
           // takes the UI over, so the commands behind either wait for that turn
@@ -1488,6 +1496,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     onSubmitPrompt,
     runShellCommand,
     config,
+    props.composerHandle,
   ]);
 
   const hostHistory = host.getHistory();

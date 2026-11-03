@@ -3055,6 +3055,38 @@ describe('OpenTuiApp shell wiring', () => {
     expect(mocks.state.handledTexts).toEqual(['/compress']);
   });
 
+  it('hands a queued ?-form command the Mods refused back to the composer', async () => {
+    mocks.state.deferDuringStreaming = true;
+    mocks.state.handleResults.push({ kind: 'refused' });
+    const restoreSubmission = vi.fn();
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+      composerHandle: {
+        current: { getText: () => '', setText: vi.fn(), restoreSubmission },
+      },
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    await submit('?compress now');
+    expect(screen.getByText(/Queued \?compress now/)).toBeTruthy();
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(restoreSubmission).toHaveBeenCalledExactlyOnceWith({
+        text: '?compress now',
+      }),
+    );
+    expect(mocks.state.handledTexts).toEqual(['?compress now']);
+  });
+
   it('runs a mid-turn slash command that opted into streaming at once', async () => {
     renderApp({ streaming: true });
     await settle();

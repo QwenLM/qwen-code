@@ -262,10 +262,15 @@ function userRow(
   };
 }
 
-/** Slash-form text, which neither the Mods' hooks nor their startup hold. */
+/**
+ * Slash-form text, which neither the Mods' hooks nor their startup hold. Text
+ * sent with attached images is a prompt whatever its form: the shell sends it
+ * to the model without dispatching it as a command.
+ */
 function isSlashForm(
-  entry: Pick<OpenTuiInputSubmission, 'text' | 'displayText'>,
+  entry: Pick<OpenTuiInputSubmission, 'text' | 'displayText' | 'imagePaths'>,
 ): boolean {
+  if (entry.imagePaths?.length) return false;
   return isSlashCommand((entry.displayText ?? entry.text).trim());
 }
 
@@ -485,7 +490,12 @@ export function useOpenTuiLiveTurn(
   // finish loading, or that Mods which failed to load refuse; until then it
   // has no row. Slash-form text keeps its own path, as it does in ink.
   const hooksHear = useCallback(
-    (entry: Pick<OpenTuiInputSubmission, 'text' | 'displayText'>) => {
+    (
+      entry: Pick<
+        OpenTuiInputSubmission,
+        'text' | 'displayText' | 'imagePaths'
+      >,
+    ) => {
       const mods = getInteractiveModSession(config);
       return (
         (mods?.hearsPrompts === true ||
@@ -562,7 +572,9 @@ export function useOpenTuiLiveTurn(
               apply({ type: 'error', text: MODS_FAILED_TO_INITIALIZE });
               // The prompts waiting behind this one would each be refused in
               // turn, so they come back with it, in the order they were
-              // sent; slash-form text stays queued, as no Mod refuses it.
+              // sent; typed slash-form text stays queued, as no Mod refuses
+              // it. Generated entries cannot be edited back, so they go with
+              // the refusal above.
               const returned = [
                 ...(active.held && editablePrompt ? [editablePrompt] : []),
                 ...queueRef.current.filter(
@@ -1049,7 +1061,8 @@ export function useOpenTuiLiveTurn(
       }
       const promptId = options?.promptId ?? nextLivePromptId(config);
       const held =
-        !generated && hooksHear({ text, displayText: options?.displayText });
+        !generated &&
+        hooksHear({ text, displayText: options?.displayText, imagePaths });
       if (!options?.invocationEchoed && !held) {
         apply(
           userRow(

@@ -3302,4 +3302,27 @@ describe('useOpenTuiLiveTurn prompt.submit', () => {
     await vi.waitFor(() => expect(live.turns).toHaveLength(2));
     expect(submitPrompt).not.toHaveBeenCalled();
   });
+
+  it('hears slash-form text sent with an image, which goes to the model as a prompt', async () => {
+    const { submitPrompt, answer } = installHooks();
+    const path = join(dir, 'slash.png');
+    writeFileSync(path, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('/deploy key AKIA1', [path]);
+    });
+    await vi.waitFor(() =>
+      expect(submitPrompt).toHaveBeenCalledExactlyOnceWith(
+        '/deploy key AKIA1',
+        expect.any(AbortSignal),
+      ),
+    );
+    expect(live.turns).toEqual([]);
+    await answer({ text: '/deploy key [redacted]' });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    const sent = live.turns[0].prompt as Array<{ text?: string }>;
+    expect(sent[0].text).toBe('/deploy key [redacted]');
+  });
 });
