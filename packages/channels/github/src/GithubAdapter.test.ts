@@ -6830,6 +6830,51 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(mockOctokit.paginate).toHaveBeenCalled();
     });
 
+    it('names the binding lookup, not workspace storage, when failing refreshes reach the cold-empty cap (R1-8)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockRejectedValue(new Error('daemon cold'));
+      mockOctokit.paginate.mockResolvedValue([]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        for (let i = 0; i < 30; i++) {
+          await pollOnce();
+        }
+        const capLine = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('has been an empty partial for 30'));
+        expect(capLine).toBeDefined();
+        expect(capLine).toContain('binding lookup itself has been failing');
+        expect(capLine).not.toContain('chats directory');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('hints at unreadable storage after ten partial snapshots and counts the listed rows (R1-8)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      // One tombstone row: no routable binding, but a listed session.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [{ sessionId: 'tomb', workspaceCwd: '/ws', prs: [] }],
+        partial: true,
+      });
+      mockOctokit.paginate.mockResolvedValue([]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        for (let i = 0; i < 10; i++) {
+          await pollOnce();
+        }
+        const hint = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .find((line) => line.includes('has been partial for 10'));
+        expect(hint).toBeDefined();
+        expect(hint).toContain('(1 sessions listed)');
+        expect(hint).toContain('PR bindings scan');
+        expect(hint).toContain('no runtime');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
     it('opens the lane on a non-empty partial snapshot and delivers known targets (R1-7)', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });
       // A partial answer that LISTS the binding is enough for the known

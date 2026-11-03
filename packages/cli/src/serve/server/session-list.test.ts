@@ -467,7 +467,8 @@ describe('merged session catalog pagination', () => {
           result.sessions.map((session) => [session.sessionId, session]),
         );
         // A corrupt sidecar must not emit an authoritative tombstone
-        // (prs: []): that would read as an unbind.
+        // (prs: []): that would read as an unbind — nor drop the row.
+        expect(byId.has(corrupt.sessionId)).toBe(true);
         expect(byId.get(corrupt.sessionId)?.prs).toBeUndefined();
         expect(byId.get(cleared.sessionId)?.prs).toEqual([]);
         expect(byId.get(unbound.sessionId)?.prs).toBeUndefined();

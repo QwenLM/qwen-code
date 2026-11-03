@@ -12,6 +12,7 @@ import { readSessionPrsDetailed } from '@qwen-code/qwen-code-core/services/sessi
 import type { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import type { BridgeSessionSummary } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isHiddenCatalogSource } from '../../runtime/agent-session-source.js';
+import { laterActivityTimestamp } from '../server/activity-timestamp.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
 import type {
@@ -29,11 +30,14 @@ import type {
  * The scan reads the `<chatsDir>/<sessionId>.pr.json` sidecars directly —
  * one `readdir` per workspace, the same enumeration the PR refresh timer
  * uses — instead of paginating the activity-ordered session list. A
- * directory listing is a snapshot, so the answer is complete unless a file
- * could not be read; `partial` therefore means an I/O failure, never "more
- * sessions than one page". Bindings the bridge holds in memory but that have
- * not reached a sidecar yet (the window between the bridge update and the
- * sidecar write, or a failed write) are appended from the live session list.
+ * directory listing is a snapshot, so the answer is complete unless
+ * something could not be read: a registry entry without a runtime, a chats
+ * directory that cannot be listed, a sidecar or transcript that cannot be
+ * read, or a live session list that cannot be fetched. `partial` therefore
+ * means an I/O failure, never "more sessions than one page". Bindings the
+ * bridge holds in memory but that have not reached a sidecar yet (the window
+ * between the bridge update and the sidecar write, or a failed write) are
+ * merged in from the live session list.
  */
 
 export interface SessionPrBindingEntry {
@@ -59,15 +63,6 @@ function validTimestamp(value: string | undefined): string | undefined {
   return value !== undefined && !Number.isNaN(Date.parse(value))
     ? value
     : undefined;
-}
-
-function later(
-  a: string | undefined,
-  b: string | undefined,
-): string | undefined {
-  if (a === undefined) return b;
-  if (b === undefined) return a;
-  return b > a ? b : a;
 }
 
 function projectPrs(
@@ -128,9 +123,11 @@ async function resolveAttribution(
   }
   const sourceType = item?.sourceType ?? liveSummary?.sourceType;
   if (isHiddenCatalogSource(sourceType)) return { kind: 'hidden' };
-  const updatedAt = later(
-    item ? new Date(item.mtime).toISOString() : undefined,
+  // The shared recency rule: an unparseable live value never displaces the
+  // persisted one, and the comparison is chronological, not lexicographic.
+  const updatedAt = laterActivityTimestamp(
     validTimestamp(liveSummary?.updatedAt ?? liveSummary?.createdAt),
+    item ? new Date(item.mtime).toISOString() : undefined,
   );
   return {
     kind: 'ok',
@@ -140,10 +137,10 @@ async function resolveAttribution(
 }
 
 /**
- * Appends one row per readable sidecar of the workspace, plus one per live
- * session whose bindings have not reached a sidecar. Returns true when a
- * sidecar or transcript could not be read, so the caller flags the answer
- * partial; such a session's bindings are UNKNOWN, not empty.
+ * Appends one row per readable sidecar of the workspace, merges in the
+ * bindings the bridge holds in memory, and returns true when anything could
+ * not be read (a sidecar, a transcript, or the live session list), so the
+ * caller flags the answer partial; such bindings are UNKNOWN, not absent.
  */
 async function scanWorkspaceBindings(
   runtime: WorkspaceRuntime,
@@ -151,19 +148,26 @@ async function scanWorkspaceBindings(
 ): Promise<boolean> {
   const sessionService = createWorkspaceRuntimeSessionService(runtime);
   const sessionIds = sessionService.listSessionIdsWithPrSidecar('active');
-  // The live list only refines the persisted facts: without it the scan
-  // still answers from the files.
+  // The live list is the only source for a binding that has not reached a
+  // sidecar, so a failed read makes the answer incomplete.
   let live = new Map<string, BridgeSessionSummary>();
+  let liveReadFailed = false;
   try {
     live = new Map(
       runtime.bridge
         .listWorkspaceSessions(runtime.workspaceCwd)
         .map((summary) => [summary.sessionId, summary]),
     );
-  } catch {
-    // Persisted facts stand on their own.
+  } catch (err) {
+    liveReadFailed = true;
+    process.stderr.write(
+      `[serve] PR bindings scan: live session list unavailable in workspace ${runtime.workspaceCwd}, live-only bindings may be missing from this answer (partial): ${sanitizeLogText(
+        err instanceof Error ? err.message : String(err),
+        200,
+      )}\n`,
+    );
   }
-  const listed = new Set<string>();
+  const rows = new Map<string, SessionPrBindingSummary>();
   const failures: Array<{ sessionId: string; cause: string }> = [];
   for (const sessionId of sessionIds) {
     try {
@@ -184,15 +188,6 @@ async function scanWorkspaceBindings(
       const sidecar = await readSessionPrsDetailed(prPath);
       // Absent: unbound or archived between the listing and the read.
       if (sidecar.status === 'absent') continue;
-      if (sidecar.status === 'ok' && sidecar.prs.length === 0) {
-        // Tombstone: "scanned, no bindings" (an observed unbind) must stay
-        // distinguishable from "not enumerated" for callers that retain
-        // state across answers. It names no delivery target, so it carries
-        // no attribution and costs no transcript read.
-        listed.add(sessionId);
-        out.push({ sessionId, workspaceCwd: runtime.workspaceCwd, prs: [] });
-        continue;
-      }
       const attribution = await resolveAttribution(
         sessionService,
         sessionId,
@@ -201,7 +196,7 @@ async function scanWorkspaceBindings(
       );
       // Non-targets are decided before any failure is counted, so a
       // machine-owned session's corrupt sidecar cannot make the answer
-      // partial.
+      // partial — and an empty sidecar of such a session is no tombstone.
       if (attribution.kind === 'hidden' || attribution.kind === 'archived') {
         continue;
       }
@@ -216,8 +211,19 @@ async function scanWorkspaceBindings(
         });
         continue;
       }
-      listed.add(sessionId);
-      out.push({
+      if (sidecar.prs.length === 0) {
+        // Tombstone: "scanned, no bindings" (an observed unbind) must stay
+        // distinguishable from "not enumerated" for callers that retain
+        // state across answers. It names no delivery target, so it carries
+        // no attribution.
+        rows.set(sessionId, {
+          sessionId,
+          workspaceCwd: runtime.workspaceCwd,
+          prs: [],
+        });
+        continue;
+      }
+      rows.set(sessionId, {
         sessionId,
         workspaceCwd: runtime.workspaceCwd,
         ...(attribution.sourceType !== undefined
@@ -235,17 +241,27 @@ async function scanWorkspaceBindings(
       });
     }
   }
-  // A binding the bridge holds but no sidecar has yet (the metadata route
+  // Bindings the bridge holds but no sidecar has yet (the metadata route
   // updates the bridge before persisting the sidecar; the write can fail)
-  // is still a binding. A listed row is authoritative — in particular an
-  // empty one stays a tombstone.
+  // are still bindings: a session without a row gets one from the live
+  // summary, and a non-empty row gains the PR numbers it lacks. An empty
+  // row is an observed unbind and stays a tombstone.
   for (const [sessionId, summary] of live) {
-    if (listed.has(sessionId) || !summary.prs?.length) continue;
+    if (!summary.prs?.length) continue;
+    const row = rows.get(sessionId);
+    if (row !== undefined) {
+      if (row.prs.length === 0) continue;
+      const known = new Set(row.prs.map((pr) => pr.number));
+      row.prs.push(
+        ...projectPrs(summary.prs.filter((pr) => !known.has(pr.number))),
+      );
+      continue;
+    }
     if (summary.isArchived || isHiddenCatalogSource(summary.sourceType)) {
       continue;
     }
     const updatedAt = validTimestamp(summary.updatedAt ?? summary.createdAt);
-    out.push({
+    rows.set(sessionId, {
       sessionId,
       workspaceCwd: runtime.workspaceCwd,
       ...(summary.sourceType !== undefined
@@ -255,14 +271,16 @@ async function scanWorkspaceBindings(
       prs: projectPrs(summary.prs),
     });
   }
-  if (failures.length === 0) return false;
-  // One line per workspace scan, not one per failing session per poll: the
-  // route is polled every channel cycle.
-  const first = failures[0]!;
-  process.stderr.write(
-    `[serve] PR bindings scan: ${failures.length} of ${sessionIds.length} sessions could not be read in workspace ${runtime.workspaceCwd}, answer partial (first: ${sanitizeLogText(first.sessionId, 64)}: ${sanitizeLogText(first.cause, 200)})\n`,
-  );
-  return true;
+  out.push(...rows.values());
+  if (failures.length > 0) {
+    // One line per workspace scan, not one per failing session per poll:
+    // the route is polled every channel cycle.
+    const first = failures[0]!;
+    process.stderr.write(
+      `[serve] PR bindings scan: ${failures.length} of ${sessionIds.length} sessions could not be read in workspace ${runtime.workspaceCwd}, answer partial (first: ${sanitizeLogText(first.sessionId, 64)}: ${sanitizeLogText(first.cause, 200)})\n`,
+    );
+  }
+  return liveReadFailed || failures.length > 0;
 }
 
 export function registerSessionPrBindingsRoutes(
@@ -280,6 +298,9 @@ export function registerSessionPrBindingsRoutes(
           // Without a runtime the workspace's session storage cannot be
           // located; its bindings are unknown, not absent. listAllEntries()
           // already excludes removed entries (legitimate absence).
+          process.stderr.write(
+            `[serve] PR bindings scan: workspace ${entry.workspaceCwd} has no runtime (state ${entry.state}), answer partial\n`,
+          );
           partial = true;
           continue;
         }

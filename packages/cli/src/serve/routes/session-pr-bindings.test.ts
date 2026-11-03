@@ -703,6 +703,140 @@ describe('GET /sessions/pr-bindings', () => {
     expect(body).toEqual({ bindings: [], partial: false });
   });
 
+  it('flags partial and keeps sidecar rows when the live session list cannot be read', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    await seedBinding(cwd, SESSION_A, [101]);
+    const runtime = makeRuntime(cwd);
+    (
+      runtime.bridge as unknown as { listWorkspaceSessions: () => never }
+    ).listWorkspaceSessions = () => {
+      throw new Error('EACCES: bridge unavailable');
+    };
+    const lines = captureStderr();
+
+    const body = await fetchBindings([makeEntry(runtime)]);
+
+    expect(body.partial).toBe(true);
+    expect(body.bindings.map((b) => b.sessionId)).toEqual([SESSION_A]);
+    expect(lines).toContainEqual(
+      expect.stringContaining('live session list unavailable'),
+    );
+  });
+
+  it('merges bridge-held PR numbers into a listed non-empty row', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A);
+    await seedBinding(cwd, SESSION_A, [101]);
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        prs: [
+          { number: 101, url: 'https://github.com/acme/widgets/pull/101' },
+          { number: 56, url: 'https://github.com/acme/widgets/pull/56' },
+        ],
+      }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.partial).toBe(false);
+    expect(body.bindings).toHaveLength(1);
+    expect(body.bindings[0]?.prs.map((pr) => pr.number)).toEqual([101, 56]);
+  });
+
+  it('does not list an empty sidecar of a machine-owned or archived session as a tombstone', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A, { sourceType: 'agent' });
+    await seedBinding(cwd, SESSION_A, []);
+    await seedTranscript(cwd, SESSION_B, { archived: true });
+    await seedBinding(cwd, SESSION_B, []);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({ bindings: [], partial: false });
+  });
+
+  it('compares timestamps chronologically, not lexicographically', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A, {
+      mtime: new Date('2026-11-02T05:00:00.000Z'),
+    });
+    await seedBinding(cwd, SESSION_A, [101]);
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        createdAt: '2026-11-01T00:00:00.000Z',
+        // 01:00Z, earlier than the persisted mtime despite sorting after it.
+        updatedAt: '2026-11-02T09:00:00+08:00',
+      }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.bindings[0]?.updatedAt).toBe('2026-11-02T05:00:00.000Z');
+  });
+
+  it('treats a non-empty transcript that yields no records as unreadable', async () => {
+    const cwd = await makeWorkspace();
+    await seedBinding(cwd, SESSION_A, [101]);
+    await fsp.writeFile(transcriptPath(cwd, SESSION_A), 'not jsonl\n', 'utf8');
+    captureStderr();
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({ bindings: [], partial: true });
+  });
+
+  it('resolves session storage from the runtime it was handed, not the ambient base', async () => {
+    const cwd = await makeWorkspace();
+    const otherBase = await fsp.mkdtemp(path.join(runtimeDir, 'other-base-'));
+    const chats = path.join(
+      new Storage(cwd, otherBase).getProjectDir(),
+      'chats',
+    );
+    await fsp.mkdir(chats, { recursive: true });
+    await fsp.writeFile(
+      path.join(chats, `${SESSION_A}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${SESSION_A}-user-1`,
+        parentUuid: null,
+        sessionId: SESSION_A,
+        timestamp: '2026-11-01T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'hello' }] },
+        cwd,
+      })}\n`,
+      'utf8',
+    );
+    await upsertSessionPr(path.join(chats, `${SESSION_A}.pr.json`), {
+      number: 101,
+      url: 'https://github.com/acme/widgets/pull/101',
+      state: 'open',
+    });
+    const runtime = {
+      ...makeRuntime(cwd),
+      sessionRuntimeBaseDir: otherBase,
+    } as WorkspaceRuntime;
+
+    const body = await fetchBindings([makeEntry(runtime)]);
+
+    expect(body.partial).toBe(false);
+    expect(body.bindings.map((b) => b.sessionId)).toEqual([SESSION_A]);
+  });
+
+  it('skips a sidecar that vanishes between the listing and the read', async () => {
+    const cwd = await makeWorkspace();
+    await fsp.mkdir(chatsDirFor(cwd), { recursive: true });
+    // A dangling symlink lists under the sidecar name but reads as ENOENT.
+    await fsp.symlink(
+      path.join(chatsDirFor(cwd), 'missing-target.pr.json'),
+      sidecarPath(cwd, SESSION_A),
+    );
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body).toEqual({ bindings: [], partial: false });
+  });
+
   it('routes registry failures through sendBridgeError', async () => {
     const { app, sendBridgeError } = appHarness({
       entries: [],
