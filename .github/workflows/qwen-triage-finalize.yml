@@ -51,8 +51,7 @@ concurrency:
   # cancel-in-progress: false — the queued PR run re-reads fresh state, so the
   # last one always converges.
   group: >-
-    qwen-triage-finalize-${{ github.event.workflow_run.event == 'pull_request'
-      && github.event.workflow_run.head_sha || github.run_id }}
+    qwen-triage-finalize-${{ github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_sha || github.run_id }}
   cancel-in-progress: false
 
 jobs:
