@@ -366,6 +366,28 @@ Both kinds of turn run the Todo Stop Guard as their stop policy, after the Stop 
 
 The core change of this step: `userTurnRecordedByHost` also covers a `Cron` and a `Notification` send, whose prompt or notification the host records.
 
+### The Ink TUI on the shared loop (PR 3)
+
+The Ink TUI already sends every model round through `LlmClient.sendMessageStream`, from one function, `submitQuery`, for every kind of turn. Its loop is split by React instead: a response that requested tools hands them to the scheduler and returns, and the scheduler's completion callback sends the results as a new `ToolResult` turn. Moving the TUI means awaiting that batch, so it moves in these steps:
+
+| Step | Content                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 3a   | every model round on the loop's `runModelRound`; the TUI keeps its tool step; the Ink parity suite                                                                                                                                                                                                                                                                                         |
+| 3b   | the tool batch of a turn awaited on the shared batch, over the TUI's `InteractiveModToolScheduler`, with the display fed from callbacks; duplicates, finalizing and recording are the loop's; the TUI's own steps (its history repair, the tool-use summary, the stops for a quota model switch and for spent background-agent capacity, the split by interaction owner) become host hooks |
+| 3c-1 | input taken at a tool boundary through the loop's next round; a retry                                                                                                                                                                                                                                                                                                                      |
+| 3c-2 | cron, background-notification, teammate and Goal turns                                                                                                                                                                                                                                                                                                                                     |
+| 3d   | default on, then remove the current loop                                                                                                                                                                                                                                                                                                                                                   |
+
+PR 3a puts every model round of the TUI on `runModelRound`. The round sends the same request with the same options, so the TUI's stream processor keeps handling every event as today. What moves is the part of the round the loop already owns:
+
+| The TUI today                                                          | With the setting on                                          |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------ |
+| the stream processor collects `ToolCallRequest` events                 | `runModelRound` collects them                                |
+| the processor drops the collected calls on `Retry` and `ModelFallback` | `runModelRound` drops them                                   |
+| a detected loop keeps the collected calls from being scheduled         | any stop reason of the round keeps them from being scheduled |
+
+A stop reason other than a detected loop comes from an event the client sends before it asks the model (the session turn cap, the session token limit, a blocked prompt) or from a cancel, which ends the round as today, so its round has no calls to schedule. The TUI therefore behaves the same with the setting on and off.
+
 ## Migration
 
 | PR   | Content                                                                                                                                             |
@@ -381,13 +403,17 @@ The core change of this step: `userTurnRecordedByHost` also covers a `Cron` and 
 | 2c-3 | ACP: Goal turns                                                                                                                                     |
 | 2c-4 | ACP: cron and background-notification turns                                                                                                         |
 | 2d   | ACP: default on, then remove its current loop                                                                                                       |
-| 3    | Ink TUI                                                                                                                                             |
+| 3a   | Ink TUI: every model round on the loop's round; the TUI keeps its tool step; the Ink parity suite                                                   |
+| 3b   | Ink TUI: the tool batch awaited on the shared batch                                                                                                 |
+| 3c-1 | Ink TUI: input at a tool boundary through the loop's next round; a retry                                                                            |
+| 3c-2 | Ink TUI: cron, background-notification, teammate and Goal turns                                                                                     |
+| 3d   | Ink TUI: default on, then remove its current loop                                                                                                   |
 | 4    | OpenTUI                                                                                                                                             |
 | 5    | AgentCore on a `Turn` round (subagents, background and forked agents, workflows)                                                                    |
 | 6    | speculation                                                                                                                                         |
 | —    | Hosted Harness: separate evaluation                                                                                                                 |
 
-Each of PRs 3–6 is followed by its own default-on and removal steps.
+Each of PRs 4–6 is followed by its own default-on and removal steps.
 
 A surface counts as moved when it passes its parity suite with the setting on and its known differences are listed. Each surface then changes its default on its own, without waiting for the others. Its default changes when:
 
@@ -445,6 +471,17 @@ A difference fails the scenario unless it is listed with a linked issue.
 - the Todo Stop Guard continuing past unfinished todos until its attempts are spent;
 - a Goal whose first continuation stops on its own and whose second proposes it complete, which the verifier accepts;
 - a background shell whose result arrives after the prompt ended and starts a notification turn.
+
+**Ink scenarios** (`integration-tests/interactive/ink-agent-loop-parity.test.ts`). The TUI runs in a pseudo-terminal against the fake server. The suite compares the requests and the session's chat records; it does not compare the screen, which repaints on timers:
+
+- plain text, and streamed text with a thought;
+- one tool, and two reads in one response;
+- an edit cut off by the output limit;
+- a stream that drops and is retried;
+- two prompts in one session;
+- a model error;
+- a UserPromptSubmit hook that blocks;
+- a Stop hook that blocks once.
 
 A continuation's request runs under a prompt id of its own on the current loop and under the turn's prompt id on the shared loop; the suite compares them as one.
 

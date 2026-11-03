@@ -366,6 +366,28 @@ prompt 循环里的共享模型轮改为三个循环共用的方法。prompt 循
 
 这一步对 core 的改动：`userTurnRecordedByHost` 也覆盖 `Cron` 和 `Notification` 发送，表示由宿主记录 prompt 或通知。
 
+### Ink TUI 迁到共享 loop（PR 3）
+
+Ink TUI 的每个模型轮已经通过 `LlmClient.sendMessageStream` 发送，所有类型的轮次都由同一个函数 `submitQuery` 发出。它的 loop 是被 React 拆开的：请求了工具的响应把工具交给 scheduler 后就返回，由 scheduler 的完成回调把结果作为新的 `ToolResult` 轮次发出。迁移 TUI 就是要等待这个工具批，因此分以下几步：
+
+| 步骤 | 内容                                                                                                                                                                                                                                                                  |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 3a   | 每个模型轮改用 loop 的 `runModelRound`；TUI 保留自己的工具步骤；Ink 对拍测试                                                                                                                                                                                          |
+| 3b   | 一个轮次的工具批改为在共享工具批上等待完成，底层仍是 TUI 的 `InteractiveModToolScheduler`，界面通过回调更新；去重、收尾和记录由 loop 负责；TUI 自己的步骤（历史修复、工具使用摘要、额度切换模型时的停止和后台 agent 容量用尽时的停止、按交互 owner 拆分）改为宿主钩子 |
+| 3c-1 | 工具边界取入的输入改走 loop 的下一轮；retry                                                                                                                                                                                                                           |
+| 3c-2 | cron、后台通知、teammate 和 Goal 轮次                                                                                                                                                                                                                                 |
+| 3d   | 默认开启，随后删除现有 loop                                                                                                                                                                                                                                           |
+
+PR 3a 把 TUI 的每个模型轮都放到 `runModelRound` 上。模型轮用相同的选项发送相同的请求，因此 TUI 的流处理器仍和现在一样处理每个事件。迁走的是 loop 本来就负责的那部分：
+
+| TUI 现在                                                 | 开启设置后                                |
+| -------------------------------------------------------- | ----------------------------------------- |
+| 流处理器收集 `ToolCallRequest` 事件                      | 由 `runModelRound` 收集                   |
+| 流处理器在 `Retry` 和 `ModelFallback` 时丢弃已收集的调用 | 由 `runModelRound` 丢弃                   |
+| 检测到循环时不调度已收集的调用                           | 模型轮的任何 stop reason 都不调度这些调用 |
+
+除检测到循环外，其他 stop reason 要么来自 client 在请求模型之前发出的事件（会话轮次上限、会话 token 上限、被拦截的 prompt），要么来自取消，而取消和现在一样结束这一轮，所以这些模型轮都没有要调度的调用。因此设置开启和关闭时，TUI 的行为相同。
+
 ## 迁移计划
 
 | PR   | 内容                                                                                                      |
@@ -381,13 +403,17 @@ prompt 循环里的共享模型轮改为三个循环共用的方法。prompt 循
 | 2c-3 | ACP：Goal 轮次                                                                                            |
 | 2c-4 | ACP：cron 和后台通知轮次                                                                                  |
 | 2d   | ACP：默认开启，随后删除现有 loop                                                                          |
-| 3    | Ink TUI                                                                                                   |
+| 3a   | Ink TUI：每个模型轮改用 loop 的模型轮；TUI 保留自己的工具步骤；Ink 对拍测试                               |
+| 3b   | Ink TUI：工具批改为在共享工具批上等待完成                                                                 |
+| 3c-1 | Ink TUI：工具边界的输入改走 loop 的下一轮；retry                                                          |
+| 3c-2 | Ink TUI：cron、后台通知、teammate 和 Goal 轮次                                                            |
+| 3d   | Ink TUI：默认开启，随后删除现有 loop                                                                      |
 | 4    | OpenTUI                                                                                                   |
 | 5    | AgentCore 改用基于 `Turn` 的模型轮（subagent、后台与 fork agent、workflow）                               |
 | 6    | speculation                                                                                               |
 | —    | Hosted Harness：单独评估                                                                                  |
 
-PR 3–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两步。
+PR 4–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两步。
 
 一个入口在设置开启时通过它的对拍测试，并列出了已知差异，才算完成迁移。之后每个入口各自修改默认值，不必等其他入口。修改默认值需要同时满足：
 
@@ -445,6 +471,17 @@ PR 3–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两�
 - Todo Stop Guard 在还有未完成 todo 时继续，直到用完尝试次数；
 - 一个 Goal：第一次续写自行停下，第二次续写提出 Goal 已完成，verifier 接受；
 - 一个后台 shell：它的结果在 prompt 结束后到达，启动一个通知轮次。
+
+**Ink 场景**（`integration-tests/interactive/ink-agent-loop-parity.test.ts`）。TUI 在伪终端里对着假服务器运行。测试比较请求和会话的聊天记录；不比较屏幕，因为屏幕按定时器重绘：
+
+- 纯文本，以及带 thought 的流式文本；
+- 一个工具，以及一次响应中的两次读取；
+- 被输出上限截断的编辑；
+- 断开后重试的流；
+- 同一会话中的两个 prompt；
+- 模型错误；
+- 拦截的 UserPromptSubmit hook；
+- 拦截一次的 Stop hook。
 
 续发请求在现有 loop 上使用自己的 prompt id，在共享 loop 上沿用这一轮的 prompt id；对拍测试把两者视为相同。
 
