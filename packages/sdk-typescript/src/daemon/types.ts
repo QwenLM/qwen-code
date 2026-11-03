@@ -2014,6 +2014,7 @@ export interface DaemonSessionLiveState {
   hasRunningBackgroundTasks?: boolean;
   isWaitingForPermission: boolean;
   isWaitingForUserQuestion: boolean;
+  hasTurnError?: boolean;
   /**
    * Daemon-observed activity watermark: the newest terminal of a prompt that
    * reached the running state in the current bridge, as an ISO timestamp.
@@ -2028,6 +2029,32 @@ export interface DaemonWorkspaceSessionLiveState {
   v: 1;
   catalogVersion: DaemonSessionCatalogVersion;
   sessions: DaemonSessionLiveState[];
+}
+
+export interface DaemonSessionLiveStateBatchRequest {
+  /** 1–20 registered workspace ids or absolute cwd paths. */
+  workspaces: string[];
+}
+
+export interface DaemonSessionLiveStateBatchSnapshot
+  extends DaemonWorkspaceSessionLiveState {
+  /** Original selector from the request. */
+  workspace: string;
+  workspaceId: string;
+  cwd: string;
+}
+
+export interface DaemonSessionLiveStateBatchError {
+  workspace: string;
+  workspaceId?: string;
+  cwd?: string;
+  error: { code: string; message: string; status: number };
+}
+
+export interface DaemonSessionLiveStateBatchResult {
+  workspaces: Array<
+    DaemonSessionLiveStateBatchSnapshot | DaemonSessionLiveStateBatchError
+  >;
 }
 
 export interface DaemonWorkspaceSessionInfo {
@@ -3767,6 +3794,28 @@ export interface DaemonSessionStatsModelMetrics {
     /** Output tokens of the requests in `totalGenerationDurationMs`. */
     totalThroughputOutputTokens: number;
   };
+  /**
+   * Most recent timed, non-internal responses (oldest first, at most 200).
+   * Absent until a streamed response records its timing, and from older
+   * daemons.
+   */
+  timingSamples?: Array<{
+    /** Event time, epoch ms. */
+    at: number;
+    ttftMs: number;
+    /** Generation window; below 100 ms it measures no output rate. */
+    generationMs: number;
+    outputTokens: number;
+    /** Subagent that issued the request; absent for the main conversation. */
+    source?: string;
+  }>;
+  /** Failed API calls; absent until the first failure, and from older daemons. */
+  failures?: {
+    /** Count per HTTP status code, else error type, else `unknown`. */
+    byKind: Record<string, number>;
+    /** Most recent failures, oldest first, at most 50. */
+    recent: Array<{ at: number; kind: string; source?: string }>;
+  };
 }
 
 export interface DaemonSessionStatsToolByName {
@@ -4967,6 +5016,47 @@ export interface DaemonChannelInstanceSnapshot {
 export interface DaemonChannelsSnapshot {
   revision: string;
   instances: Record<string, DaemonChannelInstanceSnapshot>;
+}
+
+export type DaemonChannelEventType = 'inbound' | 'outbound' | 'task' | 'poll';
+
+/**
+ * One entry of a Channel's event journal: what the Channel did, not what a
+ * message said. Records never carry message text.
+ */
+export interface DaemonChannelEvent {
+  at: string;
+  channel: string;
+  type: DaemonChannelEventType;
+  outcome: string;
+  reason?: string;
+  triggerKind?: string;
+  repository?: string;
+  thread?: string;
+  number?: number;
+  actor?: string;
+  sessionId?: string;
+  messageId?: string;
+  durationMs?: number;
+  error?: string;
+  detail?: Record<string, string | number | boolean>;
+}
+
+export interface DaemonChannelEventsSnapshot {
+  events: DaemonChannelEvent[];
+  /**
+   * True when older events are missing: the record limit was reached, a
+   * journal was left out by the route's read bounds, or a journal was taller
+   * than the tail window the route reads.
+   */
+  truncated: boolean;
+}
+
+export interface DaemonChannelEventsQuery {
+  limit?: number;
+  types?: readonly DaemonChannelEventType[];
+  channels?: readonly string[];
+  since?: string;
 }
 
 export type DaemonChannelSecretUpdate =

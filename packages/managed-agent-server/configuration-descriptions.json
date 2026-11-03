@@ -79,8 +79,8 @@
       "zh": "内置 `qwen-code` agent 的修订号标签，会固定在使用它的每个 Session 上；请求中指定 `qwen-code` 的其他修订号会被拒绝。长度必须为 1 到 128 个字符（否则启动时拒绝）。"
     },
     "qwen.managed-agent.artifacts.enabled": {
-      "en": "Whether tool results are projected into public tool results and artifacts, and whether the artifact read API is served. Reads answer not found unless `qwen.managed-agent.tool-publication.enabled` is also true, and they require an authenticated actor. Even while it is false, committed tool receipts are still recorded for projection, so turning it on later also projects the tool results recorded while it was off.",
-      "zh": "是否将工具结果投影为公开工具结果和制品，以及是否提供制品读取 API。除非同时开启 `qwen.managed-agent.tool-publication.enabled`，否则读取返回未找到；读取还要求已认证的 actor。即使为 false，已提交的工具回执仍会被记录下来等待投影，因此之后开启时，关闭期间记录的工具结果也会被投影。"
+      "en": "Whether tool results are projected into public tool results and artifacts, and whether the artifact read API is served. Reads answer not found unless `qwen.managed-agent.tool-publication.enabled` is also true, and they require an authenticated actor. Even while it is false, committed tool receipts are still recorded for projection, so turning it on later also projects the tool results recorded while it was off. Sessions created through the private CSI lane (the `csi-session` admin command) are the exception: their receipts are never recorded, so their tool results are never projected.",
+      "zh": "是否将工具结果投影为公开工具结果和制品，以及是否提供制品读取 API。除非同时开启 `qwen.managed-agent.tool-publication.enabled`，否则读取返回未找到；读取还要求已认证的 actor。即使为 false，已提交的工具回执仍会被记录下来等待投影，因此之后开启时，关闭期间记录的工具结果也会被投影。私有 CSI 通道创建的 Session（`csi-session` 管理命令）例外：它们的回执从不记录，因此其工具结果从不投影。"
     },
     "qwen.managed-agent.artifacts.max-concurrent-reads": {
       "en": "How many artifact content downloads this server process serves at once; a download beyond that gets HTTP 429 `artifact_read_limit` with `Retry-After: 1`. Must be at least 1 (startup refusal).",
@@ -141,8 +141,8 @@
       "zh": "扫描器发现到期槽位时，允许其迟到多久仍按计划触发。更迟的槽位按定义的补跑策略（`none`、`latest` 或 `bounded`）处理，未被补跑的记为错过。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。"
     },
     "qwen.managed-agent.automation.lease": {
-      "en": "How long a scanner tick or a manual run holds an automation definition's lease, counted from its claim; once it lapses another node may claim the definition, and from that claim on the earlier holder's writes to it are refused. Startup refuses a non-positive value when automation is enabled. A plain number is milliseconds.",
-      "zh": "扫描轮次或手动运行持有自动化定义租约的时长，从认领时起算；租约过期后其他节点即可认领该定义，自该认领起，原持有者对它的写入都会被拒绝。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。"
+      "en": "How long a scanner or a manual run holds an automation definition's lease, counted from its claim of that definition; once it lapses another node may claim the definition, and from that claim on the earlier holder's writes to it are refused. Startup refuses a non-positive value when automation is enabled. A plain number is milliseconds.",
+      "zh": "扫描器或手动运行持有自动化定义租约的时长，从认领该定义时起算；租约过期后其他节点即可认领该定义，自该认领起，原持有者对它的写入都会被拒绝。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。"
     },
     "qwen.managed-agent.automation.lookback": {
       "en": "How far back the scanner derives a definition's due slots; slots older than this, or older than the definition's arming, are neither fired nor recorded, which bounds every catch-up. Startup refuses a non-positive value when automation is enabled. A plain number is milliseconds.",
@@ -460,6 +460,12 @@
       "zh": "为内置 `qwen-code` agent 的 Session 提供的可选模型，可在创建 Session 时选择，之后也可由 Workspace operator 更改。元素为对象列表，包含 `model-id`（Harness 中配置的模型 ID；必填、唯一、最多 512 字节）和 `label`（显示名称，默认等于 `model-id`，最多 512 个字符）；条目无效或重复时启动时拒绝。需在 YAML 配置文件中设置，没有对应的环境变量。模型选择还要求开启 `qwen.managed-agent.harness.workspace-files-enabled`，且 Harness 支持模型选择。",
       "default": ""
     },
+    "qwen.managed-agent.model-config-base-urls": {
+      "en": "Exact HTTP(S) base URLs permitted for complete Session model configurations, set as a YAML list. Empty disables admission of new configurations. Public creation accepts `model_config`; WebShell creation accepts `modelConfig`. Requires the Session Store, Harness capability `session-model-config/1` and a `SecretProtector` (provided by the enabled Runtime Broker and its credential key ring in the standard server). Model IDs and API keys need no Harness registration. See the [Session model configuration design](../design/managed-session-model-config.md).",
+      "zh": "允许完整 Session 模型配置使用的 HTTP(S) API 地址，按完整字符串精确匹配，以 YAML 列表设置。为空时禁止准入新配置。公共创建接口接受 `model_config`，WebShell 创建接口接受 `modelConfig`。要求启用 Session Store、Harness 能力 `session-model-config/1` 和 `SecretProtector`（标准服务由已启用的 Runtime Broker 及其凭据密钥环提供）。模型 ID 和 API key 无需在 Harness 注册。参见 [Session 模型配置设计](../design/managed-session-model-config.zh-CN.md)。",
+      "type": "yaml-list",
+      "default": ""
+    },
     "qwen.managed-agent.runtime-broker.allow-non-loopback": {
       "en": "Whether the embedded Runtime Broker may bind a non-loopback address in `qwen.managed-agent.runtime-broker.host`, such as `0.0.0.0`; without it, startup refuses such an address. The listener serves one global bearer token over plaintext HTTP, with no per-tenant authorization, so enable it only behind a layer that terminates TLS and authorizes callers: restricting the network alone still sends the token in clear text, and whoever reads it can drive every execution the Broker admits. The `managed-local` profile refuses a non-loopback host regardless.",
       "zh": "是否允许内嵌 Runtime Broker 绑定 `qwen.managed-agent.runtime-broker.host` 中的非回环地址（例如 `0.0.0.0`）；未开启时，此类地址启动时拒绝。该监听器通过明文 HTTP 使用同一个全局 bearer token，且没有按租户的鉴权，因此只应在终止 TLS 并对调用方鉴权的前置层之后开启：仅限制网络仍会以明文传输该 token，读到它的人可以操控 Broker 接纳的所有执行。`managed-local` profile 无论此项如何都拒绝非回环 host。"
@@ -554,9 +560,14 @@
       "zh": "密钥轮换后保留的旧 Runtime 凭据密钥，形式为 key ID 到 base64 编码 32 字节密钥的映射，使以旧密钥加密的行仍可读取，而写入始终只使用当前密钥。属于机密。须在配置文件（YAML）中设置，并用方括号包住每个 ID，例如 `'[old-v1]': <key>`；无法通过环境变量提供。密钥不是 32 字节，或 ID 与 `qwen.managed-agent.runtime-broker.credential-key-id` 相同时启动时拒绝。",
       "default": ""
     },
+    "qwen.managed-agent.runtime-broker.provider-options": {
+      "en": "Provider-specific string settings passed to the selected Runtime factory, configured as a YAML map. Their meaning and validation belong to that provider; built-in backends continue to use their existing settings. Defaults to an empty map.",
+      "zh": "传递给选中 Runtime 工厂的专用字符串配置，以 YAML 映射设置。其含义及校验由该 provider 决定；内置后端继续使用原有配置项。默认为空映射。",
+      "default": "{}"
+    },
     "qwen.managed-agent.runtime-broker.provisioner": {
-      "en": "Which provisioner places Runtime workers: `local-process` (Node.js workers on this host), `static` (one preconfigured worker at `qwen.managed-agent.runtime-broker.static-endpoint`), `external-scratch` or `external-workspace` (an operator-run HTTP provider at `qwen.managed-agent.runtime-broker.external-provider-url`), or `kubernetes-workspace` (resident Workspaces from `qwen.managed-agent.runtime-broker.resident-workspaces`). Startup refuses any other value, including `kubernetes`.",
-      "zh": "放置 Runtime worker 所用的 provisioner：`local-process`（本机上的 Node.js worker）、`static`（位于 `qwen.managed-agent.runtime-broker.static-endpoint` 的单个预配置 worker）、`external-scratch` 或 `external-workspace`（位于 `qwen.managed-agent.runtime-broker.external-provider-url` 的运维方 HTTP provider），或 `kubernetes-workspace`（来自 `qwen.managed-agent.runtime-broker.resident-workspaces` 的常驻 Workspace）。其他取值（包括 `kubernetes`）启动时拒绝。"
+      "en": "The installed factory kind that places Runtime workers: `local-process` (local Node.js workers), `ssh-process` (registered SSH Workspaces), `static` (a preconfigured worker), `external-scratch` or `external-workspace` (an operator-run HTTP provider), or `kubernetes-workspace` (resident CSI Workspaces). A trusted additional provider may register its own kind. With the Broker enabled, missing or duplicate kinds fail before resources are created; `kubernetes` remains reserved and rejected. Embedding hosts must explicitly include the selected backend artifact.",
+      "zh": "放置 Runtime worker 所用的已安装工厂 kind：`local-process`（本机 Node.js worker）、`ssh-process`（已注册 SSH Workspace）、`static`（预配置 worker）、`external-scratch` 或 `external-workspace`（运维方 HTTP provider），或 `kubernetes-workspace`（常驻 CSI Workspace）。其他可信 provider 可以注册自己的 kind。Broker 启用时，缺失或重复的 kind 在创建资源前拒绝；`kubernetes` 仍为保留值且被拒绝。嵌入服务须显式添加所选后端产物。"
     },
     "qwen.managed-agent.runtime-broker.resident-kubernetes-api-url": {
       "en": "The HTTPS origin of the Kubernetes API server that the `kubernetes-workspace` provisioner calls for `qwen.managed-agent.runtime-broker.resident-workspaces`, together with `qwen.managed-agent.runtime-broker.resident-kubernetes-token-file` and `qwen.managed-agent.runtime-broker.resident-kubernetes-ca-file`. Startup refuses resident Workspaces without it, and refuses a URL that is not `https` or has a path, credentials, query or fragment. The resident-retirement maintenance command reads it too.",

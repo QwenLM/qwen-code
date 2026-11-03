@@ -545,9 +545,13 @@ export class NativeLspService {
     const admitted: LspServerConfig[] = [];
     const skipped: LspSkippedServer[] = [];
     for (const config of configs) {
-      if (!workspaceTrusted && config.trustRequired) {
+      if (
+        (!workspaceTrusted && config.trustRequired) ||
+        (config.source === 'workspace' &&
+          !this.config.isExplicitlyTrustedFolder())
+      ) {
         debugLogger.warn(
-          `LSP server ${config.name} requires trusted workspace, skipping`,
+          `LSP server ${config.name} requires trusted workspace, skipping. Workspace .lsp.json requires explicit trust: enable security.folderTrust.enabled in user settings and trust this folder, or grant IDE workspace trust.`,
         );
         skipped.push({ name: config.name, reason: 'server_trust_required' });
         continue;
@@ -774,11 +778,10 @@ export class NativeLspService {
   }
 
   /**
-   * Ready handles for a diagnostics query. Rejects outright when nothing is
-   * ready — no matching server, a server that failed or never started, a
-   * server still starting up, or every candidate being known not to support
-   * the requested pull — because an empty ready set would otherwise be
-   * reported as a clean result. For a document query (`uri` given) the
+   * Ready handles for a query. Rejects outright when nothing is ready — no
+   * matching server, a server that failed or never started, a server still
+   * starting up — because an empty ready set would otherwise be reported as
+   * a clean (empty) result. For a document query (`uri` given) the
    * rejection names only servers the queried file does not provably exclude;
    * when every configured server is irrelevant for the file the rejection
    * says so instead of blaming a server that could never own it. Servers
@@ -788,6 +791,45 @@ export class NativeLspService {
    * finishes. `getReadyHandles` itself must keep returning an empty array
    * for the not-ready case: `replayOpenDocuments` skips handles missing from
    * its map rather than rejecting.
+   */
+  private requireReadyHandles(
+    operation: string,
+    serverName?: string,
+    uri?: string,
+  ): Array<[string, LspServerHandle & { connection: LspConnectionInterface }]> {
+    const handles = this.getReadyHandles(serverName);
+    if (handles.length > 0) {
+      return handles;
+    }
+    const configured = Array.from(this.serverManager.getHandles()).filter(
+      ([name]) => !serverName || name === serverName,
+    );
+    const extension = uri ? this.diagnosticFileExtension(uri) : undefined;
+    const skipped = configured
+      .filter(([, handle]) => !this.serverDeclaredIrrelevant(handle, extension))
+      .map(([name, handle]) => describeLspServerState(name, handle));
+    if (skipped.length > 0) {
+      throw new Error(
+        `No LSP server is ready to provide ${operation} (${boundedRejectionDetail(skipped)})`,
+      );
+    }
+    if (uri && configured.length > 0) {
+      throw new Error(
+        `No LSP server is ready to provide ${operation} (no configured server covers the queried file)`,
+      );
+    }
+    throw new Error(
+      serverName
+        ? `No LSP server named ${serverName} is configured or running`
+        : 'No LSP servers are configured or running',
+    );
+  }
+
+  /**
+   * Ready handles for a diagnostics query, excluding servers known not to
+   * support the requested diagnostic pull. Undeclared document support stays
+   * eligible because several real servers implement it without advertising
+   * `diagnosticProvider`.
    */
   private getDiagnosticHandles(
     serverName?: string,
@@ -1476,12 +1518,9 @@ export class NativeLspService {
   ): Promise<LspSymbolInformation[]> {
     const results: LspSymbolInformation[] = [];
 
-    for (const [serverName, handle] of Array.from(
-      this.serverManager.getHandles(),
+    for (const [serverName, handle] of this.requireReadyHandles(
+      'workspace symbols',
     )) {
-      if (handle.status !== 'READY' || !handle.connection) {
-        continue;
-      }
       try {
         await this.warmupAndTrack(serverName, handle);
         const warmedUp = this.serverManager.isTypescriptServer(handle)
@@ -1544,7 +1583,11 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspDefinition[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.requireReadyHandles(
+      'definitions',
+      serverName,
+      location.uri,
+    );
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -1613,7 +1656,11 @@ export class NativeLspService {
     includeDeclaration = false,
     limit = 200,
   ): Promise<LspReference[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.requireReadyHandles(
+      'references',
+      serverName,
+      location.uri,
+    );
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -1679,7 +1726,7 @@ export class NativeLspService {
     location: LspLocation,
     serverName?: string,
   ): Promise<LspHoverResult | null> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.requireReadyHandles('hover', serverName, location.uri);
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -1730,7 +1777,11 @@ export class NativeLspService {
     serverName?: string,
     limit = 200,
   ): Promise<LspSymbolInformation[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.requireReadyHandles(
+      'document symbols',
+      serverName,
+      uri,
+    );
     const requestParams = { textDocument: { uri } };
 
     for (const [name, handle] of handles) {
@@ -1810,7 +1861,11 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspDefinition[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.requireReadyHandles(
+      'implementations',
+      serverName,
+      location.uri,
+    );
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -2010,7 +2065,11 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspCallHierarchyItem[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.requireReadyHandles(
+      'call hierarchy',
+      serverName,
+      location.uri,
+    );
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -2651,7 +2710,7 @@ export class NativeLspService {
     serverName?: string,
     limit = 20,
   ): Promise<LspCodeAction[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.requireReadyHandles('code actions', serverName, uri);
 
     for (const [name, handle] of handles) {
       try {

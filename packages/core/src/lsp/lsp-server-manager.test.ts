@@ -120,6 +120,7 @@ function createTrustedManager(): LspServerManager {
   return new LspServerManager(
     {
       isTrustedFolder: vi.fn().mockReturnValue(true),
+      isExplicitlyTrustedFolder: vi.fn().mockReturnValue(true),
     } as unknown as CoreConfig,
     {} as WorkspaceContext,
     {} as FileDiscoveryService,
@@ -798,6 +799,39 @@ describe('LspServerManager', () => {
     expect(debugLoggerMock.warn).toHaveBeenCalledWith(
       'Workspace trust check failed, not starting LSP server clangd',
     );
+  });
+
+  it('blocks workspace command probes until explicitly trusted, without blocking extension configs', async () => {
+    const config = {
+      isTrustedFolder: () => true,
+      isExplicitlyTrustedFolder: vi.fn().mockReturnValue(false),
+    };
+    const manager = new LspServerManager(
+      config as unknown as CoreConfig,
+      {} as WorkspaceContext,
+      {} as FileDiscoveryService,
+      { requireTrustedWorkspace: false, workspaceRoot: '/workspace' },
+    );
+    const probe = openGates(manager);
+    const connection = createMockConnection();
+    stubConnection(manager, { connection, process: createMockProcess() });
+    manager.setServerConfigs([{ ...serverConfig, source: 'workspace' }]);
+
+    await manager.startAll();
+    expect(probe).not.toHaveBeenCalled();
+    expect(manager.getHandles().get('clangd')?.status).toBe('FAILED');
+
+    config.isExplicitlyTrustedFolder.mockReturnValue(true);
+    await manager.startAll();
+    expect(probe).toHaveBeenCalled();
+    await manager.stopAll();
+
+    probe.mockClear();
+    config.isExplicitlyTrustedFolder.mockReturnValue(false);
+    manager.setServerConfigs([{ ...serverConfig, source: 'extension' }]);
+    await manager.startAll();
+    expect(probe).toHaveBeenCalled();
+    await manager.stopAll();
   });
 
   it('does not probe command existence for unsafe command paths', async () => {

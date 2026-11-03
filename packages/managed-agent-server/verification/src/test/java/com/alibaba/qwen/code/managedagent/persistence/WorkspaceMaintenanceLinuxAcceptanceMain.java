@@ -70,7 +70,7 @@ public final class WorkspaceMaintenanceLinuxAcceptanceMain {
                     tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'OPERATOR')",
                     tenant, "native-actor".getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+            var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             String parent = transactions.execute(ignored -> sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                     .tenantId(tenant)
                     .actorId("native-actor")

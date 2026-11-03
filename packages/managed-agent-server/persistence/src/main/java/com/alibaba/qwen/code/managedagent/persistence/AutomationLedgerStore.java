@@ -35,8 +35,10 @@ import java.util.Set;
  * projected in the same transaction as their journal commit.
  *
  * <p>Every occurrence write names the lease its writer holds: the insert selects its row from the
- * definition row the holder leases, and each settle is conditioned on that same holder and fence,
- * so a scanner whose lease expired under it cannot record or settle a decision.
+ * definition row the holder leases, and each settle is conditioned on that same holder and fence.
+ * Neither checks the lease's expiry: a writer whose lease lapsed can still write until another
+ * claims the definition, and that claim moves the fence, so from then on the earlier holder cannot
+ * record or settle a decision.
  */
 @Repository
 public class AutomationLedgerStore
@@ -73,8 +75,8 @@ public class AutomationLedgerStore
                     result.getString("timezone"),
                     result.getString("session_mode"),
                     result.getString("overlap"), result.getString("catch_up"),
-                    (Long) result.getObject("catch_up_limit"),
-                    result.getBoolean("enabled"), result.getString("state"),
+                    result.getObject("catch_up_limit", Long.class),
+                    result.getBoolean("is_enabled"), result.getString("state"),
                     result.getString("blocked_reason"),
                     result.getLong("armed_at"),
                     result.getObject("watermark_slot", Long.class),
@@ -250,7 +252,7 @@ public class AutomationLedgerStore
                             + " workspace_id, actor_id, record_revision,"
                             + " definition_revision, definition_digest, goal,"
                             + " cron, timezone, session_mode, overlap, catch_up,"
-                            + " catch_up_limit, enabled, state, blocked_reason,"
+                            + " catch_up_limit, is_enabled, state, blocked_reason,"
                             + " armed_at, watermark_slot, lease_owner,"
                             + " lease_until, fence, gmt_create, gmt_modified,"
                             + " gate)"
@@ -284,7 +286,7 @@ public class AutomationLedgerStore
                         + " record_revision = ?, definition_revision = ?,"
                         + " definition_digest = ?, goal = ?, cron = ?,"
                         + " timezone = ?, session_mode = ?, overlap = ?,"
-                        + " catch_up = ?, catch_up_limit = ?, enabled = ?,"
+                        + " catch_up = ?, catch_up_limit = ?, is_enabled = ?,"
                         + " state = ?, blocked_reason = NULL, armed_at = ?,"
                         + " gmt_modified = ?, gate = ?, gate_last_outcome = ?,"
                         + " gate_last_at = ?, gate_quiet_since_delivery = ?,"
@@ -386,7 +388,7 @@ public class AutomationLedgerStore
     /** Live, enabled, unblocked definitions whose lease is free or expired. */
     public List<ScheduleRow> findArmed(long now, int limit) {
         return jdbc.query("SELECT " + ManagedSchemaProjection.SCHEDULE.columns() + " FROM ma_schedule"
-                        + " WHERE state = ? AND enabled = TRUE"
+                        + " WHERE state = ? AND is_enabled = TRUE"
                         + " AND blocked_reason IS NULL"
                         + " AND (lease_until IS NULL OR lease_until < ?)"
                         + " ORDER BY gmt_modified, schedule_id LIMIT ?", SCHEDULE,
@@ -411,8 +413,8 @@ public class AutomationLedgerStore
 
     /**
      * Claims one definition for a scanner: the lease must be free or expired, and the fence moves
-     * so a scanner that lost it can prove nothing about the row any more. Answers the fence held,
-     * or -1.
+     * so the scanner it was taken from can prove nothing about the row any more. Answers the fence
+     * held, or -1.
      */
     public long claim(String tenantId, String scheduleId, String owner,
             long leaseUntil, long now) {
@@ -441,7 +443,10 @@ public class AutomationLedgerStore
                 now, tenantId, scheduleId, owner, fence);
     }
 
-    /** True when the fenced write landed; false when the lease was lost. */
+    /**
+     * True when the fenced write landed; false once another claim has moved the fence, or when the
+     * watermark already covers the slot.
+     */
     public boolean advanceWatermark(String tenantId, String scheduleId,
             String owner, long fence, long slot, long now) {
         return jdbc.update("UPDATE ma_schedule"
@@ -473,10 +478,10 @@ public class AutomationLedgerStore
 
     /**
      * Records one occurrence decision under the writer's lease unless one exists: the row is
-     * selected from the definition row the owner holds, so a writer whose lease was lost inserts
-     * nothing, and the primary key keeps the first decision of a slot. Answers the row now held —
-     * the one written, or the earlier decision — or empty when the lease was lost and no decision
-     * exists.
+     * selected from the definition row the owner holds, so a writer whose lease another claim has
+     * taken inserts nothing, and the unique business key keeps the first decision of a slot. Answers the row
+     * now held — the one written, or the earlier decision — or empty when another claim has taken
+     * the lease and no decision exists.
      */
     public Optional<OccurrenceRow> recordOccurrence(OccurrenceRow row,
             String owner) {
@@ -507,8 +512,9 @@ public class AutomationLedgerStore
     }
 
     /**
-     * A firing row settles into its outcome once the Harness answered; only the lease holder
-     * settles. True when the write landed.
+     * A firing row settles into its outcome once the Harness answered; only the holder of the
+     * latest claim's owner and fence settles, whether or not its lease has lapsed. True when the
+     * write landed.
      */
     public boolean settleOccurrence(String tenantId, String scheduleId,
             String occurrenceKey, String outcome, String reason, String owner,
@@ -724,7 +730,7 @@ public class AutomationLedgerStore
     }
 
     /**
-     * Claims (tenant, key) for one request before any side effect: the primary key arbitrates, so
+     * Claims (tenant, key) for one request before any side effect: the unique business key arbitrates, so
      * only one concurrent or retried caller owns the identity; the row's empty result marks it
      * unanswered. A claim whose requester dies mid-flight stays durable, which is what lets a
      * different request under the same key conflict instead of repeating the side effect.

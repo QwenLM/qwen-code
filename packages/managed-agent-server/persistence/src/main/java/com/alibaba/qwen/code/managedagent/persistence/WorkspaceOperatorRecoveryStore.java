@@ -80,6 +80,8 @@ public final class WorkspaceOperatorRecoveryStore {
                         saved.getRequest().getScope().getTenantId());
                 return null;
             });
+            LocalStorageOwners.key(jdbc, saved.getRequest().getScope().getTenantId(),
+                    saved.getRequest().getStorageId());
             List<Boolean> valid = jdbc.query("SELECT binding_state, record_version,"
                     + " resource_handle_version, provision_request_id, runtime_lease_id,"
                     + " runtime_epoch, storage_id, tenant_id, stop_evidence_json"
@@ -132,7 +134,7 @@ public final class WorkspaceOperatorRecoveryStore {
                             "blocked_execution_call_id", blockedCapture.callId(), "operator_id", operator,
                             "reason", reason, "prepared_at", Instant.now().toString()));
             if (jdbc.update("UPDATE ma_runtime_binding SET binding_state = ?,"
-                    + " drain_requested = TRUE, operation_owner = NULL, operation_lease_until = NULL,"
+                    + " is_drain_requested = TRUE, operation_owner = NULL, operation_lease_until = NULL,"
                     + " operation_generation = operation_generation + 1, record_version = record_version + 1"
                     + " WHERE binding_id = ? AND runtime_generation = ? AND record_version = ?",
                     saved.getState() == RuntimeBindingRecord.State.LOST ? "LOST" : "OPERATOR_RECOVERY",

@@ -1113,8 +1113,8 @@ class ManagedCwdChangeOperationTest {
             }
         };
         ObjectMapper mapper = new ObjectMapper();
-        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, clock,
-                ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, clock,
+                ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         return new Fixture(store, jdbc, mapper, properties, clock);
     }
 

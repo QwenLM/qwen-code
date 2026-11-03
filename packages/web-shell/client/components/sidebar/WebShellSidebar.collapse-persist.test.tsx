@@ -466,8 +466,8 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       .map((call) => call[1])
       .filter((queries) =>
         queries.some(
-          (query: { options: { group?: string } }) =>
-            query.options.group === 'all',
+          (query: { options: { group?: string; pageSize?: number } }) =>
+            query.options.group === 'all' && query.options.pageSize !== 100,
         ),
       );
     expect(activeQueryCalls.length).toBeGreaterThan(0);
@@ -630,9 +630,16 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     const activeQueryCalls = useSessionCatalogQueries.mock.calls.filter(
       (call) =>
         call[1].some(
-          (query: { options: { group?: string; archiveState?: string } }) =>
+          (query: {
+            options: {
+              group?: string;
+              archiveState?: string;
+              pageSize?: number;
+            };
+          }) =>
             query.options.group === 'all' &&
-            query.options.archiveState === 'active',
+            query.options.archiveState === 'active' &&
+            query.options.pageSize !== 100,
         ),
     );
     expect(activeQueryCalls.length).toBeGreaterThan(0);
@@ -911,9 +918,16 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     const activeQueryCalls = useSessionCatalogQueries.mock.calls.filter(
       (call) =>
         call[1].some(
-          (query: { options: { group?: string; archiveState?: string } }) =>
+          (query: {
+            options: {
+              group?: string;
+              archiveState?: string;
+              pageSize?: number;
+            };
+          }) =>
             query.options.group === 'all' &&
-            query.options.archiveState === 'active',
+            query.options.archiveState === 'active' &&
+            query.options.pageSize !== 100,
         ),
     );
     expect(activeQueryCalls.length).toBeGreaterThan(0);
