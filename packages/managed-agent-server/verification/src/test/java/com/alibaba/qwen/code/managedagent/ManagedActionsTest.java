@@ -687,8 +687,10 @@ class ManagedActionsTest {
                                 .header("Idempotency-Key", "answer")
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content(response("allow")))
-                .andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.error.code").value("action_forbidden"));
+                .andExpect(status().is(shell ? 403 : 404))
+                .andExpect(jsonPath("$.error.code").value(shell ? "action_forbidden" : "session_not_found"));
+        assertThat(actions.find(tenant, session, journal.id).orElseThrow().state()).isEqualTo("requested");
+        assertThat(delivered).hasValue(0);
         JsonNode admitted =
                 readAccepted(
                         auth(post(path(session, journal.id) + "/responses"), tenant, "owner")

@@ -433,7 +433,7 @@ class ManagedSessionLifecycleTest {
             doReturn(true).when(available).isAvailable();
             ManagedAgentService subject = new ManagedAgentService(store,
                     new RequestDigests(), null, available, null, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-            assertThatThrownBy(() -> subject.renameSession(tenant, null, "rename-closing", sessionId, "blocked"))
+            assertThatThrownBy(() -> subject.renameSession(tenant, "actor-a", "rename-closing", sessionId, "blocked"))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                         assertThat(error.getStatus()).isEqualTo(409);
                         assertThat(error.getCode()).isEqualTo("session_operation_active");
@@ -485,14 +485,14 @@ class ManagedSessionLifecycleTest {
         String digest = new RequestDigests().digest(
                 java.util.Map.of("sessionId", sessionId, "title", "renamed"));
         assertThat(store.beginSessionMutation(tenant, "RENAME_SESSION", "key",
-                digest, sessionId, SessionMutationKind.RENAME).replayed()).isFalse();
+                digest, sessionId, SessionMutationKind.RENAME, "actor-a").replayed()).isFalse();
         assertThat(store.beginSessionMutation(tenant, "RENAME_SESSION", "key",
-                digest, sessionId, SessionMutationKind.RENAME).replayed()).isTrue();
+                digest, sessionId, SessionMutationKind.RENAME, "actor-a").replayed()).isTrue();
         store.abandonSessionMutation(tenant, "RENAME_SESSION", "key", sessionId);
         for (String target : List.of(sessionId, otherId)) {
             assertThatThrownBy(() -> store.beginSessionMutation(tenant,
                     "RENAME_SESSION", "key", "other-digest", target,
-                    SessionMutationKind.RENAME))
+                    SessionMutationKind.RENAME, "actor-a"))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                             assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
         }
@@ -550,7 +550,7 @@ class ManagedSessionLifecycleTest {
                 new RequestDigests(), null, controlled, null, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         harness.setAvailable(false);
         try {
-            assertThatThrownBy(() -> subject.renameSession(tenant, null, "superseded", sessionId, "title"))
+            assertThatThrownBy(() -> subject.renameSession(tenant, "actor-a", "superseded", sessionId, "title"))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                         assertThat(error.getStatus()).isEqualTo(expectedStatus);
                         assertThat(error.getCode()).isEqualTo(expectedStatus == 409
@@ -570,7 +570,7 @@ class ManagedSessionLifecycleTest {
         doReturn(!disabled).when(unavailable).isAvailable();
         ManagedAgentService subject = new ManagedAgentService(store,
                 new RequestDigests(), null, unavailable, null, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        assertThatThrownBy(() -> subject.renameSession(tenant, null, "refused", sessionId, "new title"))
+        assertThatThrownBy(() -> subject.renameSession(tenant, "actor-a", "refused", sessionId, "new title"))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getStatus()).isEqualTo(503);
                     assertThat(error.getCode()).isEqualTo(disabled
@@ -602,13 +602,13 @@ class ManagedSessionLifecycleTest {
                         "inline", "new title", ((Number) held.get("target_revision")).longValue(),
                         ((Number) held.get("attempt_count")).intValue());
                 assertThat(store.claimRename(candidate, "peer", Duration.ofMinutes(1))).isEmpty();
-                assertThatThrownBy(() -> subject.renameSession(tenant, null, "inline", sessionId, "new title"))
+                assertThatThrownBy(() -> subject.renameSession(tenant, "actor-a", "inline", sessionId, "new title"))
                         .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                                 assertThat(error.getStatus()).isEqualTo(503));
                 assertThat(store.findCommand(tenant, "RENAME_SESSION", "inline").orElseThrow().status()).isEqualTo("PENDING");
                 return new HarnessConnector.Attachment(FixtureHarness.BOOT_ID);
             }).when(controlled).createOrLoad(anyString(), anyString(), anyBoolean(), anyBoolean());
-            assertThat(subject.renameSession(tenant, null, "inline", sessionId, "new title").body().metadata().get("title"))
+            assertThat(subject.renameSession(tenant, "actor-a", "inline", sessionId, "new title").body().metadata().get("title"))
                     .isEqualTo("new title");
             assertThat(store.findCommand(tenant, "RENAME_SESSION", "inline").orElseThrow().status()).isEqualTo("COMPLETED");
         } finally {
@@ -622,7 +622,7 @@ class ManagedSessionLifecycleTest {
         String sessionId = attachedSession(tenant);
         harness.setAvailable(false);
         try {
-            var command = store.beginSessionRename(tenant, "rename", "digest", sessionId, "new title");
+            var command = store.beginSessionRename(tenant, "rename", "digest", sessionId, "new title", "actor-a");
             var candidate = store.deliverableRenames(Long.MAX_VALUE).stream()
                     .filter(delivery -> delivery.sessionId().equals(sessionId)).findFirst().orElseThrow();
             store.claimRename(candidate, "old", Duration.ofMinutes(1)).orElseThrow();
@@ -639,7 +639,7 @@ class ManagedSessionLifecycleTest {
             store.retryRename(candidate, "old", 0);
             assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ? AND session_id = ?",
                     tenant, sessionId)).isEqualTo(row);
-            assertThat(store.beginSessionRename(tenant, "rename", "digest", sessionId, "new title").renameRevision())
+            assertThat(store.beginSessionRename(tenant, "rename", "digest", sessionId, "new title", "actor-a").renameRevision())
                     .isEqualTo(command.renameRevision());
             store.abandonSessionRename(tenant, "rename", sessionId, current.revision(), "new");
             assertThat(store.findCommand(tenant, "RENAME_SESSION", "rename").orElseThrow().status()).isEqualTo("FAILED");
@@ -659,21 +659,21 @@ class ManagedSessionLifecycleTest {
         String boot = store.requireSession(tenant, sessionId).harnessBootId();
         harness.setAvailable(false);
         try {
-            var first = store.beginSessionRename(tenant, "k1", "digest-a", sessionId, "A");
-            assertThat(store.beginSessionRename(tenant, "k1", "digest-a", sessionId, "A").renameRevision())
+            var first = store.beginSessionRename(tenant, "k1", "digest-a", sessionId, "A", "actor-a");
+            assertThat(store.beginSessionRename(tenant, "k1", "digest-a", sessionId, "A", "actor-a").renameRevision())
                     .isEqualTo(first.renameRevision());
             var firstDelivery = store.deliverableRenames(Long.MAX_VALUE).stream()
                     .filter(delivery -> delivery.sessionId().equals(sessionId)).findFirst().orElseThrow();
             store.claimRename(firstDelivery, "first-owner", Duration.ofMinutes(1)).orElseThrow();
             store.abandonSessionRename(tenant, "k1", sessionId, first.renameRevision(), "first-owner");
-            var second = store.beginSessionRename(tenant, "k2", "digest-b", sessionId, "B");
+            var second = store.beginSessionRename(tenant, "k2", "digest-b", sessionId, "B", "actor-a");
             store.completeSessionRename(tenant, "k2", sessionId, "B", boot, second.renameRevision());
             assertThatThrownBy(() -> store.completeSessionRename(tenant, "k1", sessionId, "A", boot, first.renameRevision()))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("session_mutation_superseded"));
-            assertThatThrownBy(() -> store.beginSessionRename(tenant, "k1", "digest-a", sessionId, "A"))
+            assertThatThrownBy(() -> store.beginSessionRename(tenant, "k1", "digest-a", sessionId, "A", "actor-a"))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("session_mutation_superseded"));
             assertThat(store.requireSession(tenant, sessionId).title()).isEqualTo("B");
-            var latest = store.beginSessionRename(tenant, "k3", "digest-c", sessionId, "A");
+            var latest = store.beginSessionRename(tenant, "k3", "digest-c", sessionId, "A", "actor-a");
             assertThat(latest.renameRevision()).isGreaterThan(second.renameRevision());
             store.abandonSessionRename(tenant, "k1", sessionId, first.renameRevision(), "first-owner");
             assertThat(store.findCommand(tenant, "RENAME_SESSION", "k3").orElseThrow().status()).isEqualTo("PENDING");
@@ -716,9 +716,9 @@ class ManagedSessionLifecycleTest {
         // K1 and its same-key retry both enter the Harness; one fails and
         // retires K1, which frees the Session for a fresh key.
         store.beginSessionMutation(tenant, "RENAME_SESSION", "k1", first,
-                sessionId, SessionMutationKind.RENAME);
+                sessionId, SessionMutationKind.RENAME, "actor-a");
         store.beginSessionMutation(tenant, "RENAME_SESSION", "k1", first,
-                sessionId, SessionMutationKind.RENAME);
+                sessionId, SessionMutationKind.RENAME, "actor-a");
         store.abandonSessionMutation(tenant, "RENAME_SESSION", "k1", sessionId);
         if (legacyReceipt) {
             assertThat(jdbc.update("UPDATE ma_request_receipt SET mutation_attempt_sequence"
@@ -727,7 +727,7 @@ class ManagedSessionLifecycleTest {
                     tenant, "RENAME_SESSION", "k1")).isEqualTo(1);
         }
         store.beginSessionMutation(tenant, "RENAME_SESSION", "k2", second,
-                sessionId, SessionMutationKind.RENAME);
+                sessionId, SessionMutationKind.RENAME, "actor-a");
         store.completeSessionMutation(tenant, "RENAME_SESSION", "k2", sessionId,
                 SessionMutationKind.RENAME, "B", bootId);
 
@@ -764,12 +764,12 @@ class ManagedSessionLifecycleTest {
         String sessionId = attachedSession(tenant);
         String bootId = store.requireSession(tenant, sessionId).harnessBootId();
         store.beginSessionMutation(tenant, "RENAME_SESSION", "k1", "first",
-                sessionId, SessionMutationKind.RENAME);
+                sessionId, SessionMutationKind.RENAME, "actor-a");
         store.beginSessionMutation(tenant, "RENAME_SESSION", "k1", "first",
-                sessionId, SessionMutationKind.RENAME);
+                sessionId, SessionMutationKind.RENAME, "actor-a");
         store.abandonSessionMutation(tenant, "RENAME_SESSION", "k1", sessionId);
         store.beginSessionMutation(tenant, "RENAME_SESSION", "k2", "second",
-                sessionId, SessionMutationKind.RENAME);
+                sessionId, SessionMutationKind.RENAME, "actor-a");
         assertThat(store.completeSessionMutation(tenant, "RENAME_SESSION", "k1",
                 sessionId, SessionMutationKind.RENAME, "A", bootId).title())
                 .isEqualTo("A");
@@ -792,10 +792,10 @@ class ManagedSessionLifecycleTest {
         String second = digests.digest(
                 java.util.Map.of("sessionId", sessionId, "title", "B"));
         store.beginSessionMutation(tenant, "RENAME_SESSION", "k1", first,
-                sessionId, SessionMutationKind.RENAME);
+                sessionId, SessionMutationKind.RENAME, "actor-a");
         store.abandonSessionMutation(tenant, "RENAME_SESSION", "k1", sessionId);
         store.beginSessionMutation(tenant, "RENAME_SESSION", "k2", second,
-                sessionId, SessionMutationKind.RENAME);
+                sessionId, SessionMutationKind.RENAME, "actor-a");
         harness.rename(tenant, sessionId, "B");
         store.completeSessionMutation(tenant, "RENAME_SESSION", "k2", sessionId,
                 SessionMutationKind.RENAME, "B", bootId);
@@ -805,9 +805,9 @@ class ManagedSessionLifecycleTest {
                     tenant, "RENAME_SESSION", "k1")).isEqualTo(1);
         }
         store.beginSessionMutation(tenant, "RENAME_SESSION", "k1", first,
-                sessionId, SessionMutationKind.RENAME);
+                sessionId, SessionMutationKind.RENAME, "actor-a");
         store.beginSessionMutation(tenant, "RENAME_SESSION", "k1", first,
-                sessionId, SessionMutationKind.RENAME);
+                sessionId, SessionMutationKind.RENAME, "actor-a");
         store.abandonSessionMutation(tenant, "RENAME_SESSION", "k1", sessionId);
         harness.rename(tenant, sessionId, "A");
         assertThat(store.completeSessionMutation(tenant, "RENAME_SESSION", "k1",
@@ -834,13 +834,13 @@ class ManagedSessionLifecycleTest {
         String tenant = tenant();
         String sessionId = attachedSession(tenant);
         store.beginSessionMutation(tenant, "RENAME_SESSION", "key", "digest",
-                sessionId, SessionMutationKind.RENAME);
+                sessionId, SessionMutationKind.RENAME, "actor-a");
         store.abandonSessionMutation(tenant, "RENAME_SESSION", "key", sessionId);
         assertThat(store.beginSessionMutation(tenant, "RENAME_SESSION", "key",
-                "digest", sessionId, SessionMutationKind.RENAME).replayed()).isTrue();
+                "digest", sessionId, SessionMutationKind.RENAME, "actor-a").replayed()).isTrue();
         assertThatThrownBy(() -> store.beginSessionMutation(tenant,
                 "RENAME_SESSION", "other", "other-digest", sessionId,
-                SessionMutationKind.RENAME))
+                SessionMutationKind.RENAME, "actor-a"))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("session_operation_active"));
     }
@@ -879,16 +879,17 @@ class ManagedSessionLifecycleTest {
             harness.setAvailable(false);
             return store.beginSessionRename(call.getArgument(0), call.getArgument(1),
                     call.getArgument(2), call.getArgument(3), call.getArgument(4),
-                    call.getArgument(5));
+                    call.getArgument(5), call.getArgument(6));
         }).when(faulted).beginSessionRename(anyString(), anyString(), anyString(),
-                anyString(), anyString(), any());
+                anyString(), anyString(), anyString(),
+                any(com.alibaba.qwen.code.managedagent.model.SessionPrincipal.class));
         ManagedAgentService subject = new ManagedAgentService(faulted,
                 new RequestDigests(), null, harness, null, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         if ("cleanup".equals(phase)) {
             harness.failNextRename();
         }
         try {
-            assertThatThrownBy(() -> subject.renameSession(tenant, null, "key",
+            assertThatThrownBy(() -> subject.renameSession(tenant, "actor-a", "key",
                     sessionId, "renamed"))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                         assertThat(error.getStatus()).isEqualTo(503);
@@ -937,7 +938,7 @@ class ManagedSessionLifecycleTest {
             assertThat(store.deliverableRenames(System.currentTimeMillis()))
                     .noneMatch(delivery -> sessionId.equals(delivery.sessionId()));
             try {
-                assertThatThrownBy(() -> subject.renameSession(tenant, null, "key", sessionId, "renamed"))
+                assertThatThrownBy(() -> subject.renameSession(tenant, "actor-a", "key", sessionId, "renamed"))
                         .isInstanceOf(ManagedAgentException.class);
             } finally {
                 harness.setAvailable(true);
@@ -993,7 +994,7 @@ class ManagedSessionLifecycleTest {
         logged.start();
         logger.addAppender(logged);
         try {
-            assertThatThrownBy(() -> subject.renameSession(tenant, null,
+            assertThatThrownBy(() -> subject.renameSession(tenant, "actor-a",
                     "key", sessionId, "renamed"))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                         assertThat(error.getCode())
@@ -1030,7 +1031,7 @@ class ManagedSessionLifecycleTest {
         logged.start();
         logger.addAppender(logged);
         try {
-            assertThatThrownBy(() -> subject.renameSession(tenant, null,
+            assertThatThrownBy(() -> subject.renameSession(tenant, "actor-a",
                     "key", sessionId, "renamed"))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                         assertThat(error.getCode())
@@ -1064,7 +1065,7 @@ class ManagedSessionLifecycleTest {
         String tenant = tenant();
         String sessionId = attachedSession(tenant);
         store.beginSessionMutation(tenant, "RENAME_SESSION", "pending-command",
-                "digest", sessionId, SessionMutationKind.RENAME);
+                "digest", sessionId, SessionMutationKind.RENAME, "actor-a");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                 + " ma_request_receipt WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ? AND session_id ="
                 + " ? AND state = 'PENDING'", Integer.class, tenant,

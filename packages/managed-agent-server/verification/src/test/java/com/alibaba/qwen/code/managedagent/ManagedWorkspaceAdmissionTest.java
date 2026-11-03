@@ -1215,13 +1215,12 @@ class ManagedWorkspaceAdmissionTest {
                 "SELECT title FROM ma_session WHERE tenant_id = ?"
                         + " AND session_id = ?",
                 String.class, tenant, sessionY)).isNull();
-        transaction.executeWithoutResult(status ->
-                assertThatThrownBy(() -> store.beginSessionRename(tenant, "rename", "different-digest",
-                        sessionY, "new title", "actor-b"))
-                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
-                            assertThat(error.getCode()).isEqualTo("idempotency_conflict");
-                            assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT.value());
-                        }));
+        assertThatThrownBy(() -> transaction.executeWithoutResult(status ->
+                store.beginSessionRename(tenant, "rename", "different-digest", sessionY, "new title", "actor-b")))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("idempotency_conflict");
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT.value());
+                });
         assertThat(jdbc.queryForObject("SELECT title_revision FROM ma_session"
                         + " WHERE tenant_id = ? AND session_id = ?",
                 Long.class, tenant, sessionY)).isZero();

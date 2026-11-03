@@ -766,7 +766,7 @@ class ManagedAgentApiContractTest {
                         "titleQuery", "other", "cursor", cursor))))
                 .andExpect(status().isBadRequest());
         JsonNode other = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant + "-other")
-                .param("title_query", "_%"))
+                .principal(actor(tenant + "-other")).param("title_query", "_%"))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
         assertThat(other.path("data")).isEmpty();
     }
@@ -2094,10 +2094,11 @@ class ManagedAgentApiContractTest {
         // response today's production offers, and the detail of another
         // Session's task is the documented 404, not an error.
         String emptySession = json(mvc.perform(post("/v1/agents/sessions")
-                        .header(TENANT, tenant)
+                        .header(TENANT, tenant).principal(actor(tenant))
                         .header(IDEMPOTENCY_KEY, "contract-empty-tasks")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\"}"))
+                .andExpect(status().isAccepted())
                 .andReturn().getResponse()
                 .getContentAsString(StandardCharsets.UTF_8)).get("id")
                 .asText();
@@ -3580,7 +3581,7 @@ class ManagedAgentApiContractTest {
     private void checkReplayFloor(Map<String, String> drift, String tenant)
             throws Exception {
         String sessionId = json(exchange(drift, "createSession", 202,
-                post("/v1/agents/sessions").header(TENANT, tenant)
+                post("/v1/agents/sessions").header(TENANT, tenant).principal(actor(tenant))
                         .header(IDEMPOTENCY_KEY, "contract-floor"),
                 """
                 {"agent_id":"qwen-code",
@@ -3593,7 +3594,7 @@ class ManagedAgentApiContractTest {
         JsonNode expired = json(exchange(drift, "getSessionEvents", 409,
                 get("/v1/agents/sessions/{id}/events", sessionId)
                         .param("after", Long.toString(floor - 1))
-                        .header(TENANT, tenant)
+                        .header(TENANT, tenant).principal(actor(tenant))
                         .accept(MediaType.APPLICATION_JSON), null));
         assertThat(expired.at("/error/code").asText())
                 .isEqualTo("cursor_expired");
@@ -3604,17 +3605,17 @@ class ManagedAgentApiContractTest {
         exchange(drift, "getSessionEvents", 200,
                 get("/v1/agents/sessions/{id}/events", sessionId)
                         .param("after", Long.toString(floor))
-                        .header(TENANT, tenant)
+                        .header(TENANT, tenant).principal(actor(tenant))
                         .accept(MediaType.APPLICATION_JSON), null);
         checkResync(drift, "getSessionEvents", "PublicEvent", stream(drift,
                 "getSessionEvents",
                 get("/v1/agents/sessions/{id}/events", sessionId)
-                        .param("stream", "true").header(TENANT, tenant),
+                        .param("stream", "true").header(TENANT, tenant).principal(actor(tenant)),
                 null));
         checkResync(drift, "webShellStreamEvents", "WebShellEvent",
                 stream(drift, "webShellStreamEvents",
                         post(WEB_SHELL + "/events/stream")
-                                .header(TENANT, tenant),
+                                .header(TENANT, tenant).principal(actor(tenant)),
                         "{\"sessionId\":\"%s\",\"afterSequence\":0}"
                                 .formatted(sessionId)));
     }
