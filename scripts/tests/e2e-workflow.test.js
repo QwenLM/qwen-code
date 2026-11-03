@@ -1094,6 +1094,52 @@ describe('e2e workflow', () => {
       );
     });
 
+    it('probes the apt mirror instead of pinning a region', () => {
+      // #16214: deb.debian.org serves this pool at MB/s from Hong Kong and
+      // 11-20 kB/s from the mainland hosts, where the two apt layers then
+      // outlast the job's 60-minute cap. So neither a single mirror nor a
+      // host-name map is correct — the build probes and overrides only on a
+      // clear win, which leaves healthy hosts on the built-in source.
+      expect(e2eRunScript).toContain('mirrors.aliyun.com');
+      expect(e2eRunScript).toContain('mirrors.tuna.tsinghua.edu.cn');
+      expect(e2eRunScript).toContain('--build-arg APT_MIRROR=');
+      // Both stages need the ARG: a stage cannot inherit an ARG declared
+      // before its own FROM, so one declaration per stage is the contract.
+      // Counting (not toMatch) catches deleting either one — R1-1 witnessed
+      // the runtime-stage removal surviving a single-match assertion.
+      expect(
+        readFileSync('Dockerfile', 'utf8').match(/^ARG APT_MIRROR=$/gm),
+      ).toHaveLength(2);
+
+      const selectIndex = e2eRunScript.indexOf('select_apt_mirror()');
+      expect(selectIndex).toBeGreaterThan(-1);
+      const callIndex = e2eRunScript.indexOf(
+        'apt_mirror="$(select_apt_mirror)"',
+      );
+      expect(callIndex).toBeGreaterThan(selectIndex);
+      // The probe has to run before the build consumes the flag, otherwise the
+      // mirror is decided after the layer it was meant to speed up.
+      expect(e2eRunScript.indexOf('if ! build_image;')).toBeGreaterThan(
+        callIndex,
+      );
+      // Three conditions hold the override back, and dropping any one is a real
+      // regression: a healthy default host keeps its source, a mirror has to be
+      // fast in absolute terms rather than merely faster than a broken default,
+      // and it has to beat the default decisively. The literals are pinned, not
+      // just the variable names: a 10x mutation of either threshold leaves the
+      // structure intact but flips the both-slow shape onto a still-slow mirror.
+      // \b, not toContain: 'slow_default=250000' is a substring of the 10x
+      // mutation 'slow_default=2500000', which would keep a naive pin green.
+      expect(e2eRunScript).toMatch(/slow_default=250000\b/);
+      expect(e2eRunScript).toMatch(/-lt "\$\{slow_default\}" \]/);
+      expect(e2eRunScript).toMatch(/fast_mirror=1000000\b/);
+      expect(e2eRunScript).toMatch(/-gt "\$\{fast_mirror\}" \]/);
+      expect(e2eRunScript).toMatch(/-gt \$\(\(default_rate \* 4\)\)/);
+      // The measurements have to reach the log, or the next slow build is
+      // another manual investigation.
+      expect(e2eRunScript).toContain('apt probe:');
+    });
+
     it('keeps one bounded retry without pruning the shared daemon', () => {
       expect(e2eRunScript.match(/build_image/g)).toHaveLength(3);
       expect(e2eRunScript).toContain(

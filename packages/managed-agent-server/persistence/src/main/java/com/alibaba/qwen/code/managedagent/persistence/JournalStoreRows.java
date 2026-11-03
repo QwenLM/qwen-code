@@ -449,7 +449,7 @@ final class JournalStoreRows {
                                 + " p.publication_id WHERE p.tenant_id = ? AND p.workspace_id = ?"
                                 + " AND p.session_id = ? AND p.admission_resource_id = ? AND"
                                 + " p.producer_phase IN ('FINISHED', 'REFERENCED') AND"
-                                + " p.quarantined = FALSE AND o.slot_key = X'61646d697373696f6e'"
+                                + " p.is_quarantined = FALSE AND o.slot_key = X'61646d697373696f6e'"
                                 + " AND o.capture_state = 'VERIFIED' AND o.resource_id = ? AND"
                                 + " o.capture_object_key = ? AND o.sha256 = ? AND o.byte_length ="
                                 + " ?",
@@ -488,7 +488,7 @@ final class JournalStoreRows {
         if ("managed-tool-outcome".equals(resource.kind())) {
             Long quarantined = jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture"
                             + " WHERE tenant_id = ? AND workspace_id = ? AND session_id = ?"
-                            + " AND admission_resource_id = ? AND quarantined = TRUE",
+                            + " AND admission_resource_id = ? AND is_quarantined = TRUE",
                     Long.class, resource.tenantId(), resource.workspaceId(),
                     resource.sessionId(), resource.resourceId());
             if (quarantined != null && quarantined > 0) {

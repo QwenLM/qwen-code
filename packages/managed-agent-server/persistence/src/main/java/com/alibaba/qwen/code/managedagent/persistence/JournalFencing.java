@@ -308,9 +308,9 @@ final class JournalFencing {
                                     .isConnectionTransactional(target, jdbc.getDataSource())) {
                                 var privatePins =
                                         jdbc.query(
-                                                "SELECT csi_guard FROM ma_session WHERE tenant_id ="
-                                                    + " ? AND session_id = ? AND csi_guard = TRUE",
-                                                (row, index) -> row.getBoolean("csi_guard"),
+                                                "SELECT is_csi_guard FROM ma_session WHERE tenant_id ="
+                                                    + " ? AND session_id = ? AND is_csi_guard = TRUE",
+                                                (row, index) -> row.getBoolean("is_csi_guard"),
                                                 tenantId,
                                                 sessionId);
                                 if (!privatePins.isEmpty()) {
@@ -325,7 +325,7 @@ final class JournalFencing {
                             // range locks: taking them on every writer path
                             // would couple per-turn traffic of unrelated
                             // Sessions again (#13800). The root is locked
-                            // first, by primary key once it exists, so its pin
+                            // first, by unique business key once it exists, so its pin
                             // is read as committed now even under an older
                             // REPEATABLE READ snapshot, no gap is taken that
                             // another tenant's first writer inserts into, and

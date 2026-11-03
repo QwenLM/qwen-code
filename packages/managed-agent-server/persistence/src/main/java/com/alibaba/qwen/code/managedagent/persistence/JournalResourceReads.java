@@ -107,8 +107,8 @@ final class JournalResourceReads {
         JournalStoreRows.validateStableId(resourceId, "resourceId");
         var guarded =
                 jdbc.queryForList(
-                        "SELECT csi_guard FROM ma_session"
-                                + " WHERE tenant_id = ? AND session_id = ? AND csi_guard = TRUE",
+                        "SELECT is_csi_guard FROM ma_session"
+                                + " WHERE tenant_id = ? AND session_id = ? AND is_csi_guard = TRUE",
                         tenantId,
                         sessionId);
         if (guarded.isEmpty()) {

@@ -371,7 +371,7 @@ All group settings use field-by-field inheritance: the specific group, then `"*"
 
 On the `github` and `gitlab` channels all inbound traffic is group traffic, so only `groupPolicy` and group member settings govern admission — see those channels' Security notes before using it on a public repository or project. Under `sessionScope: "single"` direct messages and groups share one conversation, so opening a group also exposes direct-message history to its members.
 
-In the Web Shell channel editor, **Who can talk in groups** and **Allowed group member IDs** edit `groups["*"]`, and **Session operators** edits `operators`. When `senders` is unset, the editor shows its effective default and writes nothing until you pick a value. Per-group overrides and an explicitly empty `"operators": []` are set in `settings.json`; saving from the editor keeps them.
+In the Web Shell channel editor, **Who can talk in groups** and **Allowed group member IDs** edit `groups["*"]`, and **Session operators** edits `operators`. When `senders` is unset, the editor shows its effective default and writes nothing until you pick a value. On `github`, the editor also shows one row per allowlisted repository for that repository's `senders`, `allowedUsers`, and `requireMention` — see [GitHub](./github.md#editing-from-the-web-shell). Other per-group overrides (`dispatchMode`, `groupHistoryLimit`, and per-group `requireMention` on chat platforms) and an explicitly empty `"operators": []` are set in `settings.json`; saving from the editor keeps them.
 
 ### Group History Backfill
 

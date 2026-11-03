@@ -55,6 +55,9 @@ export function RemoteAccessSettingsCard() {
 
   const accept = (next: RemoteAccessStatus) => {
     const previous = current.current;
+    // A successful status refresh clears any stale poll/action error so the
+    // alert banner does not outlive the failure that produced it.
+    setError('');
     if (previous?.generation !== next.generation || !next.active) {
       setSecret('');
       setRevealed(false);
@@ -119,8 +122,11 @@ export function RemoteAccessSettingsCard() {
   const acceptRef = useRef(accept);
   acceptRef.current = accept;
 
+  // Reset the operator draft and fetched state only when the daemon identity
+  // changes. A transient availability blip must not re-run this reset, or it
+  // wipes typed origins/port and the revealed token mid-edit (R1-9).
   useEffect(() => {
-    const generation = ++epoch.current;
+    ++epoch.current;
     current.current = undefined;
     setStatus(undefined);
     setSecret('');
@@ -131,7 +137,11 @@ export function RemoteAccessSettingsCard() {
     setAddress('');
     setBusy(false);
     pending.current = false;
+  }, [baseUrl, token, client]);
+
+  useEffect(() => {
     if (!available) return;
+    const generation = ++epoch.current;
     let loading = false;
     const refresh = async () => {
       if (loading || pending.current || document.hidden) return;
@@ -278,7 +288,7 @@ export function RemoteAccessSettingsCard() {
       )}
       {canManage &&
         !status?.active &&
-        (status?.interfaces?.length ?? 0) !== 1 && (
+        (status?.interfaces?.length ?? 0) > 1 && (
           <Select value={address} onValueChange={setAddress} disabled={busy}>
             <SelectTrigger aria-label={t('remoteAccess.network')}>
               <SelectValue placeholder={t('remoteAccess.network')} />
