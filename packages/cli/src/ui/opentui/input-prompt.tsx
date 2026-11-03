@@ -1113,6 +1113,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       cancelTurn,
       submitDraft,
       invalidateImportedInput,
+      restoreSubmission: (submission) => restoreSubmission(submission, '\n'),
     };
     return () => {
       if (props.composerHandle) props.composerHandle.current = null;
@@ -1123,6 +1124,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     submitDraft,
     invalidateImportedInput,
     replaceText,
+    restoreSubmission,
   ]);
 
   const acceptSuggestion = useCallback(

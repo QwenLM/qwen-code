@@ -162,10 +162,13 @@ function OpenTuiEntryApp({
   }, [config, renderer, width]);
   const { stats, startNewSession } = useSessionStats();
   const logger = useLogger(config.storage, config.getSessionId());
+  const composerHandle = useRef<OpenTuiComposerHandle | null>(null);
   const live = useOpenTuiLiveTurn({
     config,
     logger,
     dualOutput: runtime.dualOutputBridge,
+    onPromptReturned: (submission) =>
+      composerHandle.current?.restoreSubmission?.(submission),
   });
   const { applyEvent, submit, interrupt, resetTranscript, settleWaitingCall } =
     live;
@@ -254,7 +257,6 @@ function OpenTuiEntryApp({
   const getSessionStats = useCallback(() => statsRef.current, []);
 
   // --- early-input injection (ink initialCapturedInput parity) -------------
-  const composerHandle = useRef<OpenTuiComposerHandle | null>(null);
   const vimComposerBuffer = useRef<VimBuffer | null>(null);
   const vimBuffer = useMemo(
     () => createVimBuffer(() => vimComposerBuffer.current!),

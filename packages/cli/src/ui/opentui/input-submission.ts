@@ -118,5 +118,7 @@ export interface OpenTuiComposerHandle {
   setText(text: string): void;
   cancelTurn?(): void;
   submitDraft?(text: string): Promise<void>;
+  /** Puts a prompt back ahead of whatever the composer holds. */
+  restoreSubmission?(submission: OpenTuiInputSubmission): void;
   invalidateImportedInput?(): void;
 }

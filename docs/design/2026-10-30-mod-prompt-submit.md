@@ -35,7 +35,7 @@ Non-goals:
 
 ### 1. When it fires
 
-`prompt.submit` fires for each prompt a person submits, after the host has its text and before anything reads it: before UserPromptSubmit, before `@` references are read and before the user message is recorded or shown. Only a host that raises the event loads its hooks; any other host skips them at startup with the usual line, so a guard is never silently bypassed. Step 1 raises it in headless runs, for the `-p` prompt and each stream-json user message. Step 2 raises it in the Ink terminal, as described in section 7.
+`prompt.submit` fires for each prompt a person submits, after the host has its text and before anything reads it: before UserPromptSubmit, before `@` references are read and before the user message is recorded or shown. Only a host that raises the event loads its hooks; any other host skips them at startup with the usual line, so a guard is never silently bypassed. Step 1 raises it in headless runs, for the `-p` prompt and each stream-json user message. Step 2 raises it in the Ink terminal, as described in section 7, and step 3 in the OpenTUI terminal, as described in section 8.
 
 ### 2. Input
 
@@ -86,6 +86,18 @@ The Ink terminal raises the event in `prepareQueryForLlm`, for a prompt the pers
 - **A drop.** The reason is shown as an error line. The prompt gets no row and is not written to the input history. It goes back to the input box with its pastes collapsed, ahead of anything typed since, so the person can edit it and send it again.
 - **Esc while the hooks run.** It cancels the prompt, which goes back to the input box the same way.
 
+### 8. The OpenTUI terminal
+
+The OpenTUI terminal raises the event in the live turn (`useOpenTuiLiveTurn`), for a prompt the person typed, before its row is added, before the input history records it and before `@` references are read. It opts in the same way, through `initialize(['AbovePrompt'], { prompts: true })`.
+
+- **Which prompts.** The same as in Ink: a typed prompt, including one queued while a turn runs, which raises the event when it becomes a turn. Slash-form text, shell-mode commands, prompts a slash command generates and retries raise none.
+- **Queued prompts wait for the turn to end**, as in Ink: while a Mod hooks `prompt.submit`, the tool boundary takes no queued prompt.
+- **What the hooks hear.** The typed text with its pastes expanded. The composer sends attached images as parts of their own beside the text, and OpenTUI adds no notices to a prompt, so the hooks hear the whole of the prompt's text.
+- **The row waits for the hooks.** Without prompt hooks the row is added when the prompt is submitted. With them, it is added once the hooks let the prompt through, holding the rewrite if there is one; until then the turn shows as working.
+- **A rewrite.** It replaces the prompt's text for the model, the row and its recall text, the input history, the cancel restore, the `UserPromptSubmit` provenance and `turn.start`. Attached images stay after it. A paste the rewrite keeps whole is collapsed and framed again. Surrounding whitespace alone is no rewrite.
+- **A drop.** The reason is shown as an error line, the prompt gets no row and no input history entry, and it goes back to the input box with its pastes collapsed, ahead of anything typed since.
+- **Esc while the hooks run.** The prompt goes back to the input box ahead of the prompts queued behind it and of anything typed since.
+
 ## Design decisions
 
 - **The host raises the event.** Each host already holds the submitted text before it expands or records it. Raising the event there keeps the rewrite ahead of every use of the text without changing core's send.
@@ -95,13 +107,13 @@ The Ink terminal raises the event in `prepareQueryForLlm`, for a prompt the pers
 
 - **A dropped prompt is kept out of the input history.** The input history is written to disk and comes back in later sessions, and a guard usually drops a prompt for what it holds, such as a credential. Keeping it out of that history keeps the guard's purpose. Handing it back to the input box still lets the person fix it without retyping; whatever was typed since stays after it.
 - **Steering waits while prompt hooks are loaded.** Steering appends queued text to the tool results of a running turn and has no prompt of its own to hold back or rewrite. Holding queued prompts until the turn ends lets every prompt the person types pass the hooks, at the cost of mid-turn steering for sessions with such a hook.
+- **In OpenTUI the row waits for the hooks.** A guard drops a prompt for what it holds, so a row that showed the prompt first would display what the guard meant to keep out, and a rewrite would replace a row the person had already seen. The row is held only while a Mod hooks `prompt.submit`, so other sessions keep their immediate row.
 - **The hooks hear the typed text, not the model-only notices.** The person wrote the typed text; the notices belong to the terminal and change from session to session. A rewrite replaces only what the person typed, so a guard cannot drop the terminal's notices by accident.
 
 ## Differences from Claude Code
 
 These go into the user guide:
 
-- Until step 3, the OpenTUI terminal raises no `prompt.submit`.
 - Slash commands and prompts the person did not type raise none, so `command` and `isMeta` never appear.
 - `attachments` never appears, and `$.prompt.media` does not exist.
 - A UserPromptSubmit block does not turn `next(e)` into `{ drop }`, and `next(e)` resolves before the turn starts.
@@ -120,6 +132,7 @@ These go into the user guide:
   - a `.catch` that drops for a failed guard.
 - Mod session tests: no hooks, the origin, a rewrite with context, a drop's one line and its 4,096 characters, a failed worker, a cancelled prompt, and a prompt too long for a payload.
 - Client test: the Mods' context ahead of UserPromptSubmit's, escaped, with and without UserPromptSubmit hooks, and only for a new prompt.
+- OpenTUI live-turn tests: a rewrite with context in the sent prompt, the row, the input history and `turn.start`; a paste kept whole beside an attached image; a whitespace-only answer; a drop handed back with its pastes; Esc while the hooks run, with and without a composer; queued prompts held from the tool boundary and heard when they run; no event for slash-form text or a generated prompt.
 - Headless tests: the rewritten prompt and its context reaching the send and `turn.start`, a drop in JSON and text, and no event for a slash command or a notification.
 - The built CLI against a fixture server in headless JSON, text and stream-json: a rewrite that the model request and the transcript both hold, context in the hidden block, a drop, and a guard whose `.catch` drops.
 
