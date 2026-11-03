@@ -1,4 +1,12 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  afterAll,
+  beforeAll,
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+} from 'vitest';
 import { EventEmitter } from 'node:events';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -39,6 +47,19 @@ import {
 } from './ChannelProactiveDeliveryError.js';
 import { PairingStore } from './PairingStore.js';
 import type { CreatePairingRequestResult } from './PairingStore.js';
+
+// Channel event journals are written from the message path; keep them out of
+// the developer's real ~/.qwen while these tests drive rejections.
+const testQwenHome = mkdtempSync(join(tmpdir(), 'channel-base-home-'));
+const savedQwenHome = process.env['QWEN_HOME'];
+beforeAll(() => {
+  process.env['QWEN_HOME'] = testQwenHome;
+});
+afterAll(() => {
+  rmSync(testQwenHome, { recursive: true, force: true });
+  if (savedQwenHome === undefined) delete process.env['QWEN_HOME'];
+  else process.env['QWEN_HOME'] = savedQwenHome;
+});
 
 // Concrete test implementation
 class TestChannel extends ChannelBase {
@@ -332,6 +353,12 @@ class TestChannel extends ChannelBase {
       sessionId,
       segment as ChannelOutputSegmentContext | undefined,
     );
+  }
+}
+
+class CaseInsensitiveGroupChannel extends TestChannel {
+  protected override normalizeGroupId(groupId: string): string {
+    return groupId.toLowerCase();
   }
 }
 
@@ -4541,6 +4568,50 @@ describe('ChannelBase', () => {
         .calls[0][1] as string;
       expect(prompt).toBe(
         '[Chat messages since your last reply - for context]\n- [Alice] first background\n- [Bob] second background\n\n[Current message - respond to this]\n[Carol] @bot summarize',
+      );
+    });
+
+    it('applies a per-group history limit across the platform ID casing', async () => {
+      // The history limit is resolved through the same group lookup as the
+      // allowlist, so a platform with case-insensitive IDs must not lose its
+      // per-group override when the reported ID is spelled differently.
+      const ch = new CaseInsensitiveGroupChannel(
+        'test-chan',
+        defaultConfig({
+          groupPolicy: 'open',
+          groups: {
+            'qwenlm/qwen-code': { requireMention: true, groupHistoryLimit: 10 },
+          },
+        }),
+        bridge,
+        { groupHistoryPath: groupHistoryPath() },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: false,
+          chatId: 'QwenLM/qwen-code',
+          senderId: 'u1',
+          senderName: 'Alice',
+          text: 'background context',
+        }),
+      );
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: true,
+          chatId: 'QwenLM/qwen-code',
+          senderId: 'u2',
+          senderName: 'Bob',
+          text: '@bot summarize',
+        }),
+      );
+
+      const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(prompt).toBe(
+        '[Chat messages since your last reply - for context]\n- [Alice] background context\n\n[Current message - respond to this]\n[Bob] @bot summarize',
       );
     });
 

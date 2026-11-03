@@ -96,6 +96,7 @@ import { DaemonAvailabilityContext } from './daemon/availability-context.js';
 import { offlineDaemon } from './daemon/availability.test-fixtures.js';
 import { WebShellNavigationBoundary } from './navigation';
 import { HotkeySetter } from './live/HotkeySetter';
+import { TOUCH_COMPOSER_QUERY } from './hooks/useIsTouchComposer';
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
 
@@ -2447,6 +2448,13 @@ vi.doMock('./components/channels/ChannelsManagerPage', async () => {
   return {
     ChannelsManagerPage: () =>
       React.createElement('div', { 'data-testid': 'channels-manager-page' }),
+  };
+});
+vi.doMock('./components/channels/ChannelEventsPage', async () => {
+  const React = await import('react');
+  return {
+    ChannelEventsPage: () =>
+      React.createElement('div', { 'data-testid': 'channel-events-page' }),
   };
 });
 vi.doMock('./components/SplitView', async () => {
@@ -12798,6 +12806,198 @@ describe('App loading phrase settings', () => {
     expect(testState.latestChatCustomization?.loadingPhrases).toBe(
       loadingPhrases,
     );
+  });
+});
+
+describe('App touch navigation focus', () => {
+  beforeEach(() => {
+    const matchMedia = window.matchMedia;
+    vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({
+      ...matchMedia(query),
+      matches: query === TOUCH_COMPOSER_QUERY || matchMedia(query).matches,
+    }));
+  });
+
+  function expectChatFocus(container: HTMLElement) {
+    expect(editorFocus).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(
+      container.querySelector('[data-testid="chat-pane-container"]'),
+    );
+  }
+
+  it('keeps explicit new-session input focus on touch devices', async () => {
+    const { container } = renderApp();
+    await flush();
+    editorFocus.mockClear();
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')!
+        .click(),
+    );
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(editorFocus).toHaveBeenCalledOnce();
+  });
+
+  it('focuses the chat only after an existing session finishes loading', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    editorFocus.mockClear();
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="load-session"]')!
+        .click(),
+    );
+    mockConnection.sessionId = 'session-2';
+    mockConnection.loadingTranscript = true;
+    rerender();
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(editorFocus).not.toHaveBeenCalled();
+    expect(document.activeElement).not.toBe(
+      container.querySelector('[data-testid="chat-pane-container"]'),
+    );
+
+    mockConnection.loadingTranscript = false;
+    rerender();
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    expectChatFocus(container);
+  });
+
+  it.each(['before replay', 'after replay'])(
+    'preserves panel focus when Settings opens %s during a session switch',
+    async (timing) => {
+      const { container, rerender } = renderApp();
+      await flush();
+      editorFocus.mockClear();
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="load-session"]')!
+          .click(),
+      );
+      mockConnection.sessionId = 'session-2';
+      mockConnection.loadingTranscript = true;
+      rerender();
+      await flush();
+
+      if (timing === 'after replay') {
+        mockConnection.loadingTranscript = false;
+        rerender();
+      }
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="open-sidebar-settings"]',
+          )!
+          .click(),
+      );
+      const back = container.querySelector('[data-testid="panel-back"]');
+      expect(back).not.toBeNull();
+      expect(document.activeElement).toBe(back);
+
+      if (timing === 'before replay') {
+        mockConnection.loadingTranscript = false;
+        rerender();
+      }
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+      expect(document.activeElement).toBe(back);
+      expect(editorFocus).not.toHaveBeenCalled();
+    },
+  );
+
+  it('returns focus to the chat when a panel closes', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    const back = container.querySelector<HTMLButtonElement>(
+      '[data-testid="panel-back"]',
+    )!;
+    expect(document.activeElement).toBe(back);
+    editorFocus.mockClear();
+    act(() => back.click());
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    expectChatFocus(container);
+  });
+
+  it('waits for an approval to resolve before returning focus to the chat', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    editorFocus.mockClear();
+    testState.blocks = [makePendingPermissionBlock()];
+    rerender();
+    await flush();
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    expect(editorFocus).not.toHaveBeenCalled();
+    expect(document.activeElement).not.toBe(
+      container.querySelector('[data-testid="chat-pane-container"]'),
+    );
+
+    testState.blocks = [];
+    rerender();
+    await flush();
+    expectChatFocus(container);
+  });
+
+  it('returns focus to the chat when leaving the cockpit', async () => {
+    testState.settings = [sessionWorkflowSetting()];
+    window.history.replaceState(null, '', '/?view=cockpit');
+    const { container } = renderApp({ header: { items: [] } });
+    await flush();
+    const back = container.querySelector<HTMLButtonElement>(
+      '[data-testid="cockpit-empty"] button',
+    )!;
+    expect(back).not.toBeNull();
+    editorFocus.mockClear();
+    act(() => back.click());
+    await flush();
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expectChatFocus(container);
+  });
+
+  it('returns focus to the chat when a split folds on screen shrink', async () => {
+    let large = true;
+    let onChange: ((event: { matches: boolean }) => void) | undefined;
+    vi.spyOn(window, 'matchMedia').mockImplementation(
+      (query) =>
+        ({
+          get matches() {
+            return (
+              query === TOUCH_COMPOSER_QUERY ||
+              (query.includes('min-width') && large)
+            );
+          },
+          media: query,
+          addEventListener: (
+            _type: string,
+            listener: (event: { matches: boolean }) => void,
+          ) => {
+            if (query.includes('1024')) onChange = listener;
+          },
+          removeEventListener: vi.fn(),
+        }) as MediaQueryList,
+    );
+    const { container } = renderApp();
+    await flush();
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')!
+        .click(),
+    );
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    editorFocus.mockClear();
+    act(() => {
+      large = false;
+      onChange?.({ matches: false });
+    });
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+    expectChatFocus(container);
   });
 });
 

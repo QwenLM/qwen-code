@@ -73,7 +73,7 @@ class WorkspaceProfileLifecycleTest {
         assertThatThrownBy(() -> f.bindings.requireHarnessRecovery(f.scope(), f.session, null)).hasMessageContaining("closed");
         assertThatThrownBy(() -> f.bindings.requireHarnessRecovery(f.scope(), f.session, com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(first))).hasMessageContaining("closed");
         assertThatThrownBy(() -> f.bindings.requireHookAdmission(f.scope(), f.session, current)).hasMessageContaining("closed");
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(f.jdbc));
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(f.jdbc);
         var request = new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "cleanup", 60_000L);
         assertThatThrownBy(() -> f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, "w".repeat(32), request)))
                 .isInstanceOf(ManagedAgentException.class);
@@ -91,7 +91,7 @@ class WorkspaceProfileLifecycleTest {
             "hosted-workspace-mcp/1,CLOSE", "hosted-workspace-mcp/1,DELETE"})
     void initialAdmissionPreservesTheLiveWriterForOneHandoff(String profile, OperationKind kind) {
         var f = fixture();
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(f.jdbc));
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(f.jdbc);
         String token = "w".repeat(32);
         var writer = f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, token,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "resident", 1000L)));
@@ -122,7 +122,7 @@ class WorkspaceProfileLifecycleTest {
     @ValueSource(ints = {1, 2})
     void admissionNeverRevivesAnExpiredWriter(int protocol) {
         var f = fixture();
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(f.jdbc));
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(f.jdbc);
         f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, "w".repeat(32),
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "expired", 60_000L)));
         f.jdbc.update("UPDATE ma_session_head SET writer_lease_until = 0");
@@ -136,7 +136,7 @@ class WorkspaceProfileLifecycleTest {
     @ValueSource(strings = {WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP})
     void newClaimsNeverRefreshTheAdmissionHandoff(String profile) {
         var f = fixture();
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(f.jdbc));
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(f.jdbc);
         f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, "w".repeat(32),
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "resident", 1000L)));
         var first = admit(f, profile, OperationKind.CLOSE);
@@ -153,7 +153,7 @@ class WorkspaceProfileLifecycleTest {
     @ValueSource(strings = {WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP})
     void expiredResidentWriterRenewsOnlyUnderTheCurrentResourceClaim(String profile) {
         var f = fixture();
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(f.jdbc));
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(f.jdbc);
         String token = "w".repeat(32);
         var writer = f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, token,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "resident", 60_000L)));
@@ -191,7 +191,7 @@ class WorkspaceProfileLifecycleTest {
     @Test
     void filesV1DrainingStillRejectsAnExpiredWriter() {
         var f = fixture();
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(f.jdbc));
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(f.jdbc);
         var writer = f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, "w".repeat(32),
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "resident", 60_000L)));
         String id = f.transactions.execute(ignored -> f.store.beginWorkspaceLifecycle("tenant", f.session, OperationKind.CLOSE,
@@ -211,7 +211,7 @@ class WorkspaceProfileLifecycleTest {
     @ValueSource(strings = {WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP})
     void sealedCleanupWriterCanBeReacquiredOnlyWithTheCurrentResourceClaim(String profile) {
         var f = fixture();
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(f.jdbc));
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(f.jdbc);
         String token = "w".repeat(32);
         var original = f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, token,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "original", 60_000L)));
@@ -384,11 +384,11 @@ class WorkspaceProfileLifecycleTest {
         assertThat(f.jdbc.queryForObject("SELECT producer_phase FROM ma_output_capture WHERE tenant_id = ?", String.class, "tenant-1")).isEqualTo("OPEN");
         verifyPublications.run();
         verifyResources.run();
-        for (String mutation : java.util.List.of("state = 'FENCED'", "producer_phase = 'FINISHING'", "quarantined = TRUE", "terminal_resource_id = 'unexpected'")) {
+        for (String mutation : java.util.List.of("state = 'FENCED'", "producer_phase = 'FINISHING'", "is_quarantined = TRUE", "terminal_resource_id = 'unexpected'")) {
             f.jdbc.update("UPDATE ma_output_capture SET " + mutation + " WHERE tenant_id = ?", "tenant-1");
             assertThatThrownBy(verifyPublications::run).isInstanceOf(ManagedAgentException.class);
             assertThatThrownBy(verifyResources::run).isInstanceOf(ManagedAgentException.class);
-            f.jdbc.update("UPDATE ma_output_capture SET state = 'NOT_STARTED', producer_phase = 'OPEN', quarantined = FALSE, terminal_resource_id = NULL WHERE tenant_id = ?", "tenant-1");
+            f.jdbc.update("UPDATE ma_output_capture SET state = 'NOT_STARTED', producer_phase = 'OPEN', is_quarantined = FALSE, terminal_resource_id = NULL WHERE tenant_id = ?", "tenant-1");
         }
         var conflicting = publication.binding.deepCopy().put("runtimeBindingId", "other-binding");
         f.jdbc.update("UPDATE ma_output_capture SET binding_json = ?, binding_digest = ? WHERE tenant_id = ?",
@@ -506,7 +506,7 @@ class WorkspaceProfileLifecycleTest {
             f.jdbc.update("UPDATE ma_resource SET storage_kind = 'TOOL_PUBLICATION', inline_bytes = NULL WHERE resource_id = X'6f7574636f6d65'");
             assertThatThrownBy(() -> verifier.verifyPublications(operation)).isInstanceOf(ManagedAgentException.class);
             verify.run();
-            f.jdbc.update("UPDATE ma_output_capture SET quarantined = TRUE WHERE publication_id = X'7075622d31'");
+            f.jdbc.update("UPDATE ma_output_capture SET is_quarantined = TRUE WHERE publication_id = X'7075622d31'");
             assertThatThrownBy(verify::run).isInstanceOf(ManagedAgentException.class);
             return;
         }
@@ -620,7 +620,7 @@ class WorkspaceProfileLifecycleTest {
     @ValueSource(booleans = {false, true})
     void queuedNotificationIsCleanupWorkButAnActivatedNotificationIsATurn(boolean activated) throws Exception {
         var f = fixture();
-        var journal = new com.alibaba.qwen.code.managedagent.ExtensionRecordJournal(com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(f.jdbc)), "tenant", "workspace", f.session);
+        var journal = new com.alibaba.qwen.code.managedagent.ExtensionRecordJournal(com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(f.jdbc), "tenant", "workspace", f.session);
         f.transactions.executeWithoutResult(ignored -> journal.open());
         var input = f.json.createObjectNode();
         var event = input.putObject("managedSession").put("kind", "input.accepted");
@@ -688,7 +688,7 @@ class WorkspaceProfileLifecycleTest {
     @Test
     void duplicateOrdinaryCommitIsFencedByAVersionTwoClaim() throws Exception {
         var f = fixture();
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(f.jdbc));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(f.jdbc);
         var journal = f.transactions.execute(ignored ->
                 new ExtensionRecordJournal(sessions, "tenant", "workspace", f.session).open());
         var templates = ManagedHookRecordContractTest.fixtures().get("templates");

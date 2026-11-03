@@ -1096,6 +1096,45 @@ describe('LlmClient Goal admission', () => {
     });
   });
 
+  it('leaves the runtime message of a Goal turn to a host that recorded it', async () => {
+    const { client, recorder, order } = setupGoalClient();
+
+    await drain(
+      goalTurn(client, 'Continue the Goal.', { userTurnRecordedByHost: true }),
+    );
+
+    expect(recorder.recordGoalRuntimeMessage).not.toHaveBeenCalled();
+    expect(order).toContain('finish');
+  });
+
+  it("continues a Goal turn under its permit from a host's stop policy", async () => {
+    const { client, runtime, order } = setupGoalClient();
+    const policy = {
+      continueAt: vi
+        .fn()
+        .mockResolvedValueOnce([{ text: 'Finish the todos.' }])
+        .mockResolvedValue(undefined),
+    };
+    const getInterruptedGoalPauseReason = vi.fn(() => 'host reason');
+    const sendSpy = vi.spyOn(client, 'sendMessageStream');
+
+    await drain(
+      goalTurn(client, 'Continue the Goal.', {
+        stopPolicies: [policy],
+        getInterruptedGoalPauseReason,
+      }),
+    );
+
+    expect(policy.continueAt).toHaveBeenCalledTimes(2);
+    expect(sendSpy.mock.calls[1]?.[3]).toMatchObject({
+      type: SendMessageType.Hook,
+      ...exactPermit,
+      getInterruptedGoalPauseReason,
+    });
+    expect(runtime.finishTurn).toHaveBeenCalledOnce();
+    expect(order.filter((step) => step === 'finish')).toHaveLength(1);
+  });
+
   it('fails closed before recording or sampling when an automatic permit is stale', async () => {
     const { client, runtime, recorder } = setupGoalClient();
     vi.mocked(runtime.permitForTurn).mockReturnValue(undefined);

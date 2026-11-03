@@ -233,7 +233,7 @@ public class ManagedSchemaBusinessStoreTest {
                 "INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id,"
                     + " session_id, publication_id, execution_key, capture_id, binding_json,"
                     + " binding_digest, token_hash, state, capture_bytes, producer_bytes,"
-                    + " admission_bytes, producer_phase, write_evidence, accepted_complete) VALUES"
+                    + " admission_bytes, producer_phase, is_write_evidence, is_accepted_complete) VALUES"
                     + " (?, ?, ?, 'workspace', ?, 'capture', ?, 'capture-id', '{}', ?, ?, 'FENCED',"
                     + " 1000, 1000, 1000, 'REFERENCED', TRUE, TRUE)",
                 scope, ToolPublicationRetentionStore.hash(tenant), tenant, session, hash, hash, hash);
@@ -327,7 +327,7 @@ public class ManagedSchemaBusinessStoreTest {
                 "INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, last_sequence, replay_floor_sequence, covered_sequence, gmt_modified) VALUES (?, ?, 'SESSION', ?, 7, 2, 5, 0)",
                 tenant, session, "");
         jdbc.update(
-                "INSERT INTO ma_public_event (tenant_id, session_id, sequence_id, event_id, event_type, data_json, terminal, gmt_create) VALUES (?, ?, 7, ?, 'item.completed', '{}', FALSE, 0)", tenant, session, "event-" + tenant);
+                "INSERT INTO ma_public_event (tenant_id, session_id, sequence_id, event_id, event_type, data_json, is_terminal, gmt_create) VALUES (?, ?, 7, ?, 'item.completed', '{}', FALSE, 0)", tenant, session, "event-" + tenant);
         new TransactionTemplate(manager).executeWithoutResult(status -> {
             ToolPublicationRetentionStore.lockDeletion(jdbc, tenant, session);
             ToolPublicationRetentionStore.retire(jdbc, tenant, session, "delete");
@@ -348,6 +348,25 @@ public class ManagedSchemaBusinessStoreTest {
     }
 
     @Test
+    void scheduleReadsPreserveBoundedAndAbsentCatchUpLimits() {
+        AutomationLedgerStore automation = new AutomationLedgerStore(jdbc);
+        for (String policy : List.of("bounded", "none")) {
+            Long limit = policy.equals("bounded") ? 7L : null;
+            jdbc.update(
+                    "INSERT INTO ma_schedule (tenant_id, schedule_id, session_id, workspace_id,"
+                            + " actor_id, record_revision, definition_revision, definition_digest,"
+                            + " goal, cron, timezone, session_mode, overlap, catch_up, catch_up_limit,"
+                            + " is_enabled, state, armed_at, gmt_create, gmt_modified) VALUES"
+                            + " (?, ?, ?, 'workspace', 'actor', 1, 1, ?, 'goal', '0 * * * *', 'UTC',"
+                            + " 'new_session', 'skip', ?, ?, TRUE, 'armed', 0, 0, 0)",
+                    tenant, "schedule-" + policy, session, "a".repeat(64), policy, limit);
+            var schedule = automation.findSchedule(tenant, "schedule-" + policy).orElseThrow();
+            assertThat(schedule.catchUp()).isEqualTo(policy);
+            assertThat(schedule.catchUpLimit()).isEqualTo(limit);
+        }
+    }
+
+    @Test
     void schedulePagesUseCurrentRootPermissionsThroughoutTheChildWorkspaceChain() {
         byte[] actor = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, "operator");
         String parent = null;
@@ -362,7 +381,7 @@ public class ManagedSchemaBusinessStoreTest {
             parent = workspace;
             int time = workspace.equals("root") ? 1 : workspace.equals("child") ? 2 : workspace.equals("grandchild") ? 3 : 4;
             jdbc.update(
-                    "INSERT INTO ma_schedule (tenant_id, schedule_id, session_id, workspace_id, actor_id, record_revision, definition_revision, definition_digest, goal, cron, timezone, session_mode, overlap, catch_up, enabled, state, armed_at, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 1, 1, ?, 'goal', '0 * * * *', 'UTC', 'new_session', 'skip', 'none', TRUE, 'armed', 0, ?, ?)",
+                    "INSERT INTO ma_schedule (tenant_id, schedule_id, session_id, workspace_id, actor_id, record_revision, definition_revision, definition_digest, goal, cron, timezone, session_mode, overlap, catch_up, is_enabled, state, armed_at, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 1, 1, ?, 'goal', '0 * * * *', 'UTC', 'new_session', 'skip', 'none', TRUE, 'armed', 0, ?, ?)",
                     tenant, "schedule-" + workspace, session, workspace, actor, "a".repeat(64), time, time);
         }
         jdbc.update(
@@ -443,7 +462,7 @@ public class ManagedSchemaBusinessStoreTest {
                 "INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id,"
                     + " session_id, publication_id, execution_key, capture_id, binding_json,"
                     + " binding_digest, token_hash, state, capture_bytes, producer_bytes,"
-                    + " admission_bytes, producer_phase, write_evidence, accepted_complete) VALUES"
+                    + " admission_bytes, producer_phase, is_write_evidence, is_accepted_complete) VALUES"
                     + " (?, ?, ?, 'workspace', ?, 'capture', ?, 'capture-id', '{}', ?, ?, 'FENCED',"
                     + " 1000, 1000, 1000, 'REFERENCED', TRUE, TRUE)",
                 scope, ToolPublicationRetentionStore.hash(tenant), tenant, session, hash, hash, hash);

@@ -369,8 +369,22 @@ describe('Mod session ownership', () => {
       presentation,
     );
     expect(mocks.create.mock.calls[0][5]).toBe('terminal');
-    // The terminals raise no prompt.submit yet.
+    // A terminal that does not say it raises prompt.submit skips its hooks.
     expect(mocks.create.mock.calls[0][10]).toBe(false);
+  });
+
+  it('loads prompt.submit hooks for a terminal that raises the event', async () => {
+    const { session } = setup(
+      { isInteractive: () => true },
+      {
+        surface: 'terminal',
+        log: vi.fn(),
+        presentation: () => ({ isFullscreen: false, columns: 80 }),
+        prompts: () => true,
+      },
+    );
+    await session.initialize(new AbortController().signal);
+    expect(mocks.create.mock.calls[0][10]).toBe(true);
   });
 
   it.each([false, true])(
@@ -694,6 +708,16 @@ describe('Mod session ownership', () => {
     await loaded.session.initialize(new AbortController().signal);
     return loaded;
   };
+
+  it('says whether a loaded Mod hooks prompt.submit', async () => {
+    const quiet = setup();
+    await quiet.session.initialize(new AbortController().signal);
+    expect(quiet.session.hearsPrompts).toBe(false);
+    const { session } = await loadPrompts();
+    expect(session.hearsPrompts).toBe(true);
+    await session.close();
+    expect(session.hearsPrompts).toBe(false);
+  });
 
   it('passes a prompt through when no hook hears prompt.submit', async () => {
     const { session, runtime } = setup();

@@ -242,12 +242,12 @@ public final class ToolPublicationStore {
         var current = jdbc.query(
                                 "SELECT token_hash, state, expires_at, binding_digest,"
                                     + " binding_json, tenant_id, workspace_id, session_id, CASE"
-                                    + " WHEN quarantined THEN 1 ELSE 0 END AS quarantined FROM"
+                                    + " WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined FROM"
                                     + " ma_output_capture WHERE scope_key = ? AND publication_id ="
                                     + " ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                 scope, publicationId).getFirst();
         long nowEpoch = ToolPublicationRetentionStore.now(jdbc);
-        require(((Number) current.get("quarantined")).intValue() == 0, "Publication is quarantined");
+        require(((Number) current.get("is_quarantined")).intValue() == 0, "Publication is quarantined");
         if (access != Access.SETTLE) {
             require(equalHash(suppliedHash, (String) current.get("token_hash"))
                     && "OPEN".equals(current.get("state")) && current.get("expires_at") != null,
@@ -411,7 +411,7 @@ public final class ToolPublicationStore {
                             + " session_id, publication_id, execution_key, capture_id, binding_json,"
                         + " binding_digest, token_hash, state, expires_at, capture_bytes,"
                         + " producer_bytes, admission_bytes, capture_held_bytes,"
-                        + " producer_held_bytes, admission_held_bytes, write_evidence) VALUES (?,"
+                        + " producer_held_bytes, admission_held_bytes, is_write_evidence) VALUES (?,"
                         + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, TRUE)",
                     scope, tenantKey, tenant, workspace, session, id, hash(text(candidate, "executionCallId")),
                     text(candidate, "captureId"), candidate.toString(), digest, tokenHash, expires, bytes,
@@ -878,13 +878,13 @@ public final class ToolPublicationStore {
         require(sameResult, "Original settled Broker result conflicts with terminal result");
         JsonNode terminal = finished.path("terminal");
         var publication = jdbc.query("SELECT producer_phase, finish_operation_id, finish_digest,"
-                + " terminal_resource_id, CASE WHEN quarantined THEN 1 ELSE 0"
-                                    + " END AS quarantined FROM ma_output_capture WHERE scope_key ="
+                + " terminal_resource_id, CASE WHEN is_quarantined THEN 1 ELSE 0"
+                                    + " END AS is_quarantined FROM ma_output_capture WHERE scope_key ="
                                     + " ? AND publication_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                 scope, publicationId).getFirst();
         require(("FINISHED".equals(publication.get("producer_phase"))
                 || "REFERENCED".equals(publication.get("producer_phase")))
-                && ((Number) publication.get("quarantined")).intValue() == 0
+                && ((Number) publication.get("is_quarantined")).intValue() == 0
                 && text(finished, "finishOperationId").equals(publication.get("finish_operation_id"))
                 && text(terminal, "resourceId").equals(publication.get("terminal_resource_id"))
                 && text(terminal, "digest").equals(publication.get("finish_digest")),
