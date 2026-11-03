@@ -187,11 +187,27 @@ export interface SessionTarget {
   isGroup?: boolean;
 }
 
+/**
+ * The closed role vocabulary of role-aware bound delivery. Core owns the
+ * sidecar copy (`PR_BINDING_ROLES` in session-pr-service); the channel
+ * packages cannot depend on core, so this mirror is the channel-side
+ * source. A cross-package pin test (cli's session-pr-bindings.test.ts,
+ * which imports the real core) keeps the two lists identical.
+ */
+export const PR_BINDING_ROLES = ['review', 'verify', 'fix'] as const;
+
+export type PrBindingRole = (typeof PR_BINDING_ROLES)[number];
+
 /** One PR binding mirrored from a daemon session's PR sidecar. */
 export interface PrBindingEntry {
   number: number;
   url: string;
   state?: 'open' | 'merged' | 'closed';
+  /**
+   * The job the bound session does for the PR (role-aware delivery).
+   * Absent means untyped; the adapter groups untyped followers separately.
+   */
+  role?: PrBindingRole;
 }
 
 /**

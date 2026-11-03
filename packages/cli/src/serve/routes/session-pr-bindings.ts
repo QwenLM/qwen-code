@@ -28,6 +28,7 @@ export interface SessionPrBindingEntry {
   number: number;
   url: string;
   state?: 'open' | 'merged' | 'closed';
+  role?: 'review' | 'verify' | 'fix';
 }
 
 export interface SessionPrBindingSummary {
@@ -151,6 +152,7 @@ export function registerSessionPrBindingsRoutes(
                   number: pr.number,
                   url: pr.url,
                   ...(pr.state !== undefined ? { state: pr.state } : {}),
+                  ...(pr.role !== undefined ? { role: pr.role } : {}),
                 })),
               });
             }

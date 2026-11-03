@@ -132,7 +132,7 @@ boundSessions?: {
 1. **prompt 注入，而非 channel 接管。** `activateManagedSession` 会把跟进会话的出站目标绑到 GitHub 线程，交互式会话的每条最终回复都会被发布为公开 PR 评论（publication contract）。注入让回复留在会话内，GitHub 动作交给会话自己的判断与工具。
 2. **channel 内状态监视，而非 webhook。** 监视复用 channel 既有轮询循环与凭据；判定发生在 API 层，真实迁移出现前零模型 token。Webhook 推送需要公网隧道加在仓库建 webhook（需操作者同意），还要改造静态 webhook targets。监视本质仍是轮询，但它是维护者接受的 gate 探针形状：模型之外做廉价判定，有变化才动模型。
 3. **反查放在 daemon。** 绑定跨 workspace；worker 是 workspace 作用域且已经通过鉴权 HTTP 与 daemon 通信。只读进程级路由复用刷新定时器的扫描模式，避免在 worker 里重复 sidecar 访问。
-4. **单候选，取最近更新。** 广播到所有绑定会话会成倍放大模型成本并产生重复的 GitHub 动作；最新的非归档、非 channel 会话最可能持有工作上下文。
+4. **单候选，取最近更新。** 广播到所有绑定会话会成倍放大模型成本并产生重复的 GitHub 动作；最新的非归档、非 channel 会话最可能持有工作上下文。提案中的[绑定会话动作模板](2026-11-04-github-channel-bound-session-action-templates.zh-CN.md)设计在配置 `boundSessionActions` 时将本决策泛化为每角色一个 winner；字段缺省时，本决策逐字成立。
 5. **候选排除 channel 会话。** 经 `/review` 回填绑定的 channel 自建会话必须保持公开回复契约；正常 channel 路径已经服务它。
 6. **默认 opt-in。** 公开仓库事件驱动交互式会话是新的信任面；操作者显式开启，且评论的 sender gate 在投递前照常生效。
 7. **唤醒休眠会话，而非回退。** E2E 发现 daemon 重启后绑定会话处于休眠态、prompt 路由 404；若把这当作「会话已消失」，重启后的所有事件都会静默改走公开 channel 投递——违背功能的核心私密投递承诺。因此访问器先恢复会话（channel bridge 已在用的同款 resume 路径）再重试一次；只有无法恢复的会话才回退。恢复铸造的 client 注册由访问器在重试 prompt 落定后显式 detach：非空注册会挡住 daemon 的 prompt-settled idle close，不 detach 就会把被唤醒的会话钉在 live 态直到 TTL reaper（reaper 禁用时则永久）。

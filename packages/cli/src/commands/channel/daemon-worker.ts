@@ -432,12 +432,20 @@ export function createBoundSessionsAccessor(
       const entries: PrBindingSummary['prs'] = [];
       for (const pr of prs) {
         if (pr === null || typeof pr !== 'object') continue;
-        const { number, url, state } = pr as Record<string, unknown>;
+        const { number, url, state, role } = pr as Record<string, unknown>;
         if (
           typeof number !== 'number' ||
           !Number.isSafeInteger(number) ||
           number <= 0 ||
-          typeof url !== 'string'
+          typeof url !== 'string' ||
+          // An unknown role is a degraded entry, not a silently untyped
+          // one: dropping it to the untyped group could misroute delivery
+          // under a version skew. The count check below flags the answer
+          // partial so the adapter retains known bindings.
+          (role !== undefined &&
+            role !== 'review' &&
+            role !== 'verify' &&
+            role !== 'fix')
         ) {
           continue;
         }
@@ -447,6 +455,7 @@ export function createBoundSessionsAccessor(
           ...(state === 'open' || state === 'merged' || state === 'closed'
             ? { state }
             : {}),
+          ...(role !== undefined ? { role } : {}),
         });
       }
       if (entries.length < prs.length) {

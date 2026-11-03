@@ -94,7 +94,7 @@ vi.mock('@qwen-code/channel-base', async (importOriginal) => {
   };
 });
 
-import { GithubChannel } from './GithubAdapter.js';
+import { GithubChannel, validateBoundSessionConfig } from './GithubAdapter.js';
 
 const octokitModule = (await import('@octokit/rest')) as unknown as {
   Octokit: Mock;
@@ -8721,6 +8721,378 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
     });
   });
 
+  describe('role-aware bound delivery (boundSessionActions)', () => {
+    const roleBindings = () => [
+      makeBinding({
+        sessionId: 'review-session',
+        updatedAt: '2026-07-02T00:00:00.000Z',
+        prs: [
+          {
+            number: 42,
+            url: 'https://github.com/owner/repo/pull/42',
+            state: 'open',
+            role: 'review',
+          },
+        ],
+      }),
+      makeBinding({
+        sessionId: 'verify-session',
+        updatedAt: '2026-07-02T00:00:00.000Z',
+        prs: [
+          {
+            number: 42,
+            url: 'https://github.com/owner/repo/pull/42',
+            state: 'open',
+            role: 'verify',
+          },
+        ],
+      }),
+      makeBinding({
+        sessionId: 'fix-session',
+        updatedAt: '2026-07-02T00:00:00.000Z',
+        prs: [
+          {
+            number: 42,
+            url: 'https://github.com/owner/repo/pull/42',
+            state: 'open',
+            role: 'fix',
+          },
+        ],
+      }),
+    ];
+
+    describe('configuration validation', () => {
+      it('rejects unknown keys by name, empty values, and oversized templates', () => {
+        expect(
+          validateBoundSessionConfig(
+            {
+              deliverToBoundSessions: true,
+              boundSessionActions: { 'review:bogus': 'do it' },
+            },
+            'test-github',
+          ),
+        ).toContain('review:bogus');
+        expect(
+          validateBoundSessionConfig(
+            {
+              deliverToBoundSessions: true,
+              boundSessionActions: { default: '   ' },
+            },
+            'test-github',
+          ),
+        ).toContain('non-empty');
+        expect(
+          validateBoundSessionConfig(
+            {
+              deliverToBoundSessions: true,
+              boundSessionActions: {
+                default: 'x'.repeat(2_001),
+              },
+            },
+            'test-github',
+          ),
+        ).toContain('2000');
+      });
+
+      it('requires deliverToBoundSessions and accepts the closed vocabulary', () => {
+        expect(
+          validateBoundSessionConfig(
+            { boundSessionActions: { default: 'do it' } },
+            'test-github',
+          ),
+        ).toContain('deliverToBoundSessions');
+        expect(
+          validateBoundSessionConfig(
+            {
+              deliverToBoundSessions: true,
+              boundSessionActions: {
+                default: 'triage',
+                'watch:head_change': 're-review',
+                'review:watch:head_change': 're-review',
+                'verify:default': 'verify',
+                comment: 'address comments',
+                state_change: 'notification reason',
+                'watch:state_change': 'watch transition',
+              },
+            },
+            'test-github',
+          ),
+        ).toBeUndefined();
+        expect(
+          validateBoundSessionConfig(
+            {
+              deliverToBoundSessions: true,
+              boundSessionActions: { 'triage:comment': 'unknown role' },
+            },
+            'test-github',
+          ),
+        ).toContain('triage:comment');
+      });
+    });
+
+    it('fans a comment out to the matched roles only, with rendered templates', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: {
+            'review:comment': 'Review the new comments on %repo%#%pr%.',
+            'fix:comment': 'Address the comments (role %role%, event %event%).',
+          },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: roleBindings(),
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+      const calls = boundSessions.deliverPrompt.mock.calls as Array<
+        [string, string]
+      >;
+      const bySession = new Map(calls.map(([id, prompt]) => [id, prompt]));
+      expect(bySession.get('review-session')).toContain(
+        'Review the new comments on owner/repo#42.',
+      );
+      expect(bySession.get('review-session')).toContain('Role: review');
+      expect(bySession.get('review-session')).toContain(
+        '[Operator instruction — trusted',
+      );
+      expect(bySession.get('fix-session')).toContain(
+        'Address the comments (role fix, event comment).',
+      );
+      // verify has no comment key: the map is a per-role subscription.
+      expect(bySession.has('verify-session')).toBe(false);
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+    });
+
+    it('retires privately when followers exist but no role matched', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: {
+            'fix:watch:ci_failure': 'fix it',
+          },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: roleBindings(),
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+    });
+
+    it('resolves role:default then bare keys, and keeps untyped bindings on the bare chain', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: {
+            'review:default': 'review fallback',
+            comment: 'bare comment instruction',
+          },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          ...roleBindings(),
+          makeBinding({ sessionId: 'untyped-session' }),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const calls = boundSessions.deliverPrompt.mock.calls as Array<
+        [string, string]
+      >;
+      const bySession = new Map(calls.map(([id, prompt]) => [id, prompt]));
+      // review:comment absent → review:default wins over the bare key.
+      expect(bySession.get('review-session')).toContain('review fallback');
+      // verify/fix have no role chain match → bare comment key.
+      expect(bySession.get('verify-session')).toContain(
+        'bare comment instruction',
+      );
+      expect(bySession.get('fix-session')).toContain(
+        'bare comment instruction',
+      );
+      // The untyped binding resolves only the bare chain, no Role line.
+      expect(bySession.get('untyped-session')).toContain(
+        'bare comment instruction',
+      );
+      expect(bySession.get('untyped-session')).not.toContain('Role:');
+    });
+
+    it('renders %% escapes, leaves unknown variables literal, and caps hostile titles', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: {
+            default: '100%% done %unknown% %title%',
+          },
+        },
+        { boundSessions },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            subject: {
+              title: 'T'.repeat(300),
+              url: 'https://api.github.com/repos/owner/repo/pulls/42',
+              type: 'PullRequest',
+            },
+          }),
+        ])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+      expect(prompt).toContain('100% done %unknown%');
+      // The cap applies to the SUBSTITUTED value in the operator block; the
+      // identity line keeps the full title per the existing prompt contract.
+      const lines = prompt.split('\n');
+      const operatorLine =
+        lines[
+          lines.indexOf(
+            "[Operator instruction — trusted, from this channel's configuration]",
+          ) + 1
+        ] ?? '';
+      expect(operatorLine).toContain('[truncated]');
+      expect(operatorLine).not.toContain('T'.repeat(201));
+    });
+
+    it('defers one queue-full role without blocking the other roles', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: {
+            'review:comment': 'review',
+            'verify:comment': 'verify',
+          },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: roleBindings(),
+        partial: false,
+      });
+      boundSessions.deliverPrompt.mockImplementation(
+        async (sessionId: string) => {
+          if (sessionId === 'review-session') {
+            throw new BoundSessionQueueFullError(sessionId);
+          }
+        },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const delivered = (
+        boundSessions.deliverPrompt.mock.calls as Array<[string]>
+      ).map(([id]) => id);
+      expect(delivered).toContain('verify-session');
+      expect(delivered).toContain('review-session');
+      // The review target persists as a backpressure task; verify settled.
+      const tasks = JSON.parse(
+        readFileSync(inboundTaskPath(), 'utf-8'),
+      ) as Array<{
+        delivery?: { sessionId?: string };
+        backpressure?: boolean;
+      }>;
+      const review = tasks.find(
+        (task) => task.delivery?.sessionId === 'review-session',
+      );
+      expect(review?.backpressure).toBe(true);
+      expect(
+        tasks.some((task) => task.delivery?.sessionId === 'verify-session'),
+      ).toBe(false);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+    });
+
+    it('keeps the legacy prompt byte-compatible when no actions are configured', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+      expect(prompt).toContain('Handle the event with your normal workflow');
+      expect(prompt).not.toContain('[Operator instruction');
+      expect(prompt).not.toContain('Role:');
+    });
+
+    it('legacy gone-fallback stays generic even when bindings carry roles', async () => {
+      // A /review backfill stamps roles with no map configured; the legacy
+      // gone-fallback must not leak the role into the generic prompt.
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'gone-session',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'review',
+              },
+            ],
+          }),
+          makeBinding({ sessionId: 'live-session' }),
+        ],
+        partial: false,
+      });
+      boundSessions.deliverPrompt.mockImplementation(
+        async (sessionId: string) => {
+          if (sessionId === 'gone-session') {
+            throw new BoundSessionGoneError(sessionId);
+          }
+        },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const calls = boundSessions.deliverPrompt.mock.calls as Array<
+        [string, string]
+      >;
+      const fallback = calls.find(([id]) => id === 'live-session');
+      expect(fallback).toBeDefined();
+      expect(fallback![1]).toContain(
+        'Handle the event with your normal workflow',
+      );
+      expect(fallback![1]).not.toContain('Role:');
+      expect(fallback![1]).not.toContain('[Operator instruction');
+    });
+  });
+
   describe('PR state watch', () => {
     // Routing queues (listForRef / notifications / comments) are consumed
     // per API call, and some tests intentionally leave a value unconsumed
@@ -9179,6 +9551,216 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         `test-github-${nameHash}-github-pr-watch.json`,
       );
     }
+
+    describe('role-aware watch fan-out', () => {
+      const headChangeKey = 'watch:head_change:42:1:1751446800000';
+
+      const roleWatchConfig = {
+        deliverToBoundSessions: true,
+        prWatchEvents: ['head_change'],
+        boundSessionActions: {
+          'review:watch:head_change': 'Re-review %repo%#%pr% (role %role%).',
+          'verify:watch:head_change': 'Re-verify %repo%#%pr%.',
+        },
+      };
+
+      function roleBindings() {
+        return (['review', 'verify', 'fix'] as const).map((role) =>
+          makeBinding({
+            sessionId: `${role}-session`,
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role,
+              },
+            ],
+          }),
+        );
+      }
+
+      function headChangePending(sessionId = 'review-session') {
+        return {
+          key: headChangeKey,
+          issueNumber: 42,
+          envelope: {
+            channelName: 'test-github',
+            senderId: 'github',
+            senderName: 'GitHub',
+            chatId: 'owner/repo',
+            threadId: 'pr:42',
+            messageId: headChangeKey,
+            text: 'PR head advanced to sha-1.',
+            isGroup: true,
+            isMentioned: true,
+            isReplyToBot: false,
+            metadata:
+              'Type: Pull Request | Title: Test PR | URL: https://github.com/owner/repo/pull/42\nEvent: head_change.',
+          },
+          delivery: { kind: 'bound-session', sessionId },
+        };
+      }
+
+      function seedHeadChangeBaseline(pending: unknown[]) {
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            ci: 'success',
+            mergeableState: 'clean',
+            prState: 'open',
+            prUpdatedAt: '2026-07-02T09:00:00.000Z',
+            seq: 1,
+            fired: [],
+            pending,
+          },
+        });
+      }
+
+      function writeTasks(records: unknown[]): void {
+        const path = inboundTaskPath();
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, `${JSON.stringify(records)}\n`, 'utf-8');
+      }
+
+      function readTasks(): Array<Record<string, unknown>> {
+        if (!existsSync(inboundTaskPath())) return [];
+        return JSON.parse(readFileSync(inboundTaskPath(), 'utf-8')) as Array<
+          Record<string, unknown>
+        >;
+      }
+
+      it('delivers one watch transition to each matched role and fires only after all claims', async () => {
+        await initChannel(roleWatchConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: roleBindings(),
+          partial: false,
+        });
+        seedHeadChangeBaseline([headChangePending()]);
+        mockPull({});
+        mockNotificationsOnce([]);
+
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+        const calls = boundSessions.deliverPrompt.mock.calls as Array<
+          [string, string]
+        >;
+        const bySession = new Map(calls.map(([id, prompt]) => [id, prompt]));
+        expect(bySession.get('review-session')).toContain(
+          'Re-review owner/repo#42 (role review).',
+        );
+        expect(bySession.get('verify-session')).toContain(
+          'Re-verify owner/repo#42.',
+        );
+        // fix has no head_change key: not disturbed.
+        expect(bySession.has('fix-session')).toBe(false);
+        const state = readWatchState();
+        const entry = state.entries['owner/repo#42']!;
+        expect(entry['pending']).toEqual([]);
+        expect(entry['fired']).toEqual([headChangeKey]);
+        expect(readTasks()).toHaveLength(0);
+      });
+
+      it('re-claims only the missing target after a crash mid-fan-out', async () => {
+        await initChannel(roleWatchConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: roleBindings(),
+          partial: false,
+        });
+        const pending = headChangePending();
+        seedHeadChangeBaseline([pending]);
+        // The review target was claimed before the crash; its task survived
+        // but the pending→fired save did not. The drain must REUSE it and
+        // claim only verify — never a second review task.
+        writeTasks([
+          {
+            version: 1,
+            id: 'pre-crash-review-task',
+            createdAt: '2026-07-02T09:00:00.000Z',
+            updatedAt: '2026-07-02T09:00:00.000Z',
+            state: 'accepted',
+            issueNumber: 42,
+            source: {
+              chatId: 'owner/repo',
+              threadId: 'pr:42',
+              messageId: headChangeKey,
+            },
+            envelope: pending.envelope,
+            dedupe: {},
+            attempts: 0,
+            delivery: {
+              kind: 'bound-session',
+              sessionId: 'review-session',
+              role: 'review',
+            },
+          },
+        ]);
+        mockPull({});
+        mockNotificationsOnce([]);
+
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+        const state = readWatchState();
+        expect(state.entries['owner/repo#42']!['fired']).toEqual([
+          headChangeKey,
+        ]);
+        expect(readTasks()).toHaveLength(0);
+      });
+
+      it('keeps per-(PR, target) ordering: a stuck role does not block the others', async () => {
+        await initChannel(roleWatchConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: roleBindings(),
+          partial: false,
+        });
+        seedHeadChangeBaseline([headChangePending()]);
+        // An unsettled EARLIER watch task for the review target blocks only
+        // review; verify drains now and the event stays pending for review.
+        writeTasks([
+          {
+            version: 1,
+            id: 'review-predecessor',
+            createdAt: '2026-07-02T08:00:00.000Z',
+            updatedAt: '2026-07-02T08:00:00.000Z',
+            state: 'failed',
+            issueNumber: 42,
+            source: {
+              chatId: 'owner/repo',
+              threadId: 'pr:42',
+              messageId: 'watch:head_change:42:0:1751443200000',
+            },
+            envelope: {
+              ...headChangePending().envelope,
+              messageId: 'watch:head_change:42:0:1751443200000',
+            },
+            dedupe: {},
+            attempts: 1,
+            error: 'transient',
+            delivery: {
+              kind: 'bound-session',
+              sessionId: 'review-session',
+              role: 'review',
+            },
+          },
+        ]);
+        mockPull({});
+        mockNotificationsOnce([]);
+
+        await pollOnce();
+
+        const calls = boundSessions.deliverPrompt.mock.calls as Array<[string]>;
+        // verify delivered; the predecessor retried via recovery; the NEW
+        // event's review target waits (no second review delivery).
+        expect(calls.map(([id]) => id)).toContain('verify-session');
+        expect(calls.filter(([id]) => id === 'review-session')).toHaveLength(1);
+        const state = readWatchState();
+        const entry = state.entries['owner/repo#42']!;
+        expect(entry['pending']).toHaveLength(1);
+        expect(entry['fired']).toEqual([]);
+      });
+    });
 
     it('delivers a comment privately during a partial binding scan', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });

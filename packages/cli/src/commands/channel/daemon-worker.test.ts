@@ -4666,6 +4666,41 @@ describe('createBoundSessionsAccessor', () => {
     expect(snapshot.bindings).toHaveLength(1);
   });
 
+  it('projects binding roles and degrades an unknown role to partial', async () => {
+    const requestRest = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        bindings: [
+          {
+            sessionId: 'session-1',
+            workspaceCwd: '/ws/a',
+            prs: [
+              {
+                number: 1,
+                url: 'https://github.com/o/r/pull/1',
+                role: 'review',
+              },
+              {
+                number: 2,
+                url: 'https://github.com/o/r/pull/2',
+                role: 'triage',
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    const snapshot = await accessor.listPrBindings();
+
+    // The unknown role must not silently untype the entry: the dropped
+    // entry degrades the whole answer so the adapter retains known bindings.
+    expect(snapshot.partial).toBe(true);
+    expect(snapshot.bindings[0]!.prs).toEqual([
+      { number: 1, url: 'https://github.com/o/r/pull/1', role: 'review' },
+    ]);
+  });
+
   it('flags a partially malformed PR projection as partial (R4-B2)', async () => {
     const requestRest = vi.fn().mockResolvedValue(
       jsonResponse(200, {

@@ -23,6 +23,7 @@ import {
   toSessionPrInfo,
   type SessionArchiveState,
   type SessionPr,
+  type SessionPrRole,
   type SessionPrSource,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -162,6 +163,15 @@ interface CommandMention {
   number: number;
   bare: boolean;
   /**
+   * The command that named the number — the binding's role source:
+   * `/review` mints `review`, `/verify-pr` mints `verify`. The FIRST mention
+   * keeps its command (the same first-wins rule as position), so a session
+   * that reviewed and later verified one PR keeps the role it earned first;
+   * an explicit metadata-route role outranks both and is never overwritten
+   * by a backfill re-offer.
+   */
+  command: 'review' | 'verify-pr';
+  /**
    * Every `[HOST/]OWNER/REPO` spelling a `/verify-pr` claim on this number
    * carried: the number names THAT repo's PR, not this workspace's. Absent
    * means this workspace's, the only reading `/review` has. Kept as a list —
@@ -274,6 +284,8 @@ function parsePrCommand(prompt: string): {
   if (prompt.length > PR_COMMAND_MAX_LENGTH) return {};
   const match = PR_COMMAND_PATTERN.exec(prompt);
   if (!match) return {};
+  // The pattern's first capture is the closed command alternation.
+  const command = match[1] as 'review' | 'verify-pr';
   const bareNumber = match[2];
   if (bareNumber !== undefined) {
     // `\d{1,9}` admits 0; PR 0 does not exist and the sidecar write
@@ -295,7 +307,7 @@ function parsePrCommand(prompt: string): {
         const urlNumber = Number(urlMatch[2]);
         if (urlNumber > 0) {
           return {
-            mention: { number: urlNumber, bare: false },
+            mention: { number: urlNumber, bare: false, command },
             urlForm: { number: urlNumber, url: urlMatch[1] },
           };
         }
@@ -313,13 +325,19 @@ function parsePrCommand(prompt: string): {
     const valueCount = (prompt.match(REPO_VALUE_PATTERN) ?? []).length;
     if (valueCount < flagCount) {
       return {
-        mention: { number: Number(bareNumber), bare: true, repoForms: [] },
+        mention: {
+          number: Number(bareNumber),
+          bare: true,
+          command,
+          repoForms: [],
+        },
       };
     }
     return {
       mention: {
         number: Number(bareNumber),
         bare: true,
+        command,
         ...(repoForm !== undefined ? { repoForms: [repoForm] } : {}),
       },
     };
@@ -329,7 +347,7 @@ function parsePrCommand(prompt: string): {
   if (url === undefined || urlNumber === undefined) return {};
   const number = Number(urlNumber);
   return number > 0
-    ? { mention: { number, bare: false }, urlForm: { number, url } }
+    ? { mention: { number, bare: false, command }, urlForm: { number, url } }
     : {};
 }
 
@@ -1323,6 +1341,15 @@ export async function backfillWorkspaceSessionPrs(
               ? { ...entry, source: stamp }
               : entry;
           });
+        // Command-position roles: the first mention's command names the
+        // job. The convention number alone mints NO role — `fix` is an
+        // explicit metadata-route binding, never inferred from a worktree.
+        const roleByNumber = new Map<number, SessionPrRole>(
+          candidate.mentions.map((mention) => [
+            mention.number,
+            mention.command === 'review' ? 'review' : 'verify',
+          ]),
+        );
         const additions: SessionPr[] = [];
         for (const number of plan) {
           if (freshNumbers.has(number)) continue;
@@ -1333,6 +1360,7 @@ export async function backfillWorkspaceSessionPrs(
           // it and let the next run re-bind it.
           if (url === undefined) continue;
           const state = states.get(number);
+          const role = roleByNumber.get(number);
           const source: SessionPrSource =
             number === candidate.conventionNumber ? 'worktree' : 'review';
           additions.push({
@@ -1341,6 +1369,7 @@ export async function backfillWorkspaceSessionPrs(
             createdAt,
             ...(state !== undefined ? { state } : {}),
             source,
+            ...(role !== undefined ? { role } : {}),
           });
         }
         added = additions.length;

@@ -7,6 +7,8 @@
 import express from 'express';
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
+import { PR_BINDING_ROLES } from '@qwen-code/channel-base';
+import { PR_BINDING_ROLES as CORE_PR_BINDING_ROLES } from '@qwen-code/qwen-code-core';
 import type { ListWorkspaceSessionsResult } from '../server/session-list.js';
 import type {
   WorkspaceEntry,
@@ -135,6 +137,14 @@ const BOUND_SESSION = {
 };
 
 describe('GET /sessions/pr-bindings', () => {
+  it('keeps the channel-side role vocabulary identical to core', () => {
+    // The channel packages cannot depend on core; the two closed lists are
+    // mirrors, and this pin is the drift guard between them. It lives here
+    // (not in daemon-worker.test.ts) because this file imports the REAL
+    // core — a mocked copy would pin nothing.
+    expect([...PR_BINDING_ROLES]).toEqual([...CORE_PR_BINDING_ROLES]);
+  });
+
   it('projects bound sessions with their PR entries', async () => {
     const h = appHarness({
       entries: [makeEntry(makeRuntime())],
@@ -173,6 +183,39 @@ describe('GET /sessions/pr-bindings', () => {
       ],
       partial: false,
     });
+  });
+
+  it('projects the binding role additively', async () => {
+    const h = appHarness({
+      entries: [makeEntry(makeRuntime())],
+      listSessions: async () =>
+        page([
+          {
+            ...BOUND_SESSION,
+            prs: [
+              { ...BOUND_SESSION.prs[0], role: 'review' },
+              {
+                number: 102,
+                url: 'https://github.com/acme/widgets/pull/102',
+              },
+            ],
+          },
+        ]),
+    });
+
+    const res = await request(h.app).get('/sessions/pr-bindings');
+
+    expect(res.status).toBe(200);
+    expect(res.body.bindings[0].prs).toEqual([
+      {
+        number: 101,
+        url: 'https://github.com/acme/widgets/pull/101',
+        state: 'open',
+        role: 'review',
+      },
+      { number: 102, url: 'https://github.com/acme/widgets/pull/102' },
+    ]);
+    expect(res.body.partial).toBe(false);
   });
 
   it('flags an unreadable PR sidecar as partial instead of an unbind (W2, R1-8)', async () => {
