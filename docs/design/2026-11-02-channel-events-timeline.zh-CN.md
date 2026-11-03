@@ -69,18 +69,18 @@
 
 ### 2. 记录点
 
-| 位置                                                           | 事件                                                                                 |
-| -------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `ChannelBase.logPreflightRejected`                             | `inbound` / `skipped`，带拒绝原因                                                    |
-| `ChannelBase.preflightInbound`（消息路由、`mention_required`） | `inbound` / `skipped`，原因 `message_route` 或 `group_mention_required`              |
-| `ChannelBase.processPreflightedInbound`                        | `inbound` / `accepted`                                                               |
-| `PollingChannelBase.runLoop`                                   | `poll` / `ok` 带 `durationMs` 与适配器详情；`poll` / `failed` 带 `consecutiveErrors` |
-| `GithubAdapter` 原因过滤                                       | `inbound` / `skipped`，原因 `reason_filter`                                          |
-| `GithubAdapter` 评论通道（`onlyMentioned` 未命中）             | `inbound` / `skipped`，原因 `mention_required`                                       |
-| `GithubAdapter` 去重命中                                       | `inbound` / `skipped`，原因 `duplicate`                                              |
-| `GithubAdapter.claimInboundTask`                               | `task` / `accepted`                                                                  |
-| `GithubAdapter.transitionInboundTask`                          | `task` / `<state>`，带 `attempts` 与 `error`                                         |
-| `GithubAdapter.recordPublicationAudit`                         | `outbound` / `<outcome>`（审计文件继续保留）                                         |
+| 位置                                                           | 事件                                                                                                         |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `ChannelBase.logPreflightRejected`                             | `inbound` / `skipped`，带拒绝原因                                                                            |
+| `ChannelBase.preflightInbound`（消息路由、`mention_required`） | `inbound` / `skipped`，原因 `message_route` 或 `group_mention_required`                                      |
+| `ChannelBase.processPreflightedInbound`                        | `inbound` / `accepted`                                                                                       |
+| `PollingChannelBase.runLoop`                                   | `poll` / `ok` 带 `durationMs` 与适配器详情；`poll` / `failed` 带 `consecutiveErrors`                         |
+| `GithubAdapter` 原因过滤                                       | `inbound` / `skipped`，原因 `reason_filter`；单轮超过 20 条后，其余合并为一条带 `detail.filtered` 计数的记录 |
+| `GithubAdapter` 评论通道（`onlyMentioned` 未命中）             | `inbound` / `skipped`，原因 `mention_required`                                                               |
+| `GithubAdapter` 去重命中                                       | `inbound` / `skipped`，原因 `duplicate`                                                                      |
+| `GithubAdapter.claimInboundTask`                               | `task` / `accepted`                                                                                          |
+| `GithubAdapter.transitionInboundTask`                          | `task` / `<state>`，带 `attempts` 与 `error`                                                                 |
+| `GithubAdapter.recordPublicationAudit`                         | `outbound` / `<outcome>`（审计文件继续保留）                                                                 |
 
 `PollingChannelBase` 增加 `setPollEventDetail` 挂点，适配器可以挂自己的计数（GitHub 报告本次轮询取到多少条通知），基类不需要知道这些字段。基类在轮询开始前清空该字段，并在本次轮询结束后才消费它，因此事件绝不会把上一次轮询的计数记到本次的时间戳上。
 
@@ -136,7 +136,7 @@ GET /workspaces/:workspace/channels/events
 
 ## 风险
 
-- 繁忙群渠道的环境消息跳过可能很频繁。日志靠轮转封顶，页面请求最新 200 条事件，没有无界增长。（100 是调用方不带 `limit` 时路由自身的默认值。）
+- 繁忙群渠道的环境消息跳过可能很频繁。日志靠轮转封顶，页面请求最新 200 条事件，没有无界增长。（100 是调用方不带 `limit` 时路由自身的默认值。）但只靠轮转不足以保住窗口的**有用性**：只要还有可恢复的入站任务——`accepted`、`running`，或 `failed` 且仍有重试次数——GitHub 的轮询游标就不前进，于是服务端每轮都返回同一批通知，而被过滤的通知在任何去重之前就被跳过。进行中的回合本身不会造成这一点：轮询循环 `await pollOnce()`，回合进行中根本不会发起新的轮询；真正可达的情形是任务失败但仍可重试。一次真实运行（2 秒轮询 + 一个反复失败的回合）把同一批 300 条被过滤通知反复写入，直到日志轮转，把 accepted/posted 行挤出了页面窗口。因此适配器每轮最多记 20 条 `reason_filter`，其余合并为一条带 `detail.filtered` 的记录，页面把它渲染成计数。对真实适配器实测：15 轮共返回 4500 条通知，只写入 315 行而非 4500 行，且日志没有轮转。该额度按轮计算，因此真正新到的一批仍会被完整描述。
 - 同步追加位于消息路径上。记录很小且失败被吞掉；改成异步队列会在崩溃时丢掉最后几条事件，而那时恰恰最需要它们。
 - 路由每次请求都读磁盘。读取以 64 KiB 分块 await、每次请求预算 4 MiB，因此一次轮询会让出事件循环而不是阻塞它；页面仅在标签页可见时每 5 秒轮询一次。
 

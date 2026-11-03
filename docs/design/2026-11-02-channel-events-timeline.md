@@ -104,18 +104,18 @@ handling.
 
 ### 2. Emit points
 
-| Where                                                              | Event                                                                                                |
-| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| `ChannelBase.logPreflightRejected`                                 | `inbound` / `skipped` with the rejection reason                                                      |
-| `ChannelBase.preflightInbound` (message route, `mention_required`) | `inbound` / `skipped` with `message_route` or `group_mention_required`                               |
-| `ChannelBase.processPreflightedInbound`                            | `inbound` / `accepted`                                                                               |
-| `PollingChannelBase.runLoop`                                       | `poll` / `ok` with `durationMs` and the adapter's detail, `poll` / `failed` with `consecutiveErrors` |
-| `GithubAdapter` reason filter                                      | `inbound` / `skipped`, reason `reason_filter`                                                        |
-| `GithubAdapter` comment lane (`onlyMentioned` miss)                | `inbound` / `skipped`, reason `mention_required`                                                     |
-| `GithubAdapter` dedupe hit                                         | `inbound` / `skipped`, reason `duplicate`                                                            |
-| `GithubAdapter.claimInboundTask`                                   | `task` / `accepted`                                                                                  |
-| `GithubAdapter.transitionInboundTask`                              | `task` / `<state>` with `attempts` and `error`                                                       |
-| `GithubAdapter.recordPublicationAudit`                             | `outbound` / `<outcome>` (also keep the audit file)                                                  |
+| Where                                                              | Event                                                                                                                |
+| ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| `ChannelBase.logPreflightRejected`                                 | `inbound` / `skipped` with the rejection reason                                                                      |
+| `ChannelBase.preflightInbound` (message route, `mention_required`) | `inbound` / `skipped` with `message_route` or `group_mention_required`                                               |
+| `ChannelBase.processPreflightedInbound`                            | `inbound` / `accepted`                                                                                               |
+| `PollingChannelBase.runLoop`                                       | `poll` / `ok` with `durationMs` and the adapter's detail, `poll` / `failed` with `consecutiveErrors`                 |
+| `GithubAdapter` reason filter                                      | `inbound` / `skipped`, reason `reason_filter`; past 20 in one poll, one row with `detail.filtered` counting the rest |
+| `GithubAdapter` comment lane (`onlyMentioned` miss)                | `inbound` / `skipped`, reason `mention_required`                                                                     |
+| `GithubAdapter` dedupe hit                                         | `inbound` / `skipped`, reason `duplicate`                                                                            |
+| `GithubAdapter.claimInboundTask`                                   | `task` / `accepted`                                                                                                  |
+| `GithubAdapter.transitionInboundTask`                              | `task` / `<state>` with `attempts` and `error`                                                                       |
+| `GithubAdapter.recordPublicationAudit`                             | `outbound` / `<outcome>` (also keep the audit file)                                                                  |
 
 `PollingChannelBase` gains a `setPollEventDetail` seam so an adapter can attach
 its own counters (GitHub reports how many notifications a poll returned)
@@ -235,7 +235,21 @@ must not be the answer when the journal could not be read.
 - Ambient skips on a busy group Channel can be frequent. The journal is capped
   by rotation and the page asks for the newest 200 events; nothing is
   unbounded. (100 is the route's own default, used when a caller sends no
-  `limit`.)
+  `limit`.) Rotation alone is not enough for the _usefulness_ of the window:
+  the GitHub poll cursor does not advance while an inbound task is recoverable
+  — `accepted`, `running`, or `failed` with attempts left — so the provider
+  returns the same notifications on every poll, and filtered notifications are
+  skipped before any dedupe. An in-flight turn does not cause this on its own:
+  the poll loop awaits `pollOnce`, so no poll runs while a turn is in progress;
+  the reachable case is a task that failed and is still retryable. A real
+  run with a 2 s poll and a turn that kept failing re-journaled one batch of
+  300 filtered notifications until the journal rotated, pushing the
+  accepted/posted rows out of the page's window. The adapter therefore journals
+  at most 20 `reason_filter` rows per poll and collapses the remainder into one
+  row carrying `detail.filtered`, which the page renders as a count. Measured
+  against the real adapter: 15 polls served 4,500 notifications and wrote 315
+  rows instead of 4,500, and the journal did not rotate. The budget is per
+  poll, so a genuinely new batch is still described in full.
 - A synchronous append sits in the message path. The record is small, and a
   failure is swallowed; the alternative (async queue) would lose the last
   events on a crash, which is when they matter.

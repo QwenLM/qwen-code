@@ -321,6 +321,14 @@ type InboundTaskState =
   | 'cancelled';
 
 const MAX_INBOUND_TASK_ATTEMPTS = 3;
+/**
+ * The poll cursor does not advance while an inbound task is recoverable, so a
+ * slow or stuck turn makes GitHub return the same notifications on every poll.
+ * Filtered notifications are skipped before any dedupe, so journaling each one
+ * every time would rotate the useful rows out of the page's window. Journal the
+ * first few individually and collapse the rest into one counted row.
+ */
+const MAX_REASON_FILTER_EVENTS_PER_POLL = 20;
 
 interface InboundTaskDedupe {
   dispatchedBodies?: string[];
@@ -1256,6 +1264,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           ? maxUpdatedAt
           : this.pendingCursorUpdatedAt;
     }
+    let reasonFilterJournaled = 0;
+    let reasonFilterCollapsed = 0;
     for (const notification of notifications) {
       if (!notification.subject.url) continue;
       const extracted = this.extractFromSubjectUrl(notification.subject.url);
@@ -1276,15 +1286,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           threadId,
           reason: notification.reason,
         });
-        this.recordChannelEvent({
-          type: 'inbound',
-          outcome: 'skipped',
-          reason: 'reason_filter',
-          triggerKind: reason,
-          repository: chatId,
-          thread: threadId,
-          number: issueNumber,
-        });
+        if (reasonFilterJournaled < MAX_REASON_FILTER_EVENTS_PER_POLL) {
+          reasonFilterJournaled += 1;
+          this.recordChannelEvent({
+            type: 'inbound',
+            outcome: 'skipped',
+            reason: 'reason_filter',
+            triggerKind: reason,
+            repository: chatId,
+            thread: threadId,
+            number: issueNumber,
+          });
+        } else {
+          reasonFilterCollapsed += 1;
+        }
         continue;
       }
       const ctx: NotificationContext = {
@@ -1329,6 +1344,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         );
         continue;
       }
+    }
+    if (reasonFilterCollapsed > 0) {
+      // One counted row instead of a row per notification: the threads differ,
+      // so this carries no single repository/thread, and the page renders the
+      // count beside the reason.
+      this.recordChannelEvent({
+        type: 'inbound',
+        outcome: 'skipped',
+        reason: 'reason_filter',
+        detail: { filtered: reasonFilterCollapsed },
+      });
     }
     if (this.hasRecoverableInboundTasks()) {
       this.inboundRecoveryPending = true;

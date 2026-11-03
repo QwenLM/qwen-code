@@ -167,6 +167,29 @@ describe('ChannelEventsPage', () => {
     expect(rows[1]?.textContent).toContain('reason_filter');
   });
 
+  it('shows how many further notifications a collapsed skip stands for', async () => {
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'bot',
+          type: 'inbound',
+          outcome: 'skipped',
+          reason: 'reason_filter',
+          detail: { filtered: 280 },
+        },
+      ],
+    };
+
+    await renderPage();
+
+    const rows = container.querySelectorAll('li');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.textContent).toContain('reason_filter');
+    expect(rows[0]?.textContent).toContain('280 more filtered this poll');
+  });
+
   it('refetches with the selected event type', async () => {
     await renderPage();
     eventsMock.mockClear();

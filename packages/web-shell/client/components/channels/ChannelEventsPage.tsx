@@ -349,6 +349,13 @@ export function ChannelEventsPage({
                               })}
                             </span>
                           ) : null}
+                          {typeof event.detail?.['filtered'] === 'number' ? (
+                            <span className={styles.duration}>
+                              {t('channelEvents.moreFiltered', {
+                                count: event.detail['filtered'] as number,
+                              })}
+                            </span>
+                          ) : null}
                           {event.durationMs !== undefined ? (
                             <span className={styles.duration}>
                               {t('channelEvents.duration', {

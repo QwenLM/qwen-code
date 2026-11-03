@@ -1248,7 +1248,10 @@ journal as `{ "events": [...], "truncated": boolean }` with
 message it accepted or skipped (with the machine reason: `reason_filter`,
 `mention_required`, `duplicate`, a sender-gate rejection), a publication
 outcome, an inbound task transition, or a poll result — and never carries
-message text. Query parameters: `limit` (1-500, default 100), `type`
+message text. A GitHub poll that filters more than 20 notifications journals
+the first 20 individually and one further `reason_filter` row whose
+`detail.filtered` counts the rest, so a pinned poll cursor cannot flood the
+journal with repeats of the same batch. Query parameters: `limit` (1-500, default 100), `type`
 (comma-separated `inbound`, `outbound`, `task`, `poll`), `channel`
 (repeat the parameter once per instance name), and `since` (ISO 8601). The route reads only
 the resolved workspace's Channel state directory and needs no operator authority. Reads are

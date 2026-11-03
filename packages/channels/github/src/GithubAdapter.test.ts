@@ -5180,6 +5180,81 @@ describe('GithubChannel', () => {
       ]);
     });
 
+    function filteredFlood(count: number) {
+      return Array.from({ length: count }, (_, index) =>
+        makeNotification({
+          id: `flood-${index}`,
+          reason: 'comment',
+          subject: {
+            title: `Issue ${index}`,
+            url: `https://api.github.com/repos/owner/repo/issues/${100 + index}`,
+            type: 'Issue',
+          },
+        }),
+      );
+    }
+
+    it('collapses a flood of filtered notifications into one counted row', async () => {
+      // A task that failed and is still retryable keeps the poll cursor put, so
+      // the same filtered notifications come back on every poll. Only the first
+      // few are journaled individually; the rest become one row carrying the
+      // count, so a busy repository cannot rotate the useful rows out of the
+      // page's window.
+      await initWithoutLoop({ reasonFilter: ['mention'] });
+      mockOctokit.paginate.mockResolvedValueOnce(filteredFlood(25));
+
+      await pollOnce();
+
+      const events = readJournal();
+      expect(events).toHaveLength(21);
+      const individual = events.filter(
+        (event) => event['detail'] === undefined,
+      );
+      expect(individual).toHaveLength(20);
+      expect(individual[0]).toMatchObject({
+        reason: 'reason_filter',
+        thread: 'issue:100',
+        number: 100,
+      });
+      expect(individual.at(-1)).toMatchObject({
+        thread: 'issue:119',
+        number: 119,
+      });
+      expect(events.at(-1)).toEqual(
+        expect.objectContaining({
+          type: 'inbound',
+          outcome: 'skipped',
+          reason: 'reason_filter',
+          detail: { filtered: 5 },
+        }),
+      );
+      expect(events.at(-1)).not.toHaveProperty('repository');
+      expect(events.at(-1)).not.toHaveProperty('thread');
+    });
+
+    it('resets the collapse budget on the next poll', async () => {
+      await initWithoutLoop({ reasonFilter: ['mention'] });
+      const flood = filteredFlood(25);
+      mockOctokit.paginate
+        .mockResolvedValueOnce(flood)
+        .mockResolvedValueOnce(flood);
+
+      await pollOnce();
+      await pollOnce();
+
+      const events = readJournal();
+      expect(events).toHaveLength(42);
+      const counted = events.filter(
+        (event) =>
+          (event['detail'] as { filtered?: number } | undefined)?.filtered !==
+          undefined,
+      );
+      expect(counted).toHaveLength(2);
+      expect(
+        counted.every((event) => event['detail']?.['filtered'] === 5),
+      ).toBe(true);
+    });
+
     it('records a comment skipped because it does not mention the bot', async () => {
       await initWithoutLoop();
       mockOctokit.paginate
