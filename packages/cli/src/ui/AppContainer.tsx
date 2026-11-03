@@ -1988,8 +1988,14 @@ export const AppContainer = (props: AppContainerProps) => {
     ) {
       return;
     }
-    const projectHooks = settings.workspace.settings.hooks;
-    if (!projectHooks || Object.keys(projectHooks).length === 0) return;
+    const projectHooks = settings.workspace?.settings?.hooks;
+    if (
+      !projectHooks ||
+      typeof projectHooks !== 'object' ||
+      Object.keys(projectHooks).length === 0
+    ) {
+      return;
+    }
     addHistoryItem(
       {
         type: MessageType.WARNING,
