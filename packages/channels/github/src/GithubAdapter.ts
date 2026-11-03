@@ -1978,10 +1978,19 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ? `[${omitted} earlier comment(s) omitted from this batch; list the PR comments to see them]\n`
         : '') +
       comments
-        .map(
-          ({ comment, body }) =>
-            `- @${comment.user?.login || 'unknown'}: ${sanitizeDisplayText(body, MAX_AGGREGATE_COMMENT_CHARS)}`,
-        )
+        .map(({ comment, body }) => {
+          // The per-comment display cap must be visible too: the comment is
+          // already recorded in dispatchedComments, so a silent 400-char cut
+          // would drop a long comment's tail (possibly its actionable last
+          // line) from every surface while the bullet reads complete.
+          const display = sanitizeDisplayText(body);
+          const total = Array.from(display).length;
+          const rendered =
+            total > MAX_AGGREGATE_COMMENT_CHARS
+              ? `${truncateCodePoints(display, MAX_AGGREGATE_COMMENT_CHARS)}… [comment truncated: ${total - MAX_AGGREGATE_COMMENT_CHARS} more characters]`
+              : display;
+          return `- @${comment.user?.login || 'unknown'}: ${rendered}`;
+        })
         .join('\n');
     const envelope: Envelope = {
       channelName: this.name,

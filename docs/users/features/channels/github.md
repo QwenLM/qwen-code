@@ -191,9 +191,12 @@ so the session that follows the PR handles the event with its existing context.
   privately. (2) _Backpressure_: a deferred bound event keeps its own durable
   retry (previous bullet) while the rest of the channel continues normally.
 - The injected prompt names the comment author and marks truncation
-  explicitly: comment content is capped at 6,000 code points with an
-  `[prompt truncated: N more characters omitted]` notice, and an aggregate
-  batch that drops older comments says so — no tail is silently consumed.
+  explicitly at every level: comment content is capped at 6,000 code points
+  with an `[prompt truncated: N more characters omitted]` notice, an
+  aggregate batch that drops older comments says so, and each aggregated
+  comment's 400-character display cap carries its own
+  `[comment truncated: N more characters]` marker — no tail is silently
+  consumed.
 - This feature requires a daemon-managed channel; standalone
   `qwen channel start` ignores the setting with a warning.
 

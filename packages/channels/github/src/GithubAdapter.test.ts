@@ -2266,6 +2266,30 @@ describe('GithubChannel', () => {
       );
     });
 
+    it('marks the per-comment display cut in the aggregate prompt (R1-1)', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          // 5 + 490 + 17 = 512 code points: the 400-char display cap cuts
+          // 112, and the cut must be visible (the comment is already in
+          // dispatchedComments, so a silent cut loses the tail everywhere).
+          makeComment({ body: `HEAD ${'b'.repeat(490)} TAIL-INSTRUCTION` }),
+        ]);
+
+      await pollOnce();
+
+      const text = channel.inboundEnvelopes[0]!.text;
+      expect(text).toContain('HEAD');
+      expect(text).toContain('[comment truncated: 112 more characters]');
+      expect(text).not.toContain('TAIL-INSTRUCTION');
+    });
+
     it('records aggregated comments that exceed the summary cap', async () => {
       await initWithoutLoop();
       const comments = Array.from({ length: 25 }, (_, index) =>
