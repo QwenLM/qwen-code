@@ -191,7 +191,8 @@ interface GithubCursor {
    * must NOT be evicted — otherwise a re-listed aggregate SUPERSET batch
    * re-dispatches already-replied comments under a fresh batch hash that
    * misses the publication-audit backstop. Keys without a recorded time are
-   * treated as protected (conservative). Pruned to the live ring.
+   * treated as protected (conservative). Bounded by MAX_COMMENT_TIMES, which
+   * retains every ring key's time plus the still-re-listable fetched comments.
    */
   dispatchedCommentTimes?: Record<string, string>;
   /** Direct-action event node IDs already accepted by the channel. */
@@ -200,14 +201,22 @@ interface GithubCursor {
 
 const MAX_DISPATCHED = 500;
 /**
- * Hard ceiling on the dispatched-comment ring. Window-aware eviction keeps
- * every re-listable (protected) key, so a permanently frozen cursor under
- * sustained traffic would otherwise grow the ring without bound. At the
- * ceiling, new comment dispatches are refused (fail-closed, surfaced) and
- * retry once the cursor advances and prunes the ring — never evicting a
- * protected key to make room, which would reintroduce duplicate publication.
+ * Ceiling on the dispatchedCommentTimes map. The ring itself has no hard
+ * cap: window-aware eviction never drops a protected (re-listable) key, so
+ * under a sustained frozen cursor the ring grows with the re-list window and
+ * shrinks once mark-read recovers — refusing dispatches to bound it would
+ * either mark-read the refused events (loss) or deadlock the cursor. This
+ * cap only bounds the auxiliary time map's NON-ring entries (fetched but
+ * never-dispatched comments); ring keys' times are always retained.
  */
-const MAX_DISPATCHED_HARD = 4096;
+const MAX_COMMENT_TIMES = 8192;
+/**
+ * Node's setTimeout clamps delays above 2^31-1 ms to ~1 ms (immediate fire).
+ * An hostile proxy's retry-after or an extreme clock skew against
+ * x-ratelimit-reset could otherwise produce such a value and turn the retry
+ * cooldown into an instant retry storm. Cap the delay at the timer maximum.
+ */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const MAX_AGGREGATE_COMMENTS = 20;
 const MAX_AGGREGATE_COMMENT_CHARS = 400;
 
@@ -998,6 +1007,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     ] as const) {
       if (base[field] !== undefined && !Array.isArray(base[field])) {
         base[field] = [];
+      } else if (Array.isArray(base[field])) {
+        // Drop non-string members: a malformed cursor with e.g. null entries
+        // would otherwise seed time-less (permanently protected) ring keys
+        // that never evict and bloat the ring without bound.
+        base[field] = base[field].filter(
+          (member): member is string => typeof member === 'string',
+        );
       }
     }
     // Migrate/coerce the comment-time map. A legacy cursor has ring keys but
@@ -1012,7 +1028,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     } else {
       const clean: Record<string, string> = {};
       for (const [key, value] of Object.entries(times)) {
-        if (typeof value === 'string') clean[key] = value;
+        // Date-validate: a non-parseable time (corrupt/truncated string)
+        // would compare unpredictably against the cursor and could make a
+        // still-re-listable key evictable, reopening the duplicate-superset
+        // hole. Dropping it falls back to the safe time-less = protected
+        // direction (mirrors the lastProcessedAt / metaFloor validation).
+        if (typeof value === 'string' && !Number.isNaN(Date.parse(value))) {
+          clean[key] = value;
+        }
       }
       base.dispatchedCommentTimes = clean;
     }
@@ -1698,7 +1721,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   protected async pollOnce(): Promise<void> {
     this.inboundPersistenceBlocked = false;
     this.publicationAuditBlocked = false;
-    this.commentRingOverflow = false;
     this.publicationAuditKeysCache = undefined;
 
     if (this.deliverToBoundSessions) {
@@ -2288,7 +2310,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     );
     // Capture created_at for every re-listable comment at the single fetch
     // choke point, so ring eviction can protect keys the frozen cursor can
-    // still re-fetch (see dispatchedCommentTimes). Pruned to the live ring.
+    // still re-fetch (see dispatchedCommentTimes). Bounded by MAX_COMMENT_TIMES.
     const times = (this.cursor.dispatchedCommentTimes ??= {});
     for (const comment of comments) {
       if (comment.created_at) {
@@ -2417,9 +2439,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * evicting it would let a re-listed aggregate SUPERSET re-dispatch
    * already-replied comments under a fresh batch hash that misses the
    * publication-audit backstop (duplicate public reply / private injection
-   * without any crash). If every remaining key is protected the ring stays
-   * over the soft cap; the HARD cap is enforced by refusing new dispatches
-   * (dispatchEnvelope), never by evicting a protected key.
+   * without any crash). Under a sustained frozen cursor the protected ring
+   * grows with the re-list window (bounded by traffic × outage duration);
+   * it shrinks again once mark-read recovers and the cursor passes the keys.
+   * A protected key is NEVER evicted to make room — there is no hard-cap
+   * refusal, because refusing dispatches without freezing the cursor would
+   * mark-read the refused events (silent loss), and freezing the cursor
+   * would deadlock (the ring can only shrink once the cursor advances).
    */
   private evictDispatchedComments(list: string[]): string[] {
     if (list.length <= MAX_DISPATCHED) return list;
@@ -2448,55 +2474,22 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // Bound the map even under a permanently frozen cursor (nothing expires):
     // fetch captures a time for every re-listable comment, including ones the
     // sender gate never dispatches, so without a ceiling the map would grow
-    // with traffic during a hard-cap stall. Ring keys are always kept (their
+    // with traffic during a long outage. Ring keys are always kept (their
     // protection is load-bearing); excess NON-ring entries are dropped oldest
-    // first — a dropped key is re-captured on its next fetch, and if dispatched
-    // before then it is treated as protected (unknown time), the safe direction.
-    const cap = MAX_DISPATCHED_HARD * 2;
+    // first — a dropped key is re-captured on its next fetch, and a recovery
+    // re-record without a time stays protected (the conservative direction).
     const keys = Object.keys(times);
-    if (keys.length > cap) {
+    if (keys.length > MAX_COMMENT_TIMES) {
       const droppable = keys
         .filter((key) => !live.has(key))
         .sort((a, b) => (times[a]! < times[b]! ? -1 : 1));
-      let excess = keys.length - cap;
+      let excess = keys.length - MAX_COMMENT_TIMES;
       for (const key of droppable) {
         if (excess <= 0) break;
         delete times[key];
         excess -= 1;
       }
     }
-  }
-
-  /** Ring keys that must not be evicted (re-listable, or unknown time). */
-  private protectedCommentCount(): number {
-    const times = this.cursor.dispatchedCommentTimes ?? {};
-    const cursor = this.cursor.lastProcessedAt;
-    let count = 0;
-    for (const key of this.cursor.dispatchedComments ?? []) {
-      const time = times[key];
-      if (time === undefined || time > cursor) count += 1;
-    }
-    return count;
-  }
-
-  /**
-   * True when recording these new comment keys would push the protected ring
-   * past the hard cap. Window-aware eviction can only remove expired keys, so
-   * the protected count is the ring's irreducible floor; adding protected
-   * keys beyond the cap must be refused (fail-closed) rather than evicting a
-   * protected key to make room.
-   */
-  private wouldOverflowCommentRing(newKeys: string[]): boolean {
-    const ring = new Set(this.cursor.dispatchedComments ?? []);
-    const times = this.cursor.dispatchedCommentTimes ?? {};
-    const cursor = this.cursor.lastProcessedAt;
-    let protectedCount = this.protectedCommentCount();
-    for (const key of newKeys) {
-      if (ring.has(key)) continue;
-      const time = times[key];
-      if (time === undefined || time > cursor) protectedCount += 1;
-    }
-    return protectedCount > MAX_DISPATCHED_HARD;
   }
 
   private async dispatchEnvelope(
@@ -2536,23 +2529,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     if (auditKeys.has(sourceKey)) {
       this.applyTaskDedupe(dedupe);
       return true;
-    }
-    // Hard-cap backpressure: a frozen cursor (mark-read failing) under
-    // sustained traffic fills the ring with protected keys that must not be
-    // evicted. Rather than evict one and risk a duplicate superset dispatch,
-    // refuse new comment dispatches; the unread events retry once the cursor
-    // advances and prunes the ring. No key is recorded and no task claimed.
-    if (
-      dedupe.dispatchedComments?.length &&
-      this.wouldOverflowCommentRing(dedupe.dispatchedComments)
-    ) {
-      if (!this.commentRingOverflow) {
-        this.commentRingOverflow = true;
-        process.stderr.write(
-          `[Channel:${this.name}] dispatched-comment ring at hard cap (${MAX_DISPATCHED_HARD}) with a frozen cursor; deferring new comment dispatches until mark-read recovers (no protected key is evicted)\n`,
-        );
-      }
-      return false;
     }
     const delivery = this.resolveBoundDelivery(envelope.chatId, issueNumber);
     const task = this.claimInboundTask(envelope, issueNumber, dedupe, delivery);
@@ -3026,7 +3002,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   private publicationAuditKeysCache: Set<string> | undefined;
   private publicationAuditBlocked = false;
-  private commentRingOverflow = false;
 
   /**
    * Publication audit keys cached for the current poll (reset at pollOnce
@@ -3377,6 +3352,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         } else {
           cooldown = 1000 * 2 ** (attempt - 1);
         }
+        cooldown = Math.min(cooldown, MAX_TIMER_DELAY_MS);
 
         process.stderr.write(
           `[Channel:${this.name}] ${label} failed (attempt ${attempt}/${retries}, status=${e.status}), retrying in ${cooldown}ms: ${sanitizeLogText(e.message ?? String(err), 200)}\n`,

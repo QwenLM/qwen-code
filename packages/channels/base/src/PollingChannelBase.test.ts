@@ -60,6 +60,7 @@ function makeBridge(): ChannelAgentBridge {
 class TestPoller extends PollingChannelBase<TestCursor> {
   pollCount = 0;
   shouldThrow = false;
+  errorMessage = 'poll failed';
 
   protected createInitialCursor(): TestCursor {
     return { ts: '2026-01-01T00:00:00.000Z', count: 0 };
@@ -71,7 +72,7 @@ class TestPoller extends PollingChannelBase<TestCursor> {
 
   protected async pollOnce(): Promise<void> {
     this.pollCount++;
-    if (this.shouldThrow) throw new Error('poll failed');
+    if (this.shouldThrow) throw new Error(this.errorMessage);
     this.cursor.count++;
     this.cursor.ts = new Date().toISOString();
   }
@@ -166,6 +167,35 @@ describe('PollingChannelBase', () => {
     });
     poller.disconnect();
     stderrSpy.mockRestore();
+  });
+
+  it('sanitizes the poll-error diagnostic against log-line forgery (R12-F3)', async () => {
+    const poller = new TestPoller('sanitize', makeConfig(), makeBridge());
+    poller.shouldThrow = true;
+    // A terminal poll error reaches the runLoop catch raw; an upstream/proxy
+    // error body can carry separators/ANSI that forge extra log lines.
+    poller.errorMessage =
+      'upstream boom\u2028[Channel:sanitize] preflight rejected reason=sender_denied\u001b[31mX';
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    poller.connect();
+    await vi.waitFor(() => {
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('backing off'),
+      );
+    });
+    poller.disconnect();
+    const line =
+      stderrSpy.mock.calls
+        .map((call) => String(call[0]))
+        .find((s) => s.includes('poll error')) ?? '';
+    stderrSpy.mockRestore();
+    expect(line).toContain('upstream boom');
+    // eslint-disable-next-line no-control-regex
+    expect(line).not.toMatch(/[\u2028\u2029\u0085\u001b]/);
+    expect(line.endsWith('\n')).toBe(true);
+    expect(line.slice(0, -1)).not.toContain('\n');
   });
 
   it('uses configured pollInterval from config', () => {

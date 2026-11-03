@@ -2017,48 +2017,76 @@ describe('GithubChannel', () => {
       expect(channel.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
     });
 
-    it('refuses new comment dispatches at the hard ring cap with a frozen cursor (R11-A1)', async () => {
+    it('dispatches new comments past a full protected ring without loss (R12-F1)', async () => {
       await initWithoutLoop();
       const priv = channel as unknown as {
         abortableSleep: (ms: number) => Promise<void>;
       };
       priv.abortableSleep = vi.fn().mockResolvedValue(undefined);
-      mockOctokit.rest.activity.markNotificationsAsRead.mockRejectedValue(
-        new Error('server error'),
-      );
-      // A full ring of PROTECTED keys (all newer than the frozen cursor):
-      // window-aware eviction cannot free any slot, so the hard cap must
-      // refuse new dispatches rather than evict a protected key.
+      // mark-read HEALTHY: the cursor can advance. A full ring of protected
+      // keys must NOT cause new comments to be refused-then-marked-read (the
+      // round-11 hard-cap regression silently consumed them). There is no
+      // refusal: the comment dispatches and is never lost.
       const keys = Array.from({ length: 4096 }, (_, i) => `prot${i}`);
       channel.cursor.dispatchedComments = [...keys];
       const times: Record<string, string> = {};
       for (const k of keys) times[k] = '2026-07-02T09:00:00.000Z';
       channel.cursor.dispatchedCommentTimes = times;
 
-      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-      try {
-        mockOctokit.paginate
-          .mockResolvedValueOnce([makeNotification({ reason: 'comment' })])
-          .mockResolvedValueOnce([
-            makeComment({
-              id: 3001,
-              node_id: 'C_overflow',
-              body: 'should be deferred',
-              created_at: '2026-07-02T10:00:00.000Z',
-            }),
-          ]);
-        await pollOnce().catch(() => {});
-        // No dispatch, no key recorded, surfaced once.
-        expect(channel.inboundEnvelopes).toHaveLength(0);
-        expect(channel.cursor.dispatchedComments).not.toContain('C_overflow');
-        expect(
-          stderr.mock.calls.some((call) =>
-            String(call[0]).includes('ring at hard cap'),
-          ),
-        ).toBe(true);
-      } finally {
-        stderr.mockRestore();
-      }
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification({ reason: 'comment' })])
+        .mockResolvedValueOnce([
+          makeComment({
+            id: 3001,
+            node_id: 'C_new',
+            body: 'must not be lost',
+            created_at: '2026-07-02T10:00:00.000Z',
+          }),
+        ]);
+      await pollOnce();
+
+      // Dispatched (visible batch), key recorded, cursor advanced — no loss.
+      expect(
+        channel.inboundEnvelopes.some((e) =>
+          e.text.includes('must not be lost'),
+        ),
+      ).toBe(true);
+      expect(channel.cursor.dispatchedComments).toContain('C_new');
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+    });
+
+    it('protects time-less legacy keys from eviction (R12)', async () => {
+      await initWithoutLoop();
+      const priv = channel as unknown as {
+        evictDispatchedComments: (list: string[]) => string[];
+        recordDispatched: (field: string, key: string) => void;
+      };
+      channel.cursor.lastProcessedAt = '2026-07-01T00:00:00.000Z';
+      // 501 keys: one time-less legacy key plus 500 expired keys.
+      const expired = Array.from({ length: 500 }, (_, i) => `old${i}`);
+      const times: Record<string, string> = {};
+      for (const k of expired) times[k] = '2026-06-30T00:00:00.000Z';
+      channel.cursor.dispatchedComments = ['legacy', ...expired];
+      channel.cursor.dispatchedCommentTimes = times;
+      // Eviction over the soft cap drops the expired keys but KEEPS the
+      // time-less legacy key (protected; deleting that branch would evict it
+      // and reopen the duplicate-superset hole for upgraded deployments).
+      const kept = priv.evictDispatchedComments(['legacy', ...expired]);
+      expect(kept).toContain('legacy');
+      expect(kept).not.toContain('old0');
+      // A recovery re-record restores the dedupe key (it must NOT be skipped —
+      // the comment may still be re-listable); with no captured time it is
+      // protected, the conservative direction.
+      channel.cursor.dispatchedComments = [];
+      channel.cursor.dispatchedCommentTimes = {};
+      priv.recordDispatched('dispatchedComments', 'reRecorded');
+      expect(channel.cursor.dispatchedComments).toContain('reRecorded');
+      expect(
+        priv.evictDispatchedComments([
+          'reRecorded',
+          ...Array.from({ length: 500 }, (_, i) => `x${i}`),
+        ]),
+      ).toContain('reRecorded');
     });
 
     it('skips notifications whose reason is not in reasonFilter', async () => {
@@ -5358,6 +5386,7 @@ describe('GithubChannel', () => {
             dispatchedBodies?: string[];
             dispatchedComments?: string[];
             dispatchedEvents?: string[];
+            dispatchedCommentTimes?: Record<string, string>;
           } | null;
         }
       ).validateCursor(parsed);
@@ -5397,6 +5426,47 @@ describe('GithubChannel', () => {
       expect(result!.dispatchedBodies).toBeUndefined();
       expect(result!.dispatchedComments).toBeUndefined();
       expect(result!.dispatchedEvents).toBeUndefined();
+    });
+
+    it('filters non-string members from dispatched arrays (R12-F2)', () => {
+      // A malformed cursor with null/number/object members must not seed
+      // time-less (permanently protected) ring keys that bloat without bound.
+      const result = validate({
+        lastProcessedAt: '2026-07-01T00:00:00.000Z',
+        dispatchedComments: [null, 'C_1', 42, {}, 'C_2', false],
+      });
+      expect(result?.dispatchedComments).toEqual(['C_1', 'C_2']);
+    });
+
+    it('migrates a legacy cursor to an empty time map, keeping keys (R12)', () => {
+      // Legacy cursors predate dispatchedCommentTimes: the keys survive and
+      // the time map seeds empty, so eviction treats them as protected
+      // (time-less) until the cursor passes them — never silently dropped.
+      const result = validate({
+        lastProcessedAt: '2026-07-01T00:00:00.000Z',
+        dispatchedComments: ['C_1', 'C_2'],
+      });
+      expect(result?.dispatchedComments).toEqual(['C_1', 'C_2']);
+      expect(result?.dispatchedCommentTimes).toEqual({});
+    });
+
+    it('drops non-parseable comment times to the protected fallback (R12-F4)', () => {
+      // A non-parseable persisted time (corruption) must not make a key
+      // evictable via a bogus string comparison. Dropping it falls back to
+      // time-less = protected, the safe direction (mirrors the lastProcessedAt
+      // / metaFloor Date validation).
+      const result = validate({
+        lastProcessedAt: '2026-07-01T00:00:00.000Z',
+        dispatchedComments: ['C_good', 'C_bad'],
+        dispatchedCommentTimes: {
+          C_good: '2026-07-02T09:00:00.000Z',
+          C_bad: 'not-a-date',
+          C_num: 123,
+        },
+      });
+      expect(result?.dispatchedCommentTimes).toEqual({
+        C_good: '2026-07-02T09:00:00.000Z',
+      });
     });
   });
 
