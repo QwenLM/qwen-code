@@ -364,14 +364,16 @@ const MAX_BOUND_DEFERRALS = 240;
 
 /**
  * Cold-start bound: consecutive EMPTY partial snapshots tolerated before the
- * comment lane opens anyway. A draining/unreadable workspace can answer
+ * comment lane opens anyway. A workspace whose chats directory the daemon
+ * cannot list, or a registry entry without a runtime, can answer
  * {bindings: [], partial: true} on the first poll after a restart while its
  * bound sessions still exist; opening the lane on that answer would route
  * every event publicly and commit the cursor — an irreversible
  * misclassification. The cap keeps a PERMANENTLY empty partial (a workspace
- * that is never active) from freezing the lane forever: once reached, the
- * lane opens and unmatched PR events take the per-event bounded deferral
- * (MAX_BOUND_DEFERRALS -> dead-letter) instead of the public path.
+ * that never becomes readable) from freezing the lane forever: once
+ * reached, the lane opens and unmatched PR events take the per-event
+ * bounded deferral (MAX_BOUND_DEFERRALS -> dead-letter) instead of the
+ * public path.
  */
 const MAX_COLD_EMPTY_PARTIAL_POLLS = 30;
 
@@ -1878,8 +1880,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       return;
     }
     // An EMPTY partial first answer is not an authoritative absence either:
-    // a draining/unreadable workspace returns {bindings: [], partial: true}
-    // while its bound sessions still exist, and opening the lane here would
+    // a workspace whose chats directory cannot be listed (or an entry without
+    // a runtime) returns {bindings: [], partial: true} while its bound
+    // sessions still exist, and opening the lane here would
     // publicly route every event and commit the cursor before the real
     // snapshot arrives. Keep deferring while the map is empty and no
     // complete snapshot has ever succeeded — bounded, so a permanently
@@ -3595,7 +3598,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.coldEmptyPartialStreak += 1;
         if (this.coldEmptyPartialStreak === MAX_COLD_EMPTY_PARTIAL_POLLS) {
           process.stderr.write(
-            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence — verify the daemon's workspaces are active and readable.\n`,
+            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence — verify that every registered workspace has a runtime and that the daemon can list each workspace's chats directory.\n`,
           );
         }
       } else {
@@ -3647,7 +3650,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.coldEmptyPartialStreak += 1;
         if (this.coldEmptyPartialStreak === MAX_COLD_EMPTY_PARTIAL_POLLS) {
           process.stderr.write(
-            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence — verify the daemon's workspaces are active and readable.\n`,
+            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence — verify that every registered workspace has a runtime and that the daemon can list each workspace's chats directory.\n`,
           );
         }
         // Surface the stall distinctly and actionably, throttled so a
