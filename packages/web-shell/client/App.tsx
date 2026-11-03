@@ -345,6 +345,7 @@ import { buildGoalControlRequest } from './utils/goalControlRequest';
 import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
+import { ChannelEventsPage } from './components/channels/ChannelEventsPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
 import {
   McpAppHostContext,
@@ -10163,6 +10164,7 @@ export function App({
     | 'plugins'
     | 'agents'
     | 'channels'
+    | 'channel-events'
     | 'live'
     | 'workspaces'
     | null
@@ -10320,6 +10322,7 @@ export function App({
         | 'plugins'
         | 'agents'
         | 'channels'
+        | 'channel-events'
         | 'live'
         | 'workspaces',
     ) => {
@@ -10466,6 +10469,9 @@ export function App({
     sidebarRailEnabled &&
     sidebarOptions.showLive &&
     sidebarOptions.primaryNav?.items?.includes('live') !== false;
+  const channelNavigationEnabled =
+    projectFeaturesAvailable &&
+    (sidebarOptions.primaryNav?.items?.includes('channelEvents') ?? true);
   useEffect(() => {
     setSidebarSection((current) =>
       liveSidebarEnabled && connection.sessionContext?.kind === 'live'
@@ -10613,7 +10619,9 @@ export function App({
         ? 'scheduledTasks'
         : page === 'pr-watches'
           ? 'prWatches'
-          : page;
+          : page === 'channel-events'
+            ? 'channelEvents'
+            : page;
     const allowed =
       page === 'chat' ||
       (page === 'settings'
@@ -10623,6 +10631,7 @@ export function App({
         : projectFeaturesAvailable &&
           (page !== 'live' || liveSidebarEnabled) &&
           (page !== 'pr-watches' || prWatchesAvailable) &&
+          (page !== 'channel-events' || channelNavigationEnabled) &&
           (hostSidebar?.primaryNav?.items?.some(
             (item) => item === primaryItem,
           ) ??
@@ -10636,6 +10645,7 @@ export function App({
     setActivePanel(
       nextPage === 'plugins' ||
         nextPage === 'channels' ||
+        nextPage === 'channel-events' ||
         nextPage === 'live' ||
         nextPage === 'settings'
         ? nextPage
@@ -10660,6 +10670,7 @@ export function App({
     hostSidebar?.primaryNav?.items,
     liveSidebarEnabled,
     prWatchesAvailable,
+    channelNavigationEnabled,
     workspaceCapabilitiesReady,
   ]);
   useEffect(() => {
@@ -22720,6 +22731,14 @@ export function App({
                       });
                     }
                   }}
+                  onOpenChannelEvents={
+                    channelNavigationEnabled
+                      ? () => {
+                          closeMobileDrawer();
+                          openPanel('channel-events');
+                        }
+                      : undefined
+                  }
                   onOpenManagedSessions={
                     managedAgentProvider
                       ? () => {
@@ -23535,6 +23554,15 @@ export function App({
                       <ChannelsManagerPage
                         onClose={
                           channelSidebarEnabled && navigationRailVisible
+                            ? undefined
+                            : returnToChat
+                        }
+                        initialFocusRef={panelHeadingRef}
+                      />
+                    ) : activePanel === 'channel-events' ? (
+                      <ChannelEventsPage
+                        onClose={
+                          channelNavigationEnabled && navigationRailVisible
                             ? undefined
                             : returnToChat
                         }
