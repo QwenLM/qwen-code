@@ -6503,6 +6503,10 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
 
     it('does not record the direct-lane key when the audit freeze refuses dispatch (R6-A1)', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      // The direct lane fetches PR meta BEFORE dispatch: without this mock
+      // the fetch throws, the per-notification catch skips the event, and
+      // the test never reaches the freeze guard (order-dependent vacuity).
+      mockOctokit.rest.pulls.get.mockResolvedValue({ data: makePrMeta() });
       boundSessions.listPrBindings.mockResolvedValue({
         bindings: [],
         partial: false,
