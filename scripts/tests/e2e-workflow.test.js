@@ -1116,11 +1116,14 @@ describe('e2e workflow', () => {
       expect(e2eRunScript.indexOf('if ! build_image;')).toBeGreaterThan(
         callIndex,
       );
-      // Two conditions hold the override back, and dropping either one is a
-      // real regression: a healthy default host keeps its source, and a mirror
-      // has to be decisively faster than a merely slow one.
+      // Three conditions hold the override back, and dropping any one is a real
+      // regression: a healthy default host keeps its source, a mirror has to be
+      // fast in absolute terms rather than merely faster than a broken default,
+      // and it has to beat the default decisively.
       expect(e2eRunScript).toContain('slow_default');
       expect(e2eRunScript).toMatch(/-lt "\$\{slow_default\}" \]/);
+      expect(e2eRunScript).toContain('fast_mirror');
+      expect(e2eRunScript).toMatch(/-gt "\$\{fast_mirror\}" \]/);
       expect(e2eRunScript).toMatch(/-gt \$\(\(default_rate \* 4\)\)/);
       // The measurements have to reach the log, or the next slow build is
       // another manual investigation.

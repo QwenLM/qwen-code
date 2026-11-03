@@ -64,6 +64,10 @@ if [ "$sandbox" = 'sandbox:docker' ]; then
     # Above it the built-in source is healthy and is left untouched — which is
     # what keeps a fixed mirror from slowing the Hong Kong hosts down.
     local slow_default=250000
+    # A mirror also has to be fast in absolute terms, not merely faster than a
+    # broken default: without this floor, two slow endpoints would still
+    # "win" and move a host onto a mirror it never needed.
+    local fast_mirror=1000000
     local default_rate best_rate=0 best='' mirror rate
     default_rate="$(apt_mirror_probe_rate deb.debian.org)"
     default_rate="${default_rate:-0}"
@@ -79,6 +83,7 @@ if [ "$sandbox" = 'sandbox:docker' ]; then
     # should not have to re-run this probe by hand (#16214).
     echo "apt probe: deb.debian.org=${default_rate} B/s best=${best_rate} B/s (${best:-none})" >&2
     if [ -n "${best}" ] && [ "${default_rate}" -lt "${slow_default}" ] &&
+      [ "${best_rate}" -gt "${fast_mirror}" ] &&
       [ "${best_rate}" -gt $((default_rate * 4)) ]; then
       printf '%s' "${best}"
     fi
