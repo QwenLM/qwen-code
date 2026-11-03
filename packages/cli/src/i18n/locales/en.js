@@ -1854,6 +1854,8 @@ export default {
     'Waiting for your subscription to become active…',
   'Your Qwen session has expired. Run /auth to sign in again.':
     'Your Qwen session has expired. Run /auth to sign in again.',
+  'Your login credentials are no longer valid. Run /auth to sign in again.':
+    'Your login credentials are no longer valid. Run /auth to sign in again.',
   'Checking your subscription…': 'Checking your subscription…',
   'Retry Connection': 'Retry Connection',
   'View Plans': 'View Plans',

@@ -630,6 +630,8 @@ export function ChatPane({
     handleCommand: handleSubscriptionLogout,
   } = useSubscriptionLogout({
     t,
+    onCommand: (text) =>
+      invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError),
     workspaceCwd: paneSettingsCwd,
     isBlocked: () =>
       streamingStateRef.current !== 'idle' ||
@@ -1000,9 +1002,9 @@ export function ChatPane({
         return false;
       }
       transcriptViewportRef.current?.scrollToBottom();
-      // The host handler is documented as running before Web Shell handles a
-      // slash command, so it gets `/goal` first here exactly as it does in the
-      // main composer — otherwise an override works on one surface only.
+      // Account commands must pass login and model checks before host overrides.
+      const subscriptionHandled = handleSubscriptionLogout(text);
+      if (subscriptionHandled !== undefined) return subscriptionHandled;
       if (
         trimmed &&
         invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
@@ -1122,8 +1124,6 @@ export function ChatPane({
         return false;
       }
       const inputAnnotations = metadata?.inputAnnotations;
-      const logoutHandled = handleSubscriptionLogout(text);
-      if (logoutHandled !== undefined) return logoutHandled;
       const notifyFirstPromptAdmitted = () => {
         if (
           trimmed &&
@@ -1468,6 +1468,12 @@ export function ChatPane({
       ),
       t,
     )
+      .filter(
+        (command) =>
+          subscriptionAvailable ||
+          !['logout', 'upgrade'].includes(command.name) ||
+          Boolean(command.source && command.source !== 'builtin-command'),
+      )
       .filter(
         (command) =>
           modelManagementPolicy.allowAdd ||

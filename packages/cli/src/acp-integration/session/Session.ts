@@ -473,11 +473,7 @@ import {
   deleteNestedPropertySafe,
   settingExistsInScope,
 } from '../../config/settingsUtils.js';
-import {
-  recordDaemonSessionModel,
-  recordDaemonSessionModelFromConfig,
-} from '../session-model-persistence.js';
-import { restoreModelAfterSubscriptionLogout } from '../../config/subscription-logout.js';
+import { recordDaemonSessionModel } from '../session-model-persistence.js';
 import {
   recordDaemonSessionApprovalMode,
   recordDaemonSessionApprovalModeFromConfig,
@@ -4618,28 +4614,13 @@ export class Session implements SessionContext {
     subscriptionSignedOut?: boolean;
   }): Promise<void> {
     if (
-      !this.settings.reloadScopesFromDiskAtomically([
-        SettingScope.User,
-        SettingScope.Workspace,
-      ])
-    ) {
-      throw new Error('Unable to reload model-provider settings from disk.');
-    }
-    this.config.reloadModelProvidersConfig(
-      this.settings.merged.modelProviders,
-      this.settings.merged.providerProtocol ?? {},
-    );
-    await this.config.setImageModel(this.settings.merged.imageModel);
-    if (
       options?.subscriptionSignedOut &&
       this.config.getAuthType() === AuthType.QWEN_SUBSCRIPTION
     ) {
-      await restoreModelAfterSubscriptionLogout(
-        this.config,
-        this.settings,
-        false,
-      );
-      await recordDaemonSessionModelFromConfig(this.config);
+      this.config
+        .getBackgroundTaskRegistry()
+        .abortAll({ notify: false, persistedStatus: 'cancelled' });
+      this.config.setSubscriptionPlan(undefined);
       const authType = this.config.getAuthType();
       const currentModelId = authType
         ? getCurrentAcpModelId(
@@ -4656,7 +4637,21 @@ export class Session implements SessionContext {
         subscriptionSignedOut: true,
       });
       await this.sendAvailableCommandsUpdate();
+      return;
     }
+    if (
+      !this.settings.reloadScopesFromDiskAtomically([
+        SettingScope.User,
+        SettingScope.Workspace,
+      ])
+    ) {
+      throw new Error('Unable to reload model-provider settings from disk.');
+    }
+    this.config.reloadModelProvidersConfig(
+      this.settings.merged.modelProviders,
+      this.settings.merged.providerProtocol ?? {},
+    );
+    await this.config.setImageModel(this.settings.merged.imageModel);
   }
 
   installPendingManagedConversationBinding(

@@ -2365,6 +2365,34 @@ describe('subscription entry', () => {
     );
   };
 
+  it.each([
+    'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    'https://api.deepseek.com',
+  ])(
+    'starts on the subscription entry with active provider %s',
+    async (baseUrl) => {
+      const config = {
+        getContentGeneratorConfig: () => ({ baseUrl }),
+      } as unknown as Config;
+      const ui = renderWithProviders(
+        <UIStateContext.Provider value={createMockUIState()}>
+          <UIActionsContext.Provider value={createMockUIActions()}>
+            <AuthDialog />
+          </UIActionsContext.Provider>
+        </UIStateContext.Provider>,
+        { settings: settings(), config },
+      );
+      try {
+        await waitForSelectedOption(
+          ui.lastFrame,
+          'Qwen Account with Subscription',
+        );
+      } finally {
+        ui.unmount();
+      }
+    },
+  );
+
   it.each([36, 100])(
     'keeps the subscription entry and full menu at width %i',
     async (width) => {

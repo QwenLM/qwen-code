@@ -12,6 +12,18 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('QWEN_SUBSCRIPTION');
 
+export function isSubscriptionSessionExpired(
+  error: unknown,
+): error is SubscriptionOAuthError {
+  return (
+    error instanceof SubscriptionOAuthError &&
+    (error.code === 'session_changed' ||
+      (error.stage === 'refresh' && error.code === 'invalid_grant') ||
+      (error.stage === 'userinfo' &&
+        (error.status === 401 || error.code === 'invalid_token')))
+  );
+}
+
 export function logSubscriptionGatewayResponse(response: Response): void {
   const requestId = response.headers.get('x-request-id');
   const gatewayRequestId = response.headers.get('x-gateway-request-id');
@@ -68,15 +80,21 @@ export function subscriptionHttpError(
 export function subscriptionErrorMessage(
   error: SubscriptionOAuthError,
 ): string {
-  if (error.status && error.status >= 400 && error.description)
-    return error.description;
+  const { description } = error;
+  if (
+    error.status &&
+    error.status >= 400 &&
+    description &&
+    !isSubscriptionSessionExpired(error)
+  )
+    return description;
   if (
     error.code === 'session_changed' ||
     (error.stage === 'refresh' && error.code === 'invalid_grant') ||
     error.code === 'invalid_token' ||
     error.status === 401
   )
-    return 'Your Qwen session has expired. Run /auth to sign in again.';
+    return 'Your login credentials are no longer valid. Run /auth to sign in again.';
   if (error.status === 429) return 'Too many requests. Please try again later.';
   if (error.stage === 'credentials' || error.stage === 'cleanup')
     return 'Could not read or save Qwen credentials. Check local file permissions and disk space.';

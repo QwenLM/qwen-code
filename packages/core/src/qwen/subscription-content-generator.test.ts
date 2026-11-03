@@ -13,6 +13,7 @@ import { preloadRuntimeFetchModule } from '../utils/runtimeFetchOptions.js';
 import { createSubscriptionContentGenerator } from './subscription-content-generator.js';
 import { SubscriptionOAuthError } from './subscription-oauth-client.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { parseAndFormatApiError } from '../utils/errorParsing.js';
 import { resolveModelConfig } from '../models/modelConfigResolver.js';
 import {
   QWEN_SUBSCRIPTION_BASE_URL,
@@ -477,21 +478,30 @@ it('allows a served per-request model without a client allowlist', async () => {
   );
 });
 
-it('does not send requests after credentials have been removed', async () => {
-  session.getAccessToken.mockRejectedValue(new Error('session_changed'));
-  await expect(
-    generator().generateContent(request, 'prompt'),
-  ).rejects.toThrow();
-  expect(fetchMock).not.toHaveBeenCalled();
-});
+it.each([
+  ['session_changed', undefined, undefined, undefined],
+  ['invalid_grant', 400, 'refresh', undefined],
+  ['invalid_grant', 400, 'refresh', 'The refresh token was revoked.'],
+] as const)(
+  'formats expired credentials (%s) without SDK wrapping',
+  async (code, status, stage, description) => {
+    session.getAccessToken.mockRejectedValue(
+      new SubscriptionOAuthError(code, status, description, undefined, stage),
+    );
+    const error = await generator()
+      .generateContent(request, 'prompt')
+      .catch((error: unknown) => error);
+    expect(getErrorMessage(error)).toBe(
+      'Your login credentials are no longer valid. Run /auth to sign in again.',
+    );
+    expect(parseAndFormatApiError(error, AuthType.QWEN_SUBSCRIPTION)).toBe(
+      'Your login credentials are no longer valid. Run /auth to sign in again.',
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  },
+);
 
 it.each([
-  [
-    'invalid_grant',
-    400,
-    'refresh',
-    'Your Qwen session has expired. Run /auth to sign in again.',
-  ],
   ['rate_limited', 429, 'refresh', 'Refresh limit reached. Try again later.'],
 ] as const)(
   'preserves %s token errors through the inference SDK',

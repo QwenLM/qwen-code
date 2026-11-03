@@ -15,8 +15,10 @@ import {
 import {
   getQwenOAuthConfig,
   getQwenSubscriptionPlansUrl,
+  getQwenSubscriptionSuccessUrl,
 } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import type { DaemonSubscriptionFlow } from '@qwen-code/sdk/daemon';
+import { isSubscriptionSessionExpired } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 
 const PUBLIC_ERRORS = new Set([
   'access_denied',
@@ -97,6 +99,7 @@ export function registerSubscriptionAuthRoutes(
   app.get('/auth/subscription', (_req, res) => {
     res.json({
       enabled: !disposed,
+      signedIn: !disposed && new QwenSubscriptionSession().isSignedIn(),
       plansUrl,
     });
   });
@@ -130,8 +133,22 @@ export function registerSubscriptionAuthRoutes(
       };
       const run = async () => {
         const session = new QwenSubscriptionSession();
+        const saved = await session
+          .getUserInfo(controller.signal)
+          .catch((error: unknown) => {
+            controller.signal.throwIfAborted();
+            if (isSubscriptionSessionExpired(error)) return null;
+            throw error;
+          });
+        if (saved) {
+          flow.view = {
+            id,
+            status: 'waiting',
+            authorizationUrl: getQwenSubscriptionSuccessUrl(),
+          };
+        }
         const user =
-          (await session.getUserInfo(controller.signal)) ??
+          saved ??
           (await session.signIn((device) => {
             controller.signal.throwIfAborted();
             const url = new URL('/authorize', webOrigin);
@@ -141,7 +158,12 @@ export function registerSubscriptionAuthRoutes(
             flow.view = { id, status: 'waiting', authorizationUrl };
           }, controller.signal));
         controller.signal.throwIfAborted();
-        finish({ id, status: 'ready', userInfo: publicUser(user) });
+        finish({
+          id,
+          status: 'ready',
+          authorizationUrl: flow.view.authorizationUrl,
+          userInfo: publicUser(user),
+        });
       };
       void run().catch((error: unknown) => {
         if (!controller.signal.aborted)

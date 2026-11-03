@@ -6,6 +6,7 @@ import {
   useActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { useI18n } from '../i18n';
+import { isDesktopShell, openExternalUrl } from '../utils/externalOpen';
 
 interface Options {
   t: ReturnType<typeof useI18n>['t'];
@@ -14,10 +15,13 @@ interface Options {
   onBlocked: () => boolean;
   onNotice: (kind: 'info' | 'success' | 'warning', message: string) => void;
   onError: (error: unknown, message: string) => void;
+  onCommand?: (text: string) => boolean;
 }
 
 export function useSubscriptionLogout(options: Options) {
   const connection = useConnection();
+  const connectionRef = useRef(connection);
+  connectionRef.current = connection;
   const actions = useWorkspaceActions();
   const sessionActions = useActions();
   const ownerGuard = useDaemonSessionOwnerGuard();
@@ -29,6 +33,13 @@ export function useSubscriptionLogout(options: Options) {
   const sessionAuthType = connection.sessionId
     ? connection.context?.state._meta?.['authType']
     : undefined;
+  const loadAuthType = useCallback(async () => {
+    if (connectionRef.current.sessionId) {
+      return (await sessionActions.getContext()).state._meta?.['authType'];
+    }
+    if (!workspaceCwd) return undefined;
+    return (await actions.loadProviders(workspaceCwd)).current?.authType;
+  }, [actions, sessionActions, workspaceCwd]);
 
   useEffect(() => {
     const abort = new AbortController();
@@ -38,13 +49,22 @@ export function useSubscriptionLogout(options: Options) {
       void actions
         .getSubscriptionConfig({ signal: abort.signal })
         .then(async (config) => {
-          if (abort.signal.aborted || !owner.isCurrent() || !config.enabled)
+          if (
+            abort.signal.aborted ||
+            !owner.isCurrent() ||
+            !config.enabled ||
+            !config.signedIn
+          )
             return;
-          const providers = await actions.loadProviders(workspaceCwd);
+          const authType = await loadAuthType();
+          const latest = await actions.getSubscriptionConfig({
+            signal: abort.signal,
+          });
           if (!abort.signal.aborted && owner.isCurrent())
             setAvailable(
-              (sessionAuthType ?? providers.current?.authType) ===
-                'qwen-subscription',
+              latest.enabled &&
+                latest.signedIn === true &&
+                authType === 'qwen-subscription',
             );
         })
         .catch(() => undefined);
@@ -58,17 +78,21 @@ export function useSubscriptionLogout(options: Options) {
     connection.currentModel,
     connection.providers,
     sessionAuthType,
+    loadAuthType,
   ]);
 
   const handleCommand = useCallback(
     (text: string): boolean | undefined => {
+      const command = /^\/(logout|upgrade)(?:\s|$)/i
+        .exec(text.trim())?.[1]
+        ?.toLowerCase();
       if (
-        !/^\/logout(?:\s|$)/.test(text.trim()) ||
+        !command ||
         connection.commands?.some(
-          (command) =>
-            command.name === 'logout' &&
-            command.source &&
-            command.source !== 'builtin-command',
+          (entry) =>
+            entry.name === command &&
+            entry.source &&
+            entry.source !== 'builtin-command',
         )
       )
         return undefined;
@@ -76,24 +100,38 @@ export function useSubscriptionLogout(options: Options) {
       if (callbacks.current.isBlocked()) return callbacks.current.onBlocked();
       if (pending.current) return true;
       const owner = ownerGuard.capture();
+      const model = connectionRef.current.currentModel;
+      const authType = connectionRef.current.context?.state._meta?.['authType'];
+      const isCurrent = () =>
+        owner.isCurrent() &&
+        connectionRef.current.currentModel === model &&
+        connectionRef.current.context?.state._meta?.['authType'] === authType;
       pending.current = true;
       void actions
         .getSubscriptionConfig()
         .then(async (config) => {
-          if (!owner.isCurrent()) return;
+          if (!isCurrent()) return;
           if (!config.enabled) {
             callbacks.current.onNotice('info', t('subscription.unavailable'));
             return;
           }
-          const providers = await actions.loadProviders(workspaceCwd);
-          if (!owner.isCurrent()) return;
+          const authType = await loadAuthType();
+          if (!isCurrent()) return;
+          const latest = await actions.getSubscriptionConfig();
+          if (!isCurrent()) return;
           if (
-            (sessionAuthType ?? providers.current?.authType) !==
-            'qwen-subscription'
+            !latest.enabled ||
+            !latest.signedIn ||
+            authType !== 'qwen-subscription'
           ) {
+            setAvailable(false);
             callbacks.current.onNotice(
               'info',
-              t('subscription.logoutNotRequired'),
+              t(
+                command === 'logout'
+                  ? 'subscription.logoutNotRequired'
+                  : 'subscription.commandUnavailable',
+              ),
             );
             return;
           }
@@ -101,7 +139,17 @@ export function useSubscriptionLogout(options: Options) {
             callbacks.current.onBlocked();
             return;
           }
+          if (callbacks.current.onCommand?.(text)) return;
+          if (command === 'upgrade') {
+            if (latest.plansUrl) {
+              if (isDesktopShell()) await openExternalUrl(latest.plansUrl);
+              else
+                window.open(latest.plansUrl, '_blank', 'noopener,noreferrer');
+            }
+            return;
+          }
           await actions.signOutSubscription();
+          setAvailable(false);
           if (!owner.isCurrent()) return;
           await sessionActions.refreshModels(undefined, {
             reloadProviders: false,
@@ -112,6 +160,7 @@ export function useSubscriptionLogout(options: Options) {
           if (!owner.isCurrent()) return;
           const failure = error as { body?: { errorStage?: string } };
           if (failure?.body?.errorStage === 'revoke') {
+            setAvailable(false);
             void sessionActions
               .refreshModels(undefined, { reloadProviders: false })
               .catch((refreshError: unknown) => {
@@ -126,7 +175,14 @@ export function useSubscriptionLogout(options: Options) {
               t('subscription.signedOutLocally'),
             );
           } else {
-            callbacks.current.onError(error, t('subscription.signOutFailed'));
+            callbacks.current.onError(
+              error,
+              t(
+                command === 'logout'
+                  ? 'subscription.signOutFailed'
+                  : 'subscription.upgradeFailed',
+              ),
+            );
           }
         })
         .finally(() => {
@@ -141,7 +197,7 @@ export function useSubscriptionLogout(options: Options) {
       ownerGuard,
       t,
       workspaceCwd,
-      sessionAuthType,
+      loadAuthType,
     ],
   );
 

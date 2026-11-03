@@ -23,6 +23,8 @@
  */
 
 import { buildModelIdContext } from '@qwen-code/qwen-code-core/utils/modelId.js';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
+import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import {
   checkAdvisorModelAvailability,
   isAdvisorModelEligible,
@@ -66,7 +68,10 @@ import { getPersistScopeForModelSelection } from '../../config/modelProvidersSco
 import { t } from '../../i18n/index.js';
 import { extensionComponentsSummary } from '../../services/extension-components-summary.js';
 import { publicProviderBaseUrl } from '../../utils/acpModelUtils.js';
-import { sortModelEntriesForDisplay } from '../../utils/model-display-order.js';
+import {
+  filterModelEntriesForDisplay,
+  sortModelEntriesForDisplay,
+} from '../../utils/model-display-order.js';
 import { getErrorMessage } from '../../utils/errors.js';
 import { getToolInvalidReasons, isToolValid } from '../components/mcp/utils.js';
 import { themeManager, AUTO_THEME_NAME } from '../themes/theme-manager.js';
@@ -119,6 +124,7 @@ function advisorSelector(
 export function buildModelEntries(
   config: Config | null | undefined,
   mode: ModelDialogMode,
+  subscriptionSignedIn?: boolean,
 ): OpenTuiModelEntry[] {
   const allModels = config?.getAllConfiguredModels?.() ?? [];
   const authType = config?.getAuthType?.();
@@ -210,7 +216,13 @@ export function buildModelEntries(
       model,
     });
   }
-  return mode === 'primary' ? sortModelEntriesForDisplay(entries) : entries;
+  const visibleEntries = filterModelEntriesForDisplay(
+    entries,
+    subscriptionSignedIn,
+  );
+  return mode === 'primary'
+    ? sortModelEntriesForDisplay(visibleEntries)
+    : visibleEntries;
 }
 
 /** Parity of ModelDialog's `resolvePersistScope`. */
@@ -628,6 +640,9 @@ export async function applyModelSelection(
     }
     after = config.getContentGeneratorConfig?.();
   } catch (e) {
+    if (e instanceof SubscriptionOAuthError) {
+      return { ok: false, error: t(subscriptionErrorMessage(e)) };
+    }
     const baseErrorMessage = e instanceof Error ? e.message : String(e);
     // Use parsed modelId for display to avoid showing raw selection key
     // (which contains invisible \0 separator between modelId and baseUrl).

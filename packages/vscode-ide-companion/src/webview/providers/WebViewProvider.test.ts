@@ -2365,7 +2365,19 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
       const setModel = vi
         .spyOn(client, 'setSessionModel')
         .mockResolvedValue({});
-      return { workspaceByCwd, activate, setModel };
+      const providers = vi
+        .spyOn(workspace, 'workspaceProviders')
+        .mockResolvedValue({
+          v: 1,
+          workspaceCwd: '/workspace-a',
+          initialized: true,
+          current: {
+            authType: 'qwen-subscription',
+            modelId: 'qwen3.8-max(qwen-subscription)',
+          },
+          providers: [],
+        });
+      return { workspaceByCwd, activate, setModel, providers };
     }
 
     async function openSidebar(sessionId: string | null = 'session-a') {
@@ -2386,33 +2398,57 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
       return { ...attached, flowId: event!.data.flowId, calls };
     }
 
-    it('opens selected Qwen authorization in the sidebar and activates through its captured owner', async () => {
-      const attached = await openSidebar();
-      expect(subscriptionMocks.run).not.toHaveBeenCalled();
-      await attached.messageHandler?.({
-        type: 'qwenSubscriptionActivate',
-        data: {
-          flowId: attached.flowId,
-          requestId: 'request',
-        },
-      });
-      expect(attached.calls.workspaceByCwd).toHaveBeenCalledWith(
-        '/workspace-a',
-      );
-      expect(attached.calls.activate).toHaveBeenCalledWith({
-        signal: expect.any(AbortSignal),
-      });
-      expect(attached.calls.setModel).toHaveBeenCalledWith(
-        'session-a',
-        'qwen3.8-max(qwen-subscription)',
-      );
-      expect(attached.postMessage).toHaveBeenCalledWith({
-        type: 'authSuccess',
-      });
-      expect(
-        (attached.provider as unknown as { authState: boolean }).authState,
-      ).toBe(true);
-    });
+    it.each([null, 'session-a'])(
+      'activates subscription through its captured owner (session: %s)',
+      async (sessionId) => {
+        const attached = await openSidebar(sessionId);
+        expect(subscriptionMocks.run).not.toHaveBeenCalled();
+        await attached.messageHandler?.({
+          type: 'qwenSubscriptionActivate',
+          data: {
+            flowId: attached.flowId,
+            requestId: 'request',
+          },
+        });
+        expect(attached.calls.workspaceByCwd).toHaveBeenCalledWith(
+          '/workspace-a',
+        );
+        expect(attached.calls.activate).toHaveBeenCalledWith({
+          signal: expect.any(AbortSignal),
+        });
+        if (sessionId) {
+          expect(attached.calls.setModel).toHaveBeenCalledExactlyOnceWith(
+            sessionId,
+            'qwen3.8-max(qwen-subscription)',
+          );
+        } else {
+          expect(attached.calls.setModel).not.toHaveBeenCalled();
+        }
+        expect(attached.calls.providers).toHaveBeenCalledOnce();
+        expect(attached.postMessage).toHaveBeenCalledWith({
+          type: 'qwenSubscriptionActivationResult',
+          data: {
+            flowId: attached.flowId,
+            requestId: 'request',
+            modelId: 'qwen3.8-max',
+          },
+        });
+        expect(attached.postMessage).not.toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'authSuccess' }),
+        );
+        await attached.messageHandler?.({
+          type: 'qwenSubscriptionComplete',
+          data: { flowId: attached.flowId, message: 'Qwen connected' },
+        });
+        expect(attached.postMessage).toHaveBeenCalledWith({
+          type: 'authSuccess',
+          data: { message: 'Qwen connected' },
+        });
+        expect(
+          (attached.provider as unknown as { authState: boolean }).authState,
+        ).toBe(true);
+      },
+    );
 
     it('clears the host auth cache when the sidebar signs out', async () => {
       const attached = await openSidebar();
@@ -2684,6 +2720,79 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
         expect(attached.postMessage).not.toHaveBeenCalledWith({
           type: 'authState',
           data: { authenticated: true },
+        });
+      },
+    );
+
+    it.each([null, 'session-a'])(
+      'checks the selected model scope for native commands (session: %s)',
+      async (sessionId) => {
+        const attached = await setup(sessionId);
+        const owner = (
+          attached.provider as unknown as {
+            subscriptionRuntime: { client: DaemonClient };
+          }
+        ).subscriptionRuntime;
+        const calls = stubActivation({ transport: owner.client });
+        const context = vi
+          .spyOn(owner.client, 'sessionContext')
+          .mockResolvedValue({
+            v: 1,
+            sessionId: 'session-a',
+            workspaceCwd: '/workspace-a',
+            state: { _meta: { authType: 'openai' } },
+          });
+        subscriptionMocks.run.mockImplementation(async (options) => {
+          expect(await options.isSubscriptionModel()).toBe(sessionId === null);
+          return { kind: 'unavailable' };
+        });
+        await attached.provider.startSubscriptionAction('upgrade');
+        if (sessionId) {
+          expect(context).toHaveBeenCalledWith(sessionId, expect.any(String));
+          expect(calls.providers).not.toHaveBeenCalled();
+        } else {
+          expect(calls.providers).toHaveBeenCalledOnce();
+          expect(context).not.toHaveBeenCalled();
+        }
+      },
+    );
+
+    it.each(['qwen-subscription', 'openai'])(
+      'cancels a pending native action when the active model connection changes to %s',
+      async (authType) => {
+        const attached = await setup();
+        await attached.messageHandler?.({
+          type: 'webShellModelChanged',
+          data: {
+            workspaceCwd: '/workspace-a',
+            modelId: 'model-a',
+            authType: 'qwen-subscription',
+          },
+        });
+        let signal!: AbortSignal;
+        subscriptionMocks.run.mockImplementation((options) => {
+          signal = options.signal;
+          return new Promise((resolve) =>
+            signal.addEventListener(
+              'abort',
+              () => resolve({ kind: 'cancelled' }),
+              { once: true },
+            ),
+          );
+        });
+        const pending = attached.provider.startSubscriptionAction('upgrade');
+        await attached.messageHandler?.({
+          type: 'webShellModelChanged',
+          data: {
+            workspaceCwd: '/workspace-a',
+            modelId: authType === 'openai' ? 'model-a' : 'model-b',
+            authType,
+          },
+        });
+        await pending;
+        expect(signal.aborted).toBe(true);
+        expect(attached.postMessage).not.toHaveBeenCalledWith({
+          type: 'authSignedOut',
         });
       },
     );

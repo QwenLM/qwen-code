@@ -7722,6 +7722,46 @@ function createTimedCreateClient({
 }
 
 describe('model catalog refresh', () => {
+  it.each([false, true])(
+    'preserves an unlisted subscription selection after logout (live: %s)',
+    async (live) => {
+      const session = createMockSession('hidden-subscription');
+      const workspace = session.client.workspaceByCwd();
+      session.client.workspaceByCwd.mockReturnValue(workspace);
+      const modelId = 'qwen3.8-max(qwen-subscription)';
+      workspace.workspaceProviders.mockResolvedValue({
+        v: 1,
+        initialized: true,
+        workspaceCwd: '/workspace',
+        current: { authType: 'qwen-subscription', modelId },
+        providers: [],
+      });
+      const context = contextStatus('hidden-subscription');
+      context.state.models = { currentModelId: modelId, availableModels: [] };
+      session.context.mockResolvedValue(context);
+      const h = createActionsHarness({
+        ...(live ? { session } : {}),
+        getClient: () => session.client as unknown as DaemonClient,
+        connection: {
+          status: 'connected',
+          ...(live ? { sessionId: 'hidden-subscription' } : {}),
+          workspaceCwd: '/workspace',
+          currentModel: modelId,
+          contextWindow: 128000,
+          models: [{ id: modelId, authType: 'qwen-subscription' }],
+        },
+      });
+      await expect(
+        h.actions.refreshModels(undefined, { reloadProviders: false }),
+      ).resolves.toBeUndefined();
+      expect(h.getConnection().currentModel).toBe(modelId);
+      expect(h.getConnection().contextWindow).toBe(128000);
+      expect(h.getConnection().models).toEqual([]);
+      expect(session.setModel).not.toHaveBeenCalled();
+      expect(workspace.reloadModelProviders).not.toHaveBeenCalled();
+    },
+  );
+
   it('reads a recovered live model without reloading providers', async () => {
     const h = setup();
     h.replaceConnection({

@@ -377,6 +377,8 @@ export function EmbeddedApp() {
   const [runtimeError, setRuntimeError] = useState<string>();
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [signedOut, setSignedOut] = useState(false);
+  const authStateRef = useRef({ authenticated, signedOut });
+  authStateRef.current = { authenticated, signedOut };
   const [authConnecting, setAuthConnecting] = useState(false);
   const [authError, setAuthError] = useState<string>();
   const [subscriptionFlowId, setSubscriptionFlowId] = useState<string>();
@@ -385,7 +387,7 @@ export function EmbeddedApp() {
   const subscriptionActivation = useRef<
     | {
         requestId: string;
-        resolve: () => void;
+        resolve: (modelId: string) => void;
         reject: (error: unknown) => void;
       }
     | undefined
@@ -511,7 +513,7 @@ export function EmbeddedApp() {
   };
 
   const activateSubscription = (signal: AbortSignal) =>
-    new Promise<void>((resolve, reject) => {
+    new Promise<string>((resolve, reject) => {
       signal.throwIfAborted();
       if (subscriptionActivation.current)
         throw new Error('Subscription activation is already running.');
@@ -530,9 +532,9 @@ export function EmbeddedApp() {
       };
       subscriptionActivation.current = {
         requestId,
-        resolve: () => {
+        resolve: (modelId) => {
           signal.removeEventListener('abort', cancel);
-          resolve();
+          resolve(modelId);
         },
         reject: (error) => {
           signal.removeEventListener('abort', cancel);
@@ -1044,7 +1046,12 @@ export function EmbeddedApp() {
                 body: subscriptionData.body,
               }),
             );
-          else pending.resolve();
+          else if (typeof subscriptionData.modelId === 'string')
+            pending.resolve(subscriptionData.modelId);
+          else
+            pending.reject(
+              new Error('Subscription activation did not return a model.'),
+            );
         }
       } else if (message.type === 'accountInfo' && message.data) {
         setAccountInfo(message.data as AccountInfo);
@@ -1080,7 +1087,13 @@ export function EmbeddedApp() {
         setAuthConnecting(false);
         setAuthError(undefined);
         if (message.type === 'authSuccess') {
-          setHostNotice({ tone: 'info', text: t('auth.signedIn') });
+          setHostNotice({
+            tone: 'info',
+            text:
+              typeof subscriptionData?.['message'] === 'string'
+                ? subscriptionData['message']
+                : t('auth.signedIn'),
+          });
         }
       } else if (message.type === 'authCancelled') {
         // A cancelled auth flow must not hide an already-authenticated
@@ -1104,8 +1117,16 @@ export function EmbeddedApp() {
             : typeof data?.error === 'string'
               ? data.error
               : t('auth.failed');
-        setAuthenticated(false);
-        setSignedOut(false);
+        if (
+          message.type === 'authError' &&
+          (authStateRef.current.authenticated === true ||
+            authStateRef.current.signedOut)
+        ) {
+          setHostNotice({ tone: 'error', text });
+        } else {
+          setAuthenticated(false);
+          setSignedOut(false);
+        }
         setAuthConnecting(false);
         setAuthError(text);
         clearInsight();
@@ -1735,17 +1756,27 @@ export function EmbeddedApp() {
               })
             }
             onActivate={activateSubscription}
+            onActivated={(message) =>
+              vscode.postMessage({
+                type: 'qwenSubscriptionComplete',
+                data: { flowId: subscriptionFlowId, message },
+              })
+            }
           />
         </QwenOnboarding>
-      ) : authenticated === false && !signedOut ? (
-        <QwenOnboarding
-          connecting={authConnecting}
-          error={authError}
-          t={t}
-          onGetStarted={() => {
-            void openAuthentication();
-          }}
-        />
+      ) : null}
+      {/* Keep the session providers mounted when subscription login replaces the view. */}
+      {authenticated === false && !signedOut ? (
+        subscriptionFlowId ? null : (
+          <QwenOnboarding
+            connecting={authConnecting}
+            error={authError}
+            t={t}
+            onGetStarted={() => {
+              void openAuthentication();
+            }}
+          />
+        )
       ) : (
         <WebShellWithProviders
           baseUrl={runtime.baseUrl}
@@ -1755,6 +1786,7 @@ export function EmbeddedApp() {
           sessionId={runtime.sessionId}
           className="qwen-code-vscode-web-shell"
           style={SHELL_STYLE}
+          viewHidden={Boolean(subscriptionFlowId)}
           theme={theme}
           // No `language` prop on purpose: the shell resolves its own UI
           // language (daemon setting, then browser locale), so a pick in its
@@ -1808,6 +1840,12 @@ export function EmbeddedApp() {
                 });
               }
             }
+          }}
+          onModelChange={(modelId, authType) => {
+            vscode.postMessage({
+              type: 'webShellModelChanged',
+              data: { workspaceCwd: runtime.workspaceCwd, modelId, authType },
+            });
           }}
           onError={handleShellError}
           sidebar={false}

@@ -1295,6 +1295,19 @@ export function AuthMessage({
             await sessionActions.refreshModels();
             signal.throwIfAborted();
             if (!owner.isCurrent()) throw new Error('Session changed.');
+            const providers = await workspaceActions.loadProviders();
+            signal.throwIfAborted();
+            if (!owner.isCurrent()) throw new Error('Session changed.');
+            if (
+              !providers.initialized ||
+              providers.current?.authType !== 'qwen-subscription' ||
+              ![
+                result.modelId,
+                `${result.modelId}(qwen-subscription)`,
+              ].includes(providers.current.modelId ?? '')
+            ) {
+              throw new Error(t('subscription.connectFailed'));
+            }
             onModelActivated?.(`${result.modelId}(qwen-subscription)`);
           }
           return result.modelId;

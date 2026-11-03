@@ -29,3 +29,9 @@ export function getQwenSubscriptionPlansUrl(): string {
   url.searchParams.set('memberPlan', 'qwen_code');
   return url.toString();
 }
+
+export function getQwenSubscriptionSuccessUrl(): string {
+  const url = new URL('/authorize/success', getQwenOAuthConfig().webOrigin);
+  url.searchParams.set('client', 'qwen-code');
+  return url.toString();
+}

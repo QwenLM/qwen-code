@@ -164,14 +164,19 @@ it.each(['free', 'FREE', 'lite', 'go', 'enterprise', 'VIP'])(
     const { result, unmount } = renderHook(() => useSubscription());
     await flush();
     expect(result.current.state.status).toBe('purchase-required');
-    expect(mocks.browser).not.toHaveBeenCalled();
+    expect(mocks.browser).toHaveBeenCalledWith(
+      'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code',
+    );
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
     expect(mocks.getUserInfo).toHaveBeenCalledTimes(2);
-    expect(mocks.browser).not.toHaveBeenCalled();
+    expect(mocks.browser).toHaveBeenCalledWith(
+      'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code',
+    );
     act(() => result.current.openPlans());
     expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
+      'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code',
       'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
     ]);
     expect(mocks.signIn).not.toHaveBeenCalled();
@@ -461,7 +466,11 @@ it('displays an unknown membership by its returned name', async () => {
   unmount();
 });
 
-it('reports invalid refresh grants without automatically reopening authorization', async () => {
+it('starts fresh authorization when saved refresh credentials are invalid', async () => {
+  mocks.signIn.mockImplementation(async (onDevice) => {
+    onDevice(device);
+    return { ...free, member_type: 'pro' };
+  });
   mocks.getUserInfo.mockRejectedValue(
     new SubscriptionOAuthError(
       'invalid_grant',
@@ -474,11 +483,13 @@ it('reports invalid refresh grants without automatically reopening authorization
   const { result, unmount } = renderHook(() => useSubscription());
   await flush();
   expect(result.current.state).toEqual({
-    status: 'error',
-    message: 'Your Qwen session has expired. Run /auth to sign in again.',
+    status: 'ready',
+    plan: 'Pro',
   });
-  expect(mocks.signIn).not.toHaveBeenCalled();
-  expect(mocks.browser).not.toHaveBeenCalled();
+  expect(mocks.signIn).toHaveBeenCalledOnce();
+  expect(mocks.browser).toHaveBeenCalledWith(
+    'https://pre4-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+  );
   unmount();
 });
 
@@ -614,7 +625,7 @@ it('keeps exchange invalid_grant distinct from refresh session expiry', async ()
     message: expect.stringContaining('Could not complete authorization'),
   });
   expect(JSON.stringify(result.current.state)).not.toContain(
-    'session has expired',
+    'credentials are no longer valid',
   );
   expect(JSON.stringify(result.current.state)).not.toContain(
     'synthetic-secret',
@@ -717,7 +728,7 @@ it('leaves CLI readiness on activation refresh expiry without implicitly signing
   await flush();
   expect(hook.result.current.state).toMatchObject({
     status: 'error',
-    message: expect.stringContaining('session has expired'),
+    message: expect.stringContaining('credentials are no longer valid'),
   });
   expect(mocks.signIn).not.toHaveBeenCalled();
   hook.unmount();
@@ -731,6 +742,10 @@ it.each(['plus', 'pro', 'PLUS', 'Pro', 'pLuS'] as const)(
     const hook = renderHook(() => useSubscription({ onActivate }));
     await flush();
     expect(onActivate).toHaveBeenCalledTimes(1);
+    expect(onActivate).toHaveBeenCalledWith(
+      expect.any(AbortSignal),
+      'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code',
+    );
     hook.rerender();
     await flush();
     expect(onActivate).toHaveBeenCalledTimes(1);
@@ -763,8 +778,14 @@ it('automatically activates a newly authorized paid account', async () => {
   const hook = renderHook(() => useSubscription({ onActivate }));
   await flush();
   expect(mocks.signIn).toHaveBeenCalledOnce();
-  expect(onActivate).toHaveBeenCalledWith(expect.any(AbortSignal));
+  expect(onActivate).toHaveBeenCalledWith(
+    expect.any(AbortSignal),
+    'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code',
+  );
   expect(onActivate).toHaveBeenCalledOnce();
+  expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
+    'https://pre4-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+  ]);
   hook.unmount();
 });
 
@@ -782,6 +803,10 @@ it('automatically activates after a failed initial membership query is retried',
     await Promise.resolve();
   });
   expect(onActivate).toHaveBeenCalledOnce();
+  expect(onActivate).toHaveBeenCalledWith(
+    expect.any(AbortSignal),
+    'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code',
+  );
   expect(hook.result.current.connectionError).toBeUndefined();
   hook.unmount();
 });

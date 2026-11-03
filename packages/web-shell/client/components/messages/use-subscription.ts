@@ -39,7 +39,8 @@ const COPY = {
     rateLimited: 'Too many requests. Please try again later.',
     network: 'The network request failed or timed out.',
     invalidResponse: 'The service returned an invalid response.',
-    expired: 'Your Qwen session has expired. Please sign in again.',
+    expired:
+      'Your login credentials are no longer valid. Run /auth to sign in again.',
     timeout:
       'Authentication timed out. Please try again or select a different authentication method.',
     queryFailed: "Couldn't check your subscription status. Please try again.",
@@ -59,7 +60,7 @@ const COPY = {
     rateLimited: '请求过多，请稍后重试。',
     network: '网络请求失败或超时。',
     invalidResponse: '服务返回的数据格式无效。',
-    expired: '你的 Qwen 登录已过期，请重新登录。',
+    expired: '登录凭证已失效，请运行 /auth 重新登录。',
     timeout: '身份验证超时，请重试或选择其他身份验证方式。',
     queryFailed: '无法查询你的订阅状态，请重试。',
     purchaseTimeout: '你的订阅尚未生效。如果已完成付款，请稍等片刻后重试。',
@@ -121,6 +122,7 @@ export function useSubscription(
     authorizationUrl: '',
   });
   const [attempt, setAttempt] = useState<number | null>(0);
+  const [authorizationUrl, setAuthorizationUrl] = useState('');
   const stateRef = useRef(state);
   stateRef.current = state;
   const lifetime = useRef<AbortController | null>(null);
@@ -240,6 +242,7 @@ export function useSubscription(
     signingOut.current = false;
     setWorking(false);
     setState({ status: 'waiting', authorizationUrl: '' });
+    setAuthorizationUrl('');
     let flowId: string | undefined;
     const cancelFlow = (id: string) => {
       void transport.cancelSubscriptionLogin(id).catch(() => undefined);
@@ -315,6 +318,7 @@ export function useSubscription(
       flowId = flow.id;
       while (flow.status === 'waiting') {
         if (flow.authorizationUrl) {
+          setAuthorizationUrl(flow.authorizationUrl);
           setState({
             status: 'waiting',
             authorizationUrl: flow.authorizationUrl,
@@ -338,6 +342,10 @@ export function useSubscription(
         return;
       }
       const next = confirmMembership(flow.userInfo, signal);
+      if (flow.authorizationUrl && openedUrl !== flow.authorizationUrl) {
+        setAuthorizationUrl(flow.authorizationUrl);
+        openUrl(flow.authorizationUrl);
+      }
       setState(next);
       if (next.status !== 'purchase-required') return;
       await startPurchase.current();
@@ -465,6 +473,7 @@ export function useSubscription(
 
   return {
     state,
+    authorizationUrl,
     readySignal:
       state.status === 'ready' &&
       confirmedMembership.current?.transport === transport &&

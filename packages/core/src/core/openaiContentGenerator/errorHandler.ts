@@ -15,6 +15,10 @@ import { getRateLimitErrorDetails } from '../../utils/rateLimit.js';
 import { getTransportCode } from '../../utils/retryErrorClassification.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import type { ErrorHandler, RequestContext } from './types.js';
+import {
+  isSubscriptionSessionExpired,
+  subscriptionErrorMessage,
+} from '../../qwen/subscription-errors.js';
 
 const debugLogger = createDebugLogger('OPENAI_ERROR');
 export type { ErrorHandler } from './types.js';
@@ -44,6 +48,13 @@ export class EnhancedErrorHandler implements ErrorHandler {
     request: GenerateContentParameters,
   ): never {
     const redactedError = redactProxyError(error);
+    const failure =
+      redactedError instanceof Error ? redactedError.cause : undefined;
+    if (isSubscriptionSessionExpired(failure)) {
+      throw Object.assign(new Error(subscriptionErrorMessage(failure)), {
+        code: failure.code,
+      });
+    }
     const isTimeoutError = this.isTimeoutError(redactedError);
     const errorMessage = this.buildErrorMessage(
       redactedError,

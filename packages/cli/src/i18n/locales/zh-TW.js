@@ -2593,7 +2593,9 @@ export default {
   'The service returned an invalid response.': '服務回傳的資料格式無效。',
   'Too many requests. Please try again later.': '請求過多，請稍後重試。',
   'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai':
-    '在 chat.qwen.ai 訂閱 Plus／Pro 方案以使用 Qwen Code + Agent',
+    '在 chat.qwen.ai 訂閱 Plus／Pro，解鎖 Qwen Code 和 Agent 能力',
+  'Your login credentials are no longer valid. Run /auth to sign in again.':
+    '登入憑證已失效，請執行 /auth 重新登入。',
   'Switch Provider': '切換供應商',
   'Use another account': '使用其他帳號',
   'Waiting for sign-in…': '正在等待登入…',

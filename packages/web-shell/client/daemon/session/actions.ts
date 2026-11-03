@@ -1993,11 +1993,11 @@ export function createDaemonSessionActions({
           throw new Error('Unable to read the refreshed session model list.');
         }
         const models = refreshed ?? { models: [] };
-        const currentModel = models.models.some(
-          (model) => model.id === refreshed?.currentModel,
-        )
-          ? refreshed?.currentModel
-          : undefined;
+        const currentModel =
+          readOnly ||
+          models.models.some((model) => model.id === refreshed?.currentModel)
+            ? refreshed?.currentModel
+            : undefined;
         setConnection((current) =>
           isCurrent(current)
             ? {
@@ -2029,9 +2029,12 @@ export function createDaemonSessionActions({
                 priorModelMutation === modelMutationGeneration
                   ? {
                       currentModel,
-                      contextWindow: models.models.find(
-                        (model) => model.id === currentModel,
-                      )?.contextWindow,
+                      contextWindow:
+                        models.models.find((model) => model.id === currentModel)
+                          ?.contextWindow ??
+                        (current.currentModel === currentModel
+                          ? current.contextWindow
+                          : undefined),
                       reasoning:
                         current.currentModel === currentModel
                           ? current.reasoning
@@ -2049,7 +2052,9 @@ export function createDaemonSessionActions({
           mapProviderStatus(providers);
         if (
           !providers.initialized ||
-          (models.length === 0 && providers.current?.authType)
+          (models.length === 0 &&
+            providers.current?.authType &&
+            !(readOnly && providers.current.authType === 'qwen-subscription'))
         ) {
           throw new Error(
             providers.errors?.[0]?.error ??
@@ -2068,7 +2073,10 @@ export function createDaemonSessionActions({
                         ? currentModel
                         : undefined,
                       contextWindow: providers.current?.authType
-                        ? contextWindow
+                        ? (contextWindow ??
+                          (current.currentModel === currentModel
+                            ? current.contextWindow
+                            : undefined))
                         : undefined,
                     }
                   : {}),

@@ -19,6 +19,21 @@ import { AuthType, DEFAULT_QWEN_MODEL } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { SettingScope } from '../../config/settings.js';
 import { getFilteredQwenModels } from '../models/availableModels.js';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
+
+const account = vi.hoisted(() => ({
+  signedIn: true,
+  listeners: new Set<() => void>(),
+}));
+vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
+  QwenSubscriptionSession: class {
+    isSignedIn = () => account.signedIn;
+    onChange = (listener: () => void) => {
+      account.listeners.add(listener);
+      return () => account.listeners.delete(listener);
+    };
+  },
+}));
 
 vi.mock('../hooks/useKeypress.js', () => ({
   useKeypress: vi.fn(),
@@ -131,6 +146,8 @@ const renderComponent = (
 describe('<ModelDialog />', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    account.signedIn = true;
+    account.listeners.clear();
     // Ensure env-based fallback models don't leak into this suite from the developer environment.
     delete process.env['OPENAI_MODEL'];
     delete process.env['ANTHROPIC_MODEL'];
@@ -143,6 +160,49 @@ describe('<ModelDialog />', () => {
   it('renders the title', () => {
     const { getByText } = renderComponent();
     expect(getByText('Select Model')).toBeDefined();
+  });
+
+  it('hides subscription entries on external logout without changing the selected model and restores them after login', () => {
+    const { mockConfig, mockSettings, props } = renderComponent(
+      {},
+      {
+        getModel: () => 'qwen3.8-max',
+        getAuthType: () => AuthType.QWEN_SUBSCRIPTION,
+        getAllConfiguredModels: () => [
+          {
+            id: 'qwen3.8-max',
+            label: 'Subscription',
+            authType: AuthType.QWEN_SUBSCRIPTION,
+          },
+          {
+            id: 'qwen3.8-max',
+            label: 'API key model',
+            authType: AuthType.USE_OPENAI,
+          },
+        ],
+      },
+    );
+    const values = () =>
+      mockedSelect.mock.calls.at(-1)![0].items.map(({ value }) => value);
+    expect(values()).toContain(`${AuthType.QWEN_SUBSCRIPTION}::qwen3.8-max`);
+    act(() => {
+      account.signedIn = false;
+      account.listeners.forEach((listener) => listener());
+    });
+    expect(values()).not.toContain(
+      `${AuthType.QWEN_SUBSCRIPTION}::qwen3.8-max`,
+    );
+    expect(values()).toContain(`${AuthType.USE_OPENAI}::qwen3.8-max`);
+    expect(mockConfig.getModel()).toBe('qwen3.8-max');
+    expect(mockConfig.getAuthType()).toBe(AuthType.QWEN_SUBSCRIPTION);
+    expect(mockConfig.switchModel).not.toHaveBeenCalled();
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+    act(() => {
+      account.signedIn = true;
+      account.listeners.forEach((listener) => listener());
+    });
+    expect(values()).toContain(`${AuthType.QWEN_SUBSCRIPTION}::qwen3.8-max`);
   });
 
   it('confirms subscription model selection without exposing API configuration', async () => {
@@ -2433,6 +2493,59 @@ describe('<ModelDialog />', () => {
     expect(mockHistoryManager.addItem).toHaveBeenCalledWith(
       { type: 'info', text: 'Kept model as gpt-4' },
       expect.any(Number),
+    );
+  });
+
+  it('explains expired subscription selection and still permits another provider', async () => {
+    const switchModel = vi.fn(async (authType: AuthType) => {
+      if (authType === AuthType.QWEN_SUBSCRIPTION)
+        throw new SubscriptionOAuthError('session_changed');
+    });
+    const { container, props, mockSettings } = renderComponent(
+      {},
+      {
+        getModel: () => 'qwen3.8-max',
+        getAuthType: () => AuthType.QWEN_SUBSCRIPTION,
+        switchModel,
+        getAllConfiguredModels: () => [
+          {
+            id: 'qwen3.8-flash',
+            label: 'Qwen Flash',
+            authType: AuthType.QWEN_SUBSCRIPTION,
+          },
+          {
+            id: 'alternate',
+            label: 'Alternate',
+            authType: AuthType.USE_OPENAI,
+          },
+        ],
+        getContentGeneratorConfig: () => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'alternate',
+        }),
+      },
+    );
+    await act(async () => {
+      await mockedSelect.mock.calls
+        .at(-1)![0]
+        .onSelect(`${AuthType.QWEN_SUBSCRIPTION}::qwen3.8-flash`);
+    });
+    expect(container.textContent).toContain(
+      'Your login credentials are no longer valid. Run /auth to sign in again.',
+    );
+    expect(container.textContent).not.toContain('session_changed');
+    expect(props.onClose).not.toHaveBeenCalled();
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    await act(async () => {
+      await mockedSelect.mock.calls
+        .at(-1)![0]
+        .onSelect(`${AuthType.USE_OPENAI}::alternate`);
+    });
+    expect(props.onClose).toHaveBeenCalledOnce();
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      'model.name',
+      'alternate',
     );
   });
 

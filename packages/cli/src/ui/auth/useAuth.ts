@@ -77,7 +77,10 @@ export type AuthController = {
       providerConfig: ProviderConfig,
       inputs: ProviderSetupInputs,
     ) => Promise<void>;
-    handleSubscriptionSubmit: (signal: AbortSignal) => Promise<void>;
+    handleSubscriptionSubmit: (
+      signal: AbortSignal,
+      authorizationUrl?: string,
+    ) => Promise<void>;
     openAuthDialog: () => void;
     cancelAuthentication: () => void;
   };
@@ -253,13 +256,17 @@ export const useAuthCommand = (
   );
 
   const handleSubscriptionSubmit = useCallback(
-    async (signal: AbortSignal) => {
+    async (signal: AbortSignal, authorizationUrl?: string) => {
       const info = await activateSubscription(settings, config, signal);
       signal.throwIfAborted();
       addItem(
         {
           type: MessageType.INFO,
-          text: subscriptionSuccessMessage(info, config.getModel()),
+          text: subscriptionSuccessMessage(
+            info,
+            config.getModel(),
+            authorizationUrl,
+          ),
           presentation: 'subscription-success',
         },
         Date.now(),

@@ -129,7 +129,7 @@ it.each([
   },
 );
 
-it('activates only the selected runtime using workspace-scoped non-secret settings', async () => {
+it('activates the selected runtime and persists user defaults for new workspaces', async () => {
   const { app, persistSettings, reloadModelProviders } = setup();
   const response = await request(app)
     .post('/workspaces/secondary/auth/subscription')
@@ -153,7 +153,12 @@ it('activates only the selected runtime using workspace-scoped non-secret settin
         key: 'model.baseUrl',
         value: QWEN_SUBSCRIPTION_BASE_URL,
       },
-    ],
+    ].flatMap((write) =>
+      [SettingScope.User, SettingScope.Workspace].map((scope) => ({
+        ...write,
+        scope,
+      })),
+    ),
     expect.any(Function),
   );
   expect(reloadModelProviders).toHaveBeenCalledWith(

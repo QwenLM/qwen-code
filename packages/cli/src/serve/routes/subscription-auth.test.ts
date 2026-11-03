@@ -13,12 +13,14 @@ import { bearerAuth, createMutationGate } from '../auth.js';
 import { registerSubscriptionAuthRoutes } from './subscription-auth.js';
 
 const mocks = vi.hoisted(() => ({
+  isSignedIn: vi.fn(),
   userInfo: vi.fn(),
   signIn: vi.fn(),
   signOut: vi.fn(),
 }));
 vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
   QwenSubscriptionSession: class {
+    isSignedIn = mocks.isSignedIn;
     getUserInfo = mocks.userInfo;
     signIn = mocks.signIn;
     signOut = mocks.signOut;
@@ -48,6 +50,7 @@ function makeApp(onSignedOut?: () => Promise<void>) {
 const base = '/auth/subscription';
 beforeEach(() => {
   vi.resetAllMocks();
+  mocks.isSignedIn.mockReturnValue(false);
   vi.stubEnv('DEV', false);
   delete process.env['DEV'];
   vi.stubEnv('QWEN_OAUTH_BASE_URL', 'https://pre-auth.qwen.ai');
@@ -61,6 +64,20 @@ afterEach(() => {
 });
 
 describe('process-global Subscription routes', () => {
+  it('reports account login independently of the subscription capability', async () => {
+    const { get } = makeApp();
+    expect((await get(base)).body).toMatchObject({
+      enabled: true,
+      signedIn: false,
+    });
+    mocks.isSignedIn.mockReturnValue(true);
+    expect((await get(base)).body).toMatchObject({
+      enabled: true,
+      signedIn: true,
+    });
+    mocks.isSignedIn.mockReturnValue(false);
+    expect((await get(base)).body.signedIn).toBe(false);
+  });
   it.each([undefined, 'revoke', 'cleanup'] as const)(
     'recovers workspace connections only after local cleanup (%s)',
     async (stage) => {
@@ -100,6 +117,7 @@ describe('process-global Subscription routes', () => {
       const { get, post } = makeApp();
       expect((await get(base)).body).toEqual({
         enabled: true,
+        signedIn: false,
         plansUrl: 'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
       });
       expect((await post(`${base}/flows`)).status).toBe(201);
@@ -112,6 +130,7 @@ describe('process-global Subscription routes', () => {
     const { get, post } = makeApp();
     expect((await get(base)).body).toEqual({
       enabled: true,
+      signedIn: false,
       plansUrl: 'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
     });
     expect((await post(`${base}/flows`)).status).toBe(201);
@@ -129,6 +148,7 @@ describe('process-global Subscription routes', () => {
     const { get, post } = makeApp();
     expect((await get(base)).body).toEqual({
       enabled: true,
+      signedIn: false,
       plansUrl: 'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
     });
     const started = await post(`${base}/flows`);
@@ -149,6 +169,8 @@ describe('process-global Subscription routes', () => {
     expect((await get(`${base}/flows/${first.body.id}`)).body).toEqual({
       id: first.body.id,
       status: 'ready',
+      authorizationUrl:
+        'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code',
       userInfo: user,
     });
     expect((await post(`${base}/userinfo`)).body).toEqual(user);

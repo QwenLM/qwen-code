@@ -1440,6 +1440,11 @@ export interface WebShellProps {
     sessionId?: string;
     sessionName?: string;
   }) => void;
+  /** Called when the active model connection changes. */
+  onModelChange?: (
+    modelId: string | undefined,
+    authType: string | undefined,
+  ) => void;
   /** Called after a new session is created. Session setup waits up to 30 seconds. */
   onSessionCreated?: (sessionId: string) => Promise<void> | void;
   /** Explicit Managed Agent backend. Omit to keep the daemon provider unchanged. */
@@ -3477,6 +3482,7 @@ export function App({
   askUserFreeTextLabel,
   onSessionIdChange,
   onSessionInfoChange,
+  onModelChange,
   onSessionCreated,
   managedAgentProvider,
   theme: providedTheme,
@@ -11718,6 +11724,15 @@ export function App({
       sessionName: sessionDisplayName,
     });
   }, [connection.sessionId, onSessionInfoChange, sessionDisplayName]);
+  const currentModelAuthType = connection.context?.state._meta?.['authType'];
+  useEffect(() => {
+    onModelChange?.(
+      connection.currentModel,
+      typeof currentModelAuthType === 'string'
+        ? currentModelAuthType
+        : undefined,
+    );
+  }, [connection.currentModel, currentModelAuthType, onModelChange]);
   const [currentMode, setCurrentMode] = useState('default');
   const [planExecutionMode, setPlanExecutionMode] = useState('default');
   const executionMode =
@@ -13896,6 +13911,8 @@ export function App({
     handleCommand: handleSubscriptionLogout,
   } = useSubscriptionLogout({
     t,
+    onCommand: (text) =>
+      invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError),
     workspaceCwd: workspaceContextActive
       ? getComposerWorkspaceCwd()
       : undefined,
@@ -18318,9 +18335,9 @@ export function App({
       ) {
         return false;
       }
-      // The host's documented slash-command override runs first; only when
-      // it declines does the policy consume a model-setup command — still
-      // ahead of daemon dispatch through the hidden-command forward below.
+      // Account commands must pass login and model checks before host overrides.
+      const subscriptionHandled = handleSubscriptionLogout(text);
+      if (subscriptionHandled !== undefined) return subscriptionHandled;
       if (
         invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
       ) {
@@ -18846,10 +18863,6 @@ export function App({
             }
             setShowAuthDialog(true);
             return true;
-          }
-          if (cmd === 'logout') {
-            const handled = handleSubscriptionLogout(text);
-            if (handled !== undefined) return handled;
           }
           if (cmd === 'model') {
             const modelArg = text.slice(match[0].length).trim();
@@ -21191,6 +21204,12 @@ export function App({
       ),
       t,
     )
+      .filter(
+        (command) =>
+          subscriptionAvailable ||
+          !['logout', 'upgrade'].includes(command.name) ||
+          Boolean(command.source && command.source !== 'builtin-command'),
+      )
       .filter(
         (command) =>
           workspaceContextActive ||

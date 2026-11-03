@@ -10,6 +10,7 @@ import { t } from '../../i18n/index.js';
 export function subscriptionSuccessMessage(
   info: SubscriptionUserInfo,
   model: string,
+  authorizationUrl?: string,
 ): string {
   return [
     `✓ ${t('Signed in successfully · {{email}}', { email: info.email })}`,
@@ -19,6 +20,12 @@ export function subscriptionSuccessMessage(
         info.member_type.slice(1).toLowerCase(),
     })}`,
     `  ${t('Model: {{model}}. Run /upgrade to upgrade your plan or /usage to view usage.', { model })}`,
+    ...(authorizationUrl
+      ? [
+          `  ${t("If the browser didn't open, visit:")}`,
+          `  ${authorizationUrl}`,
+        ]
+      : []),
     `  ${t('Common commands: /usage   /upgrade   /status   /logout')}`,
   ].join('\n');
 }

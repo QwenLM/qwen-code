@@ -18,6 +18,7 @@ export interface NativeSubscriptionActionOptions {
   >;
   signal: AbortSignal;
   action: 'logout' | 'upgrade';
+  isSubscriptionModel: () => Promise<boolean>;
 }
 export type NativeSubscriptionActionResult = {
   kind: 'signed-out' | 'upgrade-opened' | 'unavailable' | 'cancelled';
@@ -27,6 +28,7 @@ export async function runNativeSubscriptionAction({
   transport,
   signal: ownerSignal,
   action,
+  isSubscriptionModel,
 }: NativeSubscriptionActionOptions): Promise<NativeSubscriptionActionResult> {
   if (action === 'logout') {
     ownerSignal.throwIfAborted();
@@ -34,7 +36,13 @@ export async function runNativeSubscriptionAction({
       signal: ownerSignal,
     });
     ownerSignal.throwIfAborted();
-    if (!config.enabled) return { kind: 'unavailable' };
+    if (!config.enabled || !config.signedIn || !(await isSubscriptionModel()))
+      return { kind: 'unavailable' };
+    const latest = await transport.getSubscriptionConfig({
+      signal: ownerSignal,
+    });
+    ownerSignal.throwIfAborted();
+    if (!latest.enabled || !latest.signedIn) return { kind: 'unavailable' };
     try {
       await transport.signOutSubscription();
     } catch (error) {
@@ -95,15 +103,27 @@ export async function runNativeSubscriptionAction({
         status('Checking your Qwen account…');
         const config = await transport.getSubscriptionConfig({ signal });
         signal.throwIfAborted();
-        if (!config.enabled || !config.plansUrl) {
-          await choose('Qwen subscription is not available in this build', {
-            label: 'Done',
-            value: 'done',
-          });
+        if (
+          !config.enabled ||
+          !config.signedIn ||
+          !config.plansUrl ||
+          !(await isSubscriptionModel())
+        ) {
+          await choose(
+            'Sign in to Qwen and select a Qwen subscription model to use this command',
+            {
+              label: 'Done',
+              value: 'done',
+            },
+          );
           return { kind: 'unavailable' };
         }
+        const latest = await transport.getSubscriptionConfig({ signal });
+        signal.throwIfAborted();
+        if (!latest.enabled || !latest.signedIn || !latest.plansUrl)
+          return { kind: 'unavailable' };
         status('Opening subscription plans…');
-        if (!(await vscode.env.openExternal(vscode.Uri.parse(config.plansUrl))))
+        if (!(await vscode.env.openExternal(vscode.Uri.parse(latest.plansUrl))))
           throw new Error('Unable to open the browser.');
         await choose('Qwen subscription plans opened in your browser', {
           label: 'Done',

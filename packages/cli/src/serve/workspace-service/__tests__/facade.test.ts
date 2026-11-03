@@ -4458,7 +4458,7 @@ describe('createDaemonWorkspaceService', () => {
   });
 
   describe('reloadModelProviders', () => {
-    it('preheats and resets the selected runtime on subscription logout', async () => {
+    it('notifies the selected runtime without clearing model settings on subscription logout', async () => {
       const preheatAcpChild = vi.fn().mockResolvedValue(undefined);
       const invokeWorkspaceCommand = vi
         .fn()
@@ -4480,10 +4480,7 @@ describe('createDaemonWorkspaceService', () => {
         { cwd: '/workspace', subscriptionSignedOut: true },
         { timeoutMs: 30_000 },
       );
-      expect(publishWorkspaceEvent).toHaveBeenCalledWith({
-        type: 'settings_changed',
-        data: { key: 'security.auth.selectedType', scope: 'workspace' },
-      });
+      expect(publishWorkspaceEvent).not.toHaveBeenCalled();
     });
     it('uses the provider-specific environment refresh when configured', async () => {
       const reloadDaemonEnv = vi.fn();

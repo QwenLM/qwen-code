@@ -5982,6 +5982,7 @@ export interface DaemonMcpAppToolResult {
 
 export interface DaemonSubscriptionConfig {
   enabled: boolean;
+  signedIn?: boolean;
   plansUrl?: string;
 }
 

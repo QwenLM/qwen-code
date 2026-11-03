@@ -6,10 +6,20 @@
 
 import type { AvailableModel } from '@qwen-code/qwen-code-core';
 import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
 
 type ModelEntry = {
   model?: Pick<AvailableModel, 'authType' | 'id' | 'isRuntimeModel'>;
 };
+
+export function filterModelEntriesForDisplay<T extends ModelEntry>(
+  entries: readonly T[],
+  signedIn = new QwenSubscriptionSession().isSignedIn(),
+): T[] {
+  return entries.filter(
+    ({ model }) => signedIn || model?.authType !== AuthType.QWEN_SUBSCRIPTION,
+  );
+}
 
 export function sortModelEntriesForDisplay<T extends ModelEntry>(
   entries: readonly T[],

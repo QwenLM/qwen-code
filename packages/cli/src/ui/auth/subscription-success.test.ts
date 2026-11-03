@@ -51,3 +51,22 @@ it('uses the actual selected model and account in the English summary', async ()
     '  Common commands: /usage   /upgrade   /status   /logout',
   ]);
 });
+
+it('keeps the actual browser link between the model and common commands', () => {
+  const url = 'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code';
+  const message = subscriptionSuccessMessage(
+    {
+      sub: 'user',
+      name: 'Builder',
+      email: 'builder@example.com',
+      member_type: 'pro',
+    },
+    'server-model',
+    url,
+  );
+  expect(message).toContain("If the browser didn't open, visit:");
+  expect(message.indexOf('Model:')).toBeLessThan(message.indexOf(url));
+  expect(message.indexOf(url)).toBeLessThan(
+    message.indexOf('Common commands:'),
+  );
+});

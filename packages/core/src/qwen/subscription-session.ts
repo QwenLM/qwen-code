@@ -5,7 +5,14 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
+import {
+  closeSync,
+  constants,
+  openSync,
+  readFileSync,
+  unwatchFile,
+  watchFile,
+} from 'node:fs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -57,6 +64,7 @@ const credentialSchema = z.object({
     .optional(),
 });
 type Credentials = z.infer<typeof credentialSchema>;
+const CREDENTIAL_CHECK_INTERVAL_MS = 500;
 
 export class QwenSubscriptionSession {
   private readonly config = getQwenOAuthConfig();
@@ -65,6 +73,33 @@ export class QwenSubscriptionSession {
     Storage.getGlobalQwenDir(),
     'subscription_credentials.json',
   );
+
+  isSignedIn(): boolean {
+    let fd: number | undefined;
+    try {
+      fd = openSync(
+        this.filePath,
+        constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+      );
+      const credentials = credentialSchema.parse(
+        JSON.parse(readFileSync(fd, 'utf8')),
+      );
+      return Boolean(credentials.tokens && this.matches(credentials));
+    } catch {
+      return false;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+  }
+
+  onChange(listener: () => void): () => void {
+    watchFile(
+      this.filePath,
+      { persistent: false, interval: CREDENTIAL_CHECK_INTERVAL_MS },
+      listener,
+    );
+    return () => unwatchFile(this.filePath, listener);
+  }
 
   private async read(): Promise<Credentials | null> {
     let file;

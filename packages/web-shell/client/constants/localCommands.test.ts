@@ -12,7 +12,17 @@ const zh = getTranslator('zh-CN');
 const en = getTranslator('en');
 
 describe('getLocalCommands', () => {
-  it('adds the subscription logout entry only when available', () => {
+  it('adds subscription account commands only when available', () => {
+    expect(
+      getLocalCommands(en).some((command) => command.name === 'upgrade'),
+    ).toBe(false);
+    expect(
+      getLocalCommands(zh, { subscriptionAvailable: true }),
+    ).toContainEqual({
+      name: 'upgrade',
+      description: '打开 Qwen 订阅套餐页面',
+      source: 'builtin-command',
+    });
     expect(
       getLocalCommands(en).some((command) => command.name === 'logout'),
     ).toBe(false);

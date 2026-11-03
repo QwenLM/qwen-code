@@ -745,7 +745,17 @@ function TranscriptItem({
         </box>
       );
     case 'error':
-      return <ErrorRow text={item.text} hint={item.hint} />;
+      return (
+        <ErrorRow
+          text={
+            item.text ===
+            'Your login credentials are no longer valid. Run /auth to sign in again.'
+              ? t(item.text)
+              : item.text
+          }
+          hint={item.hint}
+        />
+      );
     case 'warning':
       return (
         <box flexDirection="row">

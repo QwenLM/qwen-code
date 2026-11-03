@@ -157,7 +157,8 @@ export function mapSessionContextModels(
     }
   }
 
-  if (!currentModel && models.length === 0) return undefined;
+  if (!currentModel && models.length === 0 && !Array.isArray(availableModels))
+    return undefined;
   return { models, currentModel, contextWindow };
 }
 
@@ -301,7 +302,11 @@ export function applySessionConfigContext(
   return applyConfigOptions(
     {
       ...current,
-      ...(models?.models.length ? { models: models.models } : {}),
+      ...(models &&
+      (models.models.length > 0 ||
+        Array.isArray(getRecord(context.state.models)?.['availableModels']))
+        ? { models: models.models }
+        : {}),
       currentModel: models?.currentModel ?? current.currentModel,
       currentMode: mode ?? current.currentMode,
       planExecutionMode:

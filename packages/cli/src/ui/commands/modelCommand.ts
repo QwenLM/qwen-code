@@ -1129,7 +1129,10 @@ export const modelCommand: SlashCommand = {
         ...persistScopeSpread(scopeOverride),
       };
     }
-    if (authType === AuthType.QWEN_SUBSCRIPTION) {
+    if (
+      authType === AuthType.QWEN_SUBSCRIPTION &&
+      (!parsed.authType || parsed.authType === AuthType.QWEN_SUBSCRIPTION)
+    ) {
       context.ui.addItem(
         { type: MessageType.INFO, text: t('Loading models from provider…') },
         Date.now(),
@@ -1152,6 +1155,23 @@ export const modelCommand: SlashCommand = {
             Date.now(),
           );
       } catch (error) {
+        if (!modelName && context.executionMode === 'interactive') {
+          context.ui.addItem(
+            {
+              type: MessageType.WARNING,
+              text:
+                error instanceof SubscriptionOAuthError
+                  ? t(subscriptionErrorMessage(error))
+                  : SUBSCRIPTION_MODELS_UNAVAILABLE,
+            },
+            Date.now(),
+          );
+          return {
+            type: 'dialog',
+            dialog: 'model',
+            ...persistScopeSpread(scopeOverride),
+          };
+        }
         return {
           type: 'message',
           messageType: 'error',

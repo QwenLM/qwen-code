@@ -12,6 +12,13 @@
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
+
+vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
+  QwenSubscriptionSession: class {
+    isSignedIn = () => true;
+  },
+}));
 
 // theme.ts (via the dialog modules) builds a SyntaxStyle at module scope,
 // which needs the OpenTUI native FFI — unavailable in the test runtime. Stub
@@ -368,6 +375,37 @@ describe('applyModelSelection', () => {
     } as Partial<Config>);
   }
 
+  it('hides signed-out subscription entries while retaining an API-key model with the same id', () => {
+    const config = resolvedConfig({
+      getAuthType: () => AuthType.QWEN_SUBSCRIPTION,
+      getModel: () => 'qwen3.8-max',
+      getAllConfiguredModels: () => [
+        {
+          id: 'qwen3.8-max',
+          label: 'Subscription',
+          authType: AuthType.QWEN_SUBSCRIPTION,
+        },
+        {
+          id: 'qwen3.8-max',
+          label: 'API key model',
+          authType: AuthType.USE_OPENAI,
+        },
+      ],
+    });
+    expect(
+      buildModelEntries(config, 'primary', false).map(
+        ({ authType }) => authType,
+      ),
+    ).toEqual([AuthType.USE_OPENAI]);
+    expect(
+      buildModelEntries(config, 'primary', true).map(
+        ({ authType }) => authType,
+      ),
+    ).toEqual([AuthType.QWEN_SUBSCRIPTION, AuthType.USE_OPENAI]);
+    expect(config.getModel()).toBe('qwen3.8-max');
+    expect(config.getAuthType()).toBe(AuthType.QWEN_SUBSCRIPTION);
+  });
+
   describe('primary mode (default selection)', () => {
     it.each([undefined, 'workspace', 'user'] as const)(
       'shows only the subscription model selection with scope %s',
@@ -514,6 +552,47 @@ describe('applyModelSelection', () => {
         expect(outcome.error).toContain("Failed to switch model to 'm2'.");
         expect(outcome.error).toContain('network down');
       }
+    });
+
+    it('explains expired subscription selection and still permits another provider', async () => {
+      const config = resolvedConfig({
+        getAuthType: () => AuthType.QWEN_SUBSCRIPTION,
+        switchModel: vi.fn(async (authType: AuthType) => {
+          if (authType === AuthType.QWEN_SUBSCRIPTION)
+            throw new SubscriptionOAuthError('session_changed');
+        }),
+      });
+      const { settings, written } = createFakeSettings();
+      const entries = [
+        modelRow({ id: 'qwen3.8-flash', authType: AuthType.QWEN_SUBSCRIPTION }),
+        modelRow({ id: 'm2' }),
+      ];
+      const failed = await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'primary',
+        selectionKey: entries[0].key,
+      });
+      expect(failed).toEqual({
+        ok: false,
+        error:
+          'Your login credentials are no longer valid. Run /auth to sign in again.',
+      });
+      expect(written).toEqual([]);
+      const switched = await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'primary',
+        selectionKey: entries[1].key,
+      });
+      expect(switched.ok).toBe(true);
+      expect(written).toContainEqual({
+        scope: SettingScope.User,
+        key: 'model.name',
+        value: 'm2',
+      });
     });
 
     it('honors an explicit persist scope and falls back for untrusted workspaces', async () => {

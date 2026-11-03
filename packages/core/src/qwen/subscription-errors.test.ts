@@ -93,7 +93,9 @@ describe('subscription request errors', () => {
   it('derives rejected credentials from HTTP 401 instead of a response business code', () => {
     const error = subscriptionHttpError(401, { error: 'access_denied' });
     expect(error).toMatchObject({ code: 'invalid_token', status: 401 });
-    expect(subscriptionErrorMessage(error)).toContain('session has expired');
+    expect(subscriptionErrorMessage(error)).toContain(
+      'credentials are no longer valid',
+    );
   });
 
   it('keeps the rejected-credentials fallback when a gateway code has no public message', () => {
@@ -101,7 +103,9 @@ describe('subscription request errors', () => {
       error: { code: 'PROXY_TOKEN_INVALID' },
     });
     expect(error).toMatchObject({ code: 'PROXY_TOKEN_INVALID', status: 401 });
-    expect(subscriptionErrorMessage(error)).toContain('session has expired');
+    expect(subscriptionErrorMessage(error)).toContain(
+      'credentials are no longer valid',
+    );
   });
 
   it('keeps HTTP status when the response has no business error', () => {
@@ -122,7 +126,7 @@ describe('subscription request errors', () => {
   });
 
   it.each([
-    ['invalid_grant', undefined, 'refresh', 'session has expired'],
+    ['invalid_grant', undefined, 'refresh', 'credentials are no longer valid'],
     ['request_failed', 429, undefined, 'Too many requests'],
     ['network_error', undefined, 'refresh', 'network request failed'],
     ['credentials_error', undefined, 'credentials', 'file permissions'],

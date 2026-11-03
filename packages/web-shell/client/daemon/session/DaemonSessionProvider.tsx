@@ -3628,8 +3628,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           ].filter((warning): warning is string => Boolean(warning));
           const providerModelStatus = mapProviderStatus(providers);
           const contextModelStatus = mapSessionContextModels(context);
+          const contextModelState = context?.state.models;
+          const hasContextModelCatalog =
+            isRecord(contextModelState) &&
+            Array.isArray(contextModelState['availableModels']);
           const sessionModels =
-            contextModelStatus && contextModelStatus.models.length > 0
+            contextModelStatus &&
+            (contextModelStatus.models.length > 0 || hasContextModelCatalog)
               ? contextModelStatus.models
               : providerModelStatus.models;
           const sessionCurrentModel =
@@ -3704,7 +3709,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 supportedCommands !== undefined ? commands : current.commands,
               skills: supportedCommands !== undefined ? skills : current.skills,
               models:
-                configSnapshotCurrent && sessionModels.length > 0
+                configSnapshotCurrent &&
+                (sessionModels.length > 0 || hasContextModelCatalog)
                   ? sessionModels
                   : current.models,
               currentModel: configSnapshotCurrent

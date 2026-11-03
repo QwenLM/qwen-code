@@ -111,7 +111,12 @@ export function registerWorkspaceSubscriptionRoutes(
             },
             { key: 'model.name', value: modelId },
             { key: 'model.baseUrl', value: QWEN_SUBSCRIPTION_BASE_URL },
-          ].map((write) => ({ ...write, scope: SettingScope.Workspace })),
+          ].flatMap((write) =>
+            [SettingScope.User, SettingScope.Workspace].map((scope) => ({
+              ...write,
+              scope,
+            })),
+          ),
           assertActive,
         );
         assertActive();

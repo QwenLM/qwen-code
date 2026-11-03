@@ -2227,7 +2227,7 @@ describe('Session', () => {
   });
 
   it.each([false, true])(
-    'recovers a subscription session after logout (other provider: %s)',
+    'preserves the selected subscription and catalog after logout (other provider: %s)',
     async (hasProvider) => {
       let auth: AuthType | undefined = AuthType.QWEN_SUBSCRIPTION;
       vi.mocked(mockConfig.getAuthType).mockImplementation(() => auth);
@@ -2236,6 +2236,7 @@ describe('Session', () => {
       });
       Object.assign(mockConfig, {
         clearAuth,
+        setSubscriptionPlan: vi.fn(),
         getCurrentModelRegistryBaseUrl: vi.fn(),
       });
       vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue(
@@ -2253,22 +2254,43 @@ describe('Session', () => {
       vi.mocked(mockConfig.switchModel).mockImplementation(async (next) => {
         auth = next;
       });
-      vi.mocked(mockConfig.getModel).mockReturnValue('bailian');
+      vi.mocked(mockConfig.getModel).mockReturnValue('server-only-model');
+      const registry = new core.BackgroundTaskRegistry();
+      const controller = new AbortController();
+      const task = registry.register({
+        agentId: 'subscription-logout-agent',
+        description: 'Subscription background agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: controller,
+        isBackgrounded: true,
+        outputFile: path.join(os.tmpdir(), `${randomUUID()}.jsonl`),
+      });
+      vi.mocked(mockConfig.getBackgroundTaskRegistry).mockReturnValue(registry);
       vi.spyOn(session, 'sendAvailableCommandsUpdate').mockResolvedValue(
         undefined,
       );
       await session.reloadModelProvidersFromDisk({
         subscriptionSignedOut: true,
       });
-      expect(clearAuth).toHaveBeenCalledOnce();
-      expect(auth).toBe(hasProvider ? AuthType.USE_OPENAI : undefined);
+      expect(controller.signal.aborted).toBe(true);
+      expect(task.status).toBe('cancelled');
+      expect(task.persistedCancellationStatus).toBe('cancelled');
+      expect(task.notified).toBe(true);
+      expect(clearAuth).not.toHaveBeenCalled();
+      expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
+      expect(
+        mockSettings.reloadScopesFromDiskAtomically,
+      ).not.toHaveBeenCalled();
+      expect(mockConfig.switchModel).not.toHaveBeenCalled();
+      expect(auth).toBe(AuthType.QWEN_SUBSCRIPTION);
       expect(mockSettings.setValue).not.toHaveBeenCalled();
       expect(mockClient.extNotification).toHaveBeenCalledWith(
         'qwen/notify/session/model-update',
         {
           v: 1,
           sessionId: 'test-session-id',
-          currentModelId: hasProvider ? expect.stringContaining('bailian') : '',
+          currentModelId: expect.stringContaining('server-only-model'),
           subscriptionSignedOut: true,
         },
       );

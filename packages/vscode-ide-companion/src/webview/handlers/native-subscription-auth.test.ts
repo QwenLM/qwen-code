@@ -73,21 +73,25 @@ function fixture() {
       .fn<Transport['getSubscriptionConfig']>()
       .mockResolvedValue({
         enabled: true,
+        signedIn: true,
         plansUrl: 'https://chat.qwen.ai/plans',
       }),
     signOutSubscription: vi
       .fn<Transport['signOutSubscription']>()
       .mockResolvedValue(undefined),
   };
+  const isSubscriptionModel = vi.fn().mockResolvedValue(true);
   return {
     picker,
     owner,
     transport,
+    isSubscriptionModel,
     run: (action: NativeSubscriptionActionOptions['action']) =>
       runNativeSubscriptionAction({
         transport,
         signal: owner.signal,
         action,
+        isSubscriptionModel,
       }),
   };
 }
@@ -103,6 +107,50 @@ afterEach(() => vi.useRealTimers());
 
 describe('native subscription authentication', () => {
   it.each(['logout', 'upgrade'] as const)(
+    'rechecks login after the %s model query completes',
+    async (action) => {
+      const f = fixture();
+      let finish!: (value: boolean) => void;
+      f.isSubscriptionModel.mockReturnValueOnce(
+        new Promise<boolean>((resolve) => {
+          finish = resolve;
+        }),
+      );
+      const result = f.run(action);
+      await settle();
+      f.transport.getSubscriptionConfig.mockResolvedValue({
+        enabled: true,
+        signedIn: false,
+        plansUrl: 'https://chat.qwen.ai/plans',
+      });
+      finish(true);
+      await settle();
+      await expect(result).resolves.toEqual({ kind: 'unavailable' });
+      expect(mocks.openExternal).not.toHaveBeenCalled();
+      expect(f.transport.signOutSubscription).not.toHaveBeenCalled();
+    },
+  );
+  it.each(['logout', 'upgrade'] as const)(
+    'rejects %s when signed out or using another model connection',
+    async (action) => {
+      for (const signedIn of [false, true]) {
+        const f = fixture();
+        f.transport.getSubscriptionConfig.mockResolvedValue({
+          enabled: true,
+          signedIn,
+          plansUrl: 'https://chat.qwen.ai/plans',
+        });
+        f.isSubscriptionModel.mockResolvedValue(false);
+        const result = f.run(action);
+        await settle();
+        expect(f.transport.signOutSubscription).not.toHaveBeenCalled();
+        expect(mocks.openExternal).not.toHaveBeenCalled();
+        if (action === 'upgrade') f.picker.select('Done');
+        await expect(result).resolves.toEqual({ kind: 'unavailable' });
+      }
+    },
+  );
+  it.each(['logout', 'upgrade'] as const)(
     'does not perform %s when the subscription capability is disabled',
     async (action) => {
       const f = fixture();
@@ -114,7 +162,7 @@ describe('native subscription authentication', () => {
         expect(mocks.createQuickPick).not.toHaveBeenCalled();
         return;
       }
-      expect(f.picker.status()).toContain('not available');
+      expect(f.picker.status()).toContain('Sign in to Qwen');
       expect(f.transport.signOutSubscription).not.toHaveBeenCalled();
       expect(mocks.openExternal).not.toHaveBeenCalled();
       expect(f.picker.items.map((item) => item.label)).not.toContain('Retry');
@@ -151,8 +199,39 @@ describe('native subscription authentication', () => {
     await settle();
     expect(mocks.createQuickPick).not.toHaveBeenCalled();
     expect(f.transport.signOutSubscription).toHaveBeenCalledOnce();
-    expect(f.transport.getSubscriptionConfig).toHaveBeenCalledOnce();
+    expect(f.transport.getSubscriptionConfig).toHaveBeenCalledTimes(2);
     await expect(result).resolves.toEqual({ kind: 'signed-out' });
+  });
+
+  it('does not open plans when the model owner is invalidated during the final account check', async () => {
+    const f = fixture();
+    let finish!: (config: {
+      enabled: boolean;
+      signedIn: boolean;
+      plansUrl: string;
+    }) => void;
+    f.transport.getSubscriptionConfig
+      .mockResolvedValueOnce({
+        enabled: true,
+        signedIn: true,
+        plansUrl: 'https://chat.qwen.ai/plans',
+      })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+    const result = f.run('upgrade');
+    await settle();
+    f.owner.abort();
+    finish({
+      enabled: true,
+      signedIn: true,
+      plansUrl: 'https://chat.qwen.ai/plans',
+    });
+    await expect(result).resolves.toEqual({ kind: 'cancelled' });
+    expect(mocks.openExternal).not.toHaveBeenCalled();
   });
 
   it('opens upgrade plans directly without starting OAuth or changing account state', async () => {

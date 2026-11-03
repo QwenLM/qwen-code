@@ -12,6 +12,7 @@ import { theme } from '../../semantic-colors.js';
 import type { HistoryItemInfo } from '../../types.js';
 import { ICON } from '../../constants.js';
 import { RenderInline } from '../../utils/InlineMarkdownRenderer.js';
+import { t } from '../../../i18n/index.js';
 
 interface StatusMessageProps {
   text: string;
@@ -129,7 +130,12 @@ export const ErrorMessage: React.FC<StatusTextProps & { hint?: string }> = ({
   hint,
 }) => (
   <StatusMessage
-    text={text}
+    text={
+      text ===
+      'Your login credentials are no longer valid. Run /auth to sign in again.'
+        ? t(text)
+        : text
+    }
     prefix="✕"
     prefixColor={theme.status.error}
     textColor={theme.status.error}

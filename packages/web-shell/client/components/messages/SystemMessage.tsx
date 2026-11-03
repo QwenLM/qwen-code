@@ -172,6 +172,12 @@ export const SystemMessage = memo(function SystemMessage({
   onRetryClick,
 }: SystemMessageProps) {
   const { language, t } = useI18n();
+  if (
+    content ===
+    'Your login credentials are no longer valid. Run /auth to sign in again.'
+  ) {
+    content = t('subscription.loginRequired');
+  }
   const backgroundDetails = useSubagentDetails()?.onOpenBackground;
   const [copied, flashCopied] = useCopiedFlash();
   const handleCopy = useCallback(() => {

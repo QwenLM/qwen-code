@@ -103,7 +103,6 @@ export const legacyCoreBarrelImports = [
   'packages/cli/src/config/settingsWatcher.ts',
   'packages/cli/src/config/skill-settings.ts',
   'packages/cli/src/config/trustedFolders.ts',
-  'packages/cli/src/core/auth.ts',
   'packages/cli/src/core/initializer.ts',
   'packages/cli/src/dualOutput/DualOutputBridge.ts',
   'packages/cli/src/external-agents/acp-subagent-executor.ts',

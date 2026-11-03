@@ -21,7 +21,6 @@ import { t } from '../../i18n/index.js';
 import { getRawModelProviders } from '../../config/loadedSettingsAdapter.js';
 import {
   findProviderById,
-  findProviderByCredentials,
   QWENCLOUD_PROVIDERS,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
@@ -258,7 +257,7 @@ export function AuthDialog(): React.JSX.Element {
   const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
   const [_viewStack, setViewStack] = useState<ViewLevel[]>([]);
 
-  const [mainIndex, setMainIndex] = useState<number | null>(null);
+  const [mainIndex, setMainIndex] = useState(0);
   const [subMenuIndex, setSubMenuIndex] = useState<Record<string, number>>({});
 
   const setupFlow = useProviderSetupFlow(
@@ -371,25 +370,6 @@ export function AuthDialog(): React.JSX.Element {
 
   const activeSubMenu = subMenus[viewLevel];
 
-  // -- Default main index from current auth state ---------------------------
-
-  const contentGenConfig = config.getContentGeneratorConfig();
-  const matchedProvider = findProviderByCredentials(
-    contentGenConfig?.baseUrl,
-    contentGenConfig?.apiKeyEnvKey,
-  );
-
-  // Land on the tab that matches the active provider's uiGroup so a DeepSeek
-  // / MiniMax / OpenRouter user opens Third-party Providers, not Alibaba.
-  // (resolveMetadataKey returns config.id for *any* provider with a static
-  // models[], so it can't be used to detect "Alibaba" specifically.)
-  const defaultMainIndex = useMemo(() => {
-    if (matchedProvider?.uiGroup === 'third-party') return 3;
-    if (matchedProvider?.uiGroup === 'custom') return 4;
-    if (matchedProvider?.uiGroup === 'alibaba') return 2;
-    return 0;
-  }, [matchedProvider]);
-
   // -- Handlers -------------------------------------------------------------
 
   const handleMainSelect = (value: MainOption) => {
@@ -499,7 +479,7 @@ export function AuthDialog(): React.JSX.Element {
       <ProviderMenu
         title={viewTitle}
         items={mainItems}
-        initialIndex={mainIndex ?? defaultMainIndex}
+        initialIndex={mainIndex}
         onSelect={handleMainSelect}
         onHighlight={(value) => {
           setMainIndex(mainItems.findIndex((item) => item.value === value));

@@ -1,27 +1,28 @@
 import { getTranslator, useI18n } from '../../i18n';
 import { Button } from '../ui/button';
-import type { QwenSubscriptionStatusProps } from './QwenSubscriptionStatus';
+import {
+  QwenSubscriptionStatus,
+  type QwenSubscriptionStatusProps,
+} from './QwenSubscriptionStatus';
 import styles from './QwenSubscriptionSidebarStatus.module.css';
 
 const english = getTranslator('en');
 
-export function QwenSubscriptionSidebarStatus({
-  state,
-  onOpenAuthorization,
-  onOpenPurchase,
-  onRetry,
-  onSwitchProvider,
-  onUseAnotherAccount,
-  onCancel,
-}: QwenSubscriptionStatusProps) {
+export function QwenSubscriptionSidebarStatus(
+  props: QwenSubscriptionStatusProps,
+) {
+  const {
+    state,
+    onOpenAuthorization,
+    onOpenPurchase,
+    onRetry,
+    onSwitchProvider,
+    onUseAnotherAccount,
+    onCancel,
+  } = props;
   const { t } = useI18n();
   if (state.status === 'ready') {
-    return (
-      <div role="status" className={`${styles.message} ${styles.success}`}>
-        <p>✓ {t('subscription.signedIn', { email: state.email })}</p>
-        <p>✓ {t('subscription.ready', { plan: state.plan })}</p>
-      </div>
-    );
+    return <QwenSubscriptionStatus {...props} />;
   }
   if (state.status === 'purchase-required') {
     const actions = state.canCheckAgain

@@ -97,6 +97,59 @@ function modelResponse(ids: string[], status = 200) {
   };
 }
 
+it('checks persisted login independently of the selected provider and model cache', async () => {
+  const session = new QwenSubscriptionSession();
+  expect(session.isSignedIn()).toBe(false);
+  await session.signIn(() => {});
+  expect(session.isSignedIn()).toBe(true);
+  await expire();
+  expect(session.isSignedIn()).toBe(true);
+  client.refreshToken.mockRejectedValue(
+    new SubscriptionOAuthError('invalid_grant'),
+  );
+  await expect(session.getAccessToken()).rejects.toThrow();
+  expect(session.isSignedIn()).toBe(false);
+});
+
+it('notifies observers when credentials are created or removed by another session', async () => {
+  const session = new QwenSubscriptionSession();
+  const changed = vi.fn();
+  const unsubscribe = session.onChange(changed);
+  try {
+    await new QwenSubscriptionSession().signIn(() => {});
+    await vi.waitFor(
+      () =>
+        expect(changed).toHaveBeenCalledWith(
+          expect.objectContaining({ nlink: 1 }),
+          expect.anything(),
+        ),
+      {
+        timeout: 2000,
+      },
+    );
+    expect(session.isSignedIn()).toBe(true);
+    changed.mockClear();
+    await new QwenSubscriptionSession().signOut();
+    await vi.waitFor(() => expect(changed).toHaveBeenCalled(), {
+      timeout: 2000,
+    });
+    expect(session.isSignedIn()).toBe(false);
+  } finally {
+    unsubscribe();
+  }
+});
+
+it('does not treat credentials for another OAuth environment as signed in', async () => {
+  const session = new QwenSubscriptionSession();
+  await session.signIn(() => {});
+  const credentials = JSON.parse(await fs.readFile(file, 'utf8'));
+  await fs.writeFile(
+    file,
+    JSON.stringify({ ...credentials, clientId: 'another-client' }),
+  );
+  expect(session.isSignedIn()).toBe(false);
+});
+
 it('loads every served model, persists the account cache and preserves it across token refresh', async () => {
   const session = new QwenSubscriptionSession();
   await session.signIn(() => {});

@@ -88,6 +88,7 @@ const readAttachment = vi.fn();
 const getContextUsage = vi.fn();
 const loadSession = vi.fn(async () => {});
 const daemonActions = {
+  getContext: vi.fn(),
   refreshModels: vi.fn().mockResolvedValue(undefined),
   loadSession,
   sendPrompt,
@@ -566,8 +567,12 @@ function rerender(
 
 describe('pane subscription logout', () => {
   it('handles logout in the pane workspace without sending an ACP prompt', async () => {
+    daemonActions.getContext.mockResolvedValue({
+      state: { _meta: { authType: 'qwen-subscription' } },
+    });
     subscriptionActions.getSubscriptionConfig.mockResolvedValue({
       enabled: true,
+      signedIn: true,
     });
     subscriptionActions.loadProviders.mockResolvedValue({
       current: { authType: 'qwen-subscription' },
@@ -576,9 +581,7 @@ describe('pane subscription logout', () => {
     await act(async () => {
       latestOnSubmit!('/logout');
     });
-    expect(subscriptionActions.loadProviders).toHaveBeenCalledWith(
-      '/secondary',
-    );
+    expect(daemonActions.getContext).toHaveBeenCalled();
     expect(subscriptionActions.signOutSubscription).toHaveBeenCalledOnce();
     expect(sendPrompt).not.toHaveBeenCalled();
     expect(enqueuePrompt).not.toHaveBeenCalled();

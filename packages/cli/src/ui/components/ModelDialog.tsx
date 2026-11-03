@@ -5,6 +5,8 @@
  */
 
 import type React from 'react';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
+import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import process from 'node:process';
 import { useCallback, useContext, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
@@ -33,7 +35,11 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
 import { publicProviderBaseUrl } from '../../utils/acpModelUtils.js';
-import { sortModelEntriesForDisplay } from '../../utils/model-display-order.js';
+import {
+  filterModelEntriesForDisplay,
+  sortModelEntriesForDisplay,
+} from '../../utils/model-display-order.js';
+import { useSubscriptionSignedIn } from '../hooks/use-subscription-command-visibility.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
@@ -340,6 +346,7 @@ export function ModelDialog({
   const config = useContext(ConfigContext);
   const uiState = useContext(UIStateContext);
   const settings = useSettings();
+  const subscriptionSignedIn = useSubscriptionSignedIn();
 
   // Local error state for displaying errors within the dialog
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -459,16 +466,21 @@ export function ModelDialog({
       }
     }
 
+    const visibleEntries = filterModelEntriesForDisplay(
+      result,
+      subscriptionSignedIn,
+    );
     return isFastModelMode ||
       isAdvisorModelMode ||
       isVoiceModelMode ||
       isVisionModelMode ||
       isCompactionModelMode ||
       isImageModelMode
-      ? result
-      : sortModelEntriesForDisplay(result);
+      ? visibleEntries
+      : sortModelEntriesForDisplay(visibleEntries);
   }, [
     authType,
+    subscriptionSignedIn,
     config,
     isFastModelMode,
     isAdvisorModelMode,
@@ -1221,6 +1233,10 @@ export function ModelDialog({
         effectiveAuthType = after?.authType ?? selectedAuthType ?? authType;
         effectiveModelId = after?.model ?? modelId;
       } catch (e) {
+        if (e instanceof SubscriptionOAuthError) {
+          setErrorMessage(t(subscriptionErrorMessage(e)));
+          return;
+        }
         const baseErrorMessage = e instanceof Error ? e.message : String(e);
         // Use parsed modelId for display to avoid showing raw selection key
         // (which contains invisible \0 separator between modelId and baseUrl)

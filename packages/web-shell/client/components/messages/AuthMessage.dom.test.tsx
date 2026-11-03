@@ -19,6 +19,7 @@ const { actions, ownerGuard, ownerState, sessionState, sessionActions } =
         getSubscriptionUserInfo: vi.fn(),
         signOutSubscription: vi.fn(),
         activateSubscription: vi.fn(),
+        loadProviders: vi.fn(),
         installAuthProvider: vi.fn(),
       },
       ownerGuard: {
@@ -49,6 +50,14 @@ let container: HTMLDivElement | undefined;
 
 beforeEach(() => {
   ownerState.version = 0;
+  actions.loadProviders.mockReset().mockResolvedValue({
+    initialized: true,
+    current: {
+      authType: 'qwen-subscription',
+      modelId: 'qwen3.8-max(qwen-subscription)',
+    },
+    providers: [],
+  });
   sessionState.sessionId = undefined;
   sessionActions.setModel.mockReset().mockResolvedValue({});
   sessionActions.refreshModels.mockReset().mockResolvedValue(undefined);
@@ -902,7 +911,7 @@ describe('subscription development entry', () => {
       );
       expect(completion.onModelActivated).not.toHaveBeenCalled();
       expect(completion.onMessage).toHaveBeenCalledExactlyOnceWith(
-        '✓ Signed in as user@example.test  \n✓ Qwen Pro is active · usage is included with your plan  \n  Model: qwen3.8-max · Run /usage to see your plan usage',
+        '✓ Signed in successfully · user@example.test  \n✓ Current plan: Qwen Pro. Qwen Code is ready.  \nModel: qwen3.8-max. Run /upgrade to upgrade your plan or /usage to view usage.  \nCommon commands: /usage   /upgrade   /status   /logout',
       );
     },
   );
@@ -962,8 +971,8 @@ describe('subscription development entry', () => {
       expect(completion.onClose).toHaveBeenCalledOnce();
       expect(completion.onMessage).toHaveBeenCalledExactlyOnceWith(
         language === 'zh-CN'
-          ? `✓ 已登录为 user@example.test  \n✓ Qwen ${memberType === 'pro' ? 'Pro' : 'Plus'} 已生效 · 用量包含在你的套餐中  \n  模型：qwen3.8-max · 运行 /usage 查看套餐用量`
-          : `✓ Signed in as user@example.test  \n✓ Qwen ${memberType === 'pro' ? 'Pro' : 'Plus'} is active · usage is included with your plan  \n  Model: qwen3.8-max · Run /usage to see your plan usage`,
+          ? `✓ 登录成功 · user@example.test  \n✓ 当前套餐：Qwen ${memberType === 'pro' ? 'Pro' : 'Plus'}，已可使用 Qwen Code  \n模型：qwen3.8-max，输入 /upgrade 升级套餐，/usage 查看用量。  \n常用命令：/usage   /upgrade   /status   /logout`
+          : `✓ Signed in successfully · user@example.test  \n✓ Current plan: Qwen ${memberType === 'pro' ? 'Pro' : 'Plus'}. Qwen Code is ready.  \nModel: qwen3.8-max. Run /upgrade to upgrade your plan or /usage to view usage.  \nCommon commands: /usage   /upgrade   /status   /logout`,
       );
       expect(
         completion.onModelActivated.mock.invocationCallOrder[0],
@@ -979,11 +988,11 @@ describe('subscription development entry', () => {
           </I18nProvider>,
         );
       });
-      expect(container!.querySelectorAll('br')).toHaveLength(2);
+      expect(container!.querySelectorAll('br')).toHaveLength(3);
       expect(container!.textContent).toContain(
         language === 'zh-CN'
-          ? '模型：qwen3.8-max · 运行 /usage 查看套餐用量'
-          : 'Model: qwen3.8-max · Run /usage to see your plan usage',
+          ? '模型：qwen3.8-max，输入 /upgrade 升级套餐，/usage 查看用量。'
+          : 'Model: qwen3.8-max. Run /upgrade to upgrade your plan or /usage to view usage.',
       );
     },
   );
@@ -1176,15 +1185,15 @@ describe('subscription development entry', () => {
         expect(success.textContent).toContain(
           plan === 'plus' ? 'Qwen Plus' : 'Qwen Pro',
         );
-        expect(success.textContent).not.toContain('qwen3.8-max');
+        expect(success.textContent).toContain('qwen3.8-max');
+        expect(success.textContent).not.toContain('常用命令');
+        expect(success.textContent).not.toContain('Common commands');
         expect(completion.onMessage).not.toHaveBeenCalled();
         expect(completion.onClose).not.toHaveBeenCalled();
         await act(async () =>
-          [...success.querySelectorAll('button')]
-            .find(
-              (button) =>
-                button.textContent ===
-                (language === 'en' ? 'Start Using' : '开始使用'),
+          document
+            .querySelector<HTMLButtonElement>(
+              '[role="dialog"] button[aria-label]',
             )!
             .click(),
         );

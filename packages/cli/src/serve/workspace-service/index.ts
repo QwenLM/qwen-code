@@ -1684,7 +1684,7 @@ export function createDaemonWorkspaceService(
       let failed = false;
       const reloadModelProvidersDaemonEnv =
         deps.reloadModelProvidersDaemonEnv ?? deps.reloadDaemonEnv;
-      if (reloadModelProvidersDaemonEnv) {
+      if (reloadModelProvidersDaemonEnv && !options?.subscriptionSignedOut) {
         try {
           const result = await reloadModelProvidersDaemonEnv(
             boundWorkspace,
@@ -1717,17 +1717,6 @@ export function createDaemonWorkspaceService(
         if ((child.configsFailed ?? 0) > 0) failed = true;
         if (options?.subscriptionSignedOut) {
           assertActiveGeneration();
-          if (reloadModelProvidersDaemonEnv) {
-            const result = await reloadModelProvidersDaemonEnv(
-              boundWorkspace,
-              assertGenerationOpen,
-            );
-            if (result.runtimeEnvironmentApplied === false) failed = true;
-          }
-          publishWorkspaceEvent({
-            type: 'settings_changed',
-            data: { key: 'security.auth.selectedType', scope: 'workspace' },
-          });
         }
         return { status: failed ? 'failed' : 'applied' };
       } catch (err) {

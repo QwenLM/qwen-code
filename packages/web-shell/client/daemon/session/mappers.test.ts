@@ -12,6 +12,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import {
   applyConfigOptions,
+  applySessionConfigContext,
   getConfigOptionsUpdate,
   mapWorkflowMode,
   getPlanExecutionMode,
@@ -25,6 +26,32 @@ import {
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
 import type { DaemonConnectionState } from './types.js';
+
+it.each([false, true])(
+  'respects an explicit empty catalog while retaining a partial snapshot (catalog: %s)',
+  (hasCatalog) => {
+    const current: DaemonConnectionState = {
+      status: 'connected',
+      currentModel: 'qwen3.8-max',
+      contextWindow: 1234,
+      models: [{ id: 'qwen3.8-max' }],
+    };
+    const after = applySessionConfigContext(current, {
+      v: 1,
+      sessionId: 'observer',
+      workspaceCwd: '/workspace',
+      state: {
+        models: {
+          currentModelId: 'qwen3.8-max',
+          ...(hasCatalog ? { availableModels: [] } : {}),
+        },
+      },
+    });
+    expect(after.models).toEqual(hasCatalog ? [] : current.models);
+    expect(after.currentModel).toBe(current.currentModel);
+    expect(after.contextWindow).toBe(current.contextWindow);
+  },
+);
 
 it('clears an observer selection on an empty model switch after logout', () => {
   const after = applyEvent(

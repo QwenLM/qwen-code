@@ -67,6 +67,8 @@ export {
 } from './components/managed/managed-agent-provider';
 
 export interface WebShellWithProvidersProps extends WebShellProps {
+  /** Unmount the chat view and its portals while keeping the daemon session attached. */
+  viewHidden?: boolean;
   /**
    * Opt in to URL routing. Explicit initial session target props override the
    * URL; later target prop changes replace it. Stop host history writes when
@@ -170,6 +172,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
     clientId,
     restartSseOnPrompt,
     historyPageSize,
+    viewHidden,
     ...webShellProps
   } = props;
   const resolvedBaseUrl = resolveBaseUrl(baseUrl);
@@ -185,6 +188,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
         clientId={clientId}
         restartSseOnPrompt={restartSseOnPrompt}
         historyPageSize={historyPageSize}
+        viewHidden={viewHidden}
         webShellProps={webShellProps}
       />
     </DaemonWorkspaceProvider>

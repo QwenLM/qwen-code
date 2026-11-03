@@ -16541,9 +16541,16 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
-  it.each(['', 'bailian'])(
+  it.each(['', 'bailian', 'qwen3.8-max', 'standalone'])(
     'synchronizes an observer model after logout without a provider reload (model: %s)',
-    async (modelId) => {
+    async (testCase) => {
+      const standalone = testCase === 'standalone';
+      const modelId = standalone ? 'qwen3.8-max' : testCase;
+      if (standalone)
+        sdkMocks.capabilities.mockResolvedValue({
+          workspaceCwd: '/primary',
+          features: ['standalone_sessions_v1'],
+        });
       vi.stubGlobal(
         'fetch',
         vi.fn(async () => new Response(null, { status: 204 })),
@@ -16559,7 +16566,7 @@ describe('DaemonSessionProvider', () => {
             models: {
               currentModelId: signedOut ? modelId : 'qwen3.8-max',
               availableModels: (signedOut
-                ? modelId
+                ? modelId && modelId !== 'qwen3.8-max'
                   ? [modelId]
                   : []
                 : ['qwen3.8-max']
@@ -16570,6 +16577,18 @@ describe('DaemonSessionProvider', () => {
       );
       const session = createMockSession({
         sessionId: 'observer',
+        ...(standalone
+          ? {
+              session: {
+                sessionId: 'observer',
+                workspaceCwd: '/mock-workspace',
+                sourceType: 'standalone',
+                context: { kind: 'standalone' },
+                projectlessOutputDirectory: '/output/observer',
+                workingDirectory: { state: 'ready' },
+              },
+            }
+          : {}),
         context,
         async *events(opts) {
           await changed.promise;
@@ -16602,8 +16621,17 @@ describe('DaemonSessionProvider', () => {
         transcript = useDaemonTranscriptBlocks();
         return null;
       }
-      await renderWithProvider(<Harness />, { autoConnect: true });
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        ...(standalone
+          ? {
+              sessionId: 'observer',
+              sessionContext: { kind: 'standalone' as const },
+            }
+          : {}),
+      });
       expect(connection?.currentModel).toBe('qwen3.8-max');
+      sdkMocks.workspaceByCwd.mockClear();
       sdkMocks.workspaceProviders.mockResolvedValue({
         v: 1,
         initialized: true,
@@ -16617,11 +16645,12 @@ describe('DaemonSessionProvider', () => {
       });
       expect(connection?.currentModel).toBe(modelId || undefined);
       expect(connection?.models?.map((model) => model.id)).toEqual(
-        modelId ? [modelId] : [],
+        modelId && modelId !== 'qwen3.8-max' ? [modelId] : [],
       );
       expect(connection?.providers?.current?.authType).toBeUndefined();
       expect(connection?.sessionId).toBe('observer');
       expect(reload).not.toHaveBeenCalled();
+      if (standalone) expect(sdkMocks.workspaceByCwd).not.toHaveBeenCalled();
       expect(
         transcript.some(
           (block) =>

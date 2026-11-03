@@ -701,6 +701,7 @@ const {
     },
   };
   const mockSessionActions = {
+    getContext: vi.fn(),
     refreshModels: vi.fn().mockResolvedValue(undefined),
     setDaemonActivePrompt: vi.fn(),
     sendPrompt: vi.fn().mockResolvedValue(undefined),
@@ -12760,6 +12761,14 @@ afterEach(() => {
 
 describe('App subscription logout command', () => {
   beforeEach(() => {
+    mockSessionActions.getContext.mockImplementation(
+      async () =>
+        mockConnection.context ?? {
+          state: {
+            _meta: { authType: mockConnection.providers?.current?.authType },
+          },
+        },
+    );
     mockConnection.providers = {
       v: 1,
       workspaceCwd: '/tmp/project',
@@ -12772,8 +12781,195 @@ describe('App subscription logout command', () => {
     );
     mockWorkspaceActions.getSubscriptionConfig.mockResolvedValue({
       enabled: true,
+      signedIn: true,
+      plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code',
     });
     testState.prompt = '/logout';
+  });
+
+  it.each(['/logout', '/upgrade'])(
+    'hides and rejects %s when signed out despite the retained model',
+    async (command) => {
+      mockWorkspaceActions.getSubscriptionConfig.mockResolvedValue({
+        enabled: true,
+        signedIn: false,
+      });
+      testState.prompt = command;
+      const host = vi.fn(() => true);
+      const { container } = renderApp({
+        onSlashCommand: host,
+        additionalSlashCommands: [
+          { name: 'logout', description: 'host logout' },
+          { name: 'upgrade', description: 'host upgrade' },
+        ],
+      });
+      await flush();
+      for (const name of ['logout', 'upgrade'])
+        expect(testState.latestChatEditorProps?.commands).not.toEqual(
+          expect.arrayContaining([expect.objectContaining({ name })]),
+        );
+      await clickSubmit(container);
+      await flush();
+      expect(host).not.toHaveBeenCalled();
+      expect(mockWorkspaceActions.signOutSubscription).not.toHaveBeenCalled();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it('opens upgrades through the desktop opener only for a signed-in subscription connection', async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    Object.assign(window, { __TAURI__: { core: { invoke } } });
+    testState.prompt = '/upgrade';
+    try {
+      const { container } = renderApp();
+      await flush();
+      await clickSubmit(container);
+      await flush();
+      expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+        url: 'https://chat.qwen.ai/?memberPlan=qwen_code',
+      });
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    } finally {
+      delete (window as { __TAURI__?: unknown }).__TAURI__;
+    }
+  });
+
+  it.each(['/logout', '/upgrade'])(
+    'delegates %s to the VS Code host only after checking the active subscription account',
+    async (command) => {
+      testState.prompt = command;
+      const host = vi.fn(() => true);
+      const { container } = renderApp({ onSlashCommand: host });
+      await flush();
+      await clickSubmit(container);
+      await flush();
+      expect(host).toHaveBeenCalledWith(
+        expect.objectContaining({ command: command.slice(1) }),
+      );
+      expect(mockWorkspaceActions.signOutSubscription).not.toHaveBeenCalled();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it('notifies the host when the model connection changes without changing the model ID', async () => {
+    const onModelChange = vi.fn();
+    mockConnection.currentModel = 'same-model';
+    mockConnection.context = {
+      v: 1,
+      sessionId: 'session-1',
+      workspaceCwd: '/tmp/project',
+      state: { _meta: { authType: 'qwen-subscription' } },
+    };
+    const { rerender } = renderApp({ onModelChange });
+    await flush();
+    expect(onModelChange).toHaveBeenLastCalledWith(
+      'same-model',
+      'qwen-subscription',
+    );
+    mockConnection.context = {
+      ...mockConnection.context,
+      state: { _meta: { authType: 'openai' } },
+    };
+    rerender({ onModelChange });
+    await flush();
+    expect(onModelChange).toHaveBeenLastCalledWith('same-model', 'openai');
+  });
+
+  it('refreshes both commands when the live provider changes with the same model ID', async () => {
+    const context = (authType: string) => ({
+      v: 1 as const,
+      sessionId: 'session-1',
+      workspaceCwd: '/tmp/project',
+      state: { _meta: { authType } },
+    });
+    mockConnection.context = context('qwen-subscription');
+    mockConnection.currentModel = 'same-model';
+    testState.prompt = '/upgrade';
+    const host = vi.fn(() => true);
+    const { container, rerender } = renderApp({ onSlashCommand: host });
+    await flush();
+    expect(testState.latestChatEditorProps?.commands).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'upgrade' })]),
+    );
+    mockConnection.context = context('openai');
+    rerender({ onSlashCommand: host });
+    await flush();
+    for (const name of ['logout', 'upgrade'])
+      expect(testState.latestChatEditorProps?.commands).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ name })]),
+      );
+    await clickSubmit(container);
+    await flush();
+    expect(host).not.toHaveBeenCalled();
+    mockConnection.context = context('qwen-subscription');
+    rerender({ onSlashCommand: host });
+    await flush();
+    expect(testState.latestChatEditorProps?.commands).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'upgrade' })]),
+    );
+  });
+
+  it.each(['/logout', '/upgrade'])(
+    'rejects %s when another client signs out while the model check is pending',
+    async (command) => {
+      testState.prompt = command;
+      const host = vi.fn(() => true);
+      const { container } = renderApp({ onSlashCommand: host });
+      await flush();
+      const pending = deferred<{ state: { _meta: { authType: string } } }>();
+      mockSessionActions.getContext.mockReturnValueOnce(pending.promise);
+      await clickSubmit(container);
+      mockWorkspaceActions.getSubscriptionConfig.mockResolvedValue({
+        enabled: true,
+        signedIn: false,
+      });
+      pending.resolve({ state: { _meta: { authType: 'qwen-subscription' } } });
+      await flush();
+      expect(host).not.toHaveBeenCalled();
+      expect(mockWorkspaceActions.signOutSubscription).not.toHaveBeenCalled();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it('uses the live model context rather than stale metadata when checking upgrades', async () => {
+    mockConnection.context = {
+      v: 1,
+      sessionId: 'session-1',
+      workspaceCwd: '/tmp/project',
+      state: { _meta: { authType: 'qwen-subscription' } },
+    };
+    mockSessionActions.getContext.mockResolvedValue({
+      state: { _meta: { authType: 'openai' } },
+    });
+    testState.prompt = '/upgrade';
+    const host = vi.fn(() => true);
+    const { container } = renderApp({ onSlashCommand: host });
+    await flush();
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'upgrade' })]),
+    );
+    await clickSubmit(container);
+    await flush();
+    expect(host).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('does not delegate an upgrade if the model changes while checking the account', async () => {
+    const host = vi.fn(() => true);
+    testState.prompt = '/upgrade';
+    const { container, rerender } = renderApp({ onSlashCommand: host });
+    await flush();
+    const pending = deferred<{ enabled: boolean; signedIn: boolean }>();
+    mockWorkspaceActions.getSubscriptionConfig.mockReturnValueOnce(
+      pending.promise,
+    );
+    await clickSubmit(container);
+    mockConnection.currentModel = 'another-model';
+    rerender({ onSlashCommand: host });
+    pending.resolve({ enabled: true, signedIn: true });
+    await flush();
+    expect(host).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.signOutSubscription).not.toHaveBeenCalled();
   });
 
   it('uses the live session authentication when the workspace default is another provider', async () => {
@@ -12806,9 +13002,7 @@ describe('App subscription logout command', () => {
     await clickSubmit(container);
     await flush();
     expect(mockWorkspaceActions.signOutSubscription).toHaveBeenCalledOnce();
-    expect(mockWorkspaceActions.loadProviders).toHaveBeenCalledWith(
-      '/tmp/project',
-    );
+    expect(mockSessionActions.getContext).toHaveBeenCalled();
     expect(onToast).not.toHaveBeenCalled();
     expect(mockSessionActions.refreshModels).toHaveBeenCalledOnce();
     expect(mockSessionActions.refreshModels).toHaveBeenCalledWith(undefined, {
@@ -12842,6 +13036,12 @@ describe('App subscription logout command', () => {
       current: { authType: 'openai', modelId: 'qwen' },
     };
     mockConnection.currentModel = 'other-model';
+    mockConnection.context = {
+      v: 1,
+      sessionId: 'session-1',
+      workspaceCwd: '/tmp/project',
+      state: { _meta: { authType: 'openai' } },
+    };
     mockWorkspaceActions.loadProviders.mockResolvedValue(nextProviders);
     rerender({ onToast });
     await flush();
@@ -12857,6 +13057,12 @@ describe('App subscription logout command', () => {
     );
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     mockConnection.currentModel = 'qwen';
+    mockConnection.context = {
+      v: 1,
+      sessionId: 'session-1',
+      workspaceCwd: '/tmp/project',
+      state: { _meta: { authType: 'qwen-subscription' } },
+    };
     mockWorkspaceActions.loadProviders.mockResolvedValue(
       mockConnection.providers,
     );

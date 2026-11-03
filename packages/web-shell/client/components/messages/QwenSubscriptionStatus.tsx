@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Button } from '../ui/button';
 import { useI18n } from '../../i18n';
 import styles from './QwenSubscriptionStatus.module.css';
 import authStyles from './AuthMessage.module.css';
@@ -13,7 +14,14 @@ export type QwenSubscriptionState =
       canCheckAgain?: boolean;
       message?: string;
     }
-  | { status: 'ready'; email: string; plan: string }
+  | {
+      status: 'ready';
+      email: string;
+      plan: string;
+      model?: string;
+      authorizationUrl?: string;
+      showCommonCommands?: boolean;
+    }
   | { status: 'query-error'; message: string; checking?: boolean }
   | { status: 'error'; message: string; retry?: 'authorization' };
 
@@ -40,9 +48,34 @@ export function QwenSubscriptionStatus({
   const [selectedAction, setSelectedAction] = useState('plans');
   if (state.status === 'ready') {
     return (
-      <div role="status" className={`${styles.message} ${styles.success}`}>
+      <div
+        role="status"
+        data-subscription-success={state.model ? '' : undefined}
+        className={`${styles.message} ${styles.success}`}
+      >
         <p>✓ {t('subscription.signedIn', { email: state.email })}</p>
         <p>✓ {t('subscription.ready', { plan: state.plan })}</p>
+        {state.model && (
+          <p className={styles.muted}>
+            {t('subscription.modelSummary', { model: state.model })}
+          </p>
+        )}
+        {state.authorizationUrl && (
+          <div className={styles.linkGroup}>
+            <p className={styles.muted}>{t('subscription.browserFallback')}</p>
+            <Button
+              type="button"
+              variant="link"
+              className={styles.link}
+              onClick={() => onOpenAuthorization(state.authorizationUrl!)}
+            >
+              {state.authorizationUrl}
+            </Button>
+          </div>
+        )}
+        {state.showCommonCommands && (
+          <p className={styles.muted}>{t('subscription.commonCommands')}</p>
+        )}
       </div>
     );
   }

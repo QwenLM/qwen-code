@@ -3348,7 +3348,7 @@ it('opens subscription model selection after startup failed before generator ini
   expect(result).toMatchObject({ type: 'dialog', dialog: 'model' });
 });
 
-it('directs an invalid subscription session to auth without claiming it is still signed in', async () => {
+it('opens the model picker after subscription expiry so other providers remain selectable', async () => {
   const context = createMockCommandContext({
     services: {
       config: {
@@ -3366,13 +3366,12 @@ it('directs an invalid subscription session to auth without claiming it is still
     },
   });
   expect(await modelCommand.action!(context, '')).toMatchObject({
-    type: 'message',
-    messageType: 'error',
-    content: 'Your Qwen session has expired. Run /auth to sign in again.',
+    type: 'dialog',
+    dialog: 'model',
   });
 });
 
-it('preserves the backend model permission message in /model', async () => {
+it('shows the backend model permission warning without blocking the picker', async () => {
   const context = createMockCommandContext({
     services: {
       config: {
@@ -3396,8 +3395,13 @@ it('preserves the backend model permission message in /model', async () => {
     },
   });
   expect(await modelCommand.action!(context, '')).toMatchObject({
-    type: 'message',
-    messageType: 'error',
-    content: 'Your account cannot access this model catalog.',
+    type: 'dialog',
+    dialog: 'model',
   });
+  expect(context.ui.addItem).toHaveBeenCalledWith(
+    expect.objectContaining({
+      text: 'Your account cannot access this model catalog.',
+    }),
+    expect.any(Number),
+  );
 });

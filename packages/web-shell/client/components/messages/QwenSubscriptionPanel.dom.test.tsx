@@ -235,7 +235,9 @@ it.each([false, true])(
     expect(onSignedOut).not.toHaveBeenCalled();
     await tick(1000);
     expect(document.body.textContent).toContain('second@example.test');
-    expect(document.body.textContent).toContain('Qwen Pro is active');
+    expect(document.body.textContent).toContain(
+      'Current plan: Qwen Pro. Qwen Code is ready.',
+    );
   },
 );
 
@@ -266,7 +268,9 @@ it('ignores a late purchase query after account switching', async () => {
   expect(querySignal?.aborted).toBe(true);
   await act(async () => completeQuery({ ...user, member_type: 'pro' }));
   expect(container.textContent).toContain('Waiting for sign-in');
-  expect(container.textContent).not.toContain('Qwen Pro is active');
+  expect(container.textContent).not.toContain(
+    'Current plan: Qwen Pro. Qwen Code is ready.',
+  );
 });
 
 it.each(['unmount', 'transport'] as const)(
@@ -294,7 +298,9 @@ it.each(['unmount', 'transport'] as const)(
     expect(open).not.toHaveBeenCalledWith(authorizationUrl);
     if (change === 'transport') {
       expect(nextTransport.startSubscriptionLogin).toHaveBeenCalledOnce();
-      expect(container.textContent).toContain('Qwen Plus is active');
+      expect(container.textContent).toContain(
+        'Current plan: Qwen Plus. Qwen Code is ready.',
+      );
     }
   },
 );
@@ -445,7 +451,9 @@ it('retries membership after a query failure and discovers a paid plan', async (
     "Couldn't check your subscription status",
   );
   await click('Retry Connection');
-  expect(container.textContent).toContain('Qwen Pro is active');
+  expect(container.textContent).toContain(
+    'Current plan: Qwen Pro. Qwen Code is ready.',
+  );
   expect(container.textContent).not.toContain('mock-model');
   expect(container.textContent).toContain('Sign out');
   expect(transport.startSubscriptionLogin).toHaveBeenCalledTimes(1);
@@ -504,7 +512,9 @@ it('shows session expiration without sending the user to purchase', async () => 
     errorStage: 'refresh',
   });
   await render();
-  expect(container.textContent).toContain('Your Qwen session has expired');
+  expect(container.textContent).toContain(
+    'Your login credentials are no longer valid',
+  );
   expect(open).not.toHaveBeenCalled();
 });
 
@@ -514,7 +524,9 @@ it('recognizes refresh expiry in the daemon HTTP error body during membership po
   });
   await render();
   await tick(5000);
-  expect(container.textContent).toContain('Your Qwen session has expired');
+  expect(container.textContent).toContain(
+    'Your login credentials are no longer valid',
+  );
   expect(container.textContent).not.toContain(
     "Couldn't check your subscription",
   );
@@ -553,9 +565,13 @@ it('ignores an old sign-out failure after switching daemon transports', async ()
       />,
     );
   });
-  expect(container.textContent).toContain('Qwen Plus is active');
+  expect(container.textContent).toContain(
+    'Current plan: Qwen Plus. Qwen Code is ready.',
+  );
   await act(async () => rejectSignOut(new Error('old daemon disconnected')));
-  expect(container.textContent).toContain('Qwen Plus is active');
+  expect(container.textContent).toContain(
+    'Current plan: Qwen Plus. Qwen Code is ready.',
+  );
   expect(container.textContent).not.toContain('An error occurred');
 });
 
@@ -611,7 +627,9 @@ it('does not carry an old daemon cooldown into a new transport', async () => {
   });
   await click('Retry Connection');
   expect(nextTransport.getSubscriptionUserInfo).toHaveBeenCalledTimes(1);
-  expect(container.textContent).toContain('Qwen Plus is active');
+  expect(container.textContent).toContain(
+    'Current plan: Qwen Plus. Qwen Code is ready.',
+  );
 });
 
 it('retries a failed first identity query without creating a second authorization flow', async () => {
@@ -633,7 +651,9 @@ it('retries a failed first identity query without creating a second authorizatio
   await click('Retry Connection');
   expect(transport.getSubscriptionUserInfo).toHaveBeenCalledTimes(1);
   expect(transport.startSubscriptionLogin).toHaveBeenCalledTimes(1);
-  expect(container.textContent).toContain('Qwen Plus is active');
+  expect(container.textContent).toContain(
+    'Current plan: Qwen Plus. Qwen Code is ready.',
+  );
 });
 
 it('keeps exchange invalid_grant distinct from session expiry', async () => {
@@ -645,7 +665,9 @@ it('keeps exchange invalid_grant distinct from session expiry', async () => {
   });
   await render();
   expect(container.textContent).toContain('Could not complete authorization');
-  expect(container.textContent).not.toContain('session has expired');
+  expect(container.textContent).not.toContain(
+    'credentials are no longer valid',
+  );
   expect(container.textContent).toContain('Retry Connection');
 });
 
@@ -781,7 +803,9 @@ it('leaves the paid ready state after activation discovers expired refresh crede
   await render({ onActivate, onActivated: vi.fn() }, transport, {
     dialog: true,
   });
-  expect(document.body.textContent).toContain('session has expired');
+  expect(document.body.textContent).toContain(
+    'credentials are no longer valid',
+  );
   expect(document.body.textContent).not.toContain('Signed in as');
   expect(document.body.textContent).not.toContain('Try again');
   expect(document.body.textContent).toContain('previous');
@@ -1006,7 +1030,7 @@ it('does not activate again when host callbacks change identity', async () => {
   expect(onActivated).toHaveBeenCalledOnce();
 });
 
-it.each(['Start Using', 'close', 'Escape'])(
+it.each(['close', 'Escape'])(
   'finishes desktop success once through %s after activation completes',
   async (action) => {
     transport.startSubscriptionLogin.mockResolvedValue({
@@ -1037,7 +1061,9 @@ it.each(['Start Using', 'close', 'Escape'])(
     expect(success).not.toBeNull();
     expect(success.textContent).toContain(user.email);
     expect(success.textContent).toContain('Qwen Pro');
-    expect(success.textContent).not.toContain('actual-model');
+    expect(success.textContent).toContain('actual-model');
+    expect(success.textContent).not.toContain('Common commands');
+    expect(document.body.textContent).not.toContain('Start Using');
     expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
     expect(onActivated).not.toHaveBeenCalled();
     const dismiss = () => {
@@ -1046,7 +1072,7 @@ it.each(['Start Using', 'close', 'Escape'])(
           new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
         );
       else
-        [...success.querySelectorAll('button')]
+        [...document.querySelectorAll('[role="dialog"] button')]
           .find(
             (button) =>
               button.textContent === action ||

@@ -141,6 +141,7 @@ export class WebViewProvider {
     sessionId?: string;
   };
   private subscriptionAuth?: AbortController;
+  private subscriptionModelKey?: string;
   private sidebarSubscription?: {
     id: string;
     owner: NonNullable<WebViewProvider['subscriptionRuntime']>;
@@ -1020,6 +1021,22 @@ export class WebViewProvider {
         transport: owner.client,
         action,
         signal: controller.signal,
+        isSubscriptionModel: async () => {
+          const authType = owner.sessionId
+            ? (
+                await owner.client.sessionContext(
+                  owner.sessionId,
+                  this.daemonClientId,
+                )
+              ).state._meta?.['authType']
+            : (
+                await owner.client
+                  .workspaceByCwd(owner.workspaceCwd)
+                  .workspaceProviders()
+              ).current?.authType;
+          assertOwner();
+          return authType === 'qwen-subscription';
+        },
       });
       assertOwner();
       if (result.kind === 'signed-out') {
@@ -1941,12 +1958,27 @@ export class WebViewProvider {
             );
             assertOwner();
           }
+          const providers = await owner.client
+            .workspaceByCwd(owner.workspaceCwd)
+            .workspaceProviders();
+          assertOwner();
+          if (
+            !providers.initialized ||
+            providers.current?.authType !== 'qwen-subscription' ||
+            ![result.modelId, `${result.modelId}(qwen-subscription)`].includes(
+              providers.current.modelId ?? '',
+            )
+          ) {
+            throw new Error('Subscription runtime activation failed.');
+          }
           this.sendMessageToWebView({
             type: 'qwenSubscriptionActivationResult',
-            data: { flowId: flow.id, requestId: data.requestId },
+            data: {
+              flowId: flow.id,
+              requestId: data.requestId,
+              modelId: result.modelId,
+            },
           });
-          controller.abort();
-          this.sendMessageToWebView({ type: 'authSuccess' });
         } catch (error) {
           if (!signal.aborted && this.subscriptionRuntime === owner) {
             const body = (
@@ -1995,6 +2027,12 @@ export class WebViewProvider {
         } finally {
           flow.activating = false;
         }
+      } else if (message.type === 'qwenSubscriptionComplete') {
+        flow.controller.abort();
+        this.sendMessageToWebView({
+          type: 'authSuccess',
+          data: { message: data.message },
+        });
       } else if (message.type === 'qwenSubscriptionError') {
         flow.controller.abort();
         this.sendMessageToWebView({
@@ -2031,6 +2069,19 @@ export class WebViewProvider {
         this.webShellPermissionOwners.set(webview, data.requestId);
       } else {
         this.webShellPermissionOwners.delete(webview);
+      }
+      return true;
+    }
+    if (message.type === 'webShellModelChanged') {
+      const data = message.data as
+        | { workspaceCwd?: unknown; modelId?: unknown; authType?: unknown }
+        | undefined;
+      if (data?.workspaceCwd !== this.subscriptionRuntime?.workspaceCwd)
+        return true;
+      const key = JSON.stringify([data?.modelId, data?.authType]);
+      if (key !== this.subscriptionModelKey) {
+        this.subscriptionModelKey = key;
+        if (!this.sidebarSubscription) this.subscriptionAuth?.abort();
       }
       return true;
     }

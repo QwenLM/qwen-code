@@ -9,7 +9,6 @@ import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscrip
 import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import { openBrowserSecurely } from '@qwen-code/qwen-code-core/utils/secure-browser-launcher.js';
-import { restoreModelAfterSubscriptionLogout } from '../../config/subscription-logout.js';
 import { t } from '../../i18n/index.js';
 import { MessageType } from '../types.js';
 import { CommandKind, type SlashCommand } from './types.js';
@@ -23,8 +22,11 @@ export const logoutCommand: SlashCommand = {
   supportedModes: ['interactive'],
   canCancel: false,
   action: async (context) => {
-    const { config, settings } = context.services;
-    if (config?.getAuthType() !== AuthType.QWEN_SUBSCRIPTION) {
+    const { config } = context.services;
+    if (
+      config?.getAuthType() !== AuthType.QWEN_SUBSCRIPTION ||
+      !new QwenSubscriptionSession().isSignedIn()
+    ) {
       return {
         type: 'message',
         messageType: 'info',
@@ -61,22 +63,10 @@ export const logoutCommand: SlashCommand = {
       }
     }
     context.ui.cancelBtw();
-    const selectionWarning = await restoreModelAfterSubscriptionLogout(
-      config,
-      settings,
-    );
-    if (selectionWarning) {
-      warning = [
-        warning,
-        selectionWarning === 'clear'
-          ? t(
-              'You are signed out, but the saved authentication selection could not be cleared.',
-            )
-          : t('Model switched, but the selection could not be saved.'),
-      ]
-        .filter(Boolean)
-        .join('\n');
-    }
+    config
+      .getBackgroundTaskRegistry()
+      .abortAll({ notify: false, persistedStatus: 'cancelled' });
+    config.setSubscriptionPlan(undefined);
     if (warning) {
       context.ui.addItem(
         { type: MessageType.WARNING, text: warning },
@@ -95,7 +85,10 @@ export const upgradeCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'],
   action: async (context) => {
-    if (context.services.config?.getAuthType() !== AuthType.QWEN_SUBSCRIPTION) {
+    if (
+      context.services.config?.getAuthType() !== AuthType.QWEN_SUBSCRIPTION ||
+      !new QwenSubscriptionSession().isSignedIn()
+    ) {
       return {
         type: 'message',
         messageType: 'info',
@@ -127,8 +120,9 @@ export const upgradeCommand: SlashCommand = {
 export function filterSubscriptionCommands(
   commands: readonly SlashCommand[],
   authType: AuthType | undefined,
+  signedIn = new QwenSubscriptionSession().isSignedIn(),
 ): readonly SlashCommand[] {
-  return authType === AuthType.QWEN_SUBSCRIPTION
+  return authType === AuthType.QWEN_SUBSCRIPTION && signedIn
     ? commands
     : Object.freeze(
         commands.filter(

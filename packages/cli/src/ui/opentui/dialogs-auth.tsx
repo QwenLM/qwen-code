@@ -53,7 +53,6 @@ import {
   getModelsForProviderProtocol,
   customProvider,
   findExistingProviderModels,
-  findProviderByCredentials,
   findProviderById,
   getErrorMessage,
   logAuth,
@@ -1297,7 +1296,7 @@ function SubscriptionView({
   onBack: () => void;
   onModelSelectionRequired: () => void;
   onSwitchProvider: () => void;
-  onConnect?: (signal: AbortSignal) => Promise<void>;
+  onConnect?: (signal: AbortSignal, authorizationUrl: string) => Promise<void>;
   suppressBrowserLaunch?: boolean;
   availableTerminalHeight?: number;
 }) {
@@ -1555,7 +1554,7 @@ function AuthDialogFlow({
   const stepRef = useRef<SetupStep | null>(null);
   const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
   const [_viewStack, setViewStack] = useState<ViewLevel[]>([]);
-  const [mainIndex, setMainIndex] = useState<number | null>(null);
+  const [mainIndex, setMainIndex] = useState(0);
   const [subMenuIndex, setSubMenuIndex] = useState<Record<string, number>>({});
 
   // -- Submit (useAuth.handleProviderSubmit parity: same install-plan write
@@ -1722,21 +1721,6 @@ function AuthDialogFlow({
   };
   const activeSubMenu = subMenus[viewLevel];
 
-  // -- Default main index from current auth state ---------------------------
-
-  const contentGenConfig = config.getContentGeneratorConfig();
-  const matchedProvider = findProviderByCredentials(
-    contentGenConfig?.baseUrl,
-    contentGenConfig?.apiKeyEnvKey,
-  );
-  // Land on the tab matching the active provider's uiGroup (ink parity).
-  const defaultMainIndex = useMemo(() => {
-    if (matchedProvider?.uiGroup === 'third-party') return 3;
-    if (matchedProvider?.uiGroup === 'custom') return 4;
-    if (matchedProvider?.uiGroup === 'alibaba') return 2;
-    return 0;
-  }, [matchedProvider]);
-
   // -- Main menu select -------------------------------------------------------
 
   const handleMainSelect = useCallback(
@@ -1774,7 +1758,7 @@ function AuthDialogFlow({
 
   // -- Keyboard: main / sub-menu lists --------------------------------------
 
-  const mainCursor = mainIndex ?? defaultMainIndex;
+  const mainCursor = mainIndex;
   const subCursor = activeSubMenu ? (subMenuIndex[viewLevel] ?? 0) : 0;
   // A burst of keys reaches the handler registered by the last render, so the
   // cursors it reads must be written synchronously by the movers below.
@@ -1983,11 +1967,15 @@ function AuthDialogFlow({
         suppressBrowserLaunch={config.isBrowserLaunchSuppressed()}
         onBack={goBack}
         onModelSelectionRequired={onClose}
-        onConnect={async (signal) => {
+        onConnect={async (signal, authorizationUrl) => {
           const info = await activateSubscription(settings, config, signal);
           signal.throwIfAborted();
           notify?.(
-            subscriptionSuccessMessage(info, config.getModel()),
+            subscriptionSuccessMessage(
+              info,
+              config.getModel(),
+              authorizationUrl,
+            ),
             'subscription-success',
           );
           onClose();

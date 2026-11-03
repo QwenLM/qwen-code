@@ -58,6 +58,19 @@ export async function activateSubscription(
       refreshAuth: (authType) => config.refreshAuth(authType),
     },
   );
+  settings.setValues([
+    {
+      scope: SettingScope.User,
+      key: 'security.auth.selectedType',
+      value: AuthType.QWEN_SUBSCRIPTION,
+    },
+    { scope: SettingScope.User, key: 'model.name', value: modelId },
+    {
+      scope: SettingScope.User,
+      key: 'model.baseUrl',
+      value: QWEN_SUBSCRIPTION_BASE_URL,
+    },
+  ]);
   config.setSubscriptionPlan(plan);
   return info;
 }

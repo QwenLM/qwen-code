@@ -6,7 +6,10 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
-import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
+import {
+  isSubscriptionSessionExpired,
+  subscriptionErrorMessage,
+} from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import {
   SubscriptionOAuthError,
   subscriptionError,
@@ -16,6 +19,7 @@ import {
 import {
   getQwenOAuthConfig,
   getQwenSubscriptionPlansUrl,
+  getQwenSubscriptionSuccessUrl,
 } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import {
   SUBSCRIPTION_MODELS_UNAVAILABLE,
@@ -76,7 +80,9 @@ function authenticationError(
   ) {
     return {
       status: 'error',
-      message: t('Your Qwen session has expired. Run /auth to sign in again.'),
+      message: t(
+        'Your login credentials are no longer valid. Run /auth to sign in again.',
+      ),
     };
   }
   const messages = {
@@ -149,7 +155,7 @@ export function useSubscription({
   onActivate,
 }: {
   suppressBrowserLaunch?: boolean;
-  onActivate?: (signal: AbortSignal) => Promise<void>;
+  onActivate?: (signal: AbortSignal, authorizationUrl: string) => Promise<void>;
 } = {}) {
   const [state, setState] = useState<SubscriptionState>({ status: 'waiting' });
   const [attempt, setAttempt] = useState<number | null>(0);
@@ -169,6 +175,7 @@ export function useSubscription({
   const lifetime = useRef<AbortController | null>(null);
   const busy = useRef(false);
   const plansUrl = useRef('');
+  const authorizationUrl = useRef('');
   const retryAt = useRef(0);
   const startPurchase = useRef<() => Promise<void>>(async () => {});
   const rememberRetry = (error: unknown) => {
@@ -188,6 +195,7 @@ export function useSubscription({
     busy.current = false;
     setState({ status: 'waiting' });
     setDeviceAuth(undefined);
+    authorizationUrl.current = '';
     setEmail('');
     setChecking(false);
     setConnecting(false);
@@ -244,12 +252,28 @@ export function useSubscription({
       plansUrl.current = getQwenSubscriptionPlansUrl();
       const activeSession = new QwenSubscriptionSession();
       session.current = activeSession;
-      const saved = await activeSession.getUserInfo(signal);
+      const saved = await activeSession
+        .getUserInfo(signal)
+        .catch((error: unknown) => {
+          signal.throwIfAborted();
+          if (isSubscriptionSessionExpired(error)) return null;
+          throw error;
+        });
+      if (saved) {
+        signal.throwIfAborted();
+        authorizationUrl.current = getQwenSubscriptionSuccessUrl();
+        if (!suppressBrowserLaunch) {
+          void openBrowserSecurely(authorizationUrl.current).catch(
+            () => undefined,
+          );
+        }
+      }
       const info =
         saved ??
         (await activeSession.signIn((device) => {
           signal.throwIfAborted();
           const url = subscriptionAuthorizationUrl(device);
+          authorizationUrl.current = url;
           setDeviceAuth({ ...device, verification_uri_complete: url });
           if (!suppressBrowserLaunch) {
             void openBrowserSecurely(url).catch(() => undefined);
@@ -371,7 +395,7 @@ export function useSubscription({
     setConnecting(true);
     setConnectionError(undefined);
     try {
-      await activate.current(signal);
+      await activate.current(signal, getQwenSubscriptionSuccessUrl());
     } catch (error) {
       if (!signal.aborted && lifetime.current?.signal === signal) {
         rememberRetry(error);

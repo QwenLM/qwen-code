@@ -1741,7 +1741,9 @@ export default {
   'Qwen Subscription': 'Qwen Subscription',
   'Qwen Account with Subscription': 'Qwen 会员账号',
   'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai':
-    '在 chat.qwen.ai 订阅 Plus/Pro 套餐，解锁 Qwen Code + Agent',
+    '在 chat.qwen.ai 订阅 Plus/Pro，解锁 Qwen Code 和 Agent 能力',
+  'Your login credentials are no longer valid. Run /auth to sign in again.':
+    '登录凭证已失效，请运行 /auth 重新登录。',
   'Opening chat.qwen.ai in your browser… Sign in there to connect Qwen Code.':
     '正在浏览器中打开 chat.qwen.ai… 请在那里登录以连接 Qwen Code。',
   "If the browser didn't open, visit:": '如果浏览器未打开，请访问：',

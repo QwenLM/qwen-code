@@ -369,6 +369,30 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     expect(screen.getByText('Custom Provider')).toBeTruthy();
   });
 
+  it.each([
+    'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    'https://api.deepseek.com',
+  ])(
+    'starts on the subscription entry with active provider %s',
+    async (baseUrl) => {
+      const config = createMockConfig(AuthType.USE_OPENAI);
+      vi.mocked(config.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        model: 'test-model',
+        baseUrl,
+      });
+      render(
+        <OpenTuiAuthDialog
+          config={config}
+          settings={createMockSettings()}
+          onClose={vi.fn()}
+        />,
+      );
+      await press('return');
+      expect(screen.getByText('Waiting for sign-in…')).toBeTruthy();
+    },
+  );
+
   it('blocks Esc on the main view while unauthenticated', async () => {
     const { onClose } = renderDialog();
     const consumed = await pressEsc();

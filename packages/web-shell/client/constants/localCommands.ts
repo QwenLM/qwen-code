@@ -52,7 +52,13 @@ export function getLocalCommands(
     { name: 'release', description: t('local.release') },
     { name: 'auth', description: t('local.auth') },
     ...(options.subscriptionAvailable
-      ? [{ name: 'logout', description: t('subscription.signOutDescription') }]
+      ? [
+          { name: 'logout', description: t('subscription.signOutDescription') },
+          {
+            name: 'upgrade',
+            description: t('subscription.upgradeDescription'),
+          },
+        ]
       : []),
     {
       name: 'approval-mode',

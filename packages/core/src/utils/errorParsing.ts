@@ -177,6 +177,12 @@ export function parseAndFormatApiError(
   error: unknown,
   authType?: AuthType,
 ): string {
+  if (
+    getErrorMessage(error) ===
+    'Your login credentials are no longer valid. Run /auth to sign in again.'
+  ) {
+    return 'Your login credentials are no longer valid. Run /auth to sign in again.';
+  }
   if (isStructuredError(error)) {
     // Qwen OAuth quota errors have their own user-friendly message; don't wrap them
     if (

@@ -112,6 +112,11 @@ const EN: Messages = {
   'subscription.openPlansDescription':
     'Opens the Qwen Code plans page in your browser',
   'subscription.switchProviderDescription': 'Choose another model provider',
+  'subscription.upgradeDescription': 'Open Qwen subscription plans',
+  'subscription.commandUnavailable':
+    'Sign in to Qwen and select a Qwen subscription model to use this command.',
+  'subscription.upgradeFailed':
+    'Could not open Qwen subscription plans. Please try again.',
   'subscription.signOutDescription':
     'Disconnect this device from your Qwen account',
   'subscription.title': 'Qwen Subscription',
@@ -156,12 +161,18 @@ const EN: Messages = {
   'subscription.connectFailed':
     'Could not connect Qwen Subscription. Please try again.',
   'subscription.connected': (v) =>
-    `✓ Signed in as ${v?.email ?? ''}  \n✓ Qwen ${v?.plan ?? ''} is active · usage is included with your plan${v?.model ? `  \n  Model: ${v.model} · Run /usage to see your plan usage` : ''}`,
-  'subscription.signedIn': (v) => `Signed in as ${v?.email ?? ''}`,
+    `✓ Signed in successfully · ${v?.email ?? ''}  \n✓ Current plan: Qwen ${v?.plan ?? ''}. Qwen Code is ready.${v?.model ? `  \nModel: ${v.model}. Run /upgrade to upgrade your plan or /usage to view usage.` : ''}${v?.url ? `  \nIf the browser didn't open, visit:  \n${v.url}` : ''}  \nCommon commands: /usage   /upgrade   /status   /logout`,
+  'subscription.signedIn': (v) => `Signed in successfully · ${v?.email ?? ''}`,
+  'subscription.modelSummary': (v) =>
+    `Model: ${v?.model ?? ''}. Run /upgrade to upgrade your plan or /usage to view usage.`,
+  'subscription.commonCommands':
+    'Common commands: /usage   /upgrade   /status   /logout',
+  'subscription.loginRequired':
+    'Your login credentials are no longer valid. Run /auth to sign in again.',
   'subscription.signedInWithPlan': (v) =>
     `Signed in as ${v?.email ?? ''} (Qwen ${v?.plan ?? ''})`,
   'subscription.ready': (v) =>
-    `Qwen ${v?.plan ?? ''} is active · usage is included with your plan`,
+    `Current plan: Qwen ${v?.plan ?? ''}. Qwen Code is ready.`,
   'subscription.purchase-required': (v) =>
     `You're signed in with a ${v?.plan ?? ''} account, which doesn't include Qwen Code. Choose Plus or Pro in your browser; Qwen Code continues automatically after you subscribe.`,
   'capacityChoice.persistenceUnconfirmed':
@@ -4815,10 +4826,14 @@ const ZH: Messages = {
     '手动连接本地服务、代理或其他供应商',
   'subscription.entryTitle': 'Qwen Account with Subscription',
   'subscription.entryDescription':
-    '在 chat.qwen.ai 订阅 Plus/Pro，解锁 Qwen Code 和智能体能力',
+    '在 chat.qwen.ai 订阅 Plus/Pro，解锁 Qwen Code 和 Agent 能力',
   'subscription.new': '新',
   'subscription.openPlansDescription': '在浏览器中打开 Qwen Code 套餐页',
   'subscription.switchProviderDescription': '选择其他模型供应商',
+  'subscription.upgradeDescription': '打开 Qwen 订阅套餐页面',
+  'subscription.commandUnavailable':
+    '请先登录 Qwen 并选择 Qwen 订阅模型，再使用此命令。',
+  'subscription.upgradeFailed': '无法打开 Qwen 订阅套餐页面，请重试。',
   'subscription.signOutDescription': '断开此设备与你的 Qwen 账号的连接',
   'subscription.title': 'Qwen 订阅',
   'subscription.waiting':
@@ -4856,12 +4871,17 @@ const ZH: Messages = {
   'subscription.modelsUnavailable': '无法加载模型。已保留登录态，请重试。',
   'subscription.connectFailed': '无法连接 Qwen 订阅，请重试。',
   'subscription.connected': (v) =>
-    `✓ 已登录为 ${v?.email ?? ''}  \n✓ Qwen ${v?.plan ?? ''} 已生效 · 用量包含在你的套餐中${v?.model ? `  \n  模型：${v.model} · 运行 /usage 查看套餐用量` : ''}`,
-  'subscription.signedIn': (v) => `已登录为 ${v?.email ?? ''}`,
+    `✓ 登录成功 · ${v?.email ?? ''}  \n✓ 当前套餐：Qwen ${v?.plan ?? ''}，已可使用 Qwen Code${v?.model ? `  \n模型：${v.model}，输入 /upgrade 升级套餐，/usage 查看用量。` : ''}${v?.url ? `  \n如果浏览器未打开，请访问：  \n${v.url}` : ''}  \n常用命令：/usage   /upgrade   /status   /logout`,
+  'subscription.signedIn': (v) => `登录成功 · ${v?.email ?? ''}`,
+  'subscription.modelSummary': (v) =>
+    `模型：${v?.model ?? ''}，输入 /upgrade 升级套餐，/usage 查看用量。`,
+  'subscription.commonCommands':
+    '常用命令：/usage   /upgrade   /status   /logout',
+  'subscription.loginRequired': '登录凭证已失效，请运行 /auth 重新登录。',
   'subscription.signedInWithPlan': (v) =>
     `已登录为 ${v?.email ?? ''}（Qwen ${v?.plan ?? ''}）`,
   'subscription.ready': (v) =>
-    `Qwen ${v?.plan ?? ''} 已生效 · 用量包含在你的套餐中`,
+    `当前套餐：Qwen ${v?.plan ?? ''}，已可使用 Qwen Code`,
   'subscription.purchase-required': (v) =>
     `你已使用 ${v?.plan ?? ''} 账号登录，该账号不包含 Qwen Code。请在浏览器中选择 Plus 或 Pro；订阅后 Qwen Code 将自动继续。`,
   'capacityChoice.persistenceUnconfirmed':

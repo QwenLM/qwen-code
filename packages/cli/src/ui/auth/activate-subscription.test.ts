@@ -28,7 +28,11 @@ vi.mock('@qwen-code/qwen-code-core/providers/install.js', () => ({
 vi.mock('../../config/loadedSettingsAdapter.js', () => ({
   createLoadedSettingsAdapter: mocks.createAdapter,
 }));
-const settings = { merged: {}, isTrusted: true } as LoadedSettings;
+const settings = {
+  merged: {},
+  isTrusted: true,
+  setValues: vi.fn(),
+} as unknown as LoadedSettings;
 function config() {
   return {
     refreshSubscriptionModels: vi
