@@ -665,7 +665,7 @@ class HostedMcpStreamGapIT {
                 + " CAST(turn_id AS CHAR) AS turn_id,"
                 + " CAST(item_id AS CHAR) AS item_id,"
                 + " CAST(content_part_id AS CHAR) AS content_part_id,"
-                + " event_type, gmt_create, data_json, terminal"
+                + " event_type, gmt_create, data_json, is_terminal"
                 + " FROM ma_public_event WHERE tenant_id = ? AND"
                 + " session_id = ? AND stream_kind = 'SESSION' AND"
                 + " stream_id = X'' ORDER BY sequence_id", tenant, session);
@@ -930,7 +930,7 @@ class HostedMcpStreamGapIT {
                             .toList());
             json.writeValue(destination.resolve("events.json").toFile(),
                     jdbc.queryForList("SELECT session_id, turn_id,"
-                            + " event_type, terminal FROM ma_public_event"
+                            + " event_type, is_terminal FROM ma_public_event"
                             + " WHERE tenant_id = ? ORDER BY sequence_id",
                             tenant));
             json.writeValue(destination.resolve("model-requests.json")

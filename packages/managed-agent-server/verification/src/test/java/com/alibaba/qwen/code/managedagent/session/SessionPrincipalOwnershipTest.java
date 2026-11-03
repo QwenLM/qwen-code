@@ -210,6 +210,52 @@ class SessionPrincipalOwnershipTest {
     }
 
     @Test
+    void modelRoutesKeepMissingPrincipalUnauthorizedAndPreserveTheFullOwner() {
+        var f = new Fixture();
+        f.tx.executeWithoutResult(status -> {
+            String id = f.create(OWNER, "create");
+            for (Runnable route : List.<Runnable>of(
+                    () -> f.service.queryWebShellSessionModels((SessionPrincipal) null, id),
+                    () -> f.service.changeWebShellSessionModel(null, id, "change", "model", 0),
+                    () -> f.service.queryWebShellSessionModels("tenant", null, id),
+                    () -> f.service.changeWebShellSessionModel("tenant", null, id, "change", "model", 0))) {
+                assertThatThrownBy(route::run).isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(401);
+                    assertThat(error.getCode()).isEqualTo("actor_required");
+                });
+            }
+            assertThat(f.service.queryWebShellSessionModels(OWNER, id).modelSelection()).isNotNull();
+            denied(() -> f.service.queryWebShellSessionModels(SessionPrincipal.ofUser("tenant", "user"), id));
+        });
+    }
+
+    @Test
+    void legacyTaskRoutesKeepAbsentActorsNotFoundAndValidUserPrincipalsReadable() {
+        var f = new Fixture();
+        var records = new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(f.jdbc);
+        var events = new com.alibaba.qwen.code.managedagent.persistence.ManagedTaskEventStore(f.jdbc);
+        var tasks = new ManagedTaskService(f.service, records, events);
+        f.tx.executeWithoutResult(status -> {
+            String id = f.create(SessionPrincipal.ofUser("tenant", "user"), "create");
+            for (Runnable route : List.<Runnable>of(
+                    () -> tasks.listPublicTasks("tenant", null, id, null, 10),
+                    () -> tasks.getPublicTask("tenant", null, id, "missing"),
+                    () -> tasks.queryWebShellTasks("tenant", null, id, null, 10),
+                    () -> tasks.getWebShellTask("tenant", null, id, "missing"),
+                    () -> tasks.listPublicTaskEvents("tenant", null, id, "missing", null, 10),
+                    () -> tasks.queryWebShellTaskEvents("tenant", null, id, "missing", null, 10))) {
+                assertThatThrownBy(route::run).isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(404);
+                    assertThat(error.getCode()).isEqualTo("session_not_found");
+                });
+            }
+            assertThat(tasks.listPublicTasks("tenant", "user", id, null, 10).data()).isEmpty();
+            assertThat(tasks.queryWebShellTasks("tenant", "user", id, null, 10).data()).isEmpty();
+            denied(() -> tasks.listPublicTasks("other-tenant", "user", id, null, 10));
+        });
+    }
+
+    @Test
     void taskAndRecoveryEntryPointsKeepTheActorWhileRecheckingExistingWork() {
         var f = new Fixture();
         var records = new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(f.jdbc);

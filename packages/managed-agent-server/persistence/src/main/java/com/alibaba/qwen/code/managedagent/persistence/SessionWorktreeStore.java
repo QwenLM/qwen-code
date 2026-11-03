@@ -18,6 +18,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 @Repository
@@ -28,6 +29,8 @@ public class SessionWorktreeStore
     public void configureWorktreeFiles(com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles value) { worktreeFiles = value; }
 
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final Set<String> WORKTREE_STATES =
+            Set.of("PREPARING", "READY", "FAILED", "BLOCKED", "REMOVING", "REMOVED");
     private static final String SELECT = "SELECT w.*, o.claim_owner, o.claim_generation, o.claim_until, o.phase, o.attempt_count"
             + " FROM ma_session_worktree w JOIN ma_operation o ON o.operation_kind = 'SESSION_WORKTREE'"
             + " AND o.tenant_id = w.tenant_id AND o.operation_id = w.operation_id";
@@ -202,7 +205,7 @@ public class SessionWorktreeStore
     public List<String[]> failedInitialSessions() {
         return jdbc.query("SELECT DISTINCT w.tenant_id, w.session_id, w.failure_code FROM ma_session_worktree w"
                 + " JOIN ma_turn t ON t.tenant_id = w.tenant_id AND t.session_id = w.session_id"
-                + " WHERE w.state IN ('FAILED','BLOCKED') AND t.status = 'ACCEPTED' AND t.submission_attempted = FALSE LIMIT 20",
+                + " WHERE w.state IN ('FAILED','BLOCKED') AND t.status = 'ACCEPTED' AND t.is_submission_attempted = FALSE LIMIT 20",
                 (result, index) -> new String[] {result.getString("tenant_id"), result.getString("session_id"), result.getString("failure_code")});
     }
 
@@ -237,6 +240,9 @@ public class SessionWorktreeStore
     }
 
     public boolean complete(Row row, String owner, String state, String identity, String error) {
+        if (state == null || !WORKTREE_STATES.contains(state)) {
+            throw com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.error("worktree_invalid_state");
+        }
         return transaction.execute(status -> {
             if (!lockClaim(row, owner)) {
                 return false;

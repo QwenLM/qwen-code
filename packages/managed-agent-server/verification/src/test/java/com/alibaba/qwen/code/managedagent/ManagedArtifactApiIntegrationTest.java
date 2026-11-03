@@ -675,13 +675,13 @@ class ManagedArtifactApiIntegrationTest {
                 .andExpect(jsonPath("$.access.can_read_content").value(false));
         mvc.perform(asReader(get(ROOT + "/artifacts"))).andExpect(status().isOk()).andExpect(header().string("Cache-Control", "private, no-store"))
                 .andExpect(jsonPath("$.data").isEmpty());
-        assertThat(fixture.jdbc().queryForObject("SELECT quarantined FROM ma_output_capture", Boolean.class))
+        assertThat(fixture.jdbc().queryForObject("SELECT is_quarantined FROM ma_output_capture", Boolean.class))
                 .isTrue();
     }
 
     @Test
     void deletionAndQuarantineHideContentWithoutChangingExecutionFacts() throws Exception {
-        fixture.jdbc().update("UPDATE ma_output_capture SET quarantined = TRUE WHERE publication_id = X'7075622d31'");
+        fixture.jdbc().update("UPDATE ma_output_capture SET is_quarantined = TRUE WHERE publication_id = X'7075622d31'");
         mvc.perform(asReader(get(ROOT + "/artifacts/" + stdout.path("id").asText())))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.artifact.availability").value("unavailable"))
                 .andExpect(jsonPath("$.access.can_read_content").value(false));

@@ -2127,7 +2127,7 @@ class ManagedAgentPreflightTest {
             // What a release that rewrote its baseline finds in the database.
             try (Statement statement = connection.createStatement()) {
                 statement.execute("ALTER TABLE ma_operation"
-                        + " DROP CONSTRAINT ck_ma_operation_kind");
+                        + " ADD CONSTRAINT ck_unexpected_operation CHECK (claim_generation >= 0)");
             }
             ManagedAgentPreflight.Check rewritten =
                     ManagedAgentPreflight.schemaCheck(connection, "1");

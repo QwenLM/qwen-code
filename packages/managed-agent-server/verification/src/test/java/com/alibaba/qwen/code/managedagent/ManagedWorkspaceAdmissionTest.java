@@ -1176,7 +1176,7 @@ class ManagedWorkspaceAdmissionTest {
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         grant(tenant, "ws-a", "actor-a", true);
-        grant(tenant, "ws-b", "actor-b", true);
+        grant(tenant, "ws-b", "actor-a", true);
         String sessionX = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                 .tenantId(tenant)
                 .actorId("actor-a")
@@ -1187,7 +1187,7 @@ class ManagedWorkspaceAdmissionTest {
                 .build()).sessionId();
         String sessionY = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                 .tenantId(tenant)
-                .actorId("actor-b")
+                .actorId("actor-a")
                 .idempotencyKey("create-y")
                 .requestDigest("sha256:" + "b".repeat(64))
                 .agentId("qwen-code")
@@ -1204,7 +1204,7 @@ class ManagedWorkspaceAdmissionTest {
         // recorded request, so no replay — and Y keeps its title.
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> service.renameSession(tenant,
-                        "actor-b", "rename", sessionY, "new title"))
+                        "actor-a", "rename", sessionY, "new title"))
                         .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                             assertThat(error.getCode())
                                     .isEqualTo("idempotency_conflict");
@@ -1494,7 +1494,6 @@ class ManagedWorkspaceAdmissionTest {
                 .agentId("qwen-code")
                 .selection(new WorkspaceSelection("ws-a", "."))
                 .build());
-        jdbc.update("ALTER TABLE ma_workspace_access DROP CONSTRAINT ck_ma_access_role");
         try {
             jdbc.update("UPDATE ma_workspace_access SET role = 'BROKEN'"
                             + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
@@ -1515,10 +1514,6 @@ class ManagedWorkspaceAdmissionTest {
             jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'"
                             + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, "ws-a", "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            String constraint = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.ddl()
-                    .lines().filter(line -> line.contains("CONSTRAINT ck_ma_access_role CHECK"))
-                    .findFirst().orElseThrow().trim().replaceFirst(",$", "");
-            jdbc.update("ALTER TABLE ma_workspace_access ADD " + constraint);
         }
     }
 
@@ -2108,7 +2103,7 @@ class ManagedWorkspaceAdmissionTest {
                                 .selection(new WorkspaceSelection("ws-a", "."))
                                 .build());
                     } else {
-                        store.insertSessionCommand(tenant, "CREATE_SESSION", "key",
+                        store.insertSessionCommand(tenant, "actor-a", "CREATE_SESSION", "key",
                                 "legacy-digest", "qwen-code", null, null, List.of(), null);
                     }
                     return "created";

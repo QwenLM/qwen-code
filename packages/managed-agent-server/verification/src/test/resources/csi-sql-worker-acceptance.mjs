@@ -144,6 +144,8 @@ try {
   await fs.writeFile(path.join(workspace, 'marker.txt'), 'alpha\n', {
     mode: 0o640,
   });
+  // 明确设置夹具权限，避免 CI 进程的 umask 改写待验证的原始模式。
+  await fs.chmod(path.join(workspace, 'marker.txt'), 0o640);
   const { boot, pod } = await fixture('/fixture:setup', { mount });
   Object.defineProperty(process, 'platform', {
     value: 'linux',

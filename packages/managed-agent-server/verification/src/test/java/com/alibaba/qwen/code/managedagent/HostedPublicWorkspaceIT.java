@@ -1201,7 +1201,7 @@ class HostedPublicWorkspaceIT {
             JsonNode events = request("GET", "/v1/agents/sessions/" + session + "/events", null, null, "actor", 200);
             assertThat(events.toString()).contains("G0_DONE");
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event"
-                    + " WHERE tenant_id = ? AND session_id = ? AND terminal = TRUE", Integer.class, tenant, session))
+                    + " WHERE tenant_id = ? AND session_id = ? AND is_terminal = TRUE", Integer.class, tenant, session))
                     .isEqualTo(1);
             int requests = modelRequests.size();
             long executions = jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?",

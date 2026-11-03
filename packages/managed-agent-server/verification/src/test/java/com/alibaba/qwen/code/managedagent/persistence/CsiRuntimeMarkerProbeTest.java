@@ -55,15 +55,19 @@ class CsiRuntimeMarkerProbeTest {
     @Test
     void fenceStillTakesTheForUpdateRangeLocks() throws Exception {
         var connection = mock(Connection.class);
-        var placement = mock(ResultSet.class);
+        var metadata = mock(java.sql.DatabaseMetaData.class);
+        when(connection.getMetaData()).thenReturn(metadata);
+        when(metadata.getDatabaseProductName()).thenReturn("H2");
         when(connection.getAutoCommit()).thenReturn(false);
-        when(placement.next()).thenReturn(true, false);
-        when(placement.getString("tenant_id")).thenReturn("tenant");
         when(connection.prepareStatement(anyString())).thenAnswer(call -> {
             var prepared = mock(PreparedStatement.class);
-            when(prepared.executeQuery()).thenReturn(call.<String>getArgument(0).contains("runtime_placement")
-                    ? placement
-                    : mock(ResultSet.class));
+            var rows = mock(ResultSet.class);
+            if (call.<String>getArgument(0).contains("runtime_placement")) {
+                when(rows.next()).thenReturn(true, false);
+                when(rows.getLong("id")).thenReturn(1L);
+                when(rows.getBytes("tenant_id")).thenReturn("tenant".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+            when(prepared.executeQuery()).thenReturn(rows);
             return prepared;
         });
 

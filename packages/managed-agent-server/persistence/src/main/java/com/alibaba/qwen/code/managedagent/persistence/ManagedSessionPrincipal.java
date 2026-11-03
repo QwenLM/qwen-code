@@ -29,7 +29,7 @@ public final class ManagedSessionPrincipal {
             String sessionId, SessionPrincipal principal, long now) {
         Objects.requireNonNull(principal, "principal");
         jdbc.update("INSERT INTO ma_session_principal (tenant_id, session_id,"
-                        + " version, user_id, actor_present, actor_subject_id,"
+                        + " version, user_id, is_actor_present, actor_subject_id,"
                         + " gmt_create) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 tenantId, sessionId, VERSION, principal.userId(),
                 principal.actorPresent(), principal.actorSubjectId(), now);
@@ -39,7 +39,7 @@ public final class ManagedSessionPrincipal {
     public static Row find(JdbcTemplate jdbc, String tenantId,
             String sessionId) {
         List<Row> rows = jdbc.query(
-                "SELECT version, user_id, actor_present, actor_subject_id"
+                "SELECT version, user_id, is_actor_present, actor_subject_id"
                         + " FROM ma_session_principal WHERE tenant_id = ?"
                         + " AND session_id = ?",
                 (result, index) -> new Row(result.getInt(1),

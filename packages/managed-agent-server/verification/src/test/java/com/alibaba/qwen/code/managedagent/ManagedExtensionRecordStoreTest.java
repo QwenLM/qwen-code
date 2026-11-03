@@ -1816,7 +1816,7 @@ class ManagedExtensionRecordStoreTest {
 
     @Test
     void keepsOneTextPartAcrossATaskAnnouncement() throws Exception {
-        String sessionId = agents.createSession(TENANT, "split-"
+        String sessionId = agents.createSession(TENANT, "owner", "split-"
                 + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
                 List.of()).sessionId();
         String turnId = "turn-" + UUID.randomUUID();
@@ -1853,7 +1853,7 @@ class ManagedExtensionRecordStoreTest {
 
     @Test
     void pagesTasksNewestFirstThenByTaskId() throws Exception {
-        String sessionId = agents.createSession(TENANT, "pages-"
+        String sessionId = agents.createSession(TENANT, "owner", "pages-"
                 + UUID.randomUUID(), "qwen-code", null, "tasks", Map.of(),
                 List.of()).sessionId();
         ExtensionRecordJournal journal = journal(sessionId);
@@ -1909,7 +1909,7 @@ class ManagedExtensionRecordStoreTest {
 
     @Test
     void materializesMcpWithoutTasksAndRequiresItsResourceClosure() throws Exception {
-        String sessionId = agents.createSession(TENANT, "mcp-" + UUID.randomUUID(),
+        String sessionId = agents.createSession(TENANT, "owner", "mcp-" + UUID.randomUUID(),
                 "qwen-code", null, "mcp", Map.of(), List.of()).sessionId();
         ExtensionRecordJournal journal = journal(sessionId);
         JsonNode fixtures = ManagedMcpRecordContractTest.fixtures();
@@ -1962,7 +1962,7 @@ class ManagedExtensionRecordStoreTest {
 
     @Test
     void materializesHookChainsAndAtomicallyConsumesOnceIntentsWithoutTasks() throws Exception {
-        String sessionId = agents.createSession(TENANT, "hook-" + UUID.randomUUID(),
+        String sessionId = agents.createSession(TENANT, "owner", "hook-" + UUID.randomUUID(),
                 "qwen-code", null, "hook", Map.of(), List.of()).sessionId();
         ExtensionRecordJournal journal = journal(sessionId);
         JsonNode fixtures = ManagedHookRecordContractTest.fixtures();

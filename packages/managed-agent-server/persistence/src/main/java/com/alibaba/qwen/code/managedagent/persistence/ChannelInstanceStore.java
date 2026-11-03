@@ -258,7 +258,7 @@ public class ChannelInstanceStore
         // The ordering index can scan all completed deliveries before finding a due row.
         return jdbc.query("SELECT session_id, record_id, revision,"
                         + " delivery_state, record_resource_id"
-                        + " FROM ma_session_record USE INDEX (ix_ma_record_session_delivery)"
+                        + " FROM ma_session_record USE INDEX (idx_ma_record_session_delivery)"
                         + " WHERE record_kind = 'DOMAIN' AND session_scope_key = ?"
                         + " AND domain = 'channel_delivery'"
                         + " AND delivery_state IN ('planned', 'partial')"
@@ -286,6 +286,9 @@ public class ChannelInstanceStore
 
     public ChannelClaim claim(String tenantId, String channelId,
             String deliveryId, String sessionId) {
+        if (sessionId == null) {
+            throw new IllegalArgumentException("Channel claim requires a source Session");
+        }
         long now = databaseNow();
         jdbc.update("UPDATE ma_delivery SET source_session_id = ?, claimed_at = ?,"
                         + " claim_generation = claim_generation + 1, gmt_modified = ?"
@@ -308,7 +311,8 @@ public class ChannelInstanceStore
         long now = databaseNow();
         jdbc.update("UPDATE ma_delivery SET claimed_at = ?, claim_generation = claim_generation + 1,"
                         + " reconcile_operation_id = NULL, gmt_modified = ? WHERE delivery_key = ? AND delivery_kind = 'CHANNEL'"
-                        + " AND tenant_id = ? AND channel_id = ? AND delivery_id = ? AND claimed_at IS NOT NULL",
+                        + " AND tenant_id = ? AND channel_id = ? AND delivery_id = ? AND claimed_at IS NOT NULL"
+                        + " AND source_session_id IS NOT NULL",
                 now, now, JdbcChannelDeliveryRepository.deliveryKey(tenantId, channelId, deliveryId),
                 tenantId, channelId, deliveryId);
         return findClaim(tenantId, channelId, deliveryId).orElseThrow();
@@ -318,7 +322,8 @@ public class ChannelInstanceStore
             String deliveryId) {
         return jdbc.query("SELECT tenant_id, channel_id, delivery_id, source_session_id AS session_id, claimed_at, claim_generation"
                         + " FROM ma_delivery WHERE delivery_key = ? AND delivery_kind = 'CHANNEL'"
-                        + " AND tenant_id = ? AND channel_id = ? AND delivery_id = ? AND claimed_at IS NOT NULL",
+                        + " AND tenant_id = ? AND channel_id = ? AND delivery_id = ? AND claimed_at IS NOT NULL"
+                        + " AND source_session_id IS NOT NULL",
                 CLAIM, JdbcChannelDeliveryRepository.deliveryKey(tenantId, channelId, deliveryId),
                 tenantId, channelId, deliveryId).stream().findFirst();
     }

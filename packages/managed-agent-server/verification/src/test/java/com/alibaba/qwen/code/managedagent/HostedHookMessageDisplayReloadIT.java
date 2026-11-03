@@ -499,7 +499,7 @@ class HostedHookMessageDisplayReloadIT {
                     + destination.toAbsolutePath());
             json.writeValue(destination.resolve("events.json").toFile(),
                     jdbc.queryForList("SELECT session_id, turn_id,"
-                            + " event_type, terminal FROM ma_public_event"
+                            + " event_type, is_terminal FROM ma_public_event"
                             + " WHERE tenant_id = ? ORDER BY sequence_id",
                             tenant));
             json.writeValue(destination.resolve("model-requests.json")

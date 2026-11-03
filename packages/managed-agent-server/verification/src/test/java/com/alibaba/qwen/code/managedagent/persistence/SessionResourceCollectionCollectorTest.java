@@ -84,7 +84,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         assertThat(collector.runOnce()).isTrue();
         assertThat(rows()).singleElement().satisfies(row -> assertThat(row.get("inline_bytes")).isNull());
         assertThat(((Number) ledger().get("collected_bytes")).longValue()).isEqualTo(bytes.length);
-        assertThat(jdbc.queryForObject("SELECT resource_gc_completed FROM ma_session WHERE"
+        assertThat(jdbc.queryForObject("SELECT is_resource_gc_completed FROM ma_session WHERE"
                 + " tenant_id = ? AND session_id = ?", Boolean.class, tenant, session)).isTrue();
     }
 
@@ -101,7 +101,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         assertThatThrownBy(collector::runOnce).isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("journal collection is incomplete");
         assertThat(jdbc.queryForObject(
-                                "SELECT resource_gc_completed FROM ma_session WHERE tenant_id = ?"
+                                "SELECT is_resource_gc_completed FROM ma_session WHERE tenant_id = ?"
                                         + " AND session_id = ?",
                 Boolean.class, tenant, session)).isFalse();
         assertThat(jdbc.queryForObject(
@@ -118,7 +118,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
                 tenant, session);
         assertThat(collector.runOnce()).isTrue();
         assertThat(jdbc.queryForObject(
-                                "SELECT resource_gc_completed FROM ma_session WHERE tenant_id = ?"
+                                "SELECT is_resource_gc_completed FROM ma_session WHERE tenant_id = ?"
                                         + " AND session_id = ?",
                 Boolean.class, tenant, session)).isTrue();
         assertThat(jdbc.queryForObject(
@@ -287,12 +287,12 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         head(session);
         publish("segment", CONTENT, new byte[64]);
         retire();
-        jdbc.update("UPDATE ma_session SET recovery_protected = TRUE"
+        jdbc.update("UPDATE ma_session SET is_recovery_protected = TRUE"
                 + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
         var collector = collector(true, Duration.ZERO);
         assertThat(collector.runOnce()).isFalse();
         var ledger = ledger();
-        assertThat(ledger.get("gc_blocker")).isEqualTo("recovery_protected");
+        assertThat(ledger.get("gc_blocker")).isEqualTo("is_recovery_protected");
         long now = System.currentTimeMillis();
         assertThat(((Number) ledger.get("gc_next_at")).longValue())
                 .isBetween(now + Duration.ofHours(24).toMillis() - 10_000, now + Duration.ofHours(24).toMillis() + 60_000);
@@ -1442,7 +1442,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
             ageMediaRetirement();
             assertThat(collector(true, Duration.ZERO).runOnce()).isFalse();
             assertThat(ledger().get("gc_blocker"))
-                    .isEqualTo(reader ? "reader_active" : "recovery_protected");
+                    .isEqualTo(reader ? "reader_active" : "is_recovery_protected");
             assertThat(rows()).allSatisfy(row -> assertThat(row.get("inline_bytes")).isNotNull());
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE"
                     + " session_scope_key = ?", Long.class, resScope)).isEqualTo(expectedRefs);

@@ -75,12 +75,16 @@ class ManagedSessionOwnerTest {
                 + " = creator_actor_key AND creator_actor_key IS NOT NULL",
                 Integer.class)).isEqualTo(2);
 
-        store.insertSessionCommand("tenant", "CREATE_SESSION", "anonymous",
-                "digest-anonymous", "qwen-code", null, null, List.of(),
-                null);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> store.insertSessionCommand("tenant",
+                "CREATE_SESSION", "anonymous", "digest-anonymous", "qwen-code", null, null, List.of(), null))
+                .isInstanceOfSatisfying(com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class,
+                        error -> {
+                            assertThat(error.getStatus()).isEqualTo(401);
+                            assertThat(error.getCode()).isEqualTo("actor_required");
+                        });
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                 + " ma_session WHERE owner_actor_key IS NULL"
                 + " AND creator_actor_key IS NULL", Integer.class))
-                .isEqualTo(1);
+                .isZero();
     }
 }

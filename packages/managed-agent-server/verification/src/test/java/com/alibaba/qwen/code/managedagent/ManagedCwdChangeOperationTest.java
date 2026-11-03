@@ -314,10 +314,7 @@ class ManagedCwdChangeOperationTest {
                 .workspace().getCwdRelative()).isEqualTo(kept);
     }
 
-    // An out-of-enum stored role — reachable only by an out-of-band write
-    // past V53's CHECK — settles the change fail-closed under the
-    // vocabulary filter, instead of a valueOf IllegalArgumentException the
-    // recovery would keep retrying.
+    // 模拟绕过应用入口的外部坏写入，恢复逻辑必须安全拒绝，不能无限重试。
     @Test
     void settlementFailsClosedWhenTheInitiatorsStoredRoleIsOutOfEnum() {
         Fixture fixture = fixture(true);
@@ -330,8 +327,6 @@ class ManagedCwdChangeOperationTest {
                 admitted.operation().operationId(), "owner");
         String kept = fixture.store.requireSession(TENANT, sessionId)
                 .workspace().getCwdRelative();
-        fixture.jdbc.update("ALTER TABLE ma_workspace_access"
-                + " DROP CONSTRAINT ck_ma_access_role");
         fixture.jdbc.update("UPDATE ma_workspace_access SET role ="
                         + " 'BROKEN' WHERE tenant_id = ? AND"
                         + " workspace_id = ? AND actor_id = ?", TENANT, WS,
@@ -373,7 +368,7 @@ class ManagedCwdChangeOperationTest {
         assertThat(settled.completed()).isTrue();
         assertThat(settled.resultContextRevision()).isEqualTo(2);
 
-        String legacyId = fixture.store.insertSessionCommand(TENANT,
+        String legacyId = fixture.store.insertSessionCommand(TENANT, ACTOR,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null,
                 null, List.of(), null).sessionId();
         String closeId = fixture.store.beginOperation(TENANT, legacyId,
@@ -532,7 +527,7 @@ class ManagedCwdChangeOperationTest {
                 "services/b", 1).operation().operationId();
         assertThatThrownBy(() -> fixture.store.insertTurnCommand(TENANT,
                 "SUBMIT", "turn", "digest", sessionId, List.of(),
-                "payload"))
+                "payload", ACTOR))
                 .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertRefusal(error, HttpStatus.CONFLICT,
                                 "session_context_busy"));
@@ -541,7 +536,7 @@ class ManagedCwdChangeOperationTest {
         // in-flight settlement.
         fixture.insertTurn(sessionId, "turn-completed", "COMPLETED");
         assertThat(fixture.store.insertCancelCommand(TENANT, "CANCEL",
-                "cancel-key", "digest", sessionId, "turn-completed"))
+                "cancel-key", "digest", sessionId, "turn-completed", ACTOR))
                 .isNotNull();
 
         OperationRecord claimed = claim(fixture, sessionId, operationId,
@@ -550,7 +545,7 @@ class ManagedCwdChangeOperationTest {
                 sessionId, operationId, "owner",
                 claimed.claimGeneration()).completed()).isTrue();
         var admitted = fixture.store.insertTurnCommand(TENANT, "SUBMIT",
-                "turn", "digest", sessionId, List.of(), "payload");
+                "turn", "digest", sessionId, List.of(), "payload", ACTOR);
         assertThat(admitted.turnId()).isNotBlank();
     }
 
@@ -562,16 +557,16 @@ class ManagedCwdChangeOperationTest {
         Fixture fixture = fixture(true);
         String sessionId = fixture.createBoundSession(TENANT, WS);
         fixture.store.beginSessionMutation(TENANT, "rename", "rename-key",
-                "rename-digest", sessionId, SessionMutationKind.RENAME);
+                "rename-digest", sessionId, SessionMutationKind.RENAME, ACTOR);
         var afterMutation = fixture.store.insertTurnCommand(TENANT,
                 "SUBMIT", "turn-mutation", "digest", sessionId, List.of(),
-                "payload");
+                "payload", ACTOR);
         assertThat(afterMutation.turnId()).isNotBlank();
 
         String secondId = fixture.createBoundSession(TENANT, WS);
         fixture.insertOperation(secondId, "action-op", "ACTION_RESPONSE", "RUNNING", "PENDING", null);
         var afterAction = fixture.store.insertTurnCommand(TENANT, "SUBMIT",
-                "turn-action", "digest", secondId, List.of(), "payload");
+                "turn-action", "digest", secondId, List.of(), "payload", ACTOR);
         assertThat(afterAction.turnId()).isNotBlank();
 
         // H4f: a task cancel stops one task and changes no Session context,
@@ -580,7 +575,7 @@ class ManagedCwdChangeOperationTest {
         fixture.insertOperation(thirdId, "task-cancel-op", "TASK_CANCEL", "RUNNING", "LEASED", "task_" + "a".repeat(64));
         var afterTaskCancel = fixture.store.insertTurnCommand(TENANT,
                 "SUBMIT", "turn-task-cancel", "digest", thirdId, List.of(),
-                "payload");
+                "payload", ACTOR);
         assertThat(afterTaskCancel.turnId()).isNotBlank();
     }
 
@@ -590,22 +585,22 @@ class ManagedCwdChangeOperationTest {
     @Test
     void theTurnBarrierLeavesTheLegacyRouteUntouched() {
         Fixture fixture = fixture(true);
-        String legacyId = fixture.store.insertSessionCommand(TENANT,
+        String legacyId = fixture.store.insertSessionCommand(TENANT, ACTOR,
                 "CREATE_SESSION", "create", "digest", "qwen-code", null,
                 null, List.of(), null).sessionId();
         fixture.insertOperation(legacyId, "action-op", "ACTION_RESPONSE", "RUNNING", "PENDING", null);
         var admitted = fixture.store.insertTurnCommand(TENANT, "SUBMIT",
-                "turn", "digest", legacyId, List.of(), "payload");
+                "turn", "digest", legacyId, List.of(), "payload", ACTOR);
         assertThat(admitted.turnId()).isNotBlank();
 
         // The workspace==null gate is load-bearing: with a non-action
         // open operation on the unbound Session, a Turn is still admitted.
-        String olderId = fixture.store.insertSessionCommand(TENANT,
+        String olderId = fixture.store.insertSessionCommand(TENANT, ACTOR,
                 "CREATE_SESSION", "create-2", "digest-2", "qwen-code",
                 null, null, List.of(), null).sessionId();
         fixture.insertOperation(olderId, "close-op", "CLOSE", "PENDING", "PENDING", null);
         var second = fixture.store.insertTurnCommand(TENANT, "SUBMIT",
-                "turn-2", "digest-2", olderId, List.of(), "payload-2");
+                "turn-2", "digest-2", olderId, List.of(), "payload-2", ACTOR);
         assertThat(second.turnId()).isNotBlank();
     }
 
@@ -646,7 +641,7 @@ class ManagedCwdChangeOperationTest {
                 .isEqualTo("context_revision_conflict");
         assertFailed(fixture, turnId, otherOp, "context_revision_conflict");
         var admitted = fixture.store.insertTurnCommand(TENANT, "SUBMIT",
-                "turn", "digest", turnId, List.of(), "payload");
+                "turn", "digest", turnId, List.of(), "payload", ACTOR);
         assertThat(admitted.turnId()).isNotBlank();
     }
 
@@ -955,7 +950,7 @@ class ManagedCwdChangeOperationTest {
         assertThat(settle(fixture, sessionId, retry, "owner",
                 reClaimed.claimGeneration()).completed()).isTrue();
         var admitted = fixture.store.insertTurnCommand(TENANT, "SUBMIT",
-                "turn-after", "digest", sessionId, List.of(), "payload");
+                "turn-after", "digest", sessionId, List.of(), "payload", ACTOR);
         assertThat(admitted.turnId()).isNotBlank();
     }
 

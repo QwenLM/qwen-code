@@ -332,9 +332,9 @@ class ManagedEventReplayTest {
     private static void open(ManagedEventStreamService streams,
             boolean webShell, String tenant, String sessionId) {
         if (webShell) {
-            streams.webShellStream(tenant, null, sessionId, RESUME_AFTER);
+            streams.webShellStream(tenant,"owner", sessionId, RESUME_AFTER);
         } else {
-            streams.publicStream(tenant, null, sessionId, RESUME_AFTER);
+            streams.publicStream(tenant,"owner", sessionId, RESUME_AFTER);
         }
     }
 
@@ -348,7 +348,7 @@ class ManagedEventReplayTest {
     }
 
     private String session(String tenant) {
-        return store.insertSessionCommand(tenant, "CREATE_SESSION",
+        return store.insertSessionCommand(tenant, "owner", "CREATE_SESSION",
                 "replay-" + UUID.randomUUID(), "digest", "qwen-code", null,
                 null, List.of(), "payload").sessionId();
     }

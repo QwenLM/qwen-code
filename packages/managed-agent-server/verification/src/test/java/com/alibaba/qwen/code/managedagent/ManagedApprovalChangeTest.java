@@ -484,10 +484,10 @@ class ManagedApprovalChangeTest {
         var created = transaction().execute(status -> service.createWorkspaceSession(tenant, "actor", "legacy-create",
                 definition.agentId(), null, null, null, input, new WorkspaceSelection("ws", ".")));
         session = created.sessionId();
-        jdbc.update("UPDATE ma_turn SET status='COMPLETED',approval_mode=NULL,approval_revision=NULL,plan_enabled=NULL WHERE tenant_id=? AND session_id=?",
+        jdbc.update("UPDATE ma_turn SET status='COMPLETED',approval_mode=NULL,approval_revision=NULL,is_plan_enabled=NULL WHERE tenant_id=? AND session_id=?",
                 tenant, session);
         var submitted = transaction().execute(status -> service.submitTurn(tenant, "actor", "legacy-submit", session, input));
-        jdbc.update("UPDATE ma_turn SET status='COMPLETED',approval_mode=NULL,approval_revision=NULL,plan_enabled=NULL WHERE tenant_id=? AND session_id=?",
+        jdbc.update("UPDATE ma_turn SET status='COMPLETED',approval_mode=NULL,approval_revision=NULL,is_plan_enabled=NULL WHERE tenant_id=? AND session_id=?",
                 tenant, session);
         change("actor", "new-policy", "yolo", 0);
         assertThat(transaction().execute(status -> service.createWorkspaceSession(tenant, "actor", "legacy-create",
@@ -509,7 +509,7 @@ class ManagedApprovalChangeTest {
         var admitted = transaction().execute(status -> store.insertTurnCommand(tenant, "SUBMIT_TURN", "legacy", "legacy-digest",
                 session, input, SubmitHarnessTurn.computePayloadDigest(input)));
         var turn = store.findTurn(tenant, session, admitted.turnId()).orElseThrow();
-        jdbc.update("UPDATE ma_turn SET approval_mode=NULL, approval_revision=NULL, plan_enabled=NULL, status='COMPLETED'"
+        jdbc.update("UPDATE ma_turn SET approval_mode=NULL, approval_revision=NULL, is_plan_enabled=NULL, status='COMPLETED'"
                 + " WHERE tenant_id=? AND turn_id=?", tenant, admitted.turnId());
         assertThat(store.findTurnApprovalSelection(tenant, session, turn.promptId()))
                 .isNull();

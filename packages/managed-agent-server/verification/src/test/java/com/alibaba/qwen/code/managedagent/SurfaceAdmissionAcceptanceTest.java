@@ -1421,7 +1421,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 + " schedule_id, session_id, workspace_id, actor_id,"
                 + " record_revision, definition_revision, definition_digest,"
                 + " goal, cron, timezone, session_mode, overlap, catch_up,"
-                + " catch_up_limit, enabled, state, blocked_reason, armed_at,"
+                + " catch_up_limit, is_enabled, state, blocked_reason, armed_at,"
                 + " watermark_slot, lease_owner, lease_until, fence,"
                 + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'ws', ?, 1, 1, ?,"
                 + " 'probe', '0 2 * * *', 'UTC', 'persistent', 'skip', 'none',"
@@ -1812,7 +1812,7 @@ public class SurfaceAdmissionAcceptanceTest {
         if (actor != null) {
             create.principal(actor(tenant, actor));
         }
-        return JSON.readTree(mvc.perform(create)
+        return JSON.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(create, OWNER))
                 .andExpect(status().isAccepted()).andReturn().getResponse()
                 .getContentAsString()).path("id").asText();
     }

@@ -34,7 +34,9 @@ import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiActivationAdmission;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiFilesRetirementGuard;
@@ -129,8 +131,9 @@ public class ManagedSessionStore
     private final ManagedActionStore actions;
     private final ToolPublicationRetentionStore outputRetention;
     private final org.springframework.transaction.support.TransactionTemplate ownerReads;
-    private final RowMapper<HeadRow> headMapper = (result, row) ->
-            new HeadRow(result.getString("tenant_id"),
+    private final RowMapper<HeadRow> headMapper = (result, row) -> {
+        ManagedSchemaIntegrity.validate("ma_session_head", ManagedSchemaRows.read(result));
+        return new HeadRow(result.getString("tenant_id"),
                     result.getString("workspace_id"),
                     result.getString("session_id"),
                     result.getString("state"),
@@ -152,6 +155,7 @@ public class ManagedSessionStore
                     result.getObject("activation_event_epoch", Long.class),
                     result.getObject("activation_expires_at", Long.class),
                     result.getObject("activation_head_revision", Long.class));
+    };
     private final RowMapper<TransactionRow> transactionMapper =
             (result, row) -> transactionRow(result);
     private final RowMapper<ResourceRow> resourceMapper =
@@ -872,6 +876,7 @@ public class ManagedSessionStore
             long until = row.lease().expiresAt();
             if (activation.renewalSeq() != row.lease().renewalSeq()) {
                 until = Math.max(until, plusMillis(now, activation.leaseDurationMs()).getTime());
+                validateCounter(until, "activationLeaseUntil", 0);
                 requireCsiLease(continuation, row.lease().expiresAt(), until);
                 jdbc.update("UPDATE ma_session_journal_tx SET activation_lease_until = ?, activation_renewal_seq = ?"
                                 + " WHERE tenant_id = ? AND session_id = ? AND journal_revision = ?",
@@ -1425,7 +1430,7 @@ public class ManagedSessionStore
                 continuation, head, request.writerId(), request.writerGeneration(), writerToken);
         jdbc.update("UPDATE ma_session_head SET"
                         + " journal_revision = ?, committed_sequence = ?,"
-                        + " wake_pending = wake_pending OR ?,"
+                        + " is_wake_pending = is_wake_pending OR ?,"
                         + " wake_head_revision = CASE WHEN wake_head_revision = ? THEN ? ELSE wake_head_revision END,"
                         + " cleanup_head_revision = CASE WHEN cleanup_head_revision = ? THEN ? ELSE cleanup_head_revision END,"
                         + " last_commit_digest = ?, activation_epoch = ?,"
@@ -1990,8 +1995,8 @@ public class ManagedSessionStore
         validateStableId(resourceId, "resourceId");
         var guarded =
                 jdbc.queryForList(
-                        "SELECT csi_guard FROM ma_session"
-                                + " WHERE tenant_id = ? AND session_id = ? AND csi_guard = TRUE",
+                        "SELECT is_csi_guard FROM ma_session"
+                                + " WHERE tenant_id = ? AND session_id = ? AND is_csi_guard = TRUE",
                         tenantId,
                         sessionId);
         if (guarded.isEmpty()) {
@@ -3178,9 +3183,9 @@ public class ManagedSessionStore
                                     .isConnectionTransactional(target, jdbc.getDataSource())) {
                                 var privatePins =
                                         jdbc.query(
-                                                "SELECT csi_guard FROM ma_session WHERE tenant_id ="
-                                                    + " ? AND session_id = ? AND csi_guard = TRUE",
-                                                (row, index) -> row.getBoolean("csi_guard"),
+                                                "SELECT is_csi_guard FROM ma_session WHERE tenant_id ="
+                                                    + " ? AND session_id = ? AND is_csi_guard = TRUE",
+                                                (row, index) -> row.getBoolean("is_csi_guard"),
                                                 tenantId,
                                                 sessionId);
                                 if (!privatePins.isEmpty()) {
@@ -3597,7 +3602,7 @@ public class ManagedSessionStore
                                 + " p.publication_id WHERE p.tenant_id = ? AND p.workspace_id = ?"
                                 + " AND p.session_id = ? AND p.admission_resource_id = ? AND"
                                 + " p.producer_phase IN ('FINISHED', 'REFERENCED') AND"
-                                + " p.quarantined = FALSE AND o.slot_key = X'61646d697373696f6e'"
+                                + " p.is_quarantined = FALSE AND o.slot_key = X'61646d697373696f6e'"
                                 + " AND o.capture_state = 'VERIFIED' AND o.resource_id = ? AND"
                                 + " o.capture_object_key = ? AND o.sha256 = ? AND o.byte_length ="
                                 + " ?",
@@ -3636,7 +3641,7 @@ public class ManagedSessionStore
         if ("managed-tool-outcome".equals(resource.kind())) {
             Long quarantined = jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture"
                             + " WHERE tenant_id = ? AND workspace_id = ? AND session_id = ?"
-                            + " AND admission_resource_id = ? AND quarantined = TRUE",
+                            + " AND admission_resource_id = ? AND is_quarantined = TRUE",
                     Long.class, resource.tenantId(), resource.workspaceId(),
                     resource.sessionId(), resource.resourceId());
             if (quarantined != null && quarantined > 0) {

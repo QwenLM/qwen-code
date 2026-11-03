@@ -52,6 +52,20 @@ public final class ManagedSchema {
         ManagedSchemaCatalog.validate(Objects.requireNonNull(connection, "connection"), ddl());
     }
 
+    /** 仅校验显式共享库中的 Managed 命名空间，不创建或修改任何表。 */
+    public static void validateSharedCatalog(DataSource source) {
+        Objects.requireNonNull(source, "source");
+        try (Connection connection = source.getConnection()) {
+            ManagedSchemaCatalog.validateSharedCatalog(connection, ddl());
+        } catch (SQLException exception) {
+            throw new IllegalStateException("Managed shared-catalog schema validation failed", exception);
+        }
+    }
+
+    public static void validateSharedCatalog(Connection connection) throws SQLException {
+        ManagedSchemaCatalog.validateSharedCatalog(Objects.requireNonNull(connection, "connection"), ddl());
+    }
+
     public static String ddl() {
         return read(RESOURCE);
     }

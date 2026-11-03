@@ -7,6 +7,35 @@ import java.nio.file.Path;
 public final class VerificationFixtures {
     private VerificationFixtures() { }
 
+    public static org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder authenticated(
+            org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder builder,
+            String actor) {
+        return builder.with(request -> {
+            if (request.getUserPrincipal() == null) {
+                String tenant = request.getHeader(com.alibaba.qwen.code.managedagent.api.TenantContextFilter.HEADER);
+                if (tenant != null && actor != null) {
+                    request.setUserPrincipal(new com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor() {
+                        @Override
+                        public String tenantId() {
+                            return tenant;
+                        }
+
+                        @Override
+                        public String actorId() {
+                            return actor;
+                        }
+
+                        @Override
+                        public String getName() {
+                            return actor;
+                        }
+                    });
+                }
+            }
+            return request;
+        });
+    }
+
     public static Path moduleRoot() {
         return Path.of(System.getProperty("managed.module.root", "..")).toAbsolutePath().normalize();
     }

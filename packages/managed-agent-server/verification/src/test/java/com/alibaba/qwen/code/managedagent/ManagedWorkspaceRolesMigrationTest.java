@@ -45,32 +45,18 @@ class ManagedWorkspaceRolesMigrationTest {
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES ('tenant', 'workspace', ?, 'READER')", READER);
         assertThat(new ManagedWorkspaceRegistry(jdbc).accessOf("tenant", "operator", "workspace").canCreate()).isTrue();
         assertThat(new ManagedWorkspaceRegistry(jdbc).accessOf("tenant", "reader", "workspace").canCreate()).isFalse();
-        assertThatThrownBy(() -> jdbc.update("INSERT INTO"
-                + " ma_workspace_access (tenant_id, workspace_id,"
-                + " actor_id, role) VALUES ('tenant', 'workspace', ?,"
-                + " 'NONE')", "none-actor".getBytes(StandardCharsets.UTF_8)))
-                .isInstanceOf(DataIntegrityViolationException.class);
-        assertThatThrownBy(() -> jdbc.update("INSERT INTO"
-                + " ma_workspace_access (tenant_id, workspace_id,"
-                + " actor_id, role) VALUES ('tenant', 'workspace', ?,"
-                + " 'SPECTATOR')",
-                "spectator-actor".getBytes(StandardCharsets.UTF_8)))
-                .isInstanceOf(DataIntegrityViolationException.class);
+        for (String invalidRole : new String[] {"NONE", "SPECTATOR", "READER "}) {
+            assertThatThrownBy(() -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.validate(
+                    "ma_workspace_access", com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.row(
+                            "role", invalidRole)))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
         // role carries no default: an INSERT omitting it must fail loudly,
         // as omitting a boolean did under the old NOT NULL columns.
         assertThatThrownBy(() -> jdbc.update("INSERT INTO"
                 + " ma_workspace_access (tenant_id, workspace_id,"
                 + " actor_id) VALUES ('tenant', 'workspace', ?)",
                 "default-actor".getBytes(StandardCharsets.UTF_8)))
-                .isInstanceOf(DataIntegrityViolationException.class);
-        // PAD SPACE comparisons accept a padded value into an IN-list
-        // CHECK; the length-guarded CHECK stores only byte-exact enum
-        // names.
-        assertThatThrownBy(() -> jdbc.update("INSERT INTO"
-                + " ma_workspace_access (tenant_id, workspace_id,"
-                + " actor_id, role) VALUES ('tenant', 'workspace', ?,"
-                + " 'READER ')",
-                "padded-actor".getBytes(StandardCharsets.UTF_8)))
                 .isInstanceOf(DataIntegrityViolationException.class);
 
         // A creation written after V53 keeps owner = creator on the store

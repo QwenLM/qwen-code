@@ -211,7 +211,7 @@ class ToolPublicationLifecycleMySqlIT {
                                     (prepared, call, values) -> {
                                         boolean execute = enabled && call.getName().startsWith("execute");
                                         String role = Thread.currentThread().getName();
-                                        if (execute && "receipt".equals(role) && sql.startsWith("INSERT INTO ma_tenant_guard") && sql.contains("'runtime_placement'")) {
+                                        if (execute && "receipt".equals(role) && sql.startsWith("SELECT tenant_id FROM ma_tenant_guard WHERE id = ?") && sql.contains("'runtime_placement'")) {
                                             receiptPlacement.countDown();
                                         }
                                         try {

@@ -288,7 +288,7 @@ class ManagedAgentWorkspaceReplayTest {
         String tenant = "tenant-" + UUID.randomUUID();
         ManagedAgentService service = service(new AtomicBoolean(true));
         String sessionId = transaction.execute(status -> store
-                .insertSessionCommand(tenant, "CREATE_SESSION", "create",
+                .insertSessionCommand(tenant, "owner", "CREATE_SESSION", "create",
                         "create-digest", "qwen-code", null, null, List.of(),
                         null)
                 .sessionId());
@@ -331,7 +331,7 @@ class ManagedAgentWorkspaceReplayTest {
         List<InputBlock> input = List.of(new InputBlock("text", "go"));
         String bound = boundSession(tenant);
         String legacy = transaction.execute(status -> store
-                .insertSessionCommand(tenant, "CREATE_SESSION",
+                .insertSessionCommand(tenant, "owner", "CREATE_SESSION",
                         "create-legacy", "create-legacy-digest", "qwen-code",
                         null, null, List.of(), null)
                 .sessionId());

@@ -45,7 +45,7 @@ class ManagedSchemaConfigurationTest {
         assertThat(sessionListColumns(source)).containsExactly("tenant_id", "gmt_create", "session_id");
         assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session"))
                 .isEqualTo(session)
-                .containsEntry("csi_guard", false)
+                .containsEntry("is_csi_guard", false)
                 .containsEntry("runtime_request_key", null)
                 .containsEntry("model_id", null)
                 .containsEntry("model_revision", 0L)
@@ -85,7 +85,6 @@ class ManagedSchemaConfigurationTest {
         var source = source();
         ManagedSchema.initialize(source);
         var jdbc = new ManagedSchemaJdbcTemplate(source);
-        jdbc.execute("ALTER TABLE ma_session DROP CONSTRAINT ck_ma_public_child_agents");
         jdbc.execute("ALTER TABLE ma_session DROP COLUMN public_child_agents_version");
         var flyway = mock(Flyway.class);
         assertThatThrownBy(() -> new ManagedSchemaConfiguration().freshManagedSchema(source).migrate(flyway))
@@ -103,7 +102,7 @@ class ManagedSchemaConfigurationTest {
                                 .getIndexInfo(null, null, "ma_session", false, false)) {
             var columns = new ArrayList<String>();
             while (rows.next()) {
-                if ("ix_ma_session_list".equalsIgnoreCase(rows.getString("INDEX_NAME"))) {
+                if ("idx_ma_session_list".equalsIgnoreCase(rows.getString("INDEX_NAME"))) {
                     columns.add(rows.getString("COLUMN_NAME").toLowerCase(java.util.Locale.ROOT));
                 }
             }

@@ -121,10 +121,10 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
         resource("outcome", "managed-tool-outcome", outcome);
         resource("manifest", "managed-tool-result-manifest", manifest);
         String publicationScope = ToolPublicationDataStore.scope(key);
-        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id, publication_id,"
+        jdbc.update("INSERT INTO ma_output_capture (gmt_create, gmt_modified, scope_key, tenant_key, tenant_id, workspace_id, session_id, publication_id,"
                         + " execution_key, capture_id, binding_json, binding_digest, token_hash, state, capture_bytes, producer_bytes,"
                         + " admission_bytes, producer_phase, terminal_resource_id, admission_resource_id, receipt_sequence, receipt_revision)"
-                        + " VALUES (?, ?, 'tenant', 'workspace', 'harness', 'pub', ?, 'capture', ?, ?, ?, 'FENCED', 0, 0, 0,"
+                        + " VALUES (" + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ", ?, ?, 'tenant', 'workspace', 'harness', 'pub', ?, 'capture', ?, ?, ?, 'FENCED', 0, 0, 0,"
                         + " 'REFERENCED', 'terminal', 'outcome', 1, 1)",
                 publicationScope, "a".repeat(64), hash("execution".getBytes(StandardCharsets.UTF_8)), binding.toString(),
                 ToolPublicationContract.bindingDigest(binding), "b".repeat(64));
@@ -182,7 +182,7 @@ class WorkspaceCsiCheckpointSnapshotStoreTest {
         "UPDATE ma_tool_execution SET reference_json = REPLACE(reference_json, 'payloadDigest', 'wrongDigest')",
         "UPDATE ma_tool_execution SET reference_json = '{}'",
         "UPDATE ma_runtime_session SET binding_id = 'different'",
-        "UPDATE ma_output_capture SET quarantined = TRUE",
+        "UPDATE ma_output_capture SET is_quarantined = TRUE",
         "UPDATE ma_output_capture SET producer_phase = 'FINISHED'",
         "UPDATE ma_output_capture SET binding_digest = 'bad'",
         "UPDATE ma_output_capture SET receipt_revision = 2",

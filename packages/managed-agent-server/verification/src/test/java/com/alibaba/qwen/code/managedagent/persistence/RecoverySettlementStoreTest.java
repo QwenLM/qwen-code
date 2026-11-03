@@ -56,11 +56,11 @@ class RecoverySettlementStoreTest {
         transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
         store = newStore();
         transactions.executeWithoutResult(status -> {
-            Admission session = store.insertSessionCommand(TENANT, "CREATE_SESSION", "create-key",
+            Admission session = store.insertSessionCommand(TENANT, "owner", "CREATE_SESSION", "create-key",
                     "create-digest", "qwen-code", "1", null, List.of(), null);
             sessionId = session.sessionId();
             turnId = store.insertTurnCommand(TENANT, "SUBMIT_TURN", "submit-key", "submit-digest",
-                    sessionId, List.of(Map.of("type", "text", "text", "task")), "payload").turnId();
+                    sessionId, List.of(Map.of("type", "text", "text", "task")), "payload", "owner").turnId();
             assertThat(store.claimTurn(TENANT, sessionId, turnId, OWNER, Duration.ofMinutes(1)))
                     .isPresent();
             store.markSubmissionAttempted(TENANT, sessionId, turnId, OWNER);
@@ -188,7 +188,7 @@ class RecoverySettlementStoreTest {
 
     protected void cancel() {
         transactions.executeWithoutResult(status -> assertThat(store.insertCancelCommand(TENANT,
-                "CANCEL_TURN", "cancel-key", "cancel-digest", sessionId, turnId).commandEffect()).isTrue());
+                "CANCEL_TURN", "cancel-key", "cancel-digest", sessionId, turnId, "owner").commandEffect()).isTrue());
     }
 
     protected TurnRecord turn() {

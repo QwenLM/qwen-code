@@ -576,7 +576,7 @@ class ManagedSessionMessageStoreTest {
     }
 
     private String session() {
-        return agents.createSession(TENANT, "message-" + UUID.randomUUID(),
+        return agents.createSession(TENANT, "owner", "message-" + UUID.randomUUID(),
                 "qwen-code", null, "messages", Map.of(), List.of())
                 .sessionId();
     }

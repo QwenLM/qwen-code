@@ -566,10 +566,10 @@ class ToolPublicationLockOrderMySqlIT {
                                                     && "subject".equals(Thread.currentThread().getName())) {
                                                 if (sql.startsWith("INSERT INTO ma_session") && sql.contains("ON DUPLICATE KEY UPDATE")) {
                                                     requestedLocks.add("root");
-                                                } else if (sql.startsWith("INSERT INTO ma_tenant_guard") && sql.contains("'runtime_placement'")) {
+                                                } else if (sql.startsWith("SELECT tenant_id FROM ma_tenant_guard WHERE id = ?") && sql.contains("'runtime_placement'")) {
                                                     requestedLocks.add("placement");
                                                     subjectPlacementLocks.set(List.copyOf(requestedLocks));
-                                                } else if (sql.startsWith("INSERT INTO ma_tenant_guard") && sql.contains("'output_publication'")) {
+                                                } else if (sql.startsWith("SELECT tenant_id FROM ma_tenant_guard WHERE id = ?") && sql.contains("'output_publication'")) {
                                                     requestedLocks.add("retention");
                                                 }
                                             }

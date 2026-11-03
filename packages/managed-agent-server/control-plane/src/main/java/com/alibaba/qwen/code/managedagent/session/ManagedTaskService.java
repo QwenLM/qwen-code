@@ -49,8 +49,7 @@ public class ManagedTaskService {
 
     public PublicList<PublicTask> listPublicTasks(String tenantId,
             String actorId, String sessionId, String cursor, int limit) {
-        return listPublicTasks(actorId == null ? null
-                : SessionPrincipal.ofUser(tenantId, actorId), sessionId,
+        return listPublicTasks(legacyPrincipal(tenantId, actorId), sessionId,
                 cursor, limit);
     }
 
@@ -67,8 +66,7 @@ public class ManagedTaskService {
 
     public PublicTask getPublicTask(String tenantId, String actorId,
             String sessionId, String taskId) {
-        return getPublicTask(actorId == null ? null
-                : SessionPrincipal.ofUser(tenantId, actorId), sessionId,
+        return getPublicTask(legacyPrincipal(tenantId, actorId), sessionId,
                 taskId);
     }
 
@@ -81,8 +79,7 @@ public class ManagedTaskService {
 
     public WebShellTaskPage queryWebShellTasks(String tenantId,
             String actorId, String sessionId, String cursor, int limit) {
-        return queryWebShellTasks(actorId == null ? null
-                : SessionPrincipal.ofUser(tenantId, actorId), sessionId,
+        return queryWebShellTasks(legacyPrincipal(tenantId, actorId), sessionId,
                 cursor, limit);
     }
 
@@ -101,8 +98,7 @@ public class ManagedTaskService {
 
     public WebShellTask getWebShellTask(String tenantId, String actorId,
             String sessionId, String taskId) {
-        return getWebShellTask(actorId == null ? null
-                : SessionPrincipal.ofUser(tenantId, actorId), sessionId,
+        return getWebShellTask(legacyPrincipal(tenantId, actorId), sessionId,
                 taskId);
     }
 
@@ -116,8 +112,7 @@ public class ManagedTaskService {
     public PublicList<PublicTaskEvent> listPublicTaskEvents(String tenantId,
             String actorId, String sessionId, String taskId, String after,
             int limit) {
-        return listPublicTaskEvents(actorId == null ? null
-                : SessionPrincipal.ofUser(tenantId, actorId), sessionId,
+        return listPublicTaskEvents(legacyPrincipal(tenantId, actorId), sessionId,
                 taskId, after, limit);
     }
 
@@ -135,8 +130,7 @@ public class ManagedTaskService {
     public WebShellPage<WebShellTaskEvent> queryWebShellTaskEvents(
             String tenantId, String actorId, String sessionId, String taskId,
             String after, int limit) {
-        return queryWebShellTaskEvents(actorId == null ? null
-                : SessionPrincipal.ofUser(tenantId, actorId), sessionId,
+        return queryWebShellTaskEvents(legacyPrincipal(tenantId, actorId), sessionId,
                 taskId, after, limit);
     }
 
@@ -149,6 +143,14 @@ public class ManagedTaskService {
                 .map(event -> webShellEvent(principal.tenantId(), sessionId,
                         taskId, event))
                 .toList(), page.nextCursor(), page.page().hasMore());
+    }
+
+    private static SessionPrincipal legacyPrincipal(String tenantId, String actorId) {
+        // 旧空主体会以空租户查询 Session 并返回 404，保留该不可见语义。
+        if (actorId == null) {
+            throw new ManagedAgentException(404, "session_not_found", "The Session was not found.");
+        }
+        return SessionPrincipal.ofUser(tenantId, actorId);
     }
 
     /** A read result with whether its Session is active: a task's
