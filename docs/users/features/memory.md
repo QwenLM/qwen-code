@@ -301,7 +301,7 @@ A local CLI and MCP server that indexes the session transcripts coding agents (Q
 **Method 1: CLI command**
 
 ```bash
-qwen mcp add --timeout 8000 --include-tools context_search --   deja-context deja mcp --context-search
+qwen mcp add deja-context deja mcp --context-search --timeout 8000 --include-tools context_search
 ```
 
 **Method 2: `settings.json`**
