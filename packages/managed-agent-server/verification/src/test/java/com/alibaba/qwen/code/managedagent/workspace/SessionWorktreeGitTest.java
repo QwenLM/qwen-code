@@ -242,11 +242,22 @@ class SessionWorktreeGitTest {
             }
             descendants = checkout.descendants().toList();
         } finally {
-            checkout.destroyForcibly();
-            descendants.forEach(ProcessHandle::destroyForcibly);
-            assertThat(checkout.waitFor(5, TimeUnit.SECONDS)).isTrue();
-            for (ProcessHandle child : descendants) {
-                child.onExit().get(5, TimeUnit.SECONDS);
+            System.err.println("checkout-before-stop parent="
+                    + com.alibaba.qwen.code.managedagent.VerificationFixtures.processState(checkout.pid())
+                    + ",children=" + descendants.stream().map(child ->
+                            com.alibaba.qwen.code.managedagent.VerificationFixtures.processState(child.pid())).toList());
+            try {
+                checkout.destroyForcibly();
+                descendants.forEach(ProcessHandle::destroyForcibly);
+                assertThat(checkout.waitFor(5, TimeUnit.SECONDS)).isTrue();
+                for (ProcessHandle child : descendants) {
+                    child.onExit().get(5, TimeUnit.SECONDS);
+                }
+            } finally {
+                System.err.println("checkout-after-stop parent="
+                        + com.alibaba.qwen.code.managedagent.VerificationFixtures.processState(checkout.pid())
+                        + ",children=" + descendants.stream().map(child ->
+                                com.alibaba.qwen.code.managedagent.VerificationFixtures.processState(child.pid())).toList());
             }
         }
         long checkedOut;

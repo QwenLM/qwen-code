@@ -7,6 +7,31 @@ import java.nio.file.Path;
 public final class VerificationFixtures {
     private VerificationFixtures() { }
 
+    public static String processState(Path file) {
+        try {
+            return processState(Long.parseLong(java.nio.file.Files.readString(file).strip()));
+        } catch (RuntimeException | java.io.IOException failure) {
+            return "pid-file-unavailable=" + failure.getClass().getSimpleName();
+        }
+    }
+
+    public static String processState(long pid) {
+        var process = ProcessHandle.of(pid);
+        String state = "pid=" + pid + ",alive=" + process.map(ProcessHandle::isAlive).orElse(false)
+                + ",start=" + process.flatMap(value -> value.info().startInstant()).orElse(null);
+        try {
+            Path stat = Path.of("/proc", Long.toString(pid), "stat");
+            if (java.nio.file.Files.isRegularFile(stat)) {
+                String raw = java.nio.file.Files.readString(stat);
+                String[] fields = raw.substring(raw.lastIndexOf(')') + 2).split(" ");
+                state += ",procState=" + fields[0] + ",ppid=" + fields[1] + ",startTicks=" + fields[19];
+            }
+        } catch (RuntimeException | java.io.IOException failure) {
+            state += ",proc-unavailable=" + failure.getClass().getSimpleName();
+        }
+        return state;
+    }
+
     public static com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor actor(String tenant, String user) {
         return actor(com.alibaba.qwen.code.managedagent.model.SessionPrincipal.ofUser(tenant, user));
     }

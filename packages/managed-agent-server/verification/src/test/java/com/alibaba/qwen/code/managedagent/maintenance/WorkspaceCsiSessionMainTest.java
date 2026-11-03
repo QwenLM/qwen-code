@@ -553,6 +553,9 @@ class WorkspaceCsiSessionMainTest {
 
     private void invokeMutation(Method method, String sessionId) {
         Object[] arguments = Arrays.stream(method.getParameterTypes()).map(type -> {
+            if (type == com.alibaba.qwen.code.managedagent.model.SessionPrincipal.class) {
+                return com.alibaba.qwen.code.managedagent.model.SessionPrincipal.ofUser("tenant", "actor");
+            }
             if (type == String.class) {
                 return (Object) "unused";
             }

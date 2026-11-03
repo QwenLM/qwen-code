@@ -103,11 +103,13 @@ class SessionWorktreeStoreTest {
             var resolved = location.resolved();
             transaction.executeWithoutResult(status -> {
                 jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified) VALUES ('tenant','session','agent',1,1)");
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.ownUnboundSession(jdbc, "session",
+                        com.alibaba.qwen.code.managedagent.model.SessionPrincipal.ofUser("tenant", "actor"));
                 store.admit("tenant", "actor", "session", plan, resolved);
             });
             var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
                     new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-            assertThat(sessions.listSessions("tenant", null, null, null, 1).worktrees().get("session").state())
+            assertThat(sessions.listSessions("tenant", "actor", null, null, 1).worktrees().get("session").state())
                     .isEqualTo("preparing");
             assertThat(SessionWorktreeStore.isReady(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session")).isFalse();
             assertThat(store.due()).hasSize(1);
@@ -139,7 +141,7 @@ class SessionWorktreeStoreTest {
             String identity = git.prepare(plan);
             assertThat(store.complete(claim, "foreign", "READY", identity, null)).isFalse();
             assertThat(store.complete(claim, claim.claimedBy(), "READY", identity, null)).isTrue();
-            var ready = sessions.listSessions("tenant", null, null, null, 1).worktrees().get("session");
+            var ready = sessions.listSessions("tenant", "actor", null, null, 1).worktrees().get("session");
             assertThat(ready.id()).isEqualTo(id);
             assertThat(ready.state()).isEqualTo("ready");
             SessionWorktreeStore.requireReady(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session");
@@ -152,7 +154,7 @@ class SessionWorktreeStoreTest {
                 SessionWorktreeStore.requireReady(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session");
                 return null;
             })).hasMessageContaining("worktree_identity_conflict");
-            assertThat(sessions.listSessions("tenant", null, null, null, 1).worktrees().get("session").state())
+            assertThat(sessions.listSessions("tenant", "actor", null, null, 1).worktrees().get("session").state())
                     .isEqualTo("blocked");
             assertThat(SessionWorktreeStore.descriptor(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session").state()).isEqualTo("blocked");
             assertThatThrownBy(() -> SessionWorktreeStore.requireReady(new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(), jdbc, "tenant", "session"))

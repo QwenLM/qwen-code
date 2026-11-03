@@ -427,8 +427,9 @@ class Issue13181QueryBudgetTest {
         fixture.ledger.reset();
         assertThat(fixture.service.getWebShellSession(plain, "actor",
                 plainIds.get(0)).sessionId()).isEqualTo(plainIds.get(0));
-        // Session read + latest turns + environment events + lifecycle summary, one each.
-        assertThat(fixture.ledger.total()).isEqualTo(4);
+        // Ownership + Session read + latest turns + environment events + lifecycle summary, one each.
+        assertThat(fixture.ledger.total()).isEqualTo(5);
+        assertThat(fixture.ledger.count("from ma_session_principal where tenant_id = ? and session_id = ?")).isEqualTo(1);
 
         String bound = "tenant-" + UUID.randomUUID();
         fixture.jdbc.update("INSERT INTO ma_workspace"

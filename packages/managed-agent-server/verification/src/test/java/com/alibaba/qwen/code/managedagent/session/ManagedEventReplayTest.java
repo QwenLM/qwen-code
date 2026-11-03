@@ -282,7 +282,7 @@ class ManagedEventReplayTest {
                 .andReturn().getResponse().getStatus()).isEqualTo(200);
         assertThat(EventStreams.json(objectMapper,
                         mvc.perform(get("/v1/agents/sessions/{id}", sessionId)
-                                .header(TENANT, tenant))
+                                .header(TENANT, tenant).principal(com.alibaba.qwen.code.managedagent.VerificationFixtures.actor(tenant, USER)))
                         .andReturn().getResponse())
                 .get("replay_floor_sequence").asLong()).isEqualTo(floor);
 
@@ -293,7 +293,7 @@ class ManagedEventReplayTest {
                 .andReturn().getResponse();
         MockHttpServletResponse webShellStream = mvc.perform(
                         post("/api/agent/web-shell/v1/events/stream")
-                                .header(TENANT, tenant)
+                                .header(TENANT, tenant).principal(com.alibaba.qwen.code.managedagent.VerificationFixtures.actor(tenant, USER))
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content("{\"sessionId\":\"%s\",\"afterSequence\":0}"
                                         .formatted(sessionId))

@@ -950,7 +950,9 @@ class WorkspaceCsiNativeActivationGateTest {
         }
         Process process = builder.start();
         try {
-            assertThat(process.waitFor(30, TimeUnit.SECONDS)).as("native generator must finish").isTrue();
+            boolean finished = process.waitFor(30, TimeUnit.SECONDS);
+            assertThat(finished).as("native generator must finish; fixtureWritten=%s; log:%n%s",
+                    Files.exists(directory.resolve("native-fixture.json")), Files.readString(log)).isTrue();
             assertThat(process.exitValue()).as(Files.readString(log)).isZero();
         } finally {
             if (process.isAlive()) {

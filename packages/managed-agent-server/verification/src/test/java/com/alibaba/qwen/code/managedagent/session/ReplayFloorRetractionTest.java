@@ -139,6 +139,7 @@ class ReplayFloorRetractionTest {
         var response =
                 mvc.perform(
                                 EventStreams.events(tenant, session)
+                                        .principal(com.alibaba.qwen.code.managedagent.VerificationFixtures.actor(tenant, "actor"))
                                         .param("after", Long.toString(window.floorSequence() - 1)))
                         .andReturn()
                         .getResponse();
@@ -148,6 +149,7 @@ class ReplayFloorRetractionTest {
         var current =
                 mvc.perform(
                                 EventStreams.events(tenant, session)
+                                        .principal(com.alibaba.qwen.code.managedagent.VerificationFixtures.actor(tenant, "actor"))
                                         .param("after", Long.toString(window.floorSequence())))
                         .andReturn()
                         .getResponse();
@@ -156,7 +158,7 @@ class ReplayFloorRetractionTest {
         try (var executor = Executors.newCachedThreadPool()) {
             var expired = new EventStreams.RecordingEmitter();
             EventStreams.streams(service, hub, executor, expired)
-                    .publicStream(tenant, null, session, window.floorSequence() - 1);
+                    .publicStream(tenant, "actor", session, window.floorSequence() - 1);
             assertThat(expired.completed.await(10, TimeUnit.SECONDS)).isTrue();
             assertThat(expired.ids).isEmpty();
             assertThat(expired.failed).isEmpty();
@@ -211,7 +213,8 @@ class ReplayFloorRetractionTest {
                                         .header(
                                                 com.alibaba.qwen.code.managedagent.api
                                                         .TenantContextFilter.HEADER,
-                                                tenant))
+                                                tenant)
+                                        .principal(com.alibaba.qwen.code.managedagent.VerificationFixtures.actor(tenant, "actor")))
                         .andReturn()
                         .getResponse();
         assertThat(empty.getStatus()).isEqualTo(200);
@@ -236,6 +239,7 @@ class ReplayFloorRetractionTest {
                                                 com.alibaba.qwen.code.managedagent.api
                                                         .TenantContextFilter.HEADER,
                                                 tenant)
+                                        .principal(com.alibaba.qwen.code.managedagent.VerificationFixtures.actor(tenant, "actor"))
                                         .param("after", Long.toString(oldSequence)))
                         .andReturn()
                         .getResponse();
@@ -252,6 +256,7 @@ class ReplayFloorRetractionTest {
                                                 com.alibaba.qwen.code.managedagent.api
                                                         .TenantContextFilter.HEADER,
                                                 tenant)
+                                        .principal(com.alibaba.qwen.code.managedagent.VerificationFixtures.actor(tenant, "actor"))
                                         .param("after", frozen.nextCursor()))
                         .andReturn()
                         .getResponse();
@@ -283,7 +288,7 @@ class ReplayFloorRetractionTest {
         try (var executor = Executors.newCachedThreadPool()) {
             var expired = new EventStreams.RecordingEmitter();
             EventStreams.streams(service, hub, executor, expired)
-                    .publicStream(tenant, null, session, initial.lastSequence());
+                    .publicStream(tenant, "actor", session, initial.lastSequence());
             assertThat(expired.completed.await(10, TimeUnit.SECONDS)).isTrue();
             assertThat(expired.failed).isEmpty();
             assertThat(expired.resync).containsExactly(new SessionResyncRequired(

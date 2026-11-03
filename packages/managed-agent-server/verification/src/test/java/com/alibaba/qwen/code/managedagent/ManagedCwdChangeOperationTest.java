@@ -594,7 +594,7 @@ class ManagedCwdChangeOperationTest {
                 "CREATE_SESSION", "create", "digest", "qwen-code", null,
                 null, List.of(), null).sessionId();
         fixture.insertOperation(legacyId, "action-op", "ACTION_RESPONSE", "RUNNING", "PENDING", null);
-        var admitted = fixture.store.insertTurnCommand(TENANT, "SUBMIT",
+        var admitted = fixture.store.insertTurnCommand(TENANT, ACTOR, "SUBMIT",
                 "turn", "digest", legacyId, List.of(), "payload");
         assertThat(admitted.turnId()).isNotBlank();
 
@@ -604,7 +604,7 @@ class ManagedCwdChangeOperationTest {
                 "CREATE_SESSION", "create-2", "digest-2", "qwen-code",
                 null, null, List.of(), null).sessionId();
         fixture.insertOperation(olderId, "close-op", "CLOSE", "PENDING", "PENDING", null);
-        var second = fixture.store.insertTurnCommand(TENANT, "SUBMIT",
+        var second = fixture.store.insertTurnCommand(TENANT, ACTOR, "SUBMIT",
                 "turn-2", "digest-2", olderId, List.of(), "payload-2");
         assertThat(second.turnId()).isNotBlank();
     }

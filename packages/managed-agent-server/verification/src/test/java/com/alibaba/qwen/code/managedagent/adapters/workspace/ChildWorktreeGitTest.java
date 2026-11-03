@@ -1345,6 +1345,9 @@ public class ChildWorktreeGitTest {
             } catch (InterruptedException ignored) {
                 Thread.currentThread().interrupt();
             }
+            System.err.println("slow-git-before-stop parent="
+                    + com.alibaba.qwen.code.managedagent.VerificationFixtures.processState(pid) + ",child="
+                    + com.alibaba.qwen.code.managedagent.VerificationFixtures.processState(kid));
             live.set(false);
         });
         long started = System.nanoTime();
@@ -1357,6 +1360,9 @@ public class ChildWorktreeGitTest {
             assertStopped(pid);
             assertStopped(kid);
         } finally {
+            System.err.println("slow-git-after-stop parent="
+                    + com.alibaba.qwen.code.managedagent.VerificationFixtures.processState(pid) + ",child="
+                    + com.alibaba.qwen.code.managedagent.VerificationFixtures.processState(kid));
             slowGit.close();
         }
     }
@@ -1380,6 +1386,9 @@ public class ChildWorktreeGitTest {
             assertStopped(pid);
             assertStopped(kid);
         } finally {
+            System.err.println("hung-git-after-stop parent="
+                    + com.alibaba.qwen.code.managedagent.VerificationFixtures.processState(pid) + ",child="
+                    + com.alibaba.qwen.code.managedagent.VerificationFixtures.processState(kid));
             hungGit.close();
         }
     }
