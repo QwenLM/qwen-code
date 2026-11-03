@@ -98,7 +98,7 @@ final class JournalCommit {
         if (csiOriginal != null) {
             csiOriginal.requireContinuation();
         }
-        JournalStoreRows.HeadRow csiHead = csiOriginal == null ? null : storeRows.requireHeadForUpdate(tenantId, sessionId);
+        JournalStoreRows.HeadRow csiHead = csiOriginal == null ? null : fencing.requireHeadAfterCsiCheck(tenantId, sessionId);
         JournalFencing.requireCsiWriter(csiOriginal, csiHead);
         if (csiOriginal != null
                 && ("commitFileHistory".equals(request.operation())
@@ -149,7 +149,8 @@ final class JournalCommit {
                     writerToken);
         }
         fencing.requirePhysicalSessionOpen(tenantId, request.workspaceId(), sessionId);
-        JournalStoreRows.HeadRow head = storeRows.requireHeadForUpdate(tenantId, sessionId);
+        JournalStoreRows.HeadRow head = csiHead == null
+                ? fencing.requireHeadAfterCsiCheck(tenantId, sessionId) : csiHead;
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         if (authority == null) {
             fencing.requireNoLifecycleClaim(tenantId, sessionId);
