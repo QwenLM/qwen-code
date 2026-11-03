@@ -49,7 +49,7 @@ Both call `require_runtime_origin`, which compares the calling webview's URL ori
 - Migration takes only the current origin's `localStorage` entries. Older launches wrote under ports that no longer resolve and are not recoverable.
 - `readShellState` prefers the hydrated cache in the desktop shell and falls back to `localStorage` elsewhere.
 - `writeShellState` writes through to `localStorage` (the browser path and an in-session fallback) and to IPC. The IPC write is fire-and-forget: a failure leaves the session working, the mirror survives a same-origin reload, and only a launch on a fresh origin loses the value.
-- `remote-connections.ts` and `workspace-hosts.ts` call the adapter; their readers' validation is unchanged. `rememberWorkspaceHost` adds a desktop-only write-path rejection that also skips its change-event dispatch; see the workspace-host catalog rule below.
+- `remote-connections.ts` and `workspace-hosts.ts` call the adapter; their readers' validation is unchanged. `rememberWorkspaceHost` adds a desktop-only write-path rejection that also skips its change-event dispatch; see the workspace-host catalog rule below. The saved-connection writers persist the stored list, not the page-origin-filtered view they display: hiding this launch's origin is a display rule, and rewriting the durable catalog through it would delete a saved entry that happens to match this launch's ephemeral port.
 
 ### Boot navigation
 

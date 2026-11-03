@@ -29,7 +29,13 @@ function storeRemoteConnections(origins: string[]): void {
   window.dispatchEvent(new Event(REMOTE_CONNECTIONS_CHANGE_EVENT));
 }
 
-export function readRemoteConnections(): string[] {
+/**
+ * The catalog as it is stored: validated and de-duplicated, but with the page
+ * origin still in it. Writers persist this one — hiding the current origin is a
+ * display rule, and rewriting the durable catalog without it would delete a
+ * saved connection that happens to land on this launch's ephemeral port.
+ */
+function readStoredRemoteConnections(): string[] {
   try {
     const value: unknown = JSON.parse(readShellState(STORAGE_KEY) || '[]');
     if (!Array.isArray(value)) return [];
@@ -38,8 +44,7 @@ export function readRemoteConnections(): string[] {
         value.filter(
           (origin): origin is string =>
             typeof origin === 'string' &&
-            getAllowedDaemonOrigin(origin) === origin &&
-            origin !== window.location.origin,
+            getAllowedDaemonOrigin(origin) === origin,
         ),
       ),
     );
@@ -48,16 +53,23 @@ export function readRemoteConnections(): string[] {
   }
 }
 
+export function readRemoteConnections(): string[] {
+  const origin = window.location.origin;
+  return readStoredRemoteConnections().filter(
+    (connection) => connection !== origin,
+  );
+}
+
 export function rememberRemoteConnection(origin: string): void {
   const normalized = getAllowedDaemonOrigin(origin);
   if (!normalized || normalized === window.location.origin) return;
-  const connections = readRemoteConnections();
+  const connections = readStoredRemoteConnections();
   if (connections.includes(normalized)) return;
   storeRemoteConnections([...connections, normalized]);
 }
 
 export function forgetRemoteConnection(origin: string): string[] {
-  const connections = readRemoteConnections().filter(
+  const connections = readStoredRemoteConnections().filter(
     (connection) => connection !== origin,
   );
   storeRemoteConnections(connections);

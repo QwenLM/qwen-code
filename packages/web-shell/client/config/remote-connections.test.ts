@@ -43,6 +43,32 @@ describe('remote connections', () => {
     expect(readRemoteConnections()).toEqual(['https://remote.example']);
   });
 
+  it('keeps a saved origin the view hides as this launch', () => {
+    window.localStorage.setItem(
+      'qwen-remote-connections',
+      JSON.stringify([window.location.origin, 'https://two.example']),
+    );
+
+    expect(readRemoteConnections()).toEqual(['https://two.example']);
+
+    forgetRemoteConnection('https://two.example');
+
+    // The page origin is hidden from the list this launch shows, but it is a
+    // saved connection: persisting the hidden view would delete it for good,
+    // and the read path would then have no row left to re-add it from.
+    expect(window.localStorage.getItem('qwen-remote-connections')).toBe(
+      JSON.stringify([window.location.origin]),
+    );
+
+    rememberRemoteConnection('https://three.example');
+
+    expect(
+      JSON.parse(
+        window.localStorage.getItem('qwen-remote-connections') ?? '[]',
+      ),
+    ).toEqual([window.location.origin, 'https://three.example']);
+  });
+
   it('keeps an invalid display origin from breaking render paths', () => {
     expect(formatOriginHost('//remote.example')).toBe('//remote.example');
   });

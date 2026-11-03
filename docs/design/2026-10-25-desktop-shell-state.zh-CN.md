@@ -49,7 +49,7 @@ WebView2 按 origin 隔离 `localStorage` 与 `sessionStorage`，因此每次启
 - 迁移只取当前 origin 的 `localStorage` 条目。更早的启动写入的是已无法解析的端口，无法恢复。
 - `readShellState` 在桌面外壳中优先使用已水合的缓存，在其他环境中退回 `localStorage`。
 - `writeShellState` 同时写入 `localStorage`（浏览器路径与会话内回退）和 IPC。IPC 写入是 fire-and-forget：失败时当前会话仍可用，镜像在同源重载下存活，只有在全新 origin 上启动才会丢失该值。
-- `remote-connections.ts` 与 `workspace-hosts.ts` 调用该适配器；它们读取侧的校验保持不变。`rememberWorkspaceHost` 新增了仅限桌面外壳的写入路径拒绝，同时会跳过其变更事件派发；详见下方工作区主机目录规则。
+- `remote-connections.ts` 与 `workspace-hosts.ts` 调用该适配器；它们读取侧的校验保持不变。`rememberWorkspaceHost` 新增了仅限桌面外壳的写入路径拒绝，同时会跳过其变更事件派发；详见下方工作区主机目录规则。已保存连接的写入方落盘的是存储中的列表，而不是它们展示用的、过滤掉页面 origin 的视图：隐藏本次启动的 origin 只是展示规则，若用该视图回写持久化目录，就会删掉恰好与本次启动临时端口相同的已保存条目。
 
 ### 启动导航
 
