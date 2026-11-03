@@ -83,6 +83,7 @@ import { caretSpans, useLineEdit } from './line-edit.js';
 import type { ShellConfirmationResolution } from './commands-context.js';
 import { McpApprovalChoice } from '../components/mcp/MCPServerApprovalDialog.js';
 import {
+  fitProjectHooksDescription,
   layoutProjectHooksLines,
   PROJECT_HOOKS_DIALOG_DESCRIPTION,
   PROJECT_HOOKS_DIALOG_TITLE,
@@ -1504,7 +1505,11 @@ export function OpenTuiProjectHooksApprovalDialog(
     }
   });
   const title = PROJECT_HOOKS_DIALOG_TITLE;
-  const description = PROJECT_HOOKS_DIALOG_DESCRIPTION;
+  const description = fitProjectHooksDescription(
+    PROJECT_HOOKS_DIALOG_DESCRIPTION,
+    width,
+    availableTerminalHeight ?? height,
+  );
 
   return (
     <box marginLeft={3} width={Math.max(0, dialogAreaWidth(width) - 1)}>
@@ -1514,12 +1519,12 @@ export function OpenTuiProjectHooksApprovalDialog(
             <text fg={C.text} attributes={1}>
               {title}
             </text>
-            <text fg={C.text}>{description}</text>
+            {description !== '' && <text fg={C.text}>{description}</text>}
           </box>
           <box flexDirection="column" marginBottom={1}>
             {layoutProjectHooksLines(
               lines,
-              [title, description],
+              [title, PROJECT_HOOKS_DIALOG_DESCRIPTION],
               width,
               availableTerminalHeight ?? height,
             ).map((line, index) => (

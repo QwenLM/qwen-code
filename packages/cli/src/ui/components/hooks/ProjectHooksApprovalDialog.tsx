@@ -29,20 +29,82 @@ export const PROJECT_HOOKS_DIALOG_DESCRIPTION =
 /** Rows besides the title and description: border, padding, two margins, two options, the Esc hint. */
 const PROJECT_HOOKS_DIALOG_FIXED_ROWS = 9;
 
-/** Rows `text` takes when word-wrapped at `width` columns. */
-function wrappedRows(text: string, width: number): number {
-  let rows = 1;
+/** The dialog's text width: main area (terminal less 4, at most 100) less margin, border and padding. */
+function dialogTextWidth(terminalWidth: number): number {
+  return Math.max(1, Math.min(terminalWidth - 4, 100) - 5);
+}
+
+/** `text` word-wrapped at `width` columns; the row count chrome budgets with. */
+function wrapRows(text: string, width: number): string[] {
+  const rows: string[] = [];
+  let current = '';
   let used = 0;
   for (const word of text.split(' ')) {
     const w = getCachedStringWidth(word);
     if (used > 0 && used + 1 + w > width) {
-      rows++;
+      rows.push(current);
+      current = '';
       used = 0;
     }
+    current += (used > 0 ? ' ' : '') + word;
     used += (used > 0 ? 1 : 0) + w;
-    for (; used > width; used -= width) rows++;
+    // A word wider than the frame spans rows; the remainder stays for the
+    // next word.
+    while (used > width) {
+      let cut = 0;
+      let columns = 0;
+      for (const ch of current) {
+        const cw = getCachedStringWidth(ch);
+        if (columns + cw > width) break;
+        columns += cw;
+        cut += ch.length;
+      }
+      if (cut === 0) cut = current.length;
+      rows.push(current.slice(0, cut));
+      current = current.slice(cut);
+      used -= width;
+    }
   }
+  rows.push(current);
   return rows;
+}
+
+/** Rows `text` takes when word-wrapped at `width` columns. */
+function wrappedRows(text: string, width: number): number {
+  return wrapRows(text, width).length;
+}
+
+/**
+ * Description rows the frame can show while the options stay on screen: the
+ * fixed chrome and title win, and one row stays for the hook list.
+ */
+function descriptionRowBudget(
+  titleRows: number,
+  availableHeight: number,
+): number {
+  return Math.max(
+    0,
+    availableHeight - PROJECT_HOOKS_DIALOG_FIXED_ROWS - titleRows - 1,
+  );
+}
+
+/**
+ * The description cut to the rows the chrome leaves, so a short terminal
+ * clips it instead of the Reject option; '' when no row fits. Both renderers
+ * show this exact text, matching the chrome `layoutProjectHooksLines` budgets.
+ */
+export function fitProjectHooksDescription(
+  description: string,
+  terminalWidth: number,
+  availableHeight: number | undefined,
+): string {
+  if (availableHeight === undefined) return description;
+  const width = dialogTextWidth(terminalWidth);
+  const budget = descriptionRowBudget(
+    wrappedRows(PROJECT_HOOKS_DIALOG_TITLE, width),
+    availableHeight,
+  );
+  return wrapRows(description, width).slice(0, budget).join('\n');
 }
 
 /**
@@ -56,13 +118,24 @@ export function layoutProjectHooksLines(
   terminalWidth: number,
   availableHeight: number | undefined,
 ): readonly string[] {
-  // The main area (terminal less 4, at most 100) less margin, border and padding.
-  const width = Math.max(1, Math.min(terminalWidth - 4, 100) - 5);
+  const width = dialogTextWidth(terminalWidth);
+  const titleRows = wrappedRows(header[0], width);
+  const descriptionRows = header
+    .slice(1)
+    .reduce((rows, text) => rows + wrappedRows(text, width), 0);
+  const budget =
+    availableHeight === undefined
+      ? undefined
+      : descriptionRowBudget(titleRows, availableHeight);
+  // On a short terminal the options win: the description shrinks first, then
+  // the list to its `… and N more` row, rather than push them out of the
+  // frame.
   const chrome =
     PROJECT_HOOKS_DIALOG_FIXED_ROWS +
-    header.reduce((rows, text) => rows + wrappedRows(text, width), 0);
-  // On a short terminal the options win: the list shrinks to its
-  // `… and N more` row rather than push them out of the frame.
+    titleRows +
+    (budget === undefined
+      ? descriptionRows
+      : Math.min(descriptionRows, budget));
   const shown =
     availableHeight === undefined
       ? lines
@@ -109,6 +182,11 @@ export const ProjectHooksApprovalDialog: React.FC<
     terminalWidth,
     availableTerminalHeight,
   );
+  const description = fitProjectHooksDescription(
+    PROJECT_HOOKS_DIALOG_DESCRIPTION,
+    terminalWidth,
+    availableTerminalHeight,
+  );
 
   return (
     <Box flexDirection="column">
@@ -124,9 +202,9 @@ export const ProjectHooksApprovalDialog: React.FC<
           <Text bold color={theme.text.primary}>
             {PROJECT_HOOKS_DIALOG_TITLE}
           </Text>
-          <Text color={theme.text.primary}>
-            {PROJECT_HOOKS_DIALOG_DESCRIPTION}
-          </Text>
+          {description !== '' && (
+            <Text color={theme.text.primary}>{description}</Text>
+          )}
         </Box>
 
         <Box flexDirection="column" marginBottom={1}>

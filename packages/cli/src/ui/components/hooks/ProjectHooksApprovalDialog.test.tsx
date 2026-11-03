@@ -9,8 +9,10 @@ import { Box } from 'ink';
 import { describe, expect, it, vi } from 'vitest';
 import { renderWithProviders } from '../../../test-utils/render.js';
 import {
+  PROJECT_HOOKS_DIALOG_DESCRIPTION,
   ProjectHooksApprovalChoice,
   ProjectHooksApprovalDialog,
+  fitProjectHooksDescription,
   layoutProjectHooksLines,
 } from './ProjectHooksApprovalDialog.js';
 
@@ -42,6 +44,8 @@ describe('ProjectHooksApprovalDialog', () => {
   });
 
   it.each([
+    [80, 11],
+    [80, 12],
     [80, 16],
     [80, 20],
     [80, 24],
@@ -57,6 +61,15 @@ describe('ProjectHooksApprovalDialog', () => {
       expect(frame).toMatch(/… and \d+ more/);
     },
   );
+
+  it('clips the description, not the options, on a short terminal', () => {
+    // The real frame budgets terminalHeight - 5 rows; at 80x16 that is 11,
+    // less than the fixed chrome plus the full description.
+    const frame = renderAt(lines, 80, 11).lastFrame() ?? '';
+    expect(frame.split('\n').length).toBeLessThanOrEqual(11);
+    expect(frame).toContain('Reject');
+    expect(frame).not.toContain('This workspace declares hooks');
+  });
 
   it.each([
     ['unconstrained', undefined, 30],
@@ -118,5 +131,39 @@ describe('ProjectHooksApprovalDialog', () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(onSelect).toHaveBeenCalledWith(ProjectHooksApprovalChoice.DISMISS);
+  });
+
+  describe('fitProjectHooksDescription', () => {
+    it('keeps the full description when unconstrained', () => {
+      expect(
+        fitProjectHooksDescription(
+          PROJECT_HOOKS_DIALOG_DESCRIPTION,
+          80,
+          undefined,
+        ),
+      ).toBe(PROJECT_HOOKS_DIALOG_DESCRIPTION);
+    });
+
+    it('cuts rows to the budget the chrome and one list row leave', () => {
+      // At 80 columns the title takes one row, so the budget is height - 11.
+      expect(
+        fitProjectHooksDescription(PROJECT_HOOKS_DIALOG_DESCRIPTION, 80, 11),
+      ).toBe('');
+      const three = fitProjectHooksDescription(
+        PROJECT_HOOKS_DIALOG_DESCRIPTION,
+        80,
+        14,
+      );
+      expect(three.split('\n')).toHaveLength(3);
+      expect(
+        PROJECT_HOOKS_DIALOG_DESCRIPTION.startsWith(three.split('\n')[0]),
+      ).toBe(true);
+      const full = fitProjectHooksDescription(
+        PROJECT_HOOKS_DIALOG_DESCRIPTION,
+        80,
+        40,
+      );
+      expect(full.replace(/\n/g, ' ')).toBe(PROJECT_HOOKS_DIALOG_DESCRIPTION);
+    });
   });
 });
