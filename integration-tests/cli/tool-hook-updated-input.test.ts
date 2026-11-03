@@ -11,13 +11,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -346,16 +340,6 @@ describe('PreToolUse updatedInput', () => {
     // The agent keeps writing under QWEN_HOME briefly after it exits, so keep
     // it out of rig.testDir, whose teardown would otherwise race those writes.
     const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
-    // Settings-file project hooks require explicit folder trust; grant the
-    // rig directory in this session's isolated home.
-    writeFileSync(
-      join(qwenHome, 'settings.json'),
-      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
-    );
-    writeFileSync(
-      join(qwenHome, 'trustedFolders.json'),
-      JSON.stringify({ [realpathSync(rig.testDir!)]: 'TRUST_FOLDER' }),
-    );
     const child = spawn(
       'node',
       [

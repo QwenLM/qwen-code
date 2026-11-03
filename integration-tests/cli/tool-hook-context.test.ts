@@ -11,13 +11,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -189,6 +183,22 @@ describe('tool hook additionalContext delivery', () => {
     expect(count(result, marker('PreToolUse', 'call_allow'))).toBe(1);
   });
 
+  it('headless: runs project hooks with the trust feature disabled (implicit trust)', async () => {
+    const server = await setup(
+      'hook context headless implicit trust',
+      'read_file',
+      'note.txt',
+      'call_implicit_trust',
+      undefined,
+      { security: { folderTrust: { enabled: false } } },
+    );
+    await rig.run('read the note', ...fakeModelLaunchArgs(server));
+
+    expect(hookHits()).toEqual([
+      { event: 'PreToolUse', call: 'call_implicit_trust' },
+    ]);
+  });
+
   it('headless: delivers PreToolUse context with a denied result', async () => {
     const server = await setup(
       'hook context headless deny',
@@ -310,16 +320,6 @@ describe('tool hook additionalContext delivery', () => {
     // The agent keeps writing under QWEN_HOME briefly after it exits, so keep
     // it out of rig.testDir, whose teardown would otherwise race those writes.
     const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
-    // Settings-file project hooks require explicit folder trust; grant the
-    // rig directory in this session's isolated home.
-    writeFileSync(
-      join(qwenHome, 'settings.json'),
-      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
-    );
-    writeFileSync(
-      join(qwenHome, 'trustedFolders.json'),
-      JSON.stringify({ [realpathSync(rig.testDir!)]: 'TRUST_FOLDER' }),
-    );
     const child = spawn(
       'node',
       [
