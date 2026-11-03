@@ -9,6 +9,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { Content } from '@google/genai';
+import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   openManagedSession,
@@ -49,6 +50,7 @@ const config = {
   getFastModel: () => undefined,
   getModelsConfig: () => ({ getCurrentAuthType: () => 'openai' }),
   refreshAuth: vi.fn(),
+  switchModel: vi.fn(),
   getLlmClient: () => ({ getChat: () => chat }),
   getHookSystem: () => undefined,
 };
@@ -186,6 +188,37 @@ async function reopen() {
 }
 
 describe('Hosted context compression', () => {
+  it('compresses with the Session connection without a host model registration', async () => {
+    const modelConfiguration = {
+      authType: AuthType.USE_OPENAI,
+      model: 'session-model',
+      apiKey: 'session-key',
+      baseUrl: 'https://session.example/v1',
+    };
+    compression = new HostedContextCompression({
+      session,
+      cwd: root,
+      instructions: async () => '',
+      busy: () => false,
+      hasPendingHooks: () => false,
+      modelConfig: async () => modelConfiguration,
+    });
+    engine();
+    const request = {
+      ...intent(),
+      modelSelection: { modelId: modelConfiguration.model, revision: 1 },
+    };
+    await compression.admit(request);
+    await compression.wait();
+    expect(compression.status(request.operationId)).toMatchObject({
+      status: 'completed',
+    });
+    expect(
+      vi.mocked(loadCliConfig).mock.calls[0]?.[9]?.modelConfiguration,
+    ).toEqual(modelConfiguration);
+    expect(config.switchModel).not.toHaveBeenCalled();
+  });
+
   it('durably compresses without a user Turn and replays the exact operation', async () => {
     const summarize = engine();
     const request = intent();

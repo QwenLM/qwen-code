@@ -9,6 +9,7 @@ import {
   hasLoadedEnvironmentValues,
 } from './config/environment.js';
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
+import { MODEL_CATALOG_REFRESH_ENV } from '@qwen-code/qwen-code-core/models/model-catalog-refresh.js';
 import { validateExecutionSandboxSelection } from './config/execution-sandbox-settings.js';
 import {
   AuthType,
@@ -29,6 +30,7 @@ import {
   PRIVATE_ACP_CAPABILITY_ENV,
   PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
   PRIVATE_CONVERSATIONS_RUNTIME_ENV,
+  resolveUsageStatisticsEnabled,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -856,6 +858,18 @@ export async function main() {
       // validation above re-runs the environment load, and the accepted
       // provenance travels in `privateAcpChildEnv`, which is spread last.
       delete process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV];
+
+      // The container mounts only the user settings dir and builds its env
+      // passthrough from `process.env`, so a System-scope opt-out would never
+      // reach the sandboxed CLI and it would fetch models.dev.
+      if (
+        settings.merged.model?.catalogRefresh === false ||
+        resolveUsageStatisticsEnabled(
+          settings.merged.privacy?.usageStatisticsEnabled,
+        ) === false
+      ) {
+        process.env[MODEL_CATALOG_REFRESH_ENV] = 'off';
+      }
 
       await relaunchOnExitCode(
         () =>

@@ -1839,10 +1839,13 @@ Validation:
   `schedule` printed it; `status` and `cleanup` — against real git with a
   bare remote, the test making the fix agent's commits. Its cases: a watch
   from start to merge, including a reply whose answer was lost; a push by
-  someone else during a round; a re-run spent, then refused; a check left
-  for a person after three pushes, one head's result asked of GitHub by
-  commit; and whether the PR's author can push, asked of GitHub. Each helper
-  is also tested on its own, with `gh` stubbed in-process.
+  someone else during a round; a re-run spent, then refused; a job that
+  timed out re-run once, a re-run whose answer was lost counted; a check
+  left for a person after three pushes, one head's result asked of GitHub
+  by commit; a conflict left for a person once per head, a head the watch
+  pushed before GitHub computed it included; and whether the PR's author
+  can push, asked of GitHub. Each helper is also tested on its own, with
+  `gh` stubbed in-process.
 - Manual end-to-end on a sandbox repository: a failing test is fixed and
   pushed; a collaborator comment is fixed and answered; a stranger's comment is
   ignored; merging the PR ends the loop and removes the worktree.

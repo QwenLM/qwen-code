@@ -49,6 +49,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { setMemoryFilename as mockSetMemoryFilename } from '../utils/memory-constants.js';
+import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
 import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
@@ -494,6 +495,9 @@ function mockAutoMemoryIndexRead(content: string) {
 vi.mock('../core/baseLlmClient.js');
 vi.mock('../core/toolHookTriggers.js', () => ({
   fireNotificationHook: vi.fn().mockResolvedValue({}),
+}));
+vi.mock('../models/model-catalog-refresh.js', () => ({
+  refreshModelCatalog: vi.fn().mockResolvedValue(undefined),
 }));
 
 type MemoryLoad = Awaited<ReturnType<typeof loadServerHierarchicalMemory>>;
@@ -5375,6 +5379,27 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('initialize', () => {
+    it.each([
+      ['the default', { usageStatisticsEnabled: true }, true],
+      [
+        'the operator refresh switch',
+        { usageStatisticsEnabled: true, modelCatalogRefreshEnabled: false },
+        false,
+      ],
+      [
+        'the usage-statistics opt-out',
+        { usageStatisticsEnabled: false },
+        false,
+      ],
+    ])(
+      'gates the model catalog refresh on %s',
+      async (_name, params, expected) => {
+        await initConfig(params, SKIP_ALL_INIT);
+
+        expect(refreshModelCatalog).toHaveBeenCalledTimes(expected ? 1 : 0);
+      },
+    );
+
     it('accepts managed handoff only after certified takeover is configured', async () => {
       const standalone = makeConfig();
       await standalone.closeSessionWriter({ handoff: true });
@@ -6945,6 +6970,8 @@ describe('Server Config (config.ts)', () => {
       afterEach(restoreEnv);
 
       const interactiveCli = { interactive: true, sdkMode: false };
+      // A host with no record_artifact tool and no artifact metadata route.
+      const workerHost = { artifactRecordingSupported: false };
       // `record` is the expected isRecordArtifactEnabled(), where asserted.
       it.each`
         title                                                                              | env                                                                    | params                                           | artifact | record
@@ -6956,6 +6983,8 @@ describe('Server Config (config.ts)', () => {
         ${'keeps the Artifact tool disabled for daemon CLI env enablement'}                | ${{ QWEN_CODE_ENABLE_ARTIFACT: '1' }}                                  | ${DAEMON}                                        | ${false} | ${true}
         ${'lets daemon sessions record metadata by default without publishing'}            | ${{}}                                                                  | ${DAEMON}                                        | ${false} | ${true}
         ${'lets QWEN_CODE_ENABLE_ARTIFACT force-enable interactive CLI use'}               | ${{ QWEN_CODE_ENABLE_ARTIFACT: '1' }}                                  | ${{ ...interactiveCli, artifactEnabled: false }} | ${true}  | ${undefined}
+        ${'keeps recording off for hosts that do not support it'}                          | ${{}}                                                                  | ${{ ...DAEMON, ...workerHost }}                  | ${false} | ${false}
+        ${'keeps recording off for those hosts even when force-enabled'}                   | ${{ QWEN_CODE_ENABLE_ARTIFACT: '1' }}                                  | ${{ ...interactiveCli, ...workerHost }}          | ${true}  | ${false}
       `('%s', ({ env, params, artifact, record }) => {
         Object.assign(process.env, env);
         const config = makeConfig(params);
