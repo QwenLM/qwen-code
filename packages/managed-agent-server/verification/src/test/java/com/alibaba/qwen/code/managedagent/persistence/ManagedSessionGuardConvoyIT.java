@@ -170,6 +170,11 @@ class ManagedSessionGuardConvoyIT {
                 + " recovery_detail_code = 'a2-witness' WHERE tenant_id = ? AND session_id = ?"
                 + " AND head_kind = 'MANAGED_SESSION'",
                 tenant, "blocked");
+        var agents = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
+                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        String turnSession = transactions.execute(ignored -> agents.insertSessionCommand(tenant,
+                "CREATE_SESSION", "turn-session", "digest-create", "qwen-code", null, null,
+                List.of(), null)).sessionId();
 
         var holdTx = manager.getTransaction(new DefaultTransactionDefinition());
         try {
@@ -264,10 +269,15 @@ class ManagedSessionGuardConvoyIT {
             // A Turn submit no longer admits through the placement row: it
             // orders on its Session row and the storage's fence row instead,
             // so a held tenant guard neither parks nor names it.
-            var agents = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                    new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-            assertNotGuardBound(() -> transactions.execute(ignored -> agents.insertTurnCommand(tenant,
-                    "turn.submit", "submit-witness", "a".repeat(64), "victim", List.of(), "b".repeat(64))));
+            long submitBefore = System.nanoTime();
+            try (var submitPool = Executors.newSingleThreadExecutor()) {
+                var admitted = submitPool.submit(() -> transactions.execute(ignored -> agents.insertTurnCommand(tenant,
+                        "turn.submit", "submit-witness", "a".repeat(64), turnSession, List.of(), "b".repeat(64))))
+                        .get(30, TimeUnit.SECONDS);
+                assertThat(admitted.turnId()).startsWith("turn_");
+                assertThat(admitted.commandEffect()).isTrue();
+            }
+            assertThat((System.nanoTime() - submitBefore) / 1_000_000).isLessThan(BOUNDED_FAILURE_CEILING_MS);
         } finally {
             manager.rollback(holdTx);
         }
@@ -763,24 +773,6 @@ class ManagedSessionGuardConvoyIT {
             Thread.sleep(100);
         }
         throw new AssertionError("Timed out waiting for a lock wait on " + table);
-    }
-
-    private static void assertNotGuardBound(Callable<Object> action) throws Exception {
-        long before = System.nanoTime();
-        try (var pool = Executors.newSingleThreadExecutor()) {
-            try {
-                pool.submit(action).get(30, TimeUnit.SECONDS);
-            } catch (ExecutionException error) {
-                if (error.getCause() instanceof ManagedAgentException refusal) {
-                    assertThat(refusal.getCode()).isNotEqualTo("tenant_guard_contended");
-                } else {
-                    assertThat(error.getCause()).isNotInstanceOf(org.springframework.dao.PessimisticLockingFailureException.class)
-                            .isNotInstanceOf(org.springframework.dao.QueryTimeoutException.class);
-                }
-            }
-        }
-        long elapsedMs = (System.nanoTime() - before) / 1_000_000;
-        assertThat(elapsedMs).isLessThan(BOUNDED_FAILURE_CEILING_MS);
     }
 
     private static void assertFastGuardFailure(Callable<Object> action) throws Exception {
