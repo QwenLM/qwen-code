@@ -205,7 +205,14 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
                         key={provider.storageKey}
                         sessionId={selectedSessionId}
                         onSelectSession={(next) => {
-                          if (!controlled)
+                          // A host without an echo channel still owns new
+                          // selections, but a clear (delete/archive of the
+                          // current session) must not evaporate with it.
+                          if (
+                            !controlled ||
+                            (next === undefined &&
+                              onSessionChange === undefined)
+                          )
                             setSelection((current) => ({
                               ...current,
                               selectedSessionId: next,

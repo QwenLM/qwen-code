@@ -128,6 +128,67 @@ describe('ManagedAgentWebShell', () => {
     });
   });
 
+  it('lets a delete/archive clear through when the host has no echo channel', async () => {
+    const provider = { storageKey: 'host-no-echo' } as ManagedAgentProvider;
+    await act(async () =>
+      root.render(
+        <ManagedAgentWebShell
+          managedAgentProvider={provider}
+          hostSessionOnly
+          sessionId="s1"
+        />,
+      ),
+    );
+    expect(captured.props).toMatchObject({ sessionId: 's1' });
+    // New selections stay host-owned even without an echo channel…
+    await act(async () => {
+      (
+        captured.props as { onSelectSession: (id?: string) => void }
+      ).onSelectSession('unrequested');
+    });
+    expect(captured.props).toMatchObject({ sessionId: 's1' });
+    // …but clearing the deleted/archived session must reach the page.
+    await act(async () => {
+      (
+        captured.props as { onSelectSession: (id?: string) => void }
+      ).onSelectSession(undefined);
+    });
+    expect(captured.props).toMatchObject({ sessionId: undefined });
+  });
+
+  it('routes the clear through the echo channel when the host provides one', async () => {
+    const provider = { storageKey: 'host-echo' } as ManagedAgentProvider;
+    const onSessionChange = vi.fn();
+    await act(async () =>
+      root.render(
+        <ManagedAgentWebShell
+          managedAgentProvider={provider}
+          hostSessionOnly
+          sessionId="s1"
+          onSessionChange={onSessionChange}
+        />,
+      ),
+    );
+    await act(async () => {
+      (
+        captured.props as { onSelectSession: (id?: string) => void }
+      ).onSelectSession(undefined);
+    });
+    expect(onSessionChange).toHaveBeenCalledWith(undefined);
+    // The host owns the selection: no internal write before the echo.
+    expect(captured.props).toMatchObject({ sessionId: 's1' });
+    await act(async () =>
+      root.render(
+        <ManagedAgentWebShell
+          managedAgentProvider={provider}
+          hostSessionOnly
+          onSessionChange={onSessionChange}
+        />,
+      ),
+    );
+    expect(captured.props).toMatchObject({ sessionId: undefined });
+  });
+
   it('constructs a Java provider without daemon workspace props', async () => {
     await act(async () => {
       root.render(
