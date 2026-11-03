@@ -279,6 +279,19 @@ final class JournalFencing {
         }
     }
 
+    JournalStoreRows.HeadRow requireHeadAfterCsiCheck(String tenantId, String sessionId) {
+        // A null continuation proves nothing in standalone mode. Only the CSI check
+        // on this DataSource's transaction connection has retained the root lock.
+        Boolean transactional = jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>) connection -> {
+            var target = org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(connection);
+            return !target.getAutoCommit() && org.springframework.jdbc.datasource.DataSourceUtils
+                    .isConnectionTransactional(target, jdbc.getDataSource());
+        });
+        return Boolean.TRUE.equals(transactional)
+                ? storeRows.requireHeadWithRootLocked(tenantId, sessionId)
+                : storeRows.requireHeadForUpdate(tenantId, sessionId);
+    }
+
     JdbcCsiFilesRetirementGuard.Original lockCsiOriginal(String tenantId, String sessionId) {
         var continuation = lockCsiContinuation(tenantId, sessionId);
         return continuation == null ? null : continuation.original();

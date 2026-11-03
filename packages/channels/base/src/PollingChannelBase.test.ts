@@ -11,14 +11,16 @@ import {
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PollingChannelBase } from './PollingChannelBase.js';
+import { channelEventFilePath } from './channel-events.js';
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import type { ChannelConfig } from './types.js';
 
 const testHome = mkdtempSync(join(tmpdir(), 'poll-test-'));
 
-vi.mock('./paths.js', () => ({
-  getGlobalQwenDir: () => testHome,
-}));
+vi.mock('./paths.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./paths.js')>();
+  return { ...actual, getGlobalQwenDir: () => testHome };
+});
 
 afterAll(() => {
   rmSync(testHome, { recursive: true, force: true });
@@ -225,5 +227,71 @@ describe('PollingChannelBase', () => {
       .slice(0, 16);
     expect(files.some((f: string) => f.includes(h1))).toBe(true);
     expect(files.some((f: string) => f.includes(h2))).toBe(true);
+  });
+
+  it('records the detail produced by the same poll, not the previous one', async () => {
+    class DetailPoller extends PollingChannelBase<TestCursor> {
+      private readonly counts = [7, 2, 11];
+      private index = 0;
+
+      protected createInitialCursor(): TestCursor {
+        return { ts: '2026-01-01T00:00:00.000Z', count: 0 };
+      }
+
+      protected get pollInterval(): number {
+        return 1;
+      }
+
+      protected async pollOnce(): Promise<void> {
+        this.setPollEventDetail({
+          notifications: this.counts[this.index++]!,
+        });
+      }
+
+      async connect(): Promise<void> {
+        this.startPollLoop();
+      }
+
+      disconnect(): void {
+        this.stopPollLoop();
+      }
+
+      async sendMessage(): Promise<void> {}
+    }
+
+    vi.useFakeTimers();
+    const poller = new DetailPoller(
+      'detail-poller',
+      makeConfig(),
+      makeBridge(),
+    );
+    try {
+      poller.connect();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(1);
+      poller.disconnect();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const journal = readFileSync(
+      channelEventFilePath('detail-poller', '/tmp'),
+      'utf-8',
+    )
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            type: string;
+            detail?: { notifications?: number };
+          },
+      )
+      .filter((event) => event.type === 'poll');
+
+    expect(journal.map((event) => event.detail?.notifications)).toEqual([
+      7, 2, 11,
+    ]);
   });
 });
