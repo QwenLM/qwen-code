@@ -257,6 +257,10 @@ describe('isDestructiveCommand — git commit --amend', () => {
     "bash -c'git commit --amend --no-edit'",
     'bash -c',
     "echo hi; bash <<'EOF'\ngit commit --amend --no-edit\nEOF",
+    // `$'…'` is ANSI-C quoting: still one word, so the payload is the same
+    // invocation and must not read as an unmodelled expansion.
+    "bash -c $'git commit --amend --no-edit'",
+    "bash <<< $'git commit --amend --no-edit'",
   ])('blocks amend through an execution wrapper: %s', (command) => {
     expectBlocked(command, 'amend the commit', 'amend');
   });

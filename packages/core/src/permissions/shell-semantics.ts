@@ -130,6 +130,12 @@ function tokenize(
       escaped = true;
       continue;
     }
+    // `$'…'` is ANSI-C quoting: one word, split exactly like `'…'`. Dropping
+    // the `$` keeps the payload visible to the token scan.
+    if (ch === '$' && command[i + 1] === "'" && !inSingle && !inDouble) {
+      i++;
+      continue;
+    }
     if (ch === "'" && !inDouble) {
       inSingle = !inSingle;
       continue;
