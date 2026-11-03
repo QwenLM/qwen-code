@@ -6184,6 +6184,206 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(existsSync(inboundTaskPath())).toBe(false);
     });
 
+    it('re-delivers a grown aggregate batch under a new content key after the cursor-save crash window (R3-B1)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      const c1 = makeComment({ id: 1001, body: 'first remark' });
+      const c2 = makeComment({ id: 1002, body: 'second remark' });
+      const c3 = makeComment({ id: 1003, body: 'NEW-COMMENT-AFTER-CRASH' });
+      const hashOf = (ids: string[]) =>
+        `github:owner/repo:agg:${createHash('sha256')
+          .update([...ids].sort().join('\n'))
+          .digest('hex')
+          .slice(0, 40)}`;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([c1, c2]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      const firstKey = boundSessions.deliverPrompt.mock.calls[0]![2] as string;
+      expect(firstKey).toBe(hashOf(['C_1001', 'C_1002']));
+
+      // Crash window: acceptance landed but the cursor save did not. The
+      // re-listed thread now carries a THIRD comment — a superset batch
+      // with the same first comment. A first-comment key would dedupe it
+      // into the original admission and silently drop the new member.
+      writeInboundTasks([]);
+      const ch = channel as unknown as {
+        cursor: { dispatchedComments?: string[]; lastProcessedAt: string };
+      };
+      ch.cursor.dispatchedComments = [];
+      ch.cursor.lastProcessedAt = '2026-07-01T00:00:00.000Z';
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([c1, c2, c3]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+      const secondKey = boundSessions.deliverPrompt.mock.calls[1]![2] as string;
+      expect(secondKey).toBe(hashOf(['C_1001', 'C_1002', 'C_1003']));
+      expect(secondKey).not.toBe(firstKey);
+      expect(boundSessions.deliverPrompt.mock.calls[1]![1]).toContain(
+        'NEW-COMMENT-AFTER-CRASH',
+      );
+
+      // An IDENTICAL re-listed batch keeps the same key: the acceptance
+      // crash-window dedupe still holds for unchanged content.
+      writeInboundTasks([]);
+      ch.cursor.dispatchedComments = [];
+      ch.cursor.lastProcessedAt = '2026-07-01T00:00:00.000Z';
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([c1, c2, c3]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(3);
+      expect(boundSessions.deliverPrompt.mock.calls[2]![2]).toBe(secondKey);
+    });
+
+    it('defers unmatched events under a partial snapshot even after a complete one (R3-A1)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      // Establish trusted absence authority with a complete snapshot.
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+
+      // Partial phase: PR 43 was never bound. Absence is NOT authoritative
+      // during a partial answer (an unlisted workspace or a retention-cap
+      // eviction may hide the follower): the event must defer, not take
+      // the irreversible public path.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: true,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            subject: {
+              title: 'Test PR',
+              url: 'https://api.github.com/repos/owner/repo/pulls/43',
+              type: 'PullRequest',
+            },
+          }),
+        ])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      const tasks = readInboundTasks();
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!['backpressure']).toBe(true);
+
+      // A complete snapshot re-establishes absence: recovery re-drives the
+      // deferred event onto the public path exactly once.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+      // A complete snapshot re-establishes absence: recovery re-drives the
+      // deferred event onto the public channel path exactly once.
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(existsSync(inboundTaskPath())).toBe(false);
+    });
+
+    it('selects a retained alternate when the previous winner unbinds (R3-C1)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      const newer = makeBinding({
+        sessionId: 'A',
+        updatedAt: '2026-07-03T00:00:00.000Z',
+      });
+      const older = makeBinding({
+        sessionId: 'B',
+        updatedAt: '2026-07-01T00:00:00.000Z',
+      });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [newer, older],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+      const priv = channel as unknown as {
+        boundSessionByPr: Map<string, { sessionId: string }>;
+      };
+      expect(priv.boundSessionByPr.get('owner/repo#42')?.sessionId).toBe('A');
+
+      // Partial lists only A, tombstoned (prs: []): A is authoritatively
+      // unbound, B is retained — the routing map must fall back to B, not
+      // empty out while lastBindings still knows B.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'A',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+            prs: [],
+          }),
+        ],
+        partial: true,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(priv.boundSessionByPr.get('owner/repo#42')?.sessionId).toBe('B');
+
+      // A comment on PR 42 delivers privately to the retained alternate.
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      expect(boundSessions.deliverPrompt.mock.calls[0]![0]).toBe('B');
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+    });
+
+    it('keeps issue events public under a partial snapshot (bindings are PR-only)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+
+      // Bindings are PR-only: an issue can never have a hidden follower,
+      // so a degraded binding scan must not stall its public delivery.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: true,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            subject: {
+              title: 'Issue',
+              url: 'https://api.github.com/repos/owner/repo/issues/7',
+              type: 'Issue',
+            },
+          }),
+        ])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+    });
+
+    it('treats a channel-only binding as authoritative absence under a partial snapshot', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      // Channel-owned sessions keep the public channel path: their PRs can
+      // never have a private follower, so a partial scan must not stall
+      // them behind the deferral gate.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [makeBinding({ sourceType: 'channel' })],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: true,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+    });
+
     it('does not record aggregate dedupe keys when the task claim fails (A-F1)', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });
       // An unwritable/corrupt task store: the claim throws, the per-
@@ -10062,7 +10262,19 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         bindings: [],
         partial: true,
       });
-      await channelPrivate.refreshBoundSessions();
+      const retentionStderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        await channelPrivate.refreshBoundSessions();
+        expect(
+          retentionStderr.mock.calls.some((call) =>
+            String(call[0]).includes('binding retention cap exceeded'),
+          ),
+        ).toBe(true);
+      } finally {
+        retentionStderr.mockRestore();
+      }
       expect(channelPrivate.lastBindings).toHaveLength(1024);
       expect(
         channelPrivate.lastBindings.some((b) => b['sessionId'] === 's-1099'),
@@ -10073,8 +10285,12 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(channelPrivate.boundSessionByPr.has('owner/repo#1100')).toBe(true);
       expect(channelPrivate.boundSessionByPr.has('owner/repo#1')).toBe(false);
 
-      // The entry map takes the same cap: seed 1030 idle entries plus one
-      // entry OLDER than all of them that still holds a pending event.
+      // The entry map takes the same cap: seed 1030 idle entries, one
+      // entry OLDER than all of them that still holds a pending event,
+      // one even older entry a RETAINED binding still claims (PR #1100
+      // belongs to s-1099), and one older still whose earlier transition
+      // has a surviving inbound task (PR #1031). Only the unprotected
+      // idle entries may be evicted.
       const entries: Record<string, unknown> = {};
       for (let i = 0; i < 1030; i++) {
         entries[`owner/repo#${i + 1}`] = {
@@ -10094,6 +10310,43 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         fired: [],
         pending: [makePendingWatch({ issueNumber: 0 })],
       };
+      entries['owner/repo#1100'] = {
+        headSha: 'sha-1',
+        mergeableState: 'clean',
+        prState: 'open',
+        headObservedAt: -2,
+        fired: [],
+        pending: [],
+      };
+      entries['owner/repo#1031'] = {
+        headSha: 'sha-1',
+        mergeableState: 'clean',
+        prState: 'open',
+        headObservedAt: -3,
+        fired: [],
+        pending: [],
+      };
+      writeInboundTasks([
+        makeInboundTaskRecord({
+          state: 'failed',
+          attempts: 0,
+          deferCount: 1,
+          backpressure: true,
+          issueNumber: 1031,
+          source: {
+            chatId: 'owner/repo',
+            threadId: 'pr:1031',
+            messageId: 'watch:merge_conflict:1031:1:1751446800000',
+          },
+          envelope: {
+            ...makeInboundTaskRecord().envelope,
+            threadId: 'pr:1031',
+            messageId: 'watch:merge_conflict:1031:1:1751446800000',
+          },
+          dedupe: {},
+          delivery: { kind: 'bound-session', sessionId: 'bound-session' },
+        }),
+      ]);
       seedWatchState(entries);
       const stderr = vi
         .spyOn(process.stderr, 'write')
@@ -10109,14 +10362,144 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         stderr.mockRestore();
       }
       const state = readWatchState();
-      // 1031 entries against the 1024 cap: the 7 oldest idle entries go;
-      // the pending holder is older than all of them but must survive.
+      // 1033 entries against the 1024 cap: the 9 oldest UNPROTECTED idle
+      // entries go (#1..#9). The pending holder (#0), the retained-binding
+      // entry (#1100), and the surviving-task entry (#1031) are all older
+      // than the evicted ones but must survive.
       expect(Object.keys(state.entries)).toHaveLength(1024);
       expect(state.entries['owner/repo#0']).toBeDefined();
+      expect(state.entries['owner/repo#1100']).toBeDefined();
+      expect(state.entries['owner/repo#1031']).toBeDefined();
       expect(state.entries['owner/repo#1']).toBeUndefined();
-      expect(state.entries['owner/repo#7']).toBeUndefined();
-      expect(state.entries['owner/repo#8']).toBeDefined();
+      expect(state.entries['owner/repo#9']).toBeUndefined();
+      expect(state.entries['owner/repo#10']).toBeDefined();
       expect(state.entries['owner/repo#1030']).toBeDefined();
+    });
+
+    it('keeps watch recovery blocked while subscriptions are disabled with unreconciled pendings (R3-B2)', async () => {
+      // The crash window between claim and pending->fired save: both the
+      // pending event and its accepted task are on disk.
+      const key = 'watch:state_change:42:1:1751446800000';
+      seedWatchState({
+        'owner/repo#42': {
+          headSha: 'sha-1',
+          mergeableState: 'clean',
+          prState: 'closed',
+          fired: [],
+          pending: [
+            makePendingWatch({
+              key,
+              text: 'The PR was closed without merging.',
+            }),
+          ],
+        },
+      });
+      writeInboundTasks([
+        makeInboundTaskRecord({
+          state: 'accepted',
+          attempts: 0,
+          issueNumber: 42,
+          delivery: { kind: 'bound-session', sessionId: 'bound-session' },
+          source: { chatId: 'owner/repo', threadId: 'pr:42', messageId: key },
+          envelope: {
+            ...makePendingWatch({
+              key,
+              text: 'The PR was closed without merging.',
+            }).envelope,
+          },
+          dedupe: {},
+        }),
+      ]);
+      // Subscriptions OFF: reconcile is skipped, but the accepted task's
+      // pending record is unreconciled — recovery must not deliver and
+      // remove it ahead of a later re-enabled drain.
+      await initChannel(
+        { deliverToBoundSessions: true, prWatchEvents: [] },
+        { boundSessions },
+      );
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      expect(readInboundTasks()).toHaveLength(1);
+      expect(
+        readWatchState().entries['owner/repo#42']!['pending'],
+      ).toHaveLength(1);
+
+      // Re-enabled (fresh instance over the same state): reconcile drains
+      // the pending, claims the EXISTING task, and delivers exactly once.
+      await initChannel(watchConfig, { boundSessions });
+      mockPull({ state: 'closed', merged: false });
+      mockNotificationsOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      expect(existsSync(inboundTaskPath())).toBe(false);
+      expect(
+        readWatchState().entries['owner/repo#42']!['pending'],
+      ).toHaveLength(0);
+    });
+
+    it('caps the pending queue and dead-letters the oldest overflow when claims keep failing (R3-B3)', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      const pending = Array.from({ length: 64 }, (_, i) =>
+        makePendingWatch({
+          key: `watch:merge_conflict:42:seed-${i}:1751446800000`,
+          text: `seed event ${i}`,
+        }),
+      );
+      seedWatchState({
+        'owner/repo#42': {
+          headSha: 'sha-1',
+          mergeableState: 'clean',
+          prState: 'open',
+          fired: [],
+          pending,
+        },
+      });
+      // A persistently unreadable task store: every claim fails, the queue
+      // cannot drain, and detection keeps appending. The 65th event must
+      // retire the OLDEST queued one to the dead-letter, not grow the file.
+      writeFileSync(inboundTaskPath(), '{corrupt', 'utf-8');
+      const watch = channel as unknown as {
+        runPrStateWatch: () => Promise<void>;
+        refreshBoundSessions: () => Promise<void>;
+      };
+      await watch.refreshBoundSessions();
+      mockPull({ mergeable: false, mergeable_state: 'dirty' });
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        await watch.runPrStateWatch();
+        expect(
+          stderr.mock.calls.some((call) =>
+            String(call[0]).includes('watch pending overflow'),
+          ),
+        ).toBe(true);
+      } finally {
+        stderr.mockRestore();
+      }
+      const entry = readWatchState().entries['owner/repo#42']!;
+      const queued = entry['pending'] as Array<{ key: string }>;
+      expect(queued).toHaveLength(64);
+      expect(queued[0]!.key).toBe(
+        'watch:merge_conflict:42:seed-1:1751446800000',
+      );
+      expect(
+        queued.some((p) => /^watch:merge_conflict:42:1:\d+$/.test(p.key)),
+      ).toBe(true);
+      const lines = readFileSync(boundDeadLetterPath(), 'utf-8')
+        .trim()
+        .split('\n');
+      expect(lines).toHaveLength(1);
+      const record = JSON.parse(lines[0]!) as {
+        reason: string;
+        source: { messageId: string };
+      };
+      expect(record.reason).toContain('overflow');
+      expect(record.source.messageId).toBe(
+        'watch:merge_conflict:42:seed-0:1751446800000',
+      );
     });
   });
 });

@@ -336,12 +336,23 @@ const MAX_COLD_EMPTY_PARTIAL_POLLS = 30;
  * Retention bound under a PERMANENT partial snapshot: prune never runs while
  * the binding answer is incomplete, so unlisted sessions and unbound PR
  * entries would otherwise accumulate for the daemon's whole uptime (same
- * cap discipline as the worker's wake cache). Oldest-first eviction; a
- * dropped candidate degrades through the documented partial-state paths,
- * and watch keys carry a detection timestamp so an evicted baseline can
- * re-fire an event but never dedupe it into an old admission.
+ * cap discipline as the worker's wake cache). Oldest-first eviction,
+ * surfaced on stderr; watch-entry eviction additionally protects retained
+ * bindings and in-flight tasks, and an evicted entry's PR has no delivery
+ * target — a later rebind re-baselines silently like any first observation,
+ * so eviction bounds memory without losing a deliverable event.
  */
 const MAX_PARTIAL_RETAINED = 1024;
+
+/**
+ * Per-entry pending queue bound. A persistently failing claim (task store
+ * unreadable/unwritable) keeps every detected transition queued; without a
+ * cap the entry is also exempt from retention eviction, and the watch file
+ * would grow without bound. Overflow retires the OLDEST queued event to the
+ * private dead-letter (surfaced, never silent); a failed dead-letter write
+ * keeps the event queued and retries the overflow next detection.
+ */
+const MAX_PENDING_WATCH_PER_ENTRY = 64;
 
 type PrWatchEventType =
   | 'ci_failure'
@@ -868,6 +879,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * gated on this (a partial answer is not an absence).
    */
   private boundSnapshotTrusted = false;
+  /**
+   * PR keys whose absence IS authoritative under the current partial
+   * snapshot: the PR was known before, and every session that bound it is
+   * listed now (each listed session's PR set is complete) and excludes it.
+   * Recomputed on every refresh, so it never accumulates; empty on a
+   * complete snapshot, where every absence is authoritative anyway.
+   */
+  private authoritativeUnbinds = new Set<string>();
   /**
    * False until ANY binding snapshot succeeds (complete or partial). The
    * cold-start comment-lane gate uses this, not boundSnapshotTrusted: the
@@ -1662,7 +1681,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         );
       }
     } else {
-      this.watchReconcileBlocked = false;
+      // Subscriptions are off, but unreconciled pending records on disk
+      // still own their accepted tasks: recovery must not deliver and
+      // remove a task that a later re-enabled drain would claim and
+      // deliver again. Keep the guard until no watch pending remains.
+      this.watchReconcileBlocked = this.hasUnreconciledWatchPending();
+      if (this.watchReconcileBlocked) {
+        process.stderr.write(
+          `[Channel:${this.name}] watch subscriptions are disabled but pending watch events remain unreconciled; watch task recovery stays blocked until they drain\n`,
+        );
+      }
     }
 
     // The watch pass runs before generic recovery so detection cannot race
@@ -2022,13 +2050,30 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           return `- @${comment.user?.login || 'unknown'}: ${rendered}`;
         })
         .join('\n');
+    // The idempotency identity must cover the WHOLE batch, not its first
+    // comment: a crash before the cursor save re-lists the thread, and the
+    // re-fetched batch can be a SUPERSET (new comments arrived meanwhile).
+    // A first-comment key would let the daemon ring dedupe the superset
+    // into the original admission and silently drop the new members. The
+    // sorted member hash keeps identical batches dedupable (the acceptance
+    // crash window) while a grown batch re-delivers at-least-once, and it
+    // cannot collide with the mention lane's per-comment keys.
+    const batchId = `agg:${createHash('sha256')
+      .update(
+        comments
+          .map(({ comment }) => comment.node_id || String(comment.id))
+          .sort()
+          .join('\n'),
+      )
+      .digest('hex')
+      .slice(0, 40)}`;
     const envelope: Envelope = {
       channelName: this.name,
       senderId: (first.user?.login || 'unknown').toLowerCase(),
       senderName: first.user?.login || 'unknown',
       chatId: ctx.chatId,
       threadId: ctx.threadId,
-      messageId: String(first.id),
+      messageId: batchId,
       text: `${AGGREGATE_COMMENTS_PROMPT_PREFIX}${summary}`,
       isGroup: true,
       isMentioned: true,
@@ -2292,18 +2337,30 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     if (!envelope) return true;
     const bound = task.delivery?.kind === 'bound-session';
     const isWatch = envelope.messageId?.startsWith('watch:') === true;
-    // While no COMPLETE snapshot has ever succeeded, absence from the map
-    // is not an authoritative unbind: routing this event publicly would be
-    // irreversible (the cursor commits in the same poll, and a later
-    // snapshot cannot undo the public reply). Defer it as backpressure —
-    // recoverable, bounded by MAX_BOUND_DEFERRALS, and re-resolved against
-    // the map by recovery once a complete snapshot lands. Known targets
-    // (bound tasks) are unaffected and proceed immediately.
+    // Absence from the map authorizes the irreversible public path ONLY
+    // when it is authoritative: a current complete, successful snapshot,
+    // or — under a partial answer — a PR whose every previous binder is
+    // listed and excludes it (a listed session's PR set is complete, so
+    // its tombstone is authoritative per PR). Before the first complete
+    // snapshot, and for a PR whose binder the scan omitted (or retention
+    // evicted) or that was never known, an unmatched event may belong to a
+    // live session: defer it as backpressure — recoverable, bounded by
+    // MAX_BOUND_DEFERRALS, and re-resolved by recovery once absence becomes
+    // authoritative. The partial/failed-refresh clauses are PR-scoped:
+    // bindings are PR-only, so an issue event's absence is always
+    // authoritative and must not stall behind a degraded binding scan.
+    // Known targets (bound tasks) are unaffected and proceed immediately.
     if (
       !bound &&
       !isWatch &&
       this.deliverToBoundSessions &&
-      !this.boundSnapshotTrusted
+      (!this.boundSnapshotTrusted ||
+        (envelope.threadId?.startsWith('pr:') === true &&
+          (this.boundRefreshFailed ||
+            (this.lastBindingsPartial &&
+              !this.authoritativeUnbinds.has(
+                this.prBindingKey(envelope.chatId, task.issueNumber),
+              )))))
     ) {
       const deferCount = (task.deferCount ?? 0) + 1;
       if (deferCount >= MAX_BOUND_DEFERRALS) {
@@ -3001,6 +3058,27 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.boundSnapshotSeen = true;
       this.boundSnapshotFailureStreak = 0;
       if (!snapshot.partial) this.boundSnapshotTrusted = true;
+      // Per-PR binders BEFORE this refresh: the input to the partial
+      // snapshot's authoritative-absence decision below. Captured now
+      // because lastBindings is replaced with the merged rows later.
+      // Channel-owned sessions are tracked too, but flagged: they never
+      // provide private delivery, so they cannot hide a follower.
+      const previousBinders = new Map<string, Set<string>>();
+      const previousSessionSources = new Map<string, string | undefined>();
+      for (const summary of this.lastBindings) {
+        previousSessionSources.set(summary.sessionId, summary.sourceType);
+        for (const pr of summary.prs) {
+          const identity = this.parsePrBindingUrl(pr.url);
+          if (!identity || identity.number !== pr.number) continue;
+          const key = this.prBindingKey(identity.chatId, identity.number);
+          let binders = previousBinders.get(key);
+          if (!binders) {
+            binders = new Set();
+            previousBinders.set(key, binders);
+          }
+          binders.add(summary.sessionId);
+        }
+      }
       const map = new Map<string, PrBindingSummary>();
       for (const summary of snapshot.bindings) {
         // Channel-owned sessions keep the normal channel path so their
@@ -3031,8 +3109,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         const seen = new Set(snapshot.bindings.map((b) => b.sessionId));
         // A permanent partial must not grow retention without bound: keep
         // the most recent unlisted sessions and drop the rest (oldest
-        // first). A dropped candidate's events follow the documented
-        // partial-state degradation, never a silent loss.
+        // first). A dropped candidate's unmatched events defer as
+        // backpressure (an evicted binder is unlisted, so absence is not
+        // authoritative) and surface in the dead-letter at the horizon —
+        // never a silent loss or an irreversible public reply.
         const retained = this.lastBindings.filter(
           (b) => !seen.has(b.sessionId),
         );
@@ -3044,16 +3124,28 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
                 )
                 .slice(0, MAX_PARTIAL_RETAINED)
             : retained;
-        const retainedIds = new Set(retainedCapped.map((b) => b.sessionId));
-        for (const [key, summary] of this.boundSessionByPr) {
-          if (seen.has(summary.sessionId)) continue;
-          if (!retainedIds.has(summary.sessionId)) continue;
-          const existing = map.get(key);
-          if (
-            !existing ||
-            (summary.updatedAt ?? '') > (existing.updatedAt ?? '')
-          ) {
-            map.set(key, summary);
+        if (retainedCapped.length < retained.length) {
+          process.stderr.write(
+            `[Channel:${this.name}] binding retention cap exceeded under a partial snapshot: dropped ${retained.length - retainedCapped.length} oldest unlisted sessions (keeping ${MAX_PARTIAL_RETAINED}); their unmatched events defer until a complete snapshot establishes absence\n`,
+          );
+        }
+        // Rebuild retention from the retained SESSION rows, not the old
+        // winners: when the previous winner unbinds (a listed tombstone),
+        // an older retained follower must still be selectable for the PR
+        // instead of emptying the routing map.
+        for (const summary of retainedCapped) {
+          if (summary.sourceType === 'channel') continue;
+          for (const pr of summary.prs) {
+            const identity = this.parsePrBindingUrl(pr.url);
+            if (!identity || identity.number !== pr.number) continue;
+            const key = this.prBindingKey(identity.chatId, identity.number);
+            const existing = map.get(key);
+            if (
+              !existing ||
+              (summary.updatedAt ?? '') > (existing.updatedAt ?? '')
+            ) {
+              map.set(key, summary);
+            }
           }
         }
         this.lastBindings = [...snapshot.bindings, ...retainedCapped];
@@ -3061,6 +3153,34 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.lastBindings = snapshot.bindings;
       }
       this.boundSessionByPr = map;
+      // Absence authority under a partial answer: a PR is authoritatively
+      // unbound only if it was known before AND every session that bound it
+      // is listed now and excludes it (a listed session's PR set is
+      // complete). A never-known PR may hide a fresh binding in an unlisted
+      // workspace, and a cap-evicted binder is unlisted — both must defer
+      // instead of routing publicly. Recomputed per refresh (never
+      // accumulates); a complete snapshot clears it because every absence
+      // is authoritative then.
+      const authoritativeUnbinds = new Set<string>();
+      if (snapshot.partial) {
+        const listed = new Set(snapshot.bindings.map((b) => b.sessionId));
+        for (const [key, binders] of previousBinders) {
+          if (map.has(key)) continue;
+          let allListed = true;
+          for (const id of binders) {
+            // A channel-owned binder never provides private delivery, so
+            // it cannot hide a follower; only non-channel binders must be
+            // listed (and excluding the PR) for absence to be authoritative.
+            if (previousSessionSources.get(id) === 'channel') continue;
+            if (!listed.has(id)) {
+              allListed = false;
+              break;
+            }
+          }
+          if (allListed) authoritativeUnbinds.add(key);
+        }
+      }
+      this.authoritativeUnbinds = authoritativeUnbinds;
       if (snapshot.partial && map.size === 0 && !this.boundSnapshotTrusted) {
         this.coldEmptyPartialStreak += 1;
         if (this.coldEmptyPartialStreak === MAX_COLD_EMPTY_PARTIAL_POLLS) {
@@ -3385,6 +3505,46 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     this.prWatchStateLoaded = true;
   }
 
+  /**
+   * Whether any persisted watch entry still holds pending events. Keeps
+   * recovery blocked while watch subscriptions are disabled: an accepted
+   * task whose pending record is unreconciled must not be delivered and
+   * removed ahead of a later re-enabled drain. Fail-closed on read errors.
+   */
+  private hasUnreconciledWatchPending(): boolean {
+    try {
+      this.loadPrWatchState();
+    } catch {
+      return true;
+    }
+    return Object.values(this.prWatchState.entries).some(
+      (entry) => (entry.pending?.length ?? 0) > 0,
+    );
+  }
+
+  /**
+   * PR keys whose earlier watch transition still has a recoverable inbound
+   * task. Undefined when the task store cannot be read: the caller must
+   * not prune or evict watch memory it cannot cross-check (fail-closed).
+   */
+  private survivingWatchPrKeys(): Set<string> | undefined {
+    try {
+      return new Set(
+        this.readInboundTasks()
+          .filter(
+            (task) =>
+              this.isRecoverableInboundTask(task) &&
+              task.envelope?.messageId?.startsWith('watch:') === true,
+          )
+          .map((task) =>
+            this.prBindingKey(task.source.chatId, task.issueNumber),
+          ),
+      );
+    } catch {
+      return undefined;
+    }
+  }
+
   private savePrWatchState(): void {
     // Never overwrite on-disk state with memory that failed to load: a
     // transient read error must not destroy pending events / fired rings.
@@ -3499,25 +3659,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // baseline and ciFiredSha pin while the old transition is in flight so
     // a rebind does not re-fire the same red head.
     if (!this.lastBindingsPartial) {
-      let survivingWatchPrs: Set<string> | undefined;
-      try {
-        survivingWatchPrs = new Set(
-          this.readInboundTasks()
-            .filter(
-              (task) =>
-                this.isRecoverableInboundTask(task) &&
-                task.envelope?.messageId?.startsWith('watch:') === true,
-            )
-            .map((task) =>
-              this.prBindingKey(task.source.chatId, task.issueNumber),
-            ),
-        );
-      } catch {
-        // Task state unknown: pruning watch memory now could collide with
-        // tasks we cannot see. Skip pruning entirely this poll (fail-closed,
-        // same convention as the persistence-blocked cursor).
-        survivingWatchPrs = undefined;
-      }
+      // Undefined = task store unreadable: skip pruning entirely this poll
+      // (fail-closed, same convention as the persistence-blocked cursor).
+      const survivingWatchPrs = this.survivingWatchPrKeys();
       if (survivingWatchPrs !== undefined) {
         for (const key of Object.keys(this.prWatchState.entries)) {
           if (candidates.has(key)) continue;
@@ -3529,30 +3673,40 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
     // The prune above never runs under a permanent partial; cap the entry
     // map so an unscannable workspace cannot grow it without bound. Evict
-    // the oldest idle entries (no pending events) and surface it: losing a
-    // baseline can re-fire a red head's ci_failure once, but the detection
-    // timestamp in watch keys keeps the re-fire from deduping into an old
-    // admission, so this bounds memory without losing events.
+    // only the oldest IDLE entries that no retained binding still claims
+    // and no in-flight watch task still owns — the same protections as the
+    // complete-snapshot prune. An evicted entry belongs to a PR with no
+    // delivery target: a later rebind re-baselines silently like any first
+    // observation, so eviction bounds memory without losing a deliverable
+    // event. Surfaced on stderr, never silent.
     const entryKeys = Object.keys(this.prWatchState.entries);
     if (entryKeys.length > MAX_PARTIAL_RETAINED) {
-      const evictable = entryKeys
-        .filter((key) => !this.prWatchState.entries[key]?.pending?.length)
-        .sort(
-          (a, b) =>
-            (this.prWatchState.entries[a]?.headObservedAt ?? 0) -
-            (this.prWatchState.entries[b]?.headObservedAt ?? 0),
+      const survivingWatchPrs = this.survivingWatchPrKeys();
+      if (survivingWatchPrs !== undefined) {
+        const evictable = entryKeys
+          .filter(
+            (key) =>
+              !this.prWatchState.entries[key]?.pending?.length &&
+              !candidates.has(key) &&
+              !survivingWatchPrs.has(key),
+          )
+          .sort(
+            (a, b) =>
+              (this.prWatchState.entries[a]?.headObservedAt ?? 0) -
+              (this.prWatchState.entries[b]?.headObservedAt ?? 0),
+          );
+        const evictCount = Math.min(
+          evictable.length,
+          entryKeys.length - MAX_PARTIAL_RETAINED,
         );
-      const evictCount = Math.min(
-        evictable.length,
-        entryKeys.length - MAX_PARTIAL_RETAINED,
-      );
-      for (let i = 0; i < evictCount; i++) {
-        delete this.prWatchState.entries[evictable[i]];
-      }
-      if (evictCount > 0) {
-        process.stderr.write(
-          `[Channel:${this.name}] PR watch entry cap exceeded: evicted ${evictCount} idle entries (oldest first) to bound memory under a partial binding snapshot\n`,
-        );
+        for (let i = 0; i < evictCount; i++) {
+          delete this.prWatchState.entries[evictable[i]];
+        }
+        if (evictCount > 0) {
+          process.stderr.write(
+            `[Channel:${this.name}] PR watch entry cap exceeded: evicted ${evictCount} idle entries (oldest first) to bound memory under a partial binding snapshot\n`,
+          );
+        }
       }
     }
     const watched = [...active.entries()]
@@ -3777,7 +3931,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // dedupe the second PR's event. The timestamp survives episode-counter
     // resets (prune, corruption recovery): the daemon ring outlives the
     // worker, and a re-issued bare seq key would dedupe into the old
-    // admission instead of delivering the new transition.
+    // admission instead of delivering the new transition. The identity is
+    // instance-local by design: two channel configurations watching the
+    // same repo each deliver their own watch notifications (at-least-once
+    // per subscription) — the ring dedupes retries of ONE delivery, not
+    // independent subscriptions. Comment events still dedupe across
+    // instances via their stable GitHub ids.
     const detectedAt = Date.now();
     for (const event of events) {
       // ci_failure dedupes per head SHA: once per head even when the
@@ -3840,6 +3999,40 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         envelope,
         delivery: this.resolveBoundDelivery(chatId, number),
       });
+      if (next.pending.length > MAX_PENDING_WATCH_PER_ENTRY) {
+        const oldest = next.pending[0]!;
+        const record = {
+          retiredAt: new Date().toISOString(),
+          issueNumber: oldest.issueNumber,
+          source: {
+            chatId,
+            threadId: `pr:${number}`,
+            messageId: oldest.key,
+          },
+          delivery: oldest.delivery,
+          reason: `watch pending queue overflow (cap ${MAX_PENDING_WATCH_PER_ENTRY}); oldest event retired undelivered`,
+          text: oldest.envelope.text,
+        };
+        try {
+          const path = this.channelFilePath('github-bound-deadletter.jsonl');
+          mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+          appendFileSync(path, `${JSON.stringify(record)}\n`, {
+            encoding: 'utf-8',
+            mode: 0o600,
+          });
+          next.pending.shift();
+          process.stderr.write(
+            `[Channel:${this.name}] watch pending overflow for ${key}: retired ${oldest.key} to dead-letter (cap ${MAX_PENDING_WATCH_PER_ENTRY})\n`,
+          );
+        } catch (err) {
+          // Same fail-safe as retireBoundTask: if the exhaustion surface
+          // cannot be written, keep the event queued (over cap) and retry
+          // the overflow on the next detection instead of dropping it.
+          process.stderr.write(
+            `[Channel:${this.name}] failed to write watch pending overflow dead-letter (${oldest.key}): ${err}; payload: ${JSON.stringify(record)}\n`,
+          );
+        }
+      }
       if (event.type === 'ci_failure' && headSha !== undefined) {
         next.ciFiredSha = headSha;
       }

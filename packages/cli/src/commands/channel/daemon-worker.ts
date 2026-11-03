@@ -375,9 +375,10 @@ export function createBoundSessionsAccessor(
       // reason: cross-workspace channel classification requires it.
       body: JSON.stringify({
         prompt: [{ type: 'text', text: prompt }],
-        // The durable task id: the daemon deduplicates repeated admissions
-        // of the same key, so a retry after a lost acceptance mark or a
-        // lost 202 response does not re-inject the event.
+        // The stable event identity (source chat + message id): the daemon
+        // deduplicates repeated admissions of the same key, so a retry
+        // after a lost acceptance mark or a lost 202 response does not
+        // re-inject the event.
         ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
         _meta: {
           [CHANNEL_PROMPT_META_KEY]: true,

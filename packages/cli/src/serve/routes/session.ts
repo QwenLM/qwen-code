@@ -8856,7 +8856,13 @@ export function registerSessionRoutes(
               // it). The remembered key must be removed, or a retry would
               // dedupe into a phantom admission and silently lose the
               // event. Turn failures (the prompt WAS admitted) keep their
-              // key.
+              // key. Residual: this route returns 202 before admission
+              // completes, so the CURRENT delivery of a deferred rejection
+              // is already consumed by the caller — the forget protects
+              // subsequent retries (the relay's wake-and-retry path). The
+              // only reachable deferred pre-admission rejection is the
+              // reserved standalone working-directory check; prompt shape
+              // is pre-validated above.
               if (idempotencyKey !== undefined && !promptAdmitted) {
                 forgetPromptIdempotencyKey(sessionId, idempotencyKey);
               }
