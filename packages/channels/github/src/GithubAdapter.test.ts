@@ -10448,6 +10448,111 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(existsSync(inboundTaskPath())).toBe(false);
     });
 
+    it('keeps the notification cursor flowing while watch reconciliation is blocked (R7-B1)', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      seedWatchState({
+        'owner/repo#42': {
+          headSha: 'sha-1',
+          ci: 'success',
+          mergeableState: 'clean',
+          prState: 'open',
+          prUpdatedAt: '2026-07-02T09:00:00.000Z',
+          fired: [],
+          pending: [makePendingWatch()],
+        },
+      });
+      // Crash window: an accepted watch task and its pending record are
+      // both on disk. The sidecar then becomes unreadable, so reconcile
+      // fails and recovery must keep skipping the task.
+      const watchTask = makeInboundTaskRecord({
+        id: 'watch-task-1',
+        state: 'accepted',
+        issueNumber: 42,
+        source: {
+          chatId: 'owner/repo',
+          threadId: 'pr:42',
+          messageId: 'watch:ci_failure:sha-1',
+        },
+        envelope: {
+          ...makeInboundTaskRecord().envelope,
+          threadId: 'pr:42',
+          messageId: 'watch:ci_failure:sha-1',
+          text: 'CI failed on head sha-1.',
+        },
+        dedupe: {},
+        delivery: { kind: 'bound-session', sessionId: 'bound-session' },
+      });
+      writeInboundTasks([watchTask]);
+      const originalRead = nodeFs.readFileSync;
+      const spy = vi.spyOn(nodeFs, 'readFileSync').mockImplementation(((
+        path: unknown,
+        ...args: unknown[]
+      ) => {
+        if (String(path) === watchStatePath()) {
+          throw Object.assign(new Error('EACCES: permission denied'), {
+            code: 'EACCES',
+          });
+        }
+        return (originalRead as (p: unknown, ...a: unknown[]) => unknown)(
+          path,
+          ...args,
+        );
+      }) as unknown as typeof nodeFs.readFileSync);
+      try {
+        // An unrelated mention comment arrives while reconcile is blocked.
+        mockPull({});
+        mockNotificationsOnce([prNotification()]);
+        mockOctokit.rest.issues.listComments.mockResolvedValueOnce([
+          makeComment(),
+        ]);
+        await pollOnce();
+
+        // The comment delivers privately...
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'please fix this',
+        );
+        // ...and the shared cursor must commit: the blocked watch task
+        // cannot make progress this poll, and watch events do not ride the
+        // notification cursor, so freezing mark-as-read for it would stall
+        // every unrelated PR until the sidecar recovers.
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+        const ch = channel as unknown as {
+          cursor: { lastProcessedAt: string };
+        };
+        expect(ch.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+        // The watch task itself stays queued and undelivered.
+        const tasks = readInboundTasks();
+        expect(tasks.some((t) => t['id'] === 'watch-task-1')).toBe(true);
+
+        // A second blocked poll with no new notifications keeps the
+        // committed cursor and still does not deliver the watch task.
+        mockPull({});
+        mockNotificationsOnce([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+        expect(ch.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+      } finally {
+        spy.mockRestore();
+      }
+
+      // Readable again: reconciliation drains the pending event exactly
+      // once — the cursor commits during the block consumed no watch event.
+      mockPull({});
+      mockNotificationsOnce([]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+      expect(boundSessions.deliverPrompt.mock.calls[1]![1]).toContain(
+        'CI failed on head sha-1',
+      );
+      expect(existsSync(inboundTaskPath())).toBe(false);
+    });
+
     it('bounds CI re-fetches by the interval even when the endpoint persistently fails (A-F3)', async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date('2026-07-02T09:00:00.000Z'));

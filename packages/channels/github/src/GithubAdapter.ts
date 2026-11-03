@@ -2691,12 +2691,23 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * deferral horizon, and must not freeze mark-as-read for every unrelated
    * PR the channel follows. This covers both bound deliveries and the
    * targetless deferrals an incomplete binding snapshot produces (no
-   * delivery yet, same durable retry).
+   * delivery yet, same durable retry). Watch tasks are excluded while
+   * reconcile is blocked: recovery skips them and the drain cannot run, so
+   * they cannot make progress — and watch events are detected from PR
+   * state, not notifications, so holding the cursor for them only stalls
+   * unrelated comment traffic until the watch sidecar recovers. Once
+   * reconcile succeeds they count again, and their retry budgets guarantee
+   * they settle instead of freezing the cursor forever.
    */
   private hasCursorBlockingTasks(): boolean {
     return this.readInboundTasks().some(
       (task) =>
-        this.isRecoverableInboundTask(task) && task.backpressure !== true,
+        this.isRecoverableInboundTask(task) &&
+        task.backpressure !== true &&
+        !(
+          this.watchReconcileBlocked &&
+          task.envelope?.messageId?.startsWith('watch:') === true
+        ),
     );
   }
 
