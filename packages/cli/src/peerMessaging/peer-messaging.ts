@@ -568,8 +568,9 @@ export class PeerMessaging {
   }
 
   /**
-   * A popped or drained frame was consumed — it reached the model, so its
-   * 'delivered' receipt stands and no corrective receipt is owed at close.
+   * A frame is final — it reached the model, or a receipt above already gave
+   * the sender the definitive answer (the misaddressed reject settles here
+   * too) — so no corrective receipt is owed at close.
    */
   settleConsumedFrame(msgId: string): void {
     for (let i = this.outstanding.length - 1; i >= 0; i--) {

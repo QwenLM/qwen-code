@@ -874,6 +874,23 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     );
     await settle();
     expect(queued).toHaveLength(2);
+
+    // Closing is what exercises the reject-path settle: the misaddressed
+    // frame was settled finally at the drain, so close() must not send its
+    // sender a second, contradictory `expired` receipt on top of the
+    // 'misaddressed' answer. Scoped to the rejected frame — the second send
+    // above adds its own receipts to the same unfiltered list.
+    await started.close();
+    messaging = null;
+    await settle();
+    expect(
+      receipts
+        .filter(
+          (receipt) =>
+            receipt.type === 'control' && receipt.origMsgId === frame.msgId,
+        )
+        .map((receipt) => (receipt as { status: string }).status),
+    ).toEqual(['delivered', 'misaddressed']);
   });
 
   it('drains a matching or unpinned queued envelope', async () => {
@@ -1577,7 +1594,20 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     // so the expiry correction at close applies to it after all — restoring
     // must undo the consumption settlement, or a restored frame's sender
     // keeps a delivered receipt for a body that never reached the model.
-    const sender = await startSenderInbox();
+    // The sender's inbox requires its own token, so the corrective receipt
+    // only lands if it carries the replyToken the frame offered — the
+    // branch `trackUndecidedFrame`'s replyToken spread exists for. Drop that
+    // spread and this assertion reads ['delivered'] alone: the unauthenticated
+    // `expired` bounces off the sender's auth and its ledger keeps
+    // 'delivered' forever.
+    const SENDER_TOKEN = 'restore-sender-token';
+    const sender = await startPeerInbox({
+      socketPath: path.join(tmpDir, 'socks', 'sender.sock'),
+      requiredToken: SENDER_TOKEN,
+      onFrame: (frame) => receipts.push(frame),
+    });
+    if (!sender) throw new Error('sender inbox failed to start');
+    senderInbox = sender;
     const started = await PeerMessaging.start({
       socketPath: path.join(tmpDir, 'socks', 'self.sock'),
       getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -1592,6 +1622,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     const frame = peerFrame({
       content: 'taken then restored',
       from: sender.socketPath,
+      replyToken: SENDER_TOKEN,
     });
     await send(started.socketPath!, frame);
     await settle();
@@ -1600,6 +1631,7 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     started.trackUndecidedFrame({
       msgId: frame.msgId,
       from: sender.socketPath,
+      replyToken: SENDER_TOKEN,
     });
 
     await started.close();
