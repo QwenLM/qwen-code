@@ -302,6 +302,11 @@ const allowOnce = () => ({
         NO_PROXY: noProxy,
         no_proxy: noProxy,
         QWEN_HOME: qwenHome,
+        // TestRig keeps QWEN_RUNTIME_DIR inside the workspace; leaving it
+        // there makes the session runtime write `tmp/<hash>` into the test
+        // directory, which then differs between the two surfaces' request
+        // snapshots. Give both surfaces the same scratch runtime.
+        QWEN_RUNTIME_DIR: qwenHome,
       };
       delete env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'];
       if (shared) env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = '1';
