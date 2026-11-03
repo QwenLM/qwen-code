@@ -969,7 +969,7 @@ export const AppContainer = (props: AppContainerProps) => {
     config.getWorkingDir(),
   );
 
-  const { providerUpdateRequest, dismissProviderUpdate } = useProviderUpdates(
+  const { providerUpdateRequest } = useProviderUpdates(
     settings,
     config,
     historyManager.addItem,
@@ -5590,7 +5590,6 @@ export const AppContainer = (props: AppContainerProps) => {
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
-      dismissProviderUpdate,
       closeTrustDialog,
       closePermissionsDialog,
       setShellModeActive,
@@ -5685,7 +5684,6 @@ export const AppContainer = (props: AppContainerProps) => {
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
-      dismissProviderUpdate,
       closeTrustDialog,
       closePermissionsDialog,
       setShellModeActive,

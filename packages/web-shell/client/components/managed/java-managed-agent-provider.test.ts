@@ -1403,6 +1403,7 @@ describe('createJavaManagedAgentProvider', () => {
         events: [],
         items: [],
         lastSequence: 7,
+        coveredSequence: 5,
         hasMore: true,
         olderCursor: 'older-1',
       }),
@@ -1419,7 +1420,9 @@ describe('createJavaManagedAgentProvider', () => {
     });
 
     expect(transcript.olderCursor).toBe('older-1');
-    expect(transcript.lastEventId).toBe(7);
+    expect(transcript.lastEventId).toBe(5);
+    expect(transcript.history).toBe('items');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0]!;
     expect(String(url)).toBe(
       'https://product.example/api/agent/web-shell/v1/transcript/query',
@@ -1432,6 +1435,37 @@ describe('createJavaManagedAgentProvider', () => {
       }),
     );
   });
+
+  it.each([
+    ['missing', undefined],
+    ['null', null],
+    ['negative', -1],
+    ['fractional', 1.5],
+  ])(
+    'rejects %s message coverage instead of resuming at the head',
+    async (_label, coverage) => {
+      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+        jsonResponse({
+          events: [],
+          items: [],
+          lastSequence: 400,
+          coveredSequence: coverage,
+          hasMore: false,
+        }),
+      );
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: fetchImpl,
+      });
+      await expect(
+        provider.getTranscript('session-1', {
+          clientId: 'client-1',
+          limit: 100,
+        }),
+      ).rejects.toThrow('Invalid message transcript coverage.');
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('sends idempotent create, submit, and cancel commands only to Java', async () => {
     const fetchImpl = vi
@@ -1770,6 +1804,7 @@ describe('createJavaManagedAgentProvider', () => {
         olderCursor: 'older-1',
         hasMore: true,
         lastSequence: 4,
+        coveredSequence: 4,
       }),
     );
     const provider = createJavaManagedAgentProvider({

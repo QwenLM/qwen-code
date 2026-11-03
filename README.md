@@ -135,6 +135,27 @@ asyncio.run(main())
 
 </details>
 
+## Daemon Mode
+
+Run Qwen Code as a long-lived service when you want browser, editor, SDK, and automation clients to share agent sessions without each starting a separate process. The daemon provides the built-in Web Shell and an HTTP + SSE API, supports multiple workspaces, and lets clients reconnect to active sessions.
+
+Start it in the foreground and open the Web Shell:
+
+```bash
+qwen serve --open
+```
+
+The default address is `http://127.0.0.1:4170`. To run and manage it in the background instead:
+
+```bash
+qwen daemon start
+qwen daemon status
+qwen daemon logs -f
+qwen daemon stop
+```
+
+By default, the daemon listens on loopback without bearer authentication; any local process that can reach it can use the full API, including code execution. On shared or untrusted hosts, set `QWEN_SERVER_TOKEN` and use `--require-auth`. See the [Daemon guide](./docs/users/qwen-serve.md) for workspaces, authentication, remote access, and the API.
+
 ## Capabilities
 
 If you know Claude Code, you already know Qwen Code — and then some. We've put significant effort into [bringing Qwen Code to feature parity with Claude Code](https://github.com/wenshao/codeagents/blob/main/docs/comparison/qwen-code-improvement-report.md), improving both breadth and reliability across the board.

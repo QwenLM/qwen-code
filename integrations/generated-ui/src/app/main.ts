@@ -40,8 +40,12 @@ const continueAnalysis = element<HTMLButtonElement>('continue-analysis');
 const continuationStatus = element('continuation-status');
 const continuationHelp = element('continuation-help');
 
-// Review outcomes the host reports for a message it never sent.
+// Review outcomes the host reports for a message it never sent, and the
+// host's reason when sending failed before the session accepted it.
 const REVIEW_OUTCOME = 'qwen-code/message-review';
+const REVIEW_REASON = 'qwen-code/message-error';
+// Values settle for this long before they are offered as model context.
+const CONTEXT_SYNC_DELAY = 800;
 
 let t = translator(undefined);
 let documentTitle = '';
@@ -51,6 +55,14 @@ let state: ViewState = {
   rejectedEvents: 0,
 };
 let canReview = false;
+// Hosts that accept model context get the applied values after each change,
+// so the user can keep chatting without pressing the continue action.
+let canSyncContext = false;
+let contextTimer: ReturnType<typeof setTimeout> | undefined;
+let capturingContext = false;
+let syncedContext = '';
+// Host-provided reason a message was not sent, shown after the status.
+let continuationDetail = '';
 let interacted = false;
 let hostStyle: HostStyle = {};
 let continuationState:
@@ -99,11 +111,21 @@ function renderContinuation(): void {
   );
   setText(
     continuationHelp,
-    t(!canReview ? 'help.unavailable' : fixing ? 'help.fix' : 'help.continue'),
+    t(
+      !canReview
+        ? 'help.unavailable'
+        : fixing
+          ? 'help.fix'
+          : canSyncContext
+            ? 'help.continueChat'
+            : 'help.continue',
+    ),
   );
   setText(
     continuationStatus,
-    continuationMessage ? t(continuationMessage) : '',
+    continuationMessage
+      ? [t(continuationMessage), continuationDetail].filter(Boolean).join(' ')
+      : '',
   );
   continuationStatus.hidden = !continuationMessage;
   continuationStatus.dataset['state'] = continuationState;
@@ -198,6 +220,8 @@ async function send(
   previous: typeof continuationState,
 ): Promise<void> {
   let outcome: unknown;
+  let reason: unknown;
+  continuationDetail = '';
   try {
     const result = await app.sendMessage(
       { role: 'user', content: [{ type: 'text', text: attempt.text! }] },
@@ -205,9 +229,9 @@ async function send(
       { signal: attempt.abort.signal, timeout: 210_000 },
     );
     if (pendingAttempt !== attempt) return;
-    outcome = (result as { _meta?: Record<string, unknown> })._meta?.[
-      REVIEW_OUTCOME
-    ];
+    const meta = (result as { _meta?: Record<string, unknown> })._meta;
+    outcome = meta?.[REVIEW_OUTCOME];
+    reason = meta?.[REVIEW_REASON];
     continuationState = result.isError ? 'unconfirmed' : 'accepted';
   } catch {
     if (pendingAttempt !== attempt) return;
@@ -227,6 +251,8 @@ async function send(
         : outcome === 'expired'
           ? 'continuation.expired'
           : 'continuation.notSent';
+    if (outcome === 'failed' && typeof reason === 'string')
+      continuationDetail = reason.replace(/\s+/g, ' ').trim().slice(0, 200);
   } else {
     continuationMessage =
       continuationState === 'accepted'
@@ -310,6 +336,35 @@ async function createWorker(): Promise<Worker> {
   }
 }
 
+function syncContext(): void {
+  contextTimer = undefined;
+  if (!canSyncContext || !interacted || state.phase !== 'ready') return;
+  // Capturing publishes the state again; that publish must not reschedule.
+  capturingContext = true;
+  let capture: CaptureResult;
+  try {
+    capture = controller.captureSnapshot();
+  } finally {
+    capturingContext = false;
+  }
+  if (!capture.ok) return;
+  const message = buildContinuationText(documentTitle, capture, 'context');
+  if (!message.ok || message.text === syncedContext) return;
+  syncedContext = message.text;
+  void app
+    .updateModelContext({ content: [{ type: 'text', text: message.text }] })
+    .catch(() => {
+      syncedContext = '';
+    });
+}
+
+function scheduleContextSync(): void {
+  if (!canSyncContext || !interacted || capturingContext) return;
+  if (state.phase !== 'ready') return;
+  clearTimeout(contextTimer);
+  contextTimer = setTimeout(syncContext, CONTEXT_SYNC_DELAY);
+}
+
 function onState(next: ViewState): void {
   state = next;
   const terminal = next.phase === 'stopped' || next.phase === 'error';
@@ -322,6 +377,8 @@ function onState(next: ViewState): void {
       continuationState = 'idle';
     }
   }
+  if (terminal) clearTimeout(contextTimer);
+  else scheduleContextSync();
   renderState();
 }
 
@@ -394,6 +451,8 @@ app.connect().then(
     canReview =
       app.getHostVersion()?.name === 'qwen-code-web-shell' &&
       !!app.getHostCapabilities()?.message?.text;
+    canSyncContext =
+      canReview && !!app.getHostCapabilities()?.updateModelContext?.text;
     syncHostContext();
   },
   () =>

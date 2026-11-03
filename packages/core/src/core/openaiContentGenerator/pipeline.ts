@@ -1458,7 +1458,7 @@ export class ContentGenerationPipeline {
       // model would miss the disable signal (the regression).
       if (!thinkingMandatory && isQwenFamilyWireModel(model)) {
         if (isDashScope) {
-          if (isTieredEffortWireModel(model)) {
+          if (isTieredEffortWireModel(model, reasoningCapabilities)) {
             // The tier-native family reads reasoning_effort, not the
             // boolean: emit the canonical disable in the knob it reads
             // (the strip below preserves 'none'). Drop a user-supplied

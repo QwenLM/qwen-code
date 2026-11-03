@@ -1795,6 +1795,35 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('lsp client lifecycle', () => {
+    it('stops the session lsp client on shutdown (#14751)', async () => {
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const config = makeConfig({ lspClient: { stop } as never });
+      await config.initialize(SKIP_ALL_INIT);
+      await config.shutdown();
+      expect(stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops the client even when shutdown runs before initialize', async () => {
+      // loadCliConfig installs the client before initialization, so a session
+      // that dies during startup (e.g. daemon admission rejects it) still owns
+      // language servers; teardown must not skip them over `initialized`.
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const config = makeConfig({ lspClient: { stop } as never });
+      await config.shutdown();
+      expect(stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the remaining cleanup running when lsp stop rejects', async () => {
+      const stop = vi.fn().mockRejectedValue(new Error('stop failed'));
+      const config = makeConfig({ lspClient: { stop } as never });
+      await config.initialize({ ...SKIP_ALL_INIT, skipSkillManager: false });
+      await config.shutdown();
+      expect(stop).toHaveBeenCalledTimes(1);
+      expect(config.getSkillManager()?.stopWatching).toHaveBeenCalledTimes(1);
+    });
+  });
+
   // Shared isolation for the debug-fallback tests. The module-level
   // vi.mock('node:fs') overrides only the sync fs API, so an un-spied
   // fs.promises call would write into the real global debug dir: spy the whole
@@ -3480,6 +3509,33 @@ describe('Server Config (config.ts)', () => {
         }),
         'assets-missing',
       );
+    });
+
+    it('warns about an unavailable runtime only for an explicit opt-in', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const byDefault = await ready({
+          folderTrust: true,
+          trustedFolder: false,
+        });
+        expectUnavailable(byDefault, 'workspace-untrusted');
+        expect(byDefault.getWarnings()).not.toContainEqual(
+          expect.stringContaining('Generated UI'),
+        );
+        const requested = await ready({
+          folderTrust: true,
+          trustedFolder: false,
+          bundledGeneratedUi: { ...candidate, explicit: true },
+        });
+        expectUnavailable(requested, 'workspace-untrusted');
+        expect(requested.getWarnings()).toContainEqual(
+          expect.stringContaining(
+            'Bundled Generated UI is unavailable (workspace-untrusted)',
+          ),
+        );
+      } finally {
+        warn.mockRestore();
+      }
     });
 
     it.each([
@@ -6858,6 +6914,8 @@ describe('Server Config (config.ts)', () => {
       afterEach(restoreEnv);
 
       const interactiveCli = { interactive: true, sdkMode: false };
+      // A host with no record_artifact tool and no artifact metadata route.
+      const workerHost = { artifactRecordingSupported: false };
       // `record` is the expected isRecordArtifactEnabled(), where asserted.
       it.each`
         title                                                                              | env                                                                    | params                                           | artifact | record
@@ -6869,6 +6927,8 @@ describe('Server Config (config.ts)', () => {
         ${'keeps the Artifact tool disabled for daemon CLI env enablement'}                | ${{ QWEN_CODE_ENABLE_ARTIFACT: '1' }}                                  | ${DAEMON}                                        | ${false} | ${true}
         ${'lets daemon sessions record metadata by default without publishing'}            | ${{}}                                                                  | ${DAEMON}                                        | ${false} | ${true}
         ${'lets QWEN_CODE_ENABLE_ARTIFACT force-enable interactive CLI use'}               | ${{ QWEN_CODE_ENABLE_ARTIFACT: '1' }}                                  | ${{ ...interactiveCli, artifactEnabled: false }} | ${true}  | ${undefined}
+        ${'keeps recording off for hosts that do not support it'}                          | ${{}}                                                                  | ${{ ...DAEMON, ...workerHost }}                  | ${false} | ${false}
+        ${'keeps recording off for those hosts even when force-enabled'}                   | ${{ QWEN_CODE_ENABLE_ARTIFACT: '1' }}                                  | ${{ ...interactiveCli, ...workerHost }}          | ${true}  | ${false}
       `('%s', ({ env, params, artifact, record }) => {
         Object.assign(process.env, env);
         const config = makeConfig(params);

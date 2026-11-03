@@ -13,18 +13,25 @@ import { join } from 'node:path';
 import type { CommandModule } from 'yargs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { unsavedWork } from './cleanup.js';
-import { untrustedGitfile, untrustedSubmodules } from './worktree.js';
+import {
+  untrustedCheckoutGit,
+  untrustedGitfile,
+  untrustedSubmodules,
+} from './worktree.js';
 import { DEFAULT_EVERY } from './schedule.js';
 import {
   assertPositiveInteger,
   autofixPrPaths,
+  cloneWorktreeRoots,
   currentSessionId,
   isRegularFile,
   MAX_PUSHES,
   readGateCursor,
   readState,
-  repoRoot,
   sameRepository,
+  statePaths,
+  trustAnchor,
+  vouchedScanRoots,
   type AutofixPrGateCursor,
   type AutofixPrWatchOptions,
   type NeedsHumanItem,
@@ -64,6 +71,9 @@ export interface WatchStatus {
   needsHuman: NeedsHumanItem[];
   worktreePath: string;
   worktreeExists: boolean;
+  /** `prepare --in-place`: the watch fixes in the user's own checkout
+   * (`worktreePath`), so `worktreeWork` is what that checkout holds. */
+  inPlace: boolean;
   /** Every git directory a command in the worktree reads — its own and
    * each checked-out submodule's — is one the clone keeps, outside the
    * worktree; read from the files (Section 6.12 of the design). */
@@ -152,23 +162,62 @@ export function runStatus(args: {
    * `gitTrusted` false, unchecked. The daemon's listing runs on its own
    * thread, where a git command that hangs would hold every request. */
   git?: boolean;
-  /** The clone's main worktree: by default, the one the working directory
-   * is in. The daemon names it, as its own directory is not the clone's. */
+  /** Scan only this worktree's `.qwen/tmp`, not the whole clone. By default
+   * every worktree of the clone is scanned, so a watch is found whichever of
+   * them holds it. */
   root?: string;
+  /** Scan exactly these worktrees' `.qwen/tmp`, running no git command to
+   * find them: the daemon enumerates the clone's worktrees itself, on its
+   * own short timeout, and passes them here. Takes precedence over `root`. */
+  roots?: string[];
   /** Whose watches are `thisSession`: by default, the session this runs in
    * (`QWEN_CODE_SESSION_ID`); null for none. */
   session?: string | null;
 }): StatusOutcome {
   if (args.pr !== undefined) assertPositiveInteger(args.pr, 'PR number');
-  const root = args.root ?? repoRoot();
-  const tmp = join(root, '.qwen', 'tmp');
-  const numbers = (existsSync(tmp) ? readdirSync(tmp) : [])
-    .map((name) => STATE_FILE_RE.exec(name)?.[1])
-    .filter((n): n is string => n !== undefined)
-    .map(Number)
-    .filter((n) => Number.isSafeInteger(n) && n > 0)
-    .filter((n) => args.pr === undefined || n === args.pr)
-    .sort((a, b) => a - b);
+  const roots =
+    args.roots ??
+    (args.root !== undefined ? [args.root] : cloneWorktreeRoots());
+  // Only genuine, non-nested worktrees of this clone are read: a watch
+  // worktree's own `.qwen/tmp` or a foreign repository at a stale entry must
+  // not forge a watch.
+  const scanRoots = vouchedScanRoots(roots);
+  const primary = scanRoots[0];
+  // The worktree whose `.qwen/tmp` holds each PR's state. Git forbids one
+  // branch in two worktrees, so a PR's watch lives in at most one; a stale
+  // state file left in another loses to the one with a live worktree.
+  const rootByPr = new Map<number, string>();
+  for (const root of scanRoots) {
+    const tmp = join(root, '.qwen', 'tmp');
+    let found: number[];
+    try {
+      found = (existsSync(tmp) ? readdirSync(tmp) : [])
+        .map((name) => STATE_FILE_RE.exec(name)?.[1])
+        .filter((n): n is string => n !== undefined)
+        .map(Number)
+        .filter((n) => Number.isSafeInteger(n) && n > 0)
+        .filter((n) => args.pr === undefined || n === args.pr);
+    } catch (err) {
+      // The primary root's read failure is a real diagnostic, not an empty
+      // listing — surface it. A sibling worktree's `.qwen/tmp` may be a
+      // regular file or inaccessible (ENOTDIR/EACCES); that root holds no
+      // readable watch, and one bad sibling must not abort the listing of
+      // every other worktree's watches (a 500 for the whole clone via daemon).
+      if (root === primary) throw err;
+      continue;
+    }
+    for (const pr of found) {
+      const prev = rootByPr.get(pr);
+      if (
+        prev === undefined ||
+        (!existsSync(autofixPrPaths(prev, pr).worktreePath) &&
+          existsSync(autofixPrPaths(root, pr).worktreePath))
+      ) {
+        rootByPr.set(pr, root);
+      }
+    }
+  }
+  const numbers = [...rootByPr.keys()].sort((a, b) => a - b);
   const session =
     args.session === undefined ? currentSessionId() : args.session;
   const now = Date.now();
@@ -177,6 +226,7 @@ export function runStatus(args: {
     watches: [],
   };
   for (const pr of numbers) {
+    const root = rootByPr.get(pr)!;
     const paths = autofixPrPaths(root, pr);
     try {
       if (!isRegularFile(paths.statePath)) {
@@ -195,6 +245,7 @@ export function runStatus(args: {
         ? modifiedAt(paths.checkedPath)
         : null;
       const every = state.watch?.every ?? DEFAULT_EVERY;
+      const watchPaths = statePaths(root, state);
       outcome.watches.push({
         pr,
         repo: `${state.owner}/${state.repo}`,
@@ -221,18 +272,36 @@ export function runStatus(args: {
         watch: state.watch ?? null,
         ended: state.ended ?? null,
         needsHuman: state.needsHuman ?? [],
-        // The recorded path goes stale when the clone moves; this one does not.
-        worktreePath: paths.worktreePath,
-        worktreeExists: existsSync(paths.worktreePath),
+        // The recorded path goes stale when the clone moves; this one does
+        // not — except an in-place watch's, which is the user's checkout
+        // the state names, not a path the PR number derives.
+        worktreePath: watchPaths.worktreePath,
+        worktreeExists: existsSync(watchPaths.worktreePath),
+        inPlace: state.inPlace === true,
+        // Trust is anchored to the genuine clone recorded for the watch, never
+        // to a discovered worktree whose `.git` a round's code could rewrite.
+        // Only asked when git checks run — the daemon's `git: false` listing
+        // runs no git.
         gitTrusted:
           args.git !== false &&
-          existsSync(paths.worktreePath) &&
-          (untrustedGitfile(paths.worktreePath, root) ??
-            untrustedSubmodules(paths.worktreePath, root)) === null,
+          existsSync(watchPaths.worktreePath) &&
+          ((state.inPlace
+            ? untrustedCheckoutGit(watchPaths.worktreePath, trustAnchor(state))
+            : untrustedGitfile(watchPaths.worktreePath, trustAnchor(state))) ??
+            untrustedSubmodules(
+              watchPaths.worktreePath,
+              trustAnchor(state),
+            )) === null,
         worktreeWork:
           args.work === false || args.git === false
             ? null
-            : unsavedWork(paths, [state.lastKnownHeadSha, ...state.pushedShas]),
+            : unsavedWork(
+                watchPaths,
+                [state.lastKnownHeadSha, ...state.pushedShas],
+                undefined,
+                trustAnchor(state),
+                state.inPlace === true,
+              ),
         fix: fixOf(paths, now),
       });
     } catch (err) {

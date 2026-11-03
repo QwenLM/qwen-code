@@ -1452,6 +1452,12 @@ export interface ConfigParameters {
   /** Consent gate for the propose_goal tool; see ProposeGoalTool. */
   modelProposedGoals?: ModelProposedGoalsMode;
   artifactEnabled?: boolean;
+  /**
+   * False for hosts that expose no `record_artifact` tool and forward no
+   * artifact metadata, such as tool workers. Unlike `artifactEnabled`, the
+   * artifact env flags cannot turn recording back on.
+   */
+  artifactRecordingSupported?: boolean;
   artifactAutoOpen?: boolean;
   artifactPublisher?: 'local' | 'host' | 'oss';
   artifactHost?: ArtifactHostConfig;
@@ -3201,6 +3207,7 @@ export class Config {
   private readonly unifiedAgentLoopEnabled: boolean = false;
   private readonly agentCollaborationEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
+  private readonly artifactRecordingSupported: boolean = true;
   private artifactSnapshotsEnabled = false;
   private readonly artifactAutoOpen: boolean = true;
   private readonly artifactPublisher: 'local' | 'host' | 'oss' = 'local';
@@ -3656,6 +3663,7 @@ export class Config {
     this.unifiedAgentLoopEnabled = params.unifiedAgentLoopEnabled ?? false;
     this.agentCollaborationEnabled = params.agentCollaborationEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
+    this.artifactRecordingSupported = params.artifactRecordingSupported ?? true;
     this.artifactAutoOpen = params.artifactAutoOpen ?? true;
     this.artifactPublisher = params.artifactPublisher ?? 'local';
     this.artifactHost = params.artifactHost;
@@ -7399,10 +7407,12 @@ export class Config {
 
   /**
    * Return a higher-priority static DashScope knob that shadows the current
-   * global effort on qwen3.8-max, so interactive callers can report the
-   * effective outcome instead of confirming a tier that will not reach the
-   * wire. The provider resolves extra_body before samplingParams before the
-   * unified reasoning setting; same-layer explicit effort still wins budget.
+   * global effort on the tiered-effort Qwen families (qwen3.8-max, the
+   * invitation-only latest-series previews, and qwen4), so interactive
+   * callers can report the effective outcome instead of confirming a tier
+   * that will not reach the wire. The provider resolves extra_body before
+   * samplingParams before the unified reasoning setting; same-layer explicit
+   * effort still wins budget.
    */
   getReasoningEffortOverride(): ReasoningEffortOverride | undefined {
     const cfg = this.getContentGeneratorConfig();
@@ -8350,6 +8360,20 @@ export class Config {
         this.goalRuntime?.dispose();
       }
 
+      // Stop this session's language servers before the rest of the
+      // cleanup. A session Config holds its client before initialization
+      // completes (loadCliConfig starts servers, then installs the client),
+      // so gating on `initialized` would skip teardown exactly for the
+      // sessions that die during startup; the daemon stays up and those
+      // servers are the leak from #14751. Derived Configs never receive a
+      // client, so the guard is the client itself. Kept out of the shared
+      // try below so a stop() rejection can't skip the remaining cleanup.
+      try {
+        await this.lspClient?.stop?.();
+      } catch (lspStopError) {
+        this.debugLogger.error('Error stopping LSP client:', lspStopError);
+      }
+
       if (this.initialized) {
         this.skillManager?.stopWatching();
 
@@ -8863,11 +8887,13 @@ export class Config {
       enabled: this.bundledGeneratedUiActive,
       ...(reason ? { reason } : {}),
     };
-    // A disabled setting or a client without MCP Apps is an expected state.
+    // A disabled setting or a client without MCP Apps is an expected state,
+    // and so is any reason while the feature is only on by default.
     if (
       reason &&
       reason !== 'setting-disabled' &&
-      reason !== 'unsupported-client'
+      reason !== 'unsupported-client' &&
+      this.bundledGeneratedUi.explicit
     ) {
       const warning = `Bundled Generated UI is unavailable (${reason}). Restart the owning session after resolving it.`;
       this.warnings.push(warning);
@@ -10619,6 +10645,7 @@ export class Config {
   }
 
   isRecordArtifactEnabled(): boolean {
+    if (!this.artifactRecordingSupported) return false;
     if (process.env['QWEN_CODE_DISABLE_ARTIFACT'] === '1') return false;
     if (this.sdkMode) return false;
     if (process.env['QWEN_CODE_ENABLE_ARTIFACT'] === '1') return true;

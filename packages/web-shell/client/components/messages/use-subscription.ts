@@ -111,8 +111,9 @@ export function useSubscription(
   onOpenExternal: (url: string) => void | Promise<void>,
 ) {
   const { language } = useI18n();
-  const copy = useRef(COPY[language]);
-  copy.current = COPY[language];
+  const messages = COPY[language === 'zh-CN' ? 'zh-CN' : 'en'];
+  const copy = useRef(messages);
+  copy.current = messages;
   const open = useRef(onOpenExternal);
   open.current = onOpenExternal;
   const [state, setState] = useState<QwenSubscriptionState>({

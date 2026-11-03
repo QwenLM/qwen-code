@@ -85,7 +85,9 @@ function waitForRewindApplied(
 }
 
 const COMPOSER_TOOLBAR_ACTIONS = [
+  'addMenu',
   'approvalMode',
+  'workflowMode',
   'contextUsage',
   'model',
 ] as const satisfies readonly ComposerToolbarAction[];
@@ -1754,7 +1756,10 @@ export function EmbeddedApp() {
           className="qwen-code-vscode-web-shell"
           style={SHELL_STYLE}
           theme={theme}
-          language={language}
+          // No `language` prop on purpose: the shell resolves its own UI
+          // language (daemon setting, then browser locale), so a pick in its
+          // settings dialog is not reset to the host chrome language.
+          // `readLanguage` above feeds only the chrome's own copy table.
           sessionSourceType={
             runtime.sessionId ? undefined : VSCODE_SESSION_SOURCE_TYPE
           }

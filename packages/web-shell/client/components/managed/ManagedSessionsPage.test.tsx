@@ -2214,7 +2214,7 @@ describe('ManagedSessionsPage', () => {
       await act(async () =>
         slot
           .querySelector<HTMLButtonElement>(
-            '[aria-label="New task: Project B"]',
+            '[aria-label="New session: Project B"]',
           )!
           .click(),
       );
@@ -4822,13 +4822,51 @@ describe('ManagedSessionsPage', () => {
         new Error('History unavailable'),
       );
       await render('s1', 'en', provider, undefined, interactive);
-      expect(
-        [...container.querySelectorAll('[role="alert"]')].map(
-          (element) => element.textContent,
-        ),
-      ).toEqual(['History unavailable']);
+      // The alert wraps both the sentence and its retry button, so its
+      // textContent carries the button label too; assert the sentence and the
+      // single-alert property separately rather than the concatenation.
+      const alerts = [...container.querySelectorAll('[role="alert"]')];
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]!.textContent).toContain(
+        'Managed sessions could not be loaded.',
+      );
+      expect(alerts[0]!.textContent).not.toContain('History unavailable');
+      expect(container.textContent).not.toContain('History unavailable');
+      expect(container.querySelector('nav [role="alert"]')).not.toBeNull();
     },
   );
+
+  it('keeps an HTTP list failure retryable and does not present it as an empty list', async () => {
+    mocks.client.listSessions
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(
+          500,
+          'internal',
+          'Managed Agent request failed (500)',
+          'request-list-500',
+        ),
+      )
+      .mockResolvedValueOnce({ sessions: [] });
+
+    await render(undefined);
+
+    const alert = container.querySelector<HTMLElement>('nav [role="alert"]');
+    expect(alert?.textContent).toContain(
+      'Managed sessions could not be loaded.',
+    );
+    expect(alert?.textContent).toContain(
+      'HTTP 500 · internal · Request ID: request-list-500',
+    );
+    expect(container.textContent).not.toContain('No managed tasks yet.');
+
+    await click('Retry loading sessions');
+
+    expect(mocks.client.listSessions).toHaveBeenCalledTimes(2);
+    expect(container.textContent).not.toContain(
+      'Managed sessions could not be loaded.',
+    );
+    expect(container.textContent).toContain('No managed tasks yet.');
+  });
 
   it.each(['History unavailable', 'Not found'])(
     'keeps distinct detail errors alongside an inactive navigation alert: %s',
@@ -4840,11 +4878,16 @@ describe('ManagedSessionsPage', () => {
         new JavaManagedAgentHttpError(404, 'session_not_found', detailError),
       );
       await render('s1', 'en', provider, undefined, false);
-      expect(
-        [...container.querySelectorAll('[role="alert"]')]
-          .map((element) => element.textContent)
-          .sort(),
-      ).toEqual([...new Set(['History unavailable', detailError])].sort());
+      // The list-failure alert also wraps its retry button, so match the
+      // sentences it must carry instead of the concatenated textContent.
+      const alertTexts = [...container.querySelectorAll('[role="alert"]')].map(
+        (element) => element.textContent ?? '',
+      );
+      expect(alertTexts).toHaveLength(2);
+      expect(alertTexts.join('\n')).toContain(
+        'Managed sessions could not be loaded.',
+      );
+      expect(alertTexts.join('\n')).toContain(detailError);
     },
   );
 

@@ -220,6 +220,7 @@ describe.skipIf(process.platform === 'win32')(
             checkout,
             'packages',
             'managed-agent-server',
+            'server',
             'target',
             'managed-runtime',
             'qwen-code-managed-runtime-darwin-arm64.tar.gz',

@@ -301,9 +301,14 @@ vi.mock('./dialogs-confirm.js', () => ({
 }));
 vi.mock('./theme.js', () => ({ C: new Proxy({}, { get: () => '#ffffff' }) }));
 
+const extensionManager = {
+  setRequestConsent: vi.fn(),
+  setRequestSetting: vi.fn(),
+};
 const config = {
   getAuthType: () => 'openai',
   getResumedSessionData: () => undefined,
+  getExtensionManager: () => extensionManager,
   getSessionId: () => 'owned-voice-session',
   getContextFilePaths: () => [],
   getAccessibility: () => ({}),

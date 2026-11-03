@@ -8,6 +8,7 @@ import { WebShellPortalRootContext } from '../portalRoot';
 import type { McpAppMessages } from '../mcpAppHostContext';
 import { PromptDispatchCancelledError } from '../utils/promptAdmission';
 import {
+  readGeneratedUiParameters,
   useMcpAppMessages,
   type McpAppPromptSubmission,
 } from './useMcpAppMessages';
@@ -73,13 +74,23 @@ function setup() {
   const render = (props = {}) => act(() => root.render(<Harness {...props} />));
   render();
   mounted.push({ root, container });
-  const request = (signal = new AbortController().signal) => {
+  const request = (
+    signal = new AbortController().signal,
+    message: {
+      resourceUri?: string;
+      requiredFeature?: 'generated-ui';
+      text?: string;
+    } = {},
+  ) => {
     let result!: ReturnType<McpAppMessages['requestMessage']>;
     act(() => {
       result = context!.requestMessage({
         serverName: 'trusted-host-server',
-        resourceUri: 'ui://host/resource',
-        text: '<script>untrusted text</script>\nFull message',
+        resourceUri: message.resourceUri ?? 'ui://host/resource',
+        ...(message.requiredFeature
+          ? { requiredFeature: message.requiredFeature }
+          : {}),
+        text: message.text ?? '<script>untrusted text</script>\nFull message',
         signal,
       });
     });
@@ -103,10 +114,144 @@ function setup() {
   };
 }
 
+// A refused message reports the host's reason so the App can show it.
+const notAccepted = (reason: string) => ({
+  isError: true,
+  _meta: {
+    'qwen-code/message-review': 'failed',
+    'qwen-code/message-error': expect.stringContaining(reason),
+  },
+});
+
 // A review that ended before dispatch reports why nothing was sent.
 const notSent = (phase: 'cancelled' | 'expired' | 'failed') => ({
   isError: true,
   _meta: { 'qwen-code/message-review': phase },
+});
+
+const parameterMessage = (
+  inputs: Record<string, { value: string; checked: boolean }> = {
+    people: { value: '7', checked: false },
+    annual: { value: 'on', checked: true },
+  },
+  rejectedEvents = 0,
+) =>
+  'Continue the analysis using the captured view parameters below.\n\n' +
+  JSON.stringify(
+    {
+      kind: 'qwen.generated-ui.parameters',
+      title: 'Bill splitter',
+      snapshot: { schemaVersion: 1, documentId: 'g1_doc', inputs },
+      rejectedEvents,
+    },
+    null,
+    2,
+  );
+const parameterText = parameterMessage();
+const builtIn = {
+  resourceUri: 'ui://qwen-code-generated-ui/view-v1.html',
+  requiredFeature: 'generated-ui' as const,
+  text: parameterText,
+};
+
+describe('Generated UI continue action', () => {
+  it('recognizes only the built-in parameter message', () => {
+    expect(readGeneratedUiParameters(builtIn)).toEqual({
+      title: 'Bill splitter',
+      documentId: 'g1_doc',
+    });
+    // Any server can claim the bundled resource URI; only core's mark counts.
+    expect(readGeneratedUiParameters({ text: parameterText })).toBeUndefined();
+    expect(
+      readGeneratedUiParameters({ ...builtIn, text: 'Fix the view.\n{x' }),
+    ).toBeUndefined();
+  });
+
+  it('sends the values without a review dialog, labelled in the transcript', async () => {
+    const h = setup();
+    h.submit.mockImplementation(async (_text, submission) => {
+      submission.onDispatched();
+      submission.onAdmitted({ promptId: 'p' });
+    });
+    const result = h.request(undefined, builtIn);
+    expect(await result).toEqual({});
+    expect(h.container.querySelector('[role="dialog"]')).toBeNull();
+    expect(h.submit).toHaveBeenCalledWith(
+      parameterText,
+      expect.objectContaining({
+        inputAnnotations: [
+          {
+            type: 'reference',
+            start: 0,
+            end: parameterText.length,
+            text: parameterText,
+            reference: {
+              id: 'generated-ui:g1_doc',
+              kind: 'generated-ui',
+              value: 'Interactive view values: Bill splitter',
+              serialized: parameterText,
+            },
+          },
+        ],
+      }),
+    );
+    // The slot is free again for the next action.
+    h.submit.mockClear();
+    expect(await h.request(undefined, builtIn)).toEqual({});
+    expect(h.submit).toHaveBeenCalledOnce();
+  });
+
+  it('reports a refusal to the card instead of opening a dialog', async () => {
+    const h = setup();
+    h.submit.mockRejectedValue(new Error('The session is busy'));
+    expect(await h.request(undefined, builtIn)).toEqual(
+      notAccepted('The session is busy'),
+    );
+    expect(h.container.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('frees the slot when the App stops waiting for an unconfirmed send', async () => {
+    const h = setup();
+    h.submit.mockImplementation(async (_text, submission) => {
+      submission.onDispatched();
+      await new Promise(() => undefined);
+    });
+    const controller = new AbortController();
+    const first = h.request(controller.signal, builtIn);
+    await act(async () => Promise.resolve());
+    await act(async () => controller.abort());
+    expect(await first).toEqual({ isError: true });
+    // The user retries deliberately after the App's warning.
+    h.submit.mockImplementation(async (_text, submission) => {
+      submission.onDispatched();
+      submission.onAdmitted({ promptId: 'p2' });
+    });
+    expect(await h.request(undefined, builtIn)).toEqual({});
+  });
+
+  it('keeps the review dialog for other built-in messages', async () => {
+    const h = setup();
+    const result = h.request(undefined, {
+      ...builtIn,
+      text: 'The generated view stopped with this error.',
+    });
+    expect(h.container.textContent).toContain('Review App message');
+    await act(async () => h.button('cancel').click());
+    expect(await result).toEqual(notSent('cancelled'));
+  });
+
+  it('keeps the generic review for an App that only claims the resource URI', () => {
+    const h = setup();
+    h.request(undefined, {
+      resourceUri: 'ui://qwen-code-generated-ui/view-v1.html',
+      text: parameterText,
+    });
+    const dialog = h.container.querySelector('[role="dialog"]')!;
+    expect(dialog.textContent).not.toContain('Continue with these parameters');
+    expect(dialog.querySelector('table')).toBeNull();
+    expect(dialog.querySelector('details')).toBeNull();
+    expect(dialog.querySelector('pre')?.textContent).toBe(parameterText);
+  });
 });
 
 describe('MCP App host message review', () => {
@@ -283,7 +428,7 @@ describe('MCP App host message review', () => {
       const result = h.request();
       await act(async () => h.button('Send to session').click());
       expect(await result).toEqual(
-        definite ? notSent('failed') : { isError: true },
+        definite ? notAccepted('too large') : { isError: true },
       );
       expect(h.container.textContent).toContain(
         definite
@@ -323,7 +468,7 @@ describe('MCP App host message review', () => {
     h.submit.mockRejectedValue(new Error('The session is busy'));
     const result = h.request();
     await act(async () => h.button('Send to session').click());
-    expect(await result).toEqual(notSent('failed'));
+    expect(await result).toEqual(notAccepted('The session is busy'));
     expect(h.container.textContent).toContain('The message was not accepted');
     expect(h.container.textContent).toContain('The session is busy');
     expect(h.container.textContent).not.toContain(
@@ -528,7 +673,9 @@ describe('MCP App host message review', () => {
       const result = h.request();
       await act(async () => h.button('Send to session').click());
       expect(await result).toEqual(
-        status < 500 ? notSent('failed') : { isError: true },
+        status < 500
+          ? notAccepted('daemon rejected this request')
+          : { isError: true },
       );
       expect(h.container.textContent).toContain(
         status < 500
