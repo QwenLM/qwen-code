@@ -1,5 +1,7 @@
 # Chat Compression Cache Sharing
 
+[English](chat-compression-cache-sharing.md) | [简体中文](chat-compression-cache-sharing.zh-CN.md)
+
 ## Context
 
 Chat compression currently sends a cold side query with a dedicated system
