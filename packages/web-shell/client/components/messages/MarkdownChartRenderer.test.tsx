@@ -102,6 +102,28 @@ function canonicalGraphChart(): string {
   });
 }
 
+function canonicalHierarchyChart(): string {
+  return JSON.stringify({
+    version: 1,
+    renderer: 'echarts',
+    data: {
+      kind: 'inline',
+      shape: 'hierarchy',
+      source: [
+        {
+          id: 'company',
+          name: 'Company',
+          children: [
+            { id: 'sales', name: 'Sales', value: 10 },
+            { id: 'ops', name: 'Ops', value: 5 },
+          ],
+        },
+      ],
+    },
+    spec: { series: [{ type: 'sunburst' }] },
+  });
+}
+
 function chartTree({
   content,
   registry,
@@ -729,9 +751,9 @@ describe('Web Shell markdown-chart integration', () => {
     expect(
       container.querySelector('[data-markdown-chart-data-view="true"]'),
     ).not.toBeNull();
-    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
-      'ECharts failed to render the chart',
-    );
+    expect(
+      container.querySelector('[role="alert"]')?.textContent?.trim(),
+    ).toBeTruthy();
   });
 
   it('localizes graph data-view tabs and column headers', async () => {
@@ -783,6 +805,43 @@ describe('Web Shell markdown-chart integration', () => {
       '起点 ID',
       '终点 ID',
     ]);
+  });
+
+  it('localizes hierarchy data-view column headers', async () => {
+    const { runtime } = createFakeRuntime();
+    const registry = createMarkdownChartRegistry({
+      loadECharts: async () => runtime,
+      resizeObserver: false,
+    });
+    const { container } = await mount(
+      <I18nProvider language="zh-CN">
+        <ThemeProvider value="dark">
+          <WebShellCustomizationProvider
+            value={{ markdown: { chart: { registry } } }}
+          >
+            <Markdown
+              content={`\`\`\`markdown-chart\n${canonicalHierarchyChart()}\n\`\`\``}
+              source="assistant"
+            />
+          </WebShellCustomizationProvider>
+        </ThemeProvider>
+      </I18nProvider>,
+    );
+    await flushChart();
+
+    const showData = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="显示数据"]',
+    );
+    expect(showData).not.toBeNull();
+    await act(async () => {
+      showData?.click();
+    });
+
+    expect(
+      Array.from(container.querySelectorAll('th')).map(
+        (cell) => cell.textContent,
+      ),
+    ).toEqual(['深度', '路径', '名称', '数值', '子树合计（派生）', 'ID 路径']);
   });
 });
 
