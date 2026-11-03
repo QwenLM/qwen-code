@@ -534,6 +534,116 @@ describe('guards (ink handleSlashCommand parity)', () => {
   });
 });
 
+describe('prompt.submit for ?-form input', () => {
+  const run = async (
+    input: string,
+    answer: (text: string) => { text: string } | { drop: string },
+    mods: Record<string, unknown> = {},
+  ) => {
+    const submitPrompt = vi.fn(async (text: string) => answer(text));
+    const owner = vi
+      .spyOn(interactiveMods, 'getInteractiveModSession')
+      .mockReturnValue({
+        starting: false,
+        failed: false,
+        hearsPrompts: true,
+        ready: Promise.resolve(),
+        initialize: vi.fn().mockResolvedValue(undefined),
+        failStartup: vi.fn(),
+        submitPrompt,
+        ...mods,
+      } as unknown as interactiveMods.InteractiveModSession);
+    const action = vi.fn();
+    const logMessage = vi.fn(async () => {});
+    const host = createFakeHost();
+    const dispatcher = new OpenTuiSlashDispatcher(
+      host,
+      {
+        ...services,
+        config: makeFakeConfig({}),
+        logger: { logMessage } as unknown as NonNullable<
+          (typeof services)['logger']
+        >,
+      },
+      [stub({ name: 'btw', action })],
+    );
+    try {
+      const outcome = await dispatcher.handle(input);
+      return { outcome, submitPrompt, action, logMessage, host };
+    } finally {
+      dispatcher.dispose();
+      owner.mockRestore();
+    }
+  };
+
+  it('refuses ?btw a hook drops: not recorded, not run, back to the composer', async () => {
+    const { outcome, submitPrompt, action, logMessage, host } = await run(
+      '?btw is this key valid AKIA1',
+      () => ({ drop: 'Blocked: the prompt holds a key' }),
+    );
+    expect(submitPrompt).toHaveBeenCalledExactlyOnceWith(
+      '?btw is this key valid AKIA1',
+      expect.any(AbortSignal),
+    );
+    expect(outcome).toEqual({ kind: 'refused' });
+    expect(action).not.toHaveBeenCalled();
+    expect(logMessage).not.toHaveBeenCalled();
+    expect(host.items).toContainEqual(
+      expect.objectContaining({
+        type: 'error',
+        text: 'Blocked: the prompt holds a key',
+      }),
+    );
+  });
+
+  it('records and runs the rewrite of ?btw', async () => {
+    const { outcome, action, logMessage } = await run(
+      '?btw is this key valid AKIA1',
+      (text) => ({ text: text.replace('AKIA1', '[redacted]') }),
+    );
+    expect(outcome).toEqual({ kind: 'handled' });
+    expect(logMessage).toHaveBeenCalledWith(
+      'user',
+      '?btw is this key valid [redacted]',
+    );
+    expect(action).toHaveBeenCalledWith(
+      expect.anything(),
+      'is this key valid [redacted]',
+    );
+  });
+
+  it('refuses ?-form input sent to Mods that failed to load', async () => {
+    const { outcome, submitPrompt, action, host } = await run(
+      '?btw question',
+      (text) => ({ text }),
+      {
+        failed: true,
+        hearsPrompts: false,
+        ready: Promise.reject(new Error('x')),
+      },
+    );
+    expect(outcome).toEqual({ kind: 'refused' });
+    expect(submitPrompt).not.toHaveBeenCalled();
+    expect(action).not.toHaveBeenCalled();
+    expect(host.items).toContainEqual(
+      expect.objectContaining({
+        type: 'error',
+        text: interactiveMods.MODS_FAILED_TO_INITIALIZE,
+      }),
+    );
+  });
+
+  it('leaves slash-form /btw to its own path', async () => {
+    const { outcome, submitPrompt, action } = await run(
+      '/btw question',
+      () => ({ drop: 'never' }),
+    );
+    expect(outcome).toEqual({ kind: 'handled' });
+    expect(submitPrompt).not.toHaveBeenCalled();
+    expect(action).toHaveBeenCalled();
+  });
+});
+
 describe('shouldHideSlashCommandInvocation (slashCommandProcessor parity)', () => {
   const cmd = (name: string, kind = CommandKind.BUILT_IN): SlashCommand =>
     stub({ name, kind });

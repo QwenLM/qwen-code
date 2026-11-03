@@ -62,7 +62,10 @@ import {
   allocateCanonicalHistoryId,
   type LiveHistoryItem,
 } from './live-session-model.js';
-import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
+import {
+  getInteractiveModSession,
+  MODS_FAILED_TO_INITIALIZE,
+} from '../../services/interactive-mod-session.js';
 import type { ModTurn } from '../../services/mod-session.js';
 import type { ServerLlmStreamEvent } from '@qwen-code/qwen-code-core';
 import {
@@ -82,9 +85,6 @@ import {
 } from './input-submission.js';
 
 const debugLogger = createDebugLogger('OPENTUI_LIVE_TURN');
-// ink's line for a prompt sent to Mods that failed to load.
-const MODS_FAILED_TO_INITIALIZE =
-  'Mods failed to initialize. Fix the Mod configuration and restart. /help and /quit remain available.';
 
 /** Extension → MIME for composer attachments (core SUPPORTED subset). */
 const IMAGE_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
@@ -260,6 +260,13 @@ function userRow(
     promptId,
     sentToModel: true,
   };
+}
+
+/** Slash-form text, which neither the Mods' hooks nor their startup hold. */
+function isSlashForm(
+  entry: Pick<OpenTuiInputSubmission, 'text' | 'displayText'>,
+): boolean {
+  return isSlashCommand((entry.displayText ?? entry.text).trim());
 }
 
 /** Folds a replay batch into a fresh item list (single commit). */
@@ -484,7 +491,7 @@ export function useOpenTuiLiveTurn(
         (mods?.hearsPrompts === true ||
           mods?.starting === true ||
           mods?.failed === true) &&
-        !isSlashCommand((entry.displayText ?? entry.text).trim())
+        !isSlashForm(entry)
       );
     },
     [config],
@@ -528,10 +535,13 @@ export function useOpenTuiLiveTurn(
       skipRetryDelayRef.current = undefined;
       let promptContext: readonly string[] | undefined;
       try {
-        // Every turn waits for the Mods to load, as it does in ink, so no
-        // prompt or steering reaches the model before a guard can hear it;
-        // Mods that failed to load refuse every turn.
-        if (mods && (mods.starting || mods.failed)) {
+        // Every turn but slash-form text waits for the Mods to load, as it
+        // does in ink, so no prompt or steering reaches the model before a
+        // guard can hear it; Mods that failed to load refuse those turns.
+        const slashForm = editablePrompt
+          ? isSlashForm(editablePrompt)
+          : typeof prompt === 'string' && isSlashCommand(prompt.trim());
+        if (mods && !slashForm && (mods.starting || mods.failed)) {
           try {
             await new Promise<void>((resolve, reject) => {
               const onAbort = () => reject(abort.signal.reason);
@@ -546,23 +556,32 @@ export function useOpenTuiLiveTurn(
             // An abort while waiting; finally hands a held prompt back.
             if (abort.signal.aborted) throw error;
             if (seq !== turnSeqRef.current) return;
-            apply({ type: 'error', text: MODS_FAILED_TO_INITIALIZE });
-            // The prompts waiting behind this one would each be refused in
-            // turn, so they come back with it, in the order they were sent.
-            const returned = [
-              ...(active.held && editablePrompt ? [editablePrompt] : []),
-              ...queueRef.current.filter((entry) => !entry.generated),
-            ];
-            active.held = false;
-            queueRef.current = [];
-            syncQueue();
-            if (returned.length > 0)
-              onPromptReturnedRef.current?.(
-                returned.length === 1
-                  ? returned[0]
-                  : restoreInputSubmissions(returned),
+            // A session that failed to start before loading the Mods goes on
+            // to the send, which reports its own error.
+            if (mods.failed) {
+              apply({ type: 'error', text: MODS_FAILED_TO_INITIALIZE });
+              // The prompts waiting behind this one would each be refused in
+              // turn, so they come back with it, in the order they were
+              // sent; slash-form text stays queued, as no Mod refuses it.
+              const returned = [
+                ...(active.held && editablePrompt ? [editablePrompt] : []),
+                ...queueRef.current.filter(
+                  (entry) => !entry.generated && !isSlashForm(entry),
+                ),
+              ];
+              active.held = false;
+              queueRef.current = queueRef.current.filter(
+                (entry) => !entry.generated && isSlashForm(entry),
               );
-            return;
+              syncQueue();
+              if (returned.length > 0)
+                onPromptReturnedRef.current?.(
+                  returned.length === 1
+                    ? returned[0]
+                    : restoreInputSubmissions(returned),
+                );
+              return;
+            }
           }
           if (seq !== turnSeqRef.current || abort.signal.aborted) return;
         }

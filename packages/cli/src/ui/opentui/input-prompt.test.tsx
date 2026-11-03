@@ -3780,6 +3780,22 @@ describe('OpenTuiInputPrompt editing ownership and recall', () => {
     },
   );
 
+  it('puts a prompt handed back through the mounted handle ahead of the draft', async () => {
+    const composerHandle: OpenTuiComposerSlot = { current: null };
+    renderPrompt({ composerHandle });
+    await waitFor(() => expect(composerHandle.current).not.toBeNull());
+    await typeText('typed since');
+    act(() =>
+      composerHandle.current!.restoreSubmission!({
+        text: 'dropped prompt',
+        displayText: 'dropped prompt',
+      }),
+    );
+    await waitFor(() =>
+      expect(currentEditor().plainText).toBe('dropped prompt\ntyped since'),
+    );
+  });
+
   it('takes back a prompt handed back while no composer was mounted', async () => {
     const composerHandle: OpenTuiComposerSlot = {
       current: null,

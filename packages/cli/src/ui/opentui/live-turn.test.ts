@@ -2961,6 +2961,31 @@ describe('useOpenTuiLiveTurn prompt.submit', () => {
     });
   });
 
+  it('settles Esc with the rewrite once the hooks rewrote the prompt', async () => {
+    const { answer } = installHooks();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('first AKIA1');
+    });
+    await answer({ text: 'first [redacted]' });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    const settled = vi.fn();
+    act(() => result.current.interrupt(settled));
+    await act(async () => live.waiters.shift()?.());
+    await vi.waitFor(() => expect(settled).toHaveBeenCalled());
+    expect(settled).toHaveBeenCalledExactlyOnceWith({
+      kind: 'cancelled',
+      queued: null,
+      prompt: expect.objectContaining({
+        text: 'first [redacted]',
+        displayText: 'first [redacted]',
+      }),
+    });
+    expect(JSON.stringify(settled.mock.calls)).not.toContain('AKIA1');
+  });
+
   it('hands a held prompt back when Esc has no composer to settle with', async () => {
     const { submitPrompt } = installHooks();
     const onPromptReturned = vi.fn();
@@ -2985,6 +3010,7 @@ describe('useOpenTuiLiveTurn prompt.submit', () => {
     const startup: {
       resolve?: () => void;
       reject?: (error: Error) => void;
+      rejectSession?: (error: Error) => void;
     } = {};
     const state = { starting: true, hearsPrompts: false, failed: false };
     const ready = new Promise<void>((resolve, reject) => {
@@ -2994,6 +3020,11 @@ describe('useOpenTuiLiveTurn prompt.submit', () => {
       };
       startup.reject = (error) => {
         Object.assign(state, { starting: false, failed: true });
+        reject(error);
+      };
+      // The session failed to start before it loaded any Mod.
+      startup.rejectSession = (error) => {
+        Object.assign(state, { starting: false });
         reject(error);
       };
     });
@@ -3069,6 +3100,47 @@ describe('useOpenTuiLiveTurn prompt.submit', () => {
         kind: 'error',
         text: expect.stringContaining('Mods failed to initialize'),
       }),
+    );
+  });
+
+  it('leaves a session that failed to start to report its own error', async () => {
+    const { startup } = installStartingMods();
+    const onPromptReturned = vi.fn();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config, onPromptReturned }),
+    );
+    act(() => {
+      result.current.submit('first');
+    });
+    await act(async () => startup.rejectSession!(new Error('bad config')));
+    // The send, which surfaces the session's own error, still runs.
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    expect(onPromptReturned).not.toHaveBeenCalled();
+    expect(result.current.items).not.toContainEqual(
+      expect.objectContaining({
+        text: expect.stringContaining('Mods failed to initialize'),
+      }),
+    );
+  });
+
+  it('lets slash-form text past Mods that failed to load, as no Mod hears it', async () => {
+    const { startup } = installStartingMods();
+    const onPromptReturned = vi.fn();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config, onPromptReturned }),
+    );
+    await act(async () => startup.reject!(new Error('bad mod')));
+    act(() => {
+      result.current.submit('/unknown thing');
+    });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    expect(live.turns[0].prompt).toBe('/unknown thing');
+    expect(rows(result.current.items)).toEqual([
+      expect.objectContaining({ text: '/unknown thing' }),
+    ]);
+    expect(onPromptReturned).not.toHaveBeenCalled();
+    expect(result.current.items).not.toContainEqual(
+      expect.objectContaining({ kind: 'error' }),
     );
   });
 

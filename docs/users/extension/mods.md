@@ -699,7 +699,8 @@ In the Ink and OpenTUI terminals:
   again.
 - Esc while the hooks run cancels the prompt and hands it back the same way.
 - Slash commands, shell-mode commands, `/btw` questions and scheduled prompts
-  raise no `prompt.submit`.
+  raise no `prompt.submit`. A `?btw` question is typed text, so the hooks hear
+  it; in OpenTUI it starts no turn, so context they attach to it is not used.
 - While a Mod hooks `prompt.submit`, a prompt typed during a turn is not sent
   into that turn when a tool finishes. It waits for the turn to end, and the
   hooks hear it when it is sent.

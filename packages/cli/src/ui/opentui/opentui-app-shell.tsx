@@ -1141,6 +1141,8 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       switch (outcome.kind) {
         case 'handled':
           return true;
+        case 'refused':
+          return false;
         case 'open_dialog':
           if (outcome.request.dialog === 'rewind') {
             if (

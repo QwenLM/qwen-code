@@ -80,6 +80,7 @@ import { loadInteractiveCommands } from './slash-dispatch.js';
 import {
   getInteractiveModSession,
   isModRecoveryCommand,
+  MODS_FAILED_TO_INITIALIZE,
 } from '../../services/interactive-mod-session.js';
 import { ensureConfigInitialized, nextLivePromptId } from './live-session.js';
 import { MessageSenderType } from '@qwen-code/qwen-code-core/core/logger.js';
@@ -178,7 +179,9 @@ export type OpenTuiDispatchOutcome =
       refreshContextFilesOnWrite?: boolean;
     }
   | { kind: 'quit'; messages: HistoryItem[] }
-  | { kind: 'open_dialog'; request: OpenTuiDialogRequest };
+  | { kind: 'open_dialog'; request: OpenTuiDialogRequest }
+  /** Typed input the Mods' prompt hooks kept out; the composer gets it back. */
+  | { kind: 'refused' };
 
 interface RunOptions {
   recordRecall?: boolean;
@@ -496,10 +499,47 @@ export class OpenTuiSlashDispatcher {
     );
   }
 
+  /**
+   * `?`-form input is a prompt the person typed rather than slash-form text,
+   * so the Mods' `prompt.submit` hooks hear it before it is recorded or run,
+   * as they hear any typed prompt. Returns the text to run, or the line that
+   * refuses it; rejects when `signal` aborts.
+   */
+  private async hearPrompt(
+    text: string,
+    signal: AbortSignal,
+  ): Promise<{ text: string } | { refused: string }> {
+    const mods = this.services.config
+      ? getInteractiveModSession(this.services.config)
+      : undefined;
+    if (!mods) return { text };
+    if (mods.starting || mods.failed) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = () => reject(signal.reason);
+          signal.addEventListener('abort', onAbort, { once: true });
+          mods.ready
+            .finally(() => signal.removeEventListener('abort', onAbort))
+            .then(resolve, reject);
+        });
+      } catch (error) {
+        if (signal.aborted) throw error;
+        if (mods.failed) return { refused: MODS_FAILED_TO_INITIALIZE };
+      }
+    }
+    if (!mods.hearsPrompts) return { text };
+    const submitted = await mods.submitPrompt(text, signal);
+    if ('drop' in submitted) return { refused: submitted.drop };
+    // The text runs as typed or rewritten; it starts no turn of its own, so
+    // there is no first send for the hooks' context to ride.
+    return { text: submitted.text.trim() };
+  }
+
   private async run(
-    trimmed: string,
+    typed: string,
     options: RunOptions,
   ): Promise<OpenTuiDispatchOutcome> {
+    let trimmed = typed;
     const recordedItems: HistoryItemWithoutId[] = [];
     const addItemWithRecording = (
       item: HistoryItemWithoutId,
@@ -523,6 +563,33 @@ export class OpenTuiSlashDispatcher {
         this.host.setIsProcessing(false);
       }
     };
+    if (options.recordRecall && trimmed.startsWith('?')) {
+      let heard: { text: string } | { refused: string };
+      try {
+        heard = await this.hearPrompt(trimmed, abortController.signal);
+      } catch (error) {
+        releaseOwnership();
+        if (abortController.signal.aborted) return { kind: 'refused' };
+        throw error;
+      }
+      if (
+        abortController.signal.aborted ||
+        this.activeCommand !== activeCommand
+      ) {
+        releaseOwnership();
+        return { kind: 'refused' };
+      }
+      if ('refused' in heard) {
+        // Neither recorded nor run, since it may hold what a hook kept out.
+        this.host.addItem(
+          { type: MessageType.ERROR, text: heard.refused },
+          Date.now(),
+        );
+        releaseOwnership();
+        return { kind: 'refused' };
+      }
+      trimmed = heard.text;
+    }
     if (
       options.recordRecall &&
       this.services.logger &&

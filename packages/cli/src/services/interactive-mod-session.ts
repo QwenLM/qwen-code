@@ -21,6 +21,10 @@ import type { ICommandLoader } from './types.js';
 
 const sessions = new WeakMap<Config, InteractiveModSession>();
 
+/** The line a prompt sent to Mods that failed to load is refused with. */
+export const MODS_FAILED_TO_INITIALIZE =
+  'Mods failed to initialize. Fix the Mod configuration and restart. /help and /quit remain available.';
+
 export function isModRecoveryCommand(
   command: SlashCommand | undefined,
 ): boolean {
@@ -88,15 +92,7 @@ export class InteractiveModSession implements ICommandLoader {
     private readonly config: Config,
     settings: LoadedSettings,
   ) {
-    this.startup.then(
-      () => {
-        this.started = true;
-      },
-      () => {
-        this.started = true;
-        this.startupFailed = true;
-      },
-    );
+    this.startup.catch(() => {});
     this.session = ModSession.create(config, settings, {
       surface: 'terminal',
       presentation: () => this.presentation,
@@ -138,9 +134,12 @@ export class InteractiveModSession implements ICommandLoader {
     this.initialization ??= this.session.initialize(this.lifetime.signal).then(
       () => {
         this.session.flushLogs();
+        this.started = true;
         this.resolveStartup();
       },
       (error: unknown) => {
+        this.started = true;
+        this.startupFailed = true;
         this.emit(
           `Mods failed to initialize: ${sanitizeTerminalLine(String(error)).slice(0, 2000)}`,
           this.config.getSessionId(),
@@ -156,12 +155,19 @@ export class InteractiveModSession implements ICommandLoader {
     return this.startup;
   }
 
-  /** Whether the Mods are still loading, so which hooks they bring is unknown. */
+  /**
+   * Whether startup is still under way, so which hooks the Mods bring is
+   * unknown. False once the Mods load or fail, or the session fails to start.
+   */
   get starting(): boolean {
     return !this.closing && !this.started;
   }
 
-  /** Whether the Mods failed to load, so every prompt is refused. */
+  /**
+   * Whether the Mods themselves failed to load, so every prompt is refused.
+   * A session that failed to start before loading them reports its own error
+   * instead.
+   */
   get failed(): boolean {
     return !this.closing && this.startupFailed;
   }
@@ -169,6 +175,7 @@ export class InteractiveModSession implements ICommandLoader {
   failStartup(error: unknown): void {
     if (this.initialization) return;
     this.initialization = this.startup;
+    this.started = true;
     this.rejectStartup(error);
   }
 
