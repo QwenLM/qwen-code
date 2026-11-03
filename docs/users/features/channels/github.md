@@ -98,6 +98,29 @@ Valid `reasonFilter` values are `mention`, `review_requested`, `assign`, `author
 
 Filtered notifications are marked read only after all accepted work in the poll window completes. Removing the filter later will not replay notifications the channel already skipped.
 
+### Editing from the Web Shell
+
+Settings → Channels → GitHub exposes the poll interval under **Connection**, in milliseconds. It is kept between 1 and 86400000 (one day): a larger value is clamped to the ceiling and a smaller positive one is raised to 1, because Node rounds a sub-millisecond timeout to about 1 ms and clamps one above its 32-bit range to 1 ms as well — either would turn the poll loop into a hot loop. Leave it empty for the 60000 ms default. When `groupPolicy` is `"allowlist"`, the **Access control** section also shows one row per allowlisted repository, each with a require-mention control and a speaker control.
+
+A repository with no stored setting starts at **Inherit**, and the option label names the value it inherits — for example `Inherit (require a mention)`. A repository that already stores a value opens on that value instead, so a stored `requireMention: false` shows _Answer without a mention_. A row left at Inherit writes no key, so the repository keeps following `groups["*"]` and any later change to `"*"` still reaches it.
+
+Choosing an explicit value writes that repository's `groups` entry. Choosing Inherit again removes the **policy** key, and what happens to a speaker list you typed depends on the policy the row then inherits:
+
+- It inherits an allowlist from `groups["*"]`: the names stay in force, and the speaker box stays visible so you can keep editing them.
+- It inherits **Anyone**: the names stay in the file but are not applied, because an open policy admits every group member. They apply again if the channel-wide policy later becomes an allowlist. The speaker box is not shown in this case, so there is nothing to clear.
+
+The speaker box appears whenever the row's effective policy is an allowlist, whether the row set it or inherited it. What an **empty** box will do depends on the row's own policy, and the hint under the box says which case you are in:
+
+- The row is set to **Allowlist only**: saving an empty box writes `allowedUsers: []`, which means _nobody_. The repository admits no one and does not fall back to the channel-wide list.
+- The row inherits its policy: saving an empty box removes the per-repository list, so the channel-wide `groups["*"].allowedUsers` applies. This is also what happens when you clear a box that was showing stored names — the repository widens back to the channel-wide list rather than locking down.
+- A stored `"senders": "allowlist"` with no `allowedUsers` beside it inherits its members, so its empty box reads as _inherit_; a stored `allowedUsers: []` with no policy admits _nobody_. The hint distinguishes the two.
+
+Switching the group policy away from `"allowlist"` hides the rows but does not delete these entries. Under `"open"` and `"pairing"` the runtime keeps enforcing them, because per-repository senders and `requireMention` are resolved without consulting `groupPolicy`; under `"disabled"` the group gate drops every notification first, so the entries are kept but nothing is processed. The editor names the repositories whose settings this save keeps **and that can still take effect**, says which of those two cases applies, and tells you to switch back to Allowlist to edit them. A repository you typed during this visit is named too, even though it is not in the stored file yet. An entry is only announced when it can still change something: its own `senders` is `"allowlist"`, or its `requireMention` differs from the value it inherits. An `allowedUsers` list beside an inherited `"open"` policy restricts nobody — every group member is admitted regardless — so it is kept in the file but not announced as a setting that still applies. Row edits you made before switching are still written — including on a channel that was already `"open"`, and including a repository you added while the policy was `"allowlist"` — so the save cannot report success while restoring the old value. The one exception is a repository stored under two spellings that disagree, such as `Acme/Widgets` and `acme/widgets`: the editor cannot tell which spelling an edit was meant for, so an untouched save leaves both entries exactly as stored — including an empty one, which is what makes the exact spelling inherit `groups["*"]` rather than fall through to the other. If you edit that row and then switch the policy away from `"allowlist"`, the save is refused with a message under **Group policy** asking you to remove one of the two entries from `settings.json`, so the narrowing you just typed is never quietly dropped. Switching back to `"allowlist"` reports the same conflict.
+
+Per-repository settings the editor does not model, such as `dispatchMode` and `groupHistoryLimit`, are preserved when you save. An entry that is already empty is preserved as well when the channel never used an allowlist, so an unrelated edit does not rewrite the file.
+
+If `settings.json` holds a group entry whose value is not an object, the editor refuses the save and names the entry: the daemon rejects such an entry on every save, and no row in the form can represent it. Fix or remove it in `settings.json` and reload the channel. The editor does not delete it for you — removing the exact key would hand that repository to a differently spelled entry through the runtime's case-insensitive fallback.
+
 ## ⚠️ Security
 
 On a **public repository**, setting `groups: { "*": { "senders": "open" } }` allows **any GitHub user** who triggers a supported notification reason to submit prompts that drive the agent in your `cwd`. This includes reading code, spending tokens, posting comments, and (subject to permission policy) running tools.

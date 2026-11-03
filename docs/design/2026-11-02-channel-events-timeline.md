@@ -391,7 +391,10 @@ route, the SDK types and the protocol are unchanged.
   are journaled; the body reaches stderr but no journal row; each degraded
   reason appears once per throttle window or state edge, and the cold-start
   escape is journaled at the horizon. Every one of these guards was
-  mutation-verified: 20 mutations, 20 killed.
+  mutation-verified: 22 mutations, 22 killed. Two of them exist only to prove
+  the privacy assertion is load-bearing — one smuggles the body into another
+  field of a retire row, the other appends it after the write error so the
+  error assertion still passes.
 - §5 Web Shell: `failed_ambiguous` renders its label in English and Chinese
   rather than the raw token, the session chip truncates with the full id in
   `title`, the degraded counters render, and both catalogs cover every entry of

@@ -563,6 +563,9 @@ export interface ChannelConfigNumberFieldDescriptor
   envResolvable?: never;
   multiline?: never;
   exclusiveMinimum?: number;
+  /** Inclusive upper bound. A poll interval above Node's 32-bit timer range is
+   * clamped to 1ms, so an unbounded interval field can persist a hot loop. */
+  maximum?: number;
   properties?: never;
 }
 

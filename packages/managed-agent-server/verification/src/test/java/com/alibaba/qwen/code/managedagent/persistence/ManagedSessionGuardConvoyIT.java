@@ -170,6 +170,11 @@ class ManagedSessionGuardConvoyIT {
                 + " recovery_detail_code = 'a2-witness' WHERE tenant_id = ? AND session_id = ?"
                 + " AND head_kind = 'MANAGED_SESSION'",
                 tenant, "blocked");
+        var agents = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
+                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        String turnSession = transactions.execute(ignored -> agents.insertSessionCommand(tenant,
+                "CREATE_SESSION", "turn-session", "digest-create", "qwen-code", null, null,
+                List.of(), null)).sessionId();
 
         var holdTx = manager.getTransaction(new DefaultTransactionDefinition());
         try {
@@ -261,12 +266,18 @@ class ManagedSessionGuardConvoyIT {
             long lifecycleElapsedMs = (System.nanoTime() - lifecycleBefore) / 1_000_000;
             assertThat(lifecycleElapsedMs).isLessThan(BOUNDED_FAILURE_CEILING_MS);
 
-            // A Turn submit admits through the same placement row on its
-            // per-turn path, so it is bounded and named the same way.
-            var agents = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                    new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-            assertFastGuardFailure(() -> transactions.execute(ignored -> agents.insertTurnCommand(tenant,
-                    "turn.submit", "submit-witness", "a".repeat(64), "victim", List.of(), "b".repeat(64))));
+            // A Turn submit no longer admits through the placement row: it
+            // orders on its Session row and the storage's fence row instead,
+            // so a held tenant guard neither parks nor names it.
+            long submitBefore = System.nanoTime();
+            try (var submitPool = Executors.newSingleThreadExecutor()) {
+                var admitted = submitPool.submit(() -> transactions.execute(ignored -> agents.insertTurnCommand(tenant,
+                        "turn.submit", "submit-witness", "a".repeat(64), turnSession, List.of(), "b".repeat(64))))
+                        .get(30, TimeUnit.SECONDS);
+                assertThat(admitted.turnId()).startsWith("turn_");
+                assertThat(admitted.commandEffect()).isTrue();
+            }
+            assertThat((System.nanoTime() - submitBefore) / 1_000_000).isLessThan(BOUNDED_FAILURE_CEILING_MS);
         } finally {
             manager.rollback(holdTx);
         }
