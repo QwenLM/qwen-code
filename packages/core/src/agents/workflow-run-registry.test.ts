@@ -7,7 +7,10 @@
 import { createContext, runInContext } from 'node:vm';
 import { describe, it, expect, vi } from 'vitest';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
-import { todoWorkChainContext } from '../utils/promptIdContext.js';
+import {
+  promptIdContext,
+  todoWorkChainContext,
+} from '../utils/promptIdContext.js';
 import {
   AgentEventEmitter,
   AgentEventType,
@@ -2195,6 +2198,26 @@ describe('WorkflowRunRegistry', () => {
 
     expect(entry.todoWorkChainId).toBe('workflow-chain');
     expect(completion.mock.calls[0][2].todoWorkChainId).toBe('workflow-chain');
+  });
+
+  it('carries the registering turn on the completion notification', () => {
+    const { r, completion, bg } = withCompletion();
+    const entry = promptIdContext.run('turn-42', () => bg('wf_turn'));
+
+    r.complete(entry.runId, 'done', 1_000);
+
+    expect(entry.sourceTurnId).toBe('turn-42');
+    expect(completion.mock.calls[0][2].sourceTurnId).toBe('turn-42');
+  });
+
+  it('leaves the registering turn unattributed without turn context', () => {
+    const { r, completion, bg } = withCompletion();
+    const entry = bg('wf_turn');
+
+    r.complete(entry.runId, 'done', 1_000);
+
+    expect(entry.sourceTurnId).toBeUndefined();
+    expect(completion.mock.calls[0][2].sourceTurnId).toBeUndefined();
   });
 
   it('errors thrown by the notification callback do not break the call site', () => {

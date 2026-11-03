@@ -19,7 +19,10 @@ import {
   type MonitorNotificationMeta,
   type MonitorTaskRegistration,
 } from './monitorRegistry.js';
-import { todoWorkChainContext } from '../utils/promptIdContext.js';
+import {
+  promptIdContext,
+  todoWorkChainContext,
+} from '../utils/promptIdContext.js';
 
 type Opts = Partial<MonitorTaskRegistration>;
 
@@ -141,6 +144,30 @@ describe('MonitorRegistry', () => {
     );
 
     expect(entry.todoWorkChainId).toBe('work-chain-1');
+  });
+
+  it('carries the registering turn on the terminal notification', () => {
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+    const entry = promptIdContext.run('turn-42', () =>
+      registry.register(createEntry()),
+    );
+
+    registry.complete('mon-1', 0);
+
+    expect(entry.sourceTurnId).toBe('turn-42');
+    expect(nth(callback)[2].sourceTurnId).toBe('turn-42');
+  });
+
+  it('leaves the registering turn unattributed without turn context', () => {
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+    const entry = registry.register(createEntry());
+
+    registry.complete('mon-1', 0);
+
+    expect(entry.sourceTurnId).toBeUndefined();
+    expect(nth(callback)[2].sourceTurnId).toBeUndefined();
   });
 
   it('emits event notification via callback', () => {

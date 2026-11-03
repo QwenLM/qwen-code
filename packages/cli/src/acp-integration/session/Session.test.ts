@@ -17807,6 +17807,26 @@ describe('Session', () => {
           model: string,
           meta: { agentId: string; status: string; sourceTurnId?: string },
         ) => void;
+      const monitorNotification = () =>
+        mockMonitorRegistry.setNotificationCallback.mock.calls[0][0] as (
+          display: string,
+          model: string,
+          meta: {
+            monitorId: string;
+            status: string;
+            sourceTurnId?: string;
+          },
+        ) => void;
+      const workflowNotification = () =>
+        mockWorkflowRunRegistry.setCompletionCallback.mock.calls[0][0] as (
+          display: string,
+          model: string,
+          meta: {
+            runId: string;
+            status: string;
+            sourceTurnId?: string;
+          },
+        ) => void;
 
       it.each(['session cancel', 'admission cancel'])(
         'keeps notifications paused when a waiting successor ends via %s',
@@ -18346,6 +18366,103 @@ describe('Session', () => {
             .some((hold) => hold.id === 'same-worker'),
         ).toBe(false);
       });
+
+      it('consumes same-turn monitor and workflow results before final completion', async () => {
+        const notifyMonitor = monitorNotification();
+        const notifyWorkflow = workflowNotification();
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementationOnce(async () => {
+            const sourceTurnId = core.promptIdContext.getStore();
+            notifyMonitor('monitor complete', 'SAME_TURN_MONITOR', {
+              monitorId: 'same-monitor',
+              status: 'completed',
+              sourceTurnId,
+            });
+            notifyWorkflow('workflow complete', 'SAME_TURN_WORKFLOW', {
+              runId: 'same-workflow',
+              status: 'completed',
+              sourceTurnId,
+            });
+            return completedText('Initial response');
+          })
+          .mockResolvedValue(completedText('Results incorporated'));
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start' }],
+        });
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(
+          vi.mocked(mockChat.sendMessageStream).mock.calls[1][1].message,
+        ).toEqual(
+          expect.arrayContaining([
+            { text: 'SAME_TURN_MONITOR' },
+            { text: 'SAME_TURN_WORKFLOW' },
+          ]),
+        );
+        expect(
+          vi
+            .mocked(mockClient.extMethod)
+            .mock.calls.some(([method]) => method === '_qwencode/start_turn'),
+        ).toBe(false);
+      });
+
+      it.each([
+        {
+          kind: 'monitor',
+          notify: () =>
+            monitorNotification()('monitor complete', 'OLDER_MONITOR', {
+              monitorId: 'older-monitor',
+              status: 'completed',
+              sourceTurnId: 'older-turn',
+            }),
+          taskId: 'older-monitor',
+          result: 'OLDER_MONITOR',
+        },
+        {
+          kind: 'workflow',
+          notify: () =>
+            workflowNotification()('workflow complete', 'OLDER_WORKFLOW', {
+              runId: 'older-workflow',
+              status: 'completed',
+              sourceTurnId: 'older-turn',
+            }),
+          taskId: 'older-workflow',
+          result: 'OLDER_WORKFLOW',
+        },
+      ])(
+        'leaves an earlier-turn $kind result for automatic admission',
+        async ({ notify, taskId, result }) => {
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockImplementationOnce(async () => {
+              notify();
+              return completedText('New user answer');
+            })
+            .mockResolvedValue(completedText('Earlier result handled'));
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'new question' }],
+          });
+          await vi.waitFor(() =>
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+          );
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            '_qwencode/start_turn',
+            expect.objectContaining({
+              source: 'background_notification',
+              taskId,
+              sourceTurnId: 'older-turn',
+            }),
+          );
+          expect(
+            vi.mocked(mockChat.sendMessageStream).mock.calls[1][1].message,
+          ).toEqual(expect.arrayContaining([{ text: result }]));
+          await vi.waitFor(() =>
+            expect(session.getBackgroundTurn()).toBeUndefined(),
+          );
+        },
+      );
 
       it('leaves an earlier-turn result for a separately admitted automatic execution', async () => {
         const notify = notification();
