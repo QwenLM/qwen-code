@@ -3431,8 +3431,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // so such bindings are not silently degraded to public channel replies.
     const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
     if (host !== this.githubHost.replace(/^www\./, '')) return null;
+    // Tolerate the same paste variants as the refresh sweep's pullRequestKey:
+    // GitHub also serves `/pull/N.diff` and `/pull/N.patch`, and users copy
+    // those links. Rejecting them here would silently degrade the binding to
+    // public channel replies and skip watching the PR.
     const match = parsed.pathname.match(
-      /^\/([^/]+\/[^/]+)\/pull\/(\d+)(?:\/|$)/,
+      /^\/([^/]+\/[^/]+)\/pull\/(\d+)(?:\/|\.diff$|\.patch$|$)/,
     );
     if (!match) return null;
     return { chatId: match[1], number: Number(match[2]) };

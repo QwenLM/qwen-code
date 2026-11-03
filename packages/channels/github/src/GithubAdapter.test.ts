@@ -6159,6 +6159,39 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
     });
 
+    it.each(['.diff', '.patch'])(
+      'accepts binding URLs with a %s suffix (R16-B1)',
+      async (suffix) => {
+        await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+        // GitHub serves /pull/N.diff and /pull/N.patch and users copy those
+        // links; the refresh sweep's pullRequestKey tolerates them, so the
+        // delivery/watch parser must too — otherwise the binding silently
+        // degrades to public channel replies and the PR is never watched.
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              prs: [
+                {
+                  number: 42,
+                  url: `https://github.com/owner/repo/pull/42${suffix}`,
+                  state: 'open',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        mockOctokit.paginate
+          .mockResolvedValueOnce([prNotification()])
+          .mockResolvedValueOnce([makeComment()]);
+
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(channel.inboundEnvelopes).toHaveLength(0);
+      },
+    );
+
     it('rebinds to a different following session when the first is gone', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });
       boundSessions.deliverPrompt.mockRejectedValueOnce(
@@ -6917,6 +6950,26 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       await pollOnce();
       expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(3);
       expect(boundSessions.deliverPrompt.mock.calls[2]![2]).toBe(secondKey);
+    });
+
+    it('keys an aggregate batch by sorted members regardless of fetch order (R16-C1)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      const c1 = makeComment({ id: 1001, body: 'first remark' });
+      const c2 = makeComment({ id: 1002, body: 'second remark' });
+      const sortedKey = `github:owner/repo:agg:${createHash('sha256')
+        .update(['C_1001', 'C_1002'].sort().join('\n'))
+        .digest('hex')
+        .slice(0, 40)}`;
+      // GitHub usually returns comments ascending, but the content key must
+      // be order-independent: the same batch re-listed in a different order
+      // is the SAME batch and must dedupe to the same admission key. Pins
+      // the implementation's .sort() (R3-B1 only ever fed ascending input).
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([c2, c1]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      expect(boundSessions.deliverPrompt.mock.calls[0]![2]).toBe(sortedKey);
     });
 
     it('defers unmatched events under a partial snapshot even after a complete one (R3-A1)', async () => {
