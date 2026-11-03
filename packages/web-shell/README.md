@@ -28,12 +28,14 @@ const shell = renderManagedAgentWebShell(container, {
 // update 接受完整的新 props；宿主销毁时调用 shell.unmount()。
 ```
 
-在包内执行 `npx vite build --config vite.lib.config.ts --mode managed-host`，输出
+在包内执行 `npm run build:managed-host`，输出
 `dist-managed-host/index.js` 及相对 chunks，已 bundle React/React DOM 和运行时依赖，
 复用原有 scoped CSS 注入，无需单独 CSS 或 import map。需提供整个输出目录。
-该模式已接入包的 `build`，因此常规 CI 构建会覆盖它；产物目录在 `dist/` 之外，
-普通应用构建清空 `dist/` 不会删掉它。入口仍未接入 `exports` 和 `files`，不随 npm
-包发布（`dist/types/managed-host.d.ts` 也在发布产物之外）。
+该模式**不在**包的 `build` 里，避免给每次本地构建和全新克隆的 `prepare` 增加一次完整
+打包；防腐坏由独立 CI 任务 `Web Shell Managed Host Build` 承担，只在入口、构建配置或
+锁文件变化时触发。产物目录在 `dist/` 之外，普通应用构建清空 `dist/` 不会删掉它。
+入口仍未接入 `exports` 和 `files`，不随 npm 包发布（`dist/types/managed-host.d.ts`
+也在发布产物之外）。
 `navigationTarget` / `archivedNavigationTarget` 指向 shell 容器之外的宿主插槽时，
 入口会把列表包进带作用域标记的容器并同步主题变量，宿主无需自行引入 CSS。
 自定义 provider 的 `storageKey` 必须包含租户/账号身份；切换身份时更换 provider 与

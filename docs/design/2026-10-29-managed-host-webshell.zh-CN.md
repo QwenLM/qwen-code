@@ -50,15 +50,20 @@ Session ID 隔离。短期 token 刷新应保持 provider 身份稳定。品牌�
 
 ## 构建与约束
 
-在 `packages/web-shell` 运行
-`npx vite build --config vite.lib.config.ts --mode managed-host`。产物为
+在 `packages/web-shell` 运行 `npm run build:managed-host`（它包装
+`vite build --config vite.lib.config.ts --mode managed-host`）。产物为
 `dist-managed-host/index.js` 及相对 chunks。独立模式 bundle React、React DOM 与运行时
 依赖，复用已有 CSS 隔离和注入插件。宿主需按 JavaScript MIME 类型提供完整产物目录，
 无需 import map 或单独 CSS import。普通 default 与 transcript 构建保持既有入口和 external
 规则。
-该模式已接入包的 `build`，常规 CI 构建即可发现它腐坏；产物目录在 `dist/` 之外，
-应用构建的 `emptyOutDir` 不会删掉宿主正在使用的产物。它仍未接入 `exports` 与 `files`，
-发布包不会对外声明该入口。
+该模式**刻意不接入**包的 `build`：它不 externalize 任何依赖，挂在该脚本上会让每次本地
+构建和每次全新克隆的 `prepare` 都完整打一遍 React、xterm、mermaid、echarts、shiki 与
+codemirror，而仓库内没有任何消费方读取该产物。防腐坏改由独立的工作流
+`Web Shell Managed Host Build` 承担：在入口、构建配置或锁文件变化的 PR 与合并后 push
+上运行该模式，断言入口产物非空且含挂载符号与 scoped CSS，并检查产物仍未进入发布的
+`exports`/`files`。产物目录也在 `dist/` 之外，应用构建的 `emptyOutDir` 不会删掉宿主正在
+使用的产物。另有一个工作流 meta 测试同时固定这两半，因此「关卡缺失」和「构建税回归」
+都不会无声通过。
 
 整页宿主入口（`--mode app-host`）已从本 PR 移除：它没有构建接线、没有测试覆盖、
 硬编码了特定宿主的侧栏/footer 配置。等有明确消费者后，可以在后续 PR 中补上

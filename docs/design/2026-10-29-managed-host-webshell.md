@@ -63,16 +63,24 @@ owner routes through the shared open path and carries the owning workspace id.
 
 ## Build and constraints
 
-Run `npx vite build --config vite.lib.config.ts --mode managed-host` from
-`packages/web-shell`. Output is `dist-managed-host/index.js` with relative chunks.
+Run `npm run build:managed-host` from `packages/web-shell` (it wraps
+`vite build --config vite.lib.config.ts --mode managed-host`). Output is
+`dist-managed-host/index.js` with relative chunks.
 This separate mode bundles React, React DOM and runtime dependencies and reuses
 the existing CSS scoping and injection plugin. Serve the complete output directory
 with JavaScript MIME types; no import map or separate CSS import is required.
 The normal default and transcript builds keep their previous entry/external rules.
-The mode runs as part of the package `build`, so ordinary CI builds catch it
-rotting, and its output lives outside `dist/` so the app build's `emptyOutDir`
-cannot delete a bundle a host is already serving. It stays out of `exports` and
-`files`, so the published package still does not advertise it.
+The mode is deliberately NOT part of the package `build`: it externalizes
+nothing, so riding that script charged every local build and every fresh-clone
+`prepare` with a full bundle of React, xterm, mermaid, echarts, shiki and
+codemirror for an artifact no in-repo consumer reads. Rot detection lives in the
+dedicated `Web Shell Managed Host Build` workflow instead, which runs the mode on
+pull requests and post-merge pushes that touch the entry, its build config or the
+lockfile, asserts a non-empty entry with the mount symbol and scoped CSS, and
+checks the output stays out of the published `exports`/`files`. Its output also
+lives outside `dist/` so the app build's `emptyOutDir` cannot delete a bundle a
+host is already serving. A workflow meta-test pins both halves of that split, so
+neither the missing gate nor the returning build tax can pass unnoticed.
 
 The full-page host entry (`--mode app-host`) was removed from this PR: it had
 no build wiring, no test coverage, and hardcoded host-specific sidebar/footer

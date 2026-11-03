@@ -37,7 +37,8 @@
   ],
   "scripts": {
     "dev": "vite",
-    "build": "vite build && vite build --config vite.lib.config.ts && vite build --config vite.lib.config.ts --mode transcript && vite build --config vite.lib.config.ts --mode managed-host && tsc -p tsconfig.lib.json && npm run generate:notices",
+    "build": "vite build && vite build --config vite.lib.config.ts && vite build --config vite.lib.config.ts --mode transcript && tsc -p tsconfig.lib.json && npm run generate:notices",
+    "build:managed-host": "vite build --config vite.lib.config.ts --mode managed-host",
     "lint": "cd ../.. && eslint packages/web-shell --ext .ts,.tsx",
     "lint:fix": "cd ../.. && eslint packages/web-shell --ext .ts,.tsx --fix",
     "format:check": "cd ../.. && prettier --experimental-cli --check packages/web-shell",
