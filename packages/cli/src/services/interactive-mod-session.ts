@@ -75,6 +75,7 @@ export class InteractiveModSession implements ICommandLoader {
     columns: 80,
   };
   private sites: readonly ModRenderSite[] = [];
+  private prompts = false;
   // The band's last tree, kept until a new answer lands; none draws nothing.
   private band?: ModBand;
   private revision = 0;
@@ -90,6 +91,7 @@ export class InteractiveModSession implements ICommandLoader {
       surface: 'terminal',
       presentation: () => this.presentation,
       sites: () => this.sites,
+      prompts: () => this.prompts,
       draw: (tree, owner) => {
         const band =
           tree.type === 'engine'
@@ -111,9 +113,18 @@ export class InteractiveModSession implements ICommandLoader {
     });
   }
 
-  /** Loads the Mods once; `sites` names the render sites the host draws. */
-  initialize(sites: readonly ModRenderSite[] = []): Promise<void> {
-    if (!this.initialization) this.sites = sites;
+  /**
+   * Loads the Mods once; `sites` names the render sites the host draws, and
+   * `prompts` says whether it raises `prompt.submit`.
+   */
+  initialize(
+    sites: readonly ModRenderSite[] = [],
+    { prompts = false }: { prompts?: boolean } = {},
+  ): Promise<void> {
+    if (!this.initialization) {
+      this.sites = sites;
+      this.prompts = prompts;
+    }
     this.initialization ??= this.session.initialize(this.lifetime.signal).then(
       () => {
         this.session.flushLogs();
@@ -201,6 +212,15 @@ export class InteractiveModSession implements ICommandLoader {
 
   syncSession(reason: 'clear' | 'resume'): Promise<void> {
     return this.session.syncSession(reason);
+  }
+
+  submitPrompt(
+    text: string,
+    signal: AbortSignal,
+  ): Promise<{ text: string; context?: string[] } | { drop: string }> {
+    return this.closing
+      ? Promise.resolve({ text })
+      : this.session.submitPrompt(text, signal);
   }
 
   startTurn(

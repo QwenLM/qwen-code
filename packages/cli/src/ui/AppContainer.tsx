@@ -1269,7 +1269,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Restore the transcript before Mod diagnostics, without making input
       // or Mod startup wait for asynchronous session recovery.
       void getInteractiveModSession(config)
-        ?.initialize(['AbovePrompt'])
+        ?.initialize(['AbovePrompt'], { prompts: true })
         .catch(() => {});
 
       if (resumedSessionData) {
@@ -1633,6 +1633,18 @@ export const AppContainer = (props: AppContainerProps) => {
   });
   const setBufferText = buffer.setText;
   setBufferTextRef.current = setBufferText;
+  const bufferRef = useRef(buffer);
+  bufferRef.current = buffer;
+  // A typed prompt the Mods did not let in comes back to an empty composer,
+  // as typed text whose provenance is gone.
+  const returnPrompt = useCallback(
+    (text: string) => {
+      if (bufferRef.current.text.length > 0) return;
+      invalidateSubmittedPromptProvenance();
+      bufferRef.current.setText(text);
+    },
+    [invalidateSubmittedPromptProvenance],
+  );
   const restoredPromptStashTargetsRef = useRef(new Set<string>());
   const promptStashTargetDir = config.getTargetDir();
   useEffect(() => {
@@ -2582,6 +2594,7 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalWidthRef,
     midTurnRestoreRef,
     goalQueueRef,
+    returnPrompt,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
   clearPendingStateRef.current = clearPendingState;

@@ -646,6 +646,8 @@ export const useLlmStream = (
     submissionInFlightRef?: React.RefObject<boolean>;
     onSubmissionSettled?: () => void;
   } | null>,
+  // Hands a typed prompt that was not sent back to the composer.
+  onPromptReturned?: (text: string) => void,
 ) => {
   const [workflowKeywordActive, setWorkflowKeywordActive] = useState(false);
   const workflowConfigRef = useRef(config);
@@ -1801,6 +1803,8 @@ export const useLlmStream = (
         request: ToolCallRequestInfo;
         restoreResponseBinding?: RestoreToolResponseBinding;
       };
+      /** What the Mods' `prompt.submit` hooks let in, when they heard it. */
+      promptSubmitted?: { rewritten?: string; context?: string[] };
     }> => {
       if (turnCancelledRef.current && !preserveTurnOwnership) {
         return { queryToSend: null, shouldProceed: false };
@@ -1818,9 +1822,12 @@ export const useLlmStream = (
       }
 
       let localQueryToSendToLlm: PartListUnion | null = null;
+      let promptSubmitted:
+        | { rewritten?: string; context?: string[] }
+        | undefined;
 
       if (typeof query === 'string') {
-        const trimmedQuery = query.trim();
+        let trimmedQuery = query.trim();
 
         // Notification messages (e.g. background agent completions) are
         // pre-processed by the notification drain loop which already
@@ -1858,13 +1865,61 @@ export const useLlmStream = (
         // is the fallback for producers outside this process; slash commands
         // keep their own text. Logged before the slash and shell arms can
         // return, so handled commands stay recallable.
-        const userText =
+        let userText =
           displayText ??
           submittedPrompt ??
           (isSlash ? trimmedQuery : stripLeadingSystemReminders(trimmedQuery));
-        const recallText = pasteExpansions?.size
+        let recallText = pasteExpansions?.size
           ? expandPendingPastePlaceholders(userText, pasteExpansions)
           : userText;
+        // The Mods hear a prompt the person typed before anything reads it:
+        // the recall log, the transcript row, `@` references and the send.
+        const mods =
+          submitType === SendMessageType.UserQuery &&
+          !isSlash &&
+          !(shellModeIntent ?? shellModeActive)
+            ? getInteractiveModSession(config)
+            : undefined;
+        if (mods) {
+          let submitted: Awaited<ReturnType<typeof mods.submitPrompt>>;
+          try {
+            submitted = await mods.submitPrompt(recallText, abortSignal);
+          } catch (error) {
+            if (!abortSignal.aborted) throw error;
+            onPromptReturned?.(recallText);
+            return { queryToSend: null, shouldProceed: false };
+          }
+          // A dropped prompt is neither shown nor recalled, since it may hold
+          // what the hook kept out; the composer gets it back to edit.
+          if ('drop' in submitted) {
+            addItem(
+              { type: MessageType.ERROR, text: submitted.drop },
+              userMessageTimestamp,
+            );
+            onPromptReturned?.(recallText);
+            return { queryToSend: null, shouldProceed: false };
+          }
+          promptSubmitted = {
+            ...(submitted.context?.length
+              ? { context: submitted.context }
+              : {}),
+          };
+          if (submitted.text !== recallText) {
+            // Notices folded in ahead of the typed text stay ahead of the
+            // rewrite, which then stands wherever the typed text would.
+            const typed = recallText.trim();
+            const notices = trimmedQuery.endsWith(typed)
+              ? trimmedQuery.slice(0, trimmedQuery.length - typed.length)
+              : '';
+            const rewritten = submitted.text.trim();
+            trimmedQuery = notices + rewritten;
+            userText = recallText = rewritten;
+            submittedPrompt = rewritten;
+            pasteExpansions = undefined;
+            if (humanInput) humanInput = { text: rewritten };
+            promptSubmitted.rewritten = rewritten;
+          }
+        }
         await logger?.logMessage(MessageSenderType.USER, recallText);
         if (abortSignal.aborted) {
           return { queryToSend: null, shouldProceed: false };
@@ -2073,7 +2128,11 @@ export const useLlmStream = (
         );
         return { queryToSend: null, shouldProceed: false };
       }
-      return { queryToSend: localQueryToSendToLlm, shouldProceed: true };
+      return {
+        queryToSend: localQueryToSendToLlm,
+        shouldProceed: true,
+        ...(promptSubmitted ? { promptSubmitted } : {}),
+      };
     },
     [
       config,
@@ -2084,6 +2143,7 @@ export const useLlmStream = (
       logger,
       shellModeActive,
       applyVisionBridgeIfNeeded,
+      onPromptReturned,
     ],
   );
 
@@ -4173,6 +4233,7 @@ export const useLlmStream = (
             request: ToolCallRequestInfo;
             restoreResponseBinding?: RestoreToolResponseBinding;
           };
+          promptSubmitted?: { rewritten?: string; context?: string[] };
         };
         try {
           preparedQuery =
@@ -4221,6 +4282,16 @@ export const useLlmStream = (
         }
         const { queryToSend, shouldProceed, scheduledClientTool } =
           preparedQuery;
+        // A rewrite from the Mods' `prompt.submit` hooks is the prompt from
+        // here on: what the transcript shows, what `turn.start` hears and
+        // what workflow keywords are read from.
+        const promptRewrite = preparedQuery.promptSubmitted?.rewritten;
+        const promptContext = preparedQuery.promptSubmitted?.context;
+        const sentPrompt = promptRewrite ?? submittedPrompt;
+        const typedInput =
+          promptRewrite === undefined || !metadata?.humanInput
+            ? metadata?.humanInput
+            : { text: promptRewrite };
 
         if (scheduledClientTool && foregroundAbortController) {
           if (scheduledClientTool.restoreResponseBinding) {
@@ -4450,9 +4521,7 @@ export const useLlmStream = (
             !(metadata?.shellMode ?? shellModeActive) &&
             !dispatchesSlashCommand &&
             !(typeof query === 'string' && isBtwCommand(query));
-          const humanInput = workflowModeEligible
-            ? metadata?.humanInput
-            : undefined;
+          const humanInput = workflowModeEligible ? typedInput : undefined;
           // A prompt the person submitted or retried is a turn the Mods hear.
           const startsModTurn =
             mods !== undefined &&
@@ -4477,8 +4546,8 @@ export const useLlmStream = (
                     const turn = mods?.startTurn(
                       submitType === SendMessageType.Retry
                         ? ''
-                        : (metadata?.humanInput?.text ??
-                            submittedPrompt ??
+                        : (typedInput?.text ??
+                            sentPrompt ??
                             (typeof query === 'string' ? query : '')),
                       AbortSignal.any([abortSignal, cancel.signal]),
                       () => cancelForModRef.current(),
@@ -4497,7 +4566,10 @@ export const useLlmStream = (
             ...(allowConcurrentBtwDuringResponse
               ? { isConcurrentSideQuery: true }
               : {}),
-            ...(submittedPrompt !== undefined ? { submittedPrompt } : {}),
+            ...(sentPrompt !== undefined
+              ? { submittedPrompt: sentPrompt }
+              : {}),
+            ...(promptContext ? { promptContext } : {}),
             ...(humanInput === undefined
               ? {}
               : {

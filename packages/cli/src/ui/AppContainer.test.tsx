@@ -894,6 +894,51 @@ describe('AppContainer State Management', () => {
     },
   );
 
+  it('raises prompt.submit in Ink and hands a returned prompt only to an empty composer', async () => {
+    const initialize = vi.fn().mockResolvedValue(undefined);
+    const owner = vi
+      .spyOn(interactiveMods, 'getInteractiveModSession')
+      .mockReturnValue({
+        ready: Promise.resolve(),
+        initialize,
+        subscribe: () => () => {},
+        setPresentation: vi.fn(),
+        setRenderInput: vi.fn(),
+      } as unknown as interactiveMods.InteractiveModSession);
+    vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+    vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+    const setText = vi.fn();
+    const buffer = { text: '', setText };
+    mockedUseTextBuffer.mockReturnValue(buffer);
+    try {
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await flushConfigInitialization();
+      await vi.waitFor(() =>
+        expect(initialize).toHaveBeenCalledWith(['AbovePrompt'], {
+          prompts: true,
+        }),
+      );
+      const returnPrompt = mockedUseLlmStream.mock.lastCall![25] as (
+        text: string,
+      ) => void;
+      act(() => returnPrompt('key AKIA'));
+      expect(setText).toHaveBeenCalledExactlyOnceWith('key AKIA');
+      // A composer the person already typed in again keeps its text.
+      buffer.text = 'next prompt';
+      act(() => returnPrompt('key AKIA'));
+      expect(setText).toHaveBeenCalledOnce();
+    } finally {
+      owner.mockRestore();
+    }
+  });
+
   it.each([
     ['workflow', 'Please use a workflow.', true, false, true, false],
     ['ultracode', 'ultracode: audit', true, false, true, false],
