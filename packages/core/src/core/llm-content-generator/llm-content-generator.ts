@@ -206,6 +206,12 @@ export class LlmContentGenerator implements ContentGenerator {
         configSamplingParams?.frequency_penalty,
         'frequencyPenalty',
       ),
+      seed: getParameterValue<number>(
+        typeof configSamplingParams?.['seed'] === 'number'
+          ? configSamplingParams['seed']
+          : undefined,
+        'seed',
+      ),
       thinkingConfig: getParameterValue(
         this.buildThinkingConfig(request.model, requestConfig.thinkingConfig),
         'thinkingConfig',

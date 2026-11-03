@@ -294,11 +294,14 @@ sender check an adapter makes itself must go through
 group's setting is silently ignored on that lane. A group gate never carries
 `pairing`: an approval there would also unlock direct messages.
 
-**Operators:** commands that act on a shared session (`/approve`, `/cancel`,
+**Operators:** commands that act on a shared session (`/approve-always`, `/cancel`,
 `/clear`, `/loop`, the loop tool, steering, ...) check
 `isSharedSessionOperator`, not the sender gates. Only explicit `config.operators`
 grants shared-session operator permissions; omitted or empty means nobody.
 Private policy, user pairing, and group member admission never imply this role.
+An admitted sender may still `/approve` once or `/deny` their own pending request
+in the current attended run, in the same chat and thread. This does not grant
+session-management permissions or permission to answer another member's request.
 
 `resolvePrivatePolicy(config)` resolves the four-value private policy. Explicit
 `privatePolicy` takes precedence over deprecated `dmPolicy` and `senderPolicy`;

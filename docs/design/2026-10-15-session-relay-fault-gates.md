@@ -314,22 +314,25 @@ Mechanics notes recorded at landing:
 
 ### FG9e — SSE gap (slice 2, delivered)
 
-Two cases instead of the draft's four: each observes one `*` broadcast on
-one surface from both of its ends — the sender (alice) and a recipient
-(bob) — because both ends ride the same relay and the same team boot,
-and the fork budget (#14148) pays for every team boot. The public and
+Two resume cases instead of the draft's four: each observes one `*`
+broadcast on one surface from both of its ends — the sender (alice) and a
+recipient (bob) — because both ends ride the same relay and the same team
+boot, and the fork budget (#14148) pays for every team boot. The public and
 WebShell streams are served by the in-JVM Spring; the injection is the
 client's own abort (its HttpClient's `shutdownNow`) and resume, so the
 letter needs no proxy. Each stream is cut only once its client holds
 every committed event, resumes only after JDBC proves events committed
 beyond its cursor, and the client's whole view (the cut frames, then the
 resumed ones) must be one sequence from 1 with no gap and no duplicate,
-frame for frame the committed row as that surface serves it.
+frame for frame the committed row as that surface serves it. A third
+case, `cursor-expired-resync`, arms the expired-cursor answer the draft
+deferred (open question 3).
 
-| Case              | Injection                                                                                                                                                                                                                                                                                                | Expect                                                                                                                                                                                                                                                                                                                                 |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `public-resume`   | Hold the relay; open alice's and bob's public streams; cut alice's once her command is `planned`, then release the relay, so the whole relay runs while she is disconnected; cut bob's once both `msgc_` are minted and before his delivery; let every delivery settle; resume both with `Last-Event-ID` | Nothing relayed before alice's cut (no `msgc_`) and nothing on bob's journal at his; both Sessions committed events beyond their cursors while cut; both resumed views continuous and exactly the ledger (snake_case, second `created_at`); alice's Turn terminal once and her post-relay answer once; bob's launch Turn terminal once |
-| `webshell-resume` | Same over the WebShell stream, resumed with `afterSequence`                                                                                                                                                                                                                                              | Same over the WebShell envelope (camelCase, millisecond `createdAt`)                                                                                                                                                                                                                                                                   |
+| Case                    | Injection                                                                                                                                                                                                                                                                                                | Expect                                                                                                                                                                                                                                                                                                                                 |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `public-resume`         | Hold the relay; open alice's and bob's public streams; cut alice's once her command is `planned`, then release the relay, so the whole relay runs while she is disconnected; cut bob's once both `msgc_` are minted and before his delivery; let every delivery settle; resume both with `Last-Event-ID` | Nothing relayed before alice's cut (no `msgc_`) and nothing on bob's journal at his; both Sessions committed events beyond their cursors while cut; both resumed views continuous and exactly the ledger (snake_case, second `created_at`); alice's Turn terminal once and her post-relay answer once; bob's launch Turn terminal once |
+| `webshell-resume`       | Same over the WebShell stream, resumed with `afterSequence`                                                                                                                                                                                                                                              | Same over the WebShell envelope (camelCase, millisecond `createdAt`)                                                                                                                                                                                                                                                                   |
+| `cursor-expired-resync` | Let the lead's Turn settle, then advance the Session's replay floor through projected message coverage; reconnect both surfaces at cursor 0 and read the JSON route at 0 and at the floor                                                                                                                | Exactly one `agent.session.resync_required` frame per surface, with no event id, the floor and a snapshot cursor at or above it, and no partial replay; `GET /events?after=0` answers `409 cursor_expired` with the same floor; `after=<floor>` answers 200                                                                            |
 
 Mechanics notes recorded at landing:
 
@@ -343,11 +346,16 @@ Mechanics notes recorded at landing:
   resumes with no gap and no duplicate, frame for frame its ledger. The
   sender's end is the relay-dependent one: her Turn's tail commits only
   after the relay answered.
-- The expired-cursor `resync_required` arm (open question 3) is not
-  armed: the resync answer belongs to the Session stream's replay floor,
-  whichever capability produced the events, and the FG8 tracker
-  (#14163) owns that one case (`cursor-expired-resync`), which its
-  design deferred and its slice 2 (#14334) has not yet delivered.
+- The expired-cursor `resync_required` arm (open question 3) is armed
+  as `cursor-expired-resync`. The resync answer belongs to the Session
+  stream's replay floor whichever capability produced the events, so the
+  case needs no relay traffic of its own: it lets the lead's Turn settle,
+  advances the floor through projected coverage (the scheduled advancer
+  is off), and requires both surfaces to answer a cursor below it with
+  exactly one frame carrying no id, the floor and a snapshot cursor at or
+  above it. The JSON route answers the same window as
+  `409 cursor_expired`, and a cursor at the floor stays readable. The
+  case closes the FG8 tracker's (#14163) deferred cell carried by #15750.
 
 ### FG9b — store failures (slice 3, delivered)
 
@@ -513,8 +521,8 @@ and FG9e's stream heartbeat (below).
 - the **relay hold** is the H4e-b3 one: `SchedulerHold` parks a task on
   the one-thread `messageRelayScheduler`, so no scan — and with it no
   claim or handover — runs until the case releases it; FG9d's
-  `cancel-after-mint` / `cancel-reply-lost` and both FG9e cases take it
-  before alice sends;
+  `cancel-after-mint` / `cancel-reply-lost` and both FG9e resume cases
+  take it before alice sends;
 - a **second proxy instance** fronts the public API for the client's own
   cancel POST in `cancel-reply-lost` only (everything else talks to
   Spring directly), with the same drop-after-commit disposition;
@@ -722,6 +730,16 @@ source:
     sent" while her entry stays live, the relay delivers it anyway, and
     the copied-back reply is never consumed.
 
+Residual round (#15750), run against its case alone
+(`-Dqwen.fg9e.case=cursor-expired-resync`); the mutation patches the
+Java source:
+
+15. FG9e — `replayableEvents` skips the replay-floor check (an expired
+    cursor replays from sequence 0): `cursor-expired-resync` red — the
+    stream replays the ledger from its start and never sends the resync
+    frame, and the JSON route answers 200 instead of `409
+cursor_expired`.
+
 ## Validation and acceptance
 
 - `npm run build && npm run typecheck`; ESLint clean on the driver;
@@ -732,9 +750,9 @@ source:
   counter, `fg9b_fire` count and held kill point observed — per-letter
   selectors working, and the happy path (a broadcast with no injection)
   green with exactly one `msgc_` row per position.
-- Every slice-1 and slice-2 mutation above individually red; source
-  restored; the gate green again. Slice 3 repeats the procedure for its
-  mutations.
+- Every slice-1, slice-2 and residual-round mutation above individually
+  red; source restored; the gate green again. Slice 3 repeats the
+  procedure for its mutations.
 - `hosted-process-ci.test.js` green with any moved budgets, and
   `check-failsafe-reports.js hosted` satisfied after a full lane run.
 - Two consecutive clean open-ended and reverse audit rounds per
@@ -753,7 +771,8 @@ source:
 2. Whether the broadcast roster should grow to four members (three
    recipients) to sharpen the partial arms' decisiveness — cost is one
    more scripted member per case; decided at implementation.
-3. Resolved at slice 2: FG9e does not arm the expired-cursor
-   `resync_required` case. The resync answer belongs to the Session
-   stream's replay floor whichever capability produced the events, and
-   the FG8 tracker (#14163) still owes that one case.
+3. Closed by the residual round (#15750): FG9e now arms the
+   expired-cursor `resync_required` case (`cursor-expired-resync`). The
+   resync answer belongs to the Session stream's replay floor whichever
+   capability produced the events; the FG8 tracker (#14163) deferred the
+   cell and #15750 carried it.

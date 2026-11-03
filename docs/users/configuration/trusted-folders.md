@@ -6,6 +6,12 @@ The Trusted Folders feature is a security setting that gives you control over wh
 
 The Trusted Folders feature is **disabled by default**. To use it, you must first enable it in your settings.
 
+Disabled folder trust does not authorize project skill/subagent frontmatter
+hooks, project skill automatic tool grants, or workspace `.lsp.json` servers.
+These require folder trust to be enabled and granted, or an affirmative IDE
+workspace trust signal. Other settings-file hooks follow their own loading
+policy; see [Hooks](../features/hooks.md).
+
 Add the following to your user `settings.json` file:
 
 ```json

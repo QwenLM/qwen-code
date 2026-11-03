@@ -29,8 +29,8 @@ class WorkspaceQueryScaleMySqlIT {
             var jdbc = new CapturingJdbc(database.source());
             var manager = new DataSourceTransactionManager(database.source());
             var transactions = new TransactionTemplate(manager);
-            var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
-                    new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+            var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
+                    new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             String session = transactions.execute(ignored -> store.insertSessionCommand("tenant", "actor", "CREATE_SESSION",
                     "create", "digest", "qwen-code", null, null, List.of(), null)).sessionId();
             String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", session);

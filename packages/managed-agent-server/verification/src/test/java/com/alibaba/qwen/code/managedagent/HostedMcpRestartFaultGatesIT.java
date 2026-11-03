@@ -24,9 +24,7 @@ import org.springframework.boot.web.servlet.context.ServletWebServerApplicationC
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -40,6 +38,7 @@ import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -49,6 +48,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -64,6 +64,8 @@ import static org.awaitility.Awaitility.await;
 // original `${configurationId}:release` operation instead of minting one.
 // Its pre-dispatch cancel cell parks the owner acquire between `intent` and
 // `dispatch_started` instead of killing a process.
+// Its two-server release cell configures a second fixture server and requires
+// the first configuration's same-id retry to release it before the second.
 // Its R1-1 cell refuses the owner release after `drained` and replaces
 // Spring, and with it the embedded Broker, before the retry.
 class HostedMcpRestartFaultGatesIT {
@@ -71,21 +73,28 @@ class HostedMcpRestartFaultGatesIT {
     // Per-case evidence letter: FG12c keeps its directory, FG12d's release
     // cell lands under its own so the two letters' artefacts never mix.
     private String caseLetter;
-    private static final Map<String, String> CASE_LETTERS = Map.of(
-            "harnessKillDuringConfigureResolvesThroughStatusOnMySql",
-            "fg12c",
-            "harnessKillDuringOperationLooksUpTheOriginalInvokeOnMySql",
-            "fg12c",
-            "workerKillWhileIdleNeverMintsAFreshOwnerOnMySql", "fg12c",
-            "workerKillDuringOperationSettlesOutcomeUnknownOnMySql", "fg12c",
-            "stdioKillDuringRequestSettlesOutcomeUnknownOnMySql", "fg12c",
-            "harnessKillDuringReleaseResumesTheOriginalReleaseOnMySql",
-            "fg12d",
-            "firstReleaseRefusedBeforeForwardingResumesUnderTheSameId",
-            "fg12d",
-            "cancelBeforeDispatchIsNotStartedProvenOnMySql", "fg12d",
-            "ownerReleaseRefusedThenSpringRestartReleasesTheHolderOnMySql",
-            "fg12d");
+    private static final Map<String, String> CASE_LETTERS = Map.ofEntries(
+            Map.entry("harnessKillDuringConfigureResolvesThroughStatusOnMySql",
+                    "fg12c"),
+            Map.entry("harnessKillDuringOperationLooksUpTheOriginalInvokeOnMySql",
+                    "fg12c"),
+            Map.entry("workerKillWhileIdleNeverMintsAFreshOwnerOnMySql",
+                    "fg12c"),
+            Map.entry("workerKillDuringOperationSettlesOutcomeUnknownOnMySql",
+                    "fg12c"),
+            Map.entry("stdioKillDuringRequestSettlesOutcomeUnknownOnMySql",
+                    "fg12c"),
+            Map.entry("detachRefusedWhileToolResultUnknownOnMySql", "fg12d"),
+            Map.entry("harnessKillDuringReleaseResumesTheOriginalReleaseOnMySql",
+                    "fg12d"),
+            Map.entry("firstReleaseRefusedBeforeForwardingResumesUnderTheSameId",
+                    "fg12d"),
+            Map.entry("firstReleaseRefusedWithTwoServersReleasesBothOnMySql",
+                    "fg12d"),
+            Map.entry("cancelBeforeDispatchIsNotStartedProvenOnMySql",
+                    "fg12d"),
+            Map.entry("ownerReleaseRefusedThenSpringRestartReleasesTheHolderOnMySql",
+                    "fg12d"));
     private static final String TOKEN = "extension-process-fixture-token";
     private static final String CAPABILITY = "sha256:" + "a".repeat(64);
     private final ObjectMapper json = new ObjectMapper();
@@ -154,9 +163,11 @@ class HostedMcpRestartFaultGatesIT {
 
     @BeforeEach
     void boot(TestInfo info) throws Exception {
-        caseLetter = info.getTestMethod()
-                .map(method -> CASE_LETTERS.get(method.getName()))
-                .orElse(null);
+        String methodName = info.getTestMethod()
+                .map(method -> method.getName()).orElse("");
+        caseLetter = CASE_LETTERS.get(methodName);
+        boolean twoServers = "firstReleaseRefusedWithTwoServersReleasesBothOnMySql"
+                .equals(methodName);
         assertThat(System.getProperty("mysql.url"))
                 .as("FG12c requires a disposable MySQL")
                 .startsWith("jdbc:mysql:");
@@ -187,10 +198,18 @@ class HostedMcpRestartFaultGatesIT {
             servers.add(Map.of("tenantId", tenant, "workspaceId",
                     "workspace", "serverId", "fixture", "serverRevision",
                     revision, "definitionDigest",
-                    DigestUtils.sha256Hex(mcpDigest + revision), "transport",
+                    serverDigest("fixture", revision), "transport",
                     "stdio", "command", node, "args",
                     List.of(program.toString(), "mcp", evidence.toString(),
                             Integer.toString(revision))));
+        }
+        if (twoServers) {
+            servers.add(Map.of("tenantId", tenant, "workspaceId",
+                    "workspace", "serverId", "fixture2", "serverRevision",
+                    3, "definitionDigest", serverDigest("fixture2", 3),
+                    "transport", "stdio", "command", node, "args",
+                    List.of(program.toString(), "mcp", evidence.toString(),
+                            "3")));
         }
         json.writeValue(temporary.resolve("mcp.json").toFile(),
                 Map.of("version", 1, "servers", servers));
@@ -650,6 +669,45 @@ class HostedMcpRestartFaultGatesIT {
         pending.cancel(true);
     }
 
+    // FG12d (issue #14447): a tool result is unknown, so detach must refuse
+    // before it releases anything. The Session stays attached and the
+    // operation stays recovery_blocked; a later generation owns the only
+    // conclusive answer for its original id.
+    @Test
+    @Timeout(600)
+    void detachRefusedWhileToolResultUnknownOnMySql() throws Exception {
+        SessionRef session = createSession();
+        baseline(session);
+        String operation = uuid();
+        Future<JsonNode> pending = caseExecutor.submit(
+                () -> privateRequest("POST", "/session/" + session.id()
+                        + "/mcp/operations", Map.of("operationId", operation,
+                        "serverId", "fixture", "request", Map.of("kind",
+                                "resource_read", "uri", "ext://hold")),
+                        session, 202));
+        waitFor(() -> assertThat(fixtureEvents("mcp.hold")).hasSize(1));
+        kill(fixturePid());
+        waitFor(() -> assertThat(operations(session.id()).getLast()
+                .path("run").path("execution").asText())
+                .isEqualTo("outcome_unknown"));
+        assertThat(operations(session.id()).getLast().path("run").path("state")
+                .asText()).isEqualTo("recovery_blocked");
+        HttpResponse<String> detach = rawRequest("POST",
+                "/session/" + session.id() + "/detach", "{}",
+                session.clientId());
+        assertThat(detach.statusCode()).as("detach: %s", detach.body())
+                .isIn(409, 503);
+        JsonNode refusal = json.readTree(detach.body());
+        assertThat(refusal.path("error").asText(
+                refusal.path("code").asText()))
+                .isIn("hosted_turn_active", "managed_session_close_failed",
+                        "hosted_mcp_recovery_required");
+        assertThat(controls("mcp-release")).isEmpty();
+        assertThat(operations(session.id()).getLast().path("run").path("execution")
+                .asText()).isEqualTo("outcome_unknown");
+        pending.cancel(true);
+    }
+
     private long fixturePid() {
         return fixtureEvents("mcp.start").getFirst().path("pid").asLong();
     }
@@ -791,8 +849,18 @@ class HostedMcpRestartFaultGatesIT {
     }
 
     private Map<String, Object> mcpPin(int revision) {
-        return Map.of("serverId", "fixture", "serverRevision", revision,
-                "definitionDigest", DigestUtils.sha256Hex(mcpDigest + revision));
+        return mcpPin("fixture", revision);
+    }
+
+    private Map<String, Object> mcpPin(String serverId, int revision) {
+        return Map.of("serverId", serverId, "serverRevision", revision,
+                "definitionDigest", serverDigest(serverId, revision));
+    }
+
+    private String serverDigest(String serverId, int revision) {
+        return "fixture".equals(serverId)
+                ? DigestUtils.sha256Hex(mcpDigest + revision)
+                : DigestUtils.sha256Hex(mcpDigest + serverId + revision);
     }
 
     @Test
@@ -872,6 +940,117 @@ class HostedMcpRestartFaultGatesIT {
                 .isEqualTo("released");
         assertThat(controls("mcp-configure")).isEmpty();
         assertThat(controls("mcp-invoke")).isEmpty();
+    }
+
+    // FG12d (issue #14447, #14880 item 3): the same refusal with two servers
+    // configured. The first configuration's release is refused before it is
+    // forwarded; the same-id retry releases it, then the second
+    // configuration releases. Both fixture servers must physically exit.
+    @Test
+    @Timeout(600)
+    void firstReleaseRefusedWithTwoServersReleasesBothOnMySql()
+            throws Exception {
+        SessionRef session = createSession(List.of(mcpPin(1),
+                mcpPin("fixture2", 3)));
+        baseline(session, 2);
+        List<JsonNode> configurations = configurations(session.id());
+        assertThat(configurations).hasSize(2);
+        Map<String, String> releaseByServer = new LinkedHashMap<>();
+        for (JsonNode configuration : configurations) {
+            String serverId = configuration.path("serverId").asText();
+            releaseByServer.put(serverId, configuration
+                    .path("configurationId").asText() + ":release");
+            assertThat(configuration.path("run").path("runtime").isObject())
+                    .isTrue();
+            assertThat(configuration.path("releaseState").asText())
+                    .isEqualTo("active");
+        }
+        assertThat(releaseByServer)
+                .containsOnlyKeys("fixture", "fixture2");
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id ="
+                + " ? AND session_id = ?", PROFILE, tenant, session.id());
+        OperationRecord close = admitClose(session);
+        String closeId = close.operationId();
+        long claimGeneration = close.claimGeneration();
+        driveLifecycle(session, closeId, claimGeneration, "effects");
+        jdbc.update("UPDATE ma_session_head SET phase = 'DRAINING' WHERE"
+                + " tenant_id = ? AND harness_session_id = ? AND"
+                + " operation_id = ?", tenant, session.id(), closeId);
+        driveLifecycle(session, closeId, claimGeneration,
+                "prepare_resources");
+        refuseNextControl("mcp-release");
+        HttpResponse<String> settled = null;
+        for (int attempt = 0; attempt < 60 && settled == null; attempt++) {
+            HttpResponse<String> response = rawLifecycle(session, closeId,
+                    claimGeneration, "settle_resources");
+            if (response.statusCode() == 200) {
+                settled = response;
+                break;
+            }
+            JsonNode refusal = json.readTree(response.body());
+            String code = refusal.path("error").asText(
+                    refusal.path("code").asText());
+            if (response.statusCode() == 409
+                    && "hosted_turn_active".equals(code)) {
+                Thread.sleep(500);
+                continue;
+            }
+            assertThat(response.statusCode())
+                    .as("settle: %s", response.body()).isEqualTo(503);
+            Thread.sleep(500);
+        }
+        assertThat(settled).as("settle must complete").isNotNull();
+        List<ProxyCall> releases = controls("mcp-release");
+        assertThat(releases).hasSize(3);
+        assertThat(releases).allMatch(call ->
+                releaseByServer.containsValue(call.operationId()));
+        assertThat(releases.getFirst().status()).isEqualTo(503);
+        assertThat(releases.get(1).status()).isEqualTo(200);
+        assertThat(releases.get(2).status()).isEqualTo(200);
+        assertThat(releases.getFirst().operationId())
+                .isEqualTo(releases.get(1).operationId());
+        assertThat(releases.get(2).operationId())
+                .isNotEqualTo(releases.getFirst().operationId());
+        List<Map<String, Object>> releaseWire = wire.stream()
+                .filter(entry -> ((Number) entry.get("seq")).intValue()
+                        > wireBaseline)
+                .filter(entry -> {
+                    JsonNode request = (JsonNode) entry.get("request");
+                    return request != null
+                            && "mcp-release".equals(request.at(
+                                    "/operation/kind").asText());
+                })
+                .toList();
+        assertThat(releaseWire).hasSize(3);
+        assertThat(releaseWire.get(0).get("status")).isEqualTo(503);
+        assertThat(((JsonNode) releaseWire.get(0).get("answer"))
+                .path("result").isMissingNode()).isTrue();
+        assertThat(releaseWire.get(1).get("status")).isEqualTo(200);
+        assertThat(releaseWire.get(2).get("status")).isEqualTo(200);
+        assertThat(releaseWire).allMatch(entry -> releaseByServer
+                .containsValue(((JsonNode) entry.get("request"))
+                        .at("/operation/operationId").asText()));
+        String firstServer = releaseServer(releaseWire.get(0));
+        assertThat(releaseServer(releaseWire.get(1))).isEqualTo(firstServer);
+        String secondServer = releaseServer(releaseWire.get(2));
+        assertThat(secondServer).isNotEqualTo(firstServer);
+        assertThat(Set.of(firstServer, secondServer))
+                .containsExactlyInAnyOrder("fixture", "fixture2");
+        assertThat(configurations(session.id())).allSatisfy(configuration ->
+                assertThat(configuration.path("releaseState").asText())
+                        .isEqualTo("released"));
+        assertThat(controls("mcp-configure")).isEmpty();
+        assertThat(controls("mcp-invoke")).isEmpty();
+        assertThat(fixtureEvents("mcp.start")).hasSize(2);
+        assertThat(fixtureEvents("mcp.exit")).hasSize(2);
+        assertThat(fixtureEvents("mcp.start")).extracting(event ->
+                event.path("revision").asInt())
+                .containsExactlyInAnyOrder(1, 3);
+    }
+
+    private static String releaseServer(Map<String, Object> entry) {
+        return ((JsonNode) entry.get("request")).at("/operation/serverId")
+                .asText();
     }
 
     // FG12d (issue #14447, #14880 item 2): a cancel that lands before the raw
@@ -1105,6 +1284,11 @@ class HostedMcpRestartFaultGatesIT {
     }
 
     private void baseline(SessionRef session) throws Exception {
+        baseline(session, 1);
+    }
+
+    private void baseline(SessionRef session, int expectedConfigurations)
+            throws Exception {
         List<Map<String, Object>> prompt = List.of(
                 Map.of("type", "text", "text", "FG12C_BASE"));
         String payload = json.writeValueAsString(prompt);
@@ -1112,8 +1296,8 @@ class HostedMcpRestartFaultGatesIT {
                 Map.of("promptId", uuid(), "prompt", prompt, "payloadDigest",
                         "sha256:" + DigestUtils.sha256Hex(payload)),
                 session.clientId(), 202);
-        waitFor(() -> assertThat(HostedGateTestSupport.extensionRecords(jdbc,
-                tenant, session.id(), "mcp_configuration")).hasSize(1));
+        waitFor(() -> assertThat(configurations(session.id()))
+                .hasSize(expectedConfigurations));
         waitFor(() -> assertThat(harnessRequest("GET", "/session/"
                 + session.id() + "/status", null, session.clientId(), 200)
                         .path("hasActivePrompt").asBoolean()).isFalse());
@@ -1121,11 +1305,14 @@ class HostedMcpRestartFaultGatesIT {
         // starts before it does answers turn_active/unsettled instead of
         // reaching the release.
         waitFor(() -> {
-            JsonNode record = configuration(session.id());
-            assertThat(record.path("run").path("state").asText())
-                    .isEqualTo("settled");
-            assertThat(record.path("run").path("execution").asText())
-                    .isEqualTo("settled");
+            List<JsonNode> records = configurations(session.id());
+            assertThat(records).hasSize(expectedConfigurations);
+            assertThat(records).allSatisfy(record -> {
+                assertThat(record.path("run").path("state").asText())
+                        .isEqualTo("settled");
+                assertThat(record.path("run").path("execution").asText())
+                        .isEqualTo("settled");
+            });
         });
         // The baseline's own configure is not part of the case under test;
         // sequence marks avoid clearing a list an in-flight relay is still
@@ -1134,9 +1321,13 @@ class HostedMcpRestartFaultGatesIT {
         wireBaseline = wireSequence.get();
     }
 
+    private List<JsonNode> configurations(String session) {
+        return HostedGateTestSupport.extensionRecords(jdbc, tenant, session,
+                "mcp_configuration");
+    }
+
     private JsonNode configuration(String session) {
-        List<JsonNode> records = HostedGateTestSupport.extensionRecords(jdbc,
-                tenant, session, "mcp_configuration");
+        List<JsonNode> records = configurations(session);
         assertThat(records).isNotEmpty();
         return records.getLast();
     }
@@ -1398,6 +1589,11 @@ class HostedMcpRestartFaultGatesIT {
     }
 
     private SessionRef createSession() throws Exception {
+        return createSession(List.of(mcpPin(1)));
+    }
+
+    private SessionRef createSession(List<Map<String, Object>> pins)
+            throws Exception {
         String key = uuid();
         String session = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                 .tenantId(tenant)
@@ -1412,7 +1608,7 @@ class HostedMcpRestartFaultGatesIT {
         body.put("sessionScope", "thread");
         body.put("toolProfile", PROFILE);
         body.put("approvalMode", "yolo");
-        body.put("mcpServers", List.of(mcpPin(1)));
+        body.put("mcpServers", pins);
         body.put("managedSessionStore", storeDescriptor());
         JsonNode created = harnessRequest("POST", "/session", body, null, 200);
         assertThat(created.path("sessionId").asText()).isEqualTo(session);
@@ -1956,17 +2152,8 @@ class HostedMcpRestartFaultGatesIT {
     // HostedGateTestSupport#bootWithFreshPorts). restartSpring keeps the
     // current ports because the harness and the proxy already point at them.
     private void probePorts() {
-        try (var control = new ServerSocket(0, 1,
-                InetAddress.getByName("127.0.0.1"));
-                var hosted = new ServerSocket(0, 1,
-                        InetAddress.getByName("127.0.0.1"));
-                var runtime = new ServerSocket(0, 1,
-                        InetAddress.getByName("127.0.0.1"))) {
-            port = control.getLocalPort();
-            harnessPort = hosted.getLocalPort();
-            brokerPort = runtime.getLocalPort();
-        } catch (java.io.IOException error) {
-            throw new java.io.UncheckedIOException(error);
-        }
+        port = reservePort();
+        harnessPort = reservePort();
+        brokerPort = reservePort();
     }
 }
