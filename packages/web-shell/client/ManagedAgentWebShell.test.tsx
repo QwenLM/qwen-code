@@ -139,6 +139,9 @@ describe('ManagedAgentWebShell', () => {
     await act(async () => root.render(<ManagedAgentWebShell />));
     expect(createJavaManagedAgentProvider).not.toHaveBeenCalled();
     expect(container.textContent).not.toContain('managed-only');
+    expect(container.querySelector('[role="status"]')?.textContent).toContain(
+      'Managed Agents is unavailable',
+    );
   });
 
   it('wraps a host navigation slot in the portal scope and syncs theme variables', async () => {

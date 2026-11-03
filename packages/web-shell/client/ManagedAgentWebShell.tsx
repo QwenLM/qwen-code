@@ -21,7 +21,12 @@ import {
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import { WebShellCustomizationProvider } from './customization';
-import { I18nProvider, normalizeLanguage, type WebShellLanguage } from './i18n';
+import {
+  I18nProvider,
+  normalizeLanguage,
+  useI18n,
+  type WebShellLanguage,
+} from './i18n';
 import { WebShellPortalRootContext } from './portalRoot';
 import {
   ThemeProvider,
@@ -77,6 +82,23 @@ export interface ManagedAgentWebShellProps
   brand?: WebShellBrand;
   className?: string;
   style?: CSSProperties;
+}
+
+/**
+ * Shown when the shell is mounted with neither an injected provider nor a
+ * baseUrl to build one from. The mount docs promise a notice in this state;
+ * rendering it (rather than an empty wrapper) keeps that promise honest.
+ */
+function ManagedUnavailableNotice() {
+  const { t } = useI18n();
+  return (
+    <p
+      role="status"
+      style={{ padding: '2rem', textAlign: 'center', opacity: 0.7 }}
+    >
+      {t('managed.unavailable')}
+    </p>
+  );
 }
 
 /** Managed-only 产品入口，不创建 daemon workspace/session context。 */
@@ -304,6 +326,7 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
                           navigationSearch={navigationSearch}
                         />
                       )}
+                      {!provider && <ManagedUnavailableNotice />}
                     </div>
                   </CompactModeContext.Provider>
                 </TodoContextsProvider>

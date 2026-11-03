@@ -2096,8 +2096,16 @@ function ManagedSessionsContent({
                     lifecycleSummaries.find(
                       (session) => session.sessionId === pending.sessionId,
                     )?.workspace?.workspaceId;
+                  // `summary` is the session currently on screen, which is the
+                  // pending owner only when the ids match. In the cross-
+                  // conversation case, falling back to its workspace would bind
+                  // the owner to a foreign workspace — the very misattribution
+                  // this flow removes — so leave the target unbound instead.
                   const targetWorkspaceId =
-                    ownerWorkspaceId ?? summary?.workspace?.workspaceId;
+                    ownerWorkspaceId ??
+                    (pending.sessionId === sessionId
+                      ? summary?.workspace?.workspaceId
+                      : undefined);
                   openSession(pending.sessionId, targetWorkspaceId);
                 }}
               >
