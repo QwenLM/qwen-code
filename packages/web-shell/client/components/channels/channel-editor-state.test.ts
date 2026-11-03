@@ -1413,6 +1413,26 @@ describe('Repository-only channel access config', () => {
   });
 });
 
+/**
+ * Stored per-repository shapes the sweeps cross with edits and policies. Shared
+ * by the override, non-Allowlist and conflicting-alias sweeps so a new shape
+ * reaches every one of them.
+ */
+const SWEEP_SHAPES: Array<[string, Record<string, unknown>]> = [
+  ['empty', {}],
+  ['open', { senders: 'open' }],
+  ['allowlist', { senders: 'allowlist' }],
+  ['allowlist+empty', { senders: 'allowlist', allowedUsers: [] }],
+  ['allowlist+names', { senders: 'allowlist', allowedUsers: ['alice'] }],
+  ['list-only-empty', { allowedUsers: [] }],
+  ['list-only-names', { allowedUsers: ['alice'] }],
+  ['mention-true', { requireMention: true }],
+  ['mention-false', { requireMention: false }],
+  ['unmodelled', { dispatchMode: 'collect', groupHistoryLimit: 25 }],
+  ['dup-names', { senders: 'allowlist', allowedUsers: ['alice', 'alice'] }],
+  ['mixed-types', { senders: 'allowlist', allowedUsers: ['alice', 42] }],
+];
+
 describe('Per-repository overrides', () => {
   function githubInstance(
     groups: Record<string, unknown>,
@@ -1886,20 +1906,6 @@ describe('Per-repository overrides', () => {
   // Invariant sweep over stored shapes x single-field edits, run through the
   // real save path. The cases above pin individual decisions; these assert the
   // rules those decisions have to keep holding for shapes nobody enumerated.
-  const SWEEP_SHAPES: Array<[string, Record<string, unknown>]> = [
-    ['empty', {}],
-    ['open', { senders: 'open' }],
-    ['allowlist', { senders: 'allowlist' }],
-    ['allowlist+empty', { senders: 'allowlist', allowedUsers: [] }],
-    ['allowlist+names', { senders: 'allowlist', allowedUsers: ['alice'] }],
-    ['list-only-empty', { allowedUsers: [] }],
-    ['list-only-names', { allowedUsers: ['alice'] }],
-    ['mention-true', { requireMention: true }],
-    ['mention-false', { requireMention: false }],
-    ['unmodelled', { dispatchMode: 'collect', groupHistoryLimit: 25 }],
-    ['dup-names', { senders: 'allowlist', allowedUsers: ['alice', 'alice'] }],
-    ['mixed-types', { senders: 'allowlist', allowedUsers: ['alice', 42] }],
-  ];
   const SWEEP_WILDCARD = {
     senders: 'allowlist',
     allowedUsers: ['op', 'release-bot'],
@@ -2341,6 +2347,275 @@ describe('Repository settings under a non-Allowlist policy', () => {
       '*': { senders: 'open' },
       'Group-A': { requireMention: false },
     });
+  });
+});
+
+describe('Conflicting repository aliases across policies', () => {
+  // Two spellings of one repository that disagree. The draft keeps a single
+  // lower-cased entry, so it cannot say which spelling an edit was meant for,
+  // and the runtime resolves an exact own key first and only then falls back to
+  // the first case-insensitive match (ChannelBase.groupConfigFor). Both facts
+  // are load-bearing: an empty exact entry inherits "*", while deleting it lets
+  // the fallback reach a wider alias.
+  const ALIAS_WILDCARD = { senders: 'allowlist', allowedUsers: ['op'] };
+  const OPEN_ALIAS = { senders: 'open' };
+  const OTHER_POLICIES = ['open', 'pairing', 'disabled'] as const;
+
+  function resolveEntry(
+    groups: Record<string, unknown>,
+    chatId: string,
+  ): Record<string, unknown> {
+    if (Object.hasOwn(groups, chatId)) {
+      return groups[chatId] as Record<string, unknown>;
+    }
+    const normalized = chatId.toLowerCase();
+    for (const [groupId, group] of Object.entries(groups)) {
+      if (groupId.toLowerCase() === normalized) {
+        return group as Record<string, unknown>;
+      }
+    }
+    return {};
+  }
+
+  function aliasAdmits(
+    groups: Record<string, unknown>,
+    chatId: string,
+    who: string,
+  ): boolean {
+    const entry = resolveEntry(groups, chatId);
+    const wildcard = resolveEntry(groups, '*');
+    const policy = entry['senders'] ?? wildcard['senders'] ?? 'open';
+    if (policy !== 'allowlist') return true;
+    const members = (entry['allowedUsers'] ??
+      wildcard['allowedUsers'] ??
+      []) as string[];
+    return members.includes(who);
+  }
+
+  function aliasInstance(
+    upper: unknown,
+    storedPolicy: string,
+  ): DaemonChannelInstanceSnapshot {
+    return {
+      name: 'release-bot',
+      config: {
+        type: 'github',
+        groupPolicy: storedPolicy,
+        groups: {
+          '*': structuredClone(ALIAS_WILDCARD),
+          'Acme/Widgets': structuredClone(upper),
+          'acme/widgets': structuredClone(OPEN_ALIAS),
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+  }
+
+  function aliasSave(
+    upper: unknown,
+    storedPolicy: string,
+    finalPolicy: string,
+    edit?: Partial<ChannelGroupOverrideDraft>,
+  ) {
+    const instance = aliasInstance(upper, storedPolicy);
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    draft.values['groupPolicy'] = finalPolicy;
+    if (edit) {
+      draft.groupOverrides['acme/widgets'] = {
+        ...draft.groupOverrides['acme/widgets'],
+        ...edit,
+      };
+    }
+    const errors = validateChannelEditorDraft(GITHUB, draft, [], instance);
+    const groups = buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance)
+      .config['groups'] as Record<string, unknown>;
+    return { errors, groups, stored: instance.config['groups'] };
+  }
+
+  it('keeps an empty ambiguous alias on an untouched Open save', () => {
+    // The empty entry is what makes the exact key inherit the wildcard's
+    // allowlist. Dropping it as "carrying nothing" hands the repository to the
+    // open alias through the case-insensitive fallback, on a save that changed
+    // nothing at all.
+    const { errors, groups, stored } = aliasSave({}, 'open', 'open');
+
+    expect(errors).toEqual({});
+    expect(Object.hasOwn(groups, 'Acme/Widgets')).toBe(true);
+    expect(groups['Acme/Widgets']).toEqual({});
+    expect(JSON.stringify(groups)).toBe(JSON.stringify(stored));
+    expect(
+      aliasAdmits(stored as Record<string, unknown>, 'Acme/Widgets', 'bob'),
+    ).toBe(false);
+    expect(aliasAdmits(groups, 'Acme/Widgets', 'bob')).toBe(false);
+  });
+
+  it('refuses an edited ambiguous row once the policy leaves Allowlist', () => {
+    // The visible row is the canonical id, which shows the open alias. Editing
+    // it and switching away used to save successfully while discarding the
+    // edit, so the hint's "Empty means nobody" never happened.
+    for (const allowedUsers of ['', 'alice']) {
+      const { errors } = aliasSave(
+        { senders: 'allowlist', allowedUsers: ['alice'] },
+        'allowlist',
+        'open',
+        { senders: 'allowlist', allowedUsers },
+      );
+      expect(errors).toEqual({ groupPolicy: 'conflictingRepoAliases' });
+    }
+  });
+
+  it('refuses an edited mention on an ambiguous row too', () => {
+    const { errors } = aliasSave(
+      { senders: 'allowlist', allowedUsers: ['alice'] },
+      'allowlist',
+      'pairing',
+      { requireMention: 'false' },
+    );
+    expect(errors).toEqual({ groupPolicy: 'conflictingRepoAliases' });
+  });
+
+  it('still saves an untouched ambiguous switch and keeps both spellings', () => {
+    const { errors, groups, stored } = aliasSave(
+      { senders: 'allowlist', allowedUsers: ['alice'] },
+      'allowlist',
+      'open',
+    );
+
+    expect(errors).toEqual({});
+    expect(JSON.stringify(groups)).toBe(JSON.stringify(stored));
+    expect(aliasAdmits(groups, 'Acme/Widgets', 'bob')).toBe(false);
+  });
+
+  it('still refuses any ambiguous save while the policy is Allowlist', () => {
+    const instance = aliasInstance({ senders: 'allowlist' }, 'allowlist');
+    const draft = createChannelEditorDraft(GITHUB, instance);
+
+    expect(validateChannelEditorDraft(GITHUB, draft, [], instance)).toEqual({
+      allowedGroupIds: 'conflictingRepoAliases',
+    });
+  });
+
+  it('keeps a hand-written non-record ambiguous alias for the store to judge', () => {
+    // Deleting it here would remove the exact key and let the case-insensitive
+    // fallback reach the open alias. The store preserves an unchanged
+    // non-record value, so passing it through keeps the save a no-op instead of
+    // widening a repository nobody edited.
+    const { errors, groups, stored } = aliasSave(
+      'hand-written-garbage',
+      'open',
+      'open',
+    );
+
+    expect(errors).toEqual({});
+    expect(groups['Acme/Widgets']).toBe('hand-written-garbage');
+    expect(JSON.stringify(groups)).toBe(JSON.stringify(stored));
+    expect(
+      aliasAdmits(stored as Record<string, unknown>, 'Acme/Widgets', 'bob'),
+    ).toBe(false);
+    expect(aliasAdmits(groups, 'Acme/Widgets', 'bob')).toBe(false);
+  });
+
+  it('still drops a non-ambiguous empty entry when the policy leaves Allowlist', () => {
+    // The exemption is for aliases the draft cannot tell apart, not for every
+    // empty entry: a lone repository returned to inherit must not leave a stub.
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'allowlist',
+        groups: {
+          '*': structuredClone(ALIAS_WILDCARD),
+          'qwenlm/qwen-code': {},
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    draft.values['groupPolicy'] = 'open';
+
+    const groups = buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance)
+      .config['groups'] as Record<string, unknown>;
+    expect(Object.hasOwn(groups, 'qwenlm/qwen-code')).toBe(false);
+  });
+
+  // The alias dimension the earlier sweeps did not cross: every stored shape,
+  // as the upper spelling, against a fixed open lower spelling, over every
+  // stored and final policy. An untouched save must be a no-op and an edited
+  // row must be refused — the two failures this path actually shipped.
+  it('is a no-op untouched and refuses an edit, for every shape and policy', () => {
+    const noopViolations: string[] = [];
+    const editViolations: string[] = [];
+    const identities = ['alice', 'bob', 'op'];
+    for (const [name, shape] of SWEEP_SHAPES) {
+      if (JSON.stringify(shape) === JSON.stringify(OPEN_ALIAS)) continue;
+      for (const storedPolicy of ['allowlist', 'open']) {
+        for (const finalPolicy of OTHER_POLICIES) {
+          const untouched = aliasSave(shape, storedPolicy, finalPolicy);
+          const label = `${name} ${storedPolicy}->${finalPolicy}`;
+          if (
+            JSON.stringify(untouched.groups) !==
+            JSON.stringify(untouched.stored)
+          ) {
+            noopViolations.push(
+              `${label}: ${JSON.stringify(untouched.stored)} -> ${JSON.stringify(untouched.groups)}`,
+            );
+          }
+          if (Object.keys(untouched.errors).length > 0) {
+            noopViolations.push(
+              `${label} refused: ${JSON.stringify(untouched.errors)}`,
+            );
+          }
+          for (const who of identities) {
+            const before = aliasAdmits(
+              untouched.stored as Record<string, unknown>,
+              'Acme/Widgets',
+              who,
+            );
+            if (before !== aliasAdmits(untouched.groups, 'Acme/Widgets', who)) {
+              noopViolations.push(`${label} who=${who} admission changed`);
+            }
+          }
+          // Whether an edit is real depends on the shape: the draft collapses
+          // to the open alias, so "choose open" is a no-op for most shapes and
+          // must still save. Assert both directions rather than assuming.
+          const seeded = createChannelEditorDraft(
+            GITHUB,
+            aliasInstance(shape, storedPolicy),
+          ).groupOverrides['acme/widgets'];
+          for (const edit of [
+            { senders: 'allowlist', allowedUsers: '' },
+            { senders: 'allowlist', allowedUsers: 'carol' },
+            { senders: 'open' },
+            { requireMention: 'false' },
+          ] as Array<Partial<ChannelGroupOverrideDraft>>) {
+            const next = { ...seeded, ...edit };
+            const changed =
+              !seeded ||
+              next.requireMention !== seeded.requireMention ||
+              next.senders !== seeded.senders ||
+              next.allowedUsers !== seeded.allowedUsers;
+            const edited = aliasSave(shape, storedPolicy, finalPolicy, edit);
+            if (changed) {
+              if (edited.errors['groupPolicy'] !== 'conflictingRepoAliases') {
+                editViolations.push(
+                  `${label} edit=${JSON.stringify(edit)} errors=${JSON.stringify(edited.errors)}`,
+                );
+              }
+            } else if (Object.keys(edited.errors).length > 0) {
+              noopViolations.push(
+                `${label} no-op edit=${JSON.stringify(edit)} refused: ${JSON.stringify(edited.errors)}`,
+              );
+            }
+          }
+        }
+      }
+    }
+    expect(noopViolations).toEqual([]);
+    expect(editViolations).toEqual([]);
   });
 });
 

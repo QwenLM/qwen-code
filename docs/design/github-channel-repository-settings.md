@@ -345,7 +345,16 @@ the transcript build-artifact guard rejects that prefix.
     added during that visit exists only in the draft. Conflicting aliases are
     the exception — one lower-cased draft cannot speak for two spellings that
     disagree, so both are left exactly as stored and the Allowlist path's
-    conflict error stays the way to resolve them.
+    conflict error stays the way to resolve them. Two refinements keep that
+    exception from becoming a widening of its own: an ambiguous entry is
+    preserved whatever it holds, because the runtime matches the exact key
+    first — an empty entry inherits `"*"`, and deleting either it or a
+    hand-written non-record value lets the case-insensitive fallback reach
+    the wider alias. The store already preserves an unchanged non-record
+    value, so passing it through keeps the save a no-op. A row the operator
+    actually edited is refused rather
+    than skipped, with the error on `groupPolicy` because the allowlist
+    field is no longer on screen. An untouched switch still saves.
 
 ## Constraints
 
@@ -399,6 +408,13 @@ the transcript build-artifact guard rejects that prefix.
   path still refuses them, an untouched channel round-trips byte-for-byte,
   and a chat platform gains no entries from the typed allowlist. Each asserts
   the admitted set, not only the saved shape.
+- Conflicting aliases: the same shapes as the upper spelling against a fixed
+  open lower spelling, crossed with the stored and final policies. Untouched
+  must be a byte-for-byte no-op that admits the same people through the
+  runtime's exact-then-case-insensitive lookup; an edit that really changes
+  the collapsed draft must be refused, and one that does not must still save.
+  Two dialog cases click through the same flows and assert whether `onSave`
+  is reached.
 - Component: rows appear per allowlisted repository, typing a repository adds a
   row, the speaker input appears when the row's **effective** policy is an
   allowlist — its own or the inherited one — and is hidden when it is `open`,
@@ -441,7 +457,9 @@ the transcript build-artifact guard rejects that prefix.
     narrowing when the save lands on another policy, including on a channel
     that was never Allowlist and a repository added during the visit;
     conflicting aliases are left as stored instead of being rewritten from
-    one draft.
+    one draft. An empty ambiguous entry survives an untouched save, and an
+    edited ambiguous row is refused on a control that is still visible
+    rather than discarded.
 
 ## Open questions
 

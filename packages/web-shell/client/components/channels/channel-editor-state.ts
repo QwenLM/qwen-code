@@ -435,6 +435,33 @@ export function validateChannelEditorDraft(
       errors['allowedGroupIds'] = 'conflictingRepoAliases';
     }
   }
+  if (
+    isRepositoryOnlyChannelType(descriptor.type) &&
+    String(draft.values['groupPolicy'] ?? '') !== 'allowlist'
+  ) {
+    // Away from Allowlist the rows are hidden and the save path leaves an
+    // ambiguous alias exactly as stored, so an edit made before switching would
+    // be discarded while the dialog reports success and closes. Refuse it on the
+    // policy field, which stays visible under every policy. An untouched switch
+    // still saves: preserving both spellings is what the runtime resolved before.
+    const groups = instance?.config['groups'];
+    if (isRecord(groups)) {
+      const initial = configuredGroupOverrides(instance);
+      for (const id of conflictingRepositoryAliases(groups)) {
+        const before = initial[id];
+        const after = draft.groupOverrides[id];
+        if (!before || !after) continue;
+        if (
+          before.requireMention !== after.requireMention ||
+          before.senders !== after.senders ||
+          before.allowedUsers !== after.allowedUsers
+        ) {
+          errors['groupPolicy'] = 'conflictingRepoAliases';
+          break;
+        }
+      }
+    }
+  }
   return errors;
 }
 
@@ -703,11 +730,20 @@ function removeGroupAllowlistMembership(
             : groupConfig,
         ];
       })
-      .filter(
-        ([groupId, groupConfig]) =>
+      .filter(([groupId, groupConfig]) => {
+        // An ambiguous alias is kept verbatim, whatever it holds. An empty
+        // entry is what makes the runtime's exact match inherit "*" instead of
+        // falling through to a wider alias, and a hand-written non-record value
+        // is the store's to judge — it preserves an unchanged one — not ours to
+        // delete on the way past.
+        if (groupId !== '*' && ambiguous.has(groupId.toLowerCase())) {
+          return true;
+        }
+        return (
           isRecord(groupConfig) &&
-          (groupId === '*' || Object.keys(groupConfig).length > 0),
-      ),
+          (groupId === '*' || Object.keys(groupConfig).length > 0)
+        );
+      }),
   );
   if (Object.keys(groups).length > 0) {
     config['groups'] = groups;

@@ -2223,6 +2223,74 @@ describe('GitHub per-repository settings', () => {
     expect(document.body.textContent).toContain('acme/widgets');
   });
 
+  it('refuses an edited row when the policy leaves a conflicting allowlist', async () => {
+    // The rows disappear once the policy leaves Allowlist and the save path
+    // keeps both spellings as stored, so an edit made before switching would be
+    // discarded while the dialog closes on success. The error has to land on a
+    // control still on screen — the policy select, not the hidden allowlist.
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'allowlist',
+        groups: {
+          '*': { senders: 'allowlist', allowedUsers: ['op'] },
+          'Acme/Widgets': { senders: 'allowlist', allowedUsers: ['alice'] },
+          'acme/widgets': { senders: 'open' },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, instance, onSave });
+
+    await chooseRowOption('acme/widgets', 'senders', 'Allowlist only');
+    await selectOption('Group Policy', 'Open');
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'This channel lists one repository twice with different settings',
+    );
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it('still saves an untouched switch away from a conflicting allowlist', async () => {
+    // Refusing every save would strand an operator who only changed the policy:
+    // keeping both spellings verbatim is what the runtime already resolved.
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'allowlist',
+        groups: {
+          '*': { senders: 'allowlist', allowedUsers: ['op'] },
+          'Acme/Widgets': { senders: 'allowlist', allowedUsers: ['alice'] },
+          'acme/widgets': { senders: 'open' },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, instance, onSave });
+
+    await selectOption('Group Policy', 'Open');
+    await save();
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const request = onSave.mock.calls[0][1] as {
+      config: Record<string, unknown>;
+    };
+    expect(request.config['groups']).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'Acme/Widgets': { senders: 'allowlist', allowedUsers: ['alice'] },
+      'acme/widgets': { senders: 'open' },
+    });
+  });
+
   it('maps the Inherit option back to an absent key in both row selects', async () => {
     // The widget's `inherit` sentinel only becomes the draft's '' here, and a
     // cast hides a regression from the type checker: passing the raw value
