@@ -105,6 +105,49 @@ describe('desktop rpm build-root dependencies', () => {
       source.indexOf('sha256sum -c -'),
     );
   });
+
+  it('keeps the smoke runnable on rpm roots without Xvfb', () => {
+    const install = release.jobs.build.steps.find(
+      (step) => step.name === 'Install rpm build-root dependencies',
+    );
+    // RHEL 10 removed xorg-x11-server-Xvfb from every repository; only the
+    // Fedora leg installs it. RHEL 10 gets a headless weston compositor
+    // plus Xwayland instead — GTK3 has no headless backend, so WebKitGTK
+    // always needs a real display server.
+    expect(install.run).toContain(
+      "matrix.artifact_suffix }}' = 'linux-x64-rpm-fedora44'",
+    );
+    expect(install.run).toContain('xorg-x11-server-Xvfb');
+    expect(install.run).toContain('weston xorg-x11-server-Xwayland');
+    const smoke = release.jobs.build.steps.find(
+      (step) =>
+        step.name === 'Smoke packaged application' &&
+        String(step.if).includes("runner.os == 'Linux'"),
+    );
+    expect(smoke.run).toContain('command -v xvfb-run');
+    expect(smoke.run).not.toContain('GDK_BACKEND=dummy');
+    expect(smoke.run).toContain('weston --backend=headless-backend.so');
+    expect(smoke.run).toContain('Xwayland');
+    expect(smoke.run).toContain('XDG_RUNTIME_DIR');
+    expect(smoke.run).toContain('WAYLAND_DISPLAY');
+    // Xwayland resolves its compositor from its own environment, so the
+    // socket name has to be exported before it is launched.
+    expect(smoke.run.indexOf('export WAYLAND_DISPLAY')).toBeLessThan(
+      smoke.run.indexOf('Xwayland :33'),
+    );
+    // With both displays exported GTK3 prefers Wayland, which would leave the
+    // X11 bridge this step waits for unused; the app has to be pinned to it.
+    expect(smoke.run.indexOf('export GDK_BACKEND=x11')).toBeGreaterThan(
+      smoke.run.indexOf('Xwayland :33'),
+    );
+    // Only the Fedora leg can install Xvfb; the shared package list must not
+    // bring it back for RHEL 10, which has no such package.
+    const sharedPackages = install.run.slice(
+      0,
+      install.run.indexOf('# Fedora 44 still ships Xvfb'),
+    );
+    expect(sharedPackages).not.toContain('Xvfb');
+  });
 });
 
 describe('desktop isolation guard — nativePrefixes coverage', () => {
