@@ -132,7 +132,7 @@ public final class WorkspaceOperatorRecoveryStore {
                             "blocked_execution_call_id", blockedCapture.callId(), "operator_id", operator,
                             "reason", reason, "prepared_at", Instant.now().toString()));
             if (jdbc.update("UPDATE ma_runtime_binding SET binding_state = ?,"
-                    + " drain_requested = TRUE, operation_owner = NULL, operation_lease_until = NULL,"
+                    + " is_drain_requested = TRUE, operation_owner = NULL, operation_lease_until = NULL,"
                     + " operation_generation = operation_generation + 1, record_version = record_version + 1"
                     + " WHERE binding_id = ? AND runtime_generation = ? AND record_version = ?",
                     saved.getState() == RuntimeBindingRecord.State.LOST ? "LOST" : "OPERATOR_RECOVERY",

@@ -350,7 +350,7 @@ final class JournalCommit {
                 continuation, head, request.writerId(), request.writerGeneration(), writerToken);
         jdbc.update("UPDATE ma_session_head SET"
                         + " journal_revision = ?, committed_sequence = ?,"
-                        + " wake_pending = wake_pending OR ?,"
+                        + " is_wake_pending = is_wake_pending OR ?,"
                         + " wake_head_revision = CASE WHEN wake_head_revision = ? THEN ? ELSE wake_head_revision END,"
                         + " cleanup_head_revision = CASE WHEN cleanup_head_revision = ? THEN ? ELSE cleanup_head_revision END,"
                         + " last_commit_digest = ?, activation_epoch = ?,"
