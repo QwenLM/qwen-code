@@ -138,8 +138,8 @@ final class AgentTurnExecution {
 
     boolean markTurnFailureRecovery(String tenantId, String sessionId,
             String turnId, String owner, String message) {
-        storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
-        TurnRecord turn = storeRows.requireTurnForUpdate(tenantId, sessionId, turnId);
+        var locked = storeRows.requireLegacySessionTurnForUpdate(tenantId, sessionId, turnId);
+        TurnRecord turn = locked.turn();
         long now = clock.millis();
         String diagnostic = AgentStateStore.RUNTIME_RECOVERY_BLOCKED.equals(turn.errorCode())
                 && turn.errorMessage() != null ? turn.errorMessage() : message;
@@ -213,8 +213,9 @@ final class AgentTurnExecution {
 
     boolean bindHarness(String tenantId, String sessionId,
             String turnId, String owner, String harnessBootId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
-        TurnRecord turn = storeRows.requireTurnForUpdate(tenantId, sessionId, turnId);
+        var locked = storeRows.requireLegacySessionTurnForUpdate(tenantId, sessionId, turnId);
+        SessionRecord session = locked.session();
+        TurnRecord turn = locked.turn();
         long now = clock.millis();
         if (!owner.equals(turn.dispatchOwner())
                 || turn.dispatchLeaseUntil() == null
@@ -240,8 +241,9 @@ final class AgentTurnExecution {
     boolean bindRecoveredHarness(String tenantId, String sessionId,
             String turnId, String owner, String expectedHarnessBootId,
             String harnessBootId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
-        TurnRecord turn = storeRows.requireTurnForUpdate(tenantId, sessionId, turnId);
+        var locked = storeRows.requireLegacySessionTurnForUpdate(tenantId, sessionId, turnId);
+        SessionRecord session = locked.session();
+        TurnRecord turn = locked.turn();
         long now = clock.millis();
         if (!owner.equals(turn.dispatchOwner())
                 || turn.dispatchLeaseUntil() == null
@@ -354,8 +356,9 @@ final class AgentTurnExecution {
             String turnId, String owner, String expectedTurnEventEpoch,
             String expectedSessionEventEpoch, String eventEpoch,
             long lastEventId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
-        TurnRecord turn = storeRows.requireTurnForUpdate(tenantId, sessionId, turnId);
+        var locked = storeRows.requireLegacySessionTurnForUpdate(tenantId, sessionId, turnId);
+        SessionRecord session = locked.session();
+        TurnRecord turn = locked.turn();
         long now = clock.millis();
         if (!owner.equals(turn.dispatchOwner())
                 || turn.dispatchLeaseUntil() == null
@@ -413,8 +416,8 @@ final class AgentTurnExecution {
     void retractContinuationOutput(String tenantId, String sessionId,
             String turnId, String owner, String harnessBootId,
             String eventEpoch) {
-        storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
-        TurnRecord turn = storeRows.requireTurnForUpdate(tenantId, sessionId, turnId);
+        var locked = storeRows.requireLegacySessionTurnForUpdate(tenantId, sessionId, turnId);
+        TurnRecord turn = locked.turn();
         long now = clock.millis();
         if (!owner.equals(turn.dispatchOwner())
                 || turn.dispatchLeaseUntil() == null
@@ -489,8 +492,9 @@ final class AgentTurnExecution {
                 || fromSourceId < 1 || throughSourceId < fromSourceId || throughSourceId >= retractionSourceId)) {
             throw new IllegalArgumentException("Invalid bounded Hosted retraction");
         }
-        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
-        TurnRecord turn = storeRows.requireTurnForUpdate(tenantId, sessionId, turnId);
+        var locked = storeRows.requireSessionTurnForUpdate(tenantId, sessionId, turnId);
+        SessionRecord session = locked.session();
+        TurnRecord turn = locked.turn();
         long now = clock.millis();
         if (!owner.equals(turn.dispatchOwner())
                 || turn.dispatchLeaseUntil() == null
@@ -583,8 +587,9 @@ final class AgentTurnExecution {
         if (events.isEmpty()) {
             return;
         }
-        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
-        TurnRecord turn = storeRows.requireTurnForUpdate(tenantId, sessionId, turnId);
+        var locked = storeRows.requireSessionTurnForUpdate(tenantId, sessionId, turnId);
+        SessionRecord session = locked.session();
+        TurnRecord turn = locked.turn();
         if (!owner.equals(turn.dispatchOwner())
                 || turn.dispatchLeaseUntil() == null
                 || turn.dispatchLeaseUntil() < clock.millis()) {

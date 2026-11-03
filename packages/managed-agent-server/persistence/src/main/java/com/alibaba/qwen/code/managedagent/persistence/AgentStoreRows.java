@@ -121,7 +121,8 @@ final class AgentStoreRows {
                 readBinding(result),
                 result.getString("approval_mode"),
                 result.getString("tool_profile"),
-                result.getString("agent_definition_digest"), result.getInt("public_child_agents_version"));
+                result.getString("agent_definition_digest"), result.getInt("public_child_agents_version"),
+                result.getString("model_config_digest"));
     }
 
     final RowMapper<TurnSummary> turnSummaryMapper;
@@ -229,6 +230,19 @@ final class AgentStoreRows {
             throw new ManagedAgentException(404,
                     "session_not_found", "The Session was not found.");
         }
+    }
+
+    record LockedSessionTurn(SessionRecord session, TurnRecord turn) {
+    }
+
+    LockedSessionTurn requireSessionTurnForUpdate(String tenantId, String sessionId, String turnId) {
+        return new LockedSessionTurn(requireSessionForUpdate(tenantId, sessionId),
+                requireTurnForUpdate(tenantId, sessionId, turnId));
+    }
+
+    LockedSessionTurn requireLegacySessionTurnForUpdate(String tenantId, String sessionId, String turnId) {
+        return new LockedSessionTurn(requireLegacySessionForUpdate(tenantId, sessionId),
+                requireTurnForUpdate(tenantId, sessionId, turnId));
     }
 
     TurnRecord requireTurn(String tenantId, String sessionId,

@@ -124,6 +124,7 @@ public enum ManagedSchemaProjection {
                     + "session_kind, tenant_key, session_key, session_scope_key, title_revision, "
                     + "retirement_operation_id, retirement_generation, retired_at, recovery_protected, "
                     + "resource_gc_completed, runtime_request_key, csi_guard, model_id, model_revision, "
+                    + "model_config_digest, model_config_key_id, model_config_ciphertext, "
                     + "selected_approval_mode, approval_revision, plan_enabled, permission_rules_json, public_child_agents_version, harness_instance_id, "
                     + "harness_owner_boot_id, harness_placement_epoch, harness_placement_state"),
     SESSION_HEAD(

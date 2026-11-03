@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfi
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelOption;
 import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
+import com.alibaba.qwen.code.managedagent.model.SessionModelConfig;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
@@ -38,6 +39,7 @@ final class AgentSessionAdmissions {
     private final AgentSessionPolicies sessionPolicies;
     private final AgentStoreRows storeRows;
     private final ManagedExtensionRecordStore configRecords;
+    private final ManagedSessionModelConfigs modelConfigs;
     private final JdbcTemplate jdbc;
     private final Clock clock;
     private final String approvalMode;
@@ -81,12 +83,13 @@ final class AgentSessionAdmissions {
             ResidentWorkspaces residentWorkspaces,
             WorkspaceCreationRoots createdRoots,
             JournalEventTransport journalEventTransport,
-            boolean journalEventTransportEnabled) {
+            boolean journalEventTransportEnabled, ManagedSessionModelConfigs modelConfigs) {
         this.eventJournal = eventJournal;
         this.sessionCommands = sessionCommands;
         this.sessionPolicies = sessionPolicies;
         this.storeRows = storeRows;
         this.configRecords = configRecords;
+        this.modelConfigs = modelConfigs;
         this.jdbc = jdbc;
         this.clock = clock;
         this.approvalMode = approvalMode;
@@ -112,29 +115,48 @@ final class AgentSessionAdmissions {
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest) {
-        return insertSessionCommand(tenantId,
-                actorId == null ? null
-                        : SessionPrincipal.ofUser(tenantId, actorId),
-                operation, idempotencyKey, requestDigest, agentId,
-                requestedRevision, title, input, payloadDigest);
+        return insertSessionCommand(tenantId, actorId, operation, idempotencyKey,
+                requestDigest, agentId, requestedRevision, title, input, payloadDigest, null);
     }
 
-    Admission insertSessionCommand(String tenantId,
-            SessionPrincipal principal, String operation,
-            String idempotencyKey, String requestDigest, String agentId,
-            String requestedRevision, String title,
+    Admission insertSessionCommand(String tenantId, String actorId,
+            String operation, String idempotencyKey, String requestDigest,
+            String agentId, String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig) {
+        return insertSessionCommand(tenantId, actorId == null ? null
+                : SessionPrincipal.ofUser(tenantId, actorId), operation,
+                idempotencyKey, requestDigest, agentId, requestedRevision,
+                title, input, payloadDigest, modelConfig);
+    }
+
+    Admission insertSessionCommand(String tenantId, SessionPrincipal principal,
+            String operation, String idempotencyKey, String requestDigest,
+            String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest) {
+        return insertSessionCommand(tenantId, principal, operation, idempotencyKey,
+                requestDigest, agentId, requestedRevision, title, input, payloadDigest, null);
+    }
+
+    Admission insertSessionCommand(String tenantId, SessionPrincipal principal,
+            String operation, String idempotencyKey, String requestDigest,
+            String agentId, String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig) {
         if (principal == null) {
             throw new ManagedAgentException(401,
                     "actor_required", "A trusted actor is required.");
         }
         ManagedSessionPrincipal.requirePrincipalTenant(tenantId, principal);
+        requireModelConfiguration(modelConfig);
         AgentPin pin = sessionPolicies.resolveAgentPin(tenantId, agentId, requestedRevision,
                 false);
         requireCreationScope(tenantId, idempotencyKey, false);
-        return insertSession(tenantId, operation, idempotencyKey,
+        Admission admission = insertSession(tenantId, operation, idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
                 null, principal.userId(), pin, null, false, null, principal);
+        if (modelConfig != null) {
+            modelConfigs.save(tenantId, admission.sessionId(), modelConfig);
+        }
+        return admission;
     }
 
     Admission insertWorkspaceSessionCommand(SessionCreationCommand command) {
@@ -159,6 +181,7 @@ final class AgentSessionAdmissions {
                 command.extensionPins();
         Set<String> extensionLifecycleProfiles = command.extensionLifecycleProfiles();
         SessionWorktreeStore.Plan worktree = command.worktree();
+        SessionModelConfig modelConfig = command.modelConfig();
         if (!input.isEmpty() && !workspaceFilesEnabled) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
@@ -169,6 +192,9 @@ final class AgentSessionAdmissions {
         if (!existing.isEmpty()) {
             return replayWorkspaceCommand(tenantId, actorId,
                     requestDigest, existing.getFirst(), false);
+        }
+        if (modelConfig != null && modelId != null) {
+            throw new ManagedAgentException(400, "invalid_model_config", "Choose either a model ID or a complete configuration.");
         }
         if (modelId != null && (!"qwen-code".equals(agentId) || !workspaceFilesEnabled
                 || modelCatalog.stream().noneMatch(option -> option.modelId().equals(modelId)))) {
@@ -203,6 +229,7 @@ final class AgentSessionAdmissions {
                 && !workspaceShellEnabled) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
+        requireModelConfiguration(modelConfig);
         if (extensionPins != null) {
             if (extensionPackages == null) {
                 throw AgentSessionPolicies.workspaceExecutionUnavailable();
@@ -251,6 +278,9 @@ final class AgentSessionAdmissions {
         Admission admission = insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
                 target, actorId, pin, null, planMode, modelId);
+        if (modelConfig != null) {
+            modelConfigs.save(tenantId, admission.sessionId(), modelConfig);
+        }
         if (worktree != null) {
             sessionWorktrees.admit(tenantId, actorId, admission.sessionId(), worktree, workspace);
         }
@@ -267,6 +297,15 @@ final class AgentSessionAdmissions {
             creationSkills.saveInitialSelection(tenantId, admission.sessionId(), extensionPins);
         }
         return admission;
+    }
+
+    private void requireModelConfiguration(SessionModelConfig config) {
+        if (config != null) {
+            if (modelConfigs == null) {
+                throw new ManagedAgentException(409, "model_config_unavailable", "The Session model configuration is unavailable.");
+            }
+            modelConfigs.requireAdmission(config);
+        }
     }
 
     boolean configuredStorage(String tenant, String storage) {
@@ -586,6 +625,12 @@ final class AgentSessionAdmissions {
                         + " covered_sequence, gmt_modified) VALUES"
                         + " (?, ?, 'SESSION', '', 0, ?)",
                 tenantId, sessionId, now);
+        if (parent.modelConfigDigest() != null) {
+            if (modelConfigs == null) {
+                throw new ManagedAgentException(409, "model_config_unavailable", "The Session model configuration is unavailable.");
+            }
+            modelConfigs.inherit(tenantId, parentSessionId, sessionId);
+        }
         if (snapshot != null) {
             byte[] owner = jdbc.queryForObject("SELECT COALESCE(owner_actor_key, creator_actor_key) FROM ma_session WHERE tenant_id=? AND session_id=?", byte[].class, tenantId, parentSessionId);
             jdbc.update("UPDATE ma_session SET public_child_agents_version=1, owner_actor_key=?, approval_mode=?, selected_approval_mode=NULL, approval_revision=0, model_id=?, model_revision=1 WHERE tenant_id=? AND session_id=?",

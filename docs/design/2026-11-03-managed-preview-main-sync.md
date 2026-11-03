@@ -4,9 +4,9 @@
 
 ## Scope and status
 
-This is a private preview integration candidate, pending compilation, focused tests, complete CI, artifact validation and preproduction acceptance. Synchronize the existing `7e79b000ef1f1013a9c14ce15a81d8499ac1b0b5` preview with upstream `c26a32006a82d516eeb83640f8fc3a4f1243707b`; preserve its Session ownership and external Workspace contracts. This does not authorize a production rollout or a database migration.
+This is a private preview integration candidate, pending compilation, focused tests, complete CI, artifact validation and preproduction acceptance. Synchronize the existing `7e79b000ef1f1013a9c14ce15a81d8499ac1b0b5` preview with upstream `cb6df9d90170ec00d6563f07280bd617d8c466d3`; preserve its Session ownership and external Workspace contracts. This does not authorize a production rollout or a database migration.
 
-The Java SDK source tree is identical at the currently vendored SDK revision `1f3e2a6de0d6a6de09f042e354ad8907aaf0c28c` and this upstream revision (`f14113e5e31a846b0f66fe2b2b7d6c0def4eebe6`). Reuse the frozen SDK payload. The Java Maven version remains distinct from the CLI package version.
+The refreshed upstream Java SDK adds the Session model configuration digest and capability negotiation, so the old SDK payload can no longer be reused. Build Server and SDK from the same exact source revision and freeze unique private versions for both. The Java Maven versions remain distinct from the CLI package version.
 
 ## Integration decisions
 
@@ -24,7 +24,7 @@ Keep missing-principal rejection and authorization order unchanged. Model operat
 
 Build a new unique private Server version, preserving third-party dependencies in its real consumer POM. The user authorized isolated macOS JDK 21 compilation for this run; after the shared local budget was exhausted, remaining checks and packaging moved to CI. Aggregate production modules only; union and deduplicate `META-INF/services` entries rather than overwriting providers. Freeze source, source revision, licenses, checksums and validation evidence. Never mutate old artifact bytes or publish the verification module.
 
-The shared V1 baseline retains `ma_session_principal`, external registration receipts and shared dispatch classification. Development/preproduction catalogs must match the final artifact exactly. Legacy, partial and foreign catalogs remain refused; no Flyway repair, schema-version increment, automatic migration or mixed business catalog is allowed.
+The shared V1 baseline retains `ma_session_principal`, external registration receipts and shared dispatch classification, and includes upstream's three model configuration columns and all-null-or-all-present CHECK. Session creation writes ownership and encrypted model configuration in the same transaction, with replay preceding current capability and model endpoint admission. Development/preproduction catalogs must match the final artifact exactly. Legacy, partial and foreign catalogs remain refused; no Flyway repair, schema-version increment, automatic migration or mixed business catalog is allowed.
 
 ## Validation and acceptance
 

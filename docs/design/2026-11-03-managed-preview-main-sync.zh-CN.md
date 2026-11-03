@@ -4,9 +4,9 @@
 
 ## 范围与状态
 
-这是私有预览集成候选，尚待编译、聚焦测试、完整 CI、制品校验及预发验收。将既有 `7e79b000ef1f1013a9c14ce15a81d8499ac1b0b5` 预览与上游 `c26a32006a82d516eeb83640f8fc3a4f1243707b` 同步，保留 Session 归属与外部 Workspace 契约。本次不授权生产发布或数据库迁移。
+这是私有预览集成候选，尚待编译、聚焦测试、完整 CI、制品校验及预发验收。将既有 `7e79b000ef1f1013a9c14ce15a81d8499ac1b0b5` 预览与上游 `cb6df9d90170ec00d6563f07280bd617d8c466d3` 同步，保留 Session 归属与外部 Workspace 契约。本次不授权生产发布或数据库迁移。
 
-当前内置 SDK 提交 `1f3e2a6de0d6a6de09f042e354ad8907aaf0c28c` 与该上游提交的 Java SDK 源码树完全相同（`f14113e5e31a846b0f66fe2b2b7d6c0def4eebe6`），复用已冻结的 SDK payload。Java Maven 版本与 CLI 包版本保持区分。
+本轮刷新主线后，Java SDK 新增 Session 模型配置 digest 和能力协商，不能继续复用旧 SDK payload。Server 与 SDK 从同一精确源码提交构建并分别冻结唯一私有版本；Java Maven 版本与 CLI 包版本保持区分。
 
 ## 集成决策
 
@@ -24,7 +24,7 @@
 
 构建新的唯一私有 Server 版本，在真实消费 POM 中保留第三方依赖。用户已授权本轮使用 macOS JDK 21 隔离编译；共享本地预算耗尽后，剩余检查与打包转到 CI。仅聚合生产模块；`META-INF/services` 条目须合并去重，不能覆盖其他 provider。冻结源码、源码提交、许可证、校验和与验证证据。不修改旧制品字节，不发布 verification 模块。
 
-共享 V1 基线保留 `ma_session_principal`、外部注册回执和 shared dispatch 分类。开发/预发库必须与最终制品精确匹配。继续拒绝旧库、残缺库和混用业务库；不进行 Flyway repair、结构版本递增、自动迁移或业务混库。
+共享 V1 基线保留 `ma_session_principal`、外部注册回执和 shared dispatch 分类，并同步上游三个模型配置字段及全空或全非空 CHECK。Session 创建在同一事务写入归属与加密模型配置，重放保持在当前能力与模型端点校验之前。开发/预发库必须与最终制品精确匹配。继续拒绝旧库、残缺库和混用业务库；不进行 Flyway repair、结构版本递增、自动迁移或业务混库。
 
 ## 验证与验收
 

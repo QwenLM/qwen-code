@@ -250,14 +250,12 @@ public class WebShellAgentController {
         WebShellAdmission admission = webShell(selection == null
                 ? service.createSession(tenant.requirePrincipal(),
                         request.idempotencyKey(), request.agentId(), null,
-                        request.title(), null, request.input())
-                : worktree == null ? service.createWorkspaceSession(tenant.tenantId(),
-                        tenant.requireActorId(), request.idempotencyKey(),
-                        request.agentId(), null, request.title(), null,
-                        request.input(), selection, request.approvalMode(), request.planMode(), request.skills(), request.modelId(), request.extensionPins())
+                        request.title(), null, request.input(),
+                        com.alibaba.qwen.code.managedagent.model.SessionModelConfig.parse(request.modelConfig()))
                 : service.createWorkspaceSession(tenant.tenantId(), tenant.requireActorId(), request.idempotencyKey(),
                         request.agentId(), null, request.title(), null, request.input(), selection,
-                        request.approvalMode(), request.planMode(), request.skills(), request.modelId(), request.extensionPins(), worktree));
+                        request.approvalMode(), request.planMode(), request.skills(), request.modelId(), request.extensionPins(), worktree,
+                        com.alibaba.qwen.code.managedagent.model.SessionModelConfig.parse(request.modelConfig())));
         return ResponseEntity.accepted().body(admission);
     }
 

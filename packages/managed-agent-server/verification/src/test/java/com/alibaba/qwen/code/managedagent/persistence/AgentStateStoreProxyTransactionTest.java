@@ -26,7 +26,7 @@ import static org.mockito.Mockito.mock;
 
 class AgentStateStoreProxyTransactionTest {
     @Test
-    void bothCreationBoundariesCommitAndRollbackOnTheDedicatedConnection() throws Exception {
+    void creationBoundariesCommitAndRollbackOnTheDedicatedConnection() throws Exception {
         var source = new DriverManagerDataSource("jdbc:h2:mem:transaction-boundaries-" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1", "sa", "");
         var business = new DriverManagerDataSource("jdbc:h2:mem:host-business-" + UUID.randomUUID(), "sa", "");
         var jdbc = new JdbcTemplate(source);
@@ -34,7 +34,7 @@ class AgentStateStoreProxyTransactionTest {
         var fail = new AtomicBoolean();
         var target = mock(ManagedAgentStore.class, invocation -> {
             var method = invocation.getMethod();
-            if (method.getName().equals("insertSessionCommand") && method.getParameterCount() == 10
+            if (method.getName().equals("insertSessionCommand") && Set.of(10, 11).contains(method.getParameterCount())
                     || method.getName().equals("insertWorkspaceSessionCommand") && method.getParameterCount() == 1) {
                 assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isTrue();
                 assertThat(TransactionSynchronizationManager.hasResource(source)).isTrue();
@@ -61,9 +61,9 @@ class AgentStateStoreProxyTransactionTest {
         factory.addAdvice(interceptor);
         var proxy = (AgentStateStore) factory.getProxy();
         List<Method> entries = Arrays.stream(AgentStateStore.class.getMethods()).filter(method ->
-                method.getName().equals("insertSessionCommand") && method.getParameterCount() == 9
+                method.getName().equals("insertSessionCommand") && Set.of(10, 11).contains(method.getParameterCount())
                 || method.getName().equals("insertWorkspaceSessionCommand") && method.getParameterCount() == 1).toList();
-        assertThat(entries).hasSize(2);
+        assertThat(entries).hasSize(5);
         for (var entry : entries) {
             assertThat(ManagedAgentStore.class.getDeclaredMethod(entry.getName(), entry.getParameterTypes())
                     .getAnnotation(org.springframework.transaction.annotation.Transactional.class)).isNotNull();
