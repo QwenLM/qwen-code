@@ -4598,7 +4598,10 @@ describe('createBoundSessionsAccessor', () => {
       '/sessions/pr-bindings',
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
-    expect(snapshot.partial).toBe(false);
+    // session-1 mixed one valid PR with two malformed entries: ANY dropped
+    // entry degrades the answer to partial so the adapter never trusts its
+    // absence semantics; the valid projection still passes through.
+    expect(snapshot.partial).toBe(true);
     expect(snapshot.bindings).toEqual([
       {
         sessionId: 'session-1',
@@ -4635,6 +4638,36 @@ describe('createBoundSessionsAccessor', () => {
 
     expect(snapshot.partial).toBe(true);
     expect(snapshot.bindings).toHaveLength(1);
+  });
+
+  it('flags a partially malformed PR projection as partial (R4-B2)', async () => {
+    const requestRest = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        bindings: [
+          {
+            sessionId: 'session-1',
+            workspaceCwd: '/ws/a',
+            prs: [
+              { number: 1, url: 'https://github.com/o/r/pull/1' },
+              { number: 'two', url: 'https://github.com/o/r/pull/2' },
+            ],
+          },
+        ],
+        partial: false,
+      }),
+    );
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    const snapshot = await accessor.listPrBindings();
+
+    // One valid + one malformed entry: the projection is degraded, not
+    // complete — the adapter must not trust its absence semantics for the
+    // dropped PR.
+    expect(snapshot.partial).toBe(true);
+    expect(snapshot.bindings).toHaveLength(1);
+    expect(snapshot.bindings[0]!.prs).toEqual([
+      { number: 1, url: 'https://github.com/o/r/pull/1' },
+    ]);
   });
 
   it('rebuilds the wake cache when sessions leave the bindings', async () => {

@@ -447,11 +447,16 @@ export function createBoundSessionsAccessor(
             : {}),
         });
       }
+      if (entries.length < prs.length) {
+        // ANY malformed PR entry makes this a degraded answer: a partial
+        // projection must not masquerade as a complete one, or the adapter
+        // would trust its absence semantics for the dropped PRs.
+        partial = true;
+      }
       if (entries.length === 0 && prs.length > 0) {
         // A listed session whose PR entries ALL failed shape validation is
-        // a degraded answer, not an unbind: flag it so the adapter retains
-        // known bindings instead of trusting an empty projection.
-        partial = true;
+        // a degraded answer, not an unbind: skip the empty projection so
+        // the adapter retains known bindings instead of trusting it.
         continue;
       }
       // An empty prs row is a TOMBSTONE and must pass through: the adapter

@@ -3795,7 +3795,12 @@ Response:
 
 The `202` response acknowledges admission, not Agent completion. Observe the
 session SSE stream after `lastEventId` and correlate `turn_complete` or
-`turn_error` by `promptId`.
+`turn_error` by `promptId`. A reserved pre-enqueue check (the standalone
+working-directory guard) can still reject after the `202` was sent; the route
+then drops the request's `idempotencyKey`, so a subsequent retry is admitted
+fresh instead of deduping into a phantom admission. The caller that consumed
+the `202` (a channel relay) relies on its own wake-and-retry path for that
+delivery.
 
 `turn_complete.data.stopReason` carries the ACP `StopReason` the agent
 returned — `end_turn`, `max_tokens`, `max_turn_requests`, `refusal` or

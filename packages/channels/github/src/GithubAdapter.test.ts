@@ -6360,27 +6360,101 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
     });
 
-    it('treats a channel-only binding as authoritative absence under a partial snapshot', async () => {
+    it('treats a published audit record as durable consumption at claim time (R4-B1)', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });
-      // Channel-owned sessions keep the public channel path: their PRs can
-      // never have a private follower, so a partial scan must not stall
-      // them behind the deferral gate.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      // A previous incarnation published the reply (audit `posted`),
+      // removed the task, and lost the cursor save (mark-read failure or
+      // crash). The re-listed comment must not be claimed and published a
+      // second time: the audit is the durable consumption record, and the
+      // claim path must honor it exactly like recovery does.
+      const auditPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-audit.jsonl',
+      );
+      mkdirSync(dirname(auditPath), { recursive: true });
+      writeFileSync(
+        auditPath,
+        `${JSON.stringify({
+          outcome: 'posted',
+          repository: 'owner/repo',
+          threadId: 'pr:42',
+          sourceMessageId: '1001',
+        })}\n`,
+        'utf-8',
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      expect(existsSync(inboundTaskPath())).toBe(false);
+      const ch = channel as unknown as {
+        cursor: { dispatchedComments?: string[] };
+      };
+      expect(ch.cursor.dispatchedComments).toContain('C_1001');
+    });
+
+    it('never delivers privately to a channel-owned session and defers its PR under partial', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      // Channel-owned sessions keep the public channel path: they never
+      // enter the private routing map, even on a complete snapshot.
       boundSessions.listPrBindings.mockResolvedValue({
         bindings: [makeBinding({ sourceType: 'channel' })],
         partial: false,
-      });
-      mockOctokit.paginate.mockResolvedValueOnce([]);
-      await pollOnce();
-
-      boundSessions.listPrBindings.mockResolvedValue({
-        bindings: [],
-        partial: true,
       });
       mockOctokit.paginate
         .mockResolvedValueOnce([prNotification('comment')])
         .mockResolvedValueOnce([makeComment()]);
       await pollOnce();
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
       expect(channel.inboundEnvelopes).toHaveLength(1);
+
+      // Under a partial answer the PR defers like any unmatched PR: the
+      // channel binding cannot prove an invisible workspace has no
+      // follower. Crucially it is never delivered privately to the
+      // channel session.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: true,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            updated_at: '2026-07-02T11:00:00.000Z',
+            subject: {
+              title: 'Test PR',
+              url: 'https://api.github.com/repos/owner/repo/pulls/42',
+              type: 'PullRequest',
+            },
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({
+            id: 1002,
+            node_id: 'C_1002',
+            created_at: '2026-07-02T10:30:00.000Z',
+            updated_at: '2026-07-02T10:30:00.000Z',
+          }),
+        ]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(readInboundTasks()[0]!['backpressure']).toBe(true);
+
+      // Complete snapshot: absence established, public reply exactly once.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(2);
       expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
     });
 
@@ -6571,9 +6645,12 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           makeComment({ created_at: '2026-07-02T09:30:00.000Z' }),
         ]);
       await pollOnce();
-      // PR 43 was unbound by listed S: channel path, no revival.
+      // PR 43's only OBSERVED binder unbound, but a partial answer cannot
+      // prove an invisible workspace has no follower: defer — no public
+      // reply yet, and no private revival of S.
       expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
-      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(readInboundTasks()[0]!['backpressure']).toBe(true);
 
       mockOctokit.paginate
         .mockResolvedValueOnce([
@@ -6600,6 +6677,38 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect.any(String),
         expect.any(String),
       );
+
+      // A complete snapshot establishes absence: recovery re-drives the
+      // deferred PR 43 event onto the channel path exactly once.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'S',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+              },
+            ],
+          }),
+          makeBinding({
+            sessionId: 'T',
+            prs: [
+              {
+                number: 44,
+                url: 'https://github.com/owner/repo/pull/44',
+                state: 'open',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
     });
 
     it('keeps the newer session when a partial scan lists an older one (P1)', async () => {
@@ -10289,8 +10398,9 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       // entry OLDER than all of them that still holds a pending event,
       // one even older entry a RETAINED binding still claims (PR #1100
       // belongs to s-1099), and one older still whose earlier transition
-      // has a surviving inbound task (PR #1031). Only the unprotected
-      // idle entries may be evicted.
+      // has a surviving inbound task (PR #1101 — OUTSIDE the retained
+      // candidate range, so the task filter is its sole protection). Only
+      // the unprotected idle entries may be evicted.
       const entries: Record<string, unknown> = {};
       for (let i = 0; i < 1030; i++) {
         entries[`owner/repo#${i + 1}`] = {
@@ -10318,7 +10428,7 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         fired: [],
         pending: [],
       };
-      entries['owner/repo#1031'] = {
+      entries['owner/repo#1101'] = {
         headSha: 'sha-1',
         mergeableState: 'clean',
         prState: 'open',
@@ -10332,16 +10442,16 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           attempts: 0,
           deferCount: 1,
           backpressure: true,
-          issueNumber: 1031,
+          issueNumber: 1101,
           source: {
             chatId: 'owner/repo',
-            threadId: 'pr:1031',
-            messageId: 'watch:merge_conflict:1031:1:1751446800000',
+            threadId: 'pr:1101',
+            messageId: 'watch:merge_conflict:1101:1:1751446800000',
           },
           envelope: {
             ...makeInboundTaskRecord().envelope,
-            threadId: 'pr:1031',
-            messageId: 'watch:merge_conflict:1031:1:1751446800000',
+            threadId: 'pr:1101',
+            messageId: 'watch:merge_conflict:1101:1:1751446800000',
           },
           dedupe: {},
           delivery: { kind: 'bound-session', sessionId: 'bound-session' },
@@ -10364,12 +10474,12 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       const state = readWatchState();
       // 1033 entries against the 1024 cap: the 9 oldest UNPROTECTED idle
       // entries go (#1..#9). The pending holder (#0), the retained-binding
-      // entry (#1100), and the surviving-task entry (#1031) are all older
+      // entry (#1100), and the surviving-task entry (#1101) are all older
       // than the evicted ones but must survive.
       expect(Object.keys(state.entries)).toHaveLength(1024);
       expect(state.entries['owner/repo#0']).toBeDefined();
       expect(state.entries['owner/repo#1100']).toBeDefined();
-      expect(state.entries['owner/repo#1031']).toBeDefined();
+      expect(state.entries['owner/repo#1101']).toBeDefined();
       expect(state.entries['owner/repo#1']).toBeUndefined();
       expect(state.entries['owner/repo#9']).toBeUndefined();
       expect(state.entries['owner/repo#10']).toBeDefined();

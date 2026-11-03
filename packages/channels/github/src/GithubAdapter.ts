@@ -880,14 +880,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    */
   private boundSnapshotTrusted = false;
   /**
-   * PR keys whose absence IS authoritative under the current partial
-   * snapshot: the PR was known before, and every session that bound it is
-   * listed now (each listed session's PR set is complete) and excludes it.
-   * Recomputed on every refresh, so it never accumulates; empty on a
-   * complete snapshot, where every absence is authoritative anyway.
-   */
-  private authoritativeUnbinds = new Set<string>();
-  /**
    * False until ANY binding snapshot succeeds (complete or partial). The
    * cold-start comment-lane gate uses this, not boundSnapshotTrusted: the
    * map is populated from partial snapshots too. Gating on complete-only
@@ -1655,6 +1647,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   protected async pollOnce(): Promise<void> {
     this.inboundPersistenceBlocked = false;
+    this.publicationAuditKeysCache = undefined;
 
     if (this.deliverToBoundSessions) {
       await this.refreshBoundSessions();
@@ -1688,7 +1681,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.watchReconcileBlocked = this.hasUnreconciledWatchPending();
       if (this.watchReconcileBlocked) {
         process.stderr.write(
-          `[Channel:${this.name}] watch subscriptions are disabled but pending watch events remain unreconciled; watch task recovery stays blocked until they drain\n`,
+          `[Channel:${this.name}] watch subscriptions are disabled but pending watch events remain unreconciled; watch task recovery stays blocked until subscriptions are re-enabled and the pending events reconcile\n`,
         );
       }
     }
@@ -2268,6 +2261,19 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     issueNumber: number,
     dedupe: InboundTaskDedupe = {},
   ): Promise<boolean> {
+    // The publication audit is the durable consumption record for the
+    // public path: a reply can land (audit `posted`), the task be removed,
+    // and the cursor save still be lost (mark-read failure, crash). The
+    // re-listed event would then be claimed and published a SECOND time.
+    // Recovery already retires tasks whose source key is in the audit;
+    // apply the same check before claiming so the window is closed for
+    // fresh claims too. Fail-closed: an unreadable audit skips the event
+    // this poll (the per-notification catch retries it next poll).
+    const sourceKey = `${envelope.chatId}|${envelope.threadId ?? ''}|${envelope.messageId ?? ''}`;
+    if (this.publicationAuditKeysThisPoll().has(sourceKey)) {
+      this.applyTaskDedupe(dedupe);
+      return true;
+    }
     const delivery = this.resolveBoundDelivery(envelope.chatId, issueNumber);
     const task = this.claimInboundTask(envelope, issueNumber, dedupe, delivery);
     return this.runInboundTask(task);
@@ -2303,7 +2309,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const recurrible =
         existing.source.messageId?.startsWith('watch:') === true;
       if (!terminal || !recurrible) {
-        this.applyTaskDedupe(existing);
+        this.applyTaskDedupe(existing.dedupe);
         return existing;
       }
       this.removeInboundTask(existing.id);
@@ -2327,7 +2333,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       ...(delivery ? { delivery } : {}),
     };
     this.updateInboundTasks((records) => [...records, task]);
-    this.applyTaskDedupe(task);
+    this.applyTaskDedupe(task.dedupe);
     return task;
   }
 
@@ -2338,29 +2344,25 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const bound = task.delivery?.kind === 'bound-session';
     const isWatch = envelope.messageId?.startsWith('watch:') === true;
     // Absence from the map authorizes the irreversible public path ONLY
-    // when it is authoritative: a current complete, successful snapshot,
-    // or — under a partial answer — a PR whose every previous binder is
-    // listed and excludes it (a listed session's PR set is complete, so
-    // its tombstone is authoritative per PR). Before the first complete
-    // snapshot, and for a PR whose binder the scan omitted (or retention
-    // evicted) or that was never known, an unmatched event may belong to a
-    // live session: defer it as backpressure — recoverable, bounded by
-    // MAX_BOUND_DEFERRALS, and re-resolved by recovery once absence becomes
-    // authoritative. The partial/failed-refresh clauses are PR-scoped:
-    // bindings are PR-only, so an issue event's absence is always
-    // authoritative and must not stall behind a degraded binding scan.
-    // Known targets (bound tasks) are unaffected and proceed immediately.
+    // on a current complete, successful snapshot. A partial answer cannot
+    // prove absence for a PR even when every OBSERVED binder is listed and
+    // excludes it: an unscannable workspace may hold a never-observed
+    // follower, and a listed tombstone proves only that the listed session
+    // unbound. So before the first complete snapshot, during any partial
+    // answer, and while a refresh is failing, an unmatched PR event defers
+    // as backpressure — recoverable, bounded by MAX_BOUND_DEFERRALS, and
+    // re-resolved by recovery once a complete snapshot lands. The
+    // partial/failed-refresh clauses are PR-scoped: bindings are PR-only,
+    // so once the cold-start gate opens an issue event's absence is
+    // provable and must not stall behind a degraded binding scan. Known
+    // targets (bound tasks) are unaffected and proceed immediately.
     if (
       !bound &&
       !isWatch &&
       this.deliverToBoundSessions &&
       (!this.boundSnapshotTrusted ||
         (envelope.threadId?.startsWith('pr:') === true &&
-          (this.boundRefreshFailed ||
-            (this.lastBindingsPartial &&
-              !this.authoritativeUnbinds.has(
-                this.prBindingKey(envelope.chatId, task.issueNumber),
-              )))))
+          (this.boundRefreshFailed || this.lastBindingsPartial)))
     ) {
       const deferCount = (task.deferCount ?? 0) + 1;
       if (deferCount >= MAX_BOUND_DEFERRALS) {
@@ -2535,7 +2537,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
     for (const task of tasks) {
       if (!task.envelope) continue;
-      this.applyTaskDedupe(task);
+      this.applyTaskDedupe(task.dedupe);
       if (
         this.watchReconcileBlocked &&
         task.envelope.messageId?.startsWith('watch:') === true
@@ -2693,6 +2695,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     return `${task.source.chatId}|${task.source.threadId ?? ''}|${task.source.messageId ?? ''}`;
   }
 
+  private publicationAuditKeysCache: Set<string> | undefined;
+
+  /**
+   * Publication audit keys cached for the current poll (reset at pollOnce
+   * start). Strict: an unreadable audit fails closed so the caller skips
+   * the event this poll instead of risking a duplicate publication.
+   */
+  private publicationAuditKeysThisPoll(): Set<string> {
+    this.publicationAuditKeysCache ??= this.readPublicationAuditKeys(true);
+    return this.publicationAuditKeysCache;
+  }
+
   private readPublicationAuditKeys(strict = false): Set<string> {
     try {
       const keys = new Set<string>();
@@ -2724,8 +2738,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
   }
 
-  private applyTaskDedupe(task: InboundTaskRecord): void {
-    for (const [field, keys] of Object.entries(task.dedupe) as Array<
+  private applyTaskDedupe(dedupe: InboundTaskDedupe): void {
+    for (const [field, keys] of Object.entries(dedupe) as Array<
       [keyof InboundTaskDedupe, string[] | undefined]
     >) {
       for (const key of keys ?? []) {
@@ -3058,27 +3072,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.boundSnapshotSeen = true;
       this.boundSnapshotFailureStreak = 0;
       if (!snapshot.partial) this.boundSnapshotTrusted = true;
-      // Per-PR binders BEFORE this refresh: the input to the partial
-      // snapshot's authoritative-absence decision below. Captured now
-      // because lastBindings is replaced with the merged rows later.
-      // Channel-owned sessions are tracked too, but flagged: they never
-      // provide private delivery, so they cannot hide a follower.
-      const previousBinders = new Map<string, Set<string>>();
-      const previousSessionSources = new Map<string, string | undefined>();
-      for (const summary of this.lastBindings) {
-        previousSessionSources.set(summary.sessionId, summary.sourceType);
-        for (const pr of summary.prs) {
-          const identity = this.parsePrBindingUrl(pr.url);
-          if (!identity || identity.number !== pr.number) continue;
-          const key = this.prBindingKey(identity.chatId, identity.number);
-          let binders = previousBinders.get(key);
-          if (!binders) {
-            binders = new Set();
-            previousBinders.set(key, binders);
-          }
-          binders.add(summary.sessionId);
-        }
-      }
       const map = new Map<string, PrBindingSummary>();
       for (const summary of snapshot.bindings) {
         // Channel-owned sessions keep the normal channel path so their
@@ -3153,34 +3146,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.lastBindings = snapshot.bindings;
       }
       this.boundSessionByPr = map;
-      // Absence authority under a partial answer: a PR is authoritatively
-      // unbound only if it was known before AND every session that bound it
-      // is listed now and excludes it (a listed session's PR set is
-      // complete). A never-known PR may hide a fresh binding in an unlisted
-      // workspace, and a cap-evicted binder is unlisted — both must defer
-      // instead of routing publicly. Recomputed per refresh (never
-      // accumulates); a complete snapshot clears it because every absence
-      // is authoritative then.
-      const authoritativeUnbinds = new Set<string>();
-      if (snapshot.partial) {
-        const listed = new Set(snapshot.bindings.map((b) => b.sessionId));
-        for (const [key, binders] of previousBinders) {
-          if (map.has(key)) continue;
-          let allListed = true;
-          for (const id of binders) {
-            // A channel-owned binder never provides private delivery, so
-            // it cannot hide a follower; only non-channel binders must be
-            // listed (and excluding the PR) for absence to be authoritative.
-            if (previousSessionSources.get(id) === 'channel') continue;
-            if (!listed.has(id)) {
-              allListed = false;
-              break;
-            }
-          }
-          if (allListed) authoritativeUnbinds.add(key);
-        }
-      }
-      this.authoritativeUnbinds = authoritativeUnbinds;
       if (snapshot.partial && map.size === 0 && !this.boundSnapshotTrusted) {
         this.coldEmptyPartialStreak += 1;
         if (this.coldEmptyPartialStreak === MAX_COLD_EMPTY_PARTIAL_POLLS) {
@@ -3368,7 +3333,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const preflight = this.preflightInbound(envelope);
       const admitted =
         typeof preflight === 'boolean' ? preflight : await preflight;
-      if (!admitted) return;
+      if (!admitted) {
+        // The bound path inherits the channel gates (sender allowlist,
+        // message routes); a rejection retires the event as delivered, so
+        // surface it instead of consuming it silently.
+        process.stderr.write(
+          `[Channel:${this.name}] bound event ${envelope.messageId} rejected by the channel preflight (sender/route gates); retiring without delivery\n`,
+        );
+        return;
+      }
     }
     const prompt = this.buildBoundSessionPrompt(envelope);
     // The idempotency identity is the EVENT (chat + source message), not the
