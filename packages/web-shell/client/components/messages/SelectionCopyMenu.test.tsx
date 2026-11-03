@@ -424,6 +424,29 @@ describe('SelectionCopyMenu', () => {
       expect(buttons[1].disabled).toBe(false);
     },
   );
+  it.each(['', ' '])(
+    'disables the quote button for an image-only selection (prefix=%j)',
+    async (prefix) => {
+      mount(true, 'reply', 'en', vi.fn());
+      const paragraph = container.querySelector('p')!;
+      paragraph.innerHTML = `${prefix}<img src="https://example.com/image.png" alt="">`;
+      for (const type of ['pointerdown', 'pointerup']) {
+        if (type === 'pointerup') {
+          const range = document.createRange();
+          range.selectNodeContents(paragraph);
+          window.getSelection()!.addRange(range);
+        }
+        const event = new MouseEvent(type, { bubbles: true, button: 0 });
+        Object.defineProperty(event, 'pointerType', { value: 'mouse' });
+        await act(async () => paragraph.dispatchEvent(event));
+      }
+      const quote = [...portal.querySelectorAll('button')].find(
+        (item) => item.textContent === 'Quote to composer',
+      )!;
+      expect(quote).toBeDefined();
+      expect(quote.disabled).toBe(true);
+    },
+  );
   it('closes when only the selection end changes', async () => {
     mount();
     await choose();
@@ -483,6 +506,10 @@ describe('SelectionCopyMenu', () => {
       (item) => item.textContent,
     );
     expect(texts).toContain('Quote to composer');
+    const quote = [...portal.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Quote to composer',
+    )!;
+    expect(quote.disabled).toBe(false);
   });
   it('sends the selected text to the quote action and closes the menu', async () => {
     const onQuote = vi.fn();
