@@ -586,28 +586,6 @@ final class AgentSessionPolicies {
 
     WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
             String sessionId, String key, String digest, String mode, long expectedRevision,
-            boolean supported, boolean agentDefinitionSupported) {
-        return changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode, expectedRevision,
-                supported, agentDefinitionSupported, null, false);
-    }
-
-    WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
-            String sessionId, String key, String digest, String mode, long expectedRevision,
-            boolean supported, boolean agentDefinitionSupported, Boolean requestedPlanMode, boolean planModeSupported) {
-        return changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode, expectedRevision,
-                supported, agentDefinitionSupported, requestedPlanMode, planModeSupported, false);
-    }
-
-    WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
-            String sessionId, String key, String digest, String mode, long expectedRevision,
-            boolean supported, boolean agentDefinitionSupported, Boolean requestedPlanMode, boolean planModeSupported,
-            boolean liveSupported) {
-        return changeSessionApproval(tenantId, actorId, sessionId, key, digest, mode, expectedRevision,
-                supported, agentDefinitionSupported, requestedPlanMode, planModeSupported, liveSupported, null, false, false);
-    }
-
-    WebShellApprovalChangeResult changeSessionApproval(String tenantId, String actorId,
-            String sessionId, String key, String digest, String mode, long expectedRevision,
             boolean supported, boolean agentDefinitionSupported, Boolean requestedPlanMode, boolean planModeSupported,
             boolean liveSupported, Map<String, List<String>> requestedRules, boolean rulesSupported, boolean autoSupported) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);

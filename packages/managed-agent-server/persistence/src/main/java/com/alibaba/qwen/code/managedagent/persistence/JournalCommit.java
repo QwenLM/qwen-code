@@ -65,11 +65,6 @@ final class JournalCommit {
         this.actions = actions;
     }
 
-    CommitReceipt commit(String tenantId, String sessionId,
-            String writerToken, CommitTransactionRequest request) {
-        return commit(tenantId, sessionId, writerToken, request, null);
-    }
-
     CommitReceipt commit(String tenantId, String sessionId, String writerToken,
             CommitTransactionRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);

@@ -524,7 +524,6 @@ class SessionRowLockOrderTest {
                 handle.substring(handle.indexOf('.') + 1, handle.indexOf('/')))))
                 .containsExactlyInAnyOrder(
                         "AgentLifecycleOperations.beginLifecycle/8",
-                        "AgentLifecycleOperations.beginLifecycle/9",
                         "AgentLifecycleOperations.beginLifecycle/10",
                         "AgentLifecycleOperations.beginLifecycle/11",
                         "AgentTurnExecution.completeHarnessTurn/8",
@@ -547,18 +546,15 @@ class SessionRowLockOrderTest {
                         "AgentSessionCommands.settleTurnCommands/4",
                         "AgentTurnExecution.updateHarnessCursor/7",
                         "AgentLifecycleOperations.validateOperationStart/2");
-        // The references the parse cannot resolve to one member —
-        // ItemRow.toRecord behind the lambda parameter at the item read,
-        // and main's this::renameDelivery RowMapper references (#13682),
-        // whose arity a method reference never spells — are pinned exactly:
-        // a new unresolvable reference fails here, and an entry goes stale
-        // the day the call is typed or moved.
+        // Unresolvable references, including this::renameDelivery RowMapper
+        // references (#13682) whose arity a method reference never spells,
+        // are pinned exactly: a new unresolvable reference fails here,
+        // and an entry goes stale the day the call is typed or moved.
         // The nine-argument default delegate is covered through a real Spring proxy in
         // AgentStateStoreProxyTransactionTest; its deepest writer is audited here.
         assertThat(audit.exemptions())
                 .containsExactly("AgentSessionCommands.renameDelivery/2",
                         "AgentStoreRows.readMap/1",
-                        "ItemRow.toRecord/0",
                         "ManagedAgentStore.insertSessionCommand/9");
         // The harvest is asserted against the bytecode's own enumeration,
         // recursively over nested types and as a multiset: a member the

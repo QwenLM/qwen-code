@@ -450,10 +450,6 @@ final class JournalResourceReads {
         return outputRetention.open(resource.objectKey(), publicationObjects, lease, () -> {});
     }
 
-    byte[] readPublicationObject(JournalStoreRows.ResourceRow resource, ToolPublicationRetentionStore.ReadLease lease) {
-        return readPublicationObject(resource, lease, true);
-    }
-
     byte[] readPublicationObject(JournalStoreRows.ResourceRow resource, ToolPublicationRetentionStore.ReadLease lease, boolean quarantine) {
         if (publicationObjects == null) {
             throw JournalStoreRows.resourceCorrupt();

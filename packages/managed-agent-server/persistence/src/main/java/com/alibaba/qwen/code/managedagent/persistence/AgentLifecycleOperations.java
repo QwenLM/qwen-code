@@ -317,11 +317,6 @@ final class AgentLifecycleOperations {
     }
 
     OperationAdmission beginLifecycle(String tenantId, String sessionId, OperationKind kind,
-            String actorDigest, String idempotencyKey, String requestDigest, String actorId, boolean supported, int protocolVersion) {
-        return beginLifecycle(tenantId, sessionId, kind, actorDigest, idempotencyKey, requestDigest, actorId, supported, protocolVersion, true);
-    }
-
-    OperationAdmission beginLifecycle(String tenantId, String sessionId, OperationKind kind,
             String actorDigest, String idempotencyKey, String requestDigest, String actorId, boolean supported, int protocolVersion,
             boolean publicLifecycle) {
         return beginLifecycle(tenantId, sessionId, kind, actorDigest, idempotencyKey, requestDigest,
@@ -845,12 +840,6 @@ final class AgentLifecycleOperations {
     }
 
     void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
-            String owner, long generation, String failureCode, long availableAt) {
-        blockLifecycleOperation(tenantId, sessionId, operationId, owner,
-                generation, failureCode, availableAt, false);
-    }
-
-    void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
             String owner, long generation, String failureCode, long availableAt,
             boolean budgetExempt) {
         WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
@@ -893,13 +882,6 @@ final class AgentLifecycleOperations {
                     operationId,
                     generation);
         }
-    }
-
-    void retryOperation(String tenantId, String sessionId,
-            String operationId, String owner, long claimGeneration,
-            long availableAt) {
-        retryOperation(tenantId, sessionId, operationId, owner,
-                claimGeneration, availableAt, false);
     }
 
     void retryOperation(String tenantId, String sessionId,

@@ -216,16 +216,6 @@ final class AgentSessionQueries {
     }
 
     SessionPage listSessions(String tenantId, String actorId,
-            Long beforeCreatedAt, String beforeSessionId, int limit) {
-        return listSessions(tenantId, actorId, beforeCreatedAt, beforeSessionId, limit, "all");
-    }
-
-    SessionPage listSessions(String tenantId, String actorId,
-            Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState) {
-        return listSessions(tenantId, actorId, beforeCreatedAt, beforeSessionId, limit, archiveState, "");
-    }
-
-    SessionPage listSessions(String tenantId, String actorId,
             Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState, String titleQuery) {
         List<Object> arguments = new ArrayList<>();
         arguments.add(tenantId);

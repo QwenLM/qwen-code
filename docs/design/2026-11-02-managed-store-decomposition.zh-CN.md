@@ -6,7 +6,7 @@
 
 本文是已接受 Store 拆分方案的实施契约。基线为 main `e3c7a6d7efc6df6c58ffa8ddd9c42dbb0e1784c4`。R0（[#16061](https://github.com/QwenLM/qwen-code/pull/16061)）已作为 `1bdad7d4b7949a6f8370c95965ec55901e75f67a` 合入；R1 准备开始时，其 [full gate](https://github.com/QwenLM/qwen-code/actions/runs/41322812090) 仍在运行。合并和验收是两份独立证据。[#16029](https://github.com/QwenLM/qwen-code/pull/16029) 已合入，没有额外前置工作。
 
-R1 交付完整双语契约、下文入口/事务/调用者清单及跨文件锁检查。A1–A9 与 B0–B6 现在在实现分支中一并落地，保留下文逐阶段归属和验收清单。两个 facade 保持稳定，实现仍位于 persistence 内。实现与验收分开记录：完整改动必须通过 full Managed Agent gate 才能验收。
+R1 交付完整双语契约、下文入口/事务/调用者清单及跨文件锁检查。A1–A9 与 B0–B6 已在 [#16090](https://github.com/QwenLM/qwen-code/pull/16090) 中一并合入，合并提交为 `d9d6fc4a4b8e654d405dbb1d01bf3404e6435a1c`，保留下文逐阶段归属和验收清单。两个 facade 保持稳定，实现仍位于 persistence 内。其 head `66d23ceb1a5bee7e9cb6362cfc238eb64297f3e6` 已通过配置内的 full Managed Agent gate；Store 专项 macOS/Windows 功能资格仍未覆盖。下文精简后续改动单独记录验收证据。
 
 相关设计：[结构评审](2026-10-31-managed-agent-structure-review.zh-CN.md)、[Agent 构造装配](2026-11-01-managed-agent-store-wiring.zh-CN.md)、[Maven 边界](2026-10-29-managed-agent-maven-modules.zh-CN.md)。
 
@@ -92,36 +92,39 @@ publication/snapshot 方法、`PublicationWriter`、`TerminalCandidate`、同数
 
 此表为唯一阶段清单，英文版本完整同步。入口清单是其方法级明细，不另立独立状态表。两种语言同步记录各阶段实现、精确验证版本、相关证据和未完成项。各阶段一起交付；代码已迁移不代表已验收。
 
-| 顺序 | 交付                                            | 入口清单     | 状态 / 证据                                                            |
-| ---- | ----------------------------------------------- | ------------ | ---------------------------------------------------------------------- |
-| R0   | 完成 Agent 构造装配及实际 Spring 工厂回归       | 已有装配设计 | #16061 已合入；full Hosted 两项失败，待归因                            |
-| R1   | 双语契约/清单及跨文件锁检查                     | 下文两个清单 | R1 版本：56 个定向用例及全部 reactor Checkstyle 通过；新版本证据见下文 |
-| A1   | Agent 普通查询及首次需要的行 helper             | Agent A1     | 已实现；待验收                                                         |
-| A2   | 事件 journal                                    | Agent A2     | 已实现；待验收                                                         |
-| A3   | 消息投影                                        | Agent A3     | 已实现；待验收                                                         |
-| A4   | Session 策略                                    | Agent A4     | 已实现；待验收                                                         |
-| A5   | 命令、回执与结算                                | Agent A5     | 已实现；待验收                                                         |
-| A6   | Session 准入                                    | Agent A6     | 已实现；待验收                                                         |
-| A7   | 生命周期操作                                    | Agent A7     | 已实现；待验收                                                         |
-| A8   | 执行操作                                        | Agent A8     | 已实现；待验收                                                         |
-| A9   | Turn 执行与 Agent facade 收尾                   | Agent A9     | 已实现；待验收                                                         |
-| B0   | Session 构造装配                                | Journal B0   | 已实现；待验收                                                         |
-| B1   | 行访问、fencing 与 writer 生命周期              | Journal B1   | 已实现；待验收                                                         |
-| B2   | 生命周期授权                                    | Journal B2   | 已实现；待验收                                                         |
-| B3   | 历史查询                                        | Journal B3   | 已实现；待验收                                                         |
-| B4   | 资源写入                                        | Journal B4   | 已实现；待验收                                                         |
-| B5   | 资源读取                                        | Journal B5   | 已实现；待验收                                                         |
-| B6   | 普通/CSI terminal commit 与 Journal facade 收尾 | Journal B6   | 已实现；待验收                                                         |
+| 顺序     | 交付                                            | 入口清单         | 状态 / 证据                                                           |
+| -------- | ----------------------------------------------- | ---------------- | --------------------------------------------------------------------- |
+| R0       | 完成 Agent 构造装配及实际 Spring 工厂回归       | 已有装配设计     | #16061 已合入；当前装配由 #16090 full gate 覆盖；保留历史 R0 失败     |
+| R1       | 双语契约/清单及跨文件锁检查                     | 下文两个清单     | #16090 已合入；full gate 中 59 个锁审计用例及 reactor Checkstyle 通过 |
+| A1       | Agent 普通查询及首次需要的行 helper             | Agent A1         | #16090 已合入；基线 full gate 通过                                    |
+| A2       | 事件 journal                                    | Agent A2         | #16090 已合入；基线 full gate 通过                                    |
+| A3       | 消息投影                                        | Agent A3         | #16090 已合入；基线 full gate 通过                                    |
+| A4       | Session 策略                                    | Agent A4         | #16090 已合入；基线 full gate 通过                                    |
+| A5       | 命令、回执与结算                                | Agent A5         | #16090 已合入；基线 full gate 通过                                    |
+| A6       | Session 准入                                    | Agent A6         | #16090 已合入；基线 full gate 通过                                    |
+| A7       | 生命周期操作                                    | Agent A7         | #16090 已合入；基线 full gate 通过                                    |
+| A8       | 执行操作                                        | Agent A8         | #16090 已合入；基线 full gate 通过                                    |
+| A9       | Turn 执行与 Agent facade 收尾                   | Agent A9         | #16090 已合入；基线 full gate 通过                                    |
+| B0       | Session 构造装配                                | Journal B0       | #16090 已合入；基线 full gate 通过                                    |
+| B1       | 行访问、fencing 与 writer 生命周期              | Journal B1       | #16090 已合入；基线 full gate 通过                                    |
+| B2       | 生命周期授权                                    | Journal B2       | #16090 已合入；基线 full gate 通过                                    |
+| B3       | 历史查询                                        | Journal B3       | #16090 已合入；基线 full gate 通过                                    |
+| B4       | 资源写入                                        | Journal B4       | #16090 已合入；基线 full gate 通过                                    |
+| B5       | 资源读取                                        | Journal B5       | #16090 已合入；基线 full gate 通过                                    |
+| B6       | 普通/CSI terminal commit 与 Journal facade 收尾 | Journal B6       | #16090 已合入；基线 full gate 通过                                    |
+| 后续精简 | 已评审的精简及架构检查                          | 两个 facade / A3 | 已实现；232 个定向用例及 Checkstyle 通过；完整 CI 待验收              |
 
 ## 验证与交付标准
 
 R1 不改变 CLI/HTTP 行为，全局 CLI baseline 或模型调用无法验证此源码检查器。使用多文件合成夹具和真实 persistence 源码树，编译 verification 模块，运行 `SessionRowLockOrderTest` 及 reactor Checkstyle。检查双语结构、链接、格式和完整 diff。遵守模块共享本地 Java 预算，保留失败记录，只复用输入未变的证据；新 SHA 或继续会话不会重置预算。此前 272 个装配用例不能验收改动后的检查器。
 
-R1 本地证据：macOS/JDK 21 上原有 44 个锁检查用例和新增 12 个回归全部通过，失败、错误和跳过均为零。已测检查器源码 SHA-256 为 `bc6317d65f0d68dc9837f1d49f85e9a18ed41506e04ef395d33c326c65cd0052`；8 个 reactor Checkstyle 均通过。共享本地 Java 预算累计 413.575/600 秒，含保守延续的 R0 耗时及保留的修复尝试。这仅是定向证据：R1 的完整 verify、SpotBugs、真实 MySQL、Hosted/故障及跨平台资格仍待 CI。
+历史本地证据保存在 `.qwen/investigations/managed-store-split-implementation/`：R1 的 56 个定向锁审计用例及八个 reactor Checkstyle 通过；A1–A9/B0–B6 修复两项装配夹具失败后，17 个已完成测试类中的 260 个不同用例通过。后期两次受限 Maven 调用均超时，原共享账本保持 598.655/600 秒。这些本地命令不改判为成功；当时待补的检查由下文后续基线 CI 证据覆盖。历史 R0 失败仍归档保留，不单独重新归因。
 
-A1–A9/B0–B6 在基于 `77a0d4a4d7cbc9eeab2213b8bf45af117b47d83d` 的实现工作树上的本地证据：修复新增装配夹具的两项失败后，17 个已完成 Java 测试类中的 260 个不同用例通过；17 用例装配复测仅替代这两项失败。生产源码已编译；全部验证源码在最后仅静态修改锁审计断言前完成编译。七次 reactor Checkstyle（parent 与六个生产模块）通过，verification 模块最后的 Checkstyle 尚未执行到。根项目 build/bundle、typecheck 及 54 个专用脚本测试通过。日志、XML 报告和源码指纹保存在 `.qwen/investigations/managed-store-split-implementation/`。
+[#16090 的 full Managed Agent gate](https://github.com/QwenLM/qwen-code/actions/runs/41426848917) 已通过，head 为 `66d23ceb1a5bee7e9cb6362cfc238eb64297f3e6`。实际测试 merge 为 `61979c75f943e7383748c75beed02cf1dde977e5`，全部 86 个变更 blob 与 head 一致。unit/H2：6,098 个用例，跳过 17 个；MySQL 8.4.6：1,242 个用例，无跳过；Hosted：167 个用例，跳过四个；fault：45 个用例，无跳过；Hosted process gates：两个用例，无跳过；O4：59 个用例，无跳过。已完成测试的失败和错误均为零。59 个锁审计用例、六个生产模块 SpotBugs、八个 reactor Checkstyle、Hosted failover 及两个 EventTransport profile 均通过。跳过项不算通过。macOS/Windows 车道编译 reactor 并运行 SDK/Runtime Broker 测试，没有运行 Store 功能套件，该平台缺口继续保留。这些证据验收已合入基线的配置内检查，不验收后续精简改动、真实集群或部署。
 
-两次受限 Maven 调用均到达截止时间，不能称为整次运行成功。包含此前工作和保留的失败尝试，共享 Java 账本为 598.655/600 秒。`SessionRowLockOrderTest` 开始后被中断；更新的入口集合，以及随后仅静态修复的断言排序、SQL 文件归属集合和精确同名引用标识仍未验证。另十个已选择测试类未完成：`JournalEventPublicationPointTest`、`ManagedEventReplayTest`、`ManagedSchemaJournalAtomicityTest`、`ManagedSessionCreationSkillsTest`、`ManagedSessionNativeReadTest`、`ManagedSessionStoreBindingTest`、`ManagedSessionStoreCredentialTest`、`ManagedTaskCancelOperationTest`、`ReplayFloorRetractionTest` 和 `WorkspaceSessionCloseTest`。这些检查与 verification 模块 Checkstyle，以及 full verify、SpotBugs、真实 MySQL、Hosted/fault 和跨平台资格项均须由 CI 补齐；不宣称新版本已通过 CI 验收。
+精简后续改动从 main `73474ef094ea1c6bb2a95a9a2a33a28b0ec58e9e` 开始，删除 18 个协作类重复默认重载及三个无调用内部方法。facade 入口直接向全参数协作类方法传入原默认值，保留签名、事务属性以及经协作类分派的行为，不转调另一个 facade 重载。消息行直接映射为 `ItemRecord`，通过 `List.copyOf` 保持原分页列表不可变性。可选的 Rows 转发精简继续后置。架构检查通过反例覆盖拒绝 `@Service`/`@Repository` 等 Spring 元注解和任意大小写的 SQL 关键字；分页断言保护列表不可变性。锁审计仅移除已删除的 `beginLifecycle/9` 成员与 `ItemRow.toRecord/0` 豁免，保留 facade 集合、编译成员覆盖和失败关闭反例。
+
+精简改动本地验证的 14 个选定测试类共 232 个用例全部通过，失败、错误、跳过均为零，包含全部 59 个锁审计用例及五个拆分检查用例。八个 reactor Checkstyle 均通过。静态参数替换核对确认 18 条默认路径到达相同的全参数实现，其他 633 个已解析成员正文未变；这些静态检查不是运行时证据。首次末尾空行 Checkstyle 失败已修复，并保留在本次调查记录中。后续源码编辑仅调整注释及调用换行，由最终 Checkstyle 和默认路径核对覆盖。新版本的完整 verify、SpotBugs、真实 MySQL、Hosted/fault 和 full gate 仍待 CI；Store 专项 macOS/Windows 功能资格仍未覆盖。本次精简是 #16090 合入后用户单独选择的新改动，使用自己的共享 600 秒本地预算；原 PR 账本和证据保持原状，不作为新输入的验收证明。
 
 各已实现阶段的验收需覆盖 tenant/actor 隔离、游标语义和批量查询次数；含 definition/skills/worktree 的准入/重放；序号/去重/投影缺口/撤回/replay floor；提交后通知及回滚/重放不通知；租约 generation/token/到期及接受结果未知时不重复派发；journal 原子回滚/重放；资源损坏/读取租约失效/owner read 收尾；publication/snapshot 锁顺序和 CSI 同连接原子性。
 
@@ -141,7 +144,7 @@ facade 按原顺序只计算一次配置和 catalog 校验，再把相同值和�
 
 Session 构造现在确定原 setter 涉及的全部九个引用。Spring 必需依赖仍必需；standalone 构造保留原 null/in-process/unbound 默认值。生命周期双依赖任一缺失时，两者均不启用。CSI 仅接受同数据源 JDBC runtime binding repository。维护入口与夹具在创建下游消费者前传入依赖；实际 Spring 工厂构造另有覆盖。
 
-锁检查保留 facade 入口集合，并按 owner/name/arity 钉住已迁移的 24 个 private helper 重载。协作类与完整源文件族一起分析，同时逐文件保留显式 SQL 归属边界集合。编译成员覆盖、不可解析接收者的拒绝规则和原有反例仍为必需。下文原行号清单指记录的基线，不指迁移后位置。
+锁检查保留 facade 入口集合，并按 owner/name/arity 钉住删除未使用的 `beginLifecycle/9` 后剩余的 23 个已迁移 private helper 重载。协作类与完整源文件族一起分析，同时逐文件保留显式 SQL 归属边界集合。编译成员覆盖、不可解析接收者的拒绝规则和原有反例仍为必需。下文原行号清单指记录的基线，不指迁移后位置。
 
 ## Agent 入口清单
 
