@@ -1,3 +1,4 @@
+import { MAX_POLL_INTERVAL_MS } from '@qwen-code/channel-base';
 import type { ChannelPlugin } from '@qwen-code/channel-base';
 import {
   GithubChannel,
@@ -36,6 +37,16 @@ export const plugin: ChannelPlugin = {
         envResolvable: true,
         description:
           'GitHub Enterprise API root (e.g. https://ghe.example.com/api/v3). Leave empty for github.com',
+      },
+      {
+        key: 'pollInterval',
+        label: 'Poll Interval (ms)',
+        kind: 'number',
+        exclusiveMinimum: 0,
+        maximum: MAX_POLL_INTERVAL_MS,
+        default: '60000',
+        description:
+          'How often to poll the notifications API, in ms. Kept between 1 and 86400000 (one day): a smaller positive value is raised to 1. Leave empty for 60000',
       },
       {
         key: 'groupPolicy',
