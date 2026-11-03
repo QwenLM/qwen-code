@@ -54,13 +54,15 @@ type ManagedSessionsNavigationProps = Pick<
  */
 function HostNavigationSlot({
   target,
+  slotRef,
   children,
 }: {
   target: HTMLElement;
+  slotRef: (element: HTMLDivElement | null) => void;
   children: ReactNode;
 }) {
   return createPortal(
-    <div data-web-shell-portal-root data-web-shell-shadcn>
+    <div ref={slotRef} data-web-shell-portal-root data-web-shell-shadcn>
       {children}
     </div>,
     target,
@@ -227,13 +229,22 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
   }
   const [portalRoot, setPortalRoot] = useState<HTMLDivElement | null>(null);
   const shellRootRef = useRef<HTMLDivElement | null>(null);
+  // Track the wrappers this entry actually rendered. A host slot may already
+  // contain host chrome, and both slots may name the same element, so neither
+  // "first child" nor a per-target lookup identifies our own node.
+  const hostSlotsRef = useRef(new Set<HTMLDivElement>());
+  const registerHostSlot = useCallback((element: HTMLDivElement | null) => {
+    if (element) hostSlotsRef.current.add(element);
+  }, []);
   const syncHostSlots = useCallback(() => {
     const root = shellRootRef.current;
     if (!root) return;
     const computed = getComputedStyle(root);
-    for (const target of [navigationTarget, archivedNavigationTarget]) {
-      const slot = target?.firstElementChild;
-      if (!(slot instanceof HTMLElement)) continue;
+    for (const slot of hostSlotsRef.current) {
+      if (!slot.isConnected) {
+        hostSlotsRef.current.delete(slot);
+        continue;
+      }
       slot.classList.toggle('dark', theme === WebShellThemeId.Dark);
       slot.lang = resolvedLanguage;
       for (let index = 0; index < computed.length; index += 1) {
@@ -242,8 +253,15 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
           slot.style.setProperty(name, computed.getPropertyValue(name));
       }
     }
-  }, [navigationTarget, archivedNavigationTarget, theme, resolvedLanguage]);
-  useLayoutEffect(syncHostSlots, [syncHostSlots, portalRoot]);
+  }, [theme, resolvedLanguage]);
+  // A slot swap mounts a new wrapper, so the ref callback re-runs before this
+  // effect; the target identities themselves are not read here.
+  useLayoutEffect(syncHostSlots, [
+    syncHostSlots,
+    portalRoot,
+    navigationTarget,
+    archivedNavigationTarget,
+  ]);
   const emptyMap = useMemo(() => new Map(), []);
 
   return (
@@ -282,7 +300,10 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
                           renderNavigation={
                             navigationTarget
                               ? (navigation) => (
-                                  <HostNavigationSlot target={navigationTarget}>
+                                  <HostNavigationSlot
+                                    target={navigationTarget}
+                                    slotRef={registerHostSlot}
+                                  >
                                     {navigation}
                                   </HostNavigationSlot>
                                 )
@@ -292,6 +313,7 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
                             archivedNavigationTarget ? (
                               <HostNavigationSlot
                                 target={archivedNavigationTarget}
+                                slotRef={registerHostSlot}
                               >
                                 {archived}
                               </HostNavigationSlot>

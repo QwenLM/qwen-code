@@ -18,6 +18,7 @@ const captured = vi.hoisted(() => ({
   // Providers from commits only — a discarded render never fires an effect.
   committed: [] as unknown[],
   navigation: null as unknown,
+  archived: null as unknown,
 }));
 
 vi.mock('./components/managed/ManagedSessionsPage', async () => {
@@ -26,12 +27,20 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
     ManagedSessionsPage: (props: unknown) => {
       captured.props = props;
       captured.renders.push(props);
-      const { managedAgentProvider, renderNavigation } = props as {
+      const {
+        managedAgentProvider,
+        renderNavigation,
+        renderArchivedNavigation,
+      } = props as {
         managedAgentProvider: ManagedAgentProvider;
         renderNavigation?: (navigation: unknown) => unknown;
+        renderArchivedNavigation?: (archived: unknown) => unknown;
       };
       captured.navigation = renderNavigation
         ? renderNavigation(<nav>host list</nav>)
+        : null;
+      captured.archived = renderArchivedNavigation
+        ? renderArchivedNavigation(<nav>archived list</nav>)
         : null;
       // Issues a request from a child effect whenever the provider identity
       // changes — the same trigger ManagedSessionsContent's list effect has.
@@ -46,6 +55,7 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
         <div>
           managed-only
           {captured.navigation as ReactNode}
+          {captured.archived as ReactNode}
         </div>
       );
     },
@@ -184,6 +194,73 @@ describe('ManagedAgentWebShell', () => {
       );
     } finally {
       navigationTarget.remove();
+    }
+  });
+
+  it('styles only its own wrapper when the host slot already has children', async () => {
+    const provider = { storageKey: 'slot-shared' } as ManagedAgentProvider;
+    const target = document.createElement('div');
+    const hostChrome = document.createElement('span');
+    hostChrome.textContent = 'host chrome';
+    hostChrome.lang = 'fr';
+    target.appendChild(hostChrome);
+    document.body.appendChild(target);
+    try {
+      await act(async () =>
+        root.render(
+          <ManagedAgentWebShell
+            managedAgentProvider={provider}
+            navigationTarget={target}
+            language="zh-CN"
+            style={{ ['--background' as string]: 'oklch(0.2 0 0)' }}
+          />,
+        ),
+      );
+      const wrapper = target.querySelector<HTMLElement>(
+        '[data-web-shell-portal-root]',
+      )!;
+      // The host's own node must stay untouched: it is not ours to theme, and
+      // styling the slot's first child would both mutate it and miss the list.
+      expect(hostChrome.lang).toBe('fr');
+      expect(hostChrome.classList.contains('dark')).toBe(false);
+      expect(hostChrome.style.getPropertyValue('--background')).toBe('');
+      expect(wrapper.lang).toBe('zh-CN');
+      expect(wrapper.classList.contains('dark')).toBe(true);
+      expect(wrapper.style.getPropertyValue('--background')).toBe(
+        'oklch(0.2 0 0)',
+      );
+    } finally {
+      target.remove();
+    }
+  });
+
+  it('styles both wrappers when the host reuses one slot element', async () => {
+    const provider = { storageKey: 'slot-reused' } as ManagedAgentProvider;
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    try {
+      await act(async () =>
+        root.render(
+          <ManagedAgentWebShell
+            managedAgentProvider={provider}
+            navigationTarget={target}
+            archivedNavigationTarget={target}
+            language="zh-CN"
+          />,
+        ),
+      );
+      const wrappers = [
+        ...target.querySelectorAll<HTMLElement>('[data-web-shell-portal-root]'),
+      ];
+      // Both lists portal into the same host element, so a per-target lookup
+      // would theme only one of the two wrappers.
+      expect(wrappers).toHaveLength(2);
+      for (const wrapper of wrappers) {
+        expect(wrapper.lang).toBe('zh-CN');
+        expect(wrapper.classList.contains('dark')).toBe(true);
+      }
+    } finally {
+      target.remove();
     }
   });
 
