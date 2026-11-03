@@ -18,6 +18,7 @@ import {
   SUBSCRIPTION_MODELS_CACHED,
   subscriptionModelUnavailable,
 } from '../qwen/subscription-models.js';
+import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
 import {
   captureReasoningSnapshot,
@@ -2949,6 +2950,7 @@ export class Config {
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
   private contentGenerator?: ContentGenerator;
   private subscriptionPlan?: 'plus' | 'pro';
+  private subscriptionModelIdentity?: string;
   private readonly initialAuthType?: AuthType;
   private initialResolvedAuthType?: AuthType;
   private readonly embeddingModel: string;
@@ -5872,6 +5874,7 @@ export class Config {
     this.contentGeneratorConfigSources = {};
     this.initialResolvedAuthType = undefined;
     this.subscriptionPlan = undefined;
+    this.subscriptionModelIdentity = undefined;
     this.modelsConfig.clearAuth();
     this.toolRegistry?.unregisterTool(ToolNames.WEB_SEARCH);
     this.notifyModelChangeListeners();
@@ -6041,7 +6044,13 @@ export class Config {
   }
 
   async refreshSubscriptionModels(signal?: AbortSignal) {
+    const session = new QwenSubscriptionSession();
+    const identity = session.getIdentity();
+    this.subscriptionModelIdentity = undefined;
     const result = await this.modelsConfig.refreshSubscriptionModels(signal);
+    if (identity && session.getIdentity() === identity) {
+      this.subscriptionModelIdentity = identity;
+    }
     const previous = this.warnings.indexOf(SUBSCRIPTION_MODELS_CACHED);
     if (previous !== -1) this.warnings.splice(previous, 1);
     if (result.cached) this.warnings.push(SUBSCRIPTION_MODELS_CACHED);
@@ -6053,6 +6062,14 @@ export class Config {
    * Refresh authentication and rebuild ContentGenerator.
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
+    return this.rebuildContentGenerator(authMethod, isInitialAuth, true);
+  }
+
+  private async rebuildContentGenerator(
+    authMethod: AuthType,
+    isInitialAuth: boolean | undefined,
+    refreshSubscriptionModels: boolean,
+  ) {
     const hookOwner = captureHookExecutionOwner(this, null);
     if (!this.contentGenerator && authMethod === this.initialAuthType) {
       authMethod = this.initialResolvedAuthType ?? authMethod;
@@ -6078,7 +6095,13 @@ export class Config {
       : undefined;
 
     if (authMethod === AuthType.QWEN_SUBSCRIPTION) {
-      const { models } = await this.refreshSubscriptionModels();
+      const { models } = refreshSubscriptionModels
+        ? await this.refreshSubscriptionModels()
+        : {
+            models: this.modelsConfig
+              .getAvailableModelsForAuthType(authMethod)
+              .map((model) => model.id),
+          };
       const selected = this.modelsConfig.getModel();
       if (selected && !models.includes(selected)) {
         throw new Error(subscriptionModelUnavailable(selected));
@@ -7778,7 +7801,17 @@ export class Config {
     // we captured off the still-intact live contentGeneratorConfig above. This is
     // a no-op when the new model disables thinking (`reasoning: false`), since
     // setReasoningEffort() skips that case and never silently re-enables it.
-    await this.refreshAuth(authType);
+    const reuseSubscriptionModels =
+      authType === AuthType.QWEN_SUBSCRIPTION &&
+      this.contentGeneratorConfig.authType === authType &&
+      this.subscriptionModelIdentity !== undefined &&
+      new QwenSubscriptionSession().getIdentity() ===
+        this.subscriptionModelIdentity;
+    if (reuseSubscriptionModels) {
+      await this.rebuildContentGenerator(authType, undefined, false);
+    } else {
+      await this.refreshAuth(authType);
+    }
     if (priorReasoningEffort) {
       this.setReasoningEffort(priorReasoningEffort);
     }

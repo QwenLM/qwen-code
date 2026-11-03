@@ -111,6 +111,21 @@ it('checks persisted login independently of the selected provider and model cach
   expect(session.isSignedIn()).toBe(false);
 });
 
+it('keeps the login identity across token refresh and replaces it on sign-in', async () => {
+  const session = new QwenSubscriptionSession();
+  expect(session.getIdentity()).toBeUndefined();
+  await session.signIn(() => {});
+  const identity = session.getIdentity();
+  expect(identity).toEqual(expect.any(String));
+  await expire();
+  await session.getAccessToken();
+  expect(session.getIdentity()).toBe(identity);
+  await session.signIn(() => {});
+  expect(session.getIdentity()).not.toBe(identity);
+  await session.signOut();
+  expect(session.getIdentity()).toBeUndefined();
+});
+
 it('notifies observers when credentials are created or removed by another session', async () => {
   const session = new QwenSubscriptionSession();
   const changed = vi.fn();

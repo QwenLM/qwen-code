@@ -75,6 +75,10 @@ export class QwenSubscriptionSession {
   );
 
   isSignedIn(): boolean {
+    return this.getIdentity() !== undefined;
+  }
+
+  getIdentity(): string | undefined {
     let fd: number | undefined;
     try {
       fd = openSync(
@@ -84,9 +88,11 @@ export class QwenSubscriptionSession {
       const credentials = credentialSchema.parse(
         JSON.parse(readFileSync(fd, 'utf8')),
       );
-      return Boolean(credentials.tokens && this.matches(credentials));
+      return credentials.tokens && this.matches(credentials)
+        ? credentials.revision
+        : undefined;
     } catch {
-      return false;
+      return undefined;
     } finally {
       if (fd !== undefined) closeSync(fd);
     }
