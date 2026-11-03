@@ -6,12 +6,14 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PollingChannelBase } from './PollingChannelBase.js';
 import { channelEventFilePath } from './channel-events.js';
+import { getWorkspaceScopeDirName } from './paths.js';
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import type { ChannelConfig } from './types.js';
 
@@ -86,17 +88,33 @@ class TestPoller extends PollingChannelBase<TestCursor> {
   }
 
   async sendMessage(): Promise<void> {}
+
+  save(): void {
+    this.saveCursor();
+  }
 }
 
-function cursorFile(name: string): string {
+function scopeDir(cwd = '/tmp'): string {
+  return join(testHome, 'channels', getWorkspaceScopeDirName(cwd));
+}
+
+function cursorFileName(name: string): string {
   const encoded = name.replace(/[^a-zA-Z0-9_-]/g, '_');
   const hash = createHash('sha256').update(name).digest('hex').slice(0, 16);
-  return join(testHome, 'channels', `${encoded}-${hash}-poll-cursor.json`);
+  return `${encoded}-${hash}-poll-cursor.json`;
+}
+
+function cursorFile(name: string, cwd = '/tmp'): string {
+  return join(scopeDir(cwd), cursorFileName(name));
+}
+
+function legacyCursorFile(name: string): string {
+  return join(testHome, 'channels', cursorFileName(name));
 }
 
 describe('PollingChannelBase', () => {
   beforeEach(() => {
-    mkdirSync(join(testHome, 'channels'), { recursive: true });
+    mkdirSync(scopeDir(), { recursive: true });
   });
 
   it('initializes with default cursor when no file exists', () => {
@@ -119,6 +137,102 @@ describe('PollingChannelBase', () => {
     const poller = new TestPoller('corrupt', makeConfig(), makeBridge());
     expect(poller.cursor).toEqual({ ts: '2026-01-01T00:00:00.000Z', count: 0 });
   });
+
+  it('keeps one cursor per workspace for channels sharing a name', () => {
+    const a = new TestPoller(
+      'shared',
+      { ...makeConfig(), cwd: '/tmp/ws-a' },
+      makeBridge(),
+    );
+    const b = new TestPoller(
+      'shared',
+      { ...makeConfig(), cwd: '/tmp/ws-b' },
+      makeBridge(),
+    );
+    a.cursor = { ts: '2026-07-01T00:00:00.000Z', count: 1 };
+    b.cursor = { ts: '2026-07-02T00:00:00.000Z', count: 2 };
+    a.save();
+    b.save();
+    expect(cursorFile('shared', '/tmp/ws-a')).not.toBe(
+      cursorFile('shared', '/tmp/ws-b'),
+    );
+    expect(
+      new TestPoller(
+        'shared',
+        { ...makeConfig(), cwd: '/tmp/ws-a' },
+        makeBridge(),
+      ).cursor.count,
+    ).toBe(1);
+    expect(
+      new TestPoller(
+        'shared',
+        { ...makeConfig(), cwd: '/tmp/ws-b' },
+        makeBridge(),
+      ).cursor.count,
+    ).toBe(2);
+  });
+
+  it('reads a legacy global cursor until the scoped file exists', () => {
+    writeFileSync(
+      legacyCursorFile('upgraded'),
+      JSON.stringify({ ts: '2026-06-01T00:00:00.000Z', count: 5 }),
+      'utf-8',
+    );
+    const poller = new TestPoller('upgraded', makeConfig(), makeBridge());
+    expect(poller.cursor.count).toBe(5);
+    poller.cursor.count = 6;
+    poller.save();
+    expect(
+      JSON.parse(readFileSync(cursorFile('upgraded'), 'utf-8')).count,
+    ).toBe(6);
+    expect(
+      JSON.parse(readFileSync(legacyCursorFile('upgraded'), 'utf-8')).count,
+    ).toBe(5);
+    expect(
+      new TestPoller('upgraded', makeConfig(), makeBridge()).cursor.count,
+    ).toBe(6);
+  });
+
+  it('prefers the scoped cursor over a legacy one', () => {
+    writeFileSync(
+      legacyCursorFile('both'),
+      JSON.stringify({ ts: '2026-06-01T00:00:00.000Z', count: 1 }),
+      'utf-8',
+    );
+    writeFileSync(
+      cursorFile('both'),
+      JSON.stringify({ ts: '2026-06-02T00:00:00.000Z', count: 2 }),
+      'utf-8',
+    );
+    const poller = new TestPoller('both', makeConfig(), makeBridge());
+    expect(poller.cursor.count).toBe(2);
+  });
+
+  it('does not fall back to a legacy cursor when the scoped file is corrupt', () => {
+    writeFileSync(
+      legacyCursorFile('corrupt-scoped'),
+      JSON.stringify({ ts: '2026-06-01T00:00:00.000Z', count: 9 }),
+      'utf-8',
+    );
+    writeFileSync(cursorFile('corrupt-scoped'), 'not json{{{', 'utf-8');
+    const poller = new TestPoller('corrupt-scoped', makeConfig(), makeBridge());
+    expect(poller.cursor).toEqual({ ts: '2026-01-01T00:00:00.000Z', count: 0 });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'writes the cursor with private permissions',
+    () => {
+      const poller = new TestPoller(
+        'modes',
+        { ...makeConfig(), cwd: '/tmp/ws-modes' },
+        makeBridge(),
+      );
+      poller.save();
+      const file = cursorFile('modes', '/tmp/ws-modes');
+      expect(statSync(dirname(file)).mode & 0o777).toBe(0o700);
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+    },
+  );
 
   it('saveCursor persists JSON to disk', () => {
     const poller = new TestPoller('persist', makeConfig(), makeBridge());
@@ -232,7 +346,7 @@ describe('PollingChannelBase', () => {
       .update(longName)
       .digest('hex')
       .slice(0, 16);
-    const files = readdirSync(join(testHome, 'channels'));
+    const files = readdirSync(scopeDir());
     const cursorFile = files.find((f: string) => f.includes(expectedHash));
     expect(cursorFile).toBeDefined();
     expect(cursorFile!.length).toBeLessThanOrEqual(255);
@@ -244,7 +358,7 @@ describe('PollingChannelBase', () => {
     const p2 = new TestPoller(`${prefix}-beta`, makeConfig(), makeBridge());
     p1.saveCursor();
     p2.saveCursor();
-    const files = readdirSync(join(testHome, 'channels')).filter((f: string) =>
+    const files = readdirSync(scopeDir()).filter((f: string) =>
       f.endsWith('-poll-cursor.json'),
     );
     const h1 = createHash('sha256')
