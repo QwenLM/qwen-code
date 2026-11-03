@@ -147,6 +147,7 @@ public interface ManagedAgentSettings {
         public Duration getV3ResultWindow();
         public String getToken();
         public String getProvisioner();
+        public Map<String, String> getProviderOptions();
         public String getWorkspaceId();
         public String getWorkspaceGeneration();
         public String getWorkspaceCwd();
