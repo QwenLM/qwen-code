@@ -491,6 +491,7 @@ The suite runs in the integration job. A scheduled job also runs the whole headl
   - a cron turn's system reminders are the client's, and it carries the client's memory recall; a notification turn gets an interaction span;
   - input queued during a notification turn, and the turn's own background results, no longer continue it at its stop point; they start the next turn;
   - a cron turn cancelled between rounds keeps the results of its last tool batch in history, as a prompt does, and a notification turn whose response is retried shows only the retried text;
+  - a cron turn cancelled after its echo and before its first request keeps its prompt in history and in the record, as a cron turn cancelled while its request is going out does today;
 
   The ACP parity suite covers the common cases unchanged and asserts the date reminder, UserPromptSubmit on tool results, cancelling while that hook runs, and that a batch's approvals come before its calls run.
 
