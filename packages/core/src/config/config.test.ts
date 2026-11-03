@@ -1435,7 +1435,7 @@ describe('Server Config (config.ts)', () => {
         { folderTrust: true, trustedFolder: true },
         true,
       ],
-    ] as [string, Partial<ConfigParameters>, boolean][])(
+    ] as Array<[string, Partial<ConfigParameters>, boolean]>)(
       'gates settings-file project hooks when %s',
       (_label, trust, explicit) => {
         const config = makeConfig({ ...trust, projectHooks });
