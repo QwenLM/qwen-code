@@ -183,7 +183,7 @@ describe('OpenTuiPermissionsDialog rule rows', () => {
     expect(screen.getByText(/Project settings/)).toBeTruthy();
   });
 
-  it('marks a rule whose parentheses do not balance', () => {
+  it('marks a rule the parser rejected as invalid', () => {
     // A rule the parser rejected matches nothing. It stays listed — so it can
     // be seen and deleted — but must say so, or the row reads as active.
     const { container } = renderPermissions([

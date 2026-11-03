@@ -134,4 +134,33 @@ describe('PermissionsDialog', () => {
       ]),
     );
   });
+
+  it('deletes only the selected one of two stored spellings', async () => {
+    // The add path dedupes with an exact `includes`, so a padded entry plus an
+    // exact one can both be stored and both list as the same trimmed row. One
+    // delete removes the row it was asked for, not every entry that trims to
+    // it.
+    const { lastFrame, stdin, setValue } = renderWithRules(
+      [{ raw: 'Bash(docker *)' }],
+      { storedAllowRules: ['  Bash(docker *)  ', 'Bash(docker *)'] },
+    );
+
+    await vi.waitFor(() =>
+      expect(lastFrame() ?? '').toContain('Bash(docker *)'),
+    );
+    stdin.write('\u001B[B');
+    await vi.waitFor(() =>
+      expect(lastFrame() ?? '').toContain('› 2. Bash(docker *)'),
+    );
+    stdin.write('\r');
+    await vi.waitFor(() =>
+      expect(lastFrame() ?? '').toContain('Delete allow rule?'),
+    );
+    stdin.write('\r');
+    await vi.waitFor(() =>
+      expect(setValue).toHaveBeenCalledWith('User', 'permissions.allow', [
+        'Bash(docker *)',
+      ]),
+    );
+  });
 });

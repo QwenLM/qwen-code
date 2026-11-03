@@ -143,7 +143,11 @@ export interface PermissionRuleEntry {
   toolName: string;
   type: 'allow' | 'ask' | 'deny';
   scope: string;
-  /** The rule's parentheses do not balance, so it matches nothing. */
+  /**
+   * The rule opens a specifier and does not end at its closing `)`, so it
+   * matches nothing. Balance is not the test: `Bash(rm -rf /)*` is balanced
+   * and still invalid.
+   */
   invalid?: boolean;
 }
 
@@ -479,7 +483,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         if (rule.invalid) {
           setRuleInputError(
             t(
-              'Malformed rule: unbalanced parentheses. Use the format ToolName(specifier).',
+              'Malformed rule: write it as ToolName(specifier) so it ends at the closing ")" of the specifier.',
             ),
           );
           return;

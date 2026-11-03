@@ -19,7 +19,10 @@ import { SettingScope } from '../../config/settings.js';
 import { TextInput } from './shared/TextInput.js';
 import { Colors } from '../colors.js';
 import { t } from '../../i18n/index.js';
-import { permissionRuleLabel } from '../utils/permission-rule-label.js';
+import {
+  permissionRuleLabel,
+  withoutDeletedRule,
+} from '../utils/permission-rule-label.js';
 import type { PermissionManager } from '@qwen-code/qwen-code-core/permissions/permission-manager.js';
 import type {
   RuleWithSource,
@@ -479,7 +482,7 @@ export function PermissionsDialog({
     if (rule.invalid) {
       setRuleInputError(
         t(
-          'Malformed rule: unbalanced parentheses. Use the format ToolName(specifier).',
+          'Malformed rule: write it as ToolName(specifier) so it ends at the closing ")" of the specifier.',
         ),
       );
       return;
@@ -532,16 +535,9 @@ export function PermissionsDialog({
       const scopeRules = perms?.[ruleType];
       // `parseRule` trims, so compare against the trimmed stored entry or a
       // rule written with surrounding whitespace is removed from memory only.
-      if (
-        scopeRules?.some(
-          (r: string) =>
-            typeof r === 'string' && r.trim() === deleteTarget.rule.raw,
-        )
-      ) {
-        const updated = scopeRules.filter(
-          (r: string) =>
-            typeof r !== 'string' || r.trim() !== deleteTarget.rule.raw,
-        );
+      if (!scopeRules) continue;
+      const updated = withoutDeletedRule(scopeRules, deleteTarget.rule.raw);
+      if (updated) {
         settings.setValue(scope, `permissions.${ruleType}`, updated);
         break;
       }
