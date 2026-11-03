@@ -432,7 +432,7 @@ A difference fails the scenario unless it is listed with a linked issue.
 
 A continuation's request runs under a prompt id of its own on the current loop and under the turn's prompt id on the shared loop; the suite compares them as one.
 
-The suite runs in the integration job. A scheduled job also runs the whole headless integration suite with the setting on.
+The suite runs in the integration job. The nightly E2E run, and one started by hand, also runs the whole integration suite with the setting on, in a Linux leg without a sandbox; it is the scheduled job a surface's default change waits on.
 
 ## Compatibility
 
