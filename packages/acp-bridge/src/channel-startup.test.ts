@@ -11,7 +11,83 @@ import type { AcpChannel } from './channel.js';
 import { BridgeTimeoutError } from './status.js';
 
 describe('channel startup', () => {
-  it('uses the remaining factory budget for initialize', async () => {
+  it('completes a slow cold startup and reuses its channel', async () => {
+    vi.useFakeTimers();
+    const handle = makeChannel({ initializeDelayMs: 30 });
+    let releaseFactory!: (channel: AcpChannel) => void;
+    const factory = new Promise<AcpChannel>((resolve) => {
+      releaseFactory = resolve;
+    });
+    const channelFactory = vi.fn(() => factory);
+    const bridge = makeBridge({ initializeTimeoutMs: 50, channelFactory });
+
+    try {
+      const preheat = bridge.preheat().catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(45);
+      releaseFactory(handle.channel);
+      await vi.advanceTimersByTimeAsync(30);
+      expect(await preheat).toBeUndefined();
+      expect(bridge.isChannelLive()).toBe(true);
+      await bridge.preheat();
+      expect(channelFactory).toHaveBeenCalledOnce();
+      expect(handle.agent.initializeCalls).toHaveLength(1);
+      expect(handle.killed).toBe(false);
+    } finally {
+      releaseFactory(handle.channel);
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    [75, 25],
+    [101, 1],
+  ])(
+    'clamps initialize to %i ms elapsed / %i ms remaining after a stalled factory',
+    async (elapsedMs, expectedBudgetMs) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      const handle = makeChannel({
+        initializeImpl: () => new Promise(() => {}),
+      });
+      let releaseFactory!: (channel: AcpChannel) => void;
+      const factory = new Promise<AcpChannel>((resolve) => {
+        releaseFactory = resolve;
+      });
+      const bridge = makeBridge({
+        initializeTimeoutMs: 50,
+        channelFactory: () => factory,
+      });
+
+      try {
+        const settled = vi.fn();
+        const preheat = bridge.preheat().catch((error: unknown) => error);
+        void preheat.then(settled);
+        vi.setSystemTime(elapsedMs);
+        releaseFactory(handle.channel);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(handle.agent.initializeCalls).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(expectedBudgetMs - 1);
+        expect(handle.killed).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(settled).toHaveBeenCalledOnce();
+        expect(handle.killed).toBe(true);
+        expect(await preheat).toMatchObject({
+          name: 'BridgeTimeoutError',
+          label: 'initialize',
+          timeoutMs: expectedBudgetMs,
+        });
+        expect(bridge.isChannelLive()).toBe(false);
+      } finally {
+        releaseFactory(handle.channel);
+        await vi.advanceTimersByTimeAsync(50);
+        await bridge.shutdown();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('gives initialize its own budget after a slow channel factory', async () => {
     vi.useFakeTimers();
     let finishInitialize!: () => void;
     const initializing = new Promise<void>((resolve) => {
@@ -38,18 +114,22 @@ describe('channel startup', () => {
 
     try {
       const preheat = bridge.preheat().catch((error: unknown) => error);
+      // The factory spends 30 ms of its own 50 ms budget before the handshake
+      // starts. Regression for #14977: `initialize` used to inherit the 20 ms
+      // the factory left, so a cold spawn could starve it down to the 1 ms
+      // floor and no retry could ever succeed.
       await vi.advanceTimersByTimeAsync(30);
       releaseFactory(handle.channel);
       await vi.advanceTimersByTimeAsync(0);
       expect(handle.agent.initializeCalls).toHaveLength(1);
-      await vi.advanceTimersByTimeAsync(19);
+      await vi.advanceTimersByTimeAsync(49);
       expect(signal?.aborted).toBe(false);
       expect(handle.killed).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
 
       const error = await preheat;
       expect(error).toBeInstanceOf(BridgeTimeoutError);
-      expect(error).toMatchObject({ label: 'initialize', timeoutMs: 20 });
+      expect(error).toMatchObject({ label: 'initialize', timeoutMs: 50 });
       expect(signal?.reason).toBe(error);
       expect(handle.killed).toBe(true);
       expect(bridge.isChannelLive()).toBe(false);

@@ -9040,16 +9040,45 @@ export function createSessionControlPlane(
       }
     };
     const promise = (async (): Promise<BridgeRestoredSession> => {
+      const restoreDeadlineAt = Date.now() + sessionRestoreTimeoutMs;
+      async function withinRestoreBudget<T>(
+        operation: () => Promise<T>,
+      ): Promise<T> {
+        const remainingMs = Math.min(
+          sessionRestoreTimeoutMs,
+          restoreDeadlineAt - Date.now(),
+        );
+        const error = new SessionRestoreTimeoutError(
+          req.sessionId,
+          action,
+          sessionRestoreTimeoutMs,
+        );
+        if (remainingMs <= 0) throw error;
+        let timer: NodeJS.Timeout | undefined;
+        const timeout = new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(error), remainingMs);
+          timer.unref();
+        });
+        try {
+          return await Promise.race([operation(), timeout]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      }
       const engine = executionEngines
-        ? await selectExecutionEngine({
-            operation: action,
-            request: Object.freeze({ ...req, workspaceCwd: workspaceKey }),
-            daemonOwnedStandalone: daemonOwnedStandaloneRestore,
-          })
+        ? await withinRestoreBudget(() =>
+            selectExecutionEngine({
+              operation: action,
+              request: Object.freeze({ ...req, workspaceCwd: workspaceKey }),
+              daemonOwnedStandalone: daemonOwnedStandaloneRestore,
+            }),
+          )
         : undefined;
       assertExpectedEngine(engine);
       pendingRestoreEvents.set(req.sessionId, restoreEvents);
-      const restoreChannel = getChannelInfo(await harness.ensure(engine));
+      const restoreChannel = getChannelInfo(
+        await withinRestoreBudget(() => harness.ensure(engine)),
+      );
       restoreLifecycle.channel = restoreChannel;
       void harness.settleReleasedRuntimeWork('session restore owner selected');
       if (restoreChannel.harness.isDying) {
@@ -9094,9 +9123,21 @@ export function createSessionControlPlane(
       let replayHasMore: true | undefined;
       let replayAnchorRecordId: string | undefined;
       let restoreAskUserQuestionHint = false;
-      // Before the restore deadline starts; this never throws.
-      await deliverRememberedUserLanguage(restoreChannel);
+      await withinRestoreBudget(() =>
+        deliverRememberedUserLanguage(restoreChannel),
+      );
       try {
+        const remainingRestoreMs = Math.min(
+          sessionRestoreTimeoutMs,
+          restoreDeadlineAt - Date.now(),
+        );
+        if (remainingRestoreMs <= 0) {
+          throw new SessionRestoreTimeoutError(
+            req.sessionId,
+            action,
+            sessionRestoreTimeoutMs,
+          );
+        }
         const rawRestore = telemetry.withSpan(
           'session.restore',
           {
@@ -9238,7 +9279,7 @@ export function createSessionControlPlane(
                 sessionRestoreTimeoutMs,
               ),
             );
-          }, sessionRestoreTimeoutMs);
+          }, remainingRestoreMs);
           timer.unref();
           void observedRestore.then(
             (value) => {
@@ -9699,11 +9740,14 @@ export function createSessionControlPlane(
           resolveSettlement();
         }
       },
-      () => {
+      (error: unknown) => {
         if (restoreLifecycle.phase === 'active') {
           telemetry.event('session.restore.public_result', {
             'qwen-code.daemon.session_restore.action': action,
-            'qwen-code.daemon.session_restore.result': 'failure',
+            'qwen-code.daemon.session_restore.result':
+              error instanceof SessionRestoreTimeoutError
+                ? 'timeout'
+                : 'failure',
             'qwen-code.daemon.session_restore.timeout_ms':
               sessionRestoreTimeoutMs,
             ...(ci ? { 'qwen-code.daemon.acp_channel.id': ci.id } : {}),

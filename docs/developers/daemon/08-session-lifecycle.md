@@ -379,10 +379,8 @@ resets that window, including when the channel was already live.
 
 - `BridgeOptions.maxSessions` (default 32) — cap.
 - `BridgeOptions.sessionScope` (default `'single'`; optional `'thread'`).
-- `BridgeOptions.initializeTimeoutMs` (default 10s) — ACP child startup
-  deadline (Channel factory + `initialize` handshake) and default request
-  timeout.
-- `BridgeOptions.sessionRestoreTimeoutMs` (default 60s) — ACP `loadSession` / `unstable_resumeSession` deadline. Defaults to 60s; an explicitly configured initialize timeout can raise it, but never lower it.
+- `BridgeOptions.initializeTimeoutMs` (default 10s) — each of the channel factory and `initialize` handshake receives this startup budget, with their pair capped at twice it. Failed startup may additionally await one such budget for teardown. Other ACP requests retain this value as their default timeout.
+- `BridgeOptions.sessionRestoreTimeoutMs` (default 60s) — one budget for engine selection, channel readiness, remembered-language delivery, and ACP `loadSession` / `unstable_resumeSession`. The ACP request uses the remaining budget after preparation. Defaults to 60s; an explicitly configured initialize timeout can raise it, but never lower it.
 - `BridgeOptions.channelIdleTimeoutMs` (unset or `0` reaps after runtime work drains, except that plain preheat is preserved for first use; a positive value or active keepalive delays reaping, and the longer delay wins).
 - Capability tags: `session_create`, `session_startup_config`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_info`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_generation`, `session_btw`, `session_btw_stream`, `session_context_usage`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_resources`, `session_status`, `non_blocking_prompt`.
 

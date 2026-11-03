@@ -51,6 +51,7 @@ import {
 } from './bridgeErrors.js';
 import {
   BridgeTimeoutError,
+  SessionRestoreTimeoutError,
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
 } from './status.js';
@@ -4324,45 +4325,95 @@ describe('paired per-engine operations', () => {
       ]);
     });
 
-    it('sends the remembered language before a Managed restore and its deadline', async () => {
+    it.each([600, 900])(
+      'includes %i ms of language delivery in a Managed restore deadline',
+      async (languageDelayMs) => {
+        vi.useFakeTimers();
+        const log: string[] = [];
+        const language = deferred<Record<string, unknown>>();
+        const managed = engineChannel('managed', {
+          extMethodImpl: async (method, params) => {
+            if (method !== SERVE_CONTROL_EXT_METHODS.userLanguage) return {};
+            log.push(`managed:userLanguage:${String(params['language'])}`);
+            await language.promise;
+            return refreshed(0)(params);
+          },
+          loadSessionImpl: async (restore) => {
+            log.push(`managed:loadSession:${restore.sessionId}`);
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            return receipt('managed');
+          },
+        });
+        const p = paired(
+          { initializeTimeoutMs: 1_000, sessionRestoreTimeoutMs: 1_000 },
+          engineChannel('legacy'),
+          managed,
+        );
+        await expect(p.bridge.setUserLanguage(request)).rejects.toBeInstanceOf(
+          SessionNotFoundError,
+        );
+        const restore = p.bridge
+          .loadSession({
+            workspaceCwd: WS_A,
+            sessionId: 'persisted',
+          })
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(languageDelayMs);
+        expect(log).toEqual(['managed:userLanguage:zh']);
+        language.resolve({});
+        await vi.advanceTimersByTimeAsync(200);
+        if (languageDelayMs === 600) {
+          expect(await restore).toMatchObject({ sessionId: 'persisted' });
+        } else {
+          expect(await restore).toBeInstanceOf(SessionRestoreTimeoutError);
+        }
+        expect(log).toEqual([
+          'managed:userLanguage:zh',
+          'managed:loadSession:persisted',
+        ]);
+      },
+    );
+
+    it('expires during language delivery without a late restore or lost admission', async () => {
       vi.useFakeTimers();
-      const log: string[] = [];
       const language = deferred<Record<string, unknown>>();
       const managed = engineChannel('managed', {
-        extMethodImpl: async (method, params) => {
+        extMethodImpl: async (method) => {
           if (method !== SERVE_CONTROL_EXT_METHODS.userLanguage) return {};
-          log.push(`managed:userLanguage:${String(params['language'])}`);
-          await language.promise;
-          return refreshed(0)(params);
-        },
-        loadSessionImpl: async (restore) => {
-          log.push(`managed:loadSession:${restore.sessionId}`);
-          await new Promise((resolve) => setTimeout(resolve, 200));
-          return receipt('managed');
+          return await language.promise;
         },
       });
       const p = paired(
-        { initializeTimeoutMs: 1_000, sessionRestoreTimeoutMs: 1_000 },
+        {
+          initializeTimeoutMs: 1_000,
+          sessionRestoreTimeoutMs: 100,
+          maxSessions: 1,
+        },
         engineChannel('legacy'),
         managed,
       );
       await expect(p.bridge.setUserLanguage(request)).rejects.toBeInstanceOf(
         SessionNotFoundError,
       );
-      const restore = p.bridge.loadSession({
-        workspaceCwd: WS_A,
-        sessionId: 'persisted',
-      });
-      await vi.advanceTimersByTimeAsync(900);
-      expect(log).toEqual(['managed:userLanguage:zh']);
-      language.resolve({});
-      // The slow language answer does not eat into the restore deadline.
-      await vi.advanceTimersByTimeAsync(200);
-      await expect(restore).resolves.toMatchObject({ sessionId: 'persisted' });
-      expect(log).toEqual([
-        'managed:userLanguage:zh',
-        'managed:loadSession:persisted',
-      ]);
+      const restore = p.bridge
+        .loadSession({ workspaceCwd: WS_A, sessionId: 'expired-language' })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(await restore).toBeInstanceOf(SessionRestoreTimeoutError);
+      expect(managed.agent.loadSessionCalls).toHaveLength(0);
+      expect(managed.killed).toBe(false);
+      language.resolve({ language: 'zh', sessions: 0, failed: 0 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(managed.agent.loadSessionCalls).toHaveLength(0);
+      await expect(
+        p.bridge.loadSession({
+          workspaceCwd: WS_A,
+          sessionId: 'next-language',
+        }),
+      ).resolves.toMatchObject({ sessionId: 'next-language' });
+      expect(
+        managed.agent.loadSessionCalls.map((call) => call.sessionId),
+      ).toEqual(['next-language']);
     });
 
     it('does not block a Managed session when the remembered language fails', async () => {

@@ -138,6 +138,15 @@ export function createChannelStartup({
     const privateParentCapability = randomBytes(32).toString('base64url');
     const acpChannelId = randomUUID();
     const startupStartedAt = Date.now();
+    // Startup is two phases with different costs: spawning the ACP child and
+    // the `initialize` handshake. Budgeting both from one `initTimeoutMs` let
+    // a cold spawn silently spend the handshake's share — a 5s spawn left 5s
+    // for `initialize`, and a spawn that consumed the whole budget left it the
+    // `Math.max(1, ...)` floor, which can never succeed (#14977). Give each
+    // phase its own budget and keep the pair bounded by one absolute deadline,
+    // so a wedged startup still fails in bounded time.
+    const spawnBudgetMs = initTimeoutMs;
+    const startupDeadlineAt = startupStartedAt + spawnBudgetMs + initTimeoutMs;
     const startupAbort = new AbortController();
     const startup: ChannelFactoryStartupContext = {};
     const factoryPromise = telemetry.withSpan(
@@ -162,7 +171,7 @@ export function createChannelStartup({
     try {
       channel = await withTimeout(
         factoryPromise,
-        initTimeoutMs,
+        spawnBudgetMs,
         'channel factory',
       );
     } catch (error) {
@@ -290,9 +299,14 @@ export function createChannelStartup({
           'qwen-code.daemon.acp_channel.id': acpChannelId,
         },
         async () => {
-          const remainingStartupMs = Math.max(
+          // The child now exists, so the handshake gets its own full budget
+          // instead of whatever the spawn left over. The deadline only binds
+          // when the spawn overran its timer (event-loop stall), and the
+          // result never exceeds `initTimeoutMs`, so `withTimeout` stays
+          // inside the timer range validated for this option.
+          const initializeBudgetMs = Math.max(
             1,
-            initTimeoutMs - (Date.now() - startupStartedAt),
+            Math.min(initTimeoutMs, startupDeadlineAt - Date.now()),
           );
           const response = await withTimeout(
             Promise.race([
@@ -304,7 +318,7 @@ export function createChannelStartup({
               ),
               channelUnavailableReject(channel, 'during initialize'),
             ]),
-            remainingStartupMs,
+            initializeBudgetMs,
             'initialize',
           );
           const capabilities = negotiateChannelCapabilities(
@@ -319,7 +333,7 @@ export function createChannelStartup({
             const attributes = getChannelStartupProfileAttributes(
               response,
               Date.now(),
-              initTimeoutMs,
+              initializeBudgetMs,
             );
             if (attributes && telemetry.setActiveSpanAttributes) {
               telemetry.setActiveSpanAttributes(attributes);
