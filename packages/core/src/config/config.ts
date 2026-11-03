@@ -11806,7 +11806,7 @@ export class Config {
 
   /**
    * Get project-level hooks configuration.
-   * Returns hooks from workspace settings, only in trusted folders.
+   * Returns hooks from workspace settings, only in explicitly trusted folders.
    * Used by HookRegistry to load project-specific hooks with proper source attribution.
    */
   getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
@@ -11824,16 +11824,46 @@ export class Config {
       : undefined;
   }
 
+  /**
+   * The project hooks block the interactive trust gate withholds, for the
+   * `/hooks` listing only — it shows what is configured but switched off.
+   * Never feed this to the registry; `getProjectHooks()` is the execution
+   * accessor. `undefined` when the trust gate is not what withholds them.
+   */
+  getTrustWithheldProjectHooks():
+    | { [K in HookEventName]?: HookDefinition[] }
+    | undefined {
+    if (this.getBareMode() || this.isSafeMode()) {
+      return undefined;
+    }
+    if (!this.isInteractive() || this.isExplicitlyTrustedFolder()) {
+      return undefined;
+    }
+    return this.readProjectHooksBlock();
+  }
+
   private readProjectHooks():
     | { [K in HookEventName]?: HookDefinition[] }
     | undefined {
     if (this.getBareMode() || this.isSafeMode()) {
       return undefined;
     }
-    // Only return project hooks if workspace is trusted
-    if (!this.isTrustedFolder()) {
+    // Interactive sessions need explicit trust for repo-supplied hooks: a
+    // disabled folder-trust feature must not silently authorize them.
+    // Non-interactive invocations (`-p`, piped stdin, ACP/SDK embeddings)
+    // treat trust as implicit — the caller chose the directory and there is
+    // no prompt surface; only run them in directories you trust. An explicit
+    // refusal is already enforced upstream: an untrusted workspace
+    // contributes no settings, so it supplies no project hooks.
+    if (this.isInteractive() && !this.isExplicitlyTrustedFolder()) {
       return undefined;
     }
+    return this.readProjectHooksBlock();
+  }
+
+  private readProjectHooksBlock():
+    | { [K in HookEventName]?: HookDefinition[] }
+    | undefined {
     // The legacy merged `hooks` stands in only when no scope was supplied.
     const hooks =
       this.projectHooks ?? (this.hasScopedHooks() ? undefined : this.hooks);

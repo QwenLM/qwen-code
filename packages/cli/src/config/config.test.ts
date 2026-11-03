@@ -1571,6 +1571,21 @@ describe('loadCliConfig', () => {
     expect(provider).not.toHaveBeenCalled();
   });
 
+  it('derives folderTrust from settings and defaults it to false', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    // The interactive project-hook gate reads Config.folderTrust, so a
+    // derivation defaulting it to true would silently arm repo-supplied hooks.
+    await loadCliConfig({}, argv);
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].folderTrust).toBe(
+      false,
+    );
+    await loadCliConfig({ security: { folderTrust: { enabled: true } } }, argv);
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].folderTrust).toBe(
+      true,
+    );
+  });
+
   it.each(['bare', 'safe', 'ssh', 'agent-host', 'provisional'] as const)(
     'H03 strips a supplied ancestor provider from %s sessions',
     async (kind) => {

@@ -184,6 +184,22 @@ describe('tool hook additionalContext delivery', () => {
     expect(count(result, marker('PreToolUse', 'call_allow'))).toBe(1);
   });
 
+  it('headless: runs project hooks with the trust feature disabled (implicit trust)', async () => {
+    const server = await setup(
+      'hook context headless implicit trust',
+      'read_file',
+      'note.txt',
+      'call_implicit_trust',
+      undefined,
+      { security: { folderTrust: { enabled: false } } },
+    );
+    await rig.run('read the note', ...fakeModelLaunchArgs(server));
+
+    expect(hookHits()).toEqual([
+      { event: 'PreToolUse', call: 'call_implicit_trust' },
+    ]);
+  });
+
   it('headless: delivers PreToolUse context with a denied result', async () => {
     const server = await setup(
       'hook context headless deny',
@@ -254,6 +270,63 @@ describe('tool hook additionalContext delivery', () => {
       count(result, marker('PostToolUseFailure', 'call_exec_fail:code:1')),
     ).toBe(1);
   });
+
+  it('interactive: withholds project hooks in an untrusted folder and says why', async () => {
+    const server = await setup(
+      'hook context interactive untrusted',
+      'read_file',
+      'note.txt',
+      'call_untrusted',
+    );
+    // Every other fixture runs pre-trusted, so drop the rig's trust grant to
+    // reach the withheld branch the gate exists for.
+    writeFileSync(
+      join(rig.testDir!, '.qwen-home', 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    writeFileSync(
+      join(rig.testDir!, '.qwen-home', 'trustedFolders.json'),
+      JSON.stringify({}),
+    );
+    const { ptyProcess } = rig.runInteractive(...fakeModelLaunchArgs(server));
+    let output = '';
+    ptyProcess.onData((data) => {
+      output += data;
+    });
+    const waitFor = makeWaitFor(rig, () => output);
+    // The pane wraps the warning, so match on a fragment inside one line.
+    await waitFor('the folder-trust dialog', () =>
+      output.includes('Do you trust this folder?'),
+    );
+    // The third option declines trust; esc alone leaves the dialog open.
+    ptyProcess.write('\u001b[B');
+    ptyProcess.write('\u001b[B');
+    ptyProcess.write('\r');
+    await waitFor('the composer after declining trust', () =>
+      output.includes('Type your message'),
+    );
+    await waitFor('the withheld-hooks warning', () =>
+      output.includes('Project hooks in .qwen/settings.json were not loaded'),
+    );
+
+    const prompt = 'read the note';
+    ptyProcess.write(prompt);
+    await waitFor('the prompt to echo', () => output.includes(prompt));
+    ptyProcess.write('\r');
+    await waitFor('the follow-up model request', () =>
+      server.requests.some(
+        (request) =>
+          request.body['stream'] === true &&
+          JSON.stringify(request.body['messages']).includes('"role":"tool"'),
+      ),
+    );
+    await exitInteractive(ptyProcess, waitFor, () => output);
+
+    expect(hookHits()).toEqual([]);
+    const result = toolResultFor(server, 'call_untrusted');
+    expect(result).toContain('hello from note');
+    expect(count(result, marker('PreToolUse', 'call_untrusted'))).toBe(0);
+  }, 360_000);
 
   it('interactive: delivers the first PreToolUse ask context once after approval', async () => {
     const server = await setup(

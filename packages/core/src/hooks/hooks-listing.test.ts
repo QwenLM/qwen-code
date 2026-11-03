@@ -46,6 +46,7 @@ function makeConfig(options: {
   userHooks?: Record<string, unknown>;
   projectHooks?: Record<string, unknown>;
   withheldProjectHooks?: Record<string, unknown>;
+  trustWithheldProjectHooks?: Record<string, unknown>;
   rejected?: boolean;
   extensions?: Array<{ isActive: boolean; hooks?: Record<string, unknown> }>;
 }): HooksListingConfig {
@@ -72,6 +73,9 @@ function makeConfig(options: {
     getWithheldProjectHooks: vi
       .fn()
       .mockReturnValue(options.withheldProjectHooks),
+    getTrustWithheldProjectHooks: vi
+      .fn()
+      .mockReturnValue(options.trustWithheldProjectHooks),
     isProjectHooksRejected: vi.fn().mockReturnValue(options.rejected ?? false),
     getExtensions: vi.fn().mockReturnValue(options.extensions ?? []),
   } as unknown as HooksListingConfig;
@@ -489,6 +493,20 @@ describe('buildHooksListing', () => {
     },
   );
 
+  it('lists trust-withheld project hooks as disabled with the trust reason', async () => {
+    const listed = await lintRows({
+      trustWithheldProjectHooks: LINT_SETTINGS,
+    });
+
+    expect(
+      listed.map((row) => [row.source, row.enabled, row.disabledReason]),
+    ).toEqual([
+      [HooksConfigSource.User, true, undefined],
+      [HooksConfigSource.Project, false, 'untrusted'],
+    ]);
+    expect(listed[1]).toMatchObject({ trustGated: true });
+  });
+
   describe('without a hook system', () => {
     const hook = (command: string) => ({
       [HookEventName.PreToolUse]: [
@@ -522,6 +540,23 @@ describe('buildHooksListing', () => {
         ['user', './user.sh', 'Bash', false, 'allHooksDisabled'],
         ['project', './project.sh', 'Bash', false, 'allHooksDisabled'],
         ['extensions', './extension.sh', 'Bash', false, 'allHooksDisabled'],
+      ]);
+    });
+
+    it('still lists trust-withheld project hooks under disableAllHooks', () => {
+      const listed = rows({
+        hookSystem: false,
+        disableAll: true,
+        trustWithheldProjectHooks: hook('./project.sh'),
+      });
+
+      expect(listed).toMatchObject([
+        {
+          source: 'project',
+          displayText: './project.sh',
+          enabled: false,
+          disabledReason: 'allHooksDisabled',
+        },
       ]);
     });
 

@@ -123,7 +123,7 @@ class JournalLockContractTest {
     }
 
     private long roots() {
-        return trace.successful(TENANT, SESSION).stream().filter(event -> event.sql().startsWith("select tenant_id, session_id, csi_guard from ma_session ")).count();
+        return trace.successful(TENANT, SESSION).stream().filter(event -> event.sql().startsWith("select tenant_id, session_id, is_csi_guard from ma_session ")).count();
     }
 
     private long heads() {

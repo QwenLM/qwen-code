@@ -12775,8 +12775,10 @@ export class Session implements SessionContext {
         homeDir: homeConfineRoot,
         homeQwenDir,
         // The project `.qwen/loop.md` is repo-controlled, so an untrusted folder
-        // must not read it and feed it to the model (mirrors getProjectHooks()'s
-        // trust gate). The home/global `~/.qwen/loop.md` is user-owned and stays
+        // must not read it and feed it to the model. This is the legacy
+        // folder-trust check: loop.md is prompt content, while the stricter
+        // explicit-trust gate (getProjectHooks()) covers executable repo
+        // content. The home/global `~/.qwen/loop.md` is user-owned and stays
         // allowed. Pass a getter, not a snapshot: isTrustedFolder() can flip
         // mid-session on an IDE workspace-trust update, and the resolver outlives
         // a single tick — re-read it on every resolve() so a trusted→untrusted

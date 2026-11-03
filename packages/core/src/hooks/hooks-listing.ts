@@ -114,7 +114,14 @@ export type HooksListingConfig = Pick<
   | 'getProjectHooks'
   | 'getExtensions'
 > &
-  Partial<Pick<Config, 'getWithheldProjectHooks' | 'isProjectHooksRejected'>>;
+  Partial<
+    Pick<
+      Config,
+      | 'getWithheldProjectHooks'
+      | 'isProjectHooksRejected'
+      | 'getTrustWithheldProjectHooks'
+    >
+  >;
 
 const PROMPT_DISPLAY_LIMIT = 50;
 
@@ -309,7 +316,14 @@ function rowsFromSettings(
   const scopes: Array<[unknown, HooksConfigSource]> = [
     [config.getSystemHooks(), HooksConfigSource.System],
     [config.getUserHooks(), HooksConfigSource.User],
-    [config.getProjectHooks(), HooksConfigSource.Project],
+    // The gates withhold the block from the execution accessor; the listing
+    // still shows what is configured (allDisabled outranks the other reasons).
+    [
+      config.getTrustWithheldProjectHooks?.() ??
+        config.getWithheldProjectHooks?.() ??
+        config.getProjectHooks(),
+      HooksConfigSource.Project,
+    ],
   ];
   for (const extension of config.getExtensions()) {
     if (extension.isActive && extension.hooks) {
@@ -323,6 +337,7 @@ function settingsRows(
   scopes: ReadonlyArray<[unknown, HooksConfigSource]>,
   gates: HooksListingGates,
   pendingApproval: boolean | 'rejected' = false,
+  trustGated = false,
 ): HooksListingRow[] {
   const rows: HooksListingRow[] = [];
   // The registry drops a hook whose source, event, identity, matcher and
@@ -384,6 +399,7 @@ function settingsRows(
                 origin: 'registry',
                 entryEnabled: true,
                 ...(pendingApproval ? { pendingApproval } : {}),
+                ...(trustGated ? { trustGated: true } : {}),
               },
               gates,
             ),
@@ -459,6 +475,20 @@ export function buildHooksListing(config: HooksListingConfig): HooksListing {
         [[withheld, HooksConfigSource.Project]],
         gates,
         config.isProjectHooksRejected?.() ? 'rejected' : true,
+      ),
+    );
+  }
+  // The interactive trust gate withholds project hooks too; list them with
+  // the trust reason. The two accessors are mutually exclusive: while the
+  // trust gate withholds, getWithheldProjectHooks() returns nothing.
+  const trustWithheld = config.getTrustWithheldProjectHooks?.();
+  if (trustWithheld) {
+    listing.rows.push(
+      ...settingsRows(
+        [[trustWithheld, HooksConfigSource.Project]],
+        { ...gates, trustedFolder: false },
+        false,
+        true,
       ),
     );
   }
