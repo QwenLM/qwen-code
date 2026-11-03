@@ -1647,6 +1647,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   protected async pollOnce(): Promise<void> {
     this.inboundPersistenceBlocked = false;
+    this.publicationAuditBlocked = false;
     this.publicationAuditKeysCache = undefined;
 
     if (this.deliverToBoundSessions) {
@@ -1862,6 +1863,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // notification window each poll.
     if (
       !this.inboundPersistenceBlocked &&
+      !this.publicationAuditBlocked &&
       !this.hasCursorBlockingTasks() &&
       this.pendingCursorUpdatedAt
     ) {
@@ -2267,10 +2269,30 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // re-listed event would then be claimed and published a SECOND time.
     // Recovery already retires tasks whose source key is in the audit;
     // apply the same check before claiming so the window is closed for
-    // fresh claims too. Fail-closed: an unreadable audit skips the event
-    // this poll (the per-notification catch retries it next poll).
+    // fresh claims too. Fail-closed: an unreadable audit freezes the whole
+    // poll's cursor (see the catch below) so no event is marked read past
+    // a refusal to dispatch.
     const sourceKey = `${envelope.chatId}|${envelope.threadId ?? ''}|${envelope.messageId ?? ''}`;
-    if (this.publicationAuditKeysThisPoll().has(sourceKey)) {
+    let auditKeys: Set<string>;
+    try {
+      auditKeys = this.publicationAuditKeysThisPoll();
+    } catch (err) {
+      // Fail CLOSED on the whole poll, not just this notification: the
+      // per-notification catch would skip the event without claiming a
+      // task, and the end-of-poll cursor commit (mark-read included) would
+      // then advance past it — the thread never re-lists, so "retry next
+      // poll" would become permanent silent consumption. Freeze the
+      // cursor; the next poll retries the read and the events.
+      this.publicationAuditBlocked = true;
+      process.stderr.write(
+        `[Channel:${this.name}] publication audit unreadable; freezing the notification cursor this poll: ${sanitizeLogText(
+          err instanceof Error ? err.message : String(err),
+          200,
+        )}\n`,
+      );
+      return false;
+    }
+    if (auditKeys.has(sourceKey)) {
       this.applyTaskDedupe(dedupe);
       return true;
     }
@@ -2404,7 +2426,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // target) must never fall through to the public channel path —
       // deliverToBoundSession retires a targetless watch event privately.
       if (bound || isWatch) {
-        await this.deliverToBoundSession(task, envelope);
+        const settled = await this.deliverToBoundSession(task, envelope);
+        if (!settled) return false;
       } else {
         await this.handleInbound(envelope);
       }
@@ -2696,6 +2719,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   private publicationAuditKeysCache: Set<string> | undefined;
+  private publicationAuditBlocked = false;
 
   /**
    * Publication audit keys cached for the current poll (reset at pollOnce
@@ -2709,7 +2733,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   private readPublicationAuditKeys(strict = false): Set<string> {
     try {
-      const keys = new Set<string>();
+      // Last outcome per source key wins: a `posting` followed by a
+      // terminal `failed` means the reply never landed, so the event is
+      // NOT consumed and must stay retryable. A `posting` with no terminal
+      // record (crash mid-post) stays consumed — the ambiguous outcome
+      // resolves to at-most-once, matching recovery's contract.
+      const lastOutcome = new Map<string, PublicationAuditRecord['outcome']>();
       for (const line of readFileSync(
         this.channelFilePath('github-audit.jsonl'),
         'utf-8',
@@ -2720,15 +2749,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           if (
             record.outcome === 'posted' ||
             record.outcome === 'suppressed' ||
-            record.outcome === 'posting'
+            record.outcome === 'posting' ||
+            record.outcome === 'failed'
           ) {
-            keys.add(
+            lastOutcome.set(
               `${record.repository}|${record.threadId ?? ''}|${record.sourceMessageId ?? ''}`,
+              record.outcome,
             );
           }
         } catch {
           continue;
         }
+      }
+      const keys = new Set<string>();
+      for (const [key, outcome] of lastOutcome) {
+        if (outcome !== 'failed') keys.add(key);
       }
       return keys;
     } catch (err) {
@@ -3274,7 +3309,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private async deliverToBoundSession(
     task: InboundTaskRecord,
     envelope: Envelope,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const boundSessions = this.boundSessions;
     let delivery = task.delivery;
     const isWatch = envelope.messageId?.startsWith('watch:') === true;
@@ -3287,10 +3322,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         process.stderr.write(
           `[Channel:${this.name}] watch event ${envelope.messageId} has no bound delivery target; retiring without public fallback\n`,
         );
-        return;
+        return true;
       }
       await this.handleInbound(envelope);
-      return;
+      return true;
     }
     // The target was frozen at claim/detection time. Re-validate it against
     // the latest COMPLETE snapshot: a live rebind must not keep delivering
@@ -3321,7 +3356,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         );
         this.transitionInboundTask(task.id, 'running', { delivery: undefined });
         task.delivery = undefined;
-        return;
+        return true;
       }
     }
     // The channel path runs the group/sender/pairing gates inside
@@ -3340,7 +3375,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         process.stderr.write(
           `[Channel:${this.name}] bound event ${envelope.messageId} rejected by the channel preflight (sender/route gates); retiring without delivery\n`,
         );
-        return;
+        return true;
       }
     }
     const prompt = this.buildBoundSessionPrompt(envelope);
@@ -3385,7 +3420,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             prompt,
             idempotencyKey,
           );
-          return;
+          return true;
         } catch (retryErr) {
           if (!(retryErr instanceof BoundSessionGoneError)) throw retryErr;
           // The re-resolved candidate is gone too. Evict it and fall through
@@ -3403,14 +3438,42 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         );
         this.transitionInboundTask(task.id, 'running', { delivery: undefined });
         task.delivery = undefined;
-        return;
+        return true;
       }
       // Comment events keep today's contract: fall back to the normal
-      // channel path so the event is not lost.
+      // channel path so the event is not lost — but only when absence is
+      // authoritative. Under a partial/failed scan an unscannable
+      // workspace may still hold a never-observed follower of this PR, and
+      // the public reply would be irreversible: defer as backpressure
+      // (delivery cleared so recovery re-resolves without a doomed POST)
+      // until a complete snapshot lands, same rule as unmatched claims.
+      // The false return tells runInboundTask the task was deferred HERE:
+      // its success path must not retire the record as delivered.
+      if (this.lastBindingsPartial || this.boundRefreshFailed) {
+        const deferCount = (task.deferCount ?? 0) + 1;
+        task.delivery = undefined;
+        if (deferCount >= MAX_BOUND_DEFERRALS) {
+          this.retireBoundTask(
+            task,
+            `gone fallback deferred ${deferCount} times; binding snapshot never completed`,
+          );
+          return false;
+        }
+        this.transitionInboundTask(task.id, 'failed', {
+          delivery: undefined,
+          error:
+            'gone fallback under incomplete binding snapshot; absence not established',
+          attempts: task.attempts ?? 0,
+          deferCount,
+          backpressure: true,
+        });
+        return false;
+      }
       this.transitionInboundTask(task.id, 'running', { delivery: undefined });
       task.delivery = undefined;
       await this.handleInbound(envelope);
     }
+    return true;
   }
 
   private prWatchStatePath(): string {
@@ -4106,7 +4169,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         );
         return;
       }
-      await this.runInboundTask(task);
+      const delivered = await this.runInboundTask(task);
+      if (!delivered) {
+        // Preserve per-PR ordering: a failed/deferred event retries via
+        // recovery next poll; delivering later pendings now would arrive
+        // out of order. Pending and fired are already persisted, so
+        // stopping here loses nothing.
+        return;
+      }
     }
   }
 

@@ -6368,9 +6368,14 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       });
       // A previous incarnation published the reply (audit `posted`),
       // removed the task, and lost the cursor save (mark-read failure or
-      // crash). The re-listed comment must not be claimed and published a
-      // second time: the audit is the durable consumption record, and the
-      // claim path must honor it exactly like recovery does.
+      // crash). The re-listed batch must not be claimed and published a
+      // second time. The AGGREGATE lane does not self-record dispatched
+      // comments (the claim path does), so the cursor assertion below
+      // independently witnesses the audit branch's dedupe recording.
+      const batchId = `agg:${createHash('sha256')
+        .update('C_1001')
+        .digest('hex')
+        .slice(0, 40)}`;
       const auditPath = inboundTaskPath().replace(
         'github-inbound-tasks.json',
         'github-audit.jsonl',
@@ -6382,12 +6387,12 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           outcome: 'posted',
           repository: 'owner/repo',
           threadId: 'pr:42',
-          sourceMessageId: '1001',
+          sourceMessageId: batchId,
         })}\n`,
         'utf-8',
       );
       mockOctokit.paginate
-        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([prNotification('comment')])
         .mockResolvedValueOnce([makeComment()]);
       await pollOnce();
       expect(channel.inboundEnvelopes).toHaveLength(0);
@@ -6397,6 +6402,163 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         cursor: { dispatchedComments?: string[] };
       };
       expect(ch.cursor.dispatchedComments).toContain('C_1001');
+    });
+
+    it('freezes the cursor when the publication audit is unreadable (R5-A1)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      // An unreadable audit (here: a directory at the audit path) must
+      // fail CLOSED on the whole poll: skipping the notification while
+      // the cursor commits would mark it read and never re-list it —
+      // permanent silent consumption instead of the promised retry.
+      const auditPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-audit.jsonl',
+      );
+      mkdirSync(auditPath, { recursive: true });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(existsSync(inboundTaskPath())).toBe(false);
+      expect(
+        mockOctokit.rest.activity.markNotificationsAsRead,
+      ).not.toHaveBeenCalled();
+      const ch = channel as unknown as {
+        cursor: { lastProcessedAt: string };
+      };
+      expect(ch.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
+
+      // Once the audit is readable again, the SAME event delivers: the
+      // frozen cursor re-listed it.
+      rmSync(auditPath, { recursive: true, force: true });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+    });
+
+    it('keeps a posting-then-failed audit event retryable but consumes a bare posting (R5-A2)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      const auditPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-audit.jsonl',
+      );
+      mkdirSync(dirname(auditPath), { recursive: true });
+      const row = (sourceMessageId: string, outcome: string) =>
+        JSON.stringify({
+          outcome,
+          repository: 'owner/repo',
+          threadId: 'pr:42',
+          sourceMessageId,
+        });
+      // posting -> failed: the reply never landed; the event must retry.
+      // posting alone (crash mid-post): ambiguous, consumed at-most-once.
+      writeFileSync(
+        auditPath,
+        `${row('1001', 'posting')}\n${row('1001', 'failed')}\n${row('1002', 'posting')}\n`,
+        'utf-8',
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            updated_at: '2026-07-02T11:00:00.000Z',
+            subject: {
+              title: 'Test PR',
+              url: 'https://api.github.com/repos/owner/repo/pulls/42',
+              type: 'PullRequest',
+            },
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({
+            id: 1002,
+            node_id: 'C_1002',
+            created_at: '2026-07-02T10:30:00.000Z',
+            updated_at: '2026-07-02T10:30:00.000Z',
+          }),
+        ]);
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      const ch = channel as unknown as {
+        cursor: { dispatchedComments?: string[] };
+      };
+      expect(ch.cursor.dispatchedComments).toContain('C_1002');
+    });
+
+    it('defers the gone-session public fallback under a partial snapshot (R5-A3)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings
+        .mockResolvedValueOnce({ bindings: [makeBinding()], partial: false })
+        .mockResolvedValue({ bindings: [], partial: true });
+      boundSessions.deliverPrompt.mockRejectedValue(
+        new BoundSessionGoneError('bound-session'),
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      // Gone is authoritative for THAT session, but under a partial scan
+      // an invisible workspace may still follow the PR: the public
+      // fallback would be irreversible, so defer instead.
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      const tasks = readInboundTasks();
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!['backpressure']).toBe(true);
+      expect(tasks[0]!['delivery']).toBeUndefined();
+
+      // Complete snapshot: absence established, public reply exactly once.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+    });
+
+    it('surfaces a bound preflight rejection instead of consuming silently', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          // Group-shaped envelopes are gated by the GROUP sender policy.
+          groups: { '*': { senders: 'allowlist', allowedUsers: [] } },
+        },
+        { boundSessions },
+      );
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        mockOctokit.paginate
+          .mockResolvedValueOnce([prNotification()])
+          .mockResolvedValueOnce([makeComment()]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(
+          stderr.mock.calls.some((call) =>
+            String(call[0]).includes('rejected by the channel preflight'),
+          ),
+        ).toBe(true);
+      } finally {
+        stderr.mockRestore();
+      }
+      expect(existsSync(inboundTaskPath())).toBe(false);
     });
 
     it('never delivers privately to a channel-owned session and defers its PR under partial', async () => {
@@ -7196,13 +7358,27 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
 
       await pollOnce();
 
-      // Both candidates were tried, then the comment took the public path
-      // instead of dead-lettering on the second Gone.
+      // Both candidates were tried and are authoritatively gone, but the
+      // last scan was PARTIAL: an invisible workspace may still follow the
+      // PR, so the fallback defers instead of publishing irreversibly —
+      // and the Gone must not burn the failure budget into a dead-letter.
       expect(
         boundSessions.deliverPrompt.mock.calls.map((call) => call[0]),
       ).toEqual(['S1', 'S2']);
-      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes).toHaveLength(0);
       expect(existsSync(boundDeadLetterPath())).toBe(false);
+      const tasks = readInboundTasks();
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!['backpressure']).toBe(true);
+
+      // A complete snapshot establishes absence: public fallback once.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(1);
       expect(existsSync(inboundTaskPath())).toBe(false);
     });
 
@@ -10528,7 +10704,21 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         { boundSessions },
       );
       mockOctokit.paginate.mockResolvedValueOnce([]);
-      await pollOnce();
+      const disabledStderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        await pollOnce();
+        expect(
+          disabledStderr.mock.calls.some((call) =>
+            String(call[0]).includes(
+              'until subscriptions are re-enabled and the pending events reconcile',
+            ),
+          ),
+        ).toBe(true);
+      } finally {
+        disabledStderr.mockRestore();
+      }
       expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
       expect(readInboundTasks()).toHaveLength(1);
       expect(
@@ -10610,6 +10800,46 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(record.source.messageId).toBe(
         'watch:merge_conflict:42:seed-0:1751446800000',
       );
+    });
+
+    it('stops the watch drain at the first failed delivery to preserve per-PR order (R5-B3)', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      const key1 = 'watch:head_change:42:1:1751446800000';
+      const key2 = 'watch:ci_failure:42:sha-1:1751446801000';
+      seedWatchState({
+        'owner/repo#42': {
+          headSha: 'sha-1',
+          ci: 'success',
+          mergeableState: 'clean',
+          prState: 'open',
+          fired: [],
+          pending: [
+            makePendingWatch({ key: key1, text: 'earlier event' }),
+            makePendingWatch({ key: key2, text: 'later event' }),
+          ],
+        },
+      });
+      boundSessions.deliverPrompt.mockRejectedValueOnce(
+        new BoundSessionQueueFullError('bound-session'),
+      );
+      const watch = channel as unknown as {
+        runPrStateWatch: () => Promise<void>;
+        refreshBoundSessions: () => Promise<void>;
+      };
+      await watch.refreshBoundSessions();
+      mockPull({});
+      await watch.runPrStateWatch();
+      // The FIRST event failed (queue full): the later one must NOT jump
+      // ahead of it. It stays queued for the next drain; the failed one
+      // retries via recovery.
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+        'earlier event',
+      );
+      const entry = readWatchState().entries['owner/repo#42']!;
+      const queued = entry['pending'] as Array<{ key: string }>;
+      expect(queued.map((p) => p.key)).toEqual([key2]);
+      expect(entry['fired']).toContain(key1);
     });
   });
 });

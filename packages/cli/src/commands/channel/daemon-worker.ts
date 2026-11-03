@@ -417,7 +417,12 @@ export function createBoundSessionsAccessor(
     // dormant delivery into a gone-session public fallback.
     if (!partial) cwdBySession.clear();
     for (const entry of body.bindings) {
-      if (entry === null || typeof entry !== 'object') continue;
+      if (entry === null || typeof entry !== 'object') {
+        // A dropped session row is a degraded answer too: its bindings
+        // are unknown, so the snapshot must not claim completeness.
+        partial = true;
+        continue;
+      }
       const record = entry as Record<string, unknown>;
       const { sessionId, workspaceCwd, prs } = record;
       if (
@@ -425,6 +430,7 @@ export function createBoundSessionsAccessor(
         typeof workspaceCwd !== 'string' ||
         !Array.isArray(prs)
       ) {
+        partial = true;
         continue;
       }
       const entries: PrBindingSummary['prs'] = [];
@@ -1036,9 +1042,13 @@ export async function runChannelDaemonWorker(
           // Draining/transitioning workspaces (400 workspace_mismatch,
           // 503 unavailable), restore conflicts and session limits are
           // retry-later backpressure, not delivery failures: burning the
-          // attempt budget on them would silently lose the event.
+          // attempt budget on them would silently lose the event. The
+          // mutation rate limit (429) and spawn/handshake jitter (any
+          // 5xx) are equally transient — a poll waking many dormant
+          // sessions can hit the resume rate limit in one burst.
           if (
-            status === 503 ||
+            status === 429 ||
+            (typeof status === 'number' && status >= 500) ||
             status === 409 ||
             (status === 400 && code === 'workspace_mismatch')
           ) {

@@ -2986,6 +2986,32 @@ describe('runChannelDaemonWorker', () => {
       await handle.close();
     });
 
+    it.each([429, 500, 502])(
+      'maps wake HTTP %i to BoundSessionUnavailableError (R5-B1)',
+      async (status) => {
+        const sdk = createSdk();
+        sdk.DaemonSessionClient.resume.mockRejectedValue({
+          status,
+          body: { code: status === 429 ? 'rate_limited' : 'internal_error' },
+        });
+        sdk.client.requestRest
+          .mockResolvedValueOnce(
+            jsonResponse(404, { code: 'session_not_found' }),
+          )
+          .mockResolvedValueOnce(boundSessionResponse());
+
+        const { handle, boundSessions } = await startBoundWorker(sdk);
+
+        // The resume mutation rate limit (429) and spawn/handshake jitter
+        // (5xx) are transient: classifying them as delivery failures would
+        // burn the attempt budget and dead-letter a recoverable event.
+        await expect(
+          boundSessions.deliverPrompt('bound-1', 'x'),
+        ).rejects.toBeInstanceOf(BoundSessionUnavailableError);
+        await handle.close();
+      },
+    );
+
     it('maps an archived wake conflict to BoundSessionGoneError', async () => {
       const sdk = createSdk();
       sdk.DaemonSessionClient.resume.mockRejectedValue({
@@ -4668,6 +4694,30 @@ describe('createBoundSessionsAccessor', () => {
     expect(snapshot.bindings[0]!.prs).toEqual([
       { number: 1, url: 'https://github.com/o/r/pull/1' },
     ]);
+  });
+
+  it('flags a dropped session row as partial (R5-C3)', async () => {
+    const requestRest = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        bindings: [
+          null,
+          {
+            sessionId: 'session-1',
+            workspaceCwd: '/ws/a',
+            prs: [{ number: 1, url: 'https://github.com/o/r/pull/1' }],
+          },
+        ],
+        partial: false,
+      }),
+    );
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    const snapshot = await accessor.listPrBindings();
+
+    // A dropped row's bindings are unknown: the answer is degraded, and
+    // the valid session still projects.
+    expect(snapshot.partial).toBe(true);
+    expect(snapshot.bindings).toHaveLength(1);
   });
 
   it('rebuilds the wake cache when sessions leave the bindings', async () => {
