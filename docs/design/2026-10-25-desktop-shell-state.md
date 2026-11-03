@@ -45,7 +45,7 @@ Both call `require_runtime_origin`, which compares the calling webview's URL ori
 
 `packages/web-shell/client/config/shell-state.ts` owns the desktop branch:
 
-- `hydrateShellState()` runs before the first render. It reads both keys over IPC and caches them in memory. A `localStorage` copy that matches the native value is dropped; one that differs is newer — within one launch `writeShellState` mirrors every change while hydration clears the copy — so it is re-pushed rather than deleted, otherwise a reload would resurrect a stale catalog and destroy the only surviving copy of the newer one.
+- `hydrateShellState()` runs before the first render. It reads both keys over IPC and caches them in memory. A `localStorage` copy that matches the native value is dropped. One that differs is adopted only when it carries this launch's stamp — `writeShellState` records the launch nonce beside the mirror — because a stamp-less or foreign copy can outlive its launch on disk and reappear when an ephemeral port is reused, where it is older than the catalog the launches in between built; such a copy is dropped and the native value kept. With no native copy at all there is nothing to lose, so a pre-desktop mirror is still migrated.
 - Migration takes only the current origin's `localStorage` entries. Older launches wrote under ports that no longer resolve and are not recoverable.
 - `readShellState` prefers the hydrated cache in the desktop shell and falls back to `localStorage` elsewhere.
 - `writeShellState` writes through to `localStorage` (the browser path and an in-session fallback) and to IPC. The IPC write is fire-and-forget: a failure leaves the session working, the mirror survives a same-origin reload, and only a launch on a fresh origin loses the value.

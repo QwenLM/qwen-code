@@ -45,7 +45,7 @@ WebView2 按 origin 隔离 `localStorage` 与 `sessionStorage`，因此每次启
 
 `packages/web-shell/client/config/shell-state.ts` 负责桌面分支：
 
-- `hydrateShellState()` 在首次渲染前运行。它通过 IPC 读取两个键并缓存到内存。与原生值相同的 `localStorage` 副本会被删除；与之不同的副本更新的 —— 在一次启动内 `writeShellState` 每次变更都写镜像，而水合会清空镜像 —— 因此必须回推而不是删除，否则重载会用过期目录复活并销毁唯一一份较新的副本。
+- `hydrateShellState()` 在首次渲染前运行。它通过 IPC 读取两个键并缓存到内存。与原生值相同的 `localStorage` 副本会被删除。与之不同的副本只有在带有**本次启动的标记**时才被采纳——`writeShellState` 会把启动 nonce 与镜像一起写入——因为缺少标记或属于其它启动的副本可能在其启动结束后留在磁盘上，并在临时端口被复用时重新出现，而此时它比中间几次启动构建的目录更旧；这类副本会被删除，保留原生值。若完全没有原生副本则无可损失，因此桌面端之前的镜像仍会被迁移。
 - 迁移只取当前 origin 的 `localStorage` 条目。更早的启动写入的是已无法解析的端口，无法恢复。
 - `readShellState` 在桌面外壳中优先使用已水合的缓存，在其他环境中退回 `localStorage`。
 - `writeShellState` 同时写入 `localStorage`（浏览器路径与会话内回退）和 IPC。IPC 写入是 fire-and-forget：失败时当前会话仍可用，镜像在同源重载下存活，只有在全新 origin 上启动才会丢失该值。

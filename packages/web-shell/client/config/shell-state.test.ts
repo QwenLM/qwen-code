@@ -13,6 +13,12 @@ function installDesktop(invoke: Invoke): void {
   (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
 }
 
+/** The mirror plus stamp `writeShellState` leaves behind for a launch. */
+function seedMirror(key: string, value: string, launch = 'launch-nonce'): void {
+  window.localStorage.setItem(key, value);
+  window.localStorage.setItem('qwen-shell-mirror-launch', launch);
+}
+
 describe('desktop shell state', () => {
   beforeEach(() => {
     vi.resetModules();
@@ -94,7 +100,7 @@ describe('desktop shell state', () => {
     installDesktop(invoke);
     // The mirror only ever differs after a native write that silently did not
     // land, so it is the surviving copy of the newer value.
-    window.localStorage.setItem('qwen-remote-connections', '[]');
+    seedMirror('qwen-remote-connections', '[]');
 
     const { hydrateShellState, readShellState } = await import('./shell-state');
     await hydrateShellState();
@@ -108,6 +114,33 @@ describe('desktop shell state', () => {
     });
   });
 
+  it('keeps the native catalog when the mirror came from an earlier launch', async () => {
+    const invoke = vi.fn(
+      async (command: string): Promise<unknown> =>
+        command === 'shell_state_read' ? '["https://new.example"]' : undefined,
+    );
+    installDesktop(invoke);
+    // An ephemeral port came back around: this origin still holds the mirror a
+    // previous launch wrote, and the catalog has moved on since.
+    seedMirror(
+      'qwen-remote-connections',
+      '["https://old.example"]',
+      'earlier-launch',
+    );
+
+    const { hydrateShellState, readShellState } = await import('./shell-state');
+    await hydrateShellState();
+
+    expect(readShellState('qwen-remote-connections')).toBe(
+      '["https://new.example"]',
+    );
+    expect(window.localStorage.getItem('qwen-remote-connections')).toBeNull();
+    expect(invoke).not.toHaveBeenCalledWith(
+      'shell_state_write',
+      expect.objectContaining({ key: 'qwen-remote-connections' }),
+    );
+  });
+
   it('keeps the mirror when re-pushing it is rejected', async () => {
     const invoke = vi.fn(async (command: string): Promise<unknown> => {
       if (command === 'shell_state_read') return '["https://old.example"]';
@@ -116,10 +149,7 @@ describe('desktop shell state', () => {
       );
     });
     installDesktop(invoke);
-    window.localStorage.setItem(
-      'qwen-remote-connections',
-      '["https://new.example"]',
-    );
+    seedMirror('qwen-remote-connections', '["https://new.example"]');
 
     const { hydrateShellState, readShellState } = await import('./shell-state');
     await hydrateShellState();
@@ -187,6 +217,26 @@ describe('desktop shell state', () => {
       key: 'qwen-workspace-hosts',
       nonce: 'launch-nonce',
     });
+  });
+
+  it('stamps the mirror it writes with this launch', async () => {
+    const invoke = vi.fn(async (): Promise<unknown> => null);
+    installDesktop(invoke);
+
+    const { hydrateShellState, writeShellState } = await import(
+      './shell-state'
+    );
+    await hydrateShellState();
+    writeShellState('qwen-remote-connections', '["https://new.example"]');
+
+    expect(window.localStorage.getItem('qwen-remote-connections')).toBe(
+      '["https://new.example"]',
+    );
+    // Without this stamp the next hydration would treat the mirror as an
+    // earlier launch's copy and drop it instead of re-pushing it.
+    expect(window.localStorage.getItem('qwen-shell-mirror-launch')).toBe(
+      'launch-nonce',
+    );
   });
 
   it('keeps the launch nonce across a reload that drops the fragment', async () => {

@@ -15,6 +15,13 @@ export const SHELL_STATE_KEYS = [
 export type ShellStateKey = (typeof SHELL_STATE_KEYS)[number];
 
 const SHELL_NONCE_STORAGE_KEY = 'qwen-shell-nonce';
+/**
+ * Stamps the `localStorage` mirror with the launch that wrote it. WebView2 keeps
+ * each origin's storage on disk, so a mirror outlives its launch; when an
+ * ephemeral port comes back around, an unstamped mirror would look newer than
+ * the native catalog the other launches have been building.
+ */
+const SHELL_MIRROR_STAMP_KEY = 'qwen-shell-mirror-launch';
 
 const cache = new Map<string, string | null>();
 let hydration: Promise<void> | undefined;
@@ -61,8 +68,20 @@ function readLocal(key: string): string | null {
 function writeLocal(key: string, value: string): void {
   try {
     window.localStorage.setItem(key, value);
+    window.localStorage.setItem(SHELL_MIRROR_STAMP_KEY, readShellNonce());
   } catch {
     // The desktop copy below still persists it; a browser keeps the session copy.
+  }
+}
+
+/** Whether the mirror on this origin was written by this launch. */
+function mirrorFromThisLaunch(): boolean {
+  const launch = readShellNonce();
+  if (!launch) return false;
+  try {
+    return window.localStorage.getItem(SHELL_MIRROR_STAMP_KEY) === launch;
+  } catch {
+    return false;
   }
 }
 
@@ -125,10 +144,17 @@ async function hydrateDesktop(): Promise<void> {
         });
         const local = readLocal(key);
         if (local !== null && local !== native) {
-          // Within one launch every change writes the mirror and hydration
-          // clears it, so a copy that differs from the native value can only
-          // be newer: a native write that silently never landed. Re-push it
-          // instead of deleting the only surviving copy.
+          // A copy this launch wrote is newer than the native value: a write
+          // that silently never landed. A copy from an earlier launch can
+          // reappear when an ephemeral port is reused, and there it is older —
+          // re-pushing it would drop whatever the launches in between added.
+          // With no native copy at all there is nothing to lose, so migration
+          // still adopts the mirror.
+          if (typeof native === 'string' && !mirrorFromThisLaunch()) {
+            cache.set(key, native);
+            removeLocal(key);
+            return;
+          }
           await invoke('shell_state_write', {
             key,
             value: local,
