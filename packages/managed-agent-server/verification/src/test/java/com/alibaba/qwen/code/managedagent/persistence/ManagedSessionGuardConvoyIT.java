@@ -261,11 +261,12 @@ class ManagedSessionGuardConvoyIT {
             long lifecycleElapsedMs = (System.nanoTime() - lifecycleBefore) / 1_000_000;
             assertThat(lifecycleElapsedMs).isLessThan(BOUNDED_FAILURE_CEILING_MS);
 
-            // A Turn submit admits through the same placement row on its
-            // per-turn path, so it is bounded and named the same way.
+            // A Turn submit no longer admits through the placement row: it
+            // orders on its Session row and the storage's fence row instead,
+            // so a held tenant guard neither parks nor names it.
             var agents = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
                     new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-            assertFastGuardFailure(() -> transactions.execute(ignored -> agents.insertTurnCommand(tenant,
+            assertNotGuardBound(() -> transactions.execute(ignored -> agents.insertTurnCommand(tenant,
                     "turn.submit", "submit-witness", "a".repeat(64), "victim", List.of(), "b".repeat(64))));
         } finally {
             manager.rollback(holdTx);
@@ -762,6 +763,24 @@ class ManagedSessionGuardConvoyIT {
             Thread.sleep(100);
         }
         throw new AssertionError("Timed out waiting for a lock wait on " + table);
+    }
+
+    private static void assertNotGuardBound(Callable<Object> action) throws Exception {
+        long before = System.nanoTime();
+        try (var pool = Executors.newSingleThreadExecutor()) {
+            try {
+                pool.submit(action).get(30, TimeUnit.SECONDS);
+            } catch (ExecutionException error) {
+                if (error.getCause() instanceof ManagedAgentException refusal) {
+                    assertThat(refusal.getCode()).isNotEqualTo("tenant_guard_contended");
+                } else {
+                    assertThat(error.getCause()).isNotInstanceOf(org.springframework.dao.PessimisticLockingFailureException.class)
+                            .isNotInstanceOf(org.springframework.dao.QueryTimeoutException.class);
+                }
+            }
+        }
+        long elapsedMs = (System.nanoTime() - before) / 1_000_000;
+        assertThat(elapsedMs).isLessThan(BOUNDED_FAILURE_CEILING_MS);
     }
 
     private static void assertFastGuardFailure(Callable<Object> action) throws Exception {
