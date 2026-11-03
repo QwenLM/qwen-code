@@ -302,6 +302,64 @@ describe('process liveness', () => {
       isTeardownTargetAlive(123, { platform: 'linux', kill: groupGone }),
     ).toBe(false);
   });
+
+  // `kill(-pid, 0)` answers for members that can no longer write: a daemon the
+  // container's PID 1 has not reaped stays a zombie in its group, so the drain
+  // would wait out its window and fail teardown on a runtime that is gone.
+  it('reads a group of unreaped zombies as stopped', () => {
+    const groupAlive = () => {};
+    const procEntries = () => ['123', '124', 'self'];
+    const zombieStats = (statPath) => {
+      const pid = statPath.split('/')[2];
+      return `${pid} (qwen) Z 1 123 123 0 -1 0\n`;
+    };
+    const oneWriter = (statPath) => {
+      const pid = statPath.split('/')[2];
+      const state = pid === '124' ? 'S' : 'Z';
+      return `${pid} (qwen) ${state} 1 123 123 0 -1 0\n`;
+    };
+
+    expect(
+      isTeardownTargetAlive(123, {
+        platform: 'linux',
+        kill: groupAlive,
+        readDir: procEntries,
+        readStat: zombieStats,
+      }),
+    ).toBe(false);
+    // The writer arm is what the group handle exists for: one live member
+    // keeps the group alive even though the leader itself is a zombie.
+    expect(
+      isTeardownTargetAlive(123, {
+        platform: 'linux',
+        kill: groupAlive,
+        readDir: procEntries,
+        readStat: oneWriter,
+      }),
+    ).toBe(true);
+  });
+
+  it('keeps the platform arms the group probe falls back to', () => {
+    const leaderAliveGroupGone = (pid) => {
+      if (pid < 0) throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+    };
+    const groupDenied = (pid) => {
+      if (pid < 0) throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+    };
+
+    // Windows has no process groups and `terminate` uses taskkill, so the pid
+    // answer is the only one available there: a live leader stays alive even
+    // though the negative-pid probe is the one that fails.
+    expect(
+      isTeardownTargetAlive(123, {
+        platform: 'win32',
+        kill: leaderAliveGroupGone,
+      }),
+    ).toBe(true);
+    expect(
+      isTeardownTargetAlive(123, { platform: 'linux', kill: groupDenied }),
+    ).toBe(true);
+  });
 });
 
 // The smoke spawns the app path it is handed, and a shebang script is not
