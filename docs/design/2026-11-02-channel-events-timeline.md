@@ -158,6 +158,13 @@ The page's completeness banner therefore cannot claim a timeline is whole when
 any of those happened. The budget is spent in whole tail windows, so its flag
 always means "whole journals were left out".
 
+Every line still has to be parsed to filter it, but the accumulator is trimmed
+to the newest `limit` once it passes four times that, so a busy workspace's
+poll does not retain every record it parsed. The trim cannot change the answer:
+a dropped record is older than every kept one, and the sort is stable, so
+records sharing an instant keep their write order. Trimming counts as hitting
+the record limit, so it sets `truncated` too.
+
 A missing scope directory means "no Channel has written yet" and stays an empty
 result. Any other read failure (permissions, I/O) propagates, and the route
 answers 5xx instead of an empty list: "this workspace's Channels did nothing"
@@ -222,8 +229,9 @@ must not be the answer when the journal could not be read.
 ## Risks
 
 - Ambient skips on a busy group Channel can be frequent. The journal is capped
-  by rotation and the page shows the newest 100 by default; nothing is
-  unbounded.
+  by rotation and the page asks for the newest 200 events; nothing is
+  unbounded. (100 is the route's own default, used when a caller sends no
+  `limit`.)
 - A synchronous append sits in the message path. The record is small, and a
   failure is swallowed; the alternative (async queue) would lose the last
   events on a crash, which is when they matter.

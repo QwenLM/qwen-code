@@ -53,6 +53,13 @@ const CHANNEL_EVENT_READ_TAIL_BYTES = 256 * 1024;
 const CHANNEL_EVENT_READ_BUDGET_BYTES = 4 * 1024 * 1024;
 const CHANNEL_EVENT_READ_CHUNK_BYTES = 64 * 1024;
 const CHANNEL_EVENT_MAX_FILES = 32;
+/**
+ * Filtering needs every line parsed, but retaining every parsed record would
+ * hold a whole workspace's journals in memory on a page that re-polls every
+ * 5 s. Past this multiple of `limit` the accumulator is trimmed to the newest
+ * `limit`, which bounds retention without changing the answer.
+ */
+const CHANNEL_EVENT_READ_TRIM_FACTOR = 4;
 const EVENT_FILE_SUFFIX = 'channel-events.jsonl';
 
 export type ChannelEventDetail = Record<string, string | number | boolean>;
@@ -90,7 +97,11 @@ export interface ChannelEventQuery {
 
 export interface ChannelEventQueryResult {
   events: ChannelEventRecord[];
-  /** True when older events were dropped to honour `limit`. */
+  /**
+   * True when older events are missing: the record limit was reached, a
+   * journal was left out by the file cap or the byte budget, or a journal was
+   * taller than the tail window.
+   */
   truncated: boolean;
 }
 
@@ -365,6 +376,13 @@ async function eventFiles(
   };
 }
 
+// Journal lines carry ISO timestamps from different writers; order by the
+// parsed instant so a record with an offset cannot jump the queue.
+function eventTime(record: ChannelEventRecord): number {
+  const parsed = Date.parse(record.at);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 /**
  * Reads the newest events across the given workspace scopes. Every candidate
  * path is a file found inside an already-resolved scope directory, so a query
@@ -388,6 +406,7 @@ export async function readChannelEvents(
   const events: ChannelEventRecord[] = [];
   let budget = CHANNEL_EVENT_READ_BUDGET_BYTES;
   let clipped = false;
+  let overLimit = false;
 
   for (const scopeDir of query.scopeDirs) {
     const candidates = await eventFiles(scopeDir, query.channels);
@@ -420,16 +439,21 @@ export async function readChannelEvents(
         }
         events.push(record);
       }
+      if (events.length > limit * CHANNEL_EVENT_READ_TRIM_FACTOR) {
+        // Dropping the oldest here cannot change the answer: every later
+        // record sorts after an equal instant, so a dropped record can never
+        // re-enter the newest `limit`. The sort is stable, which is what makes
+        // that hold for records sharing a timestamp.
+        events.sort((left, right) => eventTime(left) - eventTime(right));
+        events.splice(0, events.length - limit);
+        overLimit = true;
+      }
     }
   }
 
-  // Journal lines carry ISO timestamps from different writers; order by the
-  // parsed instant so a record with an offset cannot jump the queue.
-  const timeOf = (record: ChannelEventRecord): number => {
-    const parsed = Date.parse(record.at);
-    return Number.isFinite(parsed) ? parsed : 0;
-  };
-  events.sort((left, right) => timeOf(left) - timeOf(right));
-  if (events.length <= limit) return { events, truncated: clipped };
-  return { events: events.slice(-limit), truncated: true };
+  events.sort((left, right) => eventTime(left) - eventTime(right));
+  if (overLimit || events.length > limit) {
+    return { events: events.slice(-limit), truncated: true };
+  }
+  return { events, truncated: clipped };
 }

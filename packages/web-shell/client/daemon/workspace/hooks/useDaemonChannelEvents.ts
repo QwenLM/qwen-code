@@ -71,6 +71,9 @@ export function useDaemonChannelEvents(
   // after it fails, so every snapshot is tagged with the query that produced
   // it and mismatched data is masked — otherwise the last workspace's rows
   // (and their Channel names) would show under the newly selected one.
+  // NUL cannot appear in any part: the management route rejects control
+  // characters in an instance name, journal names are sanitized, and a
+  // filesystem path cannot contain it.
   const queryKey = [
     workspaceCwd ?? '',
     channel ?? '',

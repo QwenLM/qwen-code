@@ -14,6 +14,7 @@ import type {
   DaemonAuthStatusSnapshot,
   DaemonCapabilities,
   DaemonChannelEvent,
+  DaemonChannelEventsQuery,
   DaemonChannelEventsSnapshot,
   DaemonChannelMutationResult,
   DaemonChannelPairingApprovalResult,
@@ -736,10 +737,9 @@ export interface DaemonWorkspaceActions {
 
   /** The provider workspace's Channel event journal, newest last. A scoped
    * workspace reads its own through its client. */
-  listChannelEvents(query?: {
-    limit?: number;
-    types?: readonly DaemonChannelEventEntry['type'][];
-  }): Promise<DaemonChannelEventList>;
+  listChannelEvents(
+    query?: DaemonChannelEventsQuery,
+  ): Promise<DaemonChannelEventList>;
 
   // Goals (session-scoped runtimes, listed workspace-wide)
   listGoals(): Promise<DaemonGoalList>;

@@ -6672,7 +6672,7 @@ const ZH: Messages = {
   'sidebar.moveWorkspaceDown': '下移',
   'sidebar.plugins': '插件',
   'sidebar.channels': '频道',
-  'sidebar.channelEvents': '渠道事件',
+  'sidebar.channelEvents': '频道事件',
   'sidebar.sessionSource': '会话来源',
   'sidebar.archiveSessionSource': '归档会话来源',
   'sidebar.sessionSource.tasks': '任务',

@@ -5022,7 +5022,11 @@ export interface DaemonChannelEvent {
 
 export interface DaemonChannelEventsSnapshot {
   events: DaemonChannelEvent[];
-  /** True when older events were dropped to honour the requested limit. */
+  /**
+   * True when older events are missing: the record limit was reached, a
+   * journal was left out by the route's read bounds, or a journal was taller
+   * than the tail window the route reads.
+   */
   truncated: boolean;
 }
 

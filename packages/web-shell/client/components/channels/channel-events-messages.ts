@@ -47,12 +47,12 @@ export const CHANNEL_EVENTS_MESSAGES_EN: Record<string, ChannelEventsMessage> =
 
 export const CHANNEL_EVENTS_MESSAGES_ZH: Record<string, ChannelEventsMessage> =
   {
-    'channelEvents.title': '渠道事件',
+    'channelEvents.title': '频道事件',
     'channelEvents.subtitle':
-      '每个渠道做了什么：接收或跳过了什么、发表了什么、入站任务如何流转、轮询是否正常。',
+      '每个频道做了什么：接收或跳过了什么、发表了什么、入站任务如何流转、轮询是否正常。',
     'channelEvents.refresh': '刷新',
-    'channelEvents.filterChannel': '渠道',
-    'channelEvents.allChannels': '全部渠道',
+    'channelEvents.filterChannel': '频道',
+    'channelEvents.allChannels': '全部频道',
     'channelEvents.filterType': '类型',
     'channelEvents.typeAll': '全部',
     'channelEvents.type.inbound': '入站',
@@ -71,9 +71,9 @@ export const CHANNEL_EVENTS_MESSAGES_ZH: Record<string, ChannelEventsMessage> =
     'channelEvents.outcome.cancelled': '已取消',
     'channelEvents.emptyTitle': '还没有事件',
     'channelEvents.emptyDescription':
-      '渠道轮询、收到消息或发表回复后，事件会出现在这里。',
-    'channelEvents.errorTitle': '无法加载渠道事件',
-    'channelEvents.unavailable': '当前工作区未启用渠道管理，无法查看渠道事件。',
+      '频道轮询、收到消息或发表回复后，事件会出现在这里。',
+    'channelEvents.errorTitle': '无法加载频道事件',
+    'channelEvents.unavailable': '当前工作区未启用频道管理，无法查看频道事件。',
     'channelEvents.truncated': '更早的事件未显示。',
     'channelEvents.loading': '正在加载事件…',
     'channelEvents.duration': (v) => `${v?.ms ?? 0} 毫秒`,

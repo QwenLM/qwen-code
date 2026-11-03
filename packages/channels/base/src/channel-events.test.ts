@@ -214,6 +214,45 @@ describe('channel events journal', async () => {
     expect(truncated).toBe(true);
   });
 
+  it('trims the accumulator without changing which events come back', async () => {
+    // Four journals whose records interleave in time and share instants, read
+    // freshest-first: a trim that kept the last-written rows instead of the
+    // newest ones, or that disturbed the order of equal instants, would differ
+    // from the same read with a limit large enough never to trim.
+    for (let index = 0; index < 10; index += 1) {
+      for (let channel = 0; channel < 4; channel += 1) {
+        append(index, `chan-${channel}`);
+      }
+    }
+    const scopeDirs = [channelEventScopeDir(cwd)];
+
+    const whole = await readChannelEvents({ scopeDirs, limit: 500 });
+    expect(whole.events).toHaveLength(40);
+    expect(whole.truncated).toBe(false);
+
+    const trimmed = await readChannelEvents({ scopeDirs, limit: 3 });
+    expect(trimmed.truncated).toBe(true);
+    expect(trimmed.events).toEqual(whole.events.slice(-3));
+  });
+
+  it('reports truncation when trimming leaves exactly the limit', async () => {
+    // 21 records with limit 5: the accumulator passes 4 x 5 and is trimmed to
+    // 5, so the final count alone cannot reveal that older events were dropped.
+    for (let index = 0; index < 21; index += 1) append(index);
+
+    const { events, truncated } = await readChannelEvents({
+      scopeDirs: [channelEventScopeDir(cwd)],
+      limit: 5,
+    });
+
+    expect(events).toHaveLength(5);
+    expect(truncated).toBe(true);
+    expect(events[0]?.at).toBe(new Date(2026, 0, 1, 0, 0, 16).toISOString());
+    expect(events.at(-1)?.at).toBe(
+      new Date(2026, 0, 1, 0, 0, 20).toISOString(),
+    );
+  });
+
   it('reports truncation when a single journal is taller than the tail window', async () => {
     // ~1 KiB per record: a 1 MiB journal holds ~1000 records, but the 256 KiB
     // tail window only reaches the newest ~250 — fewer than the 500 limit, so
