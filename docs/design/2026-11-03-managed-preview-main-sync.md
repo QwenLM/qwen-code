@@ -16,6 +16,8 @@ Retain main's optional runtime modules and provider registry. The external provi
 
 Keep the preview's verified-payload concurrent dispatch and terminal failed/cancelled retirement fixes. Preserve tenant/user/actor identity, exact registrations, original-worker proof, Session close isolation and fail-closed recovery. Do not implement additional tools, Shell support, implicit readiness or startup DDL.
 
+The existing preview incorrectly restricted persisted result acknowledgements to SSH. Admit fully formed external Workspace requests to the same acknowledgement path, preserving settled results, native-reference checks, durable Session membership and binding generation. Only shared external Workspace isolation may omit the single-Harness isolation key. Project the current transient lifecycle authority into the transport Session without persisting it. Regression evidence must cover both shared members receiving their own acknowledgement, releasing one while retaining the other, and the existing lost-ACK, expired-claim and original-stop ordering cases.
+
 ## Artifact and schema contract
 
 Build a new unique private Server version on the designated devbox, preserving third-party dependencies in its real consumer POM. Aggregate production modules only; union and deduplicate `META-INF/services` entries rather than overwriting providers. Freeze source, source revision, licenses, checksums and validation evidence. Never mutate old artifact bytes or publish the verification module.

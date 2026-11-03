@@ -16,6 +16,8 @@
 
 保留预览版本中已验证 payload 的并发派发修复，以及失败/取消终态不阻塞回收的修复。保留 tenant/user/actor 身份、精确注册、原 worker 证明、Session 关闭隔离及失败关闭的恢复语义。不增加工具、Shell 支持、隐式就绪或启动 DDL。
 
+既有预览错误地只允许 SSH 确认已持久化的工具结果。将结构完整的外部 Workspace 请求接入同一确认路径，保留终态结果、原生 reference、持久 Session 成员关系和 binding generation 检查。只有共享隔离的外部 Workspace 可以省去单 Harness isolation key 条件。当前瞬态 lifecycle authority 仅投影到传输用 Session，不写入持久状态。回归证据须覆盖两个共享成员各自收到确认、释放一个时保留另一个，以及既有丢失 ACK、claim 到期与原 worker 停止顺序场景。
+
 ## 制品与结构契约
 
 在指定 devbox 构建新的唯一私有 Server 版本，在真实消费 POM 中保留第三方依赖。仅聚合生产模块；`META-INF/services` 条目须合并去重，不能覆盖其他 provider。冻结源码、源码提交、许可证、校验和与验证证据。不修改旧制品字节，不发布 verification 模块。

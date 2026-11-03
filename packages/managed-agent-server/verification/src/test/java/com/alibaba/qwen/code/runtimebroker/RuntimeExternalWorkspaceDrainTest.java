@@ -39,6 +39,29 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** Broker sequencing witnesses; physical SQL ownership and native provider proof need separate integration tests. */
 class RuntimeExternalWorkspaceDrainTest {
     @Test
+    void sharedWorkerAcknowledgesEachMemberAndReleasingOneKeepsTheOtherActive() {
+        try (var fixture = new Fixture("workspace")) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            fixture.service.acquire("harness-two", "runtime-two", "bootstrap").toCompletableFuture().join();
+            String payload = "{\"toolName\":\"read_file\",\"input\":{\"file_path\":\"note.txt\"}}";
+            var first = fixture.prepare("harness", "runtime", "key", payload);
+            var second = fixture.prepare("harness-two", "runtime-two", "key-two", payload);
+            fixture.service.startExecution("harness", "runtime", first.getExecutionCallId(), payload).toCompletableFuture().join();
+            fixture.service.startExecution("harness-two", "runtime-two", second.getExecutionCallId(), payload).toCompletableFuture().join();
+            assertTrue(fixture.executions.findByExecutionCallId(first.getExecutionCallId()).isSettled());
+            assertTrue(fixture.executions.findByExecutionCallId(second.getExecutionCallId()).isSettled());
+            assertEquals(fixture.binding().getBindingId(), fixture.sessions.findById(fixture.scope, "runtime").getBindingId());
+            assertEquals(fixture.binding().getBindingId(), fixture.sessions.findById(fixture.scope, "runtime-two").getBindingId());
+            assertEquals(2L, fixture.events.stream().filter("ack"::equals).count());
+            fixture.events.clear();
+            assertTrue(fixture.service.release("harness", "runtime").toCompletableFuture().join());
+            assertTrue(fixture.sessions.findById(fixture.scope, "runtime-two").isActive());
+            assertEquals(RuntimeBindingRecord.State.READY, fixture.binding().getState());
+            assertFalse(fixture.events.contains("stop"));
+        }
+    }
+
+    @Test
     void lostMandatoryAckNeverStopsAndRetryCommitsReceiptBeforeRetiredCleanup() {
         try (var fixture = new Fixture()) {
             fixture.acquireAndExecute();
@@ -258,8 +281,7 @@ class RuntimeExternalWorkspaceDrainTest {
 
     private static final class Fixture implements AutoCloseable {
         private final MutableClock clock = new MutableClock();
-        private final RuntimeScope scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
-                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
+        private final RuntimeScope scope;
         private final InMemoryRuntimeBindingRepository bindings = new InMemoryRuntimeBindingRepository(clock, () -> "binding");
         private RuntimeBindingRepository repository = bindings;
         private final RuntimeLifecycleAuthority authority = new RuntimeLifecycleAuthority("close-operation", 1);
@@ -351,9 +373,11 @@ class RuntimeExternalWorkspaceDrainTest {
                 throw new AssertionError("No cancellation expected");
             }
             public CompletionStage<Void> acknowledgeV2(RuntimeLease lease, RuntimeSession session, Map<String, Object> reference) {
-                var saved = executions.findByIdempotencyKey("key");
+                var saved = executions.findByIdempotencyKey((String) reference.get("callId"));
                 assertTrue(saved.isSettled());
                 assertEquals(saved.getReference(), reference);
+                assertEquals(saved.getHarnessSessionId(), session.getHarnessSessionId());
+                assertEquals(saved.getRuntimeSessionId(), session.getRuntimeSessionId());
                 assertFalse(reference.containsKey("toolName"), "Hosted producer does not persist toolName in its reference");
                 assertTrue(binding().hasSameLease(lease));
                 if (repository != bindings) {
@@ -367,7 +391,17 @@ class RuntimeExternalWorkspaceDrainTest {
                         : CompletableFuture.completedFuture(null);
             }
         };
-        private RuntimeBrokerService service = newService();
+        private RuntimeBrokerService service;
+
+        Fixture() {
+            this("session");
+        }
+
+        Fixture(String isolationClass) {
+            scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                    WorkspaceExecutionProfile.CAPABILITY_DIGEST, isolationClass);
+            service = newService();
+        }
 
         RuntimeBrokerService newService() {
             try {
@@ -430,7 +464,10 @@ class RuntimeExternalWorkspaceDrainTest {
             providerClient = new ExternalHttpRuntimeClient(URI.create("http://127.0.0.1:" + providerServer.getAddress().getPort()),
                     "test-provider-token-1234", Duration.ofSeconds(5));
         }
-        RuntimeProvisionRequest request() { return new RuntimeProvisionRequest(scope, "harness", ExternalWorkspaceProvisioner.KIND, "workspace"); }
+        RuntimeProvisionRequest request() {
+            return new RuntimeProvisionRequest(scope, "workspace".equals(scope.getIsolationClass()) ? null : "harness",
+                    ExternalWorkspaceProvisioner.KIND, "workspace");
+        }
         RuntimeBindingRecord binding() { return bindings.findById("binding"); }
         RuntimeLease lease(RuntimeProvisionSeed seed) {
             return new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9999"),
@@ -441,8 +478,11 @@ class RuntimeExternalWorkspaceDrainTest {
                     binding.getProvisionSeed().getProvisionRequestId(), binding.getResourceHandle(), clock.instant());
         }
         ToolExecutionRecord prepare(String payload) {
-            return service.prepareExecution("harness", "runtime", "key", Map.of("sessionId", "runtime", "promptId", "turn",
-                    "callId", "call", "argsDigest", "sha256:" + DigestUtils.sha256Hex(payload)), null).toCompletableFuture().join();
+            return prepare("harness", "runtime", "key", payload);
+        }
+        ToolExecutionRecord prepare(String harness, String runtime, String key, String payload) {
+            return service.prepareExecution(harness, runtime, key, Map.of("sessionId", runtime, "promptId", "turn",
+                    "callId", key, "argsDigest", "sha256:" + DigestUtils.sha256Hex(payload)), null).toCompletableFuture().join();
         }
         void acquireAndExecute() {
             service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();

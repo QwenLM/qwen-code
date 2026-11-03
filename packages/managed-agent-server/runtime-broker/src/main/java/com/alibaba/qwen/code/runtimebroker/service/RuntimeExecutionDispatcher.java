@@ -9,12 +9,14 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.SessionContext;
 
@@ -23,6 +25,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -249,7 +252,8 @@ final class RuntimeExecutionDispatcher {
                     }
                     return null;
                 }).thenCompose(ignored -> {
-                    if (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(context.binding().getRequest().getProvisionerKind())) {
+                    if (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(context.binding().getRequest().getProvisionerKind())
+                            && !WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())) {
                         return CompletableFuture.completedFuture(null);
                     }
                     ToolExecutionRecord settled = executionRepository.findByExecutionCallId(executing.getExecutionCallId());
@@ -412,7 +416,9 @@ final class RuntimeExecutionDispatcher {
     }
 
     CompletionStage<Void> acknowledgePersistedTools(RuntimeBindingRecord binding, ToolExecutionRecord execution) {
+        boolean externalWorkspace = WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest());
         if (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind())
+                && !externalWorkspace
                 || !execution.isSettled() || execution.getResult() == null
                 || ProviderRuntimeProtocol.isReference(execution.getReference())) {
             return CompletableFuture.completedFuture(null);
@@ -425,23 +431,31 @@ final class RuntimeExecutionDispatcher {
         }
         RuntimeSessionRecord session = sessionRepository.findById(binding.getRequest().getScope(),
                 execution.getRuntimeSessionId());
+        boolean sharedExternal = externalWorkspace
+                && "workspace".equals(binding.getRequest().getScope().getIsolationClass());
         if (binding.getLease() == null || session == null || !execution.belongsTo(session)
                 || !binding.getBindingId().equals(execution.getBindingId())
                 || binding.getGeneration() != execution.getRuntimeGeneration()
-                || !binding.getRequest().getIsolationKey().equals(execution.getHarnessSessionId())) {
+                || !sharedExternal && !Objects.equals(binding.getRequest().getIsolationKey(), execution.getHarnessSessionId())) {
             return failed(conflict("workspace_close_identity_unverified", "Persisted Tool ownership conflicts"));
+        }
+        var runtime = session.getSession();
+        var authority = binding.getRequest().getScope().getLifecycleAuthority();
+        if (authority != null) {
+            runtime = new RuntimeSession(runtime.getHarnessSessionId(), runtime.getRuntimeSessionId(),
+                    runtime.getTurnKind(), runtime.getScope().withLifecycleAuthority(authority));
         }
         if (noStart != null) {
             CompletionStage<Map<String, Object>> acknowledgement = "deferred_v3".equals(execution.getReference().get("dispatchMode"))
-                    ? transport.acknowledgeV3(binding.getLease(), session.getSession(), execution.getReference(), noStart)
-                    : transport.acknowledge(binding.getLease(), session.getSession(), execution.getReference(), noStart);
+                    ? transport.acknowledgeV3(binding.getLease(), runtime, execution.getReference(), noStart)
+                    : transport.acknowledge(binding.getLease(), runtime, execution.getReference(), noStart);
             return acknowledgement.thenAccept(answer -> {
                 if (answer == null || !Set.of("settled", "unknown").contains(answer.get("state"))) {
                     throw conflict("runtime_execution_conflict", "Original Runtime did not confirm the no-start acknowledgement");
                 }
             });
         }
-        return transport.acknowledgeV2(binding.getLease(), session.getSession(), execution.getReference());
+        return transport.acknowledgeV2(binding.getLease(), runtime, execution.getReference());
     }
 
     private static boolean ownsDispatch(ToolExecutionRecord current,
