@@ -781,11 +781,17 @@ export function deletePermissionRule(
       | Record<string, string[]>
       | undefined;
     const scopeRules = rules?.[type];
-    if (scopeRules?.some((rule) => rule.trim() === raw)) {
+    if (
+      scopeRules?.some(
+        (rule) => typeof rule === 'string' && rule.trim() === raw,
+      )
+    ) {
       settings.setValue(
         settingScope,
         `permissions.${type}`,
-        scopeRules.filter((rule) => rule.trim() !== raw),
+        scopeRules.filter(
+          (rule) => typeof rule === 'string' && rule.trim() !== raw,
+        ),
       );
       break;
     }

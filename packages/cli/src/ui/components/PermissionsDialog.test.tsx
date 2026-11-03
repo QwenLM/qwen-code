@@ -158,6 +158,51 @@ describe('PermissionsDialog malformed rule rows', () => {
     );
   });
 
+  it('does not throw when settings contain non-string entries', async () => {
+    const raw = 'Bash(docker *';
+    const settings = new LoadedSettings(
+      { path: '', settings: {}, originalSettings: {} },
+      { path: '', settings: {}, originalSettings: {} },
+      {
+        path: '',
+        settings: {
+          permissions: { allow: [`  ${raw}  `, null as unknown as string] },
+        },
+        originalSettings: {},
+      },
+      { path: '', settings: {}, originalSettings: {} },
+      true,
+      new Set(),
+    );
+    const { stdin, removePersistentRule } = await renderRuleList(
+      [invalidRule(raw)],
+      settings,
+    );
+    const setValue = vi
+      .spyOn(settings, 'setValue')
+      .mockImplementation(() => {});
+
+    await act(async () => {
+      stdin.write('\u001B[B');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      stdin.write('\r');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      stdin.write('\r');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(removePersistentRule).toHaveBeenCalledWith(raw, 'allow');
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'permissions.allow',
+      [],
+    );
+  });
+
   it('leaves a valid rule unmarked', async () => {
     const { lastFrame } = await renderRuleList([
       {

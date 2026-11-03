@@ -1200,6 +1200,26 @@ describe('permissions data and mutations', () => {
       value: [],
     });
   });
+
+  it('does not throw when settings contain non-string entries', () => {
+    const { settings, written } = createFakeSettings({
+      user: {
+        permissions: {
+          allow: ['  Bash(docker *  ', null as unknown as string],
+        },
+      } as Settings,
+    });
+
+    expect(() =>
+      deletePermissionRule(config, settings, 'Bash(docker *', 'allow'),
+    ).not.toThrow();
+    expect(removePersistentRule).toHaveBeenCalledWith('Bash(docker *', 'allow');
+    expect(written).toContainEqual({
+      scope: SettingScope.User,
+      key: 'permissions.allow',
+      value: [],
+    });
+  });
 });
 
 describe('mcp and extension feeds', () => {
