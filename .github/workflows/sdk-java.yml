@@ -299,6 +299,13 @@ jobs:
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-broker" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-persistence" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-adapters" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-external" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-host" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-http" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-local" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-kubernetes" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-ssh" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-static" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-verification"
           # The suite resolves from the job-local copy above, so it does not
@@ -431,7 +438,7 @@ jobs:
           mkdir -p "${HOME}/.m2/repository" 9>&-
           cd "${RUNNER_TEMP}/m2-repo"
           write_back=0
-          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-runtime-external -o -path ./com/alibaba/qwen-managed-agent-runtime-host -o -path ./com/alibaba/qwen-managed-agent-runtime-http -o -path ./com/alibaba/qwen-managed-agent-runtime-local -o -path ./com/alibaba/qwen-managed-agent-runtime-kubernetes -o -path ./com/alibaba/qwen-managed-agent-runtime-ssh -o -path ./com/alibaba/qwen-managed-agent-runtime-static -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
@@ -939,6 +946,13 @@ jobs:
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-broker" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-persistence" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-adapters" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-external" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-host" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-http" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-local" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-kubernetes" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-ssh" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-static" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-verification"
           # Both Maven runs resolve from the job-local copy above, so they do
@@ -1045,7 +1059,7 @@ jobs:
           mkdir -p "${HOME}/.m2/repository" 9>&-
           cd "${RUNNER_TEMP}/m2-repo"
           write_back=0
-          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-runtime-external -o -path ./com/alibaba/qwen-managed-agent-runtime-host -o -path ./com/alibaba/qwen-managed-agent-runtime-http -o -path ./com/alibaba/qwen-managed-agent-runtime-local -o -path ./com/alibaba/qwen-managed-agent-runtime-kubernetes -o -path ./com/alibaba/qwen-managed-agent-runtime-ssh -o -path ./com/alibaba/qwen-managed-agent-runtime-static -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
@@ -1863,6 +1877,13 @@ jobs:
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-broker" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-persistence" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-adapters" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-external" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-host" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-http" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-local" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-kubernetes" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-ssh" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-static" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-verification"
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
@@ -2152,6 +2173,13 @@ jobs:
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-broker" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-persistence" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-adapters" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-external" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-host" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-http" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-local" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-kubernetes" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-ssh" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-static" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \
             "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-verification"
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install

@@ -1223,9 +1223,9 @@ class ChildWorkspaceServiceTest {
     void theScanTheMigrationGateAndTheHoldSweepReadThroughIndexes() {
         // None of the three tables is pruned: each read must key on what it
         // filters, not scan the accumulated history.
-        assertThat(indexColumns("ma_operation", "ix_ma_operation_due"))
+        assertThat(indexColumns("ma_operation", "idx_ma_operation_due"))
                 .containsExactly("operation_kind", "delivery_state", "available_at");
-        assertThat(indexColumns("ma_operation", "ix_ma_operation_storage"))
+        assertThat(indexColumns("ma_operation", "idx_ma_operation_storage"))
                 .containsExactly("storage_key", "operation_kind", "state");
         assertThat(indexColumns("ma_storage_owner", "idx_execution_lease_maintenance"))
                 .containsExactly("maintenance_id");

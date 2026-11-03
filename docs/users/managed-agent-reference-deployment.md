@@ -280,21 +280,32 @@ Wrap every map key in `[ ... ]`. Spring's relaxed binder normalises plain keys â
 
 Restart the single Java control plane, verify that existing bindings load, and verify that new binding rows record `reference-v2`. New secrets use only the active key; old rows remain encrypted under their recorded key ID. The server does not re-encrypt old rows on read, and removing a still-referenced key makes those rows unreadable.
 
-Retire `reference-v1` only when no persisted row references it. `ma_runtime_binding.credential_key_id` and `ma_runtime_binding.runtime_credential_key_id` are the only persisted references; both store UTF-8 bytes. Select them without `CONVERT` so the deduplication stays byte-exact, the way key selection is: a converted value carries the character set's default collation and would merge two IDs that differ only in case or accent, hiding a key that rows still reference.
+Retire `reference-v1` only when no persisted row references it. Runtime bindings,
+complete Session model configurations, and extension settings retain key IDs.
+Compare them as bytes so case or accent differences cannot hide a still-required
+key:
 
 ```sql
 SELECT DISTINCT credential_key_id AS key_id
 FROM ma_runtime_binding WHERE credential_key_id IS NOT NULL
 UNION
 SELECT DISTINCT runtime_credential_key_id AS key_id
-FROM ma_runtime_binding WHERE runtime_credential_key_id IS NOT NULL;
+FROM ma_runtime_binding WHERE runtime_credential_key_id IS NOT NULL
+UNION
+SELECT DISTINCT CAST(model_config_key_id AS BINARY) AS key_id
+FROM ma_session WHERE model_config_key_id IS NOT NULL
+UNION
+SELECT DISTINCT CAST(encryption_key_id AS BINARY) AS key_id
+FROM ma_extension_settings WHERE encryption_key_id IS NOT NULL;
 ```
 
-The result lists the key IDs that persisted rows still require: expect the active ID (`reference-v2`) only. While `reference-v1` appears, that key must stay configured.
+The result lists the key IDs that persisted rows still require. Keep every returned key configured; `reference-v1` can be retired only when it is absent from the result.
+
+Session model configurations are written once; closing or deleting a Session retains their rows. Extension settings retain earlier revisions. Rotating the active key does not re-encrypt or remove these records, so their old key IDs stay in the result while the records remain. This procedure provides no re-encryption or physical-purge step; keep the required keys configured and do not delete rows just to clear the check.
 
 The key ring is a map and cannot be supplied through a `QWEN_MANAGED_AGENT_*` environment variable: relaxed binding silently resolves an env-var form to an empty or mis-keyed ring, with no startup error. Configure `previous-credential-keys` in `config/application.yml`. The distribution ships `config/application.example.yml`, and both launchers export `SPRING_CONFIG_ADDITIONAL_LOCATION=file:<distribution-root>/config/application.yml` when that file exists, so the location no longer depends on the process working directory and no option is added to the command's positional arguments. When the variable is already set, the launchers leave it in effect instead. A deployment that relies on environment variables alone starts with an empty ring, so rotating `credential-key-id` without configuration of the previous key makes rows written under it unreadable. An explicit `--spring.config.additional-location` command-line argument outranks this environment default; when both are present, the command-line value wins and the bundled `config/application.yml` is not loaded.
 
-The operator-recovery entry reads the same active pair and `previous-credential-keys` map as the server. Its launcher loads `config/application.yml` the same way; when the file lives elsewhere, set `SPRING_CONFIG_ADDITIONAL_LOCATION=file:<absolute-path>/application.yml`. Keep the new key active while retaining every key still referenced by a binding. The CSI/migration maintenance mains, including the CSI Hosted probe, still read a single credential key pair; launch those entries with the key that encrypted their target binding as the active pair.
+The operator-recovery entry reads the same active pair and `previous-credential-keys` map as the server. Its launcher loads `config/application.yml` the same way; when the file lives elsewhere, set `SPRING_CONFIG_ADDITIONAL_LOCATION=file:<absolute-path>/application.yml`. Keep the new key active while retaining every key still referenced by a persisted row. The CSI/migration maintenance mains, including the CSI Hosted probe, still read a single credential key pair; launch those entries with the key that encrypted their target binding as the active pair.
 
 After successful key-ring configuration, the server and recovery entry log the resolved active ID and configured IDs once per protector instance. These IDs are non-secret identifiers already stored beside ciphertext; diagnostics JSON-escape controls and non-ASCII characters, preserve spaces and case, and never include key material, ciphertext or tokens. Compare the configured IDs with the exact IDs returned by the retirement query before using the rotated deployment. An unavailable-key error names the requested, active and configured IDs, so a silently normalised or mistyped mapping can be located without exposing secrets. This diagnostic does not prove that every stored row can be decrypted.
 

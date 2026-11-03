@@ -95,6 +95,26 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void modelConfigurationRequiresNegotiationAndSurvivesLoadCopies() {
+        var store = ManagedSessionStoreConnection.builder().baseUri(URI.create("https://store.example/"))
+                .tenantId("tenant-a").workspaceId("workspace-a").writerId(BOOT_ID)
+                .writerToken("qwt1_" + "a".repeat(43)).leaseDuration(Duration.ofSeconds(45)).build();
+        var create = CreateHarnessSession.builder().harnessSessionId(SESSION_ID)
+                .managedSessionStore(store).modelConfigDigest(DIGEST).build();
+        var load = new LoadHarnessSession(SESSION_ID, store, false).withModelConfigDigest(DIGEST);
+        assertEquals(DIGEST, create.toJson().get("modelConfigDigest"));
+        assertEquals(DIGEST, load.withChildWorkspaces(true).withForegroundOnly(true)
+                .withStoppedMessages().forLifecycle(PROMPT_ID, 1).toJson().get("modelConfigDigest"));
+        try (HostedHarnessClient client = newClient()) {
+            assertThrows(DaemonProtocolException.class, () -> client.createSession(create));
+            assertThrows(DaemonProtocolException.class, () -> client.loadSession(load));
+        }
+        assertThrows(IllegalArgumentException.class, () -> CreateHarnessSession.builder()
+                .harnessSessionId(SESSION_ID).modelConfigDigest(DIGEST).build());
+        assertThrows(IllegalArgumentException.class, () -> load.withModelConfigDigest("invalid"));
+    }
+
+    @Test
     void mcpManagementKeepsTheSessionAndOriginalCommandIdentityAcrossReadsAndSubmission() throws Exception {
         createSessionRoute();
         String command = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";

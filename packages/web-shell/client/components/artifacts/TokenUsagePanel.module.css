@@ -604,3 +604,13 @@ details[open] > summary > .collapseIcon {
 .tokenDetailsTooltip dd {
   margin: 0;
 }
+
+.failureKinds {
+  margin-top: 6px;
+  overflow: hidden;
+  color: var(--error-color);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}

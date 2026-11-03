@@ -262,6 +262,7 @@ const state = vi.hoisted(() => ({
   storeOptions: [] as Array<Record<string, unknown>>,
   ownershipReleases: [] as Array<Record<string, unknown>>,
   setLifecycleAuthority: vi.fn(),
+  modelConfig: vi.fn(),
   authorizeLifecycle: vi.fn(async () => undefined),
   authorizeOrdinary: vi.fn(async (_kind?: 'legacy-close') => undefined),
   approvalSelections: new Map<
@@ -280,6 +281,7 @@ const state = vi.hoisted(() => ({
       textDeltas?: import('./hosted-text-deltas.js').HostedTextDeltaStream;
       workspaceContext?: { read(): string | undefined };
       modelSelection?: { modelId: string; revision: number };
+      modelConfig?: import('./hosted-model-config.js').HostedModelConfigReader;
     }) => ({
       text: 'hello back',
       model: 'test-model',
@@ -404,6 +406,7 @@ vi.mock(
         assertWritable: state.assertWritable,
         claimUserMessages: async () => [],
         setLifecycleAuthority: state.setLifecycleAuthority,
+        modelConfig: state.modelConfig,
         authorizeOrdinary: state.authorizeOrdinary,
         authorizeLifecycle: state.authorizeLifecycle,
         approvalSelection: async () => {
@@ -548,6 +551,7 @@ beforeEach(({ task }) => {
   ).mockResolvedValue();
   state.approvalSelections.clear();
   state.approvalQueries.length = 0;
+  state.modelConfig.mockReset();
   vi.spyOn(
     HostedWorkspaceBroker.prototype,
     'capabilityDigest',
@@ -1617,6 +1621,94 @@ describe('Hosted Harness no-tool session', () => {
       busy.mockRestore();
     }
   });
+
+  it.each(['create', 'resident-load', 'cold-load'])(
+    'refuses an omitted Session model configuration digest on %s',
+    async (operation) => {
+      let server = await app();
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        modelConfigDigest: `sha256:${'a'.repeat(64)}`,
+      });
+      expect(created.status).toBe(200);
+      if (operation === 'cold-load') {
+        await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+          .set('X-Qwen-Client-Id', created.body.clientId as string)
+          .expect(204);
+        server = await app();
+      }
+      const result = await headers(
+        supertest(server).post(
+          operation === 'create' ? '/session' : `/session/${SESSION_ID}/load`,
+        ),
+      ).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+      });
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe('hosted_agent_definition_conflict');
+      expect(state.model).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    new ManagedSessionStoreHttpError(
+      503,
+      'store_unavailable',
+      'store is unavailable',
+    ),
+    new ManagedSessionStoreTransportError('store connection failed'),
+  ])(
+    'preserves a private model configuration Store outage as a Store failure: %s',
+    async (cause) => {
+      const server = await app();
+      const created = await headers(supertest(server).post('/session')).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        modelConfigDigest: `sha256:${'a'.repeat(64)}`,
+      });
+      expect(created.status).toBe(200);
+      state.modelConfig.mockRejectedValueOnce(cause);
+      state.model.mockImplementationOnce(async (input) => {
+        await input.modelConfig!();
+        return { text: 'unreachable', model: 'test-model' };
+      });
+      const prompt = [{ type: 'text', text: 'read configuration' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const journal = await LocalJsonlManagedSessionJournalStore.read({
+            transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+            runtimeBaseDir: state.root,
+            sessionKey: {
+              tenantId: 'tenant',
+              workspaceId: 'workspace',
+              sessionId: SESSION_ID,
+            },
+          });
+          const settled = journal.events.find(
+            (event) => event.kind === 'turn.settled',
+          );
+          expect(settled?.payload['stopReason']).toBe(
+            'managed_session_store_unavailable',
+          );
+        },
+        { timeout: settleTimeoutMs() },
+      );
+      expect(state.modelConfig).toHaveBeenCalledOnce();
+    },
+  );
 
   it('persists model selection and refuses changed resident and cold prompt replays', async () => {
     let server = await app();

@@ -36,7 +36,7 @@ public final class SessionResourceCollectionCollector {
                 + " AND object_version_id IS NULL AND encryption_key_id IS NULL AND"
                 + " deletion_operation_key IS NULL AND NOT EXISTS (SELECT 1 FROM ma_resource_ref f"
                 + " WHERE f.resource_key = ma_resource.resource_key) THEN 1 ELSE 0 END AS"
-                + " collectible FROM ma_resource USE INDEX (ix_ma_resource_scope_page) WHERE"
+                + " collectible FROM ma_resource USE INDEX (idx_ma_resource_scope_page) WHERE"
                 + " session_scope_key = ? AND resource_key > ? ORDER BY resource_key LIMIT "
                     + (PAGE_ROWS + 1);
     private final JdbcTemplate jdbc;
@@ -138,7 +138,7 @@ public final class SessionResourceCollectionCollector {
         var rows =
                 jdbc.query(
                         "SELECT s.tenant_id, s.session_id, s.session_scope_key FROM ma_session s"
-                            + " WHERE s.csi_guard = FALSE AND s.retired_at <= ? AND NOT EXISTS"
+                            + " WHERE s.is_csi_guard = FALSE AND s.retired_at <= ? AND NOT EXISTS"
                             + " (SELECT 1 FROM ma_operation o WHERE o.operation_kind ="
                             + " 'SESSION_RESOURCE_GC' AND o.scope_key = s.session_scope_key AND"
                             + " o.target_key = s.session_scope_key LIMIT 1) ORDER BY s.retired_at"
@@ -181,7 +181,7 @@ public final class SessionResourceCollectionCollector {
     Claim claim() {
         long time = ToolPublicationRetentionStore.now(jdbc);
         var candidates = jdbc.query(
-                        "SELECT scope_key, tenant_id, session_id FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC' AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = ma_operation.tenant_id AND s.session_id = ma_operation.session_id AND s.csi_guard = TRUE) AND state <> 'SUCCEEDED' AND available_at >= 0 AND available_at <= ? AND (claim_owner = ? OR claim_until IS NULL OR claim_until <= ?) ORDER BY available_at, operation_key LIMIT 32",
+                        "SELECT scope_key, tenant_id, session_id FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC' AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = ma_operation.tenant_id AND s.session_id = ma_operation.session_id AND s.is_csi_guard = TRUE) AND state <> 'SUCCEEDED' AND available_at >= 0 AND available_at <= ? AND (claim_owner = ? OR claim_until IS NULL OR claim_until <= ?) ORDER BY available_at, operation_key LIMIT 32",
                 (row, index) -> ManagedSchemaRows.read(row), time, owner, time);
         for (var candidate : candidates) {
             Claim claim =
@@ -289,7 +289,7 @@ public final class SessionResourceCollectionCollector {
     private String blocker(String tenant, String session, long now, java.util.Map<String, Object> head) {
         var roots =
                 jdbc.query(
-                        "SELECT retired_at, recovery_protected FROM ma_session WHERE tenant_key = ?"
+                        "SELECT retired_at, is_recovery_protected FROM ma_session WHERE tenant_key = ?"
                                 + " AND session_key = ? AND retired_at IS NOT NULL",
                         (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                         ToolPublicationRetentionStore.hash(tenant),
@@ -297,7 +297,7 @@ public final class SessionResourceCollectionCollector {
         if (roots.isEmpty()) {
             return "session_not_retired";
         }
-        if (ToolPublicationRetentionStore.flag(roots.getFirst(), "recovery_protected")) {
+        if (ToolPublicationRetentionStore.flag(roots.getFirst(), "is_recovery_protected")) {
             return "recovery_protected";
         }
         if (ToolPublicationRetentionStore.number(roots.getFirst(), "retired_at")

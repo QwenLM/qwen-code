@@ -277,6 +277,7 @@ public final class HostedHarnessClient implements AutoCloseable {
             throw new IllegalArgumentException("request must not be null");
         }
         ensureOpen();
+        requireModelConfigurationCapability(request.toJson());
         HttpResponse<HttpSupport.Body> raw;
         try {
             raw = send("/session", "POST", request.toJson(), null);
@@ -324,6 +325,13 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
     }
 
+    private void requireModelConfigurationCapability(Map<String, Object> request) {
+        if (request.containsKey("modelConfigDigest")
+                && !capabilities.getFeatures().contains("session-model-config/1")) {
+            throw new DaemonProtocolException("Hosted Session model configuration capability is required");
+        }
+    }
+
     public HarnessSessionRef loadSession(LoadHarnessSession request) {
         return loadSession(request, false);
     }
@@ -337,6 +345,7 @@ public final class HostedHarnessClient implements AutoCloseable {
             throw new IllegalArgumentException("request must not be null");
         }
         ensureOpen();
+        requireModelConfigurationCapability(request.toJson());
         if (request.getRecoveryCleanupPromptId() != null
                 && !capabilities.getFeatures().contains("recovery-cleanup/1")) {
             throw new DaemonProtocolException("Hosted cleanup-only load capability is required");

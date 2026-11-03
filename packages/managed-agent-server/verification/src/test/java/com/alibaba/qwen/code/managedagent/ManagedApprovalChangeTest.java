@@ -13,7 +13,6 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelect
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
@@ -133,7 +132,7 @@ class ManagedApprovalChangeTest {
 
     @Test
     void liveApprovalReadsRequireTheCurrentWriterAndReturnTheDurableSelection() {
-        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String token = "live-approval-writer-token-0123456789";
         var grant = transaction().execute(status -> privateStore.acquireWriter(tenant, session, token,
                 new AcquireWriterRequest("ws", "writer", 60_000L)));
@@ -155,7 +154,7 @@ class ManagedApprovalChangeTest {
     @Test
     void liveApprovalReadsReturnTheSelectionForTheFilesV3Profile() throws Exception {
         session = customSession("hosted-workspace-files/3", "default");
-        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String token = "live-approval-v3-writer-token-0123456789";
         var grant = transaction().execute(status -> privateStore.acquireWriter(tenant, session, token,
                 new AcquireWriterRequest("ws", "writer", 60_000L)));
@@ -484,10 +483,10 @@ class ManagedApprovalChangeTest {
         var created = transaction().execute(status -> service.createWorkspaceSession(tenant, "actor", "legacy-create",
                 definition.agentId(), null, null, null, input, new WorkspaceSelection("ws", ".")));
         session = created.sessionId();
-        jdbc.update("UPDATE ma_turn SET status='COMPLETED',approval_mode=NULL,approval_revision=NULL,plan_enabled=NULL WHERE tenant_id=? AND session_id=?",
+        jdbc.update("UPDATE ma_turn SET status='COMPLETED',approval_mode=NULL,approval_revision=NULL,is_plan_enabled=NULL WHERE tenant_id=? AND session_id=?",
                 tenant, session);
         var submitted = transaction().execute(status -> service.submitTurn(tenant, "actor", "legacy-submit", session, input));
-        jdbc.update("UPDATE ma_turn SET status='COMPLETED',approval_mode=NULL,approval_revision=NULL,plan_enabled=NULL WHERE tenant_id=? AND session_id=?",
+        jdbc.update("UPDATE ma_turn SET status='COMPLETED',approval_mode=NULL,approval_revision=NULL,is_plan_enabled=NULL WHERE tenant_id=? AND session_id=?",
                 tenant, session);
         change("actor", "new-policy", "yolo", 0);
         assertThat(transaction().execute(status -> service.createWorkspaceSession(tenant, "actor", "legacy-create",
@@ -509,7 +508,7 @@ class ManagedApprovalChangeTest {
         var admitted = transaction().execute(status -> store.insertTurnCommand(tenant, "SUBMIT_TURN", "legacy", "legacy-digest",
                 session, input, SubmitHarnessTurn.computePayloadDigest(input)));
         var turn = store.findTurn(tenant, session, admitted.turnId()).orElseThrow();
-        jdbc.update("UPDATE ma_turn SET approval_mode=NULL, approval_revision=NULL, plan_enabled=NULL, status='COMPLETED'"
+        jdbc.update("UPDATE ma_turn SET approval_mode=NULL, approval_revision=NULL, is_plan_enabled=NULL, status='COMPLETED'"
                 + " WHERE tenant_id=? AND turn_id=?", tenant, admitted.turnId());
         assertThat(store.findTurnApprovalSelection(tenant, session, turn.promptId()))
                 .isNull();
@@ -623,7 +622,7 @@ class ManagedApprovalChangeTest {
                     "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}");
         }
         if (shape.equals("recovery")) {
-            transaction().execute(status -> com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).acquireWriter(tenant, session,
+            transaction().execute(status -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).acquireWriter(tenant, session,
                     "model-selection-writer-token-0123456789", new AcquireWriterRequest("ws", "writer", 60_000L)));
             jdbc.update("UPDATE ma_session_head SET recovery_status='BLOCKED' WHERE tenant_id=?", tenant);
         }
@@ -718,7 +717,7 @@ class ManagedApprovalChangeTest {
         when(harness.supportsLiveApprovalSelection()).thenReturn(true);
         transaction().execute(status -> service.changeWebShellSessionApproval(tenant, "actor", session,
                 "stored-rules", "default", 0, null, rules));
-        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String token = "rules-writer-token-01234567890123456789";
         var grant = transaction().execute(status -> privateStore.acquireWriter(tenant, session, token,
                 new AcquireWriterRequest("ws", "writer", 60_000L)));
