@@ -18347,6 +18347,48 @@ describe('Session', () => {
         ).toBe(false);
       });
 
+      it('consumes a same-turn shell result without an automatic rerun', async () => {
+        const notifyShell =
+          mockBackgroundShellRegistry.setNotificationCallback.mock.calls[0][0] as (
+            display: string,
+            model: string,
+            meta: {
+              shellId: string;
+              status: string;
+              sourceTurnId?: string;
+            },
+          ) => void;
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementationOnce(async () => {
+            notifyShell('shell complete', 'SAME_TURN_SHELL_RESULT', {
+              shellId: 'same-shell',
+              status: 'completed',
+              sourceTurnId: core.promptIdContext.getStore(),
+            });
+            return completedText('Initial response');
+          })
+          .mockResolvedValue(completedText('Shell result incorporated'));
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start' }],
+        });
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(
+          vi.mocked(mockChat.sendMessageStream).mock.calls[1][1].message,
+        ).toEqual(expect.arrayContaining([{ text: 'SAME_TURN_SHELL_RESULT' }]));
+        expect(
+          vi
+            .mocked(mockClient.extMethod)
+            .mock.calls.some(([method]) => method === '_qwencode/start_turn'),
+        ).toBe(false);
+        expect(
+          session
+            .collectActiveWorkHolds()
+            .some((hold) => hold.id === 'same-shell'),
+        ).toBe(false);
+      });
+
       it('leaves an earlier-turn result for a separately admitted automatic execution', async () => {
         const notify = notification();
         mockChat.sendMessageStream = vi
