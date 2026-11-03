@@ -77,9 +77,9 @@ jobs:
           npm config set fetch-timeout 300000
 
       # The entry bundles its own React and runtime dependencies, so it needs no
-      # sibling workspace `dist/` except the two modules it imports from
-      # workspace packages: core's and the SDK's. Skipping `prepare` keeps this
-      # lane to those packages instead of rebuilding the monorepo first.
+      # sibling workspace `dist/` outside the chain the two modules it imports
+      # are built from. Skipping `prepare` keeps this lane to that chain instead
+      # of rebuilding the monorepo first.
       - name: 'Install dependencies'
         env:
           QWEN_SKIP_PREPARE: '1'
@@ -87,9 +87,15 @@ jobs:
 
       # Those modules are only resolvable through the package `exports` maps,
       # which point at each package's `dist/` — nothing else in this lane
-      # produces them.
+      # produces them. The SDK build needs acp-bridge too: its daemon sources
+      # import `@qwen-code/acp-bridge/<subpath>`, and `tsconfig.reference.json`
+      # references core alone, so `tsc --build` never produces that package.
+      # Order is core → acp-bridge → sdk, as in live-host-release.yml.
       - name: 'Build core for the managed host entry'
         run: 'corepack pnpm --filter @qwen-code/qwen-code-core build'
+
+      - name: 'Build acp-bridge for the SDK reference build'
+        run: 'corepack pnpm --filter @qwen-code/acp-bridge build'
 
       - name: 'Build the SDK for the managed host entry'
         run: 'corepack pnpm --filter @qwen-code/sdk build'
