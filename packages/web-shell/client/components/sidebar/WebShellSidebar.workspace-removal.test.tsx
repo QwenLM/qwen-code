@@ -435,6 +435,9 @@ function renderSidebar(
     onNewSession?: (workspaceCwd?: string) => boolean;
     onNewStandaloneSession?: () => Promise<boolean> | boolean;
     onLoadSession?: (sessionId: string, workspaceCwd?: string) => void;
+    onAddSessionToSplitView?: (sessionId: string) => void;
+    canOpenSplitView?: boolean;
+    splitSessionIds?: readonly string[];
     onLoadStandaloneSession?: (sessionId: string) => void;
     onStandaloneNotice?: (message: string) => void;
     workspaces?: DaemonWorkspaceCapability[];
@@ -454,6 +457,7 @@ function renderSidebar(
         | 'group'
         | 'export'
         | 'delete'
+        | 'split'
       )[];
       inlineItems?: readonly ('pin' | 'rename' | 'export' | 'delete')[];
     };
@@ -479,6 +483,9 @@ function renderSidebar(
           onOpenGoals={overrides.onOpenGoals ?? (() => {})}
           onOpenSessions={() => {}}
           onOpenSplitView={() => {}}
+          onAddSessionToSplitView={overrides.onAddSessionToSplitView}
+          canOpenSplitView={overrides.canOpenSplitView}
+          splitSessionIds={overrides.splitSessionIds}
           onNewSession={overrides.onNewSession ?? (() => false)}
           onNewStandaloneSession={overrides.onNewStandaloneSession}
           onLoadSession={overrides.onLoadSession ?? (() => {})}
@@ -912,6 +919,213 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe('WebShellSidebar session split action', () => {
+  it('offers a dropdown-only action that adds the selected session', async () => {
+    active.sessions.push({
+      sessionId: 'target',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Target session',
+    });
+    const onAddSessionToSplitView = vi.fn();
+    const onLoadSession = vi.fn();
+    renderSidebar({
+      canOpenSplitView: true,
+      onAddSessionToSplitView,
+      onLoadSession,
+      sessionActions: { items: ['split'] },
+    });
+    await ensureWorkspaceExpanded('project');
+    await selectSessionMenuItem('Target session', 'Add to Split View');
+    expect(onAddSessionToSplitView).toHaveBeenCalledExactlyOnceWith('target');
+    expect(onLoadSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: 'small screens', canOpenSplitView: false },
+    { label: 'missing callback', onAddSessionToSplitView: undefined },
+    {
+      label: 'action allowlist',
+      sessionActions: { items: ['rename'] as const },
+    },
+  ])(
+    'hides the split action for $label',
+    async ({ label: _, ...overrides }) => {
+      active.sessions.push({
+        sessionId: 'target',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Target session',
+      });
+      renderSidebar({
+        canOpenSplitView: true,
+        onAddSessionToSplitView: vi.fn(),
+        ...overrides,
+      });
+      await ensureWorkspaceExpanded('project');
+      expect(await openSessionMenuItems('Target session')).not.toContain(
+        'Add to Split View',
+      );
+    },
+  );
+
+  it('disables adding a new session at the six-pane limit', async () => {
+    active.sessions.push({
+      sessionId: 'target',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Target session',
+    });
+    const onAddSessionToSplitView = vi.fn();
+    renderSidebar({
+      canOpenSplitView: true,
+      onAddSessionToSplitView,
+      splitSessionIds: ['s1', 's2', 's3', 's4', 's5', 's6'],
+    });
+    await ensureWorkspaceExpanded('project');
+    const item = await openSessionMenuItem(
+      'Target session',
+      'Add to Split View',
+    );
+    expect(item.getAttribute('data-disabled')).not.toBeNull();
+    // Sidebar-specific capacity message (not the overview's "select at
+    // most N"): it names the cause and the remedy.
+    expect(item.title).toBe(
+      'Split View already shows 6 sessions — close a pane to add another',
+    );
+    await act(async () => click(item));
+    expect(onAddSessionToSplitView).not.toHaveBeenCalled();
+  });
+
+  it('disables adding the current session while the split is closed', async () => {
+    connection.sessionId = 'current-session';
+    active.sessions.push({
+      sessionId: 'current-session',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Current session',
+    });
+    const onAddSessionToSplitView = vi.fn();
+    renderSidebar({
+      canOpenSplitView: true,
+      onAddSessionToSplitView,
+    });
+    await ensureWorkspaceExpanded('project');
+    const item = await openSessionMenuItem(
+      'Current session',
+      'Add to Split View',
+    );
+    expect(item.getAttribute('data-disabled')).not.toBeNull();
+    expect(item.title).not.toBe('');
+    await act(async () => click(item));
+    expect(onAddSessionToSplitView).not.toHaveBeenCalled();
+  });
+
+  it('disables adding a session that is already open in the split', async () => {
+    active.sessions.push({
+      sessionId: 'target',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Target session',
+    });
+    const onAddSessionToSplitView = vi.fn();
+    renderSidebar({
+      canOpenSplitView: true,
+      onAddSessionToSplitView,
+      splitSessionIds: ['target'],
+    });
+    await ensureWorkspaceExpanded('project');
+    const item = await openSessionMenuItem(
+      'Target session',
+      'Add to Split View',
+    );
+    expect(item.getAttribute('data-disabled')).not.toBeNull();
+    expect(item.title).toBe('This session is already open in Split View');
+    await act(async () => click(item));
+    expect(onAddSessionToSplitView).not.toHaveBeenCalled();
+  });
+
+  it('allows sessions from a trusted secondary workspace', async () => {
+    useWorkspaceSessionCatalog(async (cwd, options) =>
+      cwd === '/tmp/other' && options?.archiveState === 'active'
+        ? [
+            {
+              sessionId: 'secondary',
+              workspaceCwd: cwd,
+              displayName: 'Secondary',
+            },
+          ]
+        : [],
+    );
+    const onAddSessionToSplitView = vi.fn();
+    renderSidebar({ canOpenSplitView: true, onAddSessionToSplitView });
+    await expandWorkspace('other');
+    await selectSessionMenuItem('Secondary', 'Add to Split View');
+    expect(onAddSessionToSplitView).toHaveBeenCalledExactlyOnceWith(
+      'secondary',
+    );
+  });
+
+  it('does not offer secondary workspace channel sessions for split', async () => {
+    enableChannelOrganization();
+    useWorkspaceSessionCatalog(async (cwd, options) =>
+      cwd === '/tmp/other' && options?.archiveState === 'active'
+        ? [
+            {
+              sessionId: 'secondary-channel',
+              workspaceCwd: cwd,
+              displayName: 'Secondary channel',
+              sourceType: 'channel',
+            },
+          ]
+        : [],
+    );
+    renderSidebar({
+      canOpenSplitView: true,
+      onAddSessionToSplitView: vi.fn(),
+    });
+    await switchSessionSource('Channels');
+    await expandWorkspace('other');
+    const items = await openSessionMenuItems('Secondary channel');
+    expect(items).toContain('Rename');
+    expect(items).not.toContain('Add to Split View');
+  });
+
+  it('does not offer archived sessions for split', async () => {
+    archived.sessions.push({
+      sessionId: 'archived',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Archived target',
+    });
+    renderSidebar({
+      canOpenSplitView: true,
+      onAddSessionToSplitView: vi.fn(),
+    });
+    await openArchiveSettings();
+    expect(await openSessionMenuItems('Archived target')).not.toContain(
+      'Add to Split View',
+    );
+  });
+
+  it('does not expose split for an untrusted workspace', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      workspaces: capabilities.workspaces.map((entry) =>
+        entry.primary ? { ...entry, trusted: false } : entry,
+      ),
+    };
+    workspace.capabilities = connection.capabilities;
+    active.sessions.push({
+      sessionId: 'untrusted',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Untrusted target',
+    });
+    renderSidebar({
+      canOpenSplitView: true,
+      onAddSessionToSplitView: vi.fn(),
+      sessionActions: { items: ['split'] },
+    });
+    await ensureWorkspaceExpanded('project');
+    expect(container.textContent).toContain('Untrusted target');
+    expect(sessionAction('Untrusted target')).toBeUndefined();
+  });
+});
+
 describe('WebShellSidebar workspace removal', () => {
   it('marks each remote workspace folder', () => {
     workspace.baseUrl = 'https://remote.example.com';
@@ -971,6 +1185,7 @@ describe('WebShellSidebar workspace removal', () => {
         archiveState?: string;
         group?: string;
         sourceType?: string;
+        pageSize?: number;
       }) => {
         if (options?.group === 'pinned') {
           return [
@@ -1042,11 +1257,25 @@ describe('WebShellSidebar workspace removal', () => {
         ([options]) => options?.sourceType === 'default',
       ),
     ).toBe(true);
+    const ordinaryCalls = listSecondarySessions.mock.calls.filter(
+      ([options]) => options?.pageSize !== 100,
+    );
+    expect(ordinaryCalls.length).toBeGreaterThan(0);
     expect(
-      listSecondarySessions.mock.calls.every(
-        ([options]) => options?.sourceType === 'default',
-      ),
+      ordinaryCalls.every(([options]) => options?.sourceType === 'default'),
     ).toBe(true);
+    const activityCalls = listSecondarySessions.mock.calls.filter(
+      ([options]) => options?.pageSize === 100,
+    );
+    expect(activityCalls.length).toBeGreaterThan(0);
+    for (const [options] of activityCalls) {
+      expect(options).toEqual({
+        pageSize: 100,
+        archiveState: 'active',
+        view: 'organized',
+        group: 'all',
+      });
+    }
   });
 
   it('gives a locked trusted secondary active row normal actions through its workspace', async () => {
@@ -2005,13 +2234,11 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
     });
     const archivedItems = await openSessionMenuItems('Configured archived');
-    expect(archivedItems).toEqual(
-      expect.arrayContaining([
-        'Export conversation record',
-        'Restore',
-        'Delete',
-      ]),
-    );
+    expect(archivedItems).toEqual(['Delete']);
+    expect(
+      inlineSessionAction('Configured archived', 'Export conversation record'),
+    ).toBeDefined();
+    expect(inlineSessionAction('Configured archived', 'Restore')).toBeDefined();
     expect(archivedItems).not.toContain('Pin');
     expect(archivedItems).not.toContain('Group');
     expect(archivedItems).not.toContain('Details');
@@ -2112,6 +2339,15 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
     });
     expect(sessionAction('Empty actions archived')).toBeUndefined();
+    expect(
+      inlineSessionAction(
+        'Empty actions archived',
+        'Export conversation record',
+      ),
+    ).toBeUndefined();
+    expect(
+      inlineSessionAction('Empty actions archived', 'Restore'),
+    ).toBeUndefined();
     expect(archiveSessionsData).not.toHaveBeenCalled();
     expect(unarchiveSessionsData).not.toHaveBeenCalled();
     expect(deleteSessionsData).not.toHaveBeenCalled();
@@ -2388,8 +2624,8 @@ describe('WebShellSidebar workspace removal', () => {
     });
     await openArchiveSettings();
 
-    await selectSessionMenuItem('Primary archived controlled', 'Restore');
     await act(async () => {
+      click(inlineSessionAction('Primary archived controlled', 'Restore')!);
       await archived.unarchiveSession.mock.results.at(-1)?.value;
     });
     expect(archived.unarchiveSession).toHaveBeenCalledWith(
@@ -3298,12 +3534,11 @@ describe('WebShellSidebar workspace removal', () => {
     expect(await openSessionMenuItems('Unlocked pinned')).toContain('Archive');
 
     const archivedItems = await openSessionMenuItems('Unlocked archived');
-    expect(archivedItems).toEqual([
-      'Rename',
-      'Export conversation record',
-      'Restore',
-      'Delete',
-    ]);
+    expect(archivedItems).toEqual(['Rename', 'Delete']);
+    expect(
+      inlineSessionAction('Unlocked archived', 'Export conversation record'),
+    ).toBeDefined();
+    expect(inlineSessionAction('Unlocked archived', 'Restore')).toBeDefined();
     expect(deleteSessionsData).not.toHaveBeenCalled();
     expect(updateSessionOrganization).not.toHaveBeenCalled();
 
@@ -4378,20 +4613,7 @@ describe('WebShellSidebar non-primary archive', () => {
     renderSidebar({ onError });
     await expandWorkspace('other');
     await openArchiveSettings();
-    const moreButton = Array.from(
-      container.querySelectorAll<HTMLButtonElement>(
-        'button[aria-label="More actions"]',
-      ),
-    ).find((button) =>
-      button
-        .closest<HTMLElement>('[class*="sessionRow"]')
-        ?.textContent?.includes('Secondary archived'),
-    );
-    expect(moreButton).toBeDefined();
-    act(() => click(moreButton!));
-    const restoreItem = Array.from(
-      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
-    ).find((item) => item.textContent?.includes('Restore'));
+    const restoreItem = inlineSessionAction('Secondary archived', 'Restore');
     expect(restoreItem).toBeDefined();
 
     await act(async () => {
@@ -6632,6 +6854,75 @@ describe('WebShellSidebar archived session export', () => {
     exportArchivedSession.mockResolvedValue(exportResult);
   });
 
+  it.each([
+    {
+      items: ['rename', 'export', 'archive', 'delete'] as const,
+      exportCapability: true,
+      labels: ['Export conversation record', 'Restore', 'More actions'],
+      width: '78px',
+    },
+    {
+      items: ['rename', 'export', 'archive', 'delete'] as const,
+      exportCapability: false,
+      labels: ['Restore', 'More actions'],
+      width: '52px',
+    },
+    {
+      items: ['export', 'archive'] as const,
+      exportCapability: true,
+      labels: ['Export conversation record', 'Restore'],
+      width: '52px',
+    },
+    {
+      items: ['export'] as const,
+      exportCapability: true,
+      labels: ['Export conversation record'],
+      width: '26px',
+    },
+    { items: [] as const, exportCapability: true, labels: [], width: '0px' },
+  ])(
+    'reserves $width for archived actions $labels',
+    async ({ items, exportCapability, labels, width }) => {
+      connection.capabilities = {
+        ...capabilities,
+        features: [
+          ...capabilities.features,
+          ...(exportCapability ? ['workspace_archived_session_export'] : []),
+        ],
+      };
+      archived.sessions.push({
+        sessionId: 'inline-archive',
+        displayName: 'Inline archive',
+        workspaceCwd: '/tmp/project',
+        isArchived: true,
+      });
+      renderSidebar({ sessionActions: { items, inlineItems: [] } });
+      await openArchiveSettings();
+      const row = Array.from(
+        container.querySelectorAll<HTMLElement>('[class*="archivedRow"]'),
+      ).find((element) => element.textContent?.includes('Inline archive'))!;
+      expect(
+        Array.from(row.querySelectorAll('button')).map((button) =>
+          button.getAttribute('aria-label'),
+        ),
+      ).toEqual(labels);
+      for (const button of row.querySelectorAll('button')) {
+        expect(button.title).toBe(button.getAttribute('aria-label'));
+      }
+      expect(
+        row
+          .querySelector<HTMLElement>('[class*="sessionMetaSlot"]')!
+          .style.getPropertyValue('--session-actions-width'),
+      ).toBe(width);
+      if (labels.includes('More actions')) {
+        expect(await openSessionMenuItems('Inline archive')).toEqual([
+          'Rename',
+          'Delete',
+        ]);
+      }
+    },
+  );
+
   it('hides export without the archived export capability', async () => {
     archived.sessions.push({
       sessionId: 'archived-primary',
@@ -6641,6 +6932,10 @@ describe('WebShellSidebar archived session export', () => {
     });
     renderSidebar();
     await openArchiveSettings();
+
+    expect(
+      inlineSessionAction('Archived primary', 'Export conversation record'),
+    ).toBeUndefined();
 
     const trigger = sessionAction('Archived primary');
     expect(trigger).toBeDefined();
@@ -6671,6 +6966,12 @@ describe('WebShellSidebar archived session export', () => {
     await openArchiveSettings();
 
     expect(sessionAction('Archived untrusted')).toBeUndefined();
+    expect(
+      inlineSessionAction('Archived untrusted', 'Export conversation record'),
+    ).toBeUndefined();
+    expect(
+      inlineSessionAction('Archived untrusted', 'Restore'),
+    ).toBeUndefined();
     expect(deleteSessionsData).not.toHaveBeenCalled();
     expect(unarchiveSessionsData).not.toHaveBeenCalled();
   });
@@ -6714,6 +7015,15 @@ describe('WebShellSidebar archived session export', () => {
     await openArchiveSettings();
 
     expect(sessionAction('Untrusted primary archived')).toBeUndefined();
+    expect(
+      inlineSessionAction(
+        'Untrusted primary archived',
+        'Export conversation record',
+      ),
+    ).toBeUndefined();
+    expect(
+      inlineSessionAction('Untrusted primary archived', 'Restore'),
+    ).toBeUndefined();
     expect(archived.unarchiveSession).not.toHaveBeenCalled();
     expect(archived.deleteSession).not.toHaveBeenCalled();
     expect(exportArchivedSession).not.toHaveBeenCalled();
@@ -6761,21 +7071,21 @@ describe('WebShellSidebar archived session export', () => {
     expect(sessionAction('Primary archive')).toBeDefined();
     expect(sessionAction('Secondary archive')).toBeDefined();
     try {
-      await selectSessionMenuItem('Primary archive', 'Export');
       await act(async () => {
+        click(
+          inlineSessionAction('Primary archive', 'Export conversation record')!,
+        );
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
-
-      const secondaryTrigger = sessionAction('Secondary archive');
-      expect(secondaryTrigger).toBeDefined();
-      await act(async () => {
-        click(secondaryTrigger!);
-        await Promise.resolve();
-      });
-      const secondaryItem = Array.from(
-        document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
-      ).find((item) => item.textContent?.includes('Export'));
-      expect(secondaryItem?.getAttribute('data-disabled')).toBeNull();
+      expect(
+        inlineSessionAction('Primary archive', 'Export conversation record')
+          ?.disabled,
+      ).toBe(true);
+      const secondaryItem = inlineSessionAction(
+        'Secondary archive',
+        'Export conversation record',
+      );
+      expect(secondaryItem?.disabled).toBe(false);
       await act(async () => {
         click(secondaryItem!);
         await Promise.resolve();
@@ -7061,7 +7371,7 @@ describe('WebShellSidebar standalone grouping', () => {
     act(() => projects.click());
     expect(
       container.querySelector('[data-testid="standalone-active-group"]'),
-    ).not.toBeNull();
+    ).toBeNull();
     act(() => projects.click());
 
     expect(listStandaloneSessionsPage).toHaveBeenCalledTimes(1);
@@ -7144,19 +7454,16 @@ describe('WebShellSidebar standalone grouping', () => {
           ?.textContent,
       ).toContain('Moving conversation');
       expect(
-        container.querySelector('[data-testid="standalone-active-group"]')
-          ?.textContent,
-      ).not.toContain('Moving conversation');
+        container.querySelector('[data-testid="standalone-active-group"]'),
+      ).toBeNull();
     });
 
     listStandaloneSessionsPage.mockClear();
-    const restoreItem = await openSessionMenuItem(
-      'Moving conversation',
-      'Restore',
-    );
+    const restoreItem = inlineSessionAction('Moving conversation', 'Restore');
+    expect(restoreItem).toBeDefined();
     isArchived = false;
     await act(async () => {
-      click(restoreItem);
+      click(restoreItem!);
       await Promise.resolve();
     });
     await vi.waitFor(() => {
@@ -7280,6 +7587,16 @@ describe('WebShellSidebar standalone grouping', () => {
   });
 
   it('puts No workspace beside Projects and hides it for a locked workspace', async () => {
+    listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'standalone-active',
+          displayName: 'Standalone active chat',
+          workspaceCwd: '/private/standalone/standalone-active',
+          context: { kind: 'standalone' },
+        },
+      ],
+    });
     const standaloneCapabilities = {
       ...capabilities,
       features: [...capabilities.features, 'standalone_sessions_v1'],

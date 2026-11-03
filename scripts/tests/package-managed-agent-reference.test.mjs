@@ -35,11 +35,13 @@ import {
 } from '../../packages/managed-agent-server/distribution/bin/qwen-managed-agent-bootstrap.mjs';
 import {
   ADMIN_COMMANDS,
+  DOCUMENTATION,
   createReferenceDistribution,
+  shippedDocumentLinks,
 } from '../package-managed-agent-reference.mjs';
 
 function mainSource(main) {
-  return `packages/managed-agent-server/src/main/java/${main.replaceAll('.', '/')}.java`;
+  return `packages/managed-agent-server/server/src/main/java/${main.replaceAll('.', '/')}.java`;
 }
 
 async function fixture(root) {
@@ -50,15 +52,15 @@ async function fixture(root) {
     }),
     LICENSE: 'license\n',
     'packages/managed-agent-server/pom.xml': `
-      <artifactId>qwen-managed-agent-server</artifactId>
+      <artifactId>qwen-managed-agent-parent</artifactId>
       <version>0.4.0-alpha</version>
       <java.version>21</java.version>
     `,
-    'packages/managed-agent-server/target/qwen-managed-agent-server-0.4.0-alpha-exec.jar':
+    'packages/managed-agent-server/server/target/qwen-managed-agent-server-0.4.0-alpha-exec.jar':
       'server',
-    'packages/managed-agent-server/target/qwen-managed-agent-server-0.4.0-alpha-operator-recovery.jar':
+    'packages/managed-agent-server/server/target/qwen-managed-agent-server-0.4.0-alpha-operator-recovery.jar':
       'recovery',
-    'packages/managed-agent-server/src/main/resources/application.yml':
+    'packages/managed-agent-server/server/src/main/resources/application.yml':
       "workspace-shell-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED:false}'\n",
     'packages/managed-agent-server/distribution/config/application.example.yml':
       'template\n',
@@ -81,9 +83,9 @@ async function fixture(root) {
       '#!/usr/bin/env sh\nupgrade\n',
     'packages/managed-agent-server/distribution/bin/qwen-managed-agent-upgrade.mjs':
       'export {};\n',
-    'packages/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json':
+    'packages/managed-agent-server/contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json':
       JSON.stringify({ info: { version: '1.46.0' } }),
-    'packages/managed-agent-server/src/main/resources/db/managed-schema/V1__baseline.sql':
+    'packages/managed-agent-server/persistence/src/main/resources/db/managed-schema/V1__baseline.sql':
       'select 1;',
     'packages/managed-agent-server/src/main/java/db/migration/V9__latest.java':
       'class Latest {}',
@@ -97,7 +99,11 @@ async function fixture(root) {
     'docs/users/managed-agent-reference-deployment.zh-CN.md': '部署\n',
     'docs/users/hosted-workspace-recovery.md': 'recover\n',
     'docs/users/hosted-workspace-recovery.zh-CN.md': '恢复\n',
-    'packages/managed-agent-server/README.md': 'server reference\n',
+    'docs/users/managed-agent-configuration-reference.md':
+      '[中文](managed-agent-configuration-reference.zh-CN.md) [guide](managed-agent-reference-deployment.md#upgrade) [site](https://example.com/a.md) [design](../design/x.md)\n',
+    'docs/users/managed-agent-configuration-reference.zh-CN.md': '配置\n',
+    'packages/managed-agent-server/README.md':
+      'server reference, [configuration](../../docs/users/managed-agent-configuration-reference.md)\n',
   };
   for (const [, main] of ADMIN_COMMANDS) {
     files[mainSource(main)] =
@@ -199,6 +205,28 @@ test('packages an independently verifiable reference distribution', async () => 
       '#!/usr/bin/env sh\nupgrade\n',
     );
     assert.equal((await stat(upgrade)).mode & 0o777, 0o755);
+    // Links to the other shipped documents name them as the archive does.
+    for (const [page, contents] of [
+      [
+        'docs/configuration.md',
+        '[中文](configuration.zh-CN.md) [guide](deployment.md#upgrade) [site](https://example.com/a.md) [design](../design/x.md)\n',
+      ],
+      ['docs/configuration.zh-CN.md', '配置\n'],
+      [
+        'docs/server-reference.md',
+        'server reference, [configuration](configuration.md)\n',
+      ],
+    ]) {
+      assert.equal(await readFile(path.join(bundle, page), 'utf8'), contents);
+    }
+    assert.equal(
+      result.manifest.documentation.configuration,
+      'docs/configuration.md',
+    );
+    assert.equal(
+      result.manifest.documentation.configurationChinese,
+      'docs/configuration.zh-CN.md',
+    );
     for (const module of [
       'qwen-managed-agent-bootstrap.mjs',
       'qwen-managed-agent-upgrade.mjs',
@@ -302,7 +330,7 @@ test('launchers load the distribution config only when it exists', async () => {
     assert.deepEqual(
       registration.split('\n').filter((line) => line.startsWith('ARG=')),
       [
-        'ARG=-Dloader.main=com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageRegistrationMain',
+        'ARG=-Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.WorkspaceStorageRegistrationMain',
         'ARG=-cp',
         `ARG=${bundle}/lib/qwen-managed-agent-server-0.4.0-alpha.jar`,
         'ARG=org.springframework.boot.loader.launch.PropertiesLauncher',
@@ -373,6 +401,96 @@ test('refuses an admin command whose entry point is gone', async () => {
   }
 });
 
+test('a shipped document links to another by its name in the archive', () => {
+  const documentation = [
+    ['docs/users/guide.md', 'docs/deployment.md'],
+    ['docs/users/guide.zh-CN.md', 'docs/deployment.zh-CN.md'],
+    ['packages/server/README.md', 'docs/server-reference.md'],
+    ['LICENSE', 'LICENSE'],
+  ];
+  const links = (text, source) =>
+    shippedDocumentLinks(text, source, documentation);
+  assert.equal(
+    links(
+      '[中文](guide.zh-CN.md#top) and [it](./guide.zh-CN.md) [server](../../packages/server/README.md)',
+      'docs/users/guide.md',
+    ),
+    '[中文](deployment.zh-CN.md#top) and [it](deployment.zh-CN.md) [server](server-reference.md)',
+  );
+  assert.equal(
+    links(
+      '[guide](../../docs/users/guide.md#upgrade)',
+      'packages/server/README.md',
+    ),
+    '[guide](deployment.md#upgrade)',
+  );
+  // LICENSE ships too, one level up from the documents.
+  assert.equal(
+    links('[license](../../LICENSE)', 'packages/server/README.md'),
+    '[license](../LICENSE)',
+  );
+  // An unshipped file, a URL, an anchor and an absolute path stay as
+  // written, even an absolute path that would join to a shipped one.
+  const kept =
+    '[notes](notes/unshipped.md) [web](https://example.com/guide.zh-CN.md) [here](#top) [root](/guide.zh-CN.md)';
+  assert.equal(links(kept, 'docs/users/guide.md'), kept);
+});
+
+test('the shipped documents reach each other by their archive names', async () => {
+  const root = fileURLToPath(new URL('../../', import.meta.url));
+  const shipped = new Map(DOCUMENTATION);
+  const pattern = /\]\(([^()\s#]+)(#[^()\s]*)?\)/g;
+  const rewritten = {};
+  for (const [source, destination] of DOCUMENTATION) {
+    if (!source.endsWith('.md')) {
+      continue;
+    }
+    const text = await readFile(path.join(root, source), 'utf8');
+    const after = shippedDocumentLinks(text, source);
+    rewritten[destination] = after;
+    const before = [...text.matchAll(pattern)];
+    const now = [...after.matchAll(pattern)];
+    assert.equal(now.length, before.length, destination);
+    before.forEach(([, target], index) => {
+      const named = shipped.get(
+        path.posix.normalize(
+          path.posix.join(path.posix.dirname(source), target),
+        ),
+      );
+      if (named !== undefined) {
+        const resolved = path.posix.join(
+          path.posix.dirname(destination),
+          now[index][1],
+        );
+        assert.equal(resolved, named, `${destination}: ${target}`);
+      }
+    });
+    assert.doesNotMatch(
+      after,
+      /\]\([^)]*(managed-agent-configuration-reference|managed-agent-reference-deployment)/,
+      destination,
+    );
+  }
+  assert.match(
+    rewritten['docs/configuration.md'],
+    /\]\(configuration\.zh-CN\.md\)/,
+  );
+  assert.match(rewritten['docs/configuration.md'], /\]\(deployment\.md\)/);
+  assert.match(
+    rewritten['docs/configuration.zh-CN.md'],
+    /\]\(deployment\.zh-CN\.md\)/,
+  );
+  assert.match(rewritten['docs/deployment.md'], /\]\(configuration\.md\)/);
+  assert.match(
+    rewritten['docs/deployment.zh-CN.md'],
+    /\]\(configuration\.zh-CN\.md\)/,
+  );
+  assert.match(
+    rewritten['docs/server-reference.md'],
+    /\]\(configuration\.md\)/,
+  );
+});
+
 test('maps every admin command to an entry point in the server', async () => {
   const root = fileURLToPath(new URL('../../', import.meta.url));
   const names = ADMIN_COMMANDS.map(([name]) => name);
@@ -389,7 +507,7 @@ test('maps every admin command to an entry point in the server', async () => {
   // application is the one main the admin launcher does not run.
   const sources = path.join(
     root,
-    'packages/managed-agent-server/src/main/java',
+    'packages/managed-agent-server/server/src/main/java',
   );
   const mains = [];
   for (const file of await readdir(sources, { recursive: true })) {
@@ -994,7 +1112,7 @@ test('rejects stale or ambiguous safety defaults', async (context) => {
   const cases = [
     {
       name: 'commented public Shell default',
-      file: 'packages/managed-agent-server/src/main/resources/application.yml',
+      file: 'packages/managed-agent-server/server/src/main/resources/application.yml',
       contents:
         "# workspace-shell-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED:false}'\nworkspace-shell-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED:true}'\n",
       error: /Public Shell must default to false/,
@@ -1009,7 +1127,7 @@ test('rejects stale or ambiguous safety defaults', async (context) => {
     },
     {
       name: 'duplicate public Shell default',
-      file: 'packages/managed-agent-server/src/main/resources/application.yml',
+      file: 'packages/managed-agent-server/server/src/main/resources/application.yml',
       contents:
         "workspace-shell-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED:false}'\nworkspace-shell-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED:false}'\n",
       error: /Cannot uniquely read public Shell default/,

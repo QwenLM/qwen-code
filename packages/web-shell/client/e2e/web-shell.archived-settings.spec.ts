@@ -8,6 +8,216 @@ import { completeReplay, submitLocalCommand } from './visuals/harness';
 const primary = '/tmp/archive-primary';
 const secondary = '/tmp/archive-secondary';
 
+for (const touch of [false, true]) {
+  test.describe(
+    touch ? 'touch archive actions' : 'desktop archive actions',
+    () => {
+      test.use({
+        hasTouch: touch,
+        viewport: { width: touch ? 390 : 1440, height: 900 },
+      });
+
+      test('exports and restores directly from an archived row @smoke', async ({
+        page,
+      }, testInfo) => {
+        const scenario = createWebShellDaemonScenario({
+          workspaceCwd: primary,
+          capabilities: {
+            features: [
+              'session_events',
+              'workspace_settings',
+              'session_archive',
+              'workspace_archived_session_export',
+              'workspace_session_metadata',
+              'workspace_qualified_rest_core',
+            ],
+            workspaces: [
+              { id: 'primary', cwd: primary, primary: true, trusted: true },
+              {
+                id: 'secondary',
+                cwd: secondary,
+                primary: false,
+                trusted: true,
+              },
+            ],
+          },
+        });
+        await installMockDaemon(page, scenario, {
+          baseURL: String(testInfo.project.use.baseURL),
+        });
+        const restored = new Set<string>();
+        await page.route(
+          /\/workspaces?\/[^/]+\/sessions(?:\?|$)/,
+          async (route) => {
+            const url = new URL(route.request().url());
+            const cwd = decodeURIComponent(url.pathname.split('/')[2]!);
+            await route.fulfill({
+              json: {
+                sessions:
+                  url.searchParams.get('archiveState') === 'archived' &&
+                  !restored.has(cwd)
+                    ? [
+                        {
+                          sessionId:
+                            cwd === primary
+                              ? 'archived-primary'
+                              : 'archived-secondary',
+                          workspaceCwd: cwd,
+                          displayName:
+                            cwd === primary
+                              ? 'Primary archived conversation'
+                              : 'Secondary archived conversation',
+                          sourceType: 'default',
+                          isArchived: true,
+                          updatedAt: '2026-10-25T00:00:00Z',
+                        },
+                      ]
+                    : [],
+              },
+            });
+          },
+        );
+        const exports: string[] = [];
+        const restores: Array<{ path: string; body: unknown }> = [];
+        await page.route(
+          /\/session\/[^/]+\/archive\/export\?/,
+          async (route) => {
+            exports.push(new URL(route.request().url()).pathname);
+            await route.fulfill({
+              contentType: 'text/html',
+              body: '<html><body>Archived conversation</body></html>',
+              headers: {
+                'content-disposition': 'attachment; filename="archive.html"',
+              },
+            });
+          },
+        );
+        await page.route(/\/sessions\/unarchive$/, async (route) => {
+          const path = new URL(route.request().url()).pathname;
+          const body = route.request().postDataJSON() as {
+            sessionIds: string[];
+          };
+          restores.push({ path, body });
+          restored.add(
+            body.sessionIds[0] === 'archived-primary' ? primary : secondary,
+          );
+          await route.fulfill({
+            json: {
+              unarchived: body.sessionIds,
+              alreadyActive: [],
+              errors: [],
+            },
+          });
+        });
+        await page.goto('/settings?language=en&theme=light');
+        await page
+          .getByRole('navigation', { name: 'Settings', exact: true })
+          .getByRole('button', { name: 'Archived conversations', exact: true })
+          .click();
+        const archive = page.locator('[data-web-shell-archived-sessions]');
+        for (const [cwd, name, id] of [
+          [primary, 'Primary archived conversation', 'archived-primary'],
+          [secondary, 'Secondary archived conversation', 'archived-secondary'],
+        ]) {
+          const row = archive
+            .locator('[class*="archivedRow"]')
+            .filter({ hasText: name });
+          await expect(row).toBeVisible();
+          await page.mouse.move(0, 0);
+          const exportButton = row.getByRole('button', {
+            name: 'Export conversation record',
+            exact: true,
+          });
+          const restoreButton = row.getByRole('button', {
+            name: 'Restore',
+            exact: true,
+          });
+          await expect(exportButton).toHaveCount(1);
+          const actions = exportButton.locator('..');
+          if (touch) {
+            expect(
+              await page.evaluate(
+                () => matchMedia('(hover: none) and (pointer: coarse)').matches,
+              ),
+            ).toBe(true);
+            await expect(actions).toHaveCSS('opacity', '1');
+          } else {
+            await expect(actions).toHaveCSS('opacity', '0');
+            await exportButton.focus();
+            await expect(actions).toHaveCSS('opacity', '1');
+            await page.keyboard.press('Tab');
+            await expect(restoreButton).toBeFocused();
+            await restoreButton.blur();
+            await row.hover();
+            await expect(actions).toHaveCSS('opacity', '1');
+          }
+          await expect(exportButton).toHaveAttribute(
+            'title',
+            'Export conversation record',
+          );
+          await expect(restoreButton).toHaveAttribute('title', 'Restore');
+          const controls = [
+            exportButton,
+            restoreButton,
+            row.getByRole('button', { name: 'More actions', exact: true }),
+          ];
+          const boxes = await Promise.all(
+            controls.map((control) => control.boundingBox()),
+          );
+          expect(boxes.every(Boolean)).toBe(true);
+          expect(boxes[0]!.x + boxes[0]!.width).toBeLessThanOrEqual(
+            boxes[1]!.x,
+          );
+          expect(boxes[1]!.x + boxes[1]!.width).toBeLessThanOrEqual(
+            boxes[2]!.x,
+          );
+          const rowBox = await row.boundingBox();
+          expect(boxes[2]!.x + boxes[2]!.width).toBeLessThanOrEqual(
+            rowBox!.x + rowBox!.width,
+          );
+          await page.screenshot({
+            path: testInfo.outputPath(`${id}-actions.png`),
+          });
+          await controls[2].click();
+          const menu = page.getByRole('menu');
+          await expect(
+            menu.getByRole('menuitem', { name: 'Rename', exact: true }),
+          ).toBeVisible();
+          await expect(
+            menu.getByRole('menuitem', { name: 'Delete', exact: true }),
+          ).toBeVisible();
+          await expect(
+            menu.getByRole('menuitem', { name: /Export|Restore/ }),
+          ).toHaveCount(0);
+          await page.keyboard.press('Escape');
+          const downloadPromise = page.waitForEvent('download');
+          if (touch) await exportButton.tap();
+          else await exportButton.click();
+          expect((await downloadPromise).suggestedFilename()).toBe(
+            'archive.html',
+          );
+          expect(exports.at(-1)).toBe(
+            `/workspaces/${encodeURIComponent(cwd)}/session/${id}/archive/export`,
+          );
+          if (touch) await restoreButton.tap();
+          else await restoreButton.click();
+          await expect
+            .poll(() => restores.length)
+            .toBe(cwd === primary ? 1 : 2);
+          expect(restores.at(-1)).toEqual({
+            path:
+              cwd === primary
+                ? '/sessions/unarchive'
+                : `/workspaces/${encodeURIComponent(cwd)}/sessions/unarchive`,
+            body: { sessionIds: [id] },
+          });
+          await expect(row).toHaveCount(0);
+        }
+      });
+    },
+  );
+}
+
 for (const variant of [
   { theme: 'dark', language: 'en', width: 1440 },
   { theme: 'light', language: 'zh-CN', width: 1440 },

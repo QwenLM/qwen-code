@@ -1477,6 +1477,7 @@ describe('parseArguments', () => {
 
 describe('loadCliConfig', () => {
   const originalArgv = process.argv;
+  let originalDebugLogFile: string | undefined;
 
   beforeEach(() => {
     vi.resetAllMocks();
@@ -1499,11 +1500,21 @@ describe('loadCliConfig', () => {
     vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
     vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
     resetMcpApprovalsForTesting();
+    originalDebugLogFile = process.env['QWEN_DEBUG_LOG_FILE'];
   });
 
   afterEach(() => {
     process.argv = originalArgv;
     vi.unstubAllEnvs();
+    // vi.unstubAllEnvs cannot undo the direct `QWEN_DEBUG_LOG_FILE = '1'`
+    // assignment that loadCliConfig makes under --debug; a leaked '1' enables
+    // the debug logger's fire-and-forget writes for the rest of the file,
+    // and they land after the QWEN_HOME pin's afterAll sweep in test-setup.
+    if (originalDebugLogFile === undefined) {
+      delete process.env['QWEN_DEBUG_LOG_FILE'];
+    } else {
+      process.env['QWEN_DEBUG_LOG_FILE'] = originalDebugLogFile;
+    }
     resetMcpApprovalsForTesting();
     vi.restoreAllMocks();
   });
@@ -1794,6 +1805,113 @@ describe('loadCliConfig', () => {
     expect(nativeLspServiceMock).not.toHaveBeenCalled();
   });
 
+  it('isolates a host-owned Session connection from same-ID providers, environment and auxiliary models', async () => {
+    process.argv = ['node', 'script.js'];
+    vi.stubEnv('OPENAI_API_KEY', 'ambient-key');
+    vi.stubEnv('OPENAI_BASE_URL', 'https://ambient.example/v1');
+    const argv = await parseArguments();
+    const settings: Settings = {
+      modelProviders: {
+        openai: [
+          {
+            id: 'shared',
+            apiKey: 'catalog-key',
+            baseUrl: 'https://catalog.example/v1',
+          },
+        ],
+      },
+      fastModel: 'ambient-fast',
+      compactionModel: 'ambient-compaction',
+      advisorModel: 'ambient-advisor',
+      modelFallbacks: ['ambient-fallback'],
+    };
+    const modelConfiguration = {
+      authType: AuthType.USE_ANTHROPIC,
+      model: 'shared',
+      apiKey: 'session-key',
+      baseUrl: 'https://session.example/v1',
+      samplingParams: { temperature: 0.4 },
+    };
+    await loadCliConfig(
+      settings,
+      argv,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      { modelConfiguration },
+    );
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        authType: AuthType.USE_ANTHROPIC,
+        generationConfig: expect.objectContaining(modelConfiguration),
+        modelProvidersConfig: {},
+        providerProtocolConfig: {},
+        fastModel: undefined,
+        compactionModel: undefined,
+        advisorModel: undefined,
+        modelFallbacks: [],
+      }),
+    );
+    expect(settings.fastModel).toBe('ambient-fast');
+    expect(settings.modelProviders?.openai?.[0]?.apiKey).toBe('catalog-key');
+    expect(process.env['OPENAI_API_KEY']).toBe('ambient-key');
+  });
+
+  it.each<[string, Record<string, boolean>, number | undefined]>([
+    ['gpt-4o-mini', { image: true }, 131072],
+    ['unknown-session-model', {}, undefined],
+  ])(
+    'derives capabilities for a Session connection using %s without ambient generation settings',
+    async (model, modalities, contextWindowSize) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const modelConfiguration = {
+        authType: AuthType.USE_OPENAI,
+        model,
+        apiKey: 'session-key',
+        baseUrl: 'https://session.example/v1',
+      };
+      await loadCliConfig(
+        {
+          model: {
+            generationConfig: {
+              modalities: { video: true },
+              contextWindowSize: 7,
+              samplingParams: { temperature: 1.9 },
+            },
+            enableOpenAILogging: true,
+            openAILoggingDir: '/tmp/session-model-audit',
+            reasoningEffort: 'high',
+          },
+        },
+        argv,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+        { modelConfiguration },
+      );
+      const actual =
+        mockConfigConstructorParams.mock.calls.at(-1)?.[0].generationConfig;
+      expect(actual).toMatchObject({
+        ...modelConfiguration,
+        enableOpenAILogging: true,
+        openAILoggingDir: '/tmp/session-model-audit',
+        reasoning: { effort: 'high' },
+      });
+      expect(actual?.modalities).toEqual(modalities);
+      expect(actual?.contextWindowSize).toBe(contextWindowSize);
+      expect(actual?.samplingParams).toBeUndefined();
+    },
+  );
+
   it('passes the effective model API to Config at startup', async () => {
     process.argv = ['node', 'script.js'];
     vi.stubEnv('RESPONSES_KEY', 'responses-key');
@@ -2074,6 +2192,25 @@ describe('loadCliConfig', () => {
       expect(config.getUsageStatisticsEnabled()).toBe(expected);
     });
   });
+
+  it.each([undefined, false, true])(
+    'passes the model catalog refresh setting to Config: %s',
+    async (catalogRefresh) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await loadCliConfig(
+        catalogRefresh === undefined ? {} : { model: { catalogRefresh } },
+        argv,
+      );
+
+      expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          modelCatalogRefreshEnabled: catalogRefresh,
+        }),
+      );
+    },
+  );
 
   describe('model.goalTokenBudget', () => {
     it('carries the setting into the Goal budget grant', async () => {

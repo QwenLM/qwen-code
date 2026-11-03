@@ -25,6 +25,7 @@ import {
   parseExecutionSandboxSettings,
   readBareModeOperatorSettings,
   readOperatorSandboxSettings,
+  selectOperatorCatalogRefresh,
   selectOperatorExecutionSandbox,
   stripUtf8Bom,
 } from './execution-sandbox-settings.js';
@@ -773,6 +774,22 @@ function mergeSettings(
   ) {
     delete merged.tools.mode;
   }
+  const operatorCatalogRefresh = selectOperatorCatalogRefresh(
+    systemDefaults,
+    user,
+    system,
+  );
+  // Same shape as the executionSandbox restore: a project that replaces the
+  // whole `model` section cannot reset the operator's refresh opt-out.
+  if (operatorCatalogRefresh !== undefined) {
+    const model = merged.model;
+    merged.model = {
+      ...(model && typeof model === 'object' && !Array.isArray(model)
+        ? model
+        : {}),
+      catalogRefresh: operatorCatalogRefresh,
+    } as Settings['model'];
+  }
   return merged;
 }
 
@@ -1049,6 +1066,7 @@ export function createMinimalSettings(): LoadedSettings {
         }
       : {}),
     ...(operator.privacy ? { privacy: operator.privacy } : {}),
+    ...(operator.model ? { model: operator.model } : {}),
   };
   const emptySettingsFile: SettingsFile = {
     path: '',
