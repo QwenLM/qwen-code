@@ -325,6 +325,28 @@ class ExternalWorkspaceRetirementServiceTest {
     }
 
     @Test
+    void terminalFailedOperationWithBlockedDeliveryDoesNotFenceRetirement() {
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_id, operation_kind,"
+                + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase, delivery_state,"
+                + " gmt_create, gmt_modified) VALUES (?, ?, NULL, ?, 'SUBMIT_INPUT', ?, 'user-session', 'SESSION', ?,"
+                + " 'digest', '{}', 'FAILED', 'FAILED', 'BLOCKED', 1, 1)",
+                "a".repeat(64), "b".repeat(64), "turn-op".getBytes(),
+                "tenant".getBytes(), "c".repeat(64));
+
+        var receipt = service.retire(request, this::terminated);
+
+        assertThat(receipt.state()).isEqualTo("RELEASED");
+        assertThat(receipt.resumed()).isFalse();
+        assertThat(bindings.findById(original.getBindingId()).getState())
+                .isEqualTo(RuntimeBindingRecord.State.RELEASED);
+        assertThat(service.resume(request, receipt.proofDigest()).resumed()).isTrue();
+        var replacement = bindings.findOrCreate(placement);
+        assertThat(replacement.getGeneration()).isEqualTo(original.getGeneration() + 1);
+        assertThat(replacement.getBindingId()).isNotEqualTo(original.getBindingId());
+        assertThat(bindings.findActive(placement).getBindingId()).isEqualTo(replacement.getBindingId());
+    }
+
+    @Test
     void unknownTurnInAnyMemberPreventsAllRetirementWrites() {
         jdbc.update("INSERT INTO ma_turn (tenant_id, session_id, turn_id, prompt_id, input_json, payload_digest, status,"
                 + " gmt_create, gmt_modified) VALUES ('tenant','user-session','unknown','prompt','{}','digest','RECOVERY_BLOCKED',1,1)");

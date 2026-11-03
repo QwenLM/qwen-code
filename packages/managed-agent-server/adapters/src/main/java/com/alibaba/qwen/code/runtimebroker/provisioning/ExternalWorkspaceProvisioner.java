@@ -75,6 +75,11 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
         return WorkspaceExecutionProfile.isExternalWorkspaceRequest(request);
     }
 
+    @Override
+    protected boolean supportsReattach(RuntimeProvisionRequest request) {
+        return isWorkspaceRequest(request);
+    }
+
     /** Verifies the saved original for acquisition; never provisions a replacement. */
     public CompletionStage<Void> verifyAcquisition(RuntimeBindingRecord binding) {
         try {

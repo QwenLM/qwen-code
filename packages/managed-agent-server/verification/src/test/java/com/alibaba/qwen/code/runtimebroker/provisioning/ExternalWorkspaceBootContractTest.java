@@ -222,6 +222,11 @@ class ExternalWorkspaceBootContractTest {
                     "state", "RUNNING", "endpoint", "http://127.0.0.1:43190"));
         }
 
+        @Override
+        public CompletionStage<Map<String, Object>> reattach(Map<String, Object> request) {
+            return CompletableFuture.failedFuture(new UnsupportedOperationException("reattach not used"));
+        }
+
         @SuppressWarnings("unchecked")
         private Map<String, Object> boot() {
             Map<String, Object> body = new LinkedHashMap<>(provisions.get(0));
