@@ -559,7 +559,7 @@ interface PostedGithubComment {
 interface PublicationAuditRecord {
   at: string;
   type: 'github_publication';
-  outcome: 'posted' | 'suppressed' | 'failed' | 'posting';
+  outcome: 'posted' | 'suppressed' | 'failed' | 'failed_ambiguous' | 'posting';
   channel: string;
   triggerKind?: string;
   repository: string;
@@ -1212,7 +1212,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ...auditBase,
         at: new Date().toISOString(),
         type: 'github_publication',
-        outcome: 'failed',
+        // Only a provable no-write unlocks the event for retry; an
+        // ambiguous error may have landed the comment, and a second public
+        // reply would be irreversible.
+        outcome: isDefiniteNoWriteGithubError(err)
+          ? 'failed'
+          : 'failed_ambiguous',
         failurePhase: 'delivery',
         failureError: sanitizeLogText(
           err instanceof Error ? err.message : String(err),
@@ -1381,7 +1386,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           ...auditBase,
           at: new Date().toISOString(),
           type: 'github_publication',
-          outcome: 'failed',
+          // Ambiguous by construction: the definite-no-write branch above
+          // already continued. Keep the key consumed (at-most-once).
+          outcome: 'failed_ambiguous',
           failurePhase: 'delivery',
           failureError: sanitizeLogText(
             err instanceof Error ? err.message : String(err),
@@ -1681,8 +1688,31 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // deliver again. Keep the guard until no watch pending remains.
       this.watchReconcileBlocked = this.hasUnreconciledWatchPending();
       if (this.watchReconcileBlocked) {
+        // Park the legacy watch tasks as backpressure so they stop
+        // blocking the SHARED notification cursor: watch delivery is off,
+        // the reconcile guard still skips them in recovery, and comment
+        // events must not stall channel-wide until an operator re-enables
+        // watch. Re-enabling drains the pendings and re-resolves them.
+        try {
+          for (const task of this.readInboundTasks()) {
+            if (
+              this.isRecoverableInboundTask(task) &&
+              task.backpressure !== true &&
+              task.envelope?.messageId?.startsWith('watch:') === true
+            ) {
+              this.transitionInboundTask(task.id, 'failed', {
+                error: 'watch subscriptions disabled; parked until re-enabled',
+                attempts: task.attempts ?? 0,
+                deferCount: task.deferCount ?? 0,
+                backpressure: true,
+              });
+            }
+          }
+        } catch {
+          // Task store unreadable/unwritable: fail closed, retry next poll.
+        }
         process.stderr.write(
-          `[Channel:${this.name}] watch subscriptions are disabled but pending watch events remain unreconciled; watch task recovery stays blocked until subscriptions are re-enabled and the pending events reconcile\n`,
+          `[Channel:${this.name}] watch subscriptions are disabled but pending watch events remain unreconciled; watch task recovery stays blocked until subscriptions are re-enabled and the pending events reconcile (legacy watch tasks parked as backpressure so the notification cursor keeps flowing)\n`,
         );
       }
     }
@@ -1985,10 +2015,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       isReplyToBot: false,
       metadata: `${this.buildMetadata(ctx.chatId, ctx.threadId, title)}\n${GITHUB_PUBLICATION_INSTRUCTIONS}\nTrigger: ${reason}.\n${buildTriggerGuidance(reason)}\n${details}`,
     };
-    await this.dispatchEnvelope(envelope, ctx.issueNumber, {
+    const dispatched = await this.dispatchEnvelope(envelope, ctx.issueNumber, {
       dispatchedEvents: [trigger.key],
     });
-    this.recordDispatched('dispatchedEvents', trigger.key);
+    // A false return can mean the audit-freeze refused the dispatch with
+    // NO task claimed: recording the key anyway would persist it via the
+    // end-of-loop cursor save and permanently filter the re-listed event.
+    if (dispatched) {
+      this.recordDispatched('dispatchedEvents', trigger.key);
+    }
   }
 
   private async processAggregateLane(ctx: NotificationContext): Promise<void> {
@@ -2230,10 +2265,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         metadata: this.buildRouteMetadata(ctx),
       };
 
-      await this.dispatchEnvelope(envelope, issueNumber, {
+      const dispatched = await this.dispatchEnvelope(envelope, issueNumber, {
         dispatchedBodies: [bodyKey],
       });
-      this.recordDispatchedBody(bodyKey);
+      // Same contract as the direct lane: a refused dispatch (audit
+      // freeze) claimed no task, so the key must not be recorded.
+      if (dispatched) {
+        this.recordDispatchedBody(bodyKey);
+      }
     } catch (err) {
       process.stderr.write(
         `[Channel:${this.name}] failed to fetch issue for first contact: ${err}\n`,
@@ -2734,10 +2773,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private readPublicationAuditKeys(strict = false): Set<string> {
     try {
       // Last outcome per source key wins: a `posting` followed by a
-      // terminal `failed` means the reply never landed, so the event is
-      // NOT consumed and must stay retryable. A `posting` with no terminal
-      // record (crash mid-post) stays consumed — the ambiguous outcome
-      // resolves to at-most-once, matching recovery's contract.
+      // DEFINITE terminal `failed` (the write provably never landed) means
+      // the event is NOT consumed and must stay retryable. An ambiguous
+      // failure (`failed_ambiguous`: 502/timeout — the write may have
+      // succeeded) and a `posting` with no terminal record (crash mid-post)
+      // stay consumed: public replies are irreversible, so the ambiguous
+      // outcome resolves to at-most-once, matching recovery's contract.
       const lastOutcome = new Map<string, PublicationAuditRecord['outcome']>();
       for (const line of readFileSync(
         this.channelFilePath('github-audit.jsonl'),
@@ -2750,7 +2791,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             record.outcome === 'posted' ||
             record.outcome === 'suppressed' ||
             record.outcome === 'posting' ||
-            record.outcome === 'failed'
+            record.outcome === 'failed' ||
+            record.outcome === 'failed_ambiguous'
           ) {
             lastOutcome.set(
               `${record.repository}|${record.threadId ?? ''}|${record.sourceMessageId ?? ''}`,
@@ -3537,6 +3579,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         );
       }
       this.prWatchState = { version: 1, entries };
+    } else {
+      // Valid JSON but an unusable container (future version, null/array
+      // entries): starting fresh overwrites the file on the next save, so
+      // surface it like the corruption path instead of wiping silently.
+      process.stderr.write(
+        `[Channel:${this.name}] PR watch state container unusable (version/entries shape), starting fresh\n`,
+      );
     }
     this.prWatchStateLoaded = true;
   }
@@ -4093,6 +4142,25 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     key: string,
     entry: PrWatchEntry,
   ): Promise<void> {
+    // Per-PR ordering across passes: an earlier watch transition that is
+    // still unsettled (a failed/backpressure/running task from a previous
+    // attempt) must settle via recovery BEFORE any later pending event
+    // drains — the watch pass re-drains after reconcile, and the next
+    // poll's reconcile runs before recovery, so a per-pass break alone
+    // would still let the later event arrive first. Skip the whole entry
+    // until recovery settles the predecessor; nothing is lost (pending
+    // and fired are persisted). A task whose key EQUALS the pending head
+    // is that same event's own claim (the crash window between claim and
+    // fire-save), not a predecessor — draining reuses it, so let it pass.
+    const headKey = entry.pending?.[0]?.key;
+    const unsettledPredecessor = this.readInboundTasks().some(
+      (task) =>
+        this.isRecoverableInboundTask(task) &&
+        task.envelope?.messageId?.startsWith('watch:') === true &&
+        task.source.messageId !== headKey &&
+        this.prBindingKey(task.source.chatId, task.issueNumber) === key,
+    );
+    if (unsettledPredecessor) return;
     while (entry.pending && entry.pending.length > 0) {
       const pending = entry.pending[0]!;
       // Re-validate the frozen recipient against the latest COMPLETE
@@ -4133,14 +4201,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         );
       } catch (err) {
         // Claim persistence failed: keep the event queued and retry on the
-        // next poll instead of consuming the transition.
+        // next poll instead of consuming the transition. Propagate so the
+        // reconcile pass fails and sets watchReconcileBlocked: a swallowed
+        // failure would let recovery deliver an accepted watch task whose
+        // pending record is still unreconciled on disk.
         process.stderr.write(
           `[Channel:${this.name}] failed to claim watch event ${pending.key}, will retry: ${sanitizeLogText(
             err instanceof Error ? err.message : String(err),
             200,
           )}\n`,
         );
-        return;
+        throw err;
       }
       const firedBefore = entry.fired;
       const pendingBefore = entry.pending;

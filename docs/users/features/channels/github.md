@@ -162,7 +162,10 @@ so the session that follows the PR handles the event with its existing context.
   bound to the same PR, the most recently updated non-archived session wins;
   channel-owned sessions are never candidates.
 - When no bound session exists (or it cannot be restored), **comment** events
-  fall back to the normal channel path and its public-reply contract. A bound
+  fall back to the normal channel path and its public-reply contract — on a
+  complete binding snapshot; while the snapshot is partial or its refresh is
+  failing, the fallback defers until a complete snapshot establishes that no
+  follower exists. A bound
   session that is dormant after a daemon restart is woken automatically for
   the delivery, so restarts do not divert events into public replies.
   **Watch events (below) are private-only**: with no bound target they are

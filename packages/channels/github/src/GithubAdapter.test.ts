@@ -2841,7 +2841,7 @@ describe('GithubChannel', () => {
       const audit = readFileSync(auditPath(), 'utf-8');
       const lastAuditLine = audit.trim().split('\n').pop()!;
       expect(JSON.parse(lastAuditLine)).toMatchObject({
-        outcome: 'failed',
+        outcome: 'failed_ambiguous',
         failurePhase: 'delivery',
         failureError: 'ambiguous transport failure',
       });
@@ -3134,7 +3134,7 @@ describe('GithubChannel', () => {
       expect(existsSync(pendingPath())).toBe(false);
       expect(existsSync(inboundTaskPath())).toBe(false);
       expect(JSON.parse(readFileSync(auditPath(), 'utf-8'))).toMatchObject({
-        outcome: 'failed',
+        outcome: 'failed_ambiguous',
         triggerKind: 'mention',
         failurePhase: 'delivery',
         failureError: 'ambiguous',
@@ -3211,7 +3211,7 @@ describe('GithubChannel', () => {
         .map((line) => JSON.parse(line));
       expect(audit).toEqual([
         expect.objectContaining({
-          outcome: 'failed',
+          outcome: 'failed_ambiguous',
           failureError: 'ambiguous',
         }),
         expect.objectContaining({
@@ -3335,6 +3335,61 @@ describe('GithubChannel', () => {
       ).rejects.toMatchObject({ cause: error });
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
       expect(existsSync(pendingPath())).toBe(false);
+    });
+
+    it('audits an ambiguous publication failure as failed_ambiguous, keeping the key consumed (R6-A3)', async () => {
+      await connectForPublication();
+      const error = Object.assign(new Error('bad gateway'), { status: 502 });
+      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toMatchObject({ cause: error });
+      const audit = readFileSync(auditPath(), 'utf-8');
+      // A 502 may have landed the comment: the verdict must NOT unlock the
+      // key for retry (a second public reply would be irreversible).
+      expect(audit).toContain('"outcome":"failed_ambiguous"');
+      expect(audit).not.toContain('"outcome":"failed"');
+      expect(existsSync(pendingPath())).toBe(false);
+    });
+
+    it('audits a definite no-write publication failure as retryable failed (R6-A3)', async () => {
+      await connectForPublication();
+      const error = Object.assign(new Error('secondary rate limit'), {
+        status: 429,
+        response: { headers: { 'x-ratelimit-remaining': 0 } },
+      });
+      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toMatchObject({ cause: error });
+      const audit = readFileSync(auditPath(), 'utf-8');
+      // remaining=0 proves the write never landed: retryable, and the
+      // pending final delivery is enqueued for the retry lane.
+      expect(audit).toContain('"outcome":"failed"');
+      expect(audit).not.toContain('"outcome":"failed_ambiguous"');
+      expect(existsSync(pendingPath())).toBe(true);
     });
 
     it('migrates legacy pending finals before retrying', async () => {
@@ -6439,6 +6494,88 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       mockOctokit.paginate
         .mockResolvedValueOnce([prNotification()])
         .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+    });
+
+    it('does not record the direct-lane key when the audit freeze refuses dispatch (R6-A1)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      const auditPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-audit.jsonl',
+      );
+      mkdirSync(auditPath, { recursive: true });
+      const notification = makeNotification({
+        reason: 'review_requested',
+        subject: {
+          title: 'Test PR',
+          url: 'https://api.github.com/repos/owner/repo/pulls/42',
+          type: 'PullRequest',
+        },
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([notification])
+        .mockResolvedValueOnce([makeIssueEvent()]);
+      await pollOnce();
+      // The freeze refused the dispatch with NO task claimed: the direct
+      // lane must not record the trigger key, or the unconditional
+      // end-of-loop cursor save persists it and the re-listed event is
+      // permanently filtered.
+      const ch = channel as unknown as {
+        cursor: { dispatchedEvents?: string[] };
+      };
+      expect(ch.cursor.dispatchedEvents ?? []).toHaveLength(0);
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(
+        mockOctokit.rest.activity.markNotificationsAsRead,
+      ).not.toHaveBeenCalled();
+
+      rmSync(auditPath, { recursive: true, force: true });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([notification])
+        .mockResolvedValueOnce([makeIssueEvent()]);
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+    });
+
+    it('does not record the first-contact body key when the audit freeze refuses dispatch (R6-A1)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: {
+          title: 'Issue',
+          body: '@test-bot first contact body',
+          user: { login: 'alice' },
+        },
+      });
+      const auditPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-audit.jsonl',
+      );
+      mkdirSync(auditPath, { recursive: true });
+      // mention reason + no new comments + never-read → first-contact feed
+      // (the mention lane requires the body to mention the bot).
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification()])
+        .mockResolvedValueOnce([]);
+      await pollOnce();
+      const ch = channel as unknown as {
+        cursor: { dispatchedBodies?: string[] };
+      };
+      expect(ch.cursor.dispatchedBodies ?? []).toHaveLength(0);
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+
+      rmSync(auditPath, { recursive: true, force: true });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification()])
+        .mockResolvedValueOnce([]);
       await pollOnce();
       expect(channel.inboundEnvelopes).toHaveLength(1);
     });
@@ -10343,20 +10480,33 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       await watch.runPrStateWatch();
       const entry = readWatchState().entries['owner/repo#42']!;
       expect(entry['seq']).toBe(2);
-      expect(entry['fired']).toContainEqual(
+      // Per-PR ordering: the old episode is still unsettled, so the new
+      // one waits in pending — it must NOT drain ahead of its predecessor.
+      const queued = entry['pending'] as Array<{ key: string }>;
+      expect(
+        queued.some((p) => /^watch:merge_conflict:42:2:\d+$/.test(p.key)),
+      ).toBe(true);
+      expect(entry['fired']).not.toContainEqual(
         expect.stringMatching(/^watch:merge_conflict:42:2:\d+$/),
       );
-      // The NEW episode owns a distinct task; the old one is not silently
-      // reused for the new event.
       const tasks = readInboundTasks();
       expect(tasks.some((t) => t['id'] === 'old-watch-task')).toBe(true);
-      expect(
-        tasks.some((t) =>
-          /^watch:merge_conflict:42:2:\d+$/.test(
-            String((t['source'] as Record<string, unknown>)['messageId']),
-          ),
-        ),
-      ).toBe(true);
+      expect(tasks).toHaveLength(1);
+
+      // Once recovery settles the old episode, the new one drains with its
+      // own distinct task (never a silent reuse of the old record).
+      boundSessions.deliverPrompt.mockResolvedValue(undefined);
+      const recovery = channel as unknown as {
+        recoverInboundTasks: () => Promise<void>;
+      };
+      await recovery.recoverInboundTasks();
+      await watch.runPrStateWatch();
+      const settled = readWatchState().entries['owner/repo#42']!;
+      expect(settled['fired']).toContainEqual(
+        expect.stringMatching(/^watch:merge_conflict:42:2:\d+$/),
+      );
+      // Both episodes delivered and retired: the task file is gone.
+      expect(existsSync(inboundTaskPath())).toBe(false);
     });
 
     it('scopes watch keys by PR so two PRs bound to one session never collide (R2-B1)', async () => {
@@ -10721,6 +10871,9 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       }
       expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
       expect(readInboundTasks()).toHaveLength(1);
+      // The legacy task is parked as backpressure so it stops blocking the
+      // shared notification cursor while watch delivery is off.
+      expect(readInboundTasks()[0]!['backpressure']).toBe(true);
       expect(
         readWatchState().entries['owner/repo#42']!['pending'],
       ).toHaveLength(1);
@@ -10840,6 +10993,133 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       const queued = entry['pending'] as Array<{ key: string }>;
       expect(queued.map((p) => p.key)).toEqual([key2]);
       expect(entry['fired']).toContain(key1);
+    });
+
+    it('never delivers a later watch event before its unsettled predecessor across passes (R6-A2)', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      const key1 = 'watch:head_change:42:1:1751446800000';
+      const key2 = 'watch:ci_failure:42:sha-1:1751446801000';
+      seedWatchState({
+        'owner/repo#42': {
+          headSha: 'sha-1',
+          ci: 'success',
+          mergeableState: 'clean',
+          prState: 'open',
+          fired: [],
+          pending: [
+            makePendingWatch({ key: key1, text: 'earlier event' }),
+            makePendingWatch({ key: key2, text: 'later event' }),
+          ],
+        },
+      });
+      boundSessions.deliverPrompt
+        .mockRejectedValueOnce(new BoundSessionQueueFullError('bound-session'))
+        .mockResolvedValue(undefined);
+      mockPull({});
+      mockNotificationsOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+      // A failed in the reconcile drain; the watch-pass re-drain must SKIP
+      // B (its predecessor is unsettled); recovery retried A successfully.
+      // B stays queued — it must never arrive before A settles.
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+      const texts1 = boundSessions.deliverPrompt.mock.calls.map(
+        (call) => call[1] as string,
+      );
+      expect(texts1.every((t) => t.includes('earlier event'))).toBe(true);
+      expect(
+        (
+          readWatchState().entries['owner/repo#42']!['pending'] as Array<{
+            key: string;
+          }>
+        ).map((p) => p.key),
+      ).toEqual([key2]);
+
+      mockNotificationsOnce([]);
+      await pollOnce();
+      const texts2 = boundSessions.deliverPrompt.mock.calls.map(
+        (call) => call[1] as string,
+      );
+      expect(texts2).toHaveLength(3);
+      expect(texts2[2]).toContain('later event');
+      expect(
+        readWatchState().entries['owner/repo#42']!['pending'],
+      ).toHaveLength(0);
+    });
+
+    it('blocks watch recovery when a drain claim fails to persist (R6-B2)', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      const key = 'watch:state_change:42:1:1751446800000';
+      seedWatchState({
+        'owner/repo#42': {
+          headSha: 'sha-1',
+          mergeableState: 'clean',
+          prState: 'open',
+          fired: [],
+          pending: [makePendingWatch({ key })],
+        },
+      });
+      writeInboundTasks([
+        makeInboundTaskRecord({
+          state: 'accepted',
+          attempts: 0,
+          issueNumber: 42,
+          delivery: { kind: 'bound-session', sessionId: 'bound-session' },
+          source: { chatId: 'owner/repo', threadId: 'pr:42', messageId: key },
+          envelope: { ...makePendingWatch({ key }).envelope },
+          dedupe: {},
+        }),
+      ]);
+      const claimable = channel as unknown as {
+        claimInboundTask: (...args: unknown[]) => unknown;
+      };
+      const spy = vi
+        .spyOn(claimable, 'claimInboundTask')
+        .mockImplementation(() => {
+          throw new Error('disk full');
+        });
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        mockPull({});
+        mockNotificationsOnce([]);
+        await pollOnce();
+        // The claim failure must propagate out of the drain so reconcile
+        // fails and the guard holds: recovery must not deliver the
+        // accepted task while its pending record is unreconciled.
+        const priv = channel as unknown as {
+          watchReconcileBlocked: boolean;
+        };
+        expect(priv.watchReconcileBlocked).toBe(true);
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(readInboundTasks()).toHaveLength(1);
+      } finally {
+        spy.mockRestore();
+        stderr.mockRestore();
+      }
+    });
+
+    it('surfaces an unusable watch state container instead of wiping silently', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      const path = watchStatePath();
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, '{"version":2,"entries":{}}\n', 'utf-8');
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        mockPull({});
+        mockNotificationsOnce([]);
+        await pollOnce();
+        expect(
+          stderr.mock.calls.some((call) =>
+            String(call[0]).includes('container unusable'),
+          ),
+        ).toBe(true);
+      } finally {
+        stderr.mockRestore();
+      }
     });
   });
 });
