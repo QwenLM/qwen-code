@@ -668,6 +668,21 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
     return this.client.readResource(validated);
   }
 
+  // Existence probe for the commit-side closure walk: a staged resource is
+  // present; a persisted one is present unless the store answers 404. Any other
+  // failure stays fatal (R6-1).
+  private async has(ref: ManagedSessionDurableRef): Promise<boolean> {
+    if (this.staged.has(ref.resourceId)) return true;
+    try {
+      await this.read(ref);
+      return true;
+    } catch (error) {
+      if (error instanceof ManagedSessionStoreHttpError && error.status === 404)
+        return false;
+      throw error;
+    }
+  }
+
   async commitResources(
     refs: readonly ManagedSessionDurableRef[],
   ): Promise<CommitResource[]> {
@@ -702,7 +717,21 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
         ref.kind !== CHECKPOINT_HISTORY_KIND &&
         isReferenceContainer(ref.kind)
       ) {
-        pending.push(...collectNestedResourceRefs(ref, await this.read(ref)));
+        for (const nested of collectNestedResourceRefs(
+          ref,
+          await this.read(ref),
+        )) {
+          // A legacy bundle may name a contributions child that was never
+          // staged — the commit-side counterpart of the read-side tolerance
+          // (R6-1). Drop only an absent contributions child from the closure;
+          // a present or conflicting one stays fatal.
+          if (
+            nested.kind === 'managed-extension-contributions' &&
+            !(await this.has(nested))
+          )
+            continue;
+          pending.push(nested);
+        }
       }
     }
     return [...closure.values()].map((ref) => {

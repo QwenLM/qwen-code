@@ -6223,6 +6223,75 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('commits a closure reaching a persisted legacy bundle whose contributions child was never staged (R6-1)', async () => {
+    // The commit-side counterpart of the read-side tolerance: a later commit
+    // whose closure reaches a legacy bundle must not abort on the bundle's
+    // never-uploaded contributions child. Remove the skip and this throws
+    // 'Resource not found.' instead of resolving.
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    try {
+      const contributionsRef = await session.resources.publish(
+        'managed-extension-contributions',
+        Buffer.from(JSON.stringify({ parts: [] }), 'utf8'),
+      );
+      const bundleRef = await session.resources.publish(
+        'managed-extension-config-bundle',
+        Buffer.from(
+          JSON.stringify({ packages: [{ contributionsRef }] }),
+          'utf8',
+        ),
+      );
+      const outcomeRef = await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}', 'utf8'),
+      );
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'recordToolResult',
+          commandId: 'receipt-legacy-bundle',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'a'.repeat(64),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'receipt:legacy-bundle',
+          sessionKey: SESSION_KEY,
+          kind: 'tool.receipt',
+          occurredAt: 1,
+          payload: {
+            executionCallId: 'execution-legacy-bundle',
+            toolOutcomeRef: outcomeRef,
+            resultRef: null,
+            resources: [bundleRef],
+            historyRevision: sequence,
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+      // Simulate the pre-closure-edge shape: the persisted bundle names a
+      // contributions child the store never uploaded.
+      (
+        server as unknown as { resources: Map<string, unknown> }
+      ).resources.delete(contributionsRef.resourceId);
+      // A later commit whose closure reaches the legacy bundle resolves and
+      // keeps the bundle in the census; the absent child is dropped, not fatal.
+      const census = await (
+        stores.resourceStore as unknown as {
+          commitResources(
+            refs: readonly ManagedSessionDurableRef[],
+          ): Promise<Array<{ resourceId: string }>>;
+        }
+      ).commitResources([bundleRef]);
+      const ids = census.map((resource) => resource.resourceId);
+      expect(ids).toContain(bundleRef.resourceId);
+      expect(ids).not.toContain(contributionsRef.resourceId);
+    } finally {
+      await session.close();
+    }
+  });
+
   function nativeSnapshotFixture(
     server: FakeManagedSessionStore,
     coverage: number,
