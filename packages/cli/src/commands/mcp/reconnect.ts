@@ -112,6 +112,16 @@ async function createMinimalConfig(): Promise<Config> {
       parseBooleanEnvFlag(process.env['QWEN_USAGE_STATISTICS_ENABLED']) ??
       settings.merged.privacy?.usageStatisticsEnabled ??
       true,
+    // Mirror loadCliConfig's catalog-refresh resolution: without it this
+    // throwaway Config leaves `modelCatalogRefreshEnabled` undefined, so the
+    // model-catalog refresh gate defaults to on and this command contacts
+    // `https://models.dev/api.json` even when the user disabled it (issue
+    // #16006). The env var has no catalog equivalent, so only the settings
+    // value is mirrored.
+    modelCatalogRefreshEnabled:
+      typeof settings.merged.model?.catalogRefresh === 'boolean'
+        ? settings.merged.model.catalogRefresh
+        : undefined,
     // Mirror loadCliConfig's proxy resolution (minus the --proxy flag this
     // command does not take): without it the session_start flush above
     // bypasses the proxy the user configured (issue #12844).

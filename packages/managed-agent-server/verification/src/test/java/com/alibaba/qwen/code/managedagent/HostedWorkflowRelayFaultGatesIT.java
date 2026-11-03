@@ -44,7 +44,6 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -75,6 +74,7 @@ import java.util.stream.Collectors;
 import java.util.stream.LongStream;
 
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.camel;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -1394,7 +1394,7 @@ class HostedWorkflowRelayFaultGatesIT {
         // Spring and the embedded broker bind ephemeral ports read back
         // after boot; the Harness port is picked ahead because Spring's
         // connector is configured with it.
-        harnessPort = freePort();
+        harnessPort = reservePort();
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelThreads = Executors.newCachedThreadPool();
         model.setExecutor(modelThreads);
@@ -1803,12 +1803,6 @@ class HostedWorkflowRelayFaultGatesIT {
         choice.put("finish_reason", calls.isEmpty() ? "stop" : "tool_calls");
         return (first + "data: " + json.writeValueAsString(chunk)
                 + "\n\ndata: [DONE]\n\n").getBytes(StandardCharsets.UTF_8);
-    }
-
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
-        }
     }
 
     private static void deleteRecursively(Path root) throws IOException {

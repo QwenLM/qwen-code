@@ -77,6 +77,7 @@ import java.util.regex.Pattern;
 import java.util.stream.LongStream;
 
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.camel;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
@@ -1979,7 +1980,8 @@ class HostedSessionRelayFaultGatesIT {
         publicProxy = HostedSessionRelayForwardingProxy.start("public",
                 casesRoot.resolve("public-proxy.log"));
         // Reserve the Harness port while the other fixture listeners bind.
-        try (ServerSocket reservation = new ServerSocket(0)) {
+        try (ServerSocket reservation = new ServerSocket(reservePort(), 1,
+                java.net.InetAddress.getByName("127.0.0.1"))) {
             harnessPort = reservation.getLocalPort();
             startSpring(cli, node, caseCount, letter);
             port = spring.getWebServer().getPort();

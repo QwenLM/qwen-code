@@ -61,6 +61,7 @@ import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachmen
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachmentsOf;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.connectorOwning;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -1122,9 +1123,9 @@ class HostedPublicWorkspaceIT {
         }
         int harnessPort;
         int brokerPort;
-        try (var springSocket = new ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"));
-                var harnessSocket = new ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"));
-                var brokerSocket = new ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"))) {
+        try (var springSocket = new ServerSocket(reservePort(), 1, java.net.InetAddress.getByName("127.0.0.1"));
+                var harnessSocket = new ServerSocket(reservePort(), 1, java.net.InetAddress.getByName("127.0.0.1"));
+                var brokerSocket = new ServerSocket(reservePort(), 1, java.net.InetAddress.getByName("127.0.0.1"))) {
             port = springSocket.getLocalPort();
             harnessPort = harnessSocket.getLocalPort();
             brokerPort = brokerSocket.getLocalPort();

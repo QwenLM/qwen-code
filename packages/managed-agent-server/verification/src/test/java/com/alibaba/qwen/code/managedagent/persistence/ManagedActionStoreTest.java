@@ -47,6 +47,7 @@ class ManagedActionStoreTest {
     private static final String ACTION = "tool_approval_" + "a".repeat(32);
     private ConsolidatedStoreFixture fixture;
     private JdbcTemplate jdbc;
+    private StoreLockTrace trace;
     private ManagedActionStore actions;
     private AgentStateStore agents;
     private TransactionTemplate transactions;
@@ -55,7 +56,8 @@ class ManagedActionStoreTest {
     @BeforeEach
     void initialize() throws Exception {
         fixture = ConsolidatedStoreFixture.open("action_store");
-        var source = fixture.source();
+        var source = new StoreLockTrace(fixture.source());
+        trace = source;
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         transactions = new TransactionTemplate(
@@ -437,8 +439,14 @@ class ManagedActionStoreTest {
                         + " VALUES (?,?,'turn','turn','[]','digest',?,'default',1,TRUE,0,0)",
                 TENANT, SESSION, turnStatus);
         ObjectNode options = planExitOptions();
+        trace.clear();
         project("requested", null, 1, options);
         project("decided", response(option), 2, options);
+        if (option.equals("allow")) {
+            trace.assertSessionBeforeTurn(TENANT, SESSION);
+        } else {
+            assertThat(trace.successful(TENANT, SESSION)).noneMatch(StoreLockTrace.Event::turn);
+        }
         assertThat(jdbc.queryForObject("SELECT plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
                 Boolean.class, TENANT, SESSION)).isEqualTo(expectedPlan);
         assertThat(jdbc.queryForObject("SELECT approval_revision FROM ma_session WHERE tenant_id=? AND session_id=?",

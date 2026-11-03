@@ -15,7 +15,6 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -42,6 +41,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class HostedProcessCrashIT {
@@ -125,10 +125,7 @@ class HostedProcessCrashIT {
             this.jdbc = jdbc;
             root = Files.createDirectory(temporary.resolve("coordinator-only")).toRealPath();
             assertThat(cli).isRegularFile();
-            try (var socket = new ServerSocket(0)) {
-                socket.setReuseAddress(true);
-                port = socket.getLocalPort();
-            }
+            port = reservePort();
         }
 
         private void run() throws Exception {
@@ -392,9 +389,9 @@ class HostedProcessCrashIT {
             Files.createDirectories(root.resolve("workspace/child"));
             // Keep initialized-root mtime distinct from birth time without relying on sleeps.
             Files.setLastModifiedTime(root.resolve("workspace"), FileTime.fromMillis(1));
-            springPort = freePort();
-            harnessProxyPort = freePort();
-            brokerPort = freePort();
+            springPort = reservePort();
+            harnessProxyPort = reservePort();
+            brokerPort = reservePort();
             if (fault.equals("recovery-settlement")) {
                 Files.setPosixFilePermissions(root.resolve("runtime"),
                         java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
@@ -851,12 +848,6 @@ class HostedProcessCrashIT {
         while (!condition.getAsBoolean()) {
             assertThat(System.nanoTime()).as(description).isLessThan(deadline);
             Thread.sleep(20);
-        }
-    }
-
-    private static int freePort() throws java.io.IOException {
-        try (var socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
         }
     }
 

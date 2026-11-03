@@ -49,6 +49,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { setMemoryFilename as mockSetMemoryFilename } from '../utils/memory-constants.js';
+import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
 import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
@@ -498,6 +499,9 @@ function mockAutoMemoryIndexRead(content: string) {
 vi.mock('../core/baseLlmClient.js');
 vi.mock('../core/toolHookTriggers.js', () => ({
   fireNotificationHook: vi.fn().mockResolvedValue({}),
+}));
+vi.mock('../models/model-catalog-refresh.js', () => ({
+  refreshModelCatalog: vi.fn().mockResolvedValue(undefined),
 }));
 
 type MemoryLoad = Awaited<ReturnType<typeof loadServerHierarchicalMemory>>;
@@ -5310,6 +5314,27 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('initialize', () => {
+    it.each([
+      ['the default', { usageStatisticsEnabled: true }, true],
+      [
+        'the operator refresh switch',
+        { usageStatisticsEnabled: true, modelCatalogRefreshEnabled: false },
+        false,
+      ],
+      [
+        'the usage-statistics opt-out',
+        { usageStatisticsEnabled: false },
+        false,
+      ],
+    ])(
+      'gates the model catalog refresh on %s',
+      async (_name, params, expected) => {
+        await initConfig(params, SKIP_ALL_INIT);
+
+        expect(refreshModelCatalog).toHaveBeenCalledTimes(expected ? 1 : 0);
+      },
+    );
+
     it('accepts managed handoff only after certified takeover is configured', async () => {
       const standalone = makeConfig();
       await standalone.closeSessionWriter({ handoff: true });

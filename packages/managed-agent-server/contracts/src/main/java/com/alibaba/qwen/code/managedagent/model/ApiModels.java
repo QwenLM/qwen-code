@@ -73,7 +73,13 @@ public final class ApiModels {
             Boolean stream,
             JsonNode workspace,
             @Size(max = 256) List<@NotNull Map<String, Object>> skills,
-            @Size(max = 32) List<@NotNull @Valid Pin> extensionPins, JsonNode worktree) {
+            @Size(max = 32) List<@NotNull @Valid Pin> extensionPins, JsonNode worktree,
+            @JsonProperty("model_config") JsonNode modelConfig) {
+        public CreateSessionRequest(String agentId, String agentRevision, List<InputBlock> input,
+                Map<String, Object> metadata, Boolean stream, JsonNode workspace, List<Map<String, Object>> skills,
+                List<Pin> extensionPins, JsonNode worktree) {
+            this(agentId, agentRevision, input, metadata, stream, workspace, skills, extensionPins, worktree, null);
+        }
         public CreateSessionRequest(String agentId, String agentRevision, List<InputBlock> input,
                 Map<String, Object> metadata, Boolean stream, JsonNode workspace, List<Map<String, Object>> skills,
                 List<Pin> extensionPins) {
@@ -454,7 +460,13 @@ public final class ApiModels {
             Map<String, Object> metadata,
             JsonNode workspace, String approvalMode, Boolean planMode, String modelId,
             @Size(max = 256) List<@NotNull Map<String, Object>> skills,
-            @Size(max = 32) List<@NotNull @Valid Pin> extensionPins, JsonNode worktree) {
+            @Size(max = 32) List<@NotNull @Valid Pin> extensionPins, JsonNode worktree, JsonNode modelConfig) {
+        public WebShellCreateRequest(String requestId, String idempotencyKey, String agentId, String title,
+                List<InputBlock> input, Map<String, Object> metadata, JsonNode workspace, String approvalMode,
+                Boolean planMode, String modelId, List<Map<String, Object>> skills, List<Pin> extensionPins, JsonNode worktree) {
+            this(requestId, idempotencyKey, agentId, title, input, metadata, workspace, approvalMode,
+                    planMode, modelId, skills, extensionPins, worktree, null);
+        }
         public WebShellCreateRequest(String requestId, String idempotencyKey, String agentId, String title,
                 List<InputBlock> input, Map<String, Object> metadata, JsonNode workspace, String approvalMode,
                 Boolean planMode, String modelId, List<Map<String, Object>> skills, List<Pin> extensionPins) {

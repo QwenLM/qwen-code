@@ -27,9 +27,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -57,6 +55,7 @@ import java.util.function.Predicate;
 import java.util.regex.Pattern;
 import java.util.stream.LongStream;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -2262,13 +2261,9 @@ class HostedAutomationFaultGatesIT {
         Files.createDirectory(root.resolve("child"));
         // Keep the initialized root's mtime distinct from its birth time without sleeping.
         Files.setLastModifiedTime(root, FileTime.fromMillis(1));
-        try (var springSocket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
-                var harnessSocket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
-                var brokerSocket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
-            port = springSocket.getLocalPort();
-            harnessPort = harnessSocket.getLocalPort();
-            brokerPort = brokerSocket.getLocalPort();
-        }
+        port = reservePort();
+        harnessPort = reservePort();
+        brokerPort = reservePort();
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelExecutor = Executors.newVirtualThreadPerTaskExecutor();
         model.setExecutor(modelExecutor);
