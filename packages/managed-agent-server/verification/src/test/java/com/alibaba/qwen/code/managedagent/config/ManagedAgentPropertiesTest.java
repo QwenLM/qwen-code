@@ -40,7 +40,7 @@ public class ManagedAgentPropertiesTest {
                         "qwen.managed-agent.service-user=  worker  ",
                         "qwen.managed-agent.model-catalog[0].model-id=model-one",
                         "qwen.managed-agent.model-catalog[0].label=Model One",
-                        "qwen.managed-agent.harness.enabled=false",
+                        "qwen.managed-agent.harness.is_enabled=false",
                         "qwen.managed-agent.harness.load-timeout=12",
                         "qwen.managed-agent.automation.scan-delay=1200",
                         "qwen.managed-agent.runtime-broker.retention.batch-size=42",
@@ -853,11 +853,11 @@ public class ManagedAgentPropertiesTest {
     public void
             sshCatalogBindsAndRetainsExistingRuntimeConfigurationWhenNewAdmissionIsDisabled() {
         var remote = new ApplicationContextRunner().withUserConfiguration(PropertiesConfiguration.class)
-                .withPropertyValues("qwen.managed-agent.harness.enabled=true",
-                        "qwen.managed-agent.harness.workspace-files-enabled=true",
-                        "qwen.managed-agent.session-store.enabled=true",
-                        "qwen.managed-agent.runtime-broker.enabled=true",
-                        "qwen.managed-agent.runtime-broker.ssh.enabled=true",
+                .withPropertyValues("qwen.managed-agent.harness.is_enabled=true",
+                        "qwen.managed-agent.harness.workspace-files-is_enabled=true",
+                        "qwen.managed-agent.session-store.is_enabled=true",
+                        "qwen.managed-agent.runtime-broker.is_enabled=true",
+                        "qwen.managed-agent.runtime-broker.ssh.is_enabled=true",
                         "qwen.managed-agent.runtime-broker.ssh.nodes[0].node-id=mac",
                         "qwen.managed-agent.runtime-broker.ssh.nodes[0].display-name=Build Mac",
                         "qwen.managed-agent.runtime-broker.ssh.nodes[0].ssh-host=build-mac",
@@ -876,11 +876,11 @@ public class ManagedAgentPropertiesTest {
             assertThat(ssh.getNodes().getFirst().admits("tenant", "actor")).isTrue();
             assertThat(ssh.getNodes().getFirst().admits("tenant", "other")).isFalse();
         });
-        remote.withPropertyValues("qwen.managed-agent.runtime-broker.ssh.enabled=false")
+        remote.withPropertyValues("qwen.managed-agent.runtime-broker.ssh.is_enabled=false")
                 .run(started -> assertThat(started).hasNotFailed());
         if (ManagedAgentProperties.childWorkspacesSupportedOn(System.getProperty("os.name"))
                 && ManagedAgentProperties.utf8FileNames(System.getProperty("sun.jnu.encoding"))) {
-            var mixed = remote.withPropertyValues("qwen.managed-agent.runtime-broker.child-workspaces-enabled=true",
+            var mixed = remote.withPropertyValues("qwen.managed-agent.runtime-broker.child-workspaces-is_enabled=true",
                     "qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=tenant",
                     "qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=local-storage",
                     "qwen.managed-agent.runtime-broker.workspace-mounts[0].root=/workspace");
@@ -892,7 +892,7 @@ public class ManagedAgentPropertiesTest {
             });
             mixed.withPropertyValues(DURABLE_KEY + "=false").run(started -> assertThat(started).hasFailed());
         }
-        for (String invalid : List.of("runtime-broker.child-workspaces-enabled=true", "harness.workspace-files-enabled=false")) {
+        for (String invalid : List.of("runtime-broker.child-workspaces-is_enabled=true", "harness.workspace-files-is_enabled=false")) {
             remote.withPropertyValues("qwen.managed-agent." + invalid).run(started -> assertThat(started).hasFailed());
         }
     }
@@ -903,10 +903,10 @@ public class ManagedAgentPropertiesTest {
                 .withUserConfiguration(PropertiesConfiguration.class);
         context.run(started -> assertThat(started).hasNotFailed());
         ApplicationContextRunner enabled = context.withPropertyValues(
-                "qwen.managed-agent.harness.enabled=true",
-                "qwen.managed-agent.harness.workspace-files-enabled=true",
-                "qwen.managed-agent.session-store.enabled=true",
-                "qwen.managed-agent.runtime-broker.enabled=true",
+                "qwen.managed-agent.harness.is_enabled=true",
+                "qwen.managed-agent.harness.workspace-files-is_enabled=true",
+                "qwen.managed-agent.session-store.is_enabled=true",
+                "qwen.managed-agent.runtime-broker.is_enabled=true",
                 "qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=tenant",
                 "qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage",
                 "qwen.managed-agent.runtime-broker.workspace-mounts[0].root=/workspace");
@@ -921,8 +921,8 @@ public class ManagedAgentPropertiesTest {
         // Store at Harness create, so the Harness implies the Store even
         // when Workspace files are off.
         context.withPropertyValues(
-                "qwen.managed-agent.harness.enabled=true",
-                "qwen.managed-agent.session-store.enabled=false")
+                "qwen.managed-agent.harness.is_enabled=true",
+                "qwen.managed-agent.session-store.is_enabled=false")
                 .run(started -> assertThat(started).hasFailed()
                         .getFailure().hasRootCauseInstanceOf(IllegalStateException.class)
                         .hasRootCauseMessage("Hosted Harness requires the Managed Session Store"));
@@ -933,8 +933,8 @@ public class ManagedAgentPropertiesTest {
         String prefix = "qwen.managed-agent.runtime-broker.";
         String entry = prefix + "resident-workspaces[0].";
         var values = new java.util.ArrayList<String>(List.of(
-                "qwen.managed-agent.harness.enabled=true", "qwen.managed-agent.harness.workspace-files-enabled=true",
-                "qwen.managed-agent.session-store.enabled=true", prefix + "enabled=true",
+                "qwen.managed-agent.harness.is_enabled=true", "qwen.managed-agent.harness.workspace-files-is_enabled=true",
+                "qwen.managed-agent.session-store.is_enabled=true", prefix + "is_enabled=true",
                 prefix + "provisioner=kubernetes-workspace", prefix + "isolation-class=workspace",
                 TRUSTED_KEY + "=false", prefix + "resident-kubernetes-api-url=https://cluster.example",
                 prefix + "resident-kubernetes-token-file=/reviewed/token", prefix + "resident-kubernetes-ca-file=/reviewed/ca",
@@ -966,7 +966,7 @@ public class ManagedAgentPropertiesTest {
         context.withPropertyValues(TRUSTED_KEY + "=true").run(started -> assertThat(started).hasFailed());
         context.withPropertyValues(prefix + "workspace-creation-root=/local-workspaces")
                 .run(started -> assertThat(started).hasFailed());
-        context.withPropertyValues("qwen.managed-agent.harness.workspace-shell-enabled=true")
+        context.withPropertyValues("qwen.managed-agent.harness.workspace-shell-is_enabled=true")
                 .run(started -> assertThat(started).hasFailed());
         context.withPropertyValues(prefix + "ssh.nodes[0].node-id=remote",
                         prefix + "ssh.nodes[0].display-name=Remote",
@@ -1040,11 +1040,11 @@ public class ManagedAgentPropertiesTest {
                 .withUserConfiguration(PropertiesConfiguration.class)
                 .withPropertyValues(
                         key + "=true",
-                        "qwen.managed-agent.harness.enabled=true",
-                        "qwen.managed-agent.harness.workspace-files-enabled=true",
+                        "qwen.managed-agent.harness.is_enabled=true",
+                        "qwen.managed-agent.harness.workspace-files-is_enabled=true",
                         "qwen.managed-agent.harness.approval-mode=default",
-                        "qwen.managed-agent.session-store.enabled=true",
-                        "qwen.managed-agent.runtime-broker.enabled=true",
+                        "qwen.managed-agent.session-store.is_enabled=true",
+                        "qwen.managed-agent.runtime-broker.is_enabled=true",
                         "qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=tenant",
                         "qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage",
                         "qwen.managed-agent.runtime-broker.workspace-mounts[0].root=/workspace");
@@ -1056,8 +1056,8 @@ public class ManagedAgentPropertiesTest {
             supported.withPropertyValues("qwen.managed-agent.harness.approval-mode=" + mode)
                     .run(started -> assertThat(started).hasFailed());
         }
-        for (String invalid : List.of("harness.workspace-files-enabled=false", "harness.enabled=false",
-                "session-store.enabled=false", "runtime-broker.enabled=false",
+        for (String invalid : List.of("harness.workspace-files-is_enabled=false", "harness.is_enabled=false",
+                "session-store.is_enabled=false", "runtime-broker.is_enabled=false",
                 "runtime-broker.isolation-class=workspace", "runtime-broker.provisioner=kubernetes")) {
             supported.withPropertyValues("qwen.managed-agent." + invalid)
                     .run(started -> assertThat(started).hasFailed());

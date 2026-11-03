@@ -223,7 +223,7 @@ public final class HostedGateTestSupport {
     static List<String> toolPublicationArgs(int servicePort, String bucket,
             long executionBytes) {
         return List.of(
-                "--qwen.managed-agent.tool-publication.enabled=true",
+                "--qwen.managed-agent.tool-publication.is_enabled=true",
                 "--qwen.managed-agent.tool-publication.oss-endpoint=https://oss-cn-hangzhou.aliyuncs.com",
                 "--qwen.managed-agent.tool-publication.oss-region=cn-hangzhou",
                 "--qwen.managed-agent.tool-publication.oss-bucket=" + bucket,
@@ -239,7 +239,7 @@ public final class HostedGateTestSupport {
                 "--qwen.managed-agent.tool-publication.claim-timeout=5s",
                 "--qwen.managed-agent.tool-publication.verification-bytes-per-second=1048576",
                 "--qwen.managed-agent.tool-publication.max-verification-timeout=20m",
-                "--qwen.managed-agent.tool-publication.gc-enabled=true",
+                "--qwen.managed-agent.tool-publication.gc-is_enabled=true",
                 "--qwen.managed-agent.tool-publication.deletion-grace=0s");
     }
 

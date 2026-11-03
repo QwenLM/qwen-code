@@ -27,11 +27,11 @@ import static org.assertj.core.api.Assertions.assertThat;
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.enabled=false",
+        "qwen.managed-agent.harness.is_enabled=false",
         "qwen.managed-agent.harness.capability-digest=sha256:"
                 + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "qwen.managed-agent.runtime-broker.enabled=true",
+        "qwen.managed-agent.runtime-broker.is_enabled=true",
         "qwen.managed-agent.runtime-broker.host=127.0.0.1",
         "qwen.managed-agent.runtime-broker.port=0",
         "qwen.managed-agent.runtime-broker.token=broker-token",

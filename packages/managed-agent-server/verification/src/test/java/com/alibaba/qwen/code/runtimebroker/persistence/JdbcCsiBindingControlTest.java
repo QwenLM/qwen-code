@@ -34,7 +34,7 @@ class JdbcCsiBindingControlTest {
         var source = source();
         try (var connection = source.getConnection()) {
             sql(connection, "CREATE SCHEMA other");
-            sql(connection, "CREATE TABLE other.ma_session (csi_guard BOOLEAN)");
+            sql(connection, "CREATE TABLE other.ma_session (is_csi_guard BOOLEAN)");
         }
         var bindings = bindings(source);
         var request = new RuntimeProvisionRequest(new RuntimeScope("tenant", "workspace", "1", "/workspace",

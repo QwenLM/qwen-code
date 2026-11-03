@@ -319,7 +319,10 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     public WebShellSessionModels queryWebShellSessionModels(
             SessionPrincipal principal, String sessionId) {
-        requireModelActor(principal == null ? null : principal.userId());
+        if (principal == null) {
+            throw new ManagedAgentException(401, "actor_required", "A trusted actor is required");
+        }
+        requireModelActor(principal.userId());
         SessionRecord session = requireReadableSession(principal, sessionId);
         boolean supported = session.workspace() != null && store.workspaceFilesEnabled()
                 && !store.modelOptions().isEmpty() && harness.supportsModelSelection();
@@ -339,7 +342,10 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     public WebShellModelChangeResult changeWebShellSessionModel(
             SessionPrincipal principal, String sessionId, String key,
             String modelId, long expectedRevision) {
-        requireModelActor(principal == null ? null : principal.userId());
+        if (principal == null) {
+            throw new ManagedAgentException(401, "actor_required", "A trusted actor is required");
+        }
+        requireModelActor(principal.userId());
         requireReadableSession(principal, sessionId);
         validateIdempotencyKey(key);
         String digest = digests.digest(Map.of("sessionId", sessionId, "modelId", modelId,

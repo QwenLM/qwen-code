@@ -42,8 +42,8 @@ import static org.mockito.Mockito.mock;
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.enabled=false",
-        "qwen.managed-agent.session-store.enabled=true",
+        "qwen.managed-agent.harness.is_enabled=false",
+        "qwen.managed-agent.session-store.is_enabled=true",
         "qwen.managed-agent.tool-publication.entry-concurrency=4"
 })
 @Import(SurfaceRegistryGateTest.ExtraControllers.class)

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Manifest;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Operation;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Package;
@@ -70,6 +71,9 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
 
     public Operation finishPublish(String tenant, String actor, String workspace, String id,
             String digest, String operationId, long length, Operation operation, Access access) {
+        if (length < 0 || length > ManagedExtensionPackages.MAX_ARCHIVE_BYTES) {
+            throw invalid();
+        }
         return transaction.execute(status -> {
             lockWorkspace(tenant, actor, workspace, access);
             jdbc.update("UPDATE ma_extension_package SET state = 'PUBLISHED', byte_length = ? WHERE package_key = ?",
@@ -102,7 +106,7 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
                 throw new ManagedAgentException(409, "extension_settings_unavailable",
                         "Encrypted extension settings are unavailable.");
             }
-            long revision = current + 1;
+            long revision = nextRevision(current);
             ProtectedSecret protectedValues = secrets.protect(settingsContext(tenant, workspace, extensionId, revision), plaintext);
             jdbc.update("INSERT INTO ma_extension_settings (settings_key, scope_key, tenant_id, workspace_id, extension_id,"
                             + " settings_revision, encryption_key_id, encrypted_values, configured_keys_json, gmt_create)"
@@ -176,7 +180,15 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
     private long nextPackageRevision(String tenant, String workspace, String extensionId) {
         Long maximum = jdbc.queryForObject("SELECT COALESCE(MAX(package_revision), 0) FROM ma_extension_package"
                 + " WHERE scope_key = ? AND extension_id = ?", Long.class, scope(tenant, workspace), extensionId);
-        return (maximum == null ? 0 : maximum) + 1;
+        return nextRevision(maximum == null ? 0 : maximum);
+    }
+
+    private static long nextRevision(long current) {
+        long revision = Math.incrementExact(current);
+        if (revision < 1) {
+            throw new IllegalStateException("Extension revision must be positive");
+        }
+        return revision;
     }
 
     private Operation existingOperation(String tenant, String actor, String workspace, String operationId, String digest, Access access) {
@@ -194,6 +206,9 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
 
     private void insertOperation(String tenant, String actor, String workspace, String operationId, String extensionId,
             String kind, long revision, String packageDigest, String requestDigest, String state) {
+        if (revision < 1) {
+            throw new IllegalStateException("Extension operation revision must be positive");
+        }
         jdbc.update("INSERT INTO ma_extension_operation (operation_key, scope_key, tenant_id, workspace_id, actor_key,"
                         + " operation_id, extension_id, operation_kind, revision, package_digest, request_digest, state, gmt_create)"
                         + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",

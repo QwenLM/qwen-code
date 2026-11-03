@@ -145,7 +145,7 @@ public class ManagedRuntimeAttestationConformanceTest {
             }
         }
         assertEquals(Set.of("execute", "status", "cancel", "acknowledge"), routes);
-        assertEquals(Set.of("prepared", "executing", "cancel_requested",
+        assertEquals(Set.of("prepared", "executing", "is_cancel_requested",
                 "settled", "acknowledged", "unknown"), states);
         assertEquals(Set.of("not_started", "success", "error", "cancelled"),
                 executionStatuses);

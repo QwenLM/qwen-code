@@ -141,16 +141,16 @@ public class HostedRecoveryWedgeGate {
                 "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
                 "--spring.datasource.username=" + System.getProperty("mysql.user"),
                 "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
-                "--qwen.managed-agent.session-store.enabled=true",
+                "--qwen.managed-agent.session-store.is_enabled=true",
                 // The conditional OSS-backed publication stack cannot boot
                 // outside a provisioned rig, so the real controller and
                 // stores are registered programmatically below with a stub
                 // object store (A1's reserve is refused before any object
                 // call), with only the entry-concurrency property bound.
                 "--qwen.managed-agent.tool-publication.entry-concurrency=32",
-                "--qwen.managed-agent.harness.enabled=false",
+                "--qwen.managed-agent.harness.is_enabled=false",
                 "--qwen.managed-agent.harness.capability-digest=sha256:" + "a".repeat(64),
-                "--qwen.managed-agent.runtime-broker.enabled=true",
+                "--qwen.managed-agent.runtime-broker.is_enabled=true",
                 "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.token=hosted-tools-broker-token",
                 "--qwen.managed-agent.runtime-broker.durable-local-process=false",
@@ -161,7 +161,7 @@ public class HostedRecoveryWedgeGate {
                 "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                 "--qwen.managed-agent.runtime-broker.node-executable=" + wrapper,
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + cli,
-                "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled=false",
+                "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-is_enabled=false",
                 "--qwen.managed-agent.runtime-broker.cli-entry=" + cli));
         for (int index = 0; index < workspaces.size(); index++) {
             String prefix = "--qwen.managed-agent.runtime-broker.workspace-mounts[" + index + "].";

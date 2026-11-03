@@ -49,7 +49,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.enabled=false",
+        "qwen.managed-agent.harness.is_enabled=false",
         // A stream reads the store only to catch up or after an overflow, so
         // live events must come through the hub. An idle stream also reads
         // the store after a heartbeat.

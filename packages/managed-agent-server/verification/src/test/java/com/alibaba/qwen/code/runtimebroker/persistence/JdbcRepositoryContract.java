@@ -117,7 +117,7 @@ public final class JdbcRepositoryContract {
         binding.put("runtime_generation", 1);
         binding.put("binding_state", "PROVISIONING");
         binding.put("attestation_generation", 0);
-        binding.put("drain_requested", false);
+        binding.put("is_drain_requested", false);
         binding.put("operation_generation", 0);
         binding.put("record_version", 3);
         binding.put("last_active_at", java.sql.Timestamp.from(START));
@@ -154,7 +154,7 @@ public final class JdbcRepositoryContract {
                         "sessionId", prefix + "-session", "promptId", "turn", "callId", "call", "argsDigest", "digest")));
                 execution.put("execution_state", state);
                 execution.put("last_sequence", 2);
-                execution.put("cancel_requested", false);
+                execution.put("is_cancel_requested", false);
                 execution.put("dispatch_generation", 0);
                 execution.put("record_version", 5);
                 if ("SETTLED".equals(state)) {

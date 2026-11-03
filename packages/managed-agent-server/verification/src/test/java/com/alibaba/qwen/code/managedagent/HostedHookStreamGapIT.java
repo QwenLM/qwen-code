@@ -402,25 +402,25 @@ class HostedHookStreamGapIT {
                         "--qwen.managed-agent.trusted-actor-header=X-Qwen-Actor-Id",
                         "--qwen.managed-agent.definition-tool-profiles="
                                 + PROFILE,
-                        "--qwen.managed-agent.session-store.enabled=true",
+                        "--qwen.managed-agent.session-store.is_enabled=true",
                         "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:"
                                 + port,
                         "--qwen.managed-agent.session-store.workspace-id=unused-global-workspace",
                         "--qwen.managed-agent.session-store.writer-lease-duration=3s",
-                        "--qwen.managed-agent.harness.enabled=true",
-                        "--qwen.managed-agent.harness.workspace-files-enabled=true",
+                        "--qwen.managed-agent.harness.is_enabled=true",
+                        "--qwen.managed-agent.harness.workspace-files-is_enabled=true",
                         "--qwen.managed-agent.harness.base-url=http://127.0.0.1:"
                                 + harnessPort,
                         "--qwen.managed-agent.harness.token=" + TOKEN,
                         "--qwen.managed-agent.harness.capability-digest="
                                 + CAPABILITY,
-                        "--qwen.managed-agent.runtime-broker.enabled=true",
+                        "--qwen.managed-agent.runtime-broker.is_enabled=true",
                         "--qwen.managed-agent.runtime-broker.port="
                                 + brokerPort,
                         "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                         "--qwen.managed-agent.runtime-broker.durable-local-process=true",
                         "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
-                        "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled=true",
+                        "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-is_enabled=true",
                         "--qwen.managed-agent.runtime-broker.workspace-cwd="
                                 + temporary.resolve("decoy"),
                         "--qwen.managed-agent.runtime-broker.state-directory="
@@ -525,7 +525,7 @@ class HostedHookStreamGapIT {
                 + " CAST(turn_id AS CHAR) AS turn_id,"
                 + " CAST(item_id AS CHAR) AS item_id,"
                 + " CAST(content_part_id AS CHAR) AS content_part_id,"
-                + " event_type, gmt_create, data_json, terminal"
+                + " event_type, gmt_create, data_json, is_terminal"
                 + " FROM ma_public_event WHERE tenant_id = ? AND"
                 + " session_id = ? AND stream_kind = 'SESSION' AND"
                 + " stream_id = X'' ORDER BY sequence_id", tenant, session);
@@ -807,7 +807,7 @@ class HostedHookStreamGapIT {
                             .toList());
             json.writeValue(destination.resolve("events.json").toFile(),
                     jdbc.queryForList("SELECT session_id, turn_id,"
-                            + " event_type, terminal FROM ma_public_event"
+                            + " event_type, is_terminal FROM ma_public_event"
                             + " WHERE tenant_id = ? ORDER BY sequence_id",
                             tenant));
             json.writeValue(destination.resolve("model-requests.json")

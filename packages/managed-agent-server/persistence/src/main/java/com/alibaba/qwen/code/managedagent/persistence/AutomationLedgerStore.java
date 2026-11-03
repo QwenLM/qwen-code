@@ -76,7 +76,7 @@ public class AutomationLedgerStore
                     result.getString("session_mode"),
                     result.getString("overlap"), result.getString("catch_up"),
                     (Long) result.getObject("catch_up_limit"),
-                    result.getBoolean("enabled"), result.getString("state"),
+                    result.getBoolean("is_enabled"), result.getString("state"),
                     result.getString("blocked_reason"),
                     result.getLong("armed_at"),
                     result.getObject("watermark_slot", Long.class),
@@ -252,7 +252,7 @@ public class AutomationLedgerStore
                             + " workspace_id, actor_id, record_revision,"
                             + " definition_revision, definition_digest, goal,"
                             + " cron, timezone, session_mode, overlap, catch_up,"
-                            + " catch_up_limit, enabled, state, blocked_reason,"
+                            + " catch_up_limit, is_enabled, state, blocked_reason,"
                             + " armed_at, watermark_slot, lease_owner,"
                             + " lease_until, fence, gmt_create, gmt_modified,"
                             + " gate)"
@@ -286,7 +286,7 @@ public class AutomationLedgerStore
                         + " record_revision = ?, definition_revision = ?,"
                         + " definition_digest = ?, goal = ?, cron = ?,"
                         + " timezone = ?, session_mode = ?, overlap = ?,"
-                        + " catch_up = ?, catch_up_limit = ?, enabled = ?,"
+                        + " catch_up = ?, catch_up_limit = ?, is_enabled = ?,"
                         + " state = ?, blocked_reason = NULL, armed_at = ?,"
                         + " gmt_modified = ?, gate = ?, gate_last_outcome = ?,"
                         + " gate_last_at = ?, gate_quiet_since_delivery = ?,"
@@ -388,7 +388,7 @@ public class AutomationLedgerStore
     /** Live, enabled, unblocked definitions whose lease is free or expired. */
     public List<ScheduleRow> findArmed(long now, int limit) {
         return jdbc.query("SELECT " + ManagedSchemaProjection.SCHEDULE.columns() + " FROM ma_schedule"
-                        + " WHERE state = ? AND enabled = TRUE"
+                        + " WHERE state = ? AND is_enabled = TRUE"
                         + " AND blocked_reason IS NULL"
                         + " AND (lease_until IS NULL OR lease_until < ?)"
                         + " ORDER BY gmt_modified, schedule_id LIMIT ?", SCHEDULE,

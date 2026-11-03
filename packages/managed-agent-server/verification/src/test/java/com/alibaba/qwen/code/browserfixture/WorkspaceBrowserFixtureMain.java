@@ -30,7 +30,7 @@ public final class WorkspaceBrowserFixtureMain {
                         "--spring.datasource.driver-class-name=org.h2.Driver",
                         "--spring.datasource.username=sa",
                         "--spring.datasource.password=",
-                        "--qwen.managed-agent.harness.enabled=false");
+                        "--qwen.managed-agent.harness.is_enabled=false");
         JdbcTemplate jdbc = context.getBean(JdbcTemplate.class);
         jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                         + " workspace_id, workspace_generation, storage_id,"

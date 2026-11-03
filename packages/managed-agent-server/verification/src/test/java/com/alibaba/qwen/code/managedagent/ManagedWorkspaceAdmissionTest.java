@@ -72,7 +72,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.enabled=false"
+        "qwen.managed-agent.harness.is_enabled=false"
 })
 @AutoConfigureMockMvc
 class ManagedWorkspaceAdmissionTest {
@@ -1494,7 +1494,6 @@ class ManagedWorkspaceAdmissionTest {
                 .agentId("qwen-code")
                 .selection(new WorkspaceSelection("ws-a", "."))
                 .build());
-        jdbc.update("ALTER TABLE ma_workspace_access DROP CONSTRAINT ck_ma_access_role");
         try {
             jdbc.update("UPDATE ma_workspace_access SET role = 'BROKEN'"
                             + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
@@ -1515,10 +1514,6 @@ class ManagedWorkspaceAdmissionTest {
             jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'"
                             + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, "ws-a", "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            String constraint = com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.ddl()
-                    .lines().filter(line -> line.contains("CONSTRAINT ck_ma_access_role CHECK"))
-                    .findFirst().orElseThrow().trim().replaceFirst(",$", "");
-            jdbc.update("ALTER TABLE ma_workspace_access ADD " + constraint);
         }
     }
 

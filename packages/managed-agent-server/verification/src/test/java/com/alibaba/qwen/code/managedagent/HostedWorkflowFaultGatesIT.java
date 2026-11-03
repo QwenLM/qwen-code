@@ -118,23 +118,23 @@ class HostedWorkflowFaultGatesIT {
                         + System.getProperty("mysql.user"),
                 "--spring.datasource.password="
                         + System.getProperty("mysql.password", ""),
-                "--qwen.managed-agent.session-store.enabled=true",
+                "--qwen.managed-agent.session-store.is_enabled=true",
                 "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:"
                         + storeProxyPort,
                 "--qwen.managed-agent.session-store.workspace-id=unused-global-workspace",
-                "--qwen.managed-agent.harness.enabled=true",
-                "--qwen.managed-agent.harness.workspace-files-enabled=true",
+                "--qwen.managed-agent.harness.is_enabled=true",
+                "--qwen.managed-agent.harness.workspace-files-is_enabled=true",
                 "--qwen.managed-agent.harness.base-url=http://127.0.0.1:"
                         + harnessPort,
                 "--qwen.managed-agent.harness.token=hosted-process-fixture-token",
                 "--qwen.managed-agent.harness.capability-digest=sha256:"
                         + "a".repeat(64),
-                "--qwen.managed-agent.runtime-broker.enabled=true",
+                "--qwen.managed-agent.runtime-broker.is_enabled=true",
                 "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.token=hosted-tools-broker-token",
                 "--qwen.managed-agent.runtime-broker.durable-local-process=false",
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
-                "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
+                "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-is_enabled="
                         + "Linux".equals(System.getProperty("os.name")),
                 "--qwen.managed-agent.runtime-broker.workspace-cwd="
                         + temporary,

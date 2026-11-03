@@ -76,7 +76,7 @@ class ToolPublicationStorageConfigurationTest {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(AliyunToolPublicationStorageAutoConfiguration.class))
                 .withUserConfiguration(PropertiesConfiguration.class)
-                .withPropertyValues(PREFIX + "enabled=true")
+                .withPropertyValues(PREFIX + "is_enabled=true")
                 .run(context -> assertThat(context).hasNotFailed().doesNotHaveBean(OSS.class)
                         .doesNotHaveBean(ToolPublicationObjectStore.class));
     }
@@ -84,7 +84,7 @@ class ToolPublicationStorageConfigurationTest {
     @Test
     void anApplicationStoreReplacesOssWithoutAnyOssSettings() {
         runner.withUserConfiguration(CustomStorageConfiguration.class)
-                .withPropertyValues(PREFIX + "enabled=true")
+                .withPropertyValues(PREFIX + "is_enabled=true")
                 .run(context -> {
                     assertThat(context).hasNotFailed().hasSingleBean(ToolPublicationObjectStore.class)
                             .doesNotHaveBean(OSS.class).doesNotHaveBean(AliyunToolPublicationStorageAutoConfiguration.class);
@@ -101,13 +101,13 @@ class ToolPublicationStorageConfigurationTest {
             "operation-timeout,deadlines are required"})
     void aCustomStoreStillRequiresCommonPublicationSettings(String missing, String failure) {
         runner.withUserConfiguration(CustomStorageConfiguration.class)
-                .withPropertyValues(PREFIX + "enabled=true", PREFIX + missing + "=")
+                .withPropertyValues(PREFIX + "is_enabled=true", PREFIX + missing + "=")
                 .run(context -> assertThat(context).hasFailed().getFailure().hasStackTraceContaining(failure));
     }
 
     @Test
     void theDefaultAdapterStillRequiresOssConfiguration() {
-        runner.withPropertyValues(PREFIX + "enabled=true")
+        runner.withPropertyValues(PREFIX + "is_enabled=true")
                 .run(context -> assertThat(context).hasFailed()
                         .getFailure().hasRootCauseInstanceOf(IllegalStateException.class)
                         .hasStackTraceContaining("OSS endpoint"));
@@ -120,7 +120,7 @@ class ToolPublicationStorageConfigurationTest {
         var acl = new AccessControlList();
         acl.setCannedACL(CannedAccessControlList.Private);
         when(client.getBucketAcl("private-test-bucket")).thenReturn(acl);
-        runner.withPropertyValues(PREFIX + "enabled=true", PREFIX + "oss-bucket=private-test-bucket")
+        runner.withPropertyValues(PREFIX + "is_enabled=true", PREFIX + "oss-bucket=private-test-bucket")
                 .withBean("unrelatedOss", OSS.class, () -> mock(OSS.class))
                 .withBean(BeanFactoryPostProcessor.class, () -> beanFactory ->
                         ((AbstractBeanDefinition) beanFactory.getBeanDefinition("toolPublicationOss"))

@@ -94,7 +94,7 @@ class EventTransportConfigurationTest {
         HarnessConnector harness = mock(HarnessConnector.class);
         return runner
                 .withPropertyValues(
-                        "qwen.managed-agent.event-transport.enabled=true",
+                        "qwen.managed-agent.event-transport.is_enabled=true",
                         "qwen.managed-agent.event-transport.endpoints=127.0.0.1:8081",
                         "qwen.managed-agent.event-transport.topic=" + TOPIC)
                 // Bound from the property values, as in a deployment.
@@ -115,7 +115,7 @@ class EventTransportConfigurationTest {
         for (String flag : new String[] {null, "false"}) {
             ApplicationContextRunner context = flag == null ? runner
                     : runner.withPropertyValues(
-                            "qwen.managed-agent.event-transport.enabled="
+                            "qwen.managed-agent.event-transport.is_enabled="
                                     + flag);
             context.run(started -> {
                 assertThat(started).hasNotFailed();

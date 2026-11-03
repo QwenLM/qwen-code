@@ -282,7 +282,7 @@ class ExternalWorkspaceMaterializationTest {
                             .isEqualTo(new com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelection("yolo", 0));
                     assertThat(jdbc.queryForObject("SELECT approval_mode FROM ma_turn WHERE session_id=?", String.class, admitted.sessionId()))
                             .isEqualTo("yolo");
-                    assertThat(jdbc.queryForObject("SELECT plan_enabled FROM ma_turn WHERE session_id=?", Boolean.class, admitted.sessionId())).isFalse();
+                    assertThat(jdbc.queryForObject("SELECT is_plan_enabled FROM ma_turn WHERE session_id=?", Boolean.class, admitted.sessionId())).isFalse();
                 }
             }
             when(harness.supportsLifecycle(profile)).thenReturn(false);
@@ -570,7 +570,7 @@ class ExternalWorkspaceMaterializationTest {
         register("tenant", "second");
         jdbc.update("INSERT INTO ma_runtime_binding (binding_id, request_key, scope_key, tenant_id, workspace_id,"
                 + " workspace_generation, canonical_cwd, capability_digest, isolation_class, provisioner_kind,"
-                + " storage_id, runtime_generation, binding_state, attestation_generation, drain_requested,"
+                + " storage_id, runtime_generation, binding_state, attestation_generation, is_drain_requested,"
                 + " operation_generation, record_version, last_active_at)"
                 + " VALUES ('binding', ?, ?, 'tenant', 'second', '1', '/workspace', 'digest', 'session',"
                 + " 'external', 'second', 1, 'READY', 1, FALSE, 0, 1, 0)", "a".repeat(64), "b".repeat(64));

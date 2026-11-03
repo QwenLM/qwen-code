@@ -30,8 +30,8 @@ import static org.assertj.core.api.Assertions.assertThat;
             "spring.datasource.driver-class-name=org.h2.Driver",
             "spring.datasource.username=sa",
             "spring.datasource.password=",
-            "qwen.managed-agent.harness.enabled=false",
-            "qwen.managed-agent.session-store.enabled=true",
+            "qwen.managed-agent.harness.is_enabled=false",
+            "qwen.managed-agent.session-store.is_enabled=true",
             "qwen.managed-agent.auth.mode=signed",
             "qwen.managed-agent.auth.signing-key=0123456789abcdef0123456789abcdef"
         })

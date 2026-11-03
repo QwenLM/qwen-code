@@ -113,6 +113,7 @@ final class WorkspaceOperations {
 
     void insertWork(Kind kind, String id, String workKind, String targetKey,
             String rawKey, String session, Map<String, Object> data, String state) {
+        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.WorkKind.valueOf(workKind);
         jdbc.update("INSERT INTO ma_operation_work (operation_key, work_kind, target_key, target_id, tenant_id, session_id, storage_key, state, payload_json, evidence_resource_key, evidence_sha256, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                 key(kind, id), workKind, targetKey, rawKey.getBytes(StandardCharsets.UTF_8), tenant.getBytes(StandardCharsets.UTF_8), session,
                 data.get("storage_key"), state, workEnvelope(rawKey, data), data.get("evidence_resource_key"), data.get("evidence_sha256"));

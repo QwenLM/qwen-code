@@ -626,7 +626,7 @@ public class ChildResultRelayStore
             String order) {
         List<TurnLine> rows = jdbc.query(
                 "SELECT turn_id, status, completed_at, error_code,"
-                        + " submission_attempted, harness_event_epoch"
+                        + " is_submission_attempted, harness_event_epoch"
                         + " FROM ma_turn"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " ORDER BY gmt_create " + order + ", turn_id "
@@ -635,7 +635,7 @@ public class ChildResultRelayStore
                         result.getString("status"),
                         result.getObject("completed_at", Long.class),
                         result.getString("error_code"),
-                        result.getBoolean("submission_attempted"),
+                        result.getBoolean("is_submission_attempted"),
                         result.getString("harness_event_epoch")),
                 tenantId, sessionId);
         return rows.isEmpty() ? null : rows.getFirst();

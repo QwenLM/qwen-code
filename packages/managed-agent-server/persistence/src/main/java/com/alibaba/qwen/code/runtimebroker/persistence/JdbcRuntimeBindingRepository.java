@@ -78,7 +78,7 @@ public final class JdbcRuntimeBindingRepository
                     "runtime_credential_ciphertext",
                     "runtime_credential_key_id",
                     "attestation_generation",
-                    "drain_requested",
+                    "is_drain_requested",
                     "operation_owner",
                     "operation_lease_until",
                     "operation_generation",
@@ -228,7 +228,7 @@ public final class JdbcRuntimeBindingRepository
             }
         }
         try (var clear = connection.prepareStatement("UPDATE ma_runtime_session SET execution_storage_key = NULL,"
-                + " execution_exclusive = FALSE WHERE execution_storage_key = ? AND binding_id = ?"
+                + " is_execution_exclusive = FALSE WHERE execution_storage_key = ? AND binding_id = ?"
                 + " AND runtime_generation = ? AND runtime_session_id = ?")) {
             clear.setString(1, key);
             JdbcRepositorySupport.setIdentity(clear, 2, session.getBindingId());
@@ -2476,27 +2476,9 @@ public final class JdbcRuntimeBindingRepository
      */
     public static void lockPlacementDomain(Connection connection, String tenantId, int timeoutSeconds)
             throws SQLException {
-        String key = JdbcRepositorySupport.valueKey(tenantId);
-        try (PreparedStatement insert = connection.prepareStatement(
-                        "INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES"
-                            + " (?, ?, 'runtime_placement') ON DUPLICATE KEY UPDATE tenant_key ="
-                            + " tenant_key")) {
-            insert.setQueryTimeout(timeoutSeconds);
-            insert.setString(1, key);
-            JdbcRepositorySupport.setIdentity(insert, 2, tenantId);
-            insert.executeUpdate();
-        }
-        try (PreparedStatement lock = connection.prepareStatement(
-                        "SELECT tenant_id FROM ma_tenant_guard WHERE tenant_key = ? AND"
-                                + " guard_domain = 'runtime_placement' FOR UPDATE")) {
-            lock.setQueryTimeout(timeoutSeconds);
-            lock.setString(1, key);
-            try (ResultSet result = lock.executeQuery()) {
-                if (!result.next() || !tenantId.equals(result.getString("tenant_id"))) {
-                    throw new IllegalStateException("Runtime placement tenant hash collision");
-                }
-            }
-        }
+        JdbcTenantGuardLocks.lock(connection, tenantId,
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.GuardDomain.RUNTIME_PLACEMENT,
+                timeoutSeconds);
     }
 
     private void requireRecoverablePlacement(Connection connection, RuntimeProvisionRequest request)
@@ -2568,7 +2550,7 @@ public final class JdbcRuntimeBindingRepository
                 "UPDATE ma_runtime_binding SET binding_state = ?, resource_handle_version = ?,"
                     + " resource_handle_json = ?, runtime_instance_id = ?, runtime_endpoint = ?,"
                     + " runtime_lease_id = ?, runtime_epoch = ?, runtime_credential_ciphertext = ?,"
-                    + " runtime_credential_key_id = ?, attestation_generation = ?, drain_requested"
+                    + " runtime_credential_key_id = ?, attestation_generation = ?, is_drain_requested"
                     + " = ?, operation_owner = ?, operation_lease_until = ?, operation_generation ="
                     + " ?, record_version = ?, last_health_at = ?, last_reconciled_at = ?,"
                     + " last_active_at = ?, loss_evidence_json = ?, stop_evidence_json = ?,"
@@ -2730,7 +2712,7 @@ public final class JdbcRuntimeBindingRepository
                 RuntimeBindingRecord.State.valueOf(
                         result.getString("binding_state")),
                 lease, handle, result.getLong("attestation_generation"),
-                result.getBoolean("drain_requested"),
+                result.getBoolean("is_drain_requested"),
                 result.getString("operation_owner"),
                 JdbcRepositorySupport.getInstant(result,
                         "operation_lease_until"),

@@ -49,7 +49,7 @@ import static org.mockito.Mockito.when;
         "spring.datasource.url=jdbc:h2:mem:model-selection;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE",
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa", "spring.datasource.password=",
-        "qwen.managed-agent.harness.enabled=false"
+        "qwen.managed-agent.harness.is_enabled=false"
 })
 class ManagedModelSelectionTest {
     @Autowired private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;

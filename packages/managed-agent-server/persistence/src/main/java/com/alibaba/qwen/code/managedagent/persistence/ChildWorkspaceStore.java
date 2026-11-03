@@ -80,6 +80,9 @@ public class ChildWorkspaceStore
         if (!WORKTREE.equals(workspaceMode) && !SNAPSHOT.equals(workspaceMode)) {
             throw new IllegalArgumentException("Unknown child Workspace mode " + workspaceMode);
         }
+        if (parent.getWorkspaceGeneration() <= 0) {
+            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+        }
         return transaction.execute(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
             var storages = jdbc.queryForList("SELECT storage_id FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ? FOR UPDATE",

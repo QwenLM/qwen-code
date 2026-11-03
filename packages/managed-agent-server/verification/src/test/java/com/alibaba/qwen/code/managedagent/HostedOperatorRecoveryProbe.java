@@ -232,7 +232,7 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
                 + "]=" + spring.getEnvironment().getProperty("qwen.managed-agent.runtime-broker.credential-key"));
         command.add("-Dqwen.managed-agent.runtime-broker.state-directory=" + state);
         command.add("-Dqwen.managed-agent.runtime-broker.durable-local-process=true");
-        command.add("-Dqwen.managed-agent.runtime-broker.operator-recovery-enabled=true");
+        command.add("-Dqwen.managed-agent.runtime-broker.operator-recovery-is_enabled=true");
         command.add("-Dqwen.managed-agent.runtime-broker.provisioner=local-process");
         command.add("-cp");
         command.add(System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")));

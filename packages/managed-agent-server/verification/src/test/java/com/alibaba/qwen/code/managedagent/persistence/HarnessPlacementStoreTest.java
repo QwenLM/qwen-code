@@ -67,18 +67,20 @@ public class HarnessPlacementStoreTest {
     }
 
     @Test
-    void freshBaselineRefusesAnAssignedPlacementWithoutItsOwner() {
+    void sessionIntegrityRefusesAnAssignedPlacementWithoutItsOwnerBeforeWrite() {
         assertThat(jdbc.queryForMap("SELECT harness_instance_id, harness_owner_boot_id,"
                 + " harness_placement_epoch, harness_placement_state FROM ma_session"))
                 .containsEntry("harness_instance_id", null)
                 .containsEntry("harness_owner_boot_id", null)
                 .containsEntry("harness_placement_epoch", 0L)
                 .containsEntry("harness_placement_state", "UNASSIGNED");
-        assertThatThrownBy(() -> jdbc.update("UPDATE ma_session SET harness_instance_id = 'pod-a',"
-                + " harness_placement_epoch = 1, harness_placement_state = 'ACTIVE'"))
-                .isInstanceOfSatisfying(DataAccessException.class, error ->
-                        assertThat(error.getMostSpecificCause().getMessage())
-                                .containsIgnoringCase("ck_ma_harness_placement"));
+        var candidate = new java.util.LinkedHashMap<>(jdbc.queryForMap("SELECT * FROM ma_session"));
+        candidate.put("harness_instance_id", "pod-a");
+        candidate.put("harness_placement_epoch", 1L);
+        candidate.put("harness_placement_state", "ACTIVE");
+        assertThatThrownBy(() -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.validate(
+                "ma_session", candidate)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("ck_ma_harness_placement");
         assertThat(placements.get(TENANT, SESSION)).isNull();
     }
 

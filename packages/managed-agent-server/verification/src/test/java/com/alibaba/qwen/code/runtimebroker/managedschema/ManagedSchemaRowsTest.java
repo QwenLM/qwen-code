@@ -56,9 +56,9 @@ class ManagedSchemaRowsTest {
         source.setURL("jdbc:h2:mem:row-types;MODE=MySQL");
         try (var connection = source.getConnection(); var statement = connection.createStatement()) {
             statement.execute("CREATE TABLE fixture (tenant_id VARBINARY(64), actor_id VARBINARY(64),"
-                    + " record_bytes BLOB, revision BIGINT, enabled TINYINT, workspace_bound BOOLEAN,"
+                    + " record_bytes BLOB, revision BIGINT, is_enabled TINYINT, is_workspace_bound BOOLEAN,"
                     + " committed_sequence BIGINT, gmt_create BIGINT UNSIGNED,"
-                    + " execution_exclusive TINYINT)");
+                    + " is_execution_exclusive TINYINT)");
             byte[] actor = {(byte) 0xff, 0};
             byte[] payload = {0, (byte) 0xfe, 10};
             long timestamp = java.time.Instant.parse("2026-10-14T01:02:03.123Z").toEpochMilli();
@@ -75,8 +75,8 @@ class ManagedSchemaRowsTest {
                 insert.executeUpdate();
             }
             try (var result = statement.executeQuery("SELECT tenant_id, actor_id, record_bytes,"
-                    + " revision, enabled, workspace_bound, committed_sequence, gmt_create, execution_exclusive,"
-                    + " CASE WHEN enabled = 1 THEN 1 ELSE 0 END AS quarantined FROM fixture")) {
+                    + " revision, is_enabled, is_workspace_bound, committed_sequence, gmt_create, is_execution_exclusive,"
+                    + " CASE WHEN is_enabled = 1 THEN 1 ELSE 0 END AS is_quarantined FROM fixture")) {
                 result.next();
                 ResultSet driver = differentObjectTypes(result);
                 var row = ManagedSchemaRows.read(driver);
@@ -84,10 +84,10 @@ class ManagedSchemaRowsTest {
                 assertArrayEquals(actor, (byte[]) row.get("actor_id"));
                 assertArrayEquals(payload, (byte[]) row.get("record_bytes"));
                 assertEquals(9_007_199_254_740_993L, row.get("revision"));
-                assertEquals(Boolean.TRUE, row.get("enabled"));
-                assertEquals(Boolean.TRUE, row.get("execution_exclusive"));
-                assertEquals(1, row.get("quarantined"));
-                assertNull(row.get("workspace_bound"));
+                assertEquals(Boolean.TRUE, row.get("is_enabled"));
+                assertEquals(Boolean.TRUE, row.get("is_execution_exclusive"));
+                assertEquals(1, row.get("is_quarantined"));
+                assertNull(row.get("is_workspace_bound"));
                 assertNull(row.get("committed_sequence"));
                 assertEquals(timestamp, row.get("gmt_create"));
             }
@@ -123,4 +123,35 @@ class ManagedSchemaRowsTest {
                     }
                 });
     }
+    @Test
+    void preservesNullableTinyIntFlagsWithoutLeakingNumericValues() throws Exception {
+        JdbcDataSource source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:nullable-row-flags;MODE=MySQL");
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE fixture (is_actor_present TINYINT, is_plan_enabled TINYINT, is_wake_pending TINYINT)");
+            statement.execute("INSERT INTO fixture VALUES (1, 0, NULL)");
+            try (var result = statement.executeQuery("SELECT is_actor_present, is_plan_enabled, is_wake_pending FROM fixture")) {
+                result.next();
+                var row = ManagedSchemaRows.read(result);
+                assertEquals(Boolean.TRUE, row.get("is_actor_present"));
+                assertEquals(Boolean.FALSE, row.get("is_plan_enabled"));
+                assertNull(row.get("is_wake_pending"));
+            }
+        }
+    }
+
+    @Test
+    void rejectsInvalidNumericBooleansBeforeTheyCanBecomeTrue() throws Exception {
+        JdbcDataSource source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:invalid-row-flags;MODE=MySQL");
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE fixture (is_plan_enabled TINYINT)");
+            statement.execute("INSERT INTO fixture VALUES (2)");
+            try (var result = statement.executeQuery("SELECT is_plan_enabled FROM fixture")) {
+                result.next();
+                assertThrows(SQLException.class, () -> ManagedSchemaRows.read(result));
+            }
+        }
+    }
+
 }

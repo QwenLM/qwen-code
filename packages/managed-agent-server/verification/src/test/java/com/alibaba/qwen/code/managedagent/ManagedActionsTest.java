@@ -86,7 +86,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
             "spring.datasource.driver-class-name=${d6b.mysql.driver:org.h2.Driver}",
             "spring.datasource.username=${d6b.mysql.user:sa}",
             "spring.datasource.password=${d6b.mysql.password:}",
-            "qwen.managed-agent.harness.enabled=false",
+            "qwen.managed-agent.harness.is_enabled=false",
             "qwen.managed-agent.dispatch.retry-initial-delay=20ms",
             "qwen.managed-agent.dispatch.scan-delay=50ms"
         })

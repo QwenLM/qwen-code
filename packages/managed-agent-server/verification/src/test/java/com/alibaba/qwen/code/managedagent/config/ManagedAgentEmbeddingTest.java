@@ -45,11 +45,11 @@ class ManagedAgentEmbeddingTest {
                         return bean;
                     }
                 })).withPropertyValues("qwen.managed-agent.datasource.url=" + url(),
-                        "qwen.managed-agent.harness.enabled=true",
+                        "qwen.managed-agent.harness.is_enabled=true",
                         "qwen.managed-agent.harness.base-url=http://192.0.2.1:9",
                         "qwen.managed-agent.harness.token=test-harness-token",
                         "qwen.managed-agent.harness.capability-digest=sha256:" + "a".repeat(64),
-                        "qwen.managed-agent.session-store.enabled=true",
+                        "qwen.managed-agent.session-store.is_enabled=true",
                         "qwen.managed-agent.session-store.base-url=https://callbacks.example.invalid",
                         "qwen.managed-agent.session-store.binding-key=" + "k".repeat(32))
                 .run(context -> {
@@ -63,7 +63,7 @@ class ManagedAgentEmbeddingTest {
     @Test
     void coreRejectsRemotePlaintextPublicationEndpoint() {
         runner().withPropertyValues("qwen.managed-agent.datasource.url=" + url(),
-                        "qwen.managed-agent.tool-publication.enabled=true",
+                        "qwen.managed-agent.tool-publication.is_enabled=true",
                         "qwen.managed-agent.tool-publication.service-base-url=http://192.0.2.1:8080")
                 .run(context -> {
                     assertThat(context).hasFailed();

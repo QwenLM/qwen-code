@@ -1262,7 +1262,7 @@ class RuntimeBrokerServiceTest {
             join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
             ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
                     "harness", PROVIDER_SESSION, "key", providerReference()));
-            fixture.transport.cancelResult = CompletableFuture.completedFuture(Map.of("state", "cancel_requested"));
+            fixture.transport.cancelResult = CompletableFuture.completedFuture(Map.of("state", "is_cancel_requested"));
             fixture.transport.statusResult = new CompletableFuture<>();
             CompletionStage<ToolExecutionRecord> cancellation = fixture.service.cancelExecution(
                     "harness", PROVIDER_SESSION, prepared.getExecutionCallId());
@@ -1286,7 +1286,7 @@ class RuntimeBrokerServiceTest {
             join(fixture.service.acquire("harness", PROVIDER_SESSION, "bootstrap"));
             ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
                     "harness", PROVIDER_SESSION, "key", providerReference()));
-            fixture.transport.cancelResult = CompletableFuture.completedFuture(Map.of("state", "cancel_requested"));
+            fixture.transport.cancelResult = CompletableFuture.completedFuture(Map.of("state", "is_cancel_requested"));
             fixture.transport.statusResult = new CompletableFuture<>();
             assertTimeoutPreemptively(Duration.ofSeconds(2), () -> assertEquals("runtime_execution_cancel_failed",
                     failure(fixture.service.cancelExecution("harness", PROVIDER_SESSION,
@@ -6239,7 +6239,7 @@ class RuntimeBrokerServiceTest {
     @Test
     void nonTerminalLookupKeepsTheExecutionUnknown() {
         for (String state : List.of("prepared", "executing",
-                "cancel_requested", "unknown")) {
+                "is_cancel_requested", "unknown")) {
             try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
                 ToolExecutionRecord unknown = unknownExecution(fixture);
                 fixture.transport.statusResult = CompletableFuture
@@ -7327,7 +7327,7 @@ class RuntimeBrokerServiceTest {
         volatile CompletableFuture<Void> installPublicationResult;
         volatile CompletableFuture<Map<String, Object>> cancelResult =
                 CompletableFuture.completedFuture(
-                        Map.of("state", "cancel_requested"));
+                        Map.of("state", "is_cancel_requested"));
         volatile CompletableFuture<Map<String, Object>> acknowledgeV3Result =
                 CompletableFuture.completedFuture(Map.of("state", "settled"));
         volatile CompletableFuture<Boolean> releaseResult =

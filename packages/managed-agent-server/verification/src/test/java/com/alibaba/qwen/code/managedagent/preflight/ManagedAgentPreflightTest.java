@@ -328,12 +328,12 @@ class ManagedAgentPreflightTest {
             System.setProperty("java.class.path", jar.toString());
             ManagedAgentPreflight.Check harness = ManagedAgentPreflight.checks(
                     new String[] {
-                        "--qwen.managed-agent.harness.enabled=true",
+                        "--qwen.managed-agent.harness.is_enabled=true",
                         "--qwen.managed-agent.harness.base-url=http://127.0.0.1:"
                                 + server.getAddress().getPort(),
                         "--qwen.managed-agent.harness.token=" + "e".repeat(64),
                         "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
-                        "--qwen.managed-agent.runtime-broker.enabled=false",
+                        "--qwen.managed-agent.runtime-broker.is_enabled=false",
                         "--server.port=0",
                         "--spring.datasource.url=",
                     }).stream().filter(check -> check.name().equals("harness"))
@@ -893,7 +893,7 @@ class ManagedAgentPreflightTest {
             assertTrue(invalid.contains("server-port:FAIL"), invalid.toString());
             // The Broker port is checked the same way.
             List<String> broker = statuses("--check", "--online", "--server.port=" + live,
-                    "--qwen.managed-agent.runtime-broker.enabled=true",
+                    "--qwen.managed-agent.runtime-broker.is_enabled=true",
                     "--qwen.managed-agent.runtime-broker.port=" + live);
             assertTrue(broker.contains("broker-port:PASS"), broker.toString());
             // Offline, the busy port's fix points at --online.
@@ -926,7 +926,7 @@ class ManagedAgentPreflightTest {
         assertEquals(ManagedAgentPreflight.Status.FAIL, unresolved.status());
         assertEquals("cannot resolve no-such-host.invalid", unresolved.detail());
         List<String> online = statuses("--check", "--online", "--server.port=" + closed,
-                "--qwen.managed-agent.runtime-broker.enabled=true",
+                "--qwen.managed-agent.runtime-broker.is_enabled=true",
                 "--qwen.managed-agent.runtime-broker.port=" + closed);
         assertTrue(online.contains("server-port:FAIL"), online.toString());
         assertTrue(online.contains("broker-port:FAIL"), online.toString());
@@ -947,7 +947,7 @@ class ManagedAgentPreflightTest {
         }
         ManagedAgentPreflight.Check workers = ManagedAgentPreflight.checks(new String[] {
                 "--check", "--server.port=" + free, "--spring.datasource.url=",
-                "--qwen.managed-agent.runtime-broker.enabled=true",
+                "--qwen.managed-agent.runtime-broker.is_enabled=true",
                 "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.state-directory=" + state})
                 .stream().filter(check -> check.name().equals("workers"))
@@ -1511,10 +1511,10 @@ class ManagedAgentPreflightTest {
                 java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
         List<ManagedAgentPreflight.Check> checks = ManagedAgentPreflight
                 .checks(new String[] {
-                    "--qwen.managed-agent.harness.enabled=true",
+                    "--qwen.managed-agent.harness.is_enabled=true",
                     "--qwen.managed-agent.harness.credentials-file=" + file,
                     "--qwen.managed-agent.harness.token=" + "e".repeat(64),
-                    "--qwen.managed-agent.runtime-broker.enabled=false",
+                    "--qwen.managed-agent.runtime-broker.is_enabled=false",
                     "--server.port=0",
                     "--spring.datasource.url=",
                 });
@@ -2127,7 +2127,7 @@ class ManagedAgentPreflightTest {
             // What a release that rewrote its baseline finds in the database.
             try (Statement statement = connection.createStatement()) {
                 statement.execute("ALTER TABLE ma_operation"
-                        + " DROP CONSTRAINT ck_ma_operation_kind");
+                        + " ADD CONSTRAINT ck_unexpected_operation CHECK (claim_generation >= 0)");
             }
             ManagedAgentPreflight.Check rewritten =
                     ManagedAgentPreflight.schemaCheck(connection, "1");

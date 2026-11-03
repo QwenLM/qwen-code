@@ -94,15 +94,15 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
             "spring.datasource.driver-class-name=org.h2.Driver",
             "spring.datasource.username=sa",
             "spring.datasource.password=",
-            "qwen.managed-agent.harness.enabled=false",
+            "qwen.managed-agent.harness.is_enabled=false",
             "qwen.managed-agent.dispatch.scan-delay=50ms",
             "qwen.managed-agent.events.poll-interval=10ms",
             "qwen.managed-agent.events.materialize-interval=10ms",
-            "qwen.managed-agent.session-store.enabled=true",
+            "qwen.managed-agent.session-store.is_enabled=true",
             "qwen.managed-agent.session-store.binding-key=" + "0123456789abcdef0123456789abcdef",
-            "qwen.managed-agent.runtime-broker.ssh.enabled=false",
+            "qwen.managed-agent.runtime-broker.ssh.is_enabled=false",
             "qwen.managed-agent.tool-publication.entry-concurrency=4",
-            "qwen.managed-agent.artifacts.enabled=true",
+            "qwen.managed-agent.artifacts.is_enabled=true",
             // The scheduled projector would race the publication-chain fixture
             // as it installs the artifact rows; the routes this test drives
             // only read the projected tables.
@@ -1421,7 +1421,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 + " schedule_id, session_id, workspace_id, actor_id,"
                 + " record_revision, definition_revision, definition_digest,"
                 + " goal, cron, timezone, session_mode, overlap, catch_up,"
-                + " catch_up_limit, enabled, state, blocked_reason, armed_at,"
+                + " catch_up_limit, is_enabled, state, blocked_reason, armed_at,"
                 + " watermark_slot, lease_owner, lease_until, fence,"
                 + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'ws', ?, 1, 1, ?,"
                 + " 'probe', '0 2 * * *', 'UTC', 'persistent', 'skip', 'none',"

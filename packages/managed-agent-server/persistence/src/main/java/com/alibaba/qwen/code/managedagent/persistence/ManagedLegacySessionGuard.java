@@ -23,10 +23,10 @@ final class ManagedLegacySessionGuard {
                                                     : "";
                                     try (var statement =
                                             connection.prepareStatement(
-                                                    "SELECT csi_guard FROM ma_session"
+                                                    "SELECT is_csi_guard FROM ma_session"
                                                             + index
                                                             + " WHERE tenant_id = ? AND session_id"
-                                                            + " = ? AND csi_guard = TRUE FOR"
+                                                            + " = ? AND is_csi_guard = TRUE FOR"
                                                             + " UPDATE")) {
                                         statement.setQueryTimeout(10);
                                         statement.setBytes(

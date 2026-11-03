@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeRetention;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
@@ -670,10 +671,10 @@ class ManagedRuntimeRetentionGuardTest {
 
     private void publication(String key) {
         jdbc.update(
-                "INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id,"
+                "INSERT INTO ma_output_capture (gmt_create, gmt_modified, scope_key, tenant_key, tenant_id, workspace_id,"
                     + " session_id, publication_id, execution_key, capture_id, binding_json,"
                     + " binding_digest, token_hash, state, capture_bytes, producer_bytes,"
-                    + " admission_bytes) VALUES (?, ?, 'tenant', 'workspace', 'session',"
+                    + " admission_bytes) VALUES (" + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ", ?, ?, 'tenant', 'workspace', 'session',"
                     + " 'publication', ?, 'capture', 'payload-is-not-parsed', ?, ?, 'FENCED', 0, 0,"
                     + " 0)",
                 "a".repeat(64),

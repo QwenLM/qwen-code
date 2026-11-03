@@ -35,7 +35,7 @@ import static org.mockito.Mockito.when;
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:managed-mcp-settings;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE",
         "spring.datasource.driver-class-name=org.h2.Driver", "spring.datasource.username=sa", "spring.datasource.password=",
-        "qwen.managed-agent.harness.enabled=false"
+        "qwen.managed-agent.harness.is_enabled=false"
 })
 class ManagedMcpSettingsStoreTest {
     @Autowired private ManagedSessionStore store;
@@ -121,7 +121,7 @@ class ManagedMcpSettingsStoreTest {
             new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
                 jdbc.queryForObject("SELECT session_id FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE",
                         String.class, "tenant", id);
-                jdbc.update("UPDATE ma_session SET plan_enabled=TRUE, selected_approval_mode='default', approval_revision=1"
+                jdbc.update("UPDATE ma_session SET is_plan_enabled=TRUE, selected_approval_mode='default', approval_revision=1"
                         + " WHERE tenant_id=? AND session_id=?", "tenant", id);
                 pending.set(executor.submit(() -> {
                     started.countDown();
@@ -149,12 +149,12 @@ class ManagedMcpSettingsStoreTest {
         ObjectNode first = settings(1, "enabled", null);
         var request = journal.requestOrdinary(first.path("operationId").asText(), "config_install", first,
                 event -> {}, records -> records, 0);
-        jdbc.update("UPDATE ma_session SET plan_enabled=TRUE, selected_approval_mode='default', approval_revision=1"
+        jdbc.update("UPDATE ma_session SET is_plan_enabled=TRUE, selected_approval_mode='default', approval_revision=1"
                 + " WHERE tenant_id=? AND session_id=?", "tenant", id);
         assertThatThrownBy(() -> journal.commit(request)).isInstanceOfSatisfying(ManagedAgentException.class,
                 error -> assertThat(error.getCode()).isEqualTo("unsupported_feature"));
         assertThat(ManagedMcpSettings.find(jdbc, "tenant", id)).isNull();
-        jdbc.update("UPDATE ma_session SET plan_enabled=FALSE WHERE tenant_id=? AND session_id=?", "tenant", id);
+        jdbc.update("UPDATE ma_session SET is_plan_enabled=FALSE WHERE tenant_id=? AND session_id=?", "tenant", id);
         jdbc.update("INSERT INTO ma_turn (tenant_id, session_id, turn_id, prompt_id, input_json, payload_digest, status, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'turn', ?, '[]', 'digest', 'ACCEPTED', 1, 1)", "tenant", id, UUID.randomUUID().toString());
         assertThatThrownBy(() -> journal.commit(request)).isInstanceOfSatisfying(ManagedAgentException.class,

@@ -70,7 +70,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.enabled=false"
+        "qwen.managed-agent.harness.is_enabled=false"
 })
 class AutomationScannerTest {
     private static final String WORKSPACE = "ws-automation";

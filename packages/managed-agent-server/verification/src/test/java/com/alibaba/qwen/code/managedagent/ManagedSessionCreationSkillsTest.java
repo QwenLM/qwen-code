@@ -40,7 +40,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:session-creation-skills;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE",
         "spring.datasource.driver-class-name=org.h2.Driver", "spring.datasource.username=sa",
-        "spring.datasource.password=", "qwen.managed-agent.harness.enabled=false"
+        "spring.datasource.password=", "qwen.managed-agent.harness.is_enabled=false"
 })
 @AutoConfigureMockMvc
 class ManagedSessionCreationSkillsTest {

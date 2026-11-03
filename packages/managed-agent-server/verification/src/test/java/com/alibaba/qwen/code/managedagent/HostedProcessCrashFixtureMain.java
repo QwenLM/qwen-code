@@ -43,7 +43,7 @@ public final class HostedProcessCrashFixtureMain {
                 "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
                 "--spring.datasource.username=" + System.getenv("FG6C_MYSQL_USER"),
                 "--spring.datasource.password=" + System.getenv().getOrDefault("FG6C_MYSQL_PASSWORD", ""),
-                "--qwen.managed-agent.session-store.enabled=true"));
+                "--qwen.managed-agent.session-store.is_enabled=true"));
         if (coordinatorRestart) {
             String port = args[5];
             arguments.addAll(List.of(
@@ -51,11 +51,11 @@ public final class HostedProcessCrashFixtureMain {
                     "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:" + port,
                     "--qwen.managed-agent.session-store.workspace-id=coordinator-restart",
                     "--qwen.managed-agent.trusted-actor-header=X-Qwen-Actor-Id",
-                    "--qwen.managed-agent.harness.enabled=true",
+                    "--qwen.managed-agent.harness.is_enabled=true",
                     "--qwen.managed-agent.harness.base-url=" + args[6],
                     "--qwen.managed-agent.harness.token=hosted-process-fixture-token",
                     "--qwen.managed-agent.harness.capability-digest=sha256:" + "a".repeat(64),
-                    "--qwen.managed-agent.runtime-broker.enabled=false",
+                    "--qwen.managed-agent.runtime-broker.is_enabled=false",
                     "--qwen.managed-agent.dispatch.scan-delay=100ms",
                     "--qwen.managed-agent.dispatch.lease-duration=3s",
                     "--qwen.managed-agent.dispatch.lease-renew-interval=1s"));
@@ -69,14 +69,14 @@ public final class HostedProcessCrashFixtureMain {
                     + ";\nawait import(" + mapper.writeValueAsString(cliPath.toUri().toString()) + ");\n");
             arguments.addAll(List.of(
                     "--server.port=" + (settlement ? args[5] : "0"),
-                    "--qwen.managed-agent.harness.enabled=" + settlement,
+                    "--qwen.managed-agent.harness.is_enabled=" + settlement,
                     "--qwen.managed-agent.harness.capability-digest=sha256:" + "a".repeat(64),
-                    "--qwen.managed-agent.runtime-broker.enabled=true",
+                    "--qwen.managed-agent.runtime-broker.is_enabled=true",
                     "--qwen.managed-agent.runtime-broker.port=" + (brokerOnly ? args[7] : "0"),
                     "--qwen.managed-agent.runtime-broker.token=hosted-tools-broker-token",
                     "--qwen.managed-agent.runtime-broker.durable-local-process=" + workspaceRecovery,
                     "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
-                    "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
+                    "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-is_enabled="
                         + List.of("Linux", "Mac OS X").contains(System.getProperty("os.name")),
                     "--qwen.managed-agent.runtime-broker.workspace-cwd=" + (workspaceRecovery ? workspace : root),
                     "--qwen.managed-agent.runtime-broker.state-directory="
@@ -96,7 +96,7 @@ public final class HostedProcessCrashFixtureMain {
                         "--qwen.managed-agent.trusted-actor-header=X-Qwen-Actor-Id",
                         "--qwen.managed-agent.harness.base-url=http://127.0.0.1:" + args[6],
                         "--qwen.managed-agent.harness.token=hosted-process-fixture-token",
-                        "--qwen.managed-agent.harness.workspace-files-enabled=true",
+                        "--qwen.managed-agent.harness.workspace-files-is_enabled=true",
                         "--qwen.managed-agent.harness.approval-mode=yolo",
                         "--qwen.managed-agent.runtime-broker.session-create-warm=false",
                         "--qwen.managed-agent.dispatch.scan-delay=100ms",

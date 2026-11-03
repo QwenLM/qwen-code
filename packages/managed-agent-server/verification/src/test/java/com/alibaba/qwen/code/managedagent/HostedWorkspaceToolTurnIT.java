@@ -304,10 +304,10 @@ class HostedWorkspaceToolTurnIT {
                 "--spring.datasource.driver-class-name=" + (mysql ? "com.mysql.cj.jdbc.Driver" : "org.h2.Driver"),
                 "--spring.datasource.username=" + System.getProperty("mysql.user", "sa"),
                 "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
-                "--qwen.managed-agent.session-store.enabled=true",
-                "--qwen.managed-agent.harness.enabled=false",
+                "--qwen.managed-agent.session-store.is_enabled=true",
+                "--qwen.managed-agent.harness.is_enabled=false",
                 "--qwen.managed-agent.harness.capability-digest=sha256:" + "a".repeat(64),
-                "--qwen.managed-agent.runtime-broker.enabled=true",
+                "--qwen.managed-agent.runtime-broker.is_enabled=true",
                 "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.token=hosted-tools-broker-token",
                 "--qwen.managed-agent.runtime-broker.durable-local-process=" + operatorRecovery,
@@ -332,7 +332,7 @@ class HostedWorkspaceToolTurnIT {
             Files.setLastModifiedTime(workspaces.get(index), FileTime.fromMillis(1));
         }
         boolean verifiedRecovery = List.of("Linux", "Mac OS X").contains(System.getProperty("os.name"));
-        arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled=" + verifiedRecovery);
+        arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-is_enabled=" + verifiedRecovery);
         var application = new SpringApplicationBuilder(ManagedAgentServerApplication.class);
         if (unicode) {
             application.initializers(context -> registerUnicodePublication((GenericApplicationContext) context));
@@ -519,7 +519,7 @@ class HostedWorkspaceToolTurnIT {
                                     .isEqualTo("中文😀é\\ud800");
                             for (String sessionId : List.of(sessions.get(index).get("sessionId").toString(), secondarySessionId)) {
                                 var publications = jdbc.queryForList("SELECT state, producer_phase,"
-                                        + " CASE WHEN accepted_complete THEN 1 ELSE 0 END AS complete"
+                                        + " CASE WHEN is_accepted_complete THEN 1 ELSE 0 END AS complete"
                                         + " FROM ma_output_capture WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
                                 if (cases.contains("o2")) {
                                     assertThat(publications).hasSize(1);
@@ -678,7 +678,7 @@ class HostedWorkspaceToolTurnIT {
                 tenant, storageId);
         assertThat(physical).isNotBlank();
         Map<String, Object> member = jdbc.queryForMap("SELECT binding_id, runtime_generation, runtime_session_id,"
-                + " session_state, execution_storage_key, execution_exclusive FROM ma_runtime_session"
+                + " session_state, execution_storage_key, is_execution_exclusive FROM ma_runtime_session"
                 + " WHERE tenant_id = ? AND harness_session_id = ? AND runtime_session_id = ?",
                 tenant, session.get("sessionId"), report.path("promptId").asText());
         boolean released = storeFaults ? fault.equals("turn-reply") : List.of("prepare", "start", "release").contains(fault);
@@ -692,7 +692,7 @@ class HostedWorkspaceToolTurnIT {
         boolean retained = !storeFaults && fault.equals("prepare-twice");
         assertThat(member.get("execution_storage_key")).as(fault + " execution membership")
                 .isEqualTo(retained ? physical : null);
-        assertThat(member.get("execution_exclusive")).isEqualTo(false);
+        assertThat(member.get("is_execution_exclusive")).isEqualTo(false);
         if (retained) {
             assertThat(member.get("binding_id")).isEqualTo(executions.getFirst().get("binding_id"));
             assertThat(member.get("runtime_generation")).isEqualTo(executions.getFirst().get("runtime_generation"));

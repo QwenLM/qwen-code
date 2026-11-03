@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
@@ -15,17 +14,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-/**
- * Real-engine counterpart of the V53 role-constraint shape: utf8mb4
- * comparisons ignore trailing spaces (PAD SPACE), so an IN-list CHECK
- * would accept and preserve 'READER ' — a value the enum parser rejects
- * at read time. The CHECK pairs each name with its exact length; only
- * byte-exact enum names are storable. The assertion talks
- * DataAccessException plus the constraint name rather than
- * DataIntegrityViolationException, because MySQL reports a CHECK
- * violation as 3819/HY000, which Spring 6.2 cannot map, while MariaDB's
- * 4025/23000 maps to DataIntegrityViolationException.
- */
+/** 在真实引擎上保留规范角色值，并在 Java 写入校验拒绝大小写及尾随空格变体。 */
 class ManagedWorkspaceRolesMySqlIT {
     private JdbcTemplate admin;
     private JdbcTemplate jdbc;
@@ -74,13 +63,11 @@ class ManagedWorkspaceRolesMySqlIT {
                 .containsExactlyInAnyOrder("READER", "OPERATOR", "OWNER");
         for (String rejected : List.of("NONE", "SPECTATOR", "reader",
                 "READER ", "OPERATOR ", "OWNER ", "REA DER")) {
-            assertThatThrownBy(() -> jdbc.update("INSERT INTO"
-                    + " ma_workspace_access (tenant_id, workspace_id,"
-                    + " actor_id, role) VALUES ('tenant', 'workspace', ?,"
-                    + " ?)", "padded".getBytes(StandardCharsets.UTF_8),
-                    rejected))
-                    .as("role %s must be rejected", rejected)
-                    .isInstanceOf(DataAccessException.class)
+            assertThatThrownBy(() -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.validate(
+                    "ma_workspace_access", com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity.row(
+                            "role", rejected)))
+                    .as("role %s must be rejected before persistence", rejected)
+                    .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("ck_ma_access_role");
         }
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"

@@ -126,9 +126,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.enabled=false",
-        "qwen.managed-agent.automation.enabled=true",
-        "qwen.managed-agent.session-store.enabled=true",
+        "qwen.managed-agent.harness.is_enabled=false",
+        "qwen.managed-agent.automation.is_enabled=true",
+        "qwen.managed-agent.session-store.is_enabled=true",
         "qwen.managed-agent.dispatch.scan-delay=50ms",
         "qwen.managed-agent.events.poll-interval=10ms",
         "qwen.managed-agent.events.materialize-interval=10ms"

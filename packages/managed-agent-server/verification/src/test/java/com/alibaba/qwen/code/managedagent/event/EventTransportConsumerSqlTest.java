@@ -46,8 +46,8 @@ import static org.mockito.Mockito.when;
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.enabled=false",
-        "qwen.managed-agent.session-store.enabled=true",
+        "qwen.managed-agent.harness.is_enabled=false",
+        "qwen.managed-agent.session-store.is_enabled=true",
         // The scheduled pass would race the notices this test hands over.
         "qwen.managed-agent.events.materialize-interval=1h"
 })
@@ -132,7 +132,7 @@ public class EventTransportConsumerSqlTest {
                         "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
                         TENANT,
                         session);
-        assertThat(sessionBefore.get("csi_guard")).isEqualTo(true);
+        assertThat(sessionBefore.get("is_csi_guard")).isEqualTo(true);
 
         deliver(wake(session, WORKSPACE, 3));
         assertThat(wakeWatermark(session)).isNull();
@@ -436,7 +436,7 @@ public class EventTransportConsumerSqlTest {
     private void event(String session, long sequence, String type) {
         jdbc.update("INSERT INTO ma_public_event (tenant_id, session_id,"
                 + " sequence_id, event_id, turn_id, event_type, data_json,"
-                + " terminal, source_key, gmt_create) VALUES (?, ?, ?, ?,"
+                + " is_terminal, source_key, gmt_create) VALUES (?, ?, ?, ?,"
                 + " NULL, ?, '{}', FALSE, NULL, ?)",
                 TENANT, session, sequence, "evt-" + UUID.randomUUID(), type,
                 1_760_000_000_000L + sequence);

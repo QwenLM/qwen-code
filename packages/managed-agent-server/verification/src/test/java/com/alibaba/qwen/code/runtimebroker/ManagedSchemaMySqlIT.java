@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaIntegrity;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
@@ -93,8 +94,8 @@ class ManagedSchemaMySqlIT {
             }
             assertEquals(ManagedSchemaContract.TABLES, tables);
             verifyMaximumStorageScopeKeys(connection, prefix);
-            verifyCaptureTimestampDefaults(connection, prefix);
-            statement.execute("DROP INDEX ix_ma_storage_owner_binding ON ma_storage_owner");
+            verifyCaptureExplicitTimestamps(connection, prefix);
+            statement.execute("DROP INDEX idx_ma_storage_owner_binding ON ma_storage_owner");
             try {
                 assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
             } finally {
@@ -104,7 +105,7 @@ class ManagedSchemaMySqlIT {
                                 .filter(
                                         line ->
                                                 line.startsWith(
-                                                        "CREATE INDEX ix_ma_storage_owner_binding "))
+                                                        "CREATE INDEX idx_ma_storage_owner_binding "))
                                 .findFirst()
                                 .orElseThrow());
             }
@@ -146,22 +147,14 @@ class ManagedSchemaMySqlIT {
                             + "tenant','"
                             + prefix
                             + "session ','agent',0,0)");
-            assertThrows(
-                    SQLException.class,
-                    () ->
-                            statement.execute(
-                                    "INSERT INTO ma_operation"
-                                        + " (operation_key,scope_key,operation_id,operation_kind,tenant_id,target_kind,target_key,request_digest,request_json,state,phase,gmt_create,gmt_modified)"
-                                        + " VALUES ('invalid','scope','invalid','CLOSE"
-                                        + " ','tenant','SESSION','target','digest','{}','PENDING','ADMITTED',0,0)"));
-            assertThrows(
-                    SQLException.class,
-                    () ->
-                            statement.execute(
-                                    "INSERT INTO ma_resource_ref"
-                                        + " (session_scope_key,owner_kind,owner_key,owner_revision,resource_key,tenant_id,session_id,gmt_create)"
-                                        + " VALUES"
-                                        + " ('scope','JOURNAL','scope',1,'missing','tenant','session'," + ManagedSchemaTime.SQL_NOW + ")"));
+            assertThrows(IllegalArgumentException.class, () -> ManagedSchemaIntegrity.validate(
+                    "ma_operation", ManagedSchemaIntegrity.row("operation_kind", "CLOSE ",
+                            "claim_generation", 0L, "attempt_count", 0L, "payload_version", 1L,
+                            "execution_mode", "SYNC", "is_verification_ready", false)));
+            statement.execute("INSERT INTO ma_resource_ref"
+                    + " (session_scope_key,owner_kind,owner_key,owner_revision,resource_key,tenant_id,session_id,gmt_create)"
+                    + " VALUES ('scope','JOURNAL','scope',1,'missing','tenant','session',"
+                    + ManagedSchemaTime.SQL_NOW + ")");
             byte[] largeBody = new byte[17 * 1024 * 1024];
             largeBody[0] = 1;
             largeBody[largeBody.length - 1] = 2;
@@ -223,13 +216,13 @@ class ManagedSchemaMySqlIT {
             }
             ManagedSchema.initialize(source);
             statement.execute(
-                    "ALTER TABLE ma_runtime_binding MODIFY provision_seeded BOOLEAN GENERATED"
+                    "ALTER TABLE ma_runtime_binding MODIFY is_provision_seeded TINYINT UNSIGNED GENERATED"
                             + " ALWAYS AS (provision_seed_ciphertext IS NULL)");
             try {
                 assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
             } finally {
                 statement.execute(
-                        "ALTER TABLE ma_runtime_binding MODIFY provision_seeded BOOLEAN GENERATED"
+                        "ALTER TABLE ma_runtime_binding MODIFY is_provision_seeded TINYINT UNSIGNED GENERATED"
                                 + " ALWAYS AS (provision_seed_ciphertext IS NOT NULL)");
             }
             ManagedSchema.initialize(source);
@@ -250,66 +243,25 @@ class ManagedSchemaMySqlIT {
                         required("mysql.user"), System.getProperty("mysql.password", ""));
                 assertThrows(IllegalStateException.class,
                         () -> ManagedSchema.initialize(disabledChecks));
-            } else {
-                statement.execute(
-                        "ALTER TABLE ma_operation ALTER CHECK ck_ma_operation_kind NOT ENFORCED");
+            }
+            String[][] unexpectedChecks = {
+                    {"ma_operation", "claim_generation >= 0"},
+                    {"ma_resource", "byte_length >= 0"},
+                    {"ma_session_head", "claim_generation >= 0"}};
+            for (int index = 0; index < unexpectedChecks.length; index++) {
+                String table = unexpectedChecks[index][0];
+                String constraint = "ck_unexpected_" + index;
+                statement.execute("ALTER TABLE " + table + " ADD CONSTRAINT " + constraint
+                        + " CHECK (" + unexpectedChecks[index][1] + ")");
                 try {
                     assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
+                    if (!mariaDb) {
+                        statement.execute("ALTER TABLE " + table + " ALTER CHECK " + constraint + " NOT ENFORCED");
+                        assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
+                    }
                 } finally {
-                    statement.execute(
-                            "ALTER TABLE ma_operation ALTER CHECK ck_ma_operation_kind ENFORCED");
+                    statement.execute("ALTER TABLE " + table + " " + dropCheck + constraint);
                 }
-            }
-            String operationCheck = ManagedSchema.ddl().lines()
-                    .filter(line -> line.contains("CONSTRAINT ck_ma_operation_kind CHECK"))
-                    .findFirst().orElseThrow().trim().replaceFirst(",$", "");
-            statement.execute("ALTER TABLE ma_operation " + dropCheck + "ck_ma_operation_kind");
-            statement.execute("ALTER TABLE ma_operation ADD "
-                    + operationCheck.replace("'CLOSE'", "'BROKE'"));
-            try {
-                assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
-            } finally {
-                statement.execute("ALTER TABLE ma_operation " + dropCheck + "ck_ma_operation_kind");
-                statement.execute("ALTER TABLE ma_operation ADD " + operationCheck);
-            }
-            String resourceCheck =
-                    ManagedSchema.ddl()
-                            .lines()
-                            .filter(
-                                    line ->
-                                            line.contains(
-                                                    "CONSTRAINT ck_ma_resource_length"
-                                                            + " CHECK"))
-                            .findFirst()
-                            .orElseThrow()
-                            .trim()
-                            .replaceFirst(",$", "");
-            statement.execute("ALTER TABLE ma_resource " + dropCheck + "ck_ma_resource_length");
-            statement.execute(
-                    "ALTER TABLE ma_resource ADD "
-                            + resourceCheck.replace("byte_length >= 0", "byte_length >= -1"));
-            try {
-                assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
-            } finally {
-                statement.execute(
-                        "ALTER TABLE ma_resource " + dropCheck + "ck_ma_resource_length");
-                statement.execute("ALTER TABLE ma_resource ADD " + resourceCheck);
-            }
-            statement.execute("ALTER TABLE ma_session_head " + dropCheck + "ck_ma_head_counters");
-            statement.execute(
-                    "ALTER TABLE ma_session_head ADD CONSTRAINT ck_ma_head_counters CHECK"
-                            + " ((claim_generation >= 0 AND writer_generation IS NULL OR"
-                            + " writer_generation >= 0) AND (activation_epoch IS NULL OR"
-                            + " activation_epoch >= 0))");
-            try {
-                assertThrows(IllegalStateException.class, () -> ManagedSchema.initialize(source));
-            } finally {
-                statement.execute("ALTER TABLE ma_session_head " + dropCheck + "ck_ma_head_counters");
-                statement.execute(
-                        "ALTER TABLE ma_session_head ADD CONSTRAINT ck_ma_head_counters CHECK"
-                                + " (claim_generation >= 0 AND (writer_generation IS NULL OR"
-                                + " writer_generation >= 0) AND (activation_epoch IS NULL OR"
-                                + " activation_epoch >= 0))");
             }
             statement.execute("ALTER TABLE ma_tenant_guard ENGINE=MyISAM");
             try {
@@ -321,7 +273,7 @@ class ManagedSchemaMySqlIT {
         }
     }
 
-    private static void verifyCaptureTimestampDefaults(java.sql.Connection connection, String prefix)
+    private static void verifyCaptureExplicitTimestamps(java.sql.Connection connection, String prefix)
             throws SQLException {
         String scope = ManagedSchemaKeys.key(prefix, "capture-time");
         try (var statement = connection.createStatement()) {
@@ -331,9 +283,9 @@ class ManagedSchemaMySqlIT {
                 before = row.getLong(1);
             }
             try (var insert = connection.prepareStatement(
-                    "INSERT INTO ma_output_capture (scope_key,tenant_key,tenant_id,workspace_id,session_id,"
+                    "INSERT INTO ma_output_capture (gmt_create, gmt_modified, scope_key,tenant_key,tenant_id,workspace_id,session_id,"
                             + "publication_id,execution_key,capture_id,binding_json,binding_digest,token_hash,state,"
-                            + "capture_bytes,producer_bytes,admission_bytes) VALUES (?,?,?,?,?,?,?,?,'{}',?,?,'OPEN',1,1,1)")) {
+                            + "capture_bytes,producer_bytes,admission_bytes) VALUES (" + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ", ?,?,?,?,?,?,?,?,'{}',?,?,'OPEN',1,1,1)")) {
                 for (int index = 1; index <= 10; index++) {
                     insert.setString(index, scope);
                 }
@@ -383,7 +335,7 @@ class ManagedSchemaMySqlIT {
         try {
             try (var invalid =
                     connection.prepareStatement(
-                            "UPDATE ma_session SET resource_gc_completed=2 WHERE tenant_id=? AND"
+                            "UPDATE ma_session SET is_resource_gc_completed=2 WHERE tenant_id=? AND"
                                     + " session_id=?")) {
                 invalid.setBytes(1, tenant);
                 invalid.setBytes(2, session);
@@ -411,7 +363,7 @@ class ManagedSchemaMySqlIT {
                                 + " ma_runtime_binding(binding_id,request_key,scope_key,tenant_id,"
                                 + "workspace_id,workspace_generation,canonical_cwd,capability_digest,"
                                 + "isolation_class,provisioner_kind,storage_id,storage_alias_key,runtime_generation,"
-                                + "binding_state,attestation_generation,drain_requested,operation_generation,record_version,last_active_at)"
+                                + "binding_state,attestation_generation,is_drain_requested,operation_generation,record_version,last_active_at)"
                                 + " VALUES(?,?,?,?,?,?,'cwd',?,'WORKSPACE',"
                                 + "'schema-test',?,?,1,'ACTIVE',0,FALSE,0,0," + ManagedSchemaTime.SQL_NOW + ")")) {
                 insert.setBytes(1, binding);
@@ -436,7 +388,7 @@ class ManagedSchemaMySqlIT {
             try (var read =
                     connection.prepareStatement(
                             "SELECT storage_key FROM ma_storage_owner FORCE"
-                                    + " INDEX(ix_ma_storage_owner_binding) WHERE binding_id=? AND"
+                                    + " INDEX(idx_ma_storage_owner_binding) WHERE binding_id=? AND"
                                     + " runtime_generation=1")) {
                 read.setBytes(1, binding);
                 try (var row = read.executeQuery()) {
@@ -448,7 +400,7 @@ class ManagedSchemaMySqlIT {
             try (var read =
                     connection.prepareStatement(
                             "SELECT session_id FROM ma_session_head FORCE"
-                                    + " INDEX(ix_ma_head_workspace) WHERE tenant_key=? AND"
+                                    + " INDEX(idx_ma_head_workspace) WHERE tenant_key=? AND"
                                     + " workspace_id=?")) {
                 read.setString(1, tenantKey);
                 read.setBytes(2, binding);
@@ -461,8 +413,8 @@ class ManagedSchemaMySqlIT {
             try (var read =
                     connection.prepareStatement(
                             "SELECT session_id FROM ma_session FORCE"
-                                    + " INDEX(ix_ma_session_storage_scope) WHERE tenant_id=? AND"
-                                    + " workspace_storage_id=? AND resource_gc_completed=0")) {
+                                    + " INDEX(idx_ma_session_storage_scope) WHERE tenant_id=? AND"
+                                    + " workspace_storage_id=? AND is_resource_gc_completed=0")) {
                 read.setBytes(1, tenant);
                 read.setBytes(2, storage);
                 try (var row = read.executeQuery()) {
@@ -474,9 +426,9 @@ class ManagedSchemaMySqlIT {
             try (var read =
                     connection.prepareStatement(
                             "SELECT binding_id FROM ma_runtime_binding FORCE"
-                                    + " INDEX(ix_ma_runtime_storage_alias_state) WHERE"
+                                    + " INDEX(idx_ma_runtime_storage_alias_state) WHERE"
                                     + " storage_alias_key=? AND binding_state='ACTIVE' AND"
-                                    + " provision_seeded=FALSE")) {
+                                    + " is_provision_seeded=FALSE")) {
                 read.setString(1, alias);
                 try (var row = read.executeQuery()) {
                     assertTrue(row.next());
@@ -487,7 +439,7 @@ class ManagedSchemaMySqlIT {
             try (var read =
                     connection.prepareStatement(
                             "SELECT runtime_session_id FROM ma_runtime_session FORCE"
-                                    + " INDEX(ix_ma_runtime_session_harness) WHERE"
+                                    + " INDEX(idx_ma_runtime_session_harness) WHERE"
                                     + " harness_session_id=? AND tenant_id=?")) {
                 read.setBytes(1, session);
                 read.setBytes(2, tenant);

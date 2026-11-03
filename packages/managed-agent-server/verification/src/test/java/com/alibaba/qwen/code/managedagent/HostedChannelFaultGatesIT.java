@@ -439,15 +439,15 @@ class HostedChannelFaultGatesIT {
                 "--spring.datasource.username=" + System.getProperty("mysql.user"),
                 "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
                 "--spring.datasource.druid.max-active=8",
-                "--qwen.managed-agent.session-store.enabled=true",
+                "--qwen.managed-agent.session-store.is_enabled=true",
                 "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:" + internal,
                 "--qwen.managed-agent.session-store.workspace-id=workspace-0",
-                "--qwen.managed-agent.harness.enabled=true",
+                "--qwen.managed-agent.harness.is_enabled=true",
                 "--qwen.managed-agent.harness.base-url=http://127.0.0.1:" + harnessPort,
                 "--qwen.managed-agent.harness.token=" + TOKEN,
                 "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
-                "--qwen.managed-agent.harness.workspace-files-enabled=true",
-                "--qwen.managed-agent.runtime-broker.enabled=true",
+                "--qwen.managed-agent.harness.workspace-files-is_enabled=true",
+                "--qwen.managed-agent.runtime-broker.is_enabled=true",
                 "--qwen.managed-agent.runtime-broker.port=" + brokerPort,
                 "--qwen.managed-agent.runtime-broker.token=fg7-broker-token",
                 "--qwen.managed-agent.runtime-broker.durable-local-process=false",
@@ -461,7 +461,7 @@ class HostedChannelFaultGatesIT {
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=" + tenant,
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage-0",
                 "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root=" + workspace,
-                "--qwen.managed-agent.channels.enabled=true",
+                "--qwen.managed-agent.channels.is_enabled=true",
                 "--qwen.managed-agent.channels.claim-lease=30m",
                 "--qwen.managed-agent.channels.scan-delay=30s",
                 "--qwen.managed-agent.internal-server.address=127.0.0.1",
@@ -1013,7 +1013,7 @@ class HostedChannelFaultGatesIT {
                             deliveryId);
                     assertThat(record.path("run").path("delivery")
                             .path("state").asText())
-                            .as("the terminal is the physical unknown,"
+                            .as("the is_terminal is the physical unknown,"
                                     + " never a fabricated cancelled")
                             .isEqualTo("unknown");
                     assertThat(record.path("cancelRequested").asBoolean())

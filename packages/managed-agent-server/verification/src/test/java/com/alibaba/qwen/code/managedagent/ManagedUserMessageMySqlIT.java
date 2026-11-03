@@ -7,7 +7,7 @@ import org.springframework.boot.test.context.SpringBootTest;
         "spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
         "spring.datasource.username=${mysql.user}",
         "spring.datasource.password=${mysql.password:}",
-        "qwen.managed-agent.harness.enabled=false"
+        "qwen.managed-agent.harness.is_enabled=false"
 })
 class ManagedUserMessageMySqlIT extends ManagedUserMessageStoreTest {
 }

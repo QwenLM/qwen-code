@@ -35,7 +35,7 @@ import static org.mockito.Mockito.when;
         "spring.datasource.driver-class-name=${qwen.queue-test.jdbc-driver:org.h2.Driver}",
         "spring.datasource.username=${qwen.queue-test.jdbc-user:sa}",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.enabled=false"
+        "qwen.managed-agent.harness.is_enabled=false"
 })
 @Transactional
 class ManagedUserMessageStoreTest {

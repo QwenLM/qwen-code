@@ -41,12 +41,12 @@ class SessionStoreDefaultsTest {
             assertThat(store(started).isEnabled()).isFalse();
         });
         // The conditional beans read the Environment, not the bound value.
-        shippedDefault.withPropertyValues("qwen.managed-agent.harness.enabled=true")
+        shippedDefault.withPropertyValues("qwen.managed-agent.harness.is_enabled=true")
                 .run(started -> {
                     assertThat(started).hasNotFailed().hasBean("storeRoutes");
                     assertThat(store(started).isEnabled()).isTrue();
                 });
-        shippedDefault.withPropertyValues("qwen.managed-agent.harness.enabled=true",
+        shippedDefault.withPropertyValues("qwen.managed-agent.harness.is_enabled=true",
                         "QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED=false")
                 .run(started -> assertThat(started).hasFailed().getFailure()
                         .hasRootCauseMessage("Hosted Harness requires the Managed Session Store"));
@@ -69,7 +69,7 @@ class SessionStoreDefaultsTest {
         assertBaseUrl("http://127.0.0.1:4190", "server.ssl.bundle=web",
                 "qwen.managed-agent.internal-server.port=4190");
         assertBaseUrl("http://127.0.0.1:8080", "server.ssl.key-store=classpath:server.p12",
-                "server.ssl.enabled=false");
+                "server.ssl.is_enabled=false");
     }
 
     @Test

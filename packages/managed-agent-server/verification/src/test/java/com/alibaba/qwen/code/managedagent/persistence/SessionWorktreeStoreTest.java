@@ -83,6 +83,14 @@ class SessionWorktreeStoreTest {
     }
 
     @Test
+    void refusesUnknownCompletionStatesBeforeStartingTheClaimTransaction() {
+        assertThatThrownBy(() -> store.complete(null, "owner", "READY ", null, null))
+                .isInstanceOf(com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class);
+        assertThatThrownBy(() -> store.complete(null, "owner", null, null, null))
+                .isInstanceOf(com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class);
+    }
+
+    @Test
     void durablePreparationClaimAndFilesystemIdentityGate() throws Exception {
         var location = store.source("tenant", "actor", new WorkspaceSelection(workspace, "."));
         Path repository = Files.createDirectory(location.root().resolve("project"));

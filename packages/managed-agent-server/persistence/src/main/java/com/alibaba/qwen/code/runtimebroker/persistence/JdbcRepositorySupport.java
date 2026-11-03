@@ -123,18 +123,22 @@ public final class JdbcRepositorySupport {
         try (Connection connection = dataSource.getConnection()) {
             boolean autoCommit = connection.getAutoCommit();
             connection.setAutoCommit(false);
-            try {
-                T result = work.run(connection);
-                connection.commit();
-                return result;
-            } catch (SQLException exception) {
-                rollback(connection, exception);
-                throw failure(exception);
-            } catch (RuntimeException exception) {
-                rollback(connection, exception);
-                throw exception;
+            try (JdbcTenantGuardLocks.Scope scope = JdbcTenantGuardLocks.openTransactionScope(connection)) {
+                try {
+                    T result = work.run(connection);
+                    connection.commit();
+                    return result;
+                } catch (SQLException exception) {
+                    rollback(connection, exception);
+                    throw failure(exception);
+                } catch (RuntimeException | Error exception) {
+                    rollback(connection, exception);
+                    throw exception;
+                }
             } finally {
-                connection.setAutoCommit(autoCommit);
+                if (!connection.isClosed()) {
+                    connection.setAutoCommit(autoCommit);
+                }
             }
         } catch (SQLException exception) {
             throw failure(exception);
@@ -186,7 +190,7 @@ public final class JdbcRepositorySupport {
     }
 
     private static void rollback(Connection connection,
-            Exception original) {
+            Throwable original) {
         try {
             connection.rollback();
         } catch (SQLException rollbackFailure) {

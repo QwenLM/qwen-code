@@ -77,7 +77,7 @@ import static org.mockito.Mockito.when;
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.enabled=false"
+        "qwen.managed-agent.harness.is_enabled=false"
 })
 class WorkspaceRuntimeTest {
     @Autowired
@@ -1212,13 +1212,13 @@ class WorkspaceRuntimeTest {
         when(fixture.http().statusV3(any(), any(), any(), eq(0L)))
                 .thenReturn(CompletableFuture.completedFuture(Map.of("state", "executing")));
         when(fixture.http().cancelV3(any(), any(), any()))
-                .thenReturn(CompletableFuture.completedFuture(Map.of("state", "cancel_requested")));
+                .thenReturn(CompletableFuture.completedFuture(Map.of("state", "is_cancel_requested")));
         when(fixture.http().acknowledgeV3(any(), any(), any(), any()))
                 .thenReturn(CompletableFuture.completedFuture(Map.of("state", "settled")));
         assertThat(fixture.transport().statusV3(fixture.lease(), runtimeSession, original, 0)
                 .toCompletableFuture().join()).containsEntry("state", "executing");
         assertThat(fixture.transport().cancelV3(fixture.lease(), runtimeSession, original)
-                .toCompletableFuture().join()).containsEntry("state", "cancel_requested");
+                .toCompletableFuture().join()).containsEntry("state", "is_cancel_requested");
         assertThat(fixture.transport().acknowledgeV3(fixture.lease(), runtimeSession, original, Map.of())
                 .toCompletableFuture().join()).containsEntry("state", "settled");
         Map<String, Object> refusal = fixture.transport().executeV3(fixture.lease(), runtimeSession,

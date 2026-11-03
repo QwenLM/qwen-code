@@ -314,10 +314,7 @@ class ManagedCwdChangeOperationTest {
                 .workspace().getCwdRelative()).isEqualTo(kept);
     }
 
-    // An out-of-enum stored role — reachable only by an out-of-band write
-    // past V53's CHECK — settles the change fail-closed under the
-    // vocabulary filter, instead of a valueOf IllegalArgumentException the
-    // recovery would keep retrying.
+    // 模拟绕过应用入口的外部坏写入，恢复逻辑必须安全拒绝，不能无限重试。
     @Test
     void settlementFailsClosedWhenTheInitiatorsStoredRoleIsOutOfEnum() {
         Fixture fixture = fixture(true);
@@ -330,8 +327,6 @@ class ManagedCwdChangeOperationTest {
                 admitted.operation().operationId(), "owner");
         String kept = fixture.store.requireSession(TENANT, sessionId)
                 .workspace().getCwdRelative();
-        fixture.jdbc.update("ALTER TABLE ma_workspace_access"
-                + " DROP CONSTRAINT ck_ma_access_role");
         fixture.jdbc.update("UPDATE ma_workspace_access SET role ="
                         + " 'BROKEN' WHERE tenant_id = ? AND"
                         + " workspace_id = ? AND actor_id = ?", TENANT, WS,

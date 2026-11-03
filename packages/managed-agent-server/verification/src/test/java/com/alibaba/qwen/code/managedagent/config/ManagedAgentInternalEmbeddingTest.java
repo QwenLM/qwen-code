@@ -32,7 +32,7 @@ class ManagedAgentInternalEmbeddingTest {
                 .withUserConfiguration(ManagedAgentConfiguration.class, ManagedAgentInternalConfiguration.class, Host.class)
                 .withPropertyValues("qwen.managed-agent.datasource.url=jdbc:h2:mem:internal-" + UUID.randomUUID()
                                 + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1",
-                        "qwen.managed-agent.session-store.enabled=true",
+                        "qwen.managed-agent.session-store.is_enabled=true",
                         "spring.jackson.property-naming-strategy=SNAKE_CASE");
     }
 
