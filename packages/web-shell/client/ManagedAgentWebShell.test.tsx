@@ -60,6 +60,31 @@ describe('ManagedAgentWebShell', () => {
     container.remove();
   });
 
+  it('fails loudly when neither a provider nor a base URL is supplied', async () => {
+    const errors: unknown[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args) => {
+      errors.push(args[0]);
+    });
+    try {
+      await act(async () => {
+        root.render(<ManagedAgentWebShell />);
+      });
+    } catch (error) {
+      errors.push(error);
+    } finally {
+      spy.mockRestore();
+    }
+    // The built-in Java provider must not silently resolve requests against
+    // `<origin>/undefined`.
+    expect(
+      errors.some(
+        (error) =>
+          error instanceof Error &&
+          error.message.includes('requires `baseUrl`'),
+      ),
+    ).toBe(true);
+  });
+
   it('uses the injected provider and resets host selection when its identity scope changes', async () => {
     const fetchImpl = vi.fn();
     const first = { storageKey: 'tenant-a:actor-a' } as ManagedAgentProvider;

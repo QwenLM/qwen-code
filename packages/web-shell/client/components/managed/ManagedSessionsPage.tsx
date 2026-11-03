@@ -467,7 +467,10 @@ function ManagedSessionsContent({
       observer?.disconnect();
       window.removeEventListener('resize', resize);
     };
-  }, []);
+    // A host that mounts before it has a session renders the ref-less waiting
+    // section, so the measured pane appears on a later commit of the same
+    // instance; without re-running here the observer never attaches.
+  }, [sessionId, hostSessionOnly]);
   useEffect(() => setTaskPanelSession(undefined), [provider, sessionId]);
   const [sessions, setSessions] = useState<ManagedAgentSessionSummary[]>([]);
   const [archivedSummaries, setArchivedSummaries] = useState<
@@ -2054,7 +2057,24 @@ function ManagedSessionsContent({
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => onSelectSession(pending?.sessionId)}
+                onClick={() => {
+                  const owner = pending?.sessionId;
+                  // Route through openSession like every other navigation
+                  // entry: it clears the draft/error of the conversation being
+                  // left and forwards the owner's workspace. A request with no
+                  // owner clears the selection instead.
+                  if (!owner) {
+                    onSelectSession(undefined);
+                    setText('');
+                    setError(undefined);
+                    return;
+                  }
+                  openSession(
+                    owner,
+                    sessions.find((item) => item.sessionId === owner)?.workspace
+                      ?.workspaceId,
+                  );
+                }}
               >
                 {t('managed.openPendingOwner')}
               </Button>

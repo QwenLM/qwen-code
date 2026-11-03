@@ -42,9 +42,15 @@ type ManagedSessionsNavigationProps = Pick<
 
 /** Change productScope with tenant/actor identity so saved selections and output caches are discarded. */
 export interface ManagedAgentWebShellProps
-  extends JavaManagedAgentProviderOptions,
+  extends Omit<JavaManagedAgentProviderOptions, 'baseUrl'>,
     ManagedSessionsNavigationProps {
   managedAgentProvider?: ManagedAgentProvider;
+  /**
+   * Backend base URL for the built-in Java provider. Required unless
+   * `managedAgentProvider` is supplied; a missing value fails loudly instead
+   * of resolving requests against `<origin>/undefined`.
+   */
+  baseUrl?: string;
   /** Only open the existing Session explicitly selected by the host. */
   hostSessionOnly?: boolean;
   sessionId?: string;
@@ -99,41 +105,43 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
   const hasFetch = fetchImpl !== undefined;
   const hasGetHeaders = getHeaders !== undefined;
   const hasSaveArtifact = saveArtifact !== undefined;
-  const provider = useMemo(
-    () =>
-      managedAgentProvider ??
-      createJavaManagedAgentProvider({
-        baseUrl,
-        credentials,
-        fetch: !hasFetch
-          ? undefined
-          : (...args) => (callbacksRef.current.fetchImpl ?? fetch)(...args),
-        getHeaders: !hasGetHeaders
-          ? undefined
-          : () => callbacksRef.current.getHeaders?.() ?? {},
-        agentId,
-        productScope,
-        enableWorkspaceBinding,
-        modelPresets,
-        saveArtifact: !hasSaveArtifact
-          ? undefined
-          : (artifact, options) =>
-              callbacksRef.current.saveArtifact?.(artifact, options) ??
-              Promise.resolve(),
-      }),
-    [
-      managedAgentProvider,
+  const provider = useMemo(() => {
+    if (managedAgentProvider) return managedAgentProvider;
+    if (!baseUrl)
+      throw new Error(
+        'ManagedAgentWebShell requires `baseUrl` when no `managedAgentProvider` is supplied.',
+      );
+    return createJavaManagedAgentProvider({
       baseUrl,
       credentials,
+      fetch: !hasFetch
+        ? undefined
+        : (...args) => (callbacksRef.current.fetchImpl ?? fetch)(...args),
+      getHeaders: !hasGetHeaders
+        ? undefined
+        : () => callbacksRef.current.getHeaders?.() ?? {},
       agentId,
       productScope,
       enableWorkspaceBinding,
       modelPresets,
-      hasFetch,
-      hasGetHeaders,
-      hasSaveArtifact,
-    ],
-  );
+      saveArtifact: !hasSaveArtifact
+        ? undefined
+        : (artifact, options) =>
+            callbacksRef.current.saveArtifact?.(artifact, options) ??
+            Promise.resolve(),
+    });
+  }, [
+    managedAgentProvider,
+    baseUrl,
+    credentials,
+    agentId,
+    productScope,
+    enableWorkspaceBinding,
+    modelPresets,
+    hasFetch,
+    hasGetHeaders,
+    hasSaveArtifact,
+  ]);
   const [selection, setSelection] = useState(() => ({
     storageKey: provider.storageKey,
     hostSessionOnly,
