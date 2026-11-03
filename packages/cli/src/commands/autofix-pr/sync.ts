@@ -47,6 +47,7 @@ import {
   networkGit,
   networkGitEnv,
   requireWorktree,
+  SwitchBackRefused,
 } from './worktree.js';
 import { assertNoFixInFlight, clearAbandonedFix } from './fix.js';
 import { AutofixPrRefusal } from './refusal.js';
@@ -115,7 +116,28 @@ function syncLocked(
       `an in-place watch never discards the user's checkout (${worktree}); commit or stash what it holds, or end the watch with \`qwen autofix-pr cleanup ${prNumber}\``,
     );
   }
-  requireWorktree(paths, prNumber, root, discard, trustAnchor(state), inPlace);
+  try {
+    requireWorktree(
+      paths,
+      prNumber,
+      root,
+      discard,
+      trustAnchor(state),
+      inPlace,
+    );
+  } catch (err) {
+    // Git refused to take the worktree back to the watch's branch: it
+    // cannot be cleaned, as one still dirty after discarding is not.
+    if (err instanceof SwitchBackRefused) {
+      return {
+        synced: false,
+        headSha: state.lastKnownHeadSha,
+        moved: false,
+        reason: err.message,
+      };
+    }
+    throw err;
+  }
 
   const known = state.lastKnownHeadSha;
   // The state with the PR's base as GitHub names it now.

@@ -333,10 +333,19 @@ export interface ReplyArgs {
   task?: string;
 }
 
-/** The plan at `path`: one that is no JSON, or not shaped as a plan, is
- * the plan's to fix (`plan_invalid`); one that cannot be read is not. */
+/** The plan at `path`: one that cannot be read, is no JSON, or is not
+ * shaped as a plan is the plan's to fix (`plan_invalid`). */
 function readPlan(path: string): Required<ReplyPlan> {
-  const text = readFileSync(path, 'utf8');
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (err) {
+    // Not there, or not a file: the write of the plan failed.
+    throw new AutofixPrRefusal(
+      'plan_invalid',
+      `the reply plan cannot be read: ${(err as Error).message}`,
+    );
+  }
   try {
     return parsePlan(JSON.parse(text));
   } catch (err) {

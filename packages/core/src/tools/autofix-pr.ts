@@ -766,6 +766,9 @@ interface PreparedLike {
 /** How long `cleanup` waits for a stopped fix agent to end. */
 const FIX_STOP_WAIT_MS = 15_000;
 
+/** A warning Node prints on stderr, and the hint it adds. */
+const NODE_WARNING = /^\(node:\d+\) |^\(Use `node --trace-/;
+
 /**
  * A helper's coded refusal: the JSON line it prints last on stderr —
  * `{"refused":"<code>","next":"<step>","message":"…"}` — verbatim, and what
@@ -776,11 +779,15 @@ export function codedRefusal(
   stderr: string,
 ): { line: string; before: string } | null {
   const lines = stderr.trimEnd().split('\n');
-  // The last coded line: a warning Node prints as the process exits may
-  // come after it.
+  // The last coded line, followed by nothing but a warning Node printed as
+  // the process exited: a line a hook or git printed earlier is not the
+  // helper's refusal, even when the helper then died without one.
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     const line = lines[i].trim();
-    if (!line.startsWith('{')) continue;
+    if (!line.startsWith('{')) {
+      if (line === '' || NODE_WARNING.test(line)) continue;
+      return null;
+    }
     try {
       const parsed = JSON.parse(line) as Record<string, unknown>;
       if (
@@ -800,7 +807,7 @@ export function codedRefusal(
 /** A helper's refusal in one line: its coded refusal, else its last line on
  * stderr, or why it did not finish. */
 function helperRefusal(command: string, run: AutofixPrRun): string {
-  const coded = codedRefusal(run.stderr);
+  const coded = run.exitCode === 1 ? codedRefusal(run.stderr) : null;
   if (coded) return `autofix-pr ${command} refused: ${coded.line}`;
   // An older CLI prints a helper's error with its stack: the reason is the
   // line that names the error — the last such, as what `gh` or git printed
@@ -1170,7 +1177,10 @@ class AutofixPrInvocation extends BaseToolInvocation<
         run.failure ??
         (run.exitCode === null ? 'killed' : `exit ${run.exitCode}`);
       // The skill acts on the coded line's `next`: it comes first.
-      const coded = run.failure ? null : codedRefusal(run.stderr);
+      // Only a helper that refused exits 1 with the line: a crash or a
+      // signal is reported as it was.
+      const coded =
+        !run.failure && run.exitCode === 1 ? codedRefusal(run.stderr) : null;
       const message = [
         coded
           ? `autofix-pr ${this.params.command} refused: ${coded.line}`

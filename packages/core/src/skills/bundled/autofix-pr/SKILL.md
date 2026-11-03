@@ -50,7 +50,7 @@ A helper that refuses prints, as its last line on stderr, `{"refused": "<code>",
   - `watch_stopped` → `stop` kept its worktree: `/autofix-pr <n>` starts it again.
   - `watched_elsewhere` → a `/clear` or `/resume` started a new session, or another session took the watch over: `/autofix-pr resume <n>` watches the PR from this session.
 - `take_over` → `prepare` found the PR watched by another session: Start step 3.
-- `discard` → `sync` found uncommitted changes, or another branch checked out, in the worktree — work an earlier round left behind, or this round's own after its fix: run `sync <n> --discard` in its place and go on with its answer: `synced: false` → Section "Stop" with its `reason`; `dropped` (this round's commits went with it) → the round again from step 1, once per turn.
+- `discard` → `sync` found uncommitted changes, or another branch checked out, in the worktree. In Round step 1 that is work an earlier round left behind: run `sync <n> --discard` in its place and go on with its answer (`synced: false` → Section "Stop" with its `reason`). Before a push (Round step 6) it is this round's own fix: nothing is pushed, the items it fixed are `needs_human` ("my fix left the worktree unclean"), and the round ends with `sync <n> --discard`, as step 6 says.
 - `foreground` → this round's fix cannot run in the background: run the same `agent` call in the foreground (Round step 5).
 - `rerun` → `ci-log` found no finished job of the run that failed or timed out: Round step 3.
 - `needs_human` → a `push` or a `rerun` did nothing for sure: the items it was for are `needs_human`, with its message as the reason (Round step 6).

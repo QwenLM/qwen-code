@@ -55,6 +55,7 @@ if (sub !== 'autofix-pr') { process.stderr.write('not autofix-pr'); process.exit
 if (mode === 'hang') setInterval(() => {}, 1000);
 else if (mode === 'refuse') { process.stderr.write('another session watches PR #12\\n'); process.exit(1); }
 else if (mode === 'lost' && command === 'fix-end') { process.stdout.write(JSON.stringify({ attempt: 'x', lostSnapshot: true }) + '\\n'); }
+else if (mode === 'crash-after-coded') { process.stderr.write(JSON.stringify({ refused: 'busy', next: 'retry', message: 'printed by a hook' }) + '\\n'); process.exit(2); }
 else if (mode === 'refuse-coded') { process.stderr.write('Error: gh said something first\\n' + JSON.stringify({ refused: 'busy', next: 'retry', message: 'another autofix-pr helper is working on PR #12' }) + '\\n'); process.exit(1); }
 else if (mode === 'refuse-stack') { process.stderr.write('Error: gh said something first\\nAn unexpected critical error occurred:\\nError: no round of PR #12 has a fix to start\\n    at runFixStart (fix.js:1:1)\\n    at handler (fix.js:2:2)\\n'); process.exit(1); }
 else if (command === 'prepare') process.stdout.write(JSON.stringify({ worktreePath: process.env.FAKE_WORKTREE, preparedAt: process.env.FAKE_PREPARED_AT, host: process.env.FAKE_HOST || undefined, authorCanPush: process.env.FAKE_CAN_PUSH === '1', tookOver: process.env.FAKE_TOOK_OVER === '1', inPlace: process.env.FAKE_IN_PLACE === '1' }) + '\\n');
@@ -853,8 +854,20 @@ describe('running a helper', () => {
     expect(codedRefusal(line)).toEqual({ line, before: '' });
     // A warning Node printed as the helper exited comes after it.
     expect(
-      codedRefusal(`git said this\n${line}\n(node:1) Warning: late\n`),
-    ).toEqual({ line, before: 'git said this\n(node:1) Warning: late' });
+      codedRefusal(
+        `git said this\n${line}\n(node:1) Warning: late\n(Use \`node --trace-warnings ...\` to show where the warning was created)\n`,
+      ),
+    ).toEqual({
+      line,
+      before:
+        'git said this\n(node:1) Warning: late\n(Use `node --trace-warnings ...` to show where the warning was created)',
+    });
+    // A line a hook printed before the helper crashed is not its refusal.
+    expect(
+      codedRefusal(
+        `${JSON.stringify({ refused: 'pr_closed', next: 'stop', message: 'hook' })}\nAn unexpected critical error occurred:\nError: boom\n    at x (y.js:1:1)\n`,
+      ),
+    ).toBeNull();
     // A code with no step, a step with no code, other JSON, or a stack:
     // the old form, reported.
     for (const stderr of [
@@ -868,6 +881,16 @@ describe('running a helper', () => {
     ]) {
       expect(codedRefusal(stderr)).toBeNull();
     }
+  });
+
+  it('reads no coded line from a helper that did not exit 1', async () => {
+    vi.stubEnv('FAKE_AUTOFIX_MODE', 'crash-after-coded');
+    const result = await invocation({ command: 'sync', pr: 12 }).execute(
+      signal(),
+    );
+    expect(result.error?.message).toMatch(
+      /^autofix-pr sync refused \(exit 2\)\./,
+    );
   });
 
   it('puts a coded refusal first, verbatim, with what the helper printed before it', async () => {

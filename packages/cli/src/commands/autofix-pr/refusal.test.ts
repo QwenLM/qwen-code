@@ -141,6 +141,27 @@ describe('refusalOf', () => {
     expect(message.endsWith('remote: denied')).toBe(true);
   });
 
+  it('drops terminal controls, and fits the message as JSON, not as text', () => {
+    // A pre-push hook's output: colours and `\r` progress, six characters
+    // each in JSON, and quotes, two.
+    const noisy = `git push to feat failed:\n${'\u001b[31m"x"\r'.repeat(3000)}remote: denied`;
+    const { message } = refusalOf('push', new Error(noisy));
+    expect(
+      [...message].filter((c) => c < ' ' && c !== '\n' && c !== '\t'),
+    ).toEqual([]);
+    expect(JSON.stringify(message).length).toBeLessThanOrEqual(
+      MAX_REFUSAL_MESSAGE,
+    );
+    expect(message.startsWith('git push to feat failed:\n')).toBe(true);
+    expect(message.endsWith('remote: denied')).toBe(true);
+    // Short as text, twice as long as JSON: still cut.
+    const quoted = refusalOf('push', new Error('"'.repeat(7000))).message;
+    expect(quoted.length).toBeLessThan(7000);
+    expect(JSON.stringify(quoted).length).toBeLessThanOrEqual(
+      MAX_REFUSAL_MESSAGE,
+    );
+  });
+
   it('reads the code of a refusal', () => {
     expect(
       refusalOf('sync', new AutofixPrRefusal('worktree_dirty', 'dirty')),

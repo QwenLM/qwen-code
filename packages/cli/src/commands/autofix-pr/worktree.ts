@@ -337,8 +337,7 @@ export function requireWorktree(
     // checked out elsewhere, or a lock or a missing branch stops it.
     // Discarding again would only ask the same.
     if (switchBack && !inPlace) {
-      throw new AutofixPrRefusal(
-        'failed',
+      throw new SwitchBackRefused(
         `${checkedOut}, and git could not switch it back; remove the watch with \`qwen autofix-pr cleanup ${prNumber} --force\` and prepare it again.`,
       );
     }
@@ -346,6 +345,14 @@ export function requireWorktree(
       'worktree_dirty',
       `${checkedOut}; switch it back before pushing or syncing.`,
     );
+  }
+}
+
+/** `sync --discard` asked to switch the worktree back to the watch's
+ * branch, and git refused: the worktree cannot be cleaned. */
+export class SwitchBackRefused extends AutofixPrRefusal {
+  constructor(message: string) {
+    super('failed', message);
   }
 }
 
