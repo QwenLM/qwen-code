@@ -14,6 +14,7 @@ import {
 } from './resumeHistoryUtils.js';
 import { MessageType, ToolCallStatus } from '../types.js';
 import { buildApiHistoryFromConversation } from '@qwen-code/qwen-code-core';
+import { formatPeerEnvelope } from '@qwen-code/qwen-code-core/ipc/peer-envelope.js';
 import { computeApiTruncationIndex } from './historyMapping.js';
 import { SUPERSEDED_FINDINGS_MESSAGE } from './findings-coalescing.js';
 import type {
@@ -266,8 +267,16 @@ describe('resumeHistoryUtils', () => {
           uuid: 'peer-note',
           message: {
             parts: [
+              // The part text comes from the real producer — the function
+              // whose output the journal writers record verbatim — so the
+              // detector's prefix match is tied to `formatPeerEnvelope`
+              // itself, not to a literal that can drift from it.
               {
-                text: '<cross_session_message from="/tmp/a.sock" name="a">ping</cross_session_message>',
+                text: formatPeerEnvelope({
+                  from: '/tmp/a.sock',
+                  fromName: 'a',
+                  content: 'ping',
+                }),
               },
             ],
           },
