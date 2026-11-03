@@ -1115,7 +1115,6 @@ final class AgentSessionCommands {
         }
     }
 
-
     // A mutation leaves the status unchanged until it completes.
     static void validateMutationStatus(SessionRecord session,
             SessionMutationKind kind) {

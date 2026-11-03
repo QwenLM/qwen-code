@@ -608,7 +608,6 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
         external.validateTerminalOriginal(binding);
     }
 
-
     @Override
     public java.util.Map<String, Object> externalRecoveryProviderRequest(
             com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord binding) {
@@ -620,7 +619,6 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
         return external.recoveryProviderRequest(binding);
     }
 
-
     @Override
     public CompletionStage<com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord>
             recoverExternalWorkspaceBinding(
@@ -629,7 +627,6 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
         return service.recoverExternalWorkspaceBinding(
                 bindingId, expectedGeneration, expectedVersion);
     }
-
 
     @Override
     public boolean supportsWorkspaceClose(String profile) {

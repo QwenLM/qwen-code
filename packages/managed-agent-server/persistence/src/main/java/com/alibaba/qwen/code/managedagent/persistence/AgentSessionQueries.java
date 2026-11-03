@@ -216,7 +216,6 @@ final class AgentSessionQueries {
         return rows.stream().findFirst();
     }
 
-
     SessionPage listSessions(String tenantId, String actorId,
             Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState, String titleQuery) {
         return listSessions(tenantId, actorId == null ? null
