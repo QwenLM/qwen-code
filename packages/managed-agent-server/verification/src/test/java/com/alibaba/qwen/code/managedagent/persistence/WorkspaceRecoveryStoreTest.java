@@ -46,6 +46,7 @@ class WorkspaceRecoveryStoreTest {
 
     @TempDir Path temporary;
     private JdbcTemplate jdbc;
+    private StoreLockTrace trace;
     private DataSourceTransactionManager manager;
     private WorkspaceStorageGuard guard;
     private ManagedAgentStore sessions;
@@ -55,7 +56,8 @@ class WorkspaceRecoveryStoreTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        var source = recoveryDataSource();
+        var source = new StoreLockTrace(recoveryDataSource());
+        trace = source;
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
@@ -270,7 +272,9 @@ class WorkspaceRecoveryStoreTest {
         String operation = retireSession(session);
         var before = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE session_id = ?", session);
         var retirement = jdbc.queryForMap("SELECT retirement_operation_id, retirement_generation, retired_at, recovery_protected FROM ma_session WHERE session_id = ?", session);
+        trace.clear();
         JsonNode source = call(capture(), "sessions").path("sessions").get(0).path("source");
+        trace.assertSessionBeforeTurn("tenant", session);
         assertThat(source.path("retirement").path("operationId").asText()).isEqualTo(operation);
         assertThat(source.path("retirement").path("tenantId").asText()).isEqualTo("tenant");
         assertThat(source.path("retirement").path("sessionId").asText()).isEqualTo(session);

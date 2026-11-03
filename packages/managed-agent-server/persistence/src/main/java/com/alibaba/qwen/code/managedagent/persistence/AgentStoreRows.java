@@ -231,6 +231,19 @@ final class AgentStoreRows {
         }
     }
 
+    record LockedSessionTurn(SessionRecord session, TurnRecord turn) {
+    }
+
+    LockedSessionTurn requireSessionTurnForUpdate(String tenantId, String sessionId, String turnId) {
+        return new LockedSessionTurn(requireSessionForUpdate(tenantId, sessionId),
+                requireTurnForUpdate(tenantId, sessionId, turnId));
+    }
+
+    LockedSessionTurn requireLegacySessionTurnForUpdate(String tenantId, String sessionId, String turnId) {
+        return new LockedSessionTurn(requireLegacySessionForUpdate(tenantId, sessionId),
+                requireTurnForUpdate(tenantId, sessionId, turnId));
+    }
+
     TurnRecord requireTurn(String tenantId, String sessionId,
             String turnId) {
         return findTurn(tenantId, sessionId, turnId).orElseThrow(() ->
