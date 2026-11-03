@@ -2089,6 +2089,48 @@ describe('GithubChannel', () => {
       ).toContain('reRecorded');
     });
 
+    it('prunes fetched comment times on cursor advance even without dispatch (R12-P2)', async () => {
+      await initWithoutLoop();
+      const priv = channel as unknown as {
+        abortableSleep: (ms: number) => Promise<void>;
+      };
+      priv.abortableSleep = vi.fn().mockResolvedValue(undefined);
+      channel.cursor.lastProcessedAt = '2026-07-01T00:00:00.000Z';
+      // A mention-lane notification whose comments never mention the bot:
+      // fetched (times recorded before filtering) but never dispatched, so
+      // recordDispatched never runs. mark-read is healthy.
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'mention',
+            updated_at: '2026-07-02T10:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({
+            id: 1,
+            node_id: 'C_1',
+            body: 'no mention here',
+            created_at: '2026-07-02T09:00:00.000Z',
+          }),
+          makeComment({
+            id: 2,
+            node_id: 'C_2',
+            body: 'also no mention',
+            created_at: '2026-07-02T09:30:00.000Z',
+          }),
+        ]);
+      await pollOnce();
+      // No dispatch (no mention), cursor advanced...
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+      // ...and the fetched times were pruned (<= advanced cursor, non-ring)
+      // by the per-poll cleanup, not left to accumulate across polls.
+      expect(
+        Object.keys(channel.cursor.dispatchedCommentTimes ?? {}),
+      ).toHaveLength(0);
+    });
+
     it('skips notifications whose reason is not in reasonFilter', async () => {
       await initWithoutLoop({
         reasonFilter: ['mention', 'review_requested', 'assign'],

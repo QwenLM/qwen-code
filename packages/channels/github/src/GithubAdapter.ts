@@ -1998,6 +1998,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       }
       this.pendingCursorUpdatedAt = undefined;
     }
+    // Bound the comment-time map EVERY poll, independent of dispatch: fetch
+    // records a time for every re-listable comment before filtering, so a
+    // mention-only lane with no bot mention, a sender-rejected stream, or a
+    // poll that dispatches nothing would otherwise never prune (the only
+    // other call site is recordDispatched) and the map would grow without
+    // bound even while the cursor advances. Ring keys' times are retained.
+    this.pruneCommentTimes();
   }
 
   private async processCommentLane(
