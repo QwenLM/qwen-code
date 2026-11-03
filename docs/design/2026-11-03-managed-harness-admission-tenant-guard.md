@@ -19,6 +19,11 @@ For scopes the check does not cover, such as non-Session isolation without a
 lifecycle authority, the check returns immediately, but only after the guard has
 been taken.
 
+This change removes only the standalone check's acquisition. `admitExecution`
+still takes the guard for each new execution, and `authorizeDispatch` takes it
+for resident Workspace bindings. Tool dispatch can therefore still wait behind
+another holder of the tenant guard.
+
 The shared check only reads. It reads `ma_session` for resident scopes and the
 Harness row in `ma_session_head`: its phase (`OPEN`, `DRAINING`,
 `LIFECYCLE_ONLY`), operation, claim generation and claim lease. Recovery also
@@ -74,6 +79,9 @@ There are no schema, API or configuration changes.
 - An engine defaulting to READ COMMITTED evaluates the reads on separate
   snapshots; each condition is still checked against committed data. Production
   MySQL and MariaDB use REPEATABLE READ.
+- Execution admission and resident dispatch authorization still acquire the
+  guard without a statement timeout. This change does not bound end-to-end tool
+  dispatch latency.
 
 ## Verification and acceptance
 
@@ -84,8 +92,12 @@ There are no schema, API or configuration changes.
 2. Existing Harness suites pass: `SharedHarnessOwnershipTest`,
    `RuntimeHarnessDrainTest`, `WorkspaceLifecycleStoreTest` and
    `WorkspaceProfileLifecycleTest`.
-3. CI runs the MySQL and Hosted profiles.
+3. Before merge, the full CI run triggered by maintainer approval passes the
+   MySQL and Hosted profiles. Fast PR CI alone does not satisfy this requirement.
 
 ## Open questions
 
-None.
+Follow-up: evaluate bounded waits for execution admission and resident dispatch
+authorization while preserving execution admission's post-lock snapshot and
+close-fence ordering. Those acquisitions write state and are outside this
+read-only change.

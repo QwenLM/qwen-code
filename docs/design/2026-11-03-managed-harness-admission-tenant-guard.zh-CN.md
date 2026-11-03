@@ -16,6 +16,10 @@ placement 行上排队，排在 Runtime placement、存储注册、fencing、迁
 retention 之后。对于检查不覆盖的 scope，例如没有生命周期 authority 的非 Session
 隔离，检查会立即返回，但 guard 已经先获取了。
 
+本改动只去掉独立检查的这一次锁获取。`admitExecution` 仍会为每个新 execution 获取
+guard，`authorizeDispatch` 仍会为 resident Workspace 绑定获取它。因此，工具派发仍可能
+等待持有该租户 guard 的其他事务。
+
 共用检查只读不写。它对 resident scope 读取 `ma_session`，并读取 `ma_session_head`
 中的 Harness 行：phase（`OPEN`、`DRAINING`、`LIFECYCLE_ONLY`）、operation、claim
 generation 与 claim lease。Recovery 还会读取生命周期操作的协议版本。这七个方法都不写
@@ -60,6 +64,8 @@ claim generation 与租约来 fence。
   上面列出的检查后保护保持不变。
 - 默认 READ COMMITTED 的引擎会让各读取使用不同快照；每个条件仍基于已提交数据检查。
   生产使用的 MySQL 和 MariaDB 为 REPEATABLE READ。
+- 执行准入和 resident 派发授权仍会获取 guard，且没有语句超时。本改动没有为工具派发的
+  端到端延迟设置上限。
 
 ## 验证与验收
 
@@ -69,8 +75,10 @@ claim generation 与租约来 fence。
 2. 现有 Harness 测试继续通过：`SharedHarnessOwnershipTest`、
    `RuntimeHarnessDrainTest`、`WorkspaceLifecycleStoreTest` 与
    `WorkspaceProfileLifecycleTest`。
-3. CI 运行 MySQL 和 Hosted profile。
+3. 合并前，由维护者批准触发的完整 CI 运行通过 MySQL 和 Hosted profile。仅通过 PR 的
+   fast CI 不能满足此要求。
 
 ## 未决问题
 
-无。
+后续工作：评估执行准入和 resident 派发授权的有界等待，同时保留执行准入在加锁后的
+快照及关闭 fence 的顺序保证。这些锁获取路径会写入状态，不在本次只读改动的范围内。
