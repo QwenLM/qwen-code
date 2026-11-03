@@ -38,6 +38,7 @@ import {
 } from './settingsSchema.js';
 import { SettingScope, type LoadedSettings } from './settings.js';
 import { PEER_MID_TURN_BUDGET_DEFAULT } from '../peerMessaging/mid-turn-constants.js';
+import { peerMidTurnBudgetOf } from '../peerMessaging/peer-messaging.js';
 
 vi.mock('./settingsSchema.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('./settingsSchema.js')>();
@@ -1346,5 +1347,41 @@ describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
     expect(budget.strictness('plenty')).toBe(budget.strictness(3));
     expect(budget.strictness('plenty')).toBeGreaterThan(budget.strictness(10));
     expect(budget.strictness('plenty')).toBeLessThan(budget.strictness(0));
+  });
+
+  // The rank and the shipped reader are two mappings of one contract
+  // written in different files; they must classify every value the same
+  // way, or a workspace setting the reader applies one way ranks another.
+  // The comparison is `===`, not `toBe`: for `-0` the reader floors to -0
+  // while the negated rank yields +0, which Object.is (and therefore
+  // `toBe`) treats as different even though both mean a zero allowance.
+  it('ranks every budget value the way the shipped reader maps it', () => {
+    const budget = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+      ({ key }) => key === 'crossSessionMidTurnBudget',
+    )!;
+    for (const value of [
+      -1,
+      -0.5,
+      -0,
+      0,
+      0.5,
+      1,
+      2.9,
+      3,
+      10,
+      NaN,
+      Infinity,
+      -Infinity,
+      'plenty',
+      '',
+      null,
+      true,
+      {},
+      undefined,
+    ]) {
+      expect(-budget.strictness(value) === peerMidTurnBudgetOf(value)).toBe(
+        true,
+      );
+    }
   });
 });

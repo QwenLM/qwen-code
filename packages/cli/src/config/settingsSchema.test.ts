@@ -28,6 +28,7 @@ import {
 import { DAEMON_APPROVAL_MODES } from '@qwen-code/sdk/daemon';
 import { advertisedMaxSessions } from '../serve/server/serve-features.js';
 import { MergeStrategy } from '../utils/deepMerge.js';
+import { PEER_MID_TURN_WINDOW_MS } from '../peerMessaging/mid-turn-constants.js';
 import {
   MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
   MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
@@ -497,17 +498,36 @@ describe('SettingsSchema', () => {
       // The `settings.md` row is the hand-maintained third copy — no
       // generator reads that file — so pin it here too against the shipped
       // reader.
-      expect(
-        readFileSync(
-          fileURLToPath(
-            new URL(
-              '../../../../docs/users/configuration/settings.md',
-              import.meta.url,
-            ),
+      const settingsMdRow = readFileSync(
+        fileURLToPath(
+          new URL(
+            '../../../../docs/users/configuration/settings.md',
+            import.meta.url,
           ),
-          'utf8',
         ),
-      ).toContain('a negative number is read as `0`');
+        'utf8',
+      );
+      expect(settingsMdRow).toContain('a negative number is read as `0`');
+      // The window figure in both sentences is prose, not a symbol, so it
+      // is pinned to the constant by the numeral it must carry — the same
+      // literal-vs-symbol shape the default above uses. If the constant
+      // moves, this fails until both copies of the prose move with it.
+      expect(
+        getSettingsSchema().agents.properties.crossSessionMidTurnBudget
+          .description,
+      ).toContain(`${PEER_MID_TURN_WINDOW_MS / 60000}-minute window`);
+      expect(settingsMdRow).toContain(
+        `${PEER_MID_TURN_WINDOW_MS / 60000}-minute window`,
+      );
+      // The held-frame release consequence is the other sentence both
+      // hand-written copies must agree on: a held `now` frame released
+      // while a turn runs steers that turn and spends budget. Pin the
+      // shared clause in both copies so they cannot drift back to the
+      // unqualified "held messages are unaffected" claim on one surface.
+      expect(
+        getSettingsSchema().agents.properties.crossSessionMidTurn.description,
+      ).toContain('keeps that marking through release');
+      expect(settingsMdRow).toContain('keeps that marking through release');
     });
 
     it('should offer exactly the hold lifetimes core knows how to parse', () => {
