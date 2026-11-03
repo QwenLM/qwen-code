@@ -57,6 +57,7 @@ export type ChannelEditorValidationCode =
   | 'invalidOption'
   | 'invalidRepoId'
   | 'conflictingRepoAliases'
+  | 'invalidGroupEntry'
   | 'number'
   | 'outOfRange'
   | 'policy';
@@ -462,7 +463,32 @@ export function validateChannelEditorDraft(
       }
     }
   }
+  if (isRepositoryOnlyChannelType(descriptor.type)) {
+    if (invalidRepositoryGroupEntries(instance).length > 0) {
+      // The store refuses a non-record group entry on every save, unchanged or
+      // not, and no row in the form can represent it. Deleting it on the way
+      // past would remove the exact key the runtime matches first and hand the
+      // repository to a case-insensitive fallback, so refuse here with the
+      // entry named instead of letting the daemon answer with a generic error.
+      errors['groupPolicy'] = 'invalidGroupEntry';
+    }
+  }
   return errors;
+}
+
+/**
+ * Stored repository entries whose value is not an object. The form has no row
+ * for them and the store rejects them on every save, so they have to be named
+ * rather than silently dropped or passed through to a generic refusal.
+ */
+export function invalidRepositoryGroupEntries(
+  instance?: DaemonChannelInstanceSnapshot,
+): string[] {
+  const groups = instance?.config['groups'];
+  if (!isRecord(groups)) return [];
+  return Object.entries(groups)
+    .filter(([groupId, group]) => groupId !== '*' && !isRecord(group))
+    .map(([groupId]) => groupId);
 }
 
 /**
@@ -716,34 +742,53 @@ function removeGroupAllowlistMembership(
   // widens a repository nobody edited. Leave those entries as stored — the
   // Allowlist path already refuses the save until the operator resolves them.
   const ambiguous = conflictingRepositoryAliases(previousGroups);
+  // A channel that never had an allowlist is not leaving one, so its stored
+  // entries are not membership markers this save is entitled to clean up.
+  const leavingAllowlist = instance?.config['groupPolicy'] === 'allowlist';
   const groups = Object.fromEntries(
     [...entries]
-      .map(([groupId, groupConfig]): [string, unknown] => {
+      .map(([groupId, stored]) => {
+        const ambiguousAlias =
+          groupId !== '*' && ambiguous.has(groupId.toLowerCase());
         const override =
-          groupId === '*' || ambiguous.has(groupId.toLowerCase())
+          groupId === '*' || ambiguousAlias
             ? undefined
             : overrides?.[groupId.toLowerCase()];
-        return [
-          groupId,
-          override && isRecord(groupConfig)
-            ? projectRepositoryGroup(groupConfig, override)
-            : groupConfig,
-        ];
+        const projected =
+          override && isRecord(stored)
+            ? projectRepositoryGroup(stored, override)
+            : stored;
+        return { groupId, projected, ambiguousAlias };
       })
-      .filter(([groupId, groupConfig]) => {
-        // An ambiguous alias is kept verbatim, whatever it holds. An empty
-        // entry is what makes the runtime's exact match inherit "*" instead of
-        // falling through to a wider alias, and a hand-written non-record value
-        // is the store's to judge — it preserves an unchanged one — not ours to
-        // delete on the way past.
-        if (groupId !== '*' && ambiguous.has(groupId.toLowerCase())) {
-          return true;
-        }
-        return (
-          isRecord(groupConfig) &&
-          (groupId === '*' || Object.keys(groupConfig).length > 0)
-        );
-      }),
+      .filter(({ groupId, projected, ambiguousAlias }) => {
+        // An ambiguous alias is kept verbatim: one lower-cased draft cannot say
+        // which spelling an edit was meant for, and an empty entry is what makes
+        // the runtime's exact match inherit "*" instead of falling through to a
+        // wider alias.
+        if (ambiguousAlias) return true;
+        // "Stored" has to mean present in the file, not present in the merged
+        // map: a repository typed during this visit is seeded with a `{}`
+        // placeholder that must not be mistaken for a stored empty entry.
+        const wasStored = Object.hasOwn(previousGroups, groupId);
+        const stored = wasStored ? previousGroups[groupId] : undefined;
+        // An entry the form cannot represent is never deleted here. A non-record
+        // value is refused by validation with a message that names it, because
+        // the store rejects it on every save; deleting it would remove the exact
+        // key the runtime matches first, a rewrite nobody asked for whether or
+        // not another spelling exists to fall through to.
+        if (groupId !== '*' && wasStored && !isRecord(stored)) return true;
+        if (!isRecord(projected)) return false;
+        if (groupId === '*' || Object.keys(projected).length > 0) return true;
+        // Drop an empty entry when it is the stub a row leaves behind on being
+        // returned to inherit, or when the channel is leaving the allowlist
+        // whose membership the entry expressed. Keep one that was already
+        // empty in a channel that never had an allowlist: an unrelated edit
+        // must not silently rewrite the stored file.
+        const wasStoredEmpty =
+          isRecord(stored) && Object.keys(stored).length === 0;
+        return wasStoredEmpty && !leavingAllowlist;
+      })
+      .map(({ groupId, projected }) => [groupId, projected]),
   );
   if (Object.keys(groups).length > 0) {
     config['groups'] = groups;
@@ -815,4 +860,53 @@ export function buildChannelUpsertRequest(
     assignGroupSenders(config, draft);
   }
   return { expectedRevision, config, secrets };
+}
+
+export interface RetainedRepositorySetting {
+  repositoryId: string;
+  /** Whether the entry can still change who is admitted or what is processed. */
+  applies: boolean;
+}
+
+/**
+ * The repositories whose settings this save keeps, read back from the request
+ * the save actually builds rather than from storage: a repository the operator
+ * typed during this visit exists only in the draft, and enumerating stored
+ * groups would let the dialog report success without naming it.
+ *
+ * `applies` follows the runtime, not the shape of the entry. `senderGateFor`
+ * builds an allowlist only when the resolved senders policy is `allowlist`, so
+ * an `allowedUsers` array beside an inherited `open` policy restricts nobody;
+ * and a `requireMention` equal to the inherited value changes nothing either.
+ */
+export function retainedRepositorySettings(
+  descriptor: DaemonChannelTypeDescriptor,
+  draft: ChannelEditorDraft,
+  instance?: DaemonChannelInstanceSnapshot,
+): RetainedRepositorySetting[] {
+  const { config } = buildChannelUpsertRequest(descriptor, draft, '', instance);
+  const groups = isRecord(config['groups']) ? config['groups'] : {};
+  const wildcard = isRecord(groups['*']) ? groups['*'] : {};
+  const inheritedSenders =
+    wildcard['senders'] === 'allowlist' ? 'allowlist' : 'open';
+  const inheritedMention =
+    typeof wildcard['requireMention'] === 'boolean'
+      ? wildcard['requireMention']
+      : true;
+  return Object.entries(groups)
+    .filter(
+      ([groupId, group]) =>
+        groupId !== '*' && isRecord(group) && Object.keys(group).length > 0,
+    )
+    .map(([groupId, group]) => {
+      const entry = group as Record<string, unknown>;
+      const senders = entry['senders'] ?? inheritedSenders;
+      const mention = entry['requireMention'];
+      return {
+        repositoryId: groupId,
+        applies:
+          senders === 'allowlist' ||
+          (typeof mention === 'boolean' && mention !== inheritedMention),
+      };
+    });
 }

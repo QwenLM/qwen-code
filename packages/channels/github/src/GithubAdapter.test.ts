@@ -5007,6 +5007,37 @@ describe('GithubChannel', () => {
         );
       },
     );
+
+    it.each([0.5, 0.001, 0.999])(
+      'raises a sub-millisecond pollInterval %s to the documented floor',
+      (value) => {
+        // The descriptor's lower bound is exclusive, so a fraction passes both
+        // the editor and the store; setTimeout then rounds it to ~1ms, which is
+        // the hot loop the ceiling exists to prevent, reached from below. The
+        // field documents 1 as the minimum, so the runtime has to enforce it.
+        const ch = new TestableGithubChannel(
+          'test',
+          makeConfig({ pollInterval: value }),
+          makeBridge(),
+        );
+        expect((ch as unknown as { pollInterval: number }).pollInterval).toBe(
+          1,
+        );
+      },
+    );
+
+    it('keeps a whole millisecond at the floor and just above it', () => {
+      for (const value of [1, 2, 60_000]) {
+        const ch = new TestableGithubChannel(
+          'test',
+          makeConfig({ pollInterval: value }),
+          makeBridge(),
+        );
+        expect((ch as unknown as { pollInterval: number }).pollInterval).toBe(
+          value,
+        );
+      }
+    });
   });
 
   describe('plugin', () => {

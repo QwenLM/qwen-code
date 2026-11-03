@@ -61,8 +61,10 @@ import {
   hasDescriptorPrivatePolicy,
   configuredPrivatePolicy,
   PRIVATE_ONLY_FIELD_KEYS,
+  invalidRepositoryGroupEntries,
   projectRepositoryGroup,
   repositoryAllowlistIds,
+  retainedRepositorySettings,
   toList,
   validateChannelEditorDraft,
   type ChannelEditorDraft,
@@ -383,6 +385,13 @@ export function ChannelEditorDialog({
         ...(numberField?.maximum !== undefined
           ? { max: numberField.maximum }
           : {}),
+      });
+    }
+    if (code === 'invalidGroupEntry') {
+      // Name the entries: the form has no row for them, so a generic refusal
+      // would leave the operator with nothing to act on.
+      return t('channels.editor.validation.invalidGroupEntry', {
+        repositories: invalidRepositoryGroupEntries(instance).join(', '),
       });
     }
     if (code === 'policy') return t('channels.editor.validation.policy');
@@ -1016,22 +1025,25 @@ export function ChannelEditorDialog({
   };
 
   const renderRetainedRepositoryOverrides = (policy: string) => {
-    const groups = instance?.config['groups'];
-    if (!isRecord(groups)) return null;
-    const retained = Object.entries(groups)
-      .filter(
-        ([groupId, group]) =>
-          groupId !== '*' && isRecord(group) && Object.keys(group).length > 0,
-      )
-      .map(([groupId]) => groupId);
-    if (retained.length === 0) return null;
+    // Read the list back from the request this save builds, not from storage:
+    // a repository typed during this visit is written by the save but absent
+    // from the stored groups, and announcing only stored entries would let the
+    // dialog report success without naming it.
+    const retained = retainedRepositorySettings(descriptor, draft, instance);
     // Under open/pairing the runtime resolves per-repository senders and
-    // requireMention without consulting groupPolicy, so these entries keep
-    // deciding who may drive the agent. Under disabled the group gate drops
-    // every envelope before either lookup, so the entries are kept but inert —
-    // saying "still apply" there would be false. The policy is the caller's, so
-    // the copy cannot disagree with the gate that decided to show this alert.
-    const variant = policy === 'disabled' ? '.disabled' : '';
+    // requireMention without consulting groupPolicy, so an entry that can still
+    // restrict someone keeps deciding who may drive the agent — but an
+    // `allowedUsers` array beside an inherited `open` policy restricts nobody,
+    // and naming it as "still applying" would be false. Under disabled the group
+    // gate drops every envelope before either lookup, so every retained entry is
+    // kept but inert. The policy is the caller's, so the copy cannot disagree
+    // with the gate that decided to show this alert.
+    const disabled = policy === 'disabled';
+    const named = disabled
+      ? retained.map((entry) => entry.repositoryId)
+      : retained.filter((entry) => entry.applies).map((e) => e.repositoryId);
+    if (named.length === 0) return null;
+    const variant = disabled ? '.disabled' : '';
     return (
       <Alert>
         <KeyRoundIcon />
@@ -1043,7 +1055,7 @@ export function ChannelEditorDialog({
         <AlertDescription>
           {t(
             `channels.editor.field.github.retainedRepositorySettings${variant}.description`,
-            { repositories: retained.join(', ') },
+            { repositories: named.join(', ') },
           )}
         </AlertDescription>
       </Alert>

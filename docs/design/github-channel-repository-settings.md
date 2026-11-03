@@ -317,6 +317,16 @@ the transcript build-artifact guard rejects that prefix.
    one day and Node's limit keeps most of its intent instead of being replaced.
    DWS overrides the getter with a constant and Email does not extend the base,
    so GitHub and GitLab are the only channels the clamp reaches.
+   The same getter enforces the low end. The vocabulary has only an
+   _exclusive_ minimum, so `exclusiveMinimum: 0` admits `0.5`, which
+   `setTimeout` rounds to ~1 ms — the hot loop again, reached from below, and
+   persistable only because this change made the field managed. Raising
+   `exclusiveMinimum` to 1 is not the fix: it would reject the documented
+   value 1 itself. `MIN_POLL_INTERVAL_MS` and `MAX_POLL_INTERVAL_MS` are
+   exported from the base, the getter clamps into both, and the GitHub
+   descriptor declares its `maximum` from the same constant so the two cannot
+   drift; the field description states that a smaller positive value is
+   raised to 1.
 10. **A newly declared bound forgives an unchanged stored number, and only its
     range.** The editor re-sends stored values verbatim, so declaring
     `pollInterval` would otherwise block every unrelated edit to a channel
@@ -350,11 +360,30 @@ the transcript build-artifact guard rejects that prefix.
     preserved whatever it holds, because the runtime matches the exact key
     first — an empty entry inherits `"*"`, and deleting either it or a
     hand-written non-record value lets the case-insensitive fallback reach
-    the wider alias. The store already preserves an unchanged non-record
-    value, so passing it through keeps the save a no-op. A row the operator
-    actually edited is refused rather
-    than skipped, with the error on `groupPolicy` because the allowlist
-    field is no longer on screen. An untouched switch still saves.
+    the wider alias. The store does **not** tolerate a non-record entry: its
+    unchanged-value tolerance covers the whole `groups` value, while a single
+    non-record entry is refused on every save with
+    `Channel field "groups.<id>" is invalid.`. Passing one through therefore
+    cannot be promised as a no-op, so validation refuses earlier with a
+    message that names the entry and points at `settings.json` — the form has
+    no row for it, and a generic daemon error would leave nothing to act on.
+    The entry is still not deleted, because deleting it is the widening.
+    A row the operator actually edited is refused rather than skipped, with
+    the error on `groupPolicy` because the allowlist field is no longer on
+    screen. An untouched switch still saves.
+    Running the branch for a channel that never had an allowlist must not
+    clean up its stored entries either: an entry that was already empty is
+    kept unless the channel is actually leaving Allowlist or the projection
+    emptied it, so an unrelated edit cannot rewrite the file. Admission is
+    the same either way — an absent key and an empty entry both fall through
+    to `"*"` — which is why that one is about the file, not about access.
+    The alert is derived from the request the save builds, not from storage,
+    and names an entry only when it can still take effect: a resolved
+    `senders` of `allowlist`, or a `requireMention` differing from the
+    inherited one. An `allowedUsers` array beside an inherited `open` policy
+    restricts nobody, and a repository typed during the visit is written by
+    the save but absent from storage; enumerating stored groups mis-announced
+    both.
 
 ## Constraints
 

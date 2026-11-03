@@ -1505,6 +1505,49 @@ describe('WorkspaceChannelSettingsStore', () => {
     },
   );
 
+  it('rejects a non-record per-entry group value even when it is unchanged', async () => {
+    // The tolerance above covers the whole `groups` value, not an entry inside
+    // it. A hand-written non-record entry is therefore refused on every save,
+    // so an editor that passes one through cannot promise a no-op — it has to
+    // refuse earlier with a message that names the entry.
+    const groups = {
+      'Acme/Widgets': 'hand-written-garbage',
+      'acme/widgets': { senders: 'open' },
+    };
+    writeWorkspaceSettings(
+      JSON.stringify({
+        $version: 4,
+        channels: {
+          bot: {
+            type: 'management-validation-test',
+            clientId: 'client-id',
+            clientSecret: 'existing-secret',
+            groups,
+          },
+        },
+      }),
+    );
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'client-id',
+          groups,
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: 'Channel field "groups.Acme/Widgets" is invalid.',
+    });
+
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
   it('rejects unchanged non-record groups containing an unsafe key', async () => {
     const groups = [JSON.parse('{"__proto__":{"polluted":true}}') as unknown];
     writeWorkspaceSettings(

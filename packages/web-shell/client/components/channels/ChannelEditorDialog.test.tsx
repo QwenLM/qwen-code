@@ -2291,6 +2291,83 @@ describe('GitHub per-repository settings', () => {
     });
   });
 
+  it('names a repository the save writes but storage has never seen', async () => {
+    // Typing a repository, narrowing its row and switching the policy away
+    // writes an entry that keeps deciding who may drive that repository. The
+    // alert used to enumerate stored groups, so it named nothing and the
+    // dialog reported success in silence.
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      }),
+      onSave,
+    });
+
+    await act(async () => {
+      setInputValue(inputByLabel('Allowed repositories')!, 'acme/widgets');
+    });
+    await chooseRowOption('acme/widgets', 'senders', 'Allowlist only');
+    await act(async () => {
+      setInputValue(
+        rowControl('acme/widgets', 'speakers') as HTMLInputElement,
+        'alice',
+      );
+    });
+    await selectOption('Group Policy', 'Open');
+
+    expect(document.body.textContent).toContain(
+      'Repository settings still apply',
+    );
+    expect(document.body.textContent).toContain('acme/widgets');
+  });
+
+  it('does not announce a speaker list the resolved open policy makes inert', async () => {
+    // senderGateFor builds an allowlist only when the resolved policy is
+    // allowlist, so this array restricts nobody and must not be announced as a
+    // setting that still applies.
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { senders: 'open' },
+        'acme/widgets': { allowedUsers: ['alice'] },
+      }),
+    });
+
+    await selectOption('Group Policy', 'Open');
+
+    expect(document.body.textContent).not.toContain(
+      'Repository settings still apply',
+    );
+  });
+
+  it('refuses a save while a stored group entry is not an object, and names it', async () => {
+    // The store rejects such an entry on every save, unchanged or not, and no
+    // row can represent it. A generic daemon error would leave the operator
+    // with nothing to act on, so the refusal names the entry and where to fix
+    // it — and the entry is still not deleted, which would widen the alias.
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { senders: 'allowlist', allowedUsers: ['op'] },
+        'Acme/Widgets': 'hand-written-garbage',
+      }),
+      onSave,
+    });
+
+    await selectOption('Group Policy', 'Open');
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'stores a group entry that is not an object',
+    );
+    expect(document.body.textContent).toContain('Acme/Widgets');
+    expect(document.body.textContent).toContain('settings.json');
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
   it('maps the Inherit option back to an absent key in both row selects', async () => {
     // The widget's `inherit` sentinel only becomes the draft's '' here, and a
     // cast hides a regression from the type checker: passing the raw value

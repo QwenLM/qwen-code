@@ -12,7 +12,9 @@ import type {
 import {
   buildChannelUpsertRequest,
   createChannelEditorDraft,
+  invalidRepositoryGroupEntries,
   repositoryAllowlistIds,
+  retainedRepositorySettings,
   validateChannelEditorDraft,
 } from './channel-editor-state';
 import type { ChannelGroupOverrideDraft } from './channel-editor-state';
@@ -2317,6 +2319,58 @@ describe('Repository settings under a non-Allowlist policy', () => {
     expect(JSON.stringify(saved)).toBe(JSON.stringify(groups));
   });
 
+  it('keeps an already-empty entry when an unrelated edit lands on Open', () => {
+    // The channel never had an allowlist, so its stored entries are not
+    // membership markers this save may clean up. Dropping the empty one
+    // rewrote settings.json on an edit that never touched groups. Admission is
+    // the same either way — an absent key and an empty entry both fall through
+    // to "*" — which is why this is about the file, not about access.
+    const stored = { '*': { senders: 'open' }, 'acme/widgets': {} };
+    const instance = githubStored(structuredClone(stored), 'open');
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    draft.values['baseUrl'] = 'https://ghe.example.com/api/v3';
+
+    expect(validateChannelEditorDraft(GITHUB, draft, [], instance)).toEqual({});
+    const groups = buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance)
+      .config['groups'];
+    expect(JSON.stringify(groups)).toBe(JSON.stringify(stored));
+  });
+
+  it('still drops a draft-only repository that carries no settings', () => {
+    // Preserving stored empty entries must not materialize new ones: a
+    // repository typed into the allowlist with nothing set has no entry to keep.
+    const instance = githubStored({ '*': { senders: 'open' } }, 'open');
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    draft.allowedGroupIds = 'acme/widgets';
+
+    const groups = buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance)
+      .config['groups'] as Record<string, unknown>;
+    expect(Object.hasOwn(groups, 'acme/widgets')).toBe(false);
+  });
+
+  it('refuses a lone non-record repository entry and does not delete it', () => {
+    // With only one spelling there is no alias ambiguity, so that exemption
+    // does not apply — but an entry the form cannot represent is still not
+    // ours to delete. Validation refuses the save and names it instead.
+    const instance = githubStored(
+      {
+        '*': { senders: 'allowlist', allowedUsers: ['op'] },
+        'acme/widgets': 'hand-written-garbage',
+      },
+      'allowlist',
+    );
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    draft.values['groupPolicy'] = 'open';
+
+    expect(validateChannelEditorDraft(GITHUB, draft, [], instance)).toEqual({
+      groupPolicy: 'invalidGroupEntry',
+    });
+    expect(invalidRepositoryGroupEntries(instance)).toEqual(['acme/widgets']);
+    const groups = buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance)
+      .config['groups'] as Record<string, unknown>;
+    expect(groups['acme/widgets']).toBe('hand-written-garbage');
+  });
+
   it('does not invent repository entries for a chat platform', () => {
     // The union with the typed allowlist is repository-only: chat group ids are
     // case-sensitive and are not derived from that field once the policy leaves
@@ -2497,18 +2551,19 @@ describe('Conflicting repository aliases across policies', () => {
     });
   });
 
-  it('keeps a hand-written non-record ambiguous alias for the store to judge', () => {
-    // Deleting it here would remove the exact key and let the case-insensitive
-    // fallback reach the open alias. The store preserves an unchanged
-    // non-record value, so passing it through keeps the save a no-op instead of
-    // widening a repository nobody edited.
+  it('refuses a hand-written non-record alias instead of deleting it', () => {
+    // The store rejects a non-record group entry on every save, unchanged or
+    // not — its tolerance covers the whole `groups` value, not an entry inside
+    // it — so this cannot be promised as a no-op. Deleting the entry instead
+    // would remove the exact key and let the case-insensitive fallback reach
+    // the open alias. Refuse with the entry named, and still do not delete it.
     const { errors, groups, stored } = aliasSave(
       'hand-written-garbage',
       'open',
       'open',
     );
 
-    expect(errors).toEqual({});
+    expect(errors).toEqual({ groupPolicy: 'invalidGroupEntry' });
     expect(groups['Acme/Widgets']).toBe('hand-written-garbage');
     expect(JSON.stringify(groups)).toBe(JSON.stringify(stored));
     expect(
@@ -2616,6 +2671,101 @@ describe('Conflicting repository aliases across policies', () => {
     }
     expect(noopViolations).toEqual([]);
     expect(editViolations).toEqual([]);
+  });
+});
+
+describe('Retained repository settings announcement', () => {
+  function announce(
+    storedGroups: Record<string, unknown>,
+    storedPolicy: string,
+    finalPolicy: string,
+    edit?: (draft: ReturnType<typeof createChannelEditorDraft>) => void,
+  ) {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'github',
+        groupPolicy: storedPolicy,
+        groups: storedGroups,
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    draft.values['groupPolicy'] = finalPolicy;
+    if (edit) edit(draft);
+    return retainedRepositorySettings(GITHUB, draft, instance);
+  }
+
+  it('names a repository the save writes but storage has never seen', () => {
+    // Typing a repository, narrowing its row and switching the policy away
+    // writes an entry that keeps deciding who may drive it. Enumerating stored
+    // groups named nothing, so the dialog reported success in silence.
+    const named = announce(
+      { '*': { senders: 'allowlist', allowedUsers: ['op'] } },
+      'allowlist',
+      'open',
+      (draft) => {
+        draft.allowedGroupIds = 'acme/widgets';
+        draft.groupOverrides['acme/widgets'] = {
+          requireMention: '',
+          senders: 'allowlist',
+          allowedUsers: 'alice',
+        };
+      },
+    );
+
+    expect(named).toEqual([{ repositoryId: 'acme/widgets', applies: true }]);
+  });
+
+  it('does not announce a speaker list the resolved policy makes inert', () => {
+    // senderGateFor builds an allowlist only when the resolved policy is
+    // allowlist, so an array beside an inherited open policy restricts nobody.
+    const named = announce(
+      {
+        '*': { senders: 'open' },
+        'acme/widgets': { allowedUsers: ['alice'] },
+      },
+      'allowlist',
+      'open',
+    );
+
+    expect(named).toEqual([{ repositoryId: 'acme/widgets', applies: false }]);
+  });
+
+  it('does not announce an entry whose only keys are unmodelled', () => {
+    const named = announce(
+      { '*': { senders: 'open' }, 'acme/widgets': { groupHistoryLimit: 25 } },
+      'allowlist',
+      'open',
+    );
+
+    expect(named).toEqual([{ repositoryId: 'acme/widgets', applies: false }]);
+  });
+
+  it('announces an entry-level policy or mention that still changes behaviour', () => {
+    const named = announce(
+      {
+        '*': { senders: 'open', requireMention: true },
+        'acme/policy': { senders: 'allowlist', allowedUsers: ['alice'] },
+        'acme/mention': { requireMention: false },
+        'acme/same': { requireMention: true },
+      },
+      'allowlist',
+      'open',
+    );
+
+    expect(named).toEqual([
+      { repositoryId: 'acme/policy', applies: true },
+      { repositoryId: 'acme/mention', applies: true },
+      // Equal to the inherited value, so it changes nothing today.
+      { repositoryId: 'acme/same', applies: false },
+    ]);
+  });
+
+  it('announces nothing when the save keeps no repository settings', () => {
+    expect(announce({ '*': { senders: 'open' } }, 'open', 'open')).toEqual([]);
   });
 });
 

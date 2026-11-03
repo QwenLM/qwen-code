@@ -4689,6 +4689,8 @@ const EN: Messages = {
     'Enter each repository as owner/repo.',
   'channels.editor.validation.conflictingRepoAliases':
     'This channel lists one repository twice with different settings, spelled differently (for example Owner/repo and owner/repo). Remove one of the entries from settings.json before saving.',
+  'channels.editor.validation.invalidGroupEntry': (v) =>
+    `This channel stores a group entry that is not an object: ${v?.repositories ?? ''}. The daemon refuses every save while it is there, and the form has no row for it. Fix or remove that entry in settings.json, then reload the channel.`,
   'channels.editor.validation.invalidOption':
     "Remove values that aren't in the allowed list.",
   'channels.editor.validation.number': 'Enter a valid number.',
@@ -9090,6 +9092,8 @@ const ZH: Messages = {
   'channels.editor.validation.invalidRepoId': '仓库需写成 owner/repo 形式。',
   'channels.editor.validation.conflictingRepoAliases':
     '该渠道把同一个仓库以不同大小写写了两次且设置不同（例如 Owner/repo 与 owner/repo）。请先在 settings.json 里删掉其中一条再保存。',
+  'channels.editor.validation.invalidGroupEntry': (v) =>
+    `该渠道把以下群组条目存成了非对象：${v?.repositories ?? ''}。只要它还在，daemon 就会拒绝每次保存，而表单里没有对应的行。请在 settings.json 里修正或删除该条目，然后重新加载渠道。`,
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.number': '请输入有效数字。',
   'channels.editor.validation.outOfRange': (v) =>

@@ -11,6 +11,17 @@ import { getGlobalQwenDir } from './paths.js';
 const INITIAL_BACKOFF = 2_000;
 const MAX_BACKOFF = 30_000;
 
+/**
+ * Inclusive bounds the poll loop enforces at runtime. Node clamps a timeout
+ * above its 32-bit range to 1ms and rounds a sub-millisecond one to ~1ms, so
+ * either end left open turns the loop into a hot loop that burns the platform's
+ * rate quota. The descriptor vocabulary has only an exclusive lower bound, so
+ * the inclusive floor a field documents is enforced here; a plugin declares
+ * `maximum: MAX_POLL_INTERVAL_MS` so the two cannot drift apart.
+ */
+export const MIN_POLL_INTERVAL_MS = 1;
+export const MAX_POLL_INTERVAL_MS = 86_400_000;
+
 export abstract class PollingChannelBase<Cursor> extends ChannelBase {
   protected cursor: Cursor;
   private abortController = new AbortController();
@@ -69,7 +80,14 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
       // replacing it with 60s would multiply the poll rate by orders of
       // magnitude. One day matches the ceiling Email enforces and GitHub
       // declares.
-      return Math.min(configured, 86_400_000);
+      //
+      // The low end needs the same treatment from the other direction: a
+      // fractional interval such as 0.5 passes the descriptor's exclusive
+      // lower bound and the store, and setTimeout rounds it to ~1ms.
+      return Math.min(
+        Math.max(configured, MIN_POLL_INTERVAL_MS),
+        MAX_POLL_INTERVAL_MS,
+      );
     }
     return 60_000;
   }
