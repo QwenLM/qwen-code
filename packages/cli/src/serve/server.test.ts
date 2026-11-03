@@ -20870,23 +20870,25 @@ describe('createServeApp', () => {
           ),
       });
       const app = createServeApp(baseOpts, undefined, { bridge });
-      const first = await request(app)
-        .post('/session/session-A/prompt')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({
-          prompt: [{ type: 'text', text: 'event' }],
-          idempotencyKey: 'phantom-key',
-        });
+      const post = () =>
+        request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'event' }],
+            idempotencyKey: 'phantom-key',
+          });
+      const first = await post();
       expect(first.status).toBe(202);
-      // Let the deferred rejection handler run.
-      await new Promise((r) => setTimeout(r, 20));
-      const retry = await request(app)
-        .post('/session/session-A/prompt')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({
-          prompt: [{ type: 'text', text: 'event' }],
-          idempotencyKey: 'phantom-key',
-        });
+      // Retry until the deferred rejection handler forgets the key: a fixed
+      // sleep flakes under load. Deduped retries never reach the bridge, so
+      // promptCalls still ends at 2; a broken forget exhausts the loop and
+      // fails the assertion below.
+      let retry = await post();
+      for (let i = 0; i < 100 && retry.body.deduplicated === true; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+        retry = await post();
+      }
       // The retry must reach admission again, not dedupe into the phantom.
       expect(retry.body.deduplicated).toBeUndefined();
       expect(bridge.promptCalls).toHaveLength(2);
@@ -20963,10 +20965,11 @@ describe('createServeApp', () => {
     });
 
     it('forgets the idempotency key on any pre-admission deferred rejection (R2-A2)', async () => {
-      // The standalone working-directory check rejects deferred with a
-      // RequestError, not SessionNotFoundError: the forget must key off the
-      // admission signal, not the error type, or the phantom key survives
-      // and a retry dedupes into a non-admission.
+      // Defense-in-depth: a custom bridge can still reject deferred with a
+      // plain Error (the built-in standalone working-directory check now
+      // throws synchronously). The forget must key off the admission
+      // signal, not the error type, or the phantom key survives and a
+      // retry dedupes into a non-admission.
       const bridge = fakeBridge({
         promptImpl: () =>
           Promise.reject(
@@ -20974,23 +20977,23 @@ describe('createServeApp', () => {
           ),
       });
       const app = createServeApp(baseOpts, undefined, { bridge });
-      const first = await request(app)
-        .post('/session/session-A/prompt')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({
-          prompt: [{ type: 'text', text: 'event' }],
-          idempotencyKey: 'standalone-key',
-        });
+      const post = () =>
+        request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'event' }],
+            idempotencyKey: 'standalone-key',
+          });
+      const first = await post();
       expect(first.status).toBe(202);
-      // Let the deferred rejection handler run.
-      await new Promise((r) => setTimeout(r, 20));
-      const retry = await request(app)
-        .post('/session/session-A/prompt')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({
-          prompt: [{ type: 'text', text: 'event' }],
-          idempotencyKey: 'standalone-key',
-        });
+      // Retry until the deferred rejection handler forgets the key (a fixed
+      // sleep flakes under load); a broken forget exhausts the loop.
+      let retry = await post();
+      for (let i = 0; i < 100 && retry.body.deduplicated === true; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+        retry = await post();
+      }
       expect(retry.body.deduplicated).toBeUndefined();
       expect(bridge.promptCalls).toHaveLength(2);
     });
