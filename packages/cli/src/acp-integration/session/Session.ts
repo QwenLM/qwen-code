@@ -980,6 +980,11 @@ interface SharedRound {
   sharedToolBatch: boolean;
   /** The turn's signal. */
   signal: AbortSignal;
+  /**
+   * Only the session aborts the turn's signal, without a reason, so a round
+   * that threw on it was cancelled, whatever the reason.
+   */
+  signalAbortedBySession?: boolean;
   responseCapture: AgentResponseCapture;
   responseInterrupt: ResponseInterrupt;
   /** Filled with the calls the round's last response made. */
@@ -8748,12 +8753,14 @@ export class Session implements SessionContext {
     const {
       message,
       promptId,
+      type: roundType,
       signal,
       responseCapture,
       responseInterrupt,
       functionCalls,
       toolRequests,
       preparationTracker,
+      keepUnsent,
     } = round;
     let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
     let streamStartTime = Date.now();
@@ -8771,7 +8778,6 @@ export class Session implements SessionContext {
       const pushCount = this.#getCurrentChat().getUserContentPushCount?.();
       return pushCount !== undefined && pushCount <= pushCountBefore;
     };
-    const keepUnsent = round.keepUnsent;
     let attempt: ModelResponseFacts = newModelResponseFacts();
     // The user-content push a response answers. A continuation
     // sends another request within the round, and its response
@@ -8786,7 +8792,6 @@ export class Session implements SessionContext {
     // `responseInterrupt.watch` gives it up on the current path.
     const cutForInput = () =>
       responseInterrupt.signal.aborted && !signal.aborted;
-    const roundType = round.type;
     // The error a response reported, thrown once the client has
     // finished the round.
     let streamError: StructuredError | undefined;
@@ -8824,9 +8829,6 @@ export class Session implements SessionContext {
     responseInterrupt.begin();
     // Whether the round's request reached history, on every exit.
     let pushed = false;
-    // A Goal turn's model started once its request went out, before the
-    // client can finish the turn at its stop point; the host checks.
-    const markModelStarted = () => round.onModelStarted?.();
     try {
       ({ stop: roundStop } = await runModelRound(
         this.config.getLlmClient(),
@@ -8847,7 +8849,10 @@ export class Session implements SessionContext {
         responseInterrupt.signal,
         {
           onModelEvent: async (event) => {
-            markModelStarted();
+            // A Goal turn's model started once its request went out, before
+            // the client can finish the turn at its stop point; the host
+            // checks.
+            round.onModelStarted?.();
             if (signal.aborted) return;
             const pushCount =
               this.#getCurrentChat().getUserContentPushCount?.();
@@ -9019,10 +9024,16 @@ export class Session implements SessionContext {
           }
           keepUnsent(message, signal.aborted);
         }
-        return { ended: await this.#endFailedModelRound(error, signal) };
+        return {
+          ended: await this.#endFailedModelRound(
+            error,
+            signal,
+            round.signalAbortedBySession,
+          ),
+        };
       }
     } finally {
-      markModelStarted();
+      round.onModelStarted?.();
       pushed =
         (this.#getCurrentChat().getUserContentPushCount?.() ?? 0) >
         pushCountBefore;
@@ -9150,15 +9161,16 @@ export class Session implements SessionContext {
     responseCapture: AgentResponseCapture;
     label: string;
     /**
-     * Called once the turn's message reached history: sent, or kept whole
-     * when it was not.
+     * Called once the turn's message reached history: sent, before its
+     * response is recorded, or kept whole when it was not.
      */
     onMessageKept?: (sent: boolean) => void;
+    /** Called as each round starts. */
+    onRound?: () => void;
   }): Promise<{
     stopReason: PromptResponse['stopReason'];
     /** Loop protection or a declined approval stopped the turn. */
     stoppedShort?: boolean;
-    rounds: number;
   }> {
     const { promptId, signal, responseCapture } = turn;
     const sharedToolBatch = this.#runsToolsOnSharedBatch();
@@ -9187,6 +9199,7 @@ export class Session implements SessionContext {
     try {
       while (nextMessage !== null) {
         rounds++;
+        turn.onRound?.();
         const first = rounds === 1;
         const message: Content = nextMessage;
         nextMessage = null;
@@ -9196,7 +9209,7 @@ export class Session implements SessionContext {
           // cancelled prompt keeps them.
           this.#preserveUnsentMessageHistory(message, true);
           if (first) keepMessage(false);
-          return { stopReason: 'cancelled', rounds };
+          return { stopReason: 'cancelled' };
         }
         const functionCalls: FunctionCall[] = [];
         const toolRequests: ToolCallRequestInfo[] = [];
@@ -9204,6 +9217,7 @@ export class Session implements SessionContext {
           this.toolCallEmitter,
         );
         let stoppedShort = false;
+        let requestUnsent = () => true;
         const round = await this.#runSharedRound({
           message,
           promptId,
@@ -9219,6 +9233,7 @@ export class Session implements SessionContext {
           stopPolicies,
           sharedToolBatch,
           signal,
+          signalAbortedBySession: true,
           responseCapture,
           responseInterrupt: this.#openResponseInterrupt(
             signal,
@@ -9234,7 +9249,13 @@ export class Session implements SessionContext {
             if (first && full) keepMessage(false);
           },
           onOpen: (open) => {
+            requestUnsent = open.requestUnsent;
             emitResponseUsage = open.emitResponseUsage;
+          },
+          // Kept as the first event of its response arrives, before the
+          // client records the response.
+          onModelStarted: () => {
+            if (first && !requestUnsent()) keepMessage(true);
           },
           onSettled: (pushed) => {
             if (first && pushed) keepMessage(true);
@@ -9246,25 +9267,14 @@ export class Session implements SessionContext {
           },
         });
         if (round.ended) {
-          return { ...round.ended, stoppedShort, rounds };
+          return { ...round.ended, stoppedShort };
         }
         commitChannelDeliveryResponseBlock(
           responseCapture,
           round.channelDeliveryResponseBlock,
           functionCalls.length > 0,
         );
-        if (round.usageMetadata) {
-          this.#recordPromptTokenCount(
-            round.usageMetadata,
-            round.requestRouteKey,
-          );
-          this.messageRewriter?.flushTurn(signal);
-          await this.messageEmitter.emitUsageMetadata(
-            round.usageMetadata,
-            '',
-            Date.now() - round.streamStartTime,
-          );
-        }
+        await emitResponseUsage();
         if (functionCalls.length === 0) break;
         const toolRun = sharedToolBatch
           ? await this.#runSharedToolBatch(
@@ -9285,7 +9295,6 @@ export class Session implements SessionContext {
           return {
             stopReason: getAbortAwareEndTurnStopReason(signal),
             stoppedShort: true,
-            rounds,
           };
         }
         if (
@@ -9296,7 +9305,7 @@ export class Session implements SessionContext {
             responseCapture.channelDelivery !== undefined,
           )
         ) {
-          return { stopReason: getAbortAwareEndTurnStopReason(signal), rounds };
+          return { stopReason: getAbortAwareEndTurnStopReason(signal) };
         }
         const next = await this.#buildNextMessageAfterToolRun(
           toolRun,
@@ -9314,12 +9323,11 @@ export class Session implements SessionContext {
           return {
             stopReason: getAbortAwareEndTurnStopReason(signal),
             stoppedShort: true,
-            rounds,
           };
         }
       }
       await this.messageRewriter?.waitForPendingRewrites();
-      return { stopReason: getAbortAwareEndTurnStopReason(signal), rounds };
+      return { stopReason: getAbortAwareEndTurnStopReason(signal) };
     } finally {
       // The client started a cron turn's memory recall.
       if (turn.type === SendMessageType.Cron) {
@@ -9331,18 +9339,21 @@ export class Session implements SessionContext {
   /**
    * Ends a turn whose model round threw. Explicit user cancellation and
    * session disposal are controlled aborts, and so is the bridge's forwarded
-   * interruption token; other AbortErrors still surface so infrastructure
-   * failures are not hidden as cancellations. A failure fires StopFailure
-   * (fire-and-forget, in place of Stop, as `use-llm-stream.ts`
+   * interruption token, as is any abort of a cron or notification turn's
+   * signal, which only the session aborts; other AbortErrors still surface so
+   * infrastructure failures are not hidden as cancellations. A failure fires
+   * StopFailure (fire-and-forget, in place of Stop, as `use-llm-stream.ts`
    * handleFinishedWithErrorEvent does) and is thrown.
    */
   #endFailedModelRound(
     error: unknown,
     turnSignal: AbortSignal,
+    signalAbortedBySession = false,
   ): { stopReason: 'cancelled' } {
     if (
       turnSignal.aborted &&
-      (turnSignal.reason === USER_CANCEL_ABORT_REASON ||
+      (signalAbortedBySession ||
+        turnSignal.reason === USER_CANCEL_ABORT_REASON ||
         turnSignal.reason === SESSION_DISPOSE_ABORT_REASON ||
         turnSignal.reason === INTERRUPTED_PROMPT_ABORT_REASON)
     ) {
@@ -12987,13 +12998,19 @@ export class Session implements SessionContext {
                       this.loopTickResolver?.markDelivered();
                     }
                   },
+                  onRound: () => {
+                    turnCount++;
+                  },
                 });
-                turnCount = result.rounds;
                 if (result.stopReason === 'max_tokens') {
                   this.#stopCronAfterTokenLimit();
                 }
+                // A turn loop protection or a declined approval stopped is
+                // not delivered, as the current path returns before it.
                 cronCompleted =
-                  result.stopReason === 'end_turn' && !ac.signal.aborted;
+                  result.stopReason === 'end_turn' &&
+                  result.stoppedShort !== true &&
+                  !ac.signal.aborted;
               } else {
                 // Cron-fired prompts stream through the chat directly and never
                 // enter LlmClient.sendMessageStream, so core's per-turn reset is

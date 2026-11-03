@@ -5975,10 +5975,14 @@ describe('Session', () => {
     });
 
     describe('cron and background-notification turns', () => {
-      /** Runs each round on the mocked client; a round pushes its request unless told not to. */
+      /**
+       * Runs each round on the mocked client; a round pushes its request
+       * unless told not to, and runs `afterEvents` once its events are out.
+       */
       function automaticRounds(
         events: (index: number) => RoundEvent[] = () => [],
         pushes: (index: number) => boolean = () => true,
+        afterEvents: (index: number) => Promise<void> | void = () => {},
       ) {
         const sends: Array<
           [Part[], AbortSignal, string, Record<string, unknown>]
@@ -6003,6 +6007,7 @@ describe('Session', () => {
               return (async function* () {
                 if (pushes(index)) pushCount++;
                 for (const event of events(index)) yield event;
+                await afterEvents(index);
               })();
             },
           ),
@@ -6012,13 +6017,13 @@ describe('Session', () => {
       }
 
       /** Fires one in-session cron job once the session starts its scheduler. */
-      function fireCron(prompt: string) {
+      function fireCron(prompt: string, job: object = {}) {
         mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
         mockConfig.getCronScheduler = vi.fn().mockReturnValue({
           size: 1,
           hasPendingWork: true,
           start: vi.fn((callback: (job: { prompt: string }) => void) =>
-            callback({ prompt }),
+            callback({ prompt, ...job }),
           ),
           stop: vi.fn(),
           getExitSummary: vi.fn().mockReturnValue(undefined),
@@ -6067,6 +6072,128 @@ describe('Session', () => {
         );
         await vi.waitFor(() => expect(agentText()).toContain('cron result'));
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      });
+
+      it('records a cron prompt before the response its round records', async () => {
+        fireCron('nightly report');
+        const order: string[] = [];
+        mockChatRecordingService.recordCronPrompt.mockImplementation(() => {
+          order.push('cron prompt');
+        });
+        // The client records a response once its stream ends.
+        automaticRounds(
+          (index) =>
+            index === 1 ? [text('cron result'), finished()] : [finished()],
+          () => true,
+          (index) => {
+            if (index === 1) order.push('cron response');
+          },
+        );
+
+        await prompt();
+        await vi.waitFor(() => expect(order).toContain('cron response'));
+
+        expect(order).toEqual(['cron prompt', 'cron response']);
+      });
+
+      describe('scheduled delivery', () => {
+        const scheduledJob = {
+          id: 'task-1',
+          lastFiredAt: 1_750_000_000_000,
+          delivery: {
+            kind: 'channel',
+            target: { channelName: 'dingtalk', type: 'chat', id: 'chat-1' },
+          },
+        };
+        const deliveries = () =>
+          vi
+            .mocked(mockClient.extMethod)
+            .mock.calls.filter(
+              ([method]) => method === 'qwen/control/channel-delivery',
+            );
+
+        it('delivers a scheduled cron turn that ended on its own', async () => {
+          fireCron('nightly report', scheduledJob);
+          automaticRounds((index) =>
+            index === 1 ? [text('cron result'), finished()] : [finished()],
+          );
+
+          await prompt();
+
+          await vi.waitFor(() => expect(deliveries()).toHaveLength(1));
+          expect(deliveries()[0][1]).toMatchObject({
+            deliveryId: 'task-1:1750000000000',
+            text: 'cron result',
+          });
+        });
+
+        it('does not deliver a scheduled cron turn loop protection stopped', async () => {
+          fireCron('nightly report', scheduledJob);
+          automaticRounds((index) =>
+            index === 1
+              ? [
+                  text('looping'),
+                  {
+                    type: core.LlmEventType.LoopDetected,
+                    value: {
+                      loopType: core.LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+                    },
+                  } as RoundEvent,
+                ]
+              : [finished()],
+          );
+
+          await prompt();
+          await vi.waitFor(() =>
+            expect(
+              mockLlmClient.finishManagedAutoMemoryRecall,
+            ).toHaveBeenCalled(),
+          );
+          // Delivery is submitted on the next tick.
+          await new Promise((resolve) => setTimeout(resolve, 20));
+
+          expect(deliveries()).toHaveLength(0);
+        });
+      });
+
+      it('ends a cron turn cancelled mid-response as cancelled, not as a failure', async () => {
+        fireCron('nightly report');
+        const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
+        mockConfig.getHookSystem = vi.fn().mockReturnValue({
+          fireStopFailureEvent,
+        });
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((name: string) => name === 'StopFailure');
+        let release!: () => void;
+        const released = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        automaticRounds(
+          (index) => (index === 1 ? [text('cron partial')] : [finished()]),
+          () => true,
+          async (index) => {
+            if (index !== 1) return;
+            await released;
+            const error = new Error('aborted');
+            error.name = 'AbortError';
+            throw error;
+          },
+        );
+
+        await prompt();
+        await vi.waitFor(() => expect(agentText()).toContain('cron partial'));
+        await session.cancelPendingPrompt();
+        release();
+        await vi.waitFor(() =>
+          expect(
+            mockLlmClient.finishManagedAutoMemoryRecall,
+          ).toHaveBeenCalled(),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(fireStopFailureEvent).not.toHaveBeenCalled();
+        expect(agentText()).not.toContain('cron error');
       });
 
       it('keeps a cron prompt whose request never went out out of the record', async () => {
