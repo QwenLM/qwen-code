@@ -4473,7 +4473,8 @@ describe('qwen-triage verify hardening round 2', () => {
     try {
       // The stub records which HTTP verb the publisher used and against
       // which comment id, keeps the body it sent, and serves a comments
-      // listing from a fixture.
+      // listing from a fixture. STUB_FAIL_LIST / STUB_FAIL_USER fail the
+      // listing or the bot-identity lookup.
       writeFileSync(
         join(dir, 'gh'),
         [
@@ -4481,10 +4482,10 @@ describe('qwen-triage verify hardening round 2', () => {
           'all="$*"',
           'for a in "$@"; do case "$a" in body=@*) cp "${a#body=@}" "$BODY_OUT";; esac; done',
           'case "$all" in',
-          '  *"api user"*|*" user "*) echo qwen-code-ci-bot ;;',
+          '  *"api user"*|*" user "*) [ -n "${STUB_FAIL_USER:-}" ] && exit 1; echo qwen-code-ci-bot ;;',
           '  */pulls/7999*) [ "$STUB_PR_STATE" = fail ] && exit 1; echo "${STUB_PR_STATE:-open}" ;;',
           '  *"-X PATCH"*) echo "PATCH $all" >> "$CALLS" ;;',
-          '  *comments*--method*GET*) cat "$LISTING" ;;',
+          '  *comments*--method*GET*) [ -n "${STUB_FAIL_LIST:-}" ] && exit 1; cat "$LISTING" ;;',
           '  *issues/*/comments*) echo "POST $all" >> "$CALLS" ;;',
           'esac',
           'exit 0',
@@ -4534,7 +4535,7 @@ describe('qwen-triage verify hardening round 2', () => {
             ...env,
           },
         });
-        expect(res.status).toBe(0);
+        expect(res.status, res.stderr).toBe(0);
         return readFileSync(calls, 'utf8');
       };
 
@@ -4580,6 +4581,17 @@ describe('qwen-triage verify hardening round 2', () => {
       const foreign = run([status(777, 1, 'someone-else')]);
       expect(foreign).toContain('POST');
       expect(foreign).not.toContain('/issues/comments/777');
+
+      // A lookup that cannot read the listing or the bot identity finds no
+      // comment of this run's, so the report is posted fresh. The step runs
+      // under its own `set -u`: each value the lookup would set needs its
+      // initializer, or this path aborts with nothing posted.
+      const blindLookups = [{ STUB_FAIL_LIST: '1' }, { STUB_FAIL_USER: '1' }];
+      for (const env of blindLookups) {
+        const blind = run([status(555, 1)], env);
+        expect(blind).toContain('POST');
+        expect(blind).not.toContain('/issues/comments/555');
+      }
 
       // Publishers queue, so the newest marker comment can be another
       // round's: its live status is that round's to replace, and an earlier
@@ -4719,6 +4731,13 @@ describe('qwen-triage verify hardening round 2', () => {
           `❌ not passed — non-deterministic tests (flakiness gate); ${headline}**`,
         );
         expect(run([ownFlakyReport], { ...flaky, ...env })).toBe('');
+        // Unable to read that report, the lookup cannot tell whether it
+        // carries the demotion, so the notice posts.
+        for (const blind of blindLookups) {
+          expect(
+            run([ownFlakyReport], { ...flaky, ...env, ...blind }),
+          ).toContain('POST');
+        }
         for (const earlier of [
           ownReport,
           {
