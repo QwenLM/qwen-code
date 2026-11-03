@@ -2036,24 +2036,24 @@ class ManagedAgentApiContractTest {
         JsonNode webShellEvents = json(exchange(drift,
                 "queryWebShellTaskEvents", 200,
                 post(WEB_SHELL + "/tasks/events/query").header(TENANT,
-                        tenant),
+                        tenant).principal(actor(tenant)),
                 "{\"sessionId\":\"%s\",\"taskId\":\"%s\"}"
                         .formatted(sessionId, taskId)));
         assertThat(webShellEvents.get("data")).isEmpty();
         assertThat(webShellEvents.get("nextCursor").isTextual()).isTrue();
         exchange(drift, "queryWebShellTaskEvents", 400,
                 post(WEB_SHELL + "/tasks/events/query").header(TENANT,
-                        tenant),
+                        tenant).principal(actor(tenant)),
                 "{\"sessionId\":\"%s\",\"taskId\":\"%s\",\"after\":\"bad\"}"
                         .formatted(sessionId, taskId));
         exchange(drift, "queryWebShellTaskEvents", 400,
                 post(WEB_SHELL + "/tasks/events/query").header(TENANT,
-                        tenant),
+                        tenant).principal(actor(tenant)),
                 "{\"sessionId\":\"%s\",\"taskId\":\"%s\",\"limit\":0}"
                         .formatted(sessionId, taskId));
         exchange(drift, "queryWebShellTaskEvents", 404,
                 post(WEB_SHELL + "/tasks/events/query").header(TENANT,
-                        otherTenant),
+                        otherTenant).principal(actor(otherTenant)),
                 "{\"sessionId\":\"%s\",\"taskId\":\"%s\"}"
                         .formatted(sessionId, taskId));
         exchange(drift, "queryWebShellTaskEvents", 403,
@@ -2063,7 +2063,7 @@ class ManagedAgentApiContractTest {
                         .formatted(sessionId, taskId));
         exchange(drift, "queryWebShellTaskEvents", 400,
                 post(WEB_SHELL + "/tasks/events/query").header(TENANT,
-                        tenant),
+                        tenant).principal(actor(tenant)),
                 "{\"sessionId\":\"%s\"}".formatted(sessionId));
         exchangeTaskCancels(drift, tenant, otherTenant, sessionId, taskId);
 
@@ -2297,7 +2297,7 @@ class ManagedAgentApiContractTest {
         // one open operation per Session rule spans task kinds.
         assertThat(json(exchange(drift, "cancelSessionTask", 409,
                 post(cancelPath, sessionId, workflowTask).header(TENANT,
-                        tenant).header(IDEMPOTENCY_KEY,
+                        tenant).principal(actor(tenant)).header(IDEMPOTENCY_KEY,
                         "contract-workflow-blocked"), null))
                 .at("/error/code").asText())
                 .isEqualTo("session_operation_active");
