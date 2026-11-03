@@ -50,7 +50,7 @@ import {
   runUpgrade,
   serverBaseUrl,
   verifyChecksums,
-  withoutPassword,
+  withoutCredentials,
 } from '../../packages/managed-agent-server/distribution/bin/qwen-managed-agent-upgrade.mjs';
 
 const SERVER = 'qwen-managed-agent-server';
@@ -286,20 +286,31 @@ test('refuses only the URLs fetch refuses', async () => {
     fetchRefusal('https://127.0.0.1:6000'),
     'is on port 6000, so fetch refuses to dial it',
   );
-  // A refusal prints the URL with its password masked, and nothing else changed.
+  // A refusal prints the URL with its user information masked, whether or
+  // not it parses, and a URL without any comes back as it was.
   for (const [url, shown] of [
+    ['http://admin:secret@127.0.0.1:18080', 'http://***@127.0.0.1:18080/'],
+    ['http://:secret@127.0.0.1:8080/x', 'http://***@127.0.0.1:8080/x'],
+    ['http://a:p%40ss@[::1]:1', 'http://***@[::1]:1/'],
+    // A token in the user-name position, as a personal access token goes.
     [
-      'http://admin:secret@127.0.0.1:18080',
-      'http://admin:***@127.0.0.1:18080/',
+      'https://ghp_abc123@cp.example.com:8443',
+      'https://***@cp.example.com:8443/',
     ],
-    ['http://:secret@127.0.0.1:8080/x', 'http://:***@127.0.0.1:8080/x'],
-    ['http://a:p%40ss@[::1]:1', 'http://a:***@[::1]:1/'],
-    ['http://admin@127.0.0.1:8080', 'http://admin@127.0.0.1:8080'],
+    // Values the parser rejects, or reads without an authority.
+    ['http://admin:secret@127.0.0.1:70000', 'http://***@127.0.0.1:70000'],
+    [
+      'http://admin:s3cret@[fe80::1%eth0]:8080',
+      'http://***@[fe80::1%eth0]:8080',
+    ],
+    ['ops:secret@127.0.0.1:8080', 'ops:***@127.0.0.1:8080'],
+    ['ghp_abc123@127.0.0.1:8080', '***@127.0.0.1:8080'],
     ['http://127.0.0.1:6000', 'http://127.0.0.1:6000'],
+    ['http://127.0.0.1:8080/a@b?c=d@e', 'http://127.0.0.1:8080/a@b?c=d@e'],
     ['proxy.test:8443', 'proxy.test:8443'],
     ['http://[fe80::1%eth0]:8080', 'http://[fe80::1%eth0]:8080'],
   ]) {
-    assert.equal(withoutPassword(url), shown, url);
+    assert.equal(withoutCredentials(url), shown, url);
   }
 
   // Each URL it refuses, the runtime's fetch rejects before it dials: a port
@@ -2356,7 +2367,7 @@ test('start and verify use server.env when the configuration does not resolve', 
   assert.equal(await host.upgrade('start'), 1);
   assert.match(
     host.output.join('\n'),
-    /start refused: The server's configuration puts the control plane at "http:\/\/\[fe80::1%eth0\]:18080", which is not a URL: a URL cannot carry an IPv6 zone\./,
+    /start refused: The server's configuration puts the health endpoint at "http:\/\/\[fe80::1%eth0\]:18080\/actuator\/health", which is not a URL: a URL cannot carry an IPv6 zone\./,
   );
 });
 
@@ -2368,7 +2379,7 @@ test('start refuses listeners it cannot reach before it starts anything', async 
   assert.equal(await host.upgrade('start'), 1);
   assert.match(
     host.output.join('\n'),
-    /start refused: The server's configuration gives the control plane no fixed port: 0 picks one at start, and a negative one opens none\. Pass --server-url <a URL that serves \/actuator\/health>\./,
+    /start refused: The server's configuration gives the health endpoint no fixed port: 0 picks one at start, and a negative one opens none\. Pass --server-url <a URL that serves the API and \/actuator\/health>\./,
   );
   // management.server.port -1 or 0, with the server on a fixed port.
   host.resolved = { healthUrl: '' };
@@ -2397,6 +2408,43 @@ test('start refuses listeners it cannot reach before it starts anything', async 
     host.output.join('\n'),
     /start refused: The control plane reaches qwen-hosted-harness at "http:\/\/\[fe80::1%eth0\]:4170", which is not a URL: a URL cannot carry an IPv6 zone; correct qwen\.managed-agent\.harness\.base-url\./,
   );
+  // The preflight takes only an http(s) origin, so whatever else it would
+  // fail after the Harness restarts is refused first, credentials masked.
+  for (const [harnessBaseUrl, shown, reason] of [
+    [
+      'http://127.0.0.1:4170/?tenant=acme',
+      'http://127.0.0.1:4170/?tenant=acme',
+      'carries a query or a fragment',
+    ],
+    [
+      'http://127.0.0.1:4170/?',
+      'http://127.0.0.1:4170/?',
+      'carries a query or a fragment',
+    ],
+    [
+      'http://127.0.0.1:4170#x',
+      'http://127.0.0.1:4170#x',
+      'carries a query or a fragment',
+    ],
+    [
+      'http://svc:s3cret@127.0.0.1:4170',
+      'http://***@127.0.0.1:4170/',
+      'carries a user name or password',
+    ],
+    [
+      'ftp://deploy:s3cret@harness.internal:4170',
+      'ftp://***@harness.internal:4170/',
+      'is not an http or https URL',
+    ],
+  ]) {
+    host.resolved = { harnessBaseUrl };
+    assert.equal(await host.upgrade('start'), 1, harnessBaseUrl);
+    assert.equal(
+      host.output.at(-1),
+      `start refused: The control plane reaches qwen-hosted-harness at ${JSON.stringify(shown)}, which ${reason}; correct qwen.managed-agent.harness.base-url.`,
+    );
+  }
+  assert.ok(!host.output.join('\n').includes('s3cret'), host.output.join('\n'));
   // A link-local listener keeps its zone, which no URL can carry.
   const zoned = 'http://[fe80:0:0:0:0:0:0:1%1]';
   host.resolved = {
@@ -2406,7 +2454,7 @@ test('start refuses listeners it cannot reach before it starts anything', async 
   assert.equal(await host.upgrade('start'), 1);
   assert.match(
     host.output.join('\n'),
-    /start refused: The server's configuration puts the control plane at "http:\/\/\[fe80:0:0:0:0:0:0:1%1\]:8080", which is not a URL: a URL cannot carry an IPv6 zone\. Bind it where fetch can reach it, or pass --server-url <a URL that serves \/actuator\/health>\./,
+    /start refused: The server's configuration puts the health endpoint at "http:\/\/\[fe80:0:0:0:0:0:0:1%1\]:8080\/actuator\/health", which is not a URL: a URL cannot carry an IPv6 zone\. Bind it where fetch can reach it, or pass --server-url <a URL that serves the API and \/actuator\/health>\./,
   );
   host.resolved = { healthUrl: `${zoned}:9091/actuator/health` };
   assert.equal(await host.upgrade('start'), 1);
@@ -2421,7 +2469,7 @@ test('start refuses listeners it cannot reach before it starts anything', async 
   assert.equal(await host.upgrade('start'), 1);
   assert.match(
     host.output.join('\n'),
-    /puts the control plane at "http:\/\/127\.0\.0\.1:70000", which is not a URL\. Bind it/,
+    /puts the health endpoint at "http:\/\/127\.0\.0\.1:70000\/actuator\/health", which is not a URL\. Bind it/,
   );
   host.resolved = {};
   assert.equal(
@@ -2441,7 +2489,7 @@ test('start refuses listeners it cannot reach before it starts anything', async 
   assert.equal(await host.upgrade('start'), 1);
   assert.match(
     host.output.join('\n'),
-    /puts the control plane at "http:\/\/127\.0\.0\.1:6000", which is on port 6000, so fetch refuses to dial it\. Bind it where fetch can reach it, or pass --server-url/,
+    /puts the health endpoint at "http:\/\/127\.0\.0\.1:6000\/actuator\/health", which is on port 6000, so fetch refuses to dial it\. Bind it where fetch can reach it, or pass --server-url/,
   );
   host.resolved = {};
   for (const [serverUrl, refusal, shown = serverUrl.replace(/\/$/, '')] of [
@@ -2449,7 +2497,17 @@ test('start refuses listeners it cannot reach before it starts anything', async 
     [
       'http://admin:secret@127.0.0.1:18080',
       'carries a user name or password, so fetch refuses it',
-      'http://admin:***@127.0.0.1:18080/',
+      'http://***@127.0.0.1:18080/',
+    ],
+    [
+      'http://admin:secret@127.0.0.1:70000',
+      'is not a URL',
+      'http://***@127.0.0.1:70000',
+    ],
+    [
+      'https://svc:secret@[fe80::1%eth0]:8080',
+      'is not a URL: a URL cannot carry an IPv6 zone',
+      'https://***@[fe80::1%eth0]:8080',
     ],
     [
       'http://127.0.0.1:10080/',
@@ -2480,7 +2538,56 @@ test('start refuses listeners it cannot reach before it starts anything', async 
   assert.equal(await host.upgrade('verify'), 1);
   assert.match(
     host.output.join('\n'),
-    /verify refused: The server's configuration gives the control plane no fixed port/,
+    /verify refused: The server's configuration gives the health endpoint no fixed port/,
+  );
+});
+
+test('start dials only the health endpoint, and verify reads the API only with --tenant', async (t) => {
+  const { host, target } = await backedUp(t);
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  // The API on a port fetch refuses, the health endpoint on its own
+  // management port: start never dials the API, so it does not refuse it.
+  host.resolved = {
+    serverUrl: 'http://127.0.0.1:6000',
+    healthUrl: 'http://127.0.0.1:9091/actuator/health',
+  };
+  host.responses['GET /actuator/health'] = { status: 'UP' };
+  host.requests = [];
+  assert.equal(await host.upgrade('start'), 0, host.output.join('\n'));
+  assert.deepEqual(
+    [...new Set(host.requests.map(({ url }) => url))],
+    ['http://127.0.0.1:9091/actuator/health'],
+  );
+  // Nor does verify without --tenant, which reads no API.
+  assert.equal(await host.upgrade('verify'), 0, host.output.join('\n'));
+  assert.equal(
+    rowsOf(host.output).health,
+    'PASS http://127.0.0.1:9091/actuator/health is UP',
+  );
+  // verify --tenant reads it, so it says why it cannot, before any probe.
+  host.requests = [];
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 1);
+  assert.equal(
+    host.output.at(-1),
+    'verify refused: The server\'s configuration puts the control plane at "http://127.0.0.1:6000", which is on port 6000, so fetch refuses to dial it. Bind it where fetch can reach it, or pass --server-url <a URL that serves the API and /actuator/health>.',
+  );
+  assert.deepEqual(host.requests, []);
+  // An API port picked at start, the same way.
+  host.resolved = {
+    serverUrl: '',
+    healthUrl: 'http://127.0.0.1:9091/actuator/health',
+  };
+  assert.equal(await host.upgrade('verify'), 0, host.output.join('\n'));
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 1);
+  assert.match(
+    host.output.at(-1),
+    /^verify refused: The server's configuration gives the control plane no fixed port/,
+  );
+  assert.equal(await host.upgrade('stop'), 0);
+  assert.equal(await host.upgrade('start'), 0, host.output.join('\n'));
+  assert.equal(
+    host.output.at(-1),
+    'qwen-managed-agent-server is UP at http://127.0.0.1:9091/actuator/health. Run verify before reopening ingress.',
   );
 });
 
@@ -2527,6 +2634,43 @@ test('health reports neutralize terminal control bytes from the endpoint', async
   assert.match(
     host.output.at(-1),
     /within 3s \(the last answer: HTTP 200, status \{"toString":1\}\) and keeps running/,
+  );
+
+  // One nested deeper than JSON.stringify() recurses parses all the same,
+  // and is shown as unprintable rather than ending the report.
+  host.responses['GET /actuator/health'] = {
+    status: JSON.parse('['.repeat(20000) + ']'.repeat(20000)),
+  };
+  assert.equal(await host.upgrade('stop'), 0);
+  assert.equal(await host.upgrade('start', '--timeout', '3'), 1);
+  assert.match(
+    host.output.at(-1),
+    /within 3s \(the last answer: HTTP 200, status \[unprintable\]\) and keeps running/,
+  );
+  assert.equal(await host.upgrade('verify'), 1);
+  assert.equal(
+    rowsOf(host.output).health,
+    'FAIL http://127.0.0.1:18080/actuator/health is not UP: HTTP 200, status [unprintable]',
+  );
+
+  // Nor can the endpoint scroll the report away with a long one: the text
+  // stops at 200 code points, never inside a surrogate pair, and says how
+  // long it was.
+  host.responses['GET /actuator/health'] = {
+    status: `${'😀'.repeat(150)}${'A'.repeat(99850)}`,
+  };
+  assert.equal(await host.upgrade('verify'), 1);
+  assert.equal(
+    rowsOf(host.output).health,
+    `FAIL http://127.0.0.1:18080/actuator/health is not UP: HTTP 200, status ${'😀'.repeat(150)}${'A'.repeat(50)}… (100000 characters)`,
+  );
+  assert.ok(host.output.join('\n').length < 2000);
+  assert.equal(await host.upgrade('stop'), 0);
+  assert.equal(await host.upgrade('start', '--timeout', '2'), 1);
+  assert.ok([...host.output.at(-1)].length < 600, host.output.at(-1));
+  assert.match(
+    host.output.at(-1),
+    /… \(100000 characters\)\) and keeps running/,
   );
 });
 
@@ -2656,7 +2800,10 @@ test('verify says why an API read failed, in text the endpoint cannot steer', as
   const id = encodeURIComponent(steer);
   host.responses['GET /v1/agents/sessions'] = { data: [{ id: steer }] };
   host.responses[`GET /v1/agents/sessions/${id}`] = { id: steer };
-  host.responses[`GET /v1/agents/sessions/${id}/items`] = { data: [] };
+  // A count that is no number, as JSON does not keep it one.
+  host.responses[`GET /v1/agents/sessions/${id}/items`] = {
+    data: { length: `2${steer}` },
+  };
   host.responses['POST /v1/agents/sessions'] = { id: steer };
   host.responses[`GET /v1/agents/sessions/${id}/events`] = {
     data: [{ sequence: 1, type: `turn.completed${steer}`, terminal: true }],

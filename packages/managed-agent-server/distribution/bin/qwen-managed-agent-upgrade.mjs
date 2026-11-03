@@ -532,17 +532,22 @@ export function fetchRefusal(url) {
   return undefined;
 }
 
-/** `url` as a refusal may print it: a password in it shows as `***`. */
-export function withoutPassword(url) {
-  if (!URL.canParse(url)) {
-    return url;
+/**
+ * `url` as a refusal may print it: its user information, a password or a
+ * token in the user-name position, shows as `***`.
+ */
+export function withoutCredentials(url) {
+  if (URL.canParse(url)) {
+    const parsed = new URL(url);
+    if (parsed.username || parsed.password) {
+      parsed.username = '***';
+      parsed.password = '';
+      return parsed.href;
+    }
   }
-  const parsed = new URL(url);
-  if (!parsed.password) {
-    return url;
-  }
-  parsed.password = '***';
-  return parsed.href;
+  // A value the parser rejects, or reads without an authority, may still
+  // spell user information before an @.
+  return url.replace(/^([a-zA-Z][a-zA-Z0-9+.-]*:(?:\/\/)?)?[^/?#]*@/, '$1***@');
 }
 
 // ---------------------------------------------------------------------------
@@ -2519,7 +2524,7 @@ async function listeners(
   system,
   deployment,
   options,
-  { reachesHarness = true } = {},
+  { reachesHarness = true, readsApi = false } = {},
 ) {
   let urls = {};
   if (reachesHarness || !options.serverUrl) {
@@ -2549,22 +2554,28 @@ async function listeners(
     urls.server = options.serverUrl;
     urls.health = `${options.serverUrl}/actuator/health`;
   }
-  if (!urls.server || !urls.health) {
-    throw new Refusal(
-      `The server's configuration gives ${urls.server ? 'the health endpoint' : 'the control plane'} no fixed port: 0 picks one at start, and a negative one opens none. Pass --server-url <a URL that serves /actuator/health>.`,
-    );
+  // A phase is refused only over a URL it dials: both probe the health
+  // endpoint, and only verify --tenant reads the API.
+  const dialled = [
+    ...(readsApi ? [['the control plane', urls.server]] : []),
+    ['the health endpoint', urls.health],
+  ];
+  const serves = 'a URL that serves the API and /actuator/health';
+  for (const [name, url] of dialled) {
+    if (!url) {
+      throw new Refusal(
+        `The server's configuration gives ${name} no fixed port: 0 picks one at start, and a negative one opens none. Pass --server-url <${serves}>.`,
+      );
+    }
   }
   // fetch would fail on each probe until the timeout, so say why up front.
-  for (const [name, url] of [
-    ['the control plane', urls.server],
-    ['the health endpoint', urls.health],
-  ]) {
+  for (const [name, url] of dialled) {
     const refusal = fetchRefusal(url);
     if (refusal) {
       throw new Refusal(
         options.serverUrl
-          ? `--server-url ${JSON.stringify(withoutPassword(options.serverUrl))} ${refusal}.`
-          : `The server's configuration puts ${name} at ${JSON.stringify(withoutPassword(url))}, which ${refusal}. Bind it where fetch can reach it, or pass --server-url <a URL that serves /actuator/health>.`,
+          ? `--server-url ${JSON.stringify(withoutCredentials(options.serverUrl))} ${refusal}.`
+          : `The server's configuration puts ${name} at ${JSON.stringify(withoutCredentials(url))}, which ${refusal}. Bind it where fetch can reach it, or pass --server-url <${serves}>.`,
       );
     }
   }
@@ -2604,6 +2615,9 @@ async function waitFor(system, deadline, probe) {
 // waits for the whole budget.
 const PROBE_TIMEOUT_MS = 5000;
 
+// Endpoint text stops at this many code points.
+const PRINTABLE_LIMIT = 200;
+
 // Endpoint-supplied text — a health body's status, a fetch error's message —
 // is interpolated into single-line terminal reports. Neutralize control bytes
 // so a queryable endpoint cannot drive the terminal that reports it: moving
@@ -2612,12 +2626,25 @@ const PROBE_TIMEOUT_MS = 5000;
 // C1 byte with U+FFFD breaks the escape introducer (ESC) and keeps the row on
 // one line, while leaving the readable text intact.
 function printable(text) {
-  // A JSON value that is no string prints as its JSON: String() throws on an
-  // object whose own toString is no function, as {"toString":1} has.
-  const shown =
-    typeof text === 'string' ? text : (JSON.stringify(text) ?? String(text));
+  let shown = text;
+  if (typeof text !== 'string') {
+    // A JSON value that is no string prints as its JSON: String() throws on
+    // an object whose own toString is no function, as {"toString":1} has,
+    // and JSON.stringify() on one nested deeper than its stack.
+    try {
+      shown = JSON.stringify(text) ?? String(text);
+    } catch {
+      shown = '[unprintable]';
+    }
+  }
   // eslint-disable-next-line no-control-regex -- matching control bytes is the point
-  return shown.replace(/[\u0000-\u001F\u007F-\u009F]/g, '\uFFFD');
+  const flat = shown.replace(/[\u0000-\u001F\u007F-\u009F]/g, '\uFFFD');
+  // Nor can an endpoint scroll the report away: the text stops at
+  // PRINTABLE_LIMIT code points, cut after the control bytes are gone.
+  const points = [...flat];
+  return points.length > PRINTABLE_LIMIT
+    ? `${points.slice(0, PRINTABLE_LIMIT).join('')}… (${points.length} characters)`
+    : flat;
 }
 
 // Why fetch rejected: fetch itself words every failure as "fetch failed", and
@@ -2694,18 +2721,23 @@ async function phaseStart(system, deployment, options) {
   const harnessUrl = URL.canParse(urls.harness)
     ? new URL(urls.harness)
     : undefined;
-  // The control plane speaks only http and https to the Harness, which the
-  // preflight would fail after the Harness restarts; and an opaque value such
-  // as proxy.test:8443 names no host to wait on at all.
-  if (!['http:', 'https:'].includes(harnessUrl?.protocol)) {
-    // When the value does not parse at all, reuse fetchRefusal so an IPv6 zone
-    // is named here exactly as --server-url names it, rather than a bare
-    // "is not a URL" that leaves the operator nothing to act on.
-    const reason = harnessUrl
+  // The preflight takes only an http(s) origin, without user information, a
+  // query or a fragment, and would fail any other after the Harness restarts;
+  // an opaque value such as proxy.test:8443 names no host to wait on at all.
+  // A value that does not parse gets fetchRefusal's reason, which names an
+  // IPv6 zone as --server-url's refusal does.
+  const unusable = !harnessUrl
+    ? fetchRefusal(urls.harness)
+    : !['http:', 'https:'].includes(harnessUrl.protocol)
       ? 'is not an http or https URL'
-      : fetchRefusal(urls.harness);
+      : harnessUrl.username || harnessUrl.password
+        ? 'carries a user name or password'
+        : urls.harness.includes('?') || urls.harness.includes('#')
+          ? 'carries a query or a fragment'
+          : undefined;
+  if (unusable) {
     throw new Refusal(
-      `The control plane reaches ${harness.name} at ${JSON.stringify(urls.harness)}, which ${reason}; correct qwen.managed-agent.harness.base-url.`,
+      `The control plane reaches ${harness.name} at ${JSON.stringify(withoutCredentials(urls.harness))}, which ${unusable}; correct qwen.managed-agent.harness.base-url.`,
     );
   }
 
@@ -2795,7 +2827,7 @@ async function phaseStart(system, deployment, options) {
     );
   }
   system.out(
-    `${server.name} is UP at ${urls.health}; its API is at ${urls.server}. Run verify before reopening ingress.`,
+    `${server.name} is UP at ${urls.health}${urls.server ? `; its API is at ${urls.server}` : ''}. Run verify before reopening ingress.`,
   );
   return 0;
 }
@@ -2885,7 +2917,7 @@ async function sessionRow(system, client) {
     return row(
       'session',
       'PASS',
-      `read Session ${printable(session.id)} and ${items?.data?.length ?? 0} item(s)`,
+      `read Session ${printable(session.id)} and ${printable(items?.data?.length ?? 0)} item(s)`,
     );
   } catch (error) {
     return row('session', 'FAIL', error.message);
@@ -2977,6 +3009,7 @@ async function phaseVerify(system, deployment, options) {
   }
   const urls = await listeners(system, deployment, options, {
     reachesHarness: false,
+    readsApi: Boolean(options.tenant),
   });
   const rows = [];
   system.out(
