@@ -697,7 +697,8 @@ jobs:
           # the chmod form leaves a world-readable window on this shared /tmp.
           (umask 077; mkdir -p "${WORKDIR}")
           # Age-sweep abandoned per-run workdirs; never read a WORKDIR pid as a kill target.
-          # Full rationale → qwen-autofix.md#af-149
+          # Hard kill skips the always() teardown and run_id never repeats, so
+          # nothing else reclaims them. Full rationale → qwen-autofix.md#af-149
           find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
           # The reused workspace's .git accumulates unreferenced objects
           # across fetch runs on this persistent pool; prune them.
@@ -3717,7 +3718,8 @@ jobs:
           # the chmod form leaves a world-readable window on this shared /tmp.
           (umask 077; mkdir -p "${WORKDIR}")
           # Age-sweep abandoned per-run workdirs; never read a WORKDIR pid as a kill target.
-          # Full rationale → qwen-autofix.md#af-149
+          # Hard kill skips the always() teardown and run_id never repeats, so
+          # nothing else reclaims them. Full rationale → qwen-autofix.md#af-149
           find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
           # The reused workspace's .git accumulates unreferenced objects
           # across fetch runs on this persistent pool; prune them.

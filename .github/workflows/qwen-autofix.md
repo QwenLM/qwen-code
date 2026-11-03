@@ -2547,6 +2547,26 @@ runner) means grep exits 1, which would kill the step exactly
 when there is nothing to clean.
 ```
 
+The two preamble lines above that block are not the allowlist sweep and
+carry their own rationale. The worktree-scoped config file
+(`git rev-parse --git-path config.worktree`) is deleted first: a worktree
+keeps per-worktree config separately, and `extensions.worktreeConfig` is
+what makes git read it at all. Because `extensions.` is itself a KEPT
+allowlist key, that file is the one place a prior job on this pool can
+still plant `core.hooksPath` while the sweep below reports itself clean —
+so the file and the matching local `extensions.worktreeConfig` key both
+go before the sweep.
+
+The hooks path is then resolved with `GIT_CONFIG_GLOBAL=/dev/null
+GIT_CONFIG_SYSTEM=/dev/null`, i.e. from the repository only, and only
+after the allowlist sweep. Both properties are load-bearing: resolving
+before the sweep would let a config a global override supplied decide the
+path the containment guard validates, and a prior job's
+`--worktree core.hooksPath=/` would survive the local sweep untouched,
+leave the hooks path outside the git dir, make the guard refuse the
+delete, and fire the planted hook on the next git command in this
+PAT-bearing job.
+
 <a id="af-086"></a>
 
 ### 86. issue-autofix · Stage trusted schema gate — The staged copy's trusted-base provenance holds at cp time only: RUNNER_TEMP is…
@@ -4726,9 +4746,11 @@ zero-round engagement is what 'stop' already means (af-007).
 
 In the workflow `env:` block.
 
-The workflow file is 451,536 bytes: under this repository's own 470 KB gate
-(`.github/scripts/check-workflow-size.sh`, env-overridable) and ~60 KB below
-GitHub's 512 KB start-runs limit. The gate is still close enough that the
+The workflow file sits well under this repository's own gate
+(`.github/scripts/check-workflow-size.sh`, env-overridable at both ends) and
+well below GitHub's 512 KB start-runs limit; `.github/workflows/.size-baseline`
+records its current byte count, so no figure here can drift from the file. The
+gate is still close enough that the
 long-form commentary on the constants below lives here verbatim — with TWO
 exceptions, each marked at its entry: the
 `TAKEOVER_COMMAND` entry was updated to name the second parameterized form, and
