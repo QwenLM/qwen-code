@@ -2496,6 +2496,50 @@ test('health reports neutralize terminal control bytes from the endpoint', async
   );
 });
 
+test('verify sanitizes a malicious health body over a real socket', async (t) => {
+  const { host, target } = await backedUp(t);
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  host.responses['GET /actuator/health'] = { status: 'UP' };
+  assert.equal(await host.upgrade('start'), 0);
+  // The same attack over a real socket and the runtime's own fetch, through the
+  // real health() -> printable() -> row() -> out() path, not the rig's fake.
+  const malicious =
+    'DOWN\u001b[1A\u001b[2K\u001b[32mPASS\u001b[0m\nsplit\u001b]52;c;SGVsbG8=\u0007';
+  const server = http.createServer((request, response) => {
+    if (request.url === '/actuator/health') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ status: malicious }));
+    } else {
+      response.writeHead(404);
+      response.end();
+    }
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => {
+    server.closeAllConnections();
+    server.close();
+  });
+  host.system.fetch = fetch;
+  const url = `http://127.0.0.1:${server.address().port}`;
+  assert.equal(await host.upgrade('verify', '--server-url', url), 1);
+  const row = rowsOf(host.output).health;
+  assert.ok(
+    row.startsWith(
+      `FAIL ${url}/actuator/health is not UP: HTTP 200, status DOWN`,
+    ),
+    row,
+  );
+  assert.ok(
+    // eslint-disable-next-line no-control-regex -- detecting surviving control bytes is the assertion
+    !/[\u0000-\u001F\u007F-\u009F]/.test(row),
+    `a control byte survived: ${JSON.stringify(row)}`,
+  );
+  assert.ok(
+    row.includes('\uFFFD') && row.includes('PASS') && row.includes('split'),
+    row,
+  );
+});
+
 test('verify refuses a URL fetch refuses before it probes', async (t) => {
   const { host, target } = await backedUp(t);
   assert.equal(await host.upgrade('install', '--backup', target), 0);
