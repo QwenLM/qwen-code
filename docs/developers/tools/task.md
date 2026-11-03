@@ -28,7 +28,7 @@ When you use the Agent tool, the subagent will:
 
 1. Receive the task prompt and, for a fork, the selected parent conversation context
 2. Execute the task using its available tools
-3. Report a completion notification by default, or return a final result message when a regular agent runs in the foreground
+3. Report a completion notification when running in the background, or return a final result message when a regular agent runs in the foreground; the default for top-level regular agents is configurable via `agents.defaultBackground`
 4. Remain addressable after a background run when its retained state supports continuation
 
 Usage:
