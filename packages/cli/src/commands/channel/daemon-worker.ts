@@ -583,11 +583,15 @@ export function createBoundSessionsAccessor(
           if (
             body.code === 'restore_in_progress' ||
             body.code === 'session_busy' ||
-            body.code === 'worktree_reset_active'
+            body.code === 'worktree_reset_active' ||
+            body.code === 'working_directory_missing'
           ) {
-            // Reversible barriers: a restore in flight, a busy session, or
-            // an armed worktree-reset prompt barrier (the reset flow tells
-            // channel-worker callers to retry). Defer, don't burn the budget.
+            // Reversible barriers: a restore in flight, a busy session, an
+            // armed worktree-reset prompt barrier (the reset flow tells
+            // channel-worker callers to retry), or a reserved standalone
+            // session whose managed conversation binding has not released
+            // yet (the daemon marks it retryable with Retry-After). Defer,
+            // don't burn the budget.
             throw new BoundSessionUnavailableError(
               sessionId,
               `HTTP 409 (${String(body.code)})`,

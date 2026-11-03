@@ -8692,11 +8692,11 @@ export function registerSessionRoutes(
 
         let promptPromise: ReturnType<AcpSessionBridge['sendPrompt']>;
         // Tracks whether the bridge actually enqueued the prompt. The
-        // admission contract throws the common failures synchronously, but
-        // a few pre-enqueue checks still reject deferred (legacy closing
-        // sessions, the reserved standalone working-directory check, prompt
-        // shape validation); the admission signal is the type-agnostic way
-        // to tell those apart from a turn that was admitted and then failed.
+        // admission contract throws every reachable pre-enqueue failure
+        // synchronously; the admission signal remains the type-agnostic
+        // defense-in-depth way to tell a non-admission apart from a turn
+        // that was admitted and then failed (a custom bridge could still
+        // reject deferred; prompt shape validation is pre-validated here).
         let promptAdmitted = false;
         try {
           promptPromise = ownerBridge.sendPrompt(
@@ -8856,13 +8856,14 @@ export function registerSessionRoutes(
               // it). The remembered key must be removed, or a retry would
               // dedupe into a phantom admission and silently lose the
               // event. Turn failures (the prompt WAS admitted) keep their
-              // key. Residual: this route returns 202 before admission
-              // completes, so the CURRENT delivery of a deferred rejection
-              // is already consumed by the caller — the forget protects
-              // subsequent retries (the relay's wake-and-retry path). The
-              // only reachable deferred pre-admission rejection is the
-              // reserved standalone working-directory check; prompt shape
-              // is pre-validated above.
+              // key. Every reachable pre-admission check in the bridge now
+              // throws synchronously (the reserved standalone
+              // working-directory check included), so the route answers
+              // non-202 before the relay can consume a phantom acceptance;
+              // this forget stays as defense-in-depth for a bridge that
+              // still rejects deferred, where the CURRENT delivery is
+              // already consumed by the caller and only subsequent retries
+              // can be protected.
               if (idempotencyKey !== undefined && !promptAdmitted) {
                 forgetPromptIdempotencyKey(sessionId, idempotencyKey);
               }

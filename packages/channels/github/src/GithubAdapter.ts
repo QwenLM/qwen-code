@@ -2638,9 +2638,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // published), and the acceptance mark must land BEFORE any cross-lane read
     // that can throw — otherwise a corrupt or unreadable pending-deliveries
     // file leaves the task running without deliveredAt, and recovery replays
-    // the injection. The replay is safe (the POST carries the task id as an
-    // idempotency key the daemon deduplicates), but the mark still retires
-    // the task without a needless round-trip.
+    // the injection. The replay is safe (the POST carries the EVENT identity
+    // — chat + source message id — as an idempotency key the daemon
+    // deduplicates, stable across task re-creation), but the mark still
+    // retires the task without a needless round-trip.
     if (task.delivery?.kind === 'bound-session') {
       this.transitionInboundTask(task.id, 'running', {
         deliveredAt: Date.now(),
@@ -2671,10 +2672,23 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const tasks = this.readInboundTasks().filter((task) =>
       this.isRecoverableInboundTask(task),
     );
-    const pendingDeliveries = tasks.length
+    // Watch tasks are private-only: they are never published, so they can
+    // match neither a pending final delivery nor a publication-audit key.
+    // A recovery pass holding nothing but watch tasks must not read (and
+    // fail on) either PUBLIC store — a crash-window watch retire would
+    // otherwise wedge behind an unrelated corrupt/unreadable file and
+    // freeze the shared cursor. The audit fail-closed contract is undiminished:
+    // it is enforced at DISPATCH time (publicationAuditBlocked), and any
+    // public recoverable task makes hasPublicLaneTask true so both strict
+    // reads still run. Envelope-less tasks count as public lane
+    // conservatively (they are skipped in the loop below).
+    const hasPublicLaneTask = tasks.some(
+      (task) => task.envelope?.messageId?.startsWith('watch:') !== true,
+    );
+    const pendingDeliveries = hasPublicLaneTask
       ? this.readPendingFinalDeliveries(true)
       : [];
-    const publicationAuditKeys = tasks.length
+    const publicationAuditKeys = hasPublicLaneTask
       ? this.readPublicationAuditKeys(true)
       : new Set<string>();
 

@@ -142,11 +142,14 @@ function isValidSessionPr(value: unknown): value is SessionPr {
 /**
  * Runtime shape check for a parsed sidecar object. Guards against partial
  * writes and manual edits (same rationale as the worktree sidecar check).
+ * An EMPTY list is a valid shape: replaceSessionPrs's explicit empty plan
+ * clears the bindings by writing {prs: []}, and that clear must read back
+ * as an authoritative "no bindings", not as corruption.
  */
 function isValidSessionPrList(value: unknown): value is SessionPrList {
   if (value === null || typeof value !== 'object') return false;
   const prs = (value as Record<string, unknown>)['prs'];
-  return Array.isArray(prs) && prs.length > 0 && prs.every(isValidSessionPr);
+  return Array.isArray(prs) && prs.every(isValidSessionPr);
 }
 
 export type SessionPrsReadResult =
@@ -158,9 +161,11 @@ export type SessionPrsReadResult =
  * Read the sidecar, distinguishing an ABSENT file (the session was never
  * bound, or its last binding was removed — an authoritative "no bindings")
  * from an INVALID one (bad JSON or failed shape check — the bindings are
- * unknown, not empty). Callers that project bindings into authoritative
- * snapshots need the distinction; a corrupt sidecar must not read as an
- * unbind. Throws only on unexpected I/O errors.
+ * unknown, not empty). A well-formed EMPTY list is a valid clear, not
+ * corruption: it reads back as ok with no entries, the same authoritative
+ * "no bindings" as an absent file. Callers that project bindings into
+ * authoritative snapshots need the distinction; a corrupt sidecar must not
+ * read as an unbind. Throws only on unexpected I/O errors.
  */
 export async function readSessionPrsDetailed(
   filePath: string,

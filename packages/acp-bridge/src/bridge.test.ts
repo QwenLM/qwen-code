@@ -4059,9 +4059,13 @@ describe('createAcpSessionBridge', () => {
         prompt: [{ type: 'text' as const, text: 'hello' }],
       };
 
-      await expect(bridge.sendPrompt(sessionId, prompt)).rejects.toMatchObject({
-        data: { errorKind: 'working_directory_missing' },
-      });
+      expect(() => bridge.sendPrompt(sessionId, prompt)).toThrow(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            errorKind: 'working_directory_missing',
+          }),
+        }),
+      );
       await expect(bridge.getSessionArtifacts(sessionId)).rejects.toMatchObject(
         {
           data: { errorKind: 'working_directory_missing' },
@@ -4076,9 +4080,13 @@ describe('createAcpSessionBridge', () => {
         managedRelocation: 'live-conversation',
         conversationDirectoryExpectation: expectation,
       });
-      await expect(bridge.sendPrompt(sessionId, prompt)).rejects.toMatchObject({
-        data: { errorKind: 'working_directory_missing' },
-      });
+      expect(() => bridge.sendPrompt(sessionId, prompt)).toThrow(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            errorKind: 'working_directory_missing',
+          }),
+        }),
+      );
       await bridge.commitManagedConversationBinding(sessionId, expectation);
       expect(artifactRestores).toEqual([
         { workspaceCwd: WS_A, workspaceAccess: 'metadata-only' },
@@ -4108,9 +4116,13 @@ describe('createAcpSessionBridge', () => {
         },
       });
       expect(artifactUpsertWorkspaceRoots).toEqual([]);
-      await expect(bridge.sendPrompt(sessionId, prompt)).rejects.toMatchObject({
-        data: { errorKind: 'working_directory_missing' },
-      });
+      expect(() => bridge.sendPrompt(sessionId, prompt)).toThrow(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            errorKind: 'working_directory_missing',
+          }),
+        }),
+      );
       await expect(bridge.getSessionArtifacts(sessionId)).rejects.toMatchObject(
         {
           data: { errorKind: 'working_directory_missing' },
@@ -27316,14 +27328,18 @@ describe('createAcpSessionBridge', () => {
           [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true,
         },
       });
-      await expect(
+      expect(() =>
         bridge.sendPrompt(sessionId, {
           sessionId,
           prompt: [{ type: 'text', text: 'must remain held' }],
         }),
-      ).rejects.toMatchObject({
-        data: { errorKind: 'working_directory_missing' },
-      });
+      ).toThrow(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            errorKind: 'working_directory_missing',
+          }),
+        }),
+      );
 
       await bridge.shutdown();
     });

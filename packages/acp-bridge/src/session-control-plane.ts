@@ -11377,7 +11377,11 @@ export function createSessionControlPlane(
         isReservedStandaloneSessionSourceType(entry.sourceType) &&
         entry.managedConversationBinding?.released !== true
       ) {
-        return Promise.reject(standaloneWorkingDirectoryMissingError());
+        // Synchronous like every sibling admission check: a deferred
+        // rejection would let the prompt route return a phantom 202 that
+        // the channel relay consumes as durable acceptance, losing the
+        // event (the route's key-forget cannot un-send the 202).
+        throw standaloneWorkingDirectoryMissingError();
       }
       if (!Array.isArray(req.prompt)) {
         return Promise.reject(

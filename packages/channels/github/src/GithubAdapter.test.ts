@@ -9841,6 +9841,117 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(ch.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
     });
 
+    it('recovers a crash-window watch retire without reading the public reply store (R9-C1)', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      // Crash between the retire's delivery-clear transition and the task
+      // removal: a running watch task with no delivery and no pending left
+      // (the event already fired). Recovery must retire it without reading
+      // the PUBLIC reply lane's store, which is corrupt here.
+      writeInboundTasks([
+        makeInboundTaskRecord({
+          state: 'running',
+          attempts: 0,
+          issueNumber: 42,
+          source: {
+            chatId: 'owner/repo',
+            threadId: 'pr:42',
+            messageId: 'watch:ci_failure:sha-1',
+          },
+          envelope: { ...makePendingWatch().envelope },
+          dedupe: {},
+        }),
+      ]);
+      const pendingPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-pending-deliveries.json',
+      );
+      mkdirSync(dirname(pendingPath), { recursive: true });
+      writeFileSync(pendingPath, '{corrupt', 'utf-8');
+      mockPull({});
+      mockNotificationsOnce([prNotification()]);
+      mockOctokit.rest.issues.listComments.mockResolvedValueOnce([
+        makeComment(),
+      ]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+
+      // The watch task retired through recovery despite the corrupt store,
+      // and the unrelated comment delivered with the cursor flowing.
+      expect(existsSync(inboundTaskPath())).toBe(false);
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+        'please fix this',
+      );
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(
+        mockOctokit.rest.activity.markNotificationsAsRead,
+      ).toHaveBeenCalledTimes(1);
+      const ch = channel as unknown as {
+        cursor: { lastProcessedAt: string };
+      };
+      expect(ch.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+    });
+
+    it('recovers a crash-window watch retire past an unreadable audit without consuming the comment (R9-A1)', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      writeInboundTasks([
+        makeInboundTaskRecord({
+          state: 'running',
+          attempts: 0,
+          issueNumber: 42,
+          source: {
+            chatId: 'owner/repo',
+            threadId: 'pr:42',
+            messageId: 'watch:ci_failure:sha-1',
+          },
+          envelope: { ...makePendingWatch().envelope },
+          dedupe: {},
+        }),
+      ]);
+      // An unreadable audit (a directory at its path) must not wedge the
+      // private watch retire in recovery — but it MUST still refuse the
+      // public comment dispatch and freeze the cursor (R5 contract).
+      const auditPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-audit.jsonl',
+      );
+      mkdirSync(auditPath, { recursive: true });
+      mockPull({});
+      mockNotificationsOnce([prNotification()]);
+      mockOctokit.rest.issues.listComments.mockResolvedValueOnce([
+        makeComment(),
+      ]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+
+      // The watch task retired despite the unreadable audit...
+      expect(existsSync(inboundTaskPath())).toBe(false);
+      // ...while the comment was refused with no claim and no delivery,
+      // and the cursor stayed frozen.
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      expect(
+        mockOctokit.rest.activity.markNotificationsAsRead,
+      ).not.toHaveBeenCalled();
+
+      // Audit readable again: the SAME comment delivers on the next poll.
+      rmSync(auditPath, { recursive: true, force: true });
+      mockPull({});
+      mockNotificationsOnce([prNotification()]);
+      mockOctokit.rest.issues.listComments.mockResolvedValueOnce([
+        makeComment(),
+      ]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+        'please fix this',
+      );
+      expect(
+        mockOctokit.rest.activity.markNotificationsAsRead,
+      ).toHaveBeenCalledTimes(1);
+    });
+
     it('replaces a cancelled watch task when its pending event drains (H5)', async () => {
       await initChannel(watchConfig, { boundSessions });
       const key = 'watch:state_change:42:1:1751446800000';

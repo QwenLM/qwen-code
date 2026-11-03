@@ -5299,6 +5299,26 @@ describe('createBoundSessionsAccessor', () => {
     );
   });
 
+  it('maps an unreleased standalone binding to BoundSessionUnavailableError (R9-B1)', async () => {
+    // The daemon marks working_directory_missing retryable (Retry-After):
+    // the bind/release window around a conversation restore is transient,
+    // so the event defers instead of burning the failure budget.
+    const requestRest = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse(409, { code: 'working_directory_missing' }),
+      );
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    const err = await accessor
+      .deliverPrompt('session-1', 'x')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BoundSessionUnavailableError);
+    expect((err as Error).message).toContain(
+      'HTTP 409 (working_directory_missing)',
+    );
+  });
+
   it('maps an archived session to BoundSessionGoneError', async () => {
     const requestRest = vi
       .fn()

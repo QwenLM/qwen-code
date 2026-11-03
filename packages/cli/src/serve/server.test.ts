@@ -96,6 +96,7 @@ import type {
   SetSessionModelRequest,
   SetSessionModelResponse,
 } from '@agentclientprotocol/sdk';
+import { RequestError } from '@agentclientprotocol/sdk';
 import {
   ApprovalMode,
   AuthType,
@@ -20921,6 +20922,44 @@ describe('createServeApp', () => {
         });
       expect(retry.status).toBe(404);
       expect(retry.body.deduplicated).toBeUndefined();
+    });
+
+    it('rejects an unreleased standalone binding synchronously with 409 before any 202 (R9-B1)', async () => {
+      // The bridge's reserved-standalone working-directory check throws
+      // synchronously (admission contract): the route must answer 409
+      // working_directory_missing BEFORE any 202, so the channel relay
+      // defers instead of consuming a phantom acceptance, and no
+      // idempotency key is remembered.
+      const bridge = fakeBridge({
+        promptImpl: () => {
+          throw new RequestError(
+            -32004,
+            'The standalone working directory is missing.',
+            { errorKind: 'working_directory_missing' },
+          );
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const first = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'standalone-sync-key',
+        });
+      expect(first.status).toBe(409);
+      expect(first.body.code).toBe('working_directory_missing');
+      expect(first.body.retryable).toBe(true);
+      const retry = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'standalone-sync-key',
+        });
+      expect(retry.status).toBe(409);
+      expect(retry.body.deduplicated).toBeUndefined();
+      expect(bridge.promptCalls).toHaveLength(2);
     });
 
     it('forgets the idempotency key on any pre-admission deferred rejection (R2-A2)', async () => {
