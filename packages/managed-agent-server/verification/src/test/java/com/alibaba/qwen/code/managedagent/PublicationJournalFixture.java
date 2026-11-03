@@ -74,9 +74,18 @@ public final class PublicationJournalFixture {
     public WorkspaceCsiReservationStore.Reservation csiReservation;
 
     private PublicationJournalFixture(DataSource source) {
+        this(source, null, null);
+    }
+
+    private PublicationJournalFixture(DataSource source,
+            com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore objects,
+            com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultStore results) {
         jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
-        sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc,
+                new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(jdbc), null,
+                null, null, objects, results, null,
+                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
         bindings = new JdbcRuntimeBindingRepository(source,
                 new AesGcmSecretProtector("key", new byte[32]),
                 () -> "binding-1");
@@ -89,8 +98,14 @@ public final class PublicationJournalFixture {
     }
 
     public static PublicationJournalFixture create(DataSource source, WorkspaceCsiRegistration registration) {
+        return create(source, registration, null, null);
+    }
+
+    public static PublicationJournalFixture create(DataSource source, WorkspaceCsiRegistration registration,
+            com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore objects,
+            com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultStore results) {
         PublicationJournalFixture fixture =
-                new PublicationJournalFixture(source);
+                new PublicationJournalFixture(source, objects, results);
         fixture.populate(source, registration, false);
         return fixture;
     }
