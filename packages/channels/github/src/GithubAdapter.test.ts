@@ -5213,4 +5213,222 @@ describe('GithubChannel', () => {
       ).resolves.toBe('https://github.example.com');
     });
   });
+
+  describe('event journal', () => {
+    function readJournal(
+      channelName = 'test-github',
+    ): Array<Record<string, unknown>> {
+      const path = inboundTaskPath('/tmp/test', channelName).replace(
+        'github-inbound-tasks.json',
+        'channel-events.jsonl',
+      );
+      try {
+        return readFileSync(path, 'utf-8')
+          .split('\n')
+          .filter((line) => line.length > 0)
+          .map((line) => JSON.parse(line) as Record<string, unknown>)
+          .filter((event) => event['type'] !== 'poll');
+      } catch {
+        return [];
+      }
+    }
+
+    it('records a notification dropped by reasonFilter before any session exists', async () => {
+      await initWithoutLoop({ reasonFilter: ['mention'] });
+      mockOctokit.paginate.mockResolvedValueOnce([
+        makeNotification({ reason: 'comment' }),
+      ]);
+
+      await pollOnce();
+
+      expect(readJournal()).toEqual([
+        expect.objectContaining({
+          channel: 'test-github',
+          type: 'inbound',
+          outcome: 'skipped',
+          reason: 'reason_filter',
+          triggerKind: 'comment',
+          repository: 'owner/repo',
+          thread: 'issue:42',
+          number: 42,
+        }),
+      ]);
+    });
+
+    function filteredFlood(count: number) {
+      return Array.from({ length: count }, (_, index) =>
+        makeNotification({
+          id: `flood-${index}`,
+          reason: 'comment',
+          subject: {
+            title: `Issue ${index}`,
+            url: `https://api.github.com/repos/owner/repo/issues/${100 + index}`,
+            type: 'Issue',
+          },
+        }),
+      );
+    }
+
+    it('collapses a flood of filtered notifications into one counted row', async () => {
+      // A task that failed and is still retryable keeps the poll cursor put, so
+      // the same filtered notifications come back on every poll. Only the first
+      // few are journaled individually; the rest become one row carrying the
+      // count, so a busy repository cannot rotate the useful rows out of the
+      // page's window.
+      await initWithoutLoop({ reasonFilter: ['mention'] });
+      mockOctokit.paginate.mockResolvedValueOnce(filteredFlood(25));
+
+      await pollOnce();
+
+      const events = readJournal();
+      expect(events).toHaveLength(21);
+      const individual = events.filter(
+        (event) => event['detail'] === undefined,
+      );
+      expect(individual).toHaveLength(20);
+      expect(individual[0]).toMatchObject({
+        reason: 'reason_filter',
+        thread: 'issue:100',
+        number: 100,
+      });
+      expect(individual.at(-1)).toMatchObject({
+        thread: 'issue:119',
+        number: 119,
+      });
+      expect(events.at(-1)).toEqual(
+        expect.objectContaining({
+          type: 'inbound',
+          outcome: 'skipped',
+          reason: 'reason_filter',
+          detail: { filtered: 5 },
+        }),
+      );
+      expect(events.at(-1)).not.toHaveProperty('repository');
+      expect(events.at(-1)).not.toHaveProperty('thread');
+    });
+
+    it('resets the collapse budget on the next poll', async () => {
+      await initWithoutLoop({ reasonFilter: ['mention'] });
+      const flood = filteredFlood(25);
+      mockOctokit.paginate
+        .mockResolvedValueOnce(flood)
+        .mockResolvedValueOnce(flood);
+
+      await pollOnce();
+      await pollOnce();
+
+      const events = readJournal();
+      expect(events).toHaveLength(42);
+      const counted = events.filter(
+        (event) =>
+          (event['detail'] as { filtered?: number } | undefined)?.filtered !==
+          undefined,
+      );
+      expect(counted).toHaveLength(2);
+      expect(
+        counted.every((event) => event['detail']?.['filtered'] === 5),
+      ).toBe(true);
+    });
+
+    it('records a comment skipped because it does not mention the bot', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification({ reason: 'mention' })])
+        .mockResolvedValueOnce([makeComment({ body: 'no mention here' })]);
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: { title: 'Test Issue', body: '', user: { login: 'alice' } },
+      });
+
+      await pollOnce();
+
+      expect(readJournal()).toEqual([
+        expect.objectContaining({
+          type: 'inbound',
+          outcome: 'skipped',
+          reason: 'mention_required',
+          messageId: 'C_1001',
+          actor: 'alice',
+        }),
+      ]);
+    });
+
+    it('records a deduplicated comment', async () => {
+      await initWithoutLoop();
+      channel.cursor = {
+        lastProcessedAt: '2026-07-01T00:00:00.000Z',
+        dispatchedComments: ['C_1001'],
+      };
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification({ reason: 'mention' })])
+        .mockResolvedValueOnce([makeComment()]);
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: { title: 'Test Issue', body: '', user: { login: 'alice' } },
+      });
+
+      await pollOnce();
+
+      expect(readJournal()).toEqual([
+        expect.objectContaining({
+          type: 'inbound',
+          outcome: 'skipped',
+          reason: 'duplicate',
+          messageId: 'C_1001',
+        }),
+      ]);
+    });
+
+    it('records the inbound acceptance, task transitions, and publication', async () => {
+      mockOctokit.rest.issues.createComment.mockResolvedValue({
+        data: { id: 500, html_url: 'https://github.com/owner/repo/500' },
+      });
+      const liveChannel = new LiveGithubChannel(
+        'test-journal',
+        makeConfig(),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await liveChannel.connect();
+      liveChannel.disconnect();
+      liveChannel.setCursorForTest('2026-07-01T00:00:00.000Z');
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await liveChannel.pollForTest();
+
+      expect(readJournal('test-journal')).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'inbound',
+            outcome: 'accepted',
+            repository: 'owner/repo',
+            thread: 'issue:42',
+            messageId: '1001',
+            actor: 'alice',
+          }),
+          expect.objectContaining({
+            type: 'task',
+            outcome: 'accepted',
+            triggerKind: 'mention',
+            number: 42,
+          }),
+          expect.objectContaining({
+            type: 'task',
+            outcome: 'running',
+            messageId: '1001',
+          }),
+          expect.objectContaining({
+            type: 'outbound',
+            outcome: 'posting',
+            repository: 'owner/repo',
+          }),
+          expect.objectContaining({
+            type: 'outbound',
+            outcome: 'posted',
+            sessionId: expect.any(String),
+          }),
+        ]),
+      );
+    });
+  });
 });

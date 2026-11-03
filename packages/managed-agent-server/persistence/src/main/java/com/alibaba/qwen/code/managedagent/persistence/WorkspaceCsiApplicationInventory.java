@@ -230,7 +230,9 @@ final class WorkspaceCsiApplicationInventory {
                     + "session_scope_key:CHAR,title_revision:BIGINT,retirement_operation_id:VARBINARY,"
                     + "retirement_generation:BIGINT,retired_at:BIGINT,recovery_protected:BOOLEAN,"
                     + "resource_gc_completed:BOOLEAN,runtime_request_key:CHAR,csi_guard:BOOLEAN,"
-                    + "model_id:VARBINARY,model_revision:BIGINT,selected_approval_mode:VARCHAR,approval_revision:BIGINT,"
+                    + "model_id:VARBINARY,model_revision:BIGINT,"
+                    + "model_config_digest:VARCHAR,model_config_key_id:VARCHAR,model_config_ciphertext:LONGTEXT,"
+                    + "selected_approval_mode:VARCHAR,approval_revision:BIGINT,"
                     + "plan_enabled:BOOLEAN,permission_rules_json:LONGTEXT,public_child_agents_version:INT,harness_instance_id:VARBINARY,harness_owner_boot_id:VARBINARY,"
                     + "harness_placement_epoch:BIGINT,harness_placement_state:VARCHAR"),
             declaration("ma_session_head", "tenant_key,harness_key",
@@ -2844,6 +2846,8 @@ final class WorkspaceCsiApplicationInventory {
                     expect(table, row, rawSession(row) && "ACTIVE".equals(row.text("status")) && row.cell("deleted_at").isNull()
                             && CsiFilesRetirementProfile.PROFILE.equals(row.text("tool_profile"))
                             && row.cell("model_id").isNull() && Objects.equals(0L, row.number("model_revision"))
+                            && row.cell("model_config_digest").isNull() && row.cell("model_config_key_id").isNull()
+                            && row.cell("model_config_ciphertext").isNull()
                             && row.cell("selected_approval_mode").isNull() && Objects.equals(0L, row.number("approval_revision"))
                             && Boolean.FALSE.equals(row.bool("plan_enabled")) && row.cell("permission_rules_json").isNull()
                             && Objects.equals(0L, row.number("public_child_agents_version"))
