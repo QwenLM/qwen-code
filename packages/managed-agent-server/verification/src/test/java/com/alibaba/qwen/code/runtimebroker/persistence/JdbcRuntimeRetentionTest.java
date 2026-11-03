@@ -300,7 +300,7 @@ class JdbcRuntimeRetentionTest {
         fixture.binding("unproven", "local-process", true, "RELEASED");
         RuntimeBindingRecord drained = fixture.binding("drained", "local-process", true, "RELEASED");
         RuntimeResourceHandle drainHandle = fixture.handle(drained);
-        fixture.execute("UPDATE ma_runtime_binding SET drain_requested = TRUE, drain_receipt_json = ? "
+        fixture.execute("UPDATE ma_runtime_binding SET is_drain_requested = TRUE, drain_receipt_json = ? "
                         + "WHERE binding_id = ?",
                 new RuntimeDrainReceipt(drained.getBindingId(), drained.getGeneration(),
                         drained.getProvisionSeed().getProvisionRequestId(), drainHandle, OLD).toJson(),
@@ -644,7 +644,7 @@ class JdbcRuntimeRetentionTest {
             executions.findOrCreate(ToolExecutionRecord.prepared(id, id + "-key", binding.getBindingId(),
                     binding.getGeneration(), "harness", session, "turn", "call", "digest",
                     Map.of("sessionId", session, "promptId", "turn", "callId", "call", "argsDigest", "digest")));
-            execute("UPDATE ma_tool_execution SET execution_state = ?, cancel_requested = ?, execution_status = ?, "
+            execute("UPDATE ma_tool_execution SET execution_state = ?, is_cancel_requested = ?, execution_status = ?, "
                             + "result_json = ?, settled_at = ?, abandoned_at = ?, loss_evidence_id = ? "
                             + "WHERE execution_call_id = ?", state, "CANCEL_REQUESTED".equals(state),
                     "SETTLED".equals(state) ? "success" : null,

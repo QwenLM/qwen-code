@@ -12,8 +12,12 @@ import type {
 import {
   buildChannelUpsertRequest,
   createChannelEditorDraft,
+  invalidRepositoryGroupEntries,
+  repositoryAllowlistIds,
+  retainedRepositorySettings,
   validateChannelEditorDraft,
 } from './channel-editor-state';
+import type { ChannelGroupOverrideDraft } from './channel-editor-state';
 
 const DINGTALK: DaemonChannelTypeDescriptor = {
   type: 'dingtalk',
@@ -1408,5 +1412,1486 @@ describe('Repository-only channel access config', () => {
         secrets: { token: { operation: 'clear' } },
       }),
     );
+  });
+});
+
+/**
+ * Stored per-repository shapes the sweeps cross with edits and policies. Shared
+ * by the override, non-Allowlist and conflicting-alias sweeps so a new shape
+ * reaches every one of them.
+ */
+const SWEEP_SHAPES: Array<[string, Record<string, unknown>]> = [
+  ['empty', {}],
+  ['open', { senders: 'open' }],
+  ['allowlist', { senders: 'allowlist' }],
+  ['allowlist+empty', { senders: 'allowlist', allowedUsers: [] }],
+  ['allowlist+names', { senders: 'allowlist', allowedUsers: ['alice'] }],
+  ['list-only-empty', { allowedUsers: [] }],
+  ['list-only-names', { allowedUsers: ['alice'] }],
+  ['mention-true', { requireMention: true }],
+  ['mention-false', { requireMention: false }],
+  ['unmodelled', { dispatchMode: 'collect', groupHistoryLimit: 25 }],
+  ['dup-names', { senders: 'allowlist', allowedUsers: ['alice', 'alice'] }],
+  ['mixed-types', { senders: 'allowlist', allowedUsers: ['alice', 42] }],
+];
+
+describe('Per-repository overrides', () => {
+  function githubInstance(
+    groups: Record<string, unknown>,
+  ): DaemonChannelInstanceSnapshot {
+    return {
+      name: 'release-bot',
+      config: { type: 'github', groupPolicy: 'allowlist', groups },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+  }
+
+  function draftFor(
+    instance: DaemonChannelInstanceSnapshot,
+    allowedGroupIds = 'qwenlm/qwen-code',
+  ) {
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    draft.allowedGroupIds = allowedGroupIds;
+    return draft;
+  }
+
+  it('reads a stored override into the draft', () => {
+    const instance = githubInstance({
+      '*': { senders: 'open' },
+      'qwenlm/qwen-code': {
+        requireMention: false,
+        senders: 'allowlist',
+        allowedUsers: ['alice', 'bob'],
+      },
+    });
+
+    expect(draftFor(instance).groupOverrides).toEqual({
+      'qwenlm/qwen-code': {
+        requireMention: 'false',
+        senders: 'allowlist',
+        allowedUsers: 'alice, bob',
+      },
+    });
+  });
+
+  it('keys the draft overrides by the canonical repository id', () => {
+    // The rows are looked up by the canonical id the allowlist produces, so a
+    // mixed-case stored key must not leave its own row showing "inherit".
+    const instance = githubInstance({
+      'QwenLM/Qwen-Code': { requireMention: false },
+    });
+
+    expect(Object.keys(draftFor(instance).groupOverrides)).toEqual([
+      'qwenlm/qwen-code',
+    ]);
+  });
+
+  it('reads an absent key as inherit rather than as the resolved default', () => {
+    const instance = githubInstance({
+      '*': { requireMention: false, senders: 'allowlist' },
+      'qwenlm/qwen-code': {},
+    });
+
+    expect(draftFor(instance).groupOverrides['qwenlm/qwen-code']).toEqual({
+      requireMention: '',
+      senders: '',
+      allowedUsers: '',
+    });
+  });
+
+  it('round-trips an untouched channel without materializing inherited values', () => {
+    // Writing the resolved default into every repository would freeze today's
+    // inheritance and stop a later change to "*" from reaching them.
+    const groups = {
+      '*': {
+        requireMention: false,
+        senders: 'allowlist',
+        allowedUsers: ['op'],
+      },
+      'qwenlm/qwen-code': {},
+      'acme/widgets': { dispatchMode: 'collect', groupHistoryLimit: 25 },
+    };
+    // Clone into the instance: comparing against the same reference would let
+    // an in-place mutation of the stored config satisfy the assertion.
+    const instance = githubInstance(structuredClone(groups));
+
+    const request = buildChannelUpsertRequest(
+      GITHUB,
+      draftFor(instance, 'qwenlm/qwen-code, acme/widgets'),
+      'rev-2',
+      instance,
+    );
+
+    expect(request.config['groups']).toEqual(groups);
+  });
+
+  it('keeps shapes the form cannot express when nothing was edited', () => {
+    // An empty allowlist means "nobody", and a list with no policy beside it
+    // inherits the policy but overrides the members. Neither may be normalized
+    // away by a save the operator meant as a no-op.
+    const groups = {
+      'qwenlm/qwen-code': { senders: 'allowlist', allowedUsers: [] },
+      'acme/widgets': { allowedUsers: ['alice'] },
+    };
+    const instance = githubInstance(structuredClone(groups));
+
+    const request = buildChannelUpsertRequest(
+      GITHUB,
+      draftFor(instance, 'qwenlm/qwen-code, acme/widgets'),
+      'rev-2',
+      instance,
+    );
+
+    expect(request.config['groups']).toEqual(groups);
+  });
+
+  it('writes an explicit require-mention as a boolean and deletes it on inherit', () => {
+    const instance = githubInstance({ 'qwenlm/qwen-code': {} });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].requireMention = 'false';
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({ 'qwenlm/qwen-code': { requireMention: false } });
+
+    draft.groupOverrides['qwenlm/qwen-code'].requireMention = 'true';
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({ 'qwenlm/qwen-code': { requireMention: true } });
+
+    draft.groupOverrides['qwenlm/qwen-code'].requireMention = '';
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({ 'qwenlm/qwen-code': {} });
+  });
+
+  it('writes an explicit speaker allowlist as a string array', () => {
+    const instance = githubInstance({ 'qwenlm/qwen-code': {} });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].senders = 'allowlist';
+    draft.groupOverrides['qwenlm/qwen-code'].allowedUsers = 'alice, bob';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({
+      'qwenlm/qwen-code': {
+        senders: 'allowlist',
+        allowedUsers: ['alice', 'bob'],
+      },
+    });
+  });
+
+  it('treats an emptied explicit allowlist as nobody, not as inherit', () => {
+    const instance = githubInstance({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': { senders: 'allowlist', allowedUsers: ['alice'] },
+    });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].allowedUsers = '';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': { senders: 'allowlist', allowedUsers: [] },
+    });
+  });
+
+  it('writes nobody when a row is switched to an allowlist and the box is left empty', () => {
+    // The operator changed only the policy, never the text. Omitting the key
+    // would hand the channel-wide list back through the runtime's `??`
+    // fallback, so the most restrictive action available would silently keep
+    // the wider audience while the row claims "empty means nobody".
+    const instance = githubInstance({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': {},
+    });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].senders = 'allowlist';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': { senders: 'allowlist', allowedUsers: [] },
+    });
+  });
+
+  it('keeps inheriting the member list when an untouched row already had an allowlist policy', () => {
+    // A stored policy with no list legitimately means "allowlist, members
+    // inherited". Writing [] here would narrow a channel nobody edited, so the
+    // empty-list rule fires only when the operator actually changed the policy.
+    const groups = {
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': { senders: 'allowlist' },
+    };
+    const instance = githubInstance(structuredClone(groups));
+
+    const request = buildChannelUpsertRequest(
+      GITHUB,
+      draftFor(instance),
+      'rev-2',
+      instance,
+    );
+
+    expect(request.config['groups']).toEqual(groups);
+  });
+
+  it('returns a repository to the channel-wide list when the policy is set back to inherit', () => {
+    // The mirror of the case above. An empty array is not nullish, so leaving
+    // it behind keeps denying everyone while the row reads "Inherit" and the
+    // hint promises the channel-wide list is back.
+    const instance = githubInstance({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': { senders: 'allowlist', allowedUsers: [] },
+    });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].senders = '';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': {},
+    });
+  });
+
+  it('keeps a typed speaker list when the policy is set back to inherit', () => {
+    // The box still shows the list, so keeping it matches what the operator
+    // sees; only an empty box means "no per-repository list".
+    const instance = githubInstance({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': { senders: 'allowlist', allowedUsers: ['alice'] },
+    });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].senders = '';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': { allowedUsers: ['alice'] },
+    });
+  });
+
+  it('keeps a stored list when the policy moves to an allowlist without editing the text', () => {
+    // A row that already carries members must not have them clobbered with []
+    // just because the policy moved.
+    const instance = githubInstance({
+      'qwenlm/qwen-code': { senders: 'open', allowedUsers: ['alice'] },
+    });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].senders = 'allowlist';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({
+      'qwenlm/qwen-code': { senders: 'allowlist', allowedUsers: ['alice'] },
+    });
+  });
+
+  it('returns a stored require-mention and policy to inheritance', () => {
+    const instance = githubInstance({
+      'qwenlm/qwen-code': { requireMention: true, senders: 'open' },
+    });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].requireMention = '';
+    draft.groupOverrides['qwenlm/qwen-code'].senders = '';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({ 'qwenlm/qwen-code': {} });
+  });
+
+  it('writes a speaker list while the policy stays inherited', () => {
+    // The reason the speaker box is shown for an inheriting row at all.
+    const instance = githubInstance({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': {},
+    });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].allowedUsers = 'alice';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': { allowedUsers: ['alice'] },
+    });
+  });
+
+  it('drops the per-repository list when an inheriting row is cleared', () => {
+    const instance = githubInstance({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': { allowedUsers: ['alice'] },
+    });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].allowedUsers = '';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': {},
+    });
+  });
+
+  it('preserves unmodelled keys beside an edited one', () => {
+    const instance = githubInstance({
+      'qwenlm/qwen-code': { dispatchMode: 'collect', groupHistoryLimit: 25 },
+    });
+    const draft = draftFor(instance);
+
+    draft.groupOverrides['qwenlm/qwen-code'].requireMention = 'false';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({
+      'qwenlm/qwen-code': {
+        dispatchMode: 'collect',
+        groupHistoryLimit: 25,
+        requireMention: false,
+      },
+    });
+  });
+
+  it('keeps the settings when the repository is retyped in another case', () => {
+    const instance = githubInstance({
+      // Unmodelled keys on purpose: with only `requireMention` the draft would
+      // reproduce the entry even if the save path stopped folding the stored
+      // keys, so the case-fold itself would go unwitnessed.
+      'QwenLM/Qwen-Code': {
+        requireMention: false,
+        dispatchMode: 'collect',
+        groupHistoryLimit: 25,
+      },
+    });
+    const draft = draftFor(instance, 'qwenlm/qwen-code');
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({
+      'qwenlm/qwen-code': {
+        requireMention: false,
+        dispatchMode: 'collect',
+        groupHistoryLimit: 25,
+      },
+    });
+  });
+
+  it('drops the entry of a repository removed from the allowlist', () => {
+    const instance = githubInstance({
+      'qwenlm/qwen-code': { requireMention: false },
+      'acme/widgets': { senders: 'open' },
+    });
+    const draft = draftFor(instance, 'qwenlm/qwen-code');
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({ 'qwenlm/qwen-code': { requireMention: false } });
+  });
+
+  it('keeps a row edit made before the policy was switched away from allowlist', () => {
+    // The rows hide once the policy leaves Allowlist, but the draft still holds
+    // the edit and the runtime keeps resolving these entries under open and
+    // pairing. Rebuilding groups from the stored config would report success
+    // while silently restoring the value the operator just changed.
+    const instance = githubInstance({
+      '*': {},
+      'acme/widgets': { requireMention: true },
+    });
+    const draft = draftFor(instance, 'acme/widgets');
+    draft.groupOverrides['acme/widgets'].requireMention = 'false';
+    draft.values.groupPolicy = 'pairing';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({ '*': {}, 'acme/widgets': { requireMention: false } });
+  });
+
+  it('still drops empty entries when the policy leaves allowlist', () => {
+    // Projecting the edits must not start retaining entries that carry nothing:
+    // acceptance criterion 9 keeps stored settings, not empty placeholders.
+    const instance = githubInstance({
+      '*': {},
+      'acme/widgets': {},
+      'qwenlm/qwen-code': { requireMention: true },
+    });
+    const draft = draftFor(instance, 'acme/widgets, qwenlm/qwen-code');
+    draft.values.groupPolicy = 'open';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({ '*': {}, 'qwenlm/qwen-code': { requireMention: true } });
+  });
+
+  it('leaves chat platforms reading and writing groups exactly as before', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'chat-bot',
+      config: {
+        type: 'dingtalk',
+        clientId: 'id',
+        clientSecret: 'secret',
+        groupPolicy: 'allowlist',
+        // Mixed case on purpose: chat group IDs are case-sensitive, so a
+        // lower-cased fixture could not detect the repository case-fold
+        // leaking into other platforms.
+        groups: { 'Group-A': { requireMention: false } },
+      },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS, instance);
+    draft.allowedGroupIds = 'Group-A';
+
+    expect(draft.groupOverrides).toEqual({});
+    expect(
+      buildChannelUpsertRequest(DINGTALK_WITH_ACCESS, draft, 'rev-2', instance)
+        .config['groups'],
+    ).toEqual({ 'Group-A': { requireMention: false } });
+  });
+
+  it('names only the repositories the allowlist can actually admit', () => {
+    expect(
+      repositoryAllowlistIds(
+        'QwenLM/qwen-code, qwen-code, acme/widgets, QwenLM/Qwen-Code',
+      ),
+    ).toEqual(['qwenlm/qwen-code', 'acme/widgets']);
+  });
+
+  // Invariant sweep over stored shapes x single-field edits, run through the
+  // real save path. The cases above pin individual decisions; these assert the
+  // rules those decisions have to keep holding for shapes nobody enumerated.
+  const SWEEP_WILDCARD = {
+    senders: 'allowlist',
+    allowedUsers: ['op', 'release-bot'],
+  };
+  const SWEEP_SENDERS = ['', 'open', 'allowlist'] as const;
+  const SWEEP_USERS = ['', 'alice', 'alice, bob'] as const;
+  const SWEEP_MENTION = ['', 'true', 'false'] as const;
+
+  function sweepDraft(stored: Record<string, unknown>) {
+    const instance = githubInstance({
+      '*': structuredClone(SWEEP_WILDCARD),
+      'qwenlm/qwen-code': structuredClone(stored),
+    });
+    return { instance, draft: draftFor(instance) };
+  }
+
+  function sweepGroups(
+    stored: Record<string, unknown>,
+    override?: ChannelGroupOverrideDraft,
+  ): Record<string, Record<string, unknown>> {
+    const { instance, draft } = sweepDraft(stored);
+    if (override) {
+      draft.groupOverrides['qwenlm/qwen-code'] = override;
+    }
+    return buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+      'groups'
+    ] as Record<string, Record<string, unknown>>;
+  }
+
+  // The runtime resolves each key per-repository -> "*" -> built-in, so an
+  // absent list is the wildcard's members, not an empty set.
+  function sweepAdmits(entry: Record<string, unknown>, who: string): boolean {
+    const policy =
+      (entry['senders'] as string | undefined) ?? SWEEP_WILDCARD.senders;
+    if (policy !== 'allowlist') {
+      return true;
+    }
+    const members =
+      (entry['allowedUsers'] as string[] | undefined) ??
+      SWEEP_WILDCARD.allowedUsers;
+    return members.includes(who);
+  }
+
+  it('reproduces every stored shape byte-for-byte when the row is untouched', () => {
+    const violations: string[] = [];
+    for (const [name, stored] of SWEEP_SHAPES) {
+      const saved = sweepGroups(stored)['qwenlm/qwen-code'];
+      if (JSON.stringify(saved) !== JSON.stringify(stored)) {
+        violations.push(
+          `${name}: ${JSON.stringify(stored)} -> ${JSON.stringify(saved)}`,
+        );
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  it('keeps the empty-box hint honest about what the save admits', () => {
+    const violations: string[] = [];
+    for (const [name, stored] of SWEEP_SHAPES) {
+      for (const senders of SWEEP_SENDERS) {
+        for (const users of SWEEP_USERS) {
+          for (const mention of SWEEP_MENTION) {
+            // The dialog derives the hint from an EMPTY box, so sweep that
+            // hypothetical rather than the draft the operator is typing in.
+            const saved = sweepGroups(stored, {
+              requireMention: mention,
+              senders,
+              allowedUsers: '',
+            })['qwenlm/qwen-code'];
+            const policy =
+              (saved['senders'] as string | undefined) ??
+              SWEEP_WILDCARD.senders;
+            if (policy !== 'allowlist') {
+              continue;
+            }
+            const members =
+              (saved['allowedUsers'] as string[] | undefined) ??
+              SWEEP_WILDCARD.allowedUsers;
+            // Owning a list is what makes the hint say "nobody", so an owned
+            // list has to be empty and an absent one has to inherit members.
+            if (
+              Array.isArray(saved['allowedUsers']) !==
+              (members.length === 0)
+            ) {
+              violations.push(
+                `${name} senders=${senders} users=${users} mention=${mention} ` +
+                  `saved=${JSON.stringify(saved)}`,
+              );
+            }
+          }
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  it('never widens the admitted set without the row asking for it', () => {
+    const violations: string[] = [];
+    for (const [name, stored] of SWEEP_SHAPES) {
+      const initialSenders =
+        stored['senders'] === 'open' || stored['senders'] === 'allowlist'
+          ? stored['senders']
+          : '';
+      for (const senders of SWEEP_SENDERS) {
+        for (const users of SWEEP_USERS) {
+          const saved = sweepGroups(stored, {
+            requireMention: '',
+            senders,
+            allowedUsers: users,
+          });
+          const after = saved['qwenlm/qwen-code'];
+          // Every identity any fixture names: the stored one, the typed ones,
+          // and both channel-wide members a silent inheritance would admit.
+          for (const who of ['alice', 'bob', 'op', 'release-bot']) {
+            if (sweepAdmits(stored, who) || !sweepAdmits(after, who)) {
+              continue;
+            }
+            const askedWider =
+              senders === 'open' ||
+              (senders === '' && initialSenders === 'allowlist') ||
+              users.split(',').some((user) => user.trim() === who) ||
+              // Clearing the box under an INHERITED policy hands the repository
+              // the channel-wide list, and the row's hint says exactly that. An
+              // explicit allowlist is the opposite promise — empty means nobody
+              // — so it must never be excused by the list it ended up without.
+              (users === '' &&
+                after['senders'] !== 'allowlist' &&
+                !Array.isArray(after['allowedUsers']));
+            if (!askedWider) {
+              violations.push(
+                `${name} senders=${senders} users=${users} who=${who}: ` +
+                  `${JSON.stringify(stored)} -> ${JSON.stringify(after)}`,
+              );
+            }
+          }
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  // The dimension the sweep above missed: it only ever ran under Allowlist. The
+  // runtime resolves senders and members without consulting groupPolicy, so the
+  // policy a save lands on must not change what a row writes or who it admits.
+  const SWEEP_POLICIES = ['allowlist', 'open', 'pairing', 'disabled'] as const;
+
+  function sweepPolicyGroups(
+    stored: Record<string, unknown>,
+    storedPolicy: string,
+    finalPolicy: string,
+    override?: ChannelGroupOverrideDraft,
+    draftOnly?: ChannelGroupOverrideDraft,
+  ): Record<string, unknown> {
+    const instance = githubInstance({
+      '*': structuredClone(SWEEP_WILDCARD),
+      'qwenlm/qwen-code': structuredClone(stored),
+    });
+    instance.config['groupPolicy'] = storedPolicy;
+    const draft = draftFor(instance);
+    draft.values['groupPolicy'] = finalPolicy;
+    if (override) {
+      draft.groupOverrides['qwenlm/qwen-code'] = override;
+    }
+    if (draftOnly) {
+      // A repository typed during this visit: a draft with no stored entry,
+      // which is the shape iterating storage alone cannot see.
+      draft.allowedGroupIds = 'qwenlm/qwen-code, acme/new';
+      draft.groupOverrides['acme/new'] = draftOnly;
+    }
+    return buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+      'groups'
+    ] as Record<string, unknown>;
+  }
+
+  // An empty entry is membership under Allowlist and carries nothing once the
+  // policy leaves it, so the two paths differ in whether they keep the key —
+  // never in what it admits.
+  function sweepEntry(
+    groups: Record<string, unknown>,
+    repositoryId = 'qwenlm/qwen-code',
+  ): Record<string, unknown> {
+    return (groups[repositoryId] ?? {}) as Record<string, unknown>;
+  }
+
+  it('writes the same repository entry whatever policy the save lands on', () => {
+    const violations: string[] = [];
+    for (const [name, stored] of SWEEP_SHAPES) {
+      for (const senders of SWEEP_SENDERS) {
+        for (const users of SWEEP_USERS) {
+          const override: ChannelGroupOverrideDraft = {
+            requireMention: '',
+            senders,
+            allowedUsers: users,
+          };
+          const reference = sweepPolicyGroups(
+            stored,
+            'allowlist',
+            'allowlist',
+            override,
+            override,
+          );
+          for (const repositoryId of ['qwenlm/qwen-code', 'acme/new']) {
+            const expected = JSON.stringify(
+              sweepEntry(reference, repositoryId),
+            );
+            for (const storedPolicy of ['allowlist', 'open']) {
+              for (const finalPolicy of SWEEP_POLICIES) {
+                const actual = JSON.stringify(
+                  sweepEntry(
+                    sweepPolicyGroups(
+                      stored,
+                      storedPolicy,
+                      finalPolicy,
+                      override,
+                      override,
+                    ),
+                    repositoryId,
+                  ),
+                );
+                if (actual !== expected) {
+                  violations.push(
+                    `${name} ${repositoryId} senders=${senders} users=${users} ` +
+                      `${storedPolicy}->${finalPolicy}: ${expected} -> ${actual}`,
+                  );
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  it('admits the same people after an untouched policy switch', () => {
+    const violations: string[] = [];
+    const identities = ['alice', 'bob', 'op', 'release-bot'];
+    for (const [name, stored] of SWEEP_SHAPES) {
+      for (const storedPolicy of ['allowlist', 'open']) {
+        for (const finalPolicy of SWEEP_POLICIES) {
+          const saved = sweepPolicyGroups(stored, storedPolicy, finalPolicy);
+          for (const who of identities) {
+            if (
+              sweepAdmits(stored, who) !== sweepAdmits(sweepEntry(saved), who)
+            ) {
+              violations.push(
+                `${name} ${storedPolicy}->${finalPolicy} who=${who}: ` +
+                  `${JSON.stringify(stored)} -> ${JSON.stringify(saved)}`,
+              );
+            }
+          }
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+});
+
+describe('Repository settings under a non-Allowlist policy', () => {
+  // Per-repository senders and members are resolved without consulting
+  // groupPolicy (ChannelBase.groupSendersFor / groupAllowedUsersFor), so these
+  // entries keep deciding who may drive the agent under open and pairing. Each
+  // case asserts the admitted set, not just the saved shape: every one of these
+  // paths used to widen a repository while reporting a successful save.
+  function admits(
+    groups: Record<string, unknown>,
+    repositoryId: string,
+    who: string,
+  ): boolean {
+    const entry = (groups[repositoryId] ?? {}) as Record<string, unknown>;
+    const wildcard = (groups['*'] ?? {}) as Record<string, unknown>;
+    const policy = entry['senders'] ?? wildcard['senders'] ?? 'open';
+    if (policy !== 'allowlist') return true;
+    const members = (entry['allowedUsers'] ??
+      wildcard['allowedUsers'] ??
+      []) as string[];
+    return members.includes(who);
+  }
+
+  function githubStored(
+    groups: Record<string, unknown>,
+    groupPolicy: string,
+  ): DaemonChannelInstanceSnapshot {
+    return {
+      name: 'release-bot',
+      config: { type: 'github', groupPolicy, groups },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+  }
+
+  function savedGroups(
+    instance: DaemonChannelInstanceSnapshot,
+    edit: (draft: ReturnType<typeof createChannelEditorDraft>) => void,
+  ) {
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    edit(draft);
+    expect(validateChannelEditorDraft(GITHUB, draft, [], instance)).toEqual({});
+    return buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+      'groups'
+    ] as Record<string, unknown>;
+  }
+
+  it('keeps a row narrowed during a temporary switch on a channel stored Open', () => {
+    // The alert tells the operator to switch back to Allowlist to edit a row, so
+    // "switch, narrow, switch back, save" is a flow the UI invites. Gating the
+    // write on the STORED policy dropped the edit and left the repository open.
+    const instance = githubStored(
+      { '*': { senders: 'open' }, 'acme/widgets': { senders: 'open' } },
+      'open',
+    );
+    const groups = savedGroups(instance, (draft) => {
+      draft.values['groupPolicy'] = 'open';
+      draft.allowedGroupIds = 'acme/widgets';
+      draft.groupOverrides['acme/widgets'] = {
+        requireMention: '',
+        senders: 'allowlist',
+        allowedUsers: 'alice',
+      };
+    });
+
+    expect(groups['acme/widgets']).toEqual({
+      senders: 'allowlist',
+      allowedUsers: ['alice'],
+    });
+    expect(admits(groups, 'acme/widgets', 'bob')).toBe(false);
+    expect(admits(groups, 'acme/widgets', 'alice')).toBe(true);
+  });
+
+  it('keeps a repository added while Allowlist when the save lands on Open', () => {
+    // Iterating stored groups alone cannot see a repository that only exists in
+    // the draft, so its restriction vanished and it fell back to the wildcard.
+    const instance = githubStored(
+      { '*': { senders: 'open' }, 'acme/widgets': {} },
+      'allowlist',
+    );
+    const groups = savedGroups(instance, (draft) => {
+      draft.values['groupPolicy'] = 'open';
+      draft.allowedGroupIds = 'acme/widgets, acme/new';
+      draft.groupOverrides['acme/new'] = {
+        requireMention: '',
+        senders: 'allowlist',
+        allowedUsers: 'alice',
+      };
+    });
+
+    expect(groups['acme/new']).toEqual({
+      senders: 'allowlist',
+      allowedUsers: ['alice'],
+    });
+    expect(admits(groups, 'acme/new', 'bob')).toBe(false);
+  });
+
+  it('leaves conflicting aliases as stored when only the policy moves', () => {
+    // The draft keeps one entry per lower-cased id, so it cannot say which
+    // spelling an edit was meant for. Projecting the last alias's draft onto
+    // both turned an alice-only repository open while validation stayed silent,
+    // because the conflict check only runs when the final policy is Allowlist.
+    const instance = githubStored(
+      {
+        '*': { senders: 'allowlist', allowedUsers: ['op'] },
+        'Acme/Widgets': { senders: 'allowlist', allowedUsers: ['alice'] },
+        'acme/widgets': { senders: 'open' },
+      },
+      'allowlist',
+    );
+    const groups = savedGroups(instance, (draft) => {
+      draft.values['groupPolicy'] = 'open';
+    });
+
+    expect(groups['Acme/Widgets']).toEqual({
+      senders: 'allowlist',
+      allowedUsers: ['alice'],
+    });
+    expect(groups['acme/widgets']).toEqual({ senders: 'open' });
+    // The runtime prefers an exact key, and GitHub keeps the repository's case.
+    expect(admits(groups, 'Acme/Widgets', 'bob')).toBe(false);
+  });
+
+  it('still refuses the same conflict when the policy stays Allowlist', () => {
+    const instance = githubStored(
+      {
+        '*': { senders: 'allowlist', allowedUsers: ['op'] },
+        'Acme/Widgets': { senders: 'allowlist', allowedUsers: ['alice'] },
+        'acme/widgets': { senders: 'open' },
+      },
+      'allowlist',
+    );
+    const draft = createChannelEditorDraft(GITHUB, instance);
+
+    expect(validateChannelEditorDraft(GITHUB, draft, [], instance)).toEqual({
+      allowedGroupIds: 'conflictingRepoAliases',
+    });
+  });
+
+  it('reproduces an untouched non-Allowlist channel byte-for-byte', () => {
+    const groups = {
+      '*': { senders: 'open' },
+      'acme/widgets': { senders: 'allowlist', allowedUsers: ['alice'] },
+      'acme/other': { dispatchMode: 'collect', groupHistoryLimit: 25 },
+      'Acme/Mixed': { requireMention: false },
+    };
+    const instance = githubStored(structuredClone(groups), 'open');
+    const draft = createChannelEditorDraft(GITHUB, instance);
+
+    const saved = buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance)
+      .config['groups'];
+    expect(JSON.stringify(saved)).toBe(JSON.stringify(groups));
+  });
+
+  it('keeps an already-empty entry when an unrelated edit lands on Open', () => {
+    // The channel never had an allowlist, so its stored entries are not
+    // membership markers this save may clean up. Dropping the empty one
+    // rewrote settings.json on an edit that never touched groups. Admission is
+    // the same either way — an absent key and an empty entry both fall through
+    // to "*" — which is why this is about the file, not about access.
+    const stored = { '*': { senders: 'open' }, 'acme/widgets': {} };
+    const instance = githubStored(structuredClone(stored), 'open');
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    draft.values['baseUrl'] = 'https://ghe.example.com/api/v3';
+
+    expect(validateChannelEditorDraft(GITHUB, draft, [], instance)).toEqual({});
+    const groups = buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance)
+      .config['groups'];
+    expect(JSON.stringify(groups)).toBe(JSON.stringify(stored));
+  });
+
+  it('still drops a draft-only repository that carries no settings', () => {
+    // Preserving stored empty entries must not materialize new ones: a
+    // repository typed into the allowlist with nothing set has no entry to keep.
+    const instance = githubStored({ '*': { senders: 'open' } }, 'open');
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    draft.allowedGroupIds = 'acme/widgets';
+
+    const groups = buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance)
+      .config['groups'] as Record<string, unknown>;
+    expect(Object.hasOwn(groups, 'acme/widgets')).toBe(false);
+  });
+
+  it('refuses a lone non-record repository entry and does not delete it', () => {
+    // With only one spelling there is no alias ambiguity, so that exemption
+    // does not apply — but an entry the form cannot represent is still not
+    // ours to delete. Validation refuses the save and names it instead.
+    const instance = githubStored(
+      {
+        '*': { senders: 'allowlist', allowedUsers: ['op'] },
+        'acme/widgets': 'hand-written-garbage',
+      },
+      'allowlist',
+    );
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    draft.values['groupPolicy'] = 'open';
+
+    expect(validateChannelEditorDraft(GITHUB, draft, [], instance)).toEqual({
+      groupPolicy: 'invalidGroupEntry',
+    });
+    expect(invalidRepositoryGroupEntries(instance)).toEqual(['acme/widgets']);
+    const groups = buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance)
+      .config['groups'] as Record<string, unknown>;
+    expect(groups['acme/widgets']).toBe('hand-written-garbage');
+  });
+
+  it('does not invent repository entries for a chat platform', () => {
+    // The union with the typed allowlist is repository-only: chat group ids are
+    // case-sensitive and are not derived from that field once the policy leaves
+    // Allowlist.
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'chat-bot',
+      config: {
+        type: 'dingtalk',
+        clientId: 'id',
+        clientSecret: 'secret',
+        groupPolicy: 'open',
+        groups: {
+          '*': { senders: 'open' },
+          'Group-A': { requireMention: false },
+        },
+      },
+      secrets: {},
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(DINGTALK_WITH_ACCESS, instance);
+    draft.allowedGroupIds = 'Group-A, Group-B';
+
+    expect(
+      buildChannelUpsertRequest(DINGTALK_WITH_ACCESS, draft, 'rev-2', instance)
+        .config['groups'],
+    ).toEqual({
+      '*': { senders: 'open' },
+      'Group-A': { requireMention: false },
+    });
+  });
+});
+
+describe('Conflicting repository aliases across policies', () => {
+  // Two spellings of one repository that disagree. The draft keeps a single
+  // lower-cased entry, so it cannot say which spelling an edit was meant for,
+  // and the runtime resolves an exact own key first and only then falls back to
+  // the first case-insensitive match (ChannelBase.groupConfigFor). Both facts
+  // are load-bearing: an empty exact entry inherits "*", while deleting it lets
+  // the fallback reach a wider alias.
+  const ALIAS_WILDCARD = { senders: 'allowlist', allowedUsers: ['op'] };
+  const OPEN_ALIAS = { senders: 'open' };
+  const OTHER_POLICIES = ['open', 'pairing', 'disabled'] as const;
+
+  function resolveEntry(
+    groups: Record<string, unknown>,
+    chatId: string,
+  ): Record<string, unknown> {
+    if (Object.hasOwn(groups, chatId)) {
+      return groups[chatId] as Record<string, unknown>;
+    }
+    const normalized = chatId.toLowerCase();
+    for (const [groupId, group] of Object.entries(groups)) {
+      if (groupId.toLowerCase() === normalized) {
+        return group as Record<string, unknown>;
+      }
+    }
+    return {};
+  }
+
+  function aliasAdmits(
+    groups: Record<string, unknown>,
+    chatId: string,
+    who: string,
+  ): boolean {
+    const entry = resolveEntry(groups, chatId);
+    const wildcard = resolveEntry(groups, '*');
+    const policy = entry['senders'] ?? wildcard['senders'] ?? 'open';
+    if (policy !== 'allowlist') return true;
+    const members = (entry['allowedUsers'] ??
+      wildcard['allowedUsers'] ??
+      []) as string[];
+    return members.includes(who);
+  }
+
+  function aliasInstance(
+    upper: unknown,
+    storedPolicy: string,
+  ): DaemonChannelInstanceSnapshot {
+    return {
+      name: 'release-bot',
+      config: {
+        type: 'github',
+        groupPolicy: storedPolicy,
+        groups: {
+          '*': structuredClone(ALIAS_WILDCARD),
+          'Acme/Widgets': structuredClone(upper),
+          'acme/widgets': structuredClone(OPEN_ALIAS),
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+  }
+
+  function aliasSave(
+    upper: unknown,
+    storedPolicy: string,
+    finalPolicy: string,
+    edit?: Partial<ChannelGroupOverrideDraft>,
+  ) {
+    const instance = aliasInstance(upper, storedPolicy);
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    draft.values['groupPolicy'] = finalPolicy;
+    if (edit) {
+      draft.groupOverrides['acme/widgets'] = {
+        ...draft.groupOverrides['acme/widgets'],
+        ...edit,
+      };
+    }
+    const errors = validateChannelEditorDraft(GITHUB, draft, [], instance);
+    const groups = buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance)
+      .config['groups'] as Record<string, unknown>;
+    return { errors, groups, stored: instance.config['groups'] };
+  }
+
+  it('keeps an empty ambiguous alias on an untouched Open save', () => {
+    // The empty entry is what makes the exact key inherit the wildcard's
+    // allowlist. Dropping it as "carrying nothing" hands the repository to the
+    // open alias through the case-insensitive fallback, on a save that changed
+    // nothing at all.
+    const { errors, groups, stored } = aliasSave({}, 'open', 'open');
+
+    expect(errors).toEqual({});
+    expect(Object.hasOwn(groups, 'Acme/Widgets')).toBe(true);
+    expect(groups['Acme/Widgets']).toEqual({});
+    expect(JSON.stringify(groups)).toBe(JSON.stringify(stored));
+    expect(
+      aliasAdmits(stored as Record<string, unknown>, 'Acme/Widgets', 'bob'),
+    ).toBe(false);
+    expect(aliasAdmits(groups, 'Acme/Widgets', 'bob')).toBe(false);
+  });
+
+  it('refuses an edited ambiguous row once the policy leaves Allowlist', () => {
+    // The visible row is the canonical id, which shows the open alias. Editing
+    // it and switching away used to save successfully while discarding the
+    // edit, so the hint's "Empty means nobody" never happened.
+    for (const allowedUsers of ['', 'alice']) {
+      const { errors } = aliasSave(
+        { senders: 'allowlist', allowedUsers: ['alice'] },
+        'allowlist',
+        'open',
+        { senders: 'allowlist', allowedUsers },
+      );
+      expect(errors).toEqual({ groupPolicy: 'conflictingRepoAliases' });
+    }
+  });
+
+  it('refuses an edited mention on an ambiguous row too', () => {
+    const { errors } = aliasSave(
+      { senders: 'allowlist', allowedUsers: ['alice'] },
+      'allowlist',
+      'pairing',
+      { requireMention: 'false' },
+    );
+    expect(errors).toEqual({ groupPolicy: 'conflictingRepoAliases' });
+  });
+
+  it('still saves an untouched ambiguous switch and keeps both spellings', () => {
+    const { errors, groups, stored } = aliasSave(
+      { senders: 'allowlist', allowedUsers: ['alice'] },
+      'allowlist',
+      'open',
+    );
+
+    expect(errors).toEqual({});
+    expect(JSON.stringify(groups)).toBe(JSON.stringify(stored));
+    expect(aliasAdmits(groups, 'Acme/Widgets', 'bob')).toBe(false);
+  });
+
+  it('still refuses any ambiguous save while the policy is Allowlist', () => {
+    const instance = aliasInstance({ senders: 'allowlist' }, 'allowlist');
+    const draft = createChannelEditorDraft(GITHUB, instance);
+
+    expect(validateChannelEditorDraft(GITHUB, draft, [], instance)).toEqual({
+      allowedGroupIds: 'conflictingRepoAliases',
+    });
+  });
+
+  it('refuses a hand-written non-record alias instead of deleting it', () => {
+    // The store rejects a non-record group entry on every save, unchanged or
+    // not — its tolerance covers the whole `groups` value, not an entry inside
+    // it — so this cannot be promised as a no-op. Deleting the entry instead
+    // would remove the exact key and let the case-insensitive fallback reach
+    // the open alias. Refuse with the entry named, and still do not delete it.
+    const { errors, groups, stored } = aliasSave(
+      'hand-written-garbage',
+      'open',
+      'open',
+    );
+
+    expect(errors).toEqual({ groupPolicy: 'invalidGroupEntry' });
+    expect(groups['Acme/Widgets']).toBe('hand-written-garbage');
+    expect(JSON.stringify(groups)).toBe(JSON.stringify(stored));
+    expect(
+      aliasAdmits(stored as Record<string, unknown>, 'Acme/Widgets', 'bob'),
+    ).toBe(false);
+    expect(aliasAdmits(groups, 'Acme/Widgets', 'bob')).toBe(false);
+  });
+
+  it('still drops a non-ambiguous empty entry when the policy leaves Allowlist', () => {
+    // The exemption is for aliases the draft cannot tell apart, not for every
+    // empty entry: a lone repository returned to inherit must not leave a stub.
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'allowlist',
+        groups: {
+          '*': structuredClone(ALIAS_WILDCARD),
+          'qwenlm/qwen-code': {},
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    draft.values['groupPolicy'] = 'open';
+
+    const groups = buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance)
+      .config['groups'] as Record<string, unknown>;
+    expect(Object.hasOwn(groups, 'qwenlm/qwen-code')).toBe(false);
+  });
+
+  // The alias dimension the earlier sweeps did not cross: every stored shape,
+  // as the upper spelling, against a fixed open lower spelling, over every
+  // stored and final policy. An untouched save must be a no-op and an edited
+  // row must be refused — the two failures this path actually shipped.
+  it('is a no-op untouched and refuses an edit, for every shape and policy', () => {
+    const noopViolations: string[] = [];
+    const editViolations: string[] = [];
+    const identities = ['alice', 'bob', 'op'];
+    for (const [name, shape] of SWEEP_SHAPES) {
+      if (JSON.stringify(shape) === JSON.stringify(OPEN_ALIAS)) continue;
+      for (const storedPolicy of ['allowlist', 'open']) {
+        for (const finalPolicy of OTHER_POLICIES) {
+          const untouched = aliasSave(shape, storedPolicy, finalPolicy);
+          const label = `${name} ${storedPolicy}->${finalPolicy}`;
+          if (
+            JSON.stringify(untouched.groups) !==
+            JSON.stringify(untouched.stored)
+          ) {
+            noopViolations.push(
+              `${label}: ${JSON.stringify(untouched.stored)} -> ${JSON.stringify(untouched.groups)}`,
+            );
+          }
+          if (Object.keys(untouched.errors).length > 0) {
+            noopViolations.push(
+              `${label} refused: ${JSON.stringify(untouched.errors)}`,
+            );
+          }
+          for (const who of identities) {
+            const before = aliasAdmits(
+              untouched.stored as Record<string, unknown>,
+              'Acme/Widgets',
+              who,
+            );
+            if (before !== aliasAdmits(untouched.groups, 'Acme/Widgets', who)) {
+              noopViolations.push(`${label} who=${who} admission changed`);
+            }
+          }
+          // Whether an edit is real depends on the shape: the draft collapses
+          // to the open alias, so "choose open" is a no-op for most shapes and
+          // must still save. Assert both directions rather than assuming.
+          const seeded = createChannelEditorDraft(
+            GITHUB,
+            aliasInstance(shape, storedPolicy),
+          ).groupOverrides['acme/widgets'];
+          for (const edit of [
+            { senders: 'allowlist', allowedUsers: '' },
+            { senders: 'allowlist', allowedUsers: 'carol' },
+            { senders: 'open' },
+            { requireMention: 'false' },
+          ] as Array<Partial<ChannelGroupOverrideDraft>>) {
+            const next = { ...seeded, ...edit };
+            const changed =
+              !seeded ||
+              next.requireMention !== seeded.requireMention ||
+              next.senders !== seeded.senders ||
+              next.allowedUsers !== seeded.allowedUsers;
+            const edited = aliasSave(shape, storedPolicy, finalPolicy, edit);
+            if (changed) {
+              if (edited.errors['groupPolicy'] !== 'conflictingRepoAliases') {
+                editViolations.push(
+                  `${label} edit=${JSON.stringify(edit)} errors=${JSON.stringify(edited.errors)}`,
+                );
+              }
+            } else if (Object.keys(edited.errors).length > 0) {
+              noopViolations.push(
+                `${label} no-op edit=${JSON.stringify(edit)} refused: ${JSON.stringify(edited.errors)}`,
+              );
+            }
+          }
+        }
+      }
+    }
+    expect(noopViolations).toEqual([]);
+    expect(editViolations).toEqual([]);
+  });
+});
+
+describe('Retained repository settings announcement', () => {
+  function announce(
+    storedGroups: Record<string, unknown>,
+    storedPolicy: string,
+    finalPolicy: string,
+    edit?: (draft: ReturnType<typeof createChannelEditorDraft>) => void,
+  ) {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'github',
+        groupPolicy: storedPolicy,
+        groups: storedGroups,
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    draft.values['groupPolicy'] = finalPolicy;
+    if (edit) edit(draft);
+    return retainedRepositorySettings(GITHUB, draft, instance);
+  }
+
+  it('names a repository the save writes but storage has never seen', () => {
+    // Typing a repository, narrowing its row and switching the policy away
+    // writes an entry that keeps deciding who may drive it. Enumerating stored
+    // groups named nothing, so the dialog reported success in silence.
+    const named = announce(
+      { '*': { senders: 'allowlist', allowedUsers: ['op'] } },
+      'allowlist',
+      'open',
+      (draft) => {
+        draft.allowedGroupIds = 'acme/widgets';
+        draft.groupOverrides['acme/widgets'] = {
+          requireMention: '',
+          senders: 'allowlist',
+          allowedUsers: 'alice',
+        };
+      },
+    );
+
+    expect(named).toEqual([{ repositoryId: 'acme/widgets', applies: true }]);
+  });
+
+  it('does not announce a speaker list the resolved policy makes inert', () => {
+    // senderGateFor builds an allowlist only when the resolved policy is
+    // allowlist, so an array beside an inherited open policy restricts nobody.
+    const named = announce(
+      {
+        '*': { senders: 'open' },
+        'acme/widgets': { allowedUsers: ['alice'] },
+      },
+      'allowlist',
+      'open',
+    );
+
+    expect(named).toEqual([{ repositoryId: 'acme/widgets', applies: false }]);
+  });
+
+  it('does not announce an entry whose only keys are unmodelled', () => {
+    const named = announce(
+      { '*': { senders: 'open' }, 'acme/widgets': { groupHistoryLimit: 25 } },
+      'allowlist',
+      'open',
+    );
+
+    expect(named).toEqual([{ repositoryId: 'acme/widgets', applies: false }]);
+  });
+
+  it('announces an entry-level policy or mention that still changes behaviour', () => {
+    const named = announce(
+      {
+        '*': { senders: 'open', requireMention: true },
+        'acme/policy': { senders: 'allowlist', allowedUsers: ['alice'] },
+        'acme/mention': { requireMention: false },
+        'acme/same': { requireMention: true },
+      },
+      'allowlist',
+      'open',
+    );
+
+    expect(named).toEqual([
+      { repositoryId: 'acme/policy', applies: true },
+      { repositoryId: 'acme/mention', applies: true },
+      // Equal to the inherited value, so it changes nothing today.
+      { repositoryId: 'acme/same', applies: false },
+    ]);
+  });
+
+  it('announces nothing when the save keeps no repository settings', () => {
+    expect(announce({ '*': { senders: 'open' } }, 'open', 'open')).toEqual([]);
+  });
+});
+
+describe('GitHub poll interval', () => {
+  const GITHUB_POLLING: DaemonChannelTypeDescriptor = {
+    ...GITHUB,
+    fields: [
+      ...GITHUB.fields,
+      {
+        key: 'pollInterval',
+        label: 'Poll Interval (ms)',
+        kind: 'number',
+        exclusiveMinimum: 0,
+        maximum: 86_400_000,
+        default: '60000',
+      },
+    ],
+  };
+
+  function pollingDraft(value?: number) {
+    const instance: DaemonChannelInstanceSnapshot | undefined =
+      value === undefined
+        ? undefined
+        : {
+            name: 'release-bot',
+            config: {
+              type: 'github',
+              groupPolicy: 'open',
+              pollInterval: value,
+            },
+            secrets: { token: { present: true, source: 'literal' } },
+            startsWithServe: false,
+            runtime: { state: 'stopped' },
+          };
+    const draft = createChannelEditorDraft(GITHUB_POLLING, instance);
+    draft.name = 'release-bot';
+    draft.secrets.token = { operation: 'replace', value: 'ghp_test' };
+    return { draft, instance };
+  }
+
+  it('leaves a new channel unset instead of persisting the descriptor default', () => {
+    // The runtime owns the 60-second default. Writing it here would freeze
+    // today's value into every channel created from the form.
+    const { draft } = pollingDraft();
+
+    expect(draft.values.pollInterval).toBe('');
+    expect(
+      buildChannelUpsertRequest(GITHUB_POLLING, draft, 'rev-1').config,
+    ).not.toHaveProperty('pollInterval');
+  });
+
+  it('reads a stored interval and saves a typed one as a number', () => {
+    const { draft, instance } = pollingDraft(30000);
+    expect(draft.values.pollInterval).toBe('30000');
+
+    draft.values.pollInterval = '45000';
+    expect(
+      buildChannelUpsertRequest(GITHUB_POLLING, draft, 'rev-2', instance)
+        .config['pollInterval'],
+    ).toBe(45000);
+  });
+
+  it('clears the key when the input is emptied', () => {
+    const { draft, instance } = pollingDraft(30000);
+
+    draft.values.pollInterval = '';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB_POLLING, draft, 'rev-2', instance)
+        .config,
+    ).not.toHaveProperty('pollInterval');
+  });
+
+  it('rejects a non-positive interval', () => {
+    const { draft } = pollingDraft();
+
+    draft.values.pollInterval = '0';
+    expect(validateChannelEditorDraft(GITHUB_POLLING, draft, [])).toEqual({
+      pollInterval: 'outOfRange',
+    });
+
+    draft.values.pollInterval = 'soon';
+    expect(validateChannelEditorDraft(GITHUB_POLLING, draft, [])).toEqual({
+      pollInterval: 'number',
+    });
+  });
+
+  it('rejects an interval above the ceiling that would become a hot loop', () => {
+    // Node clamps a timeout above its 32-bit range to 1ms, so "once a month"
+    // would poll in a tight loop and burn the API quota.
+    const { draft } = pollingDraft();
+
+    draft.values.pollInterval = '2592000000';
+    expect(validateChannelEditorDraft(GITHUB_POLLING, draft, [])).toEqual({
+      pollInterval: 'outOfRange',
+    });
+
+    draft.values.pollInterval = '86400000';
+    expect(validateChannelEditorDraft(GITHUB_POLLING, draft, [])).toEqual({});
+  });
+
+  it('does not block an unrelated edit over a stored interval the runtime tolerates', () => {
+    // PollingChannelBase falls back to 60s for a non-positive stored value and
+    // clamps one above the ceiling, so a channel carrying 0, -5 or 300000000
+    // works today. Declaring the field must not strand its operator on a
+    // setting they never touched — both halves of the range, not just the floor.
+    for (const stored of [0, -5, 300_000_000]) {
+      const { draft, instance } = pollingDraft(stored);
+      draft.values.useLocalGh = true;
+
+      expect(
+        validateChannelEditorDraft(GITHUB_POLLING, draft, [], instance),
+      ).toEqual({});
+      expect(
+        buildChannelUpsertRequest(GITHUB_POLLING, draft, 'rev-2', instance)
+          .config['pollInterval'],
+      ).toBe(stored);
+    }
+  });
+
+  it('still rejects an out-of-range interval the operator actually typed', () => {
+    const { draft, instance } = pollingDraft(30000);
+
+    draft.values.pollInterval = '0';
+    expect(
+      validateChannelEditorDraft(GITHUB_POLLING, draft, [], instance),
+    ).toEqual({ pollInterval: 'outOfRange' });
   });
 });

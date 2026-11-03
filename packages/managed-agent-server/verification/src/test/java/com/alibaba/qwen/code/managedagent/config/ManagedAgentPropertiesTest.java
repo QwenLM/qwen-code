@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.session.WakeRecovery;
 import com.alibaba.qwen.code.managedagent.workspace.ChildResultRelay;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.test.system.CapturedOutput;
@@ -17,6 +18,8 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.Scheduled;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -104,6 +107,33 @@ public class ManagedAgentPropertiesTest {
         assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
         properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(false);
         assertThatThrownBy(properties::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void preflightValidatesTheSelectedProviderAfterLoadingHarnessCredentials(@TempDir Path directory) throws Exception {
+        for (String digest : List.of("SHA256:" + "A".repeat(64), "sha256:" + "a".repeat(64))) {
+            var properties = new ManagedAgentProperties();
+            Path file = Files.writeString(directory.resolve("harness.env"), "QWEN_SERVER_TOKEN=" + "a".repeat(64)
+                    + "\nQWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=" + digest + "\n");
+            properties.getHarness().setEnabled(true);
+            properties.getHarness().setCredentialsFile(file.toString());
+            properties.getSessionStore().setEnabled(true);
+            var broker = properties.getRuntimeBroker();
+            broker.setEnabled(true);
+            broker.setProvisioner("external-scratch");
+            broker.setTrustedLocalRebootRecovery(false);
+            broker.setExternalProviderUrl("http://provider.invalid/api");
+            broker.setExternalProviderToken("provider-token-for-tests");
+            broker.setWorkspaceId("scratch");
+            broker.setWorkspaceCwd("/worker/scratch");
+            if (digest.startsWith("SHA256:")) {
+                assertThatThrownBy(properties::validateForPreflight).isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("External Runtime Harness capability digest");
+            } else {
+                assertThatCode(properties::validateForPreflight).doesNotThrowAnyException();
+            }
+            assertThat(properties.getHarness().getCapabilityDigest()).isEqualTo(digest);
+        }
     }
 
     @Test
@@ -916,7 +946,7 @@ public class ManagedAgentPropertiesTest {
                         .getFailure().hasRootCauseInstanceOf(IllegalStateException.class)
                         .hasRootCauseMessage("Hosted Workspace files require"
                                 + " a supported Harness, Session Store and Session-isolated"
-                                + " local-process Broker with Workspace mounts"));
+                                + " local-process Broker with Workspace mounts or an SSH-only Broker"));
         // A definition Session publishes instructions through the Session
         // Store at Harness create, so the Harness implies the Store even
         // when Workspace files are off.

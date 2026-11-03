@@ -61,11 +61,16 @@ import {
   hasDescriptorPrivatePolicy,
   configuredPrivatePolicy,
   PRIVATE_ONLY_FIELD_KEYS,
+  invalidRepositoryGroupEntries,
+  projectRepositoryGroup,
+  repositoryAllowlistIds,
+  retainedRepositorySettings,
   toList,
   validateChannelEditorDraft,
   type ChannelEditorDraft,
   type ChannelSecretDraft,
   type ChannelEditorValidationCode,
+  type ChannelGroupOverrideDraft,
   type ChannelGroupSenders,
 } from './channel-editor-state';
 import {
@@ -94,8 +99,12 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     token: 'channels.editor.field.github.token',
     useLocalGh: 'channels.editor.field.github.useLocalGh',
     baseUrl: 'channels.editor.field.github.baseUrl',
+    pollInterval: 'channels.editor.field.github.pollInterval',
     groupPolicy: 'channels.editor.field.github.groupPolicy',
     reasonFilter: 'channels.editor.field.github.reasonFilter',
+    deliverToBoundSessions:
+      'channels.editor.field.github.deliverToBoundSessions',
+    prWatchEvents: 'channels.editor.field.github.prWatchEvents',
   },
   gitlab: {
     token: 'channels.editor.field.gitlab.token',
@@ -136,12 +145,19 @@ const FIELD_PLACEHOLDER_KEYS: Record<string, string> = {
   'github.baseUrl': 'https://ghe.example.com/api/v3',
 };
 
-const CONNECTION_FIELD_KEYS = new Set(['baseUrl', 'wsUrl']);
+const CONNECTION_FIELD_KEYS = new Set(['baseUrl', 'wsUrl', 'pollInterval']);
 const ROUTING_FIELD_KEYS = new Set([
   'reasonFilter',
   'messageRoutes',
   'defaultMessageRoute',
 ]);
+
+/** Every repository starts fully inheriting; nothing is materialized. */
+const EMPTY_GROUP_OVERRIDE: ChannelGroupOverrideDraft = {
+  requireMention: '',
+  senders: '',
+  allowedUsers: '',
+};
 
 function fieldSectionKey(
   field: DaemonChannelConfigFieldDescriptor,
@@ -361,9 +377,24 @@ export function ChannelEditorDialog({
       return t('channels.editor.validation.invalidOption');
     if (code === 'number') return t('channels.editor.validation.number');
     if (code === 'outOfRange') {
+      const numberField = field && field.kind === 'number' ? field : undefined;
+      // Only name the bounds the descriptor actually declares: a field with a
+      // maximum and no exclusiveMinimum has no floor, and inventing "greater
+      // than 0" would state a constraint the validator does not enforce.
       return t('channels.editor.validation.outOfRange', {
-        min:
-          field && field.kind === 'number' ? (field.exclusiveMinimum ?? 0) : 0,
+        ...(numberField?.exclusiveMinimum !== undefined
+          ? { min: numberField.exclusiveMinimum }
+          : {}),
+        ...(numberField?.maximum !== undefined
+          ? { max: numberField.maximum }
+          : {}),
+      });
+    }
+    if (code === 'invalidGroupEntry') {
+      // Name the entries: the form has no row for them, so a generic refusal
+      // would leave the operator with nothing to act on.
+      return t('channels.editor.validation.invalidGroupEntry', {
+        repositories: invalidRepositoryGroupEntries(instance).join(', '),
       });
     }
     if (code === 'policy') return t('channels.editor.validation.policy');
@@ -814,6 +845,226 @@ export function ChannelEditorDialog({
     );
   };
 
+  const updateGroupOverride = (
+    repositoryId: string,
+    patch: Partial<ChannelGroupOverrideDraft>,
+  ) => {
+    setDraft((current) => {
+      const existing =
+        current.groupOverrides[repositoryId] ?? EMPTY_GROUP_OVERRIDE;
+      return {
+        ...current,
+        groupOverrides: {
+          ...current.groupOverrides,
+          [repositoryId]: { ...existing, ...patch },
+        },
+      };
+    });
+  };
+
+  const renderRepositoryOverrides = () => {
+    const repositories = repositoryAllowlistIds(draft.allowedGroupIds);
+    if (repositories.length === 0) return null;
+    const groups = instance?.config['groups'];
+    // Fold the stored keys the same way the save path does, so a mixed-case
+    // stored repository still finds its own row.
+    const storedGroups = isRecord(groups)
+      ? Object.fromEntries(
+          Object.entries(groups).map(([key, value]) => [
+            key.toLowerCase(),
+            value,
+          ]),
+        )
+      : {};
+    const wildcard = isRecord(storedGroups['*']) ? storedGroups['*'] : {};
+    const inheritedRequireMention =
+      typeof wildcard['requireMention'] === 'boolean'
+        ? wildcard['requireMention']
+        : true;
+    const inheritedSenders = draft.groupSenders || defaultGroupSenders();
+    return (
+      <div className={styles.repositoryList}>
+        <p className={styles.repositoryListTitle}>
+          {t('channels.editor.field.github.repositorySettings')}
+        </p>
+        <p className={styles.fieldDescription}>
+          {t('channels.editor.field.github.repositorySettings.description')}
+        </p>
+        {repositories.map((repositoryId) => {
+          const override =
+            draft.groupOverrides[repositoryId] ?? EMPTY_GROUP_OVERRIDE;
+          const effectiveSenders = override.senders || inheritedSenders;
+          const storedGroup = isRecord(storedGroups[repositoryId])
+            ? storedGroups[repositoryId]
+            : {};
+          // The hint promises what an EMPTY box will do, so ask the projection
+          // about that hypothetical rather than about the current draft. A
+          // stored list under an inherited policy is deleted when the box is
+          // cleared, handing the repository back the channel-wide members —
+          // asking about the untouched draft would promise "nobody" instead.
+          const ownsSpeakerList = Array.isArray(
+            projectRepositoryGroup(storedGroup, {
+              ...override,
+              allowedUsers: '',
+            })['allowedUsers'],
+          );
+          const headingId = `${formId}-repo-${repositoryId}`;
+          const mentionId = `${formId}-mention-${repositoryId}`;
+          const sendersId = `${formId}-senders-${repositoryId}`;
+          const speakersId = `${formId}-speakers-${repositoryId}`;
+          return (
+            // Labelled by its own heading so the repeated control names are
+            // distinguishable once more than one repository is listed.
+            <div
+              key={repositoryId}
+              className={styles.repositoryRow}
+              role="group"
+              aria-labelledby={headingId}
+            >
+              <h4 id={headingId} className={styles.repositoryName}>
+                {repositoryId}
+              </h4>
+              <FieldShell
+                id={mentionId}
+                label={t('channels.editor.field.github.requireMention')}
+              >
+                <Select
+                  value={override.requireMention || 'inherit'}
+                  onValueChange={(value) =>
+                    updateGroupOverride(repositoryId, {
+                      requireMention:
+                        value === 'inherit'
+                          ? ''
+                          : (value as ChannelGroupOverrideDraft['requireMention']),
+                    })
+                  }
+                >
+                  <SelectTrigger id={mentionId} className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="inherit">
+                      {t(
+                        inheritedRequireMention
+                          ? 'channels.editor.field.github.requireMention.inheritOn'
+                          : 'channels.editor.field.github.requireMention.inheritOff',
+                      )}
+                    </SelectItem>
+                    <SelectItem value="true">
+                      {t('channels.editor.field.github.requireMention.on')}
+                    </SelectItem>
+                    <SelectItem value="false">
+                      {t('channels.editor.field.github.requireMention.off')}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </FieldShell>
+              <FieldShell
+                id={sendersId}
+                label={t('channels.editor.field.github.repositorySenders')}
+              >
+                <Select
+                  value={override.senders || 'inherit'}
+                  onValueChange={(value) =>
+                    updateGroupOverride(repositoryId, {
+                      senders:
+                        value === 'inherit'
+                          ? ''
+                          : (value as ChannelGroupOverrideDraft['senders']),
+                    })
+                  }
+                >
+                  <SelectTrigger id={sendersId} className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="inherit">
+                      {t(
+                        inheritedSenders === 'allowlist'
+                          ? 'channels.editor.field.github.repositorySenders.inheritAllowlist'
+                          : 'channels.editor.field.github.repositorySenders.inheritOpen',
+                      )}
+                    </SelectItem>
+                    <SelectItem value="open">
+                      {t('channels.editor.field.github.repositorySenders.open')}
+                    </SelectItem>
+                    <SelectItem value="allowlist">
+                      {t(
+                        'channels.editor.field.github.repositorySenders.allowlist',
+                      )}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </FieldShell>
+              {effectiveSenders === 'allowlist' ? (
+                <FieldShell
+                  id={speakersId}
+                  label={t('channels.editor.field.github.repositorySpeakers')}
+                  description={t(
+                    ownsSpeakerList
+                      ? 'channels.editor.field.github.repositorySpeakers.description'
+                      : 'channels.editor.field.github.repositorySpeakers.inherited',
+                  )}
+                >
+                  <Input
+                    id={speakersId}
+                    value={override.allowedUsers}
+                    placeholder={t(
+                      'channels.editor.field.github.repositorySpeakers.placeholder',
+                    )}
+                    onChange={(event) =>
+                      updateGroupOverride(repositoryId, {
+                        allowedUsers: event.target.value,
+                      })
+                    }
+                  />
+                </FieldShell>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const renderRetainedRepositoryOverrides = (policy: string) => {
+    // Read the list back from the request this save builds, not from storage:
+    // a repository typed during this visit is written by the save but absent
+    // from the stored groups, and announcing only stored entries would let the
+    // dialog report success without naming it.
+    const retained = retainedRepositorySettings(descriptor, draft, instance);
+    // Under open/pairing the runtime resolves per-repository senders and
+    // requireMention without consulting groupPolicy, so an entry that can still
+    // restrict someone keeps deciding who may drive the agent — but an
+    // `allowedUsers` array beside an inherited `open` policy restricts nobody,
+    // and naming it as "still applying" would be false. Under disabled the group
+    // gate drops every envelope before either lookup, so every retained entry is
+    // kept but inert. The policy is the caller's, so the copy cannot disagree
+    // with the gate that decided to show this alert.
+    const disabled = policy === 'disabled';
+    const named = disabled
+      ? retained.map((entry) => entry.repositoryId)
+      : retained.filter((entry) => entry.applies).map((e) => e.repositoryId);
+    if (named.length === 0) return null;
+    const variant = disabled ? '.disabled' : '';
+    return (
+      <Alert>
+        <KeyRoundIcon />
+        <AlertTitle>
+          {t(
+            `channels.editor.field.github.retainedRepositorySettings${variant}.title`,
+          )}
+        </AlertTitle>
+        <AlertDescription>
+          {t(
+            `channels.editor.field.github.retainedRepositorySettings${variant}.description`,
+            { repositories: named.join(', ') },
+          )}
+        </AlertDescription>
+      </Alert>
+    );
+  };
+
   return (
     <Dialog
       open={open}
@@ -1160,6 +1411,12 @@ export function ChannelEditorDialog({
                       />
                     </FieldShell>
                   ) : null}
+                  {repositoryOnly && effectiveGroupPolicy === 'allowlist'
+                    ? renderRepositoryOverrides()
+                    : null}
+                  {repositoryOnly && effectiveGroupPolicy !== 'allowlist'
+                    ? renderRetainedRepositoryOverrides(effectiveGroupPolicy)
+                    : null}
                   {showGroupSenders ? (
                     <FieldShell
                       id={`${formId}-groupSenders`}
