@@ -736,7 +736,15 @@ export function usePeerMidTurnDrain({
   if (!enabled || !peerMessaging || capacity <= 0) return null;
 
   const liveBudget = () => (budgetRef.current ??= new PeerMidTurnBudget());
-  const drain: PeerMidTurnDrain = () => {
+  // The same recipient-pin answer `drainQueuedFrame` makes from the same
+  // fields, so neither the pause notice nor the barrier can disagree with the
+  // pop about deliverability: a broadcast (unpinned) envelope is genuinely
+  // held by the window and still owes its notice, while a stale-pinned one
+  // the pop would reject as misaddressed never promises a delivery.
+  const deliverablePin = (delivery: PeerQueuedDelivery) =>
+    delivery.toSessionId === undefined ||
+    delivery.toSessionId === sessionIdRef.current;
+  const drain: PeerMidTurnDrain = (options) => {
     const budget = liveBudget();
     // Once per window: silent throttling is the symptom this feature exists
     // to fix, and a per-envelope notice would let a flood write history. No
@@ -772,11 +780,20 @@ export function usePeerMidTurnDrain({
     // was never eligible; and since the boundary calls this drain every tool
     // round, a spent window with nothing takeable queued stays silent.
     if (!budget.hasAllowance(Date.now(), capacity)) {
-      if (firstMidTurnTakeablePeerDelivery() !== undefined) {
+      const waiting = firstMidTurnTakeablePeerDelivery();
+      if (waiting !== undefined && deliverablePin(waiting)) {
         writePauseNotice(Date.now());
       }
       return null;
     }
+    // The boundary captured its barrier verdict before the await gap between
+    // the steer drain and this pop and hands it back here; when it said "not
+    // this boundary", do not re-derive a second answer from the budget — a
+    // window rollover inside the gap could flip the verdict and let the
+    // envelope overtake the user text the no-barrier steer drain just
+    // released. Leaving it queued defers it to the next boundary or the idle
+    // drain: "later", never "lost".
+    if (options?.barriered === false) return null;
     // One envelope per boundary, and the caller no longer chooses the batch
     // size — so there is no unpaid remainder for this drain to hand back.
     const taken = drainPeerEntries(1);
@@ -856,10 +873,7 @@ export function usePeerMidTurnDrain({
     // `config.getSessionId()` getter into the peer messaging and passes it
     // here as `sessionId`. (`drainQueuedFrame` also delivers when its getter
     // is absent; that branch cannot arise in this hook.)
-    return (
-      delivery.toSessionId === undefined ||
-      delivery.toSessionId === sessionIdRef.current
-    );
+    return deliverablePin(delivery);
   };
   return drain;
 }

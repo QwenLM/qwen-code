@@ -258,11 +258,13 @@ export interface PeerMidTurnBatch {
  * The boundary's peer drain, as AppContainer builds it. `eligible` answers what
  * the drain is about to do — pay from the window and take a leading `"now"`
  * envelope — so the steer drain holds user text behind an envelope only while
- * that envelope is really going into this submission. Optional because a test
- * double may be a bare function.
+ * that envelope is really going into this submission. The pop receives the
+ * same verdict (`barriered`) the boundary captured for the steer drain, so the
+ * pop never re-derives it from the budget across the await gap. Optional
+ * because a test double may be a bare function.
  */
 export interface PeerMidTurnDrain {
-  (): PeerMidTurnBatch | null;
+  (options?: { barriered?: boolean }): PeerMidTurnBatch | null;
   eligible?: () => boolean;
 }
 
@@ -6512,6 +6514,12 @@ export const useLlmStream = (
       // Drain steerable user messages at this sampling boundary and append
       // them after the tool responses as genuine user content.
       // Skip if the turn was cancelled — messages stay in queue for next turn.
+      // One verdict for the whole boundary, captured before the await gap
+      // below: the steer barrier and the peer pop must not re-derive it from
+      // the budget independently — a window rollover inside the gap could
+      // flip the answer between the two reads and let the envelope overtake
+      // the user text it was queued behind.
+      const barriered = peerMidTurnWillDeliver();
       const drained =
         continuationOwner?.survivesGenerationChange ||
         continuationWasCancelled()
@@ -6519,7 +6527,7 @@ export const useLlmStream = (
           : (midTurnDrainRef?.current?.(
               false,
               Boolean(activeGoalAdmissionRef.current),
-              peerMidTurnWillDeliver(),
+              barriered,
             ) ?? []);
       let drainedSteer: SteerInput | undefined;
       if (drained.length > 0) {
@@ -6581,8 +6589,9 @@ export const useLlmStream = (
         !activeGoalAdmissionRef.current
       ) {
         // No limit: one envelope per boundary is the drain's own rule, not a
-        // number this caller gets to choose.
-        const batch = drainPeers();
+        // number this caller gets to choose. The pop gets the verdict
+        // captured above instead of re-deriving it after the await.
+        const batch = drainPeers({ barriered });
         if (batch && batch.entries.length > 0) {
           drainedPeers = batch;
           debugLogger.debug(

@@ -66,6 +66,8 @@ import {
   MAX_INLINE_IMAGES_PER_ITEM,
 } from '../utils/inline-image-parts.js';
 import type { DirectUserAdmission, QueuedGoalTurn } from './useMessageQueue.js';
+import { PeerMidTurnBudget } from '../../peerMessaging/peer-messaging.js';
+import { PEER_MID_TURN_WINDOW_MS } from '../../peerMessaging/mid-turn-constants.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
 
@@ -4650,9 +4652,9 @@ describe('useLlmStream', () => {
       expect(mockSendMessageStream.mock.calls[0][0]).toEqual(
         boundaryEntryParts,
       );
-      // Once per boundary, and the mock returns a batch so a second call is
-      // not silently absorbed: its entries are already dequeued, and a return
-      // value nobody submits and never restores is a lost peer message.
+      // Once per boundary: the count is what notices a second drain — the
+      // mock returns null after the first, so a second batch's loss would
+      // otherwise be silent, and its entries are already out of the queue.
       expect(peerDrain).toHaveBeenCalledTimes(1);
       expect(peerRestore).not.toHaveBeenCalled();
       expect(recordNotification).toHaveBeenCalledTimes(2);
@@ -4679,6 +4681,142 @@ describe('useLlmStream', () => {
       ).toHaveLength(1);
       expect(mockSendMessageStream.mock.calls[1][3]).toEqual(
         expect.objectContaining({ type: SendMessageType.Retry }),
+      );
+    });
+
+    it('keeps both boundary envelopes out of the retry payload when the boundary send is blocked', async () => {
+      // The strip that keeps boundary envelopes out of a Ctrl+Y retry lives
+      // in settleBoundary — not in the accept branches — precisely so it
+      // also runs when the boundary send never lands: a UserPromptSubmitBlocked
+      // hook (or a pre-push throw) restores both batches to their queues
+      // while lastPromptRef still holds the stored payload. Stripping on the
+      // accept path only would make the retry replay the envelopes the queues
+      // are about to deliver again — twice each, and the restore path records
+      // nothing, so the duplicates would be invisible in the transcript. The
+      // peer tail is the half no peer-only restore test can pin: stripping
+      // the teammate texts but not the peer tail must fail here too.
+      let queuedUserMessages = true;
+      let pendingSubmissionCount = 0;
+      const goalQueueRef = {
+        current: {
+          hasQueuedUserMessages: vi.fn(() => queuedUserMessages),
+          getPendingSubmissionCount: vi.fn(() => pendingSubmissionCount),
+          claimGoalTurn: vi.fn(),
+        },
+      };
+      const peerModelText =
+        '<cross_session_message from="/tmp/peer.sock" name="a">hold the lease</cross_session_message>';
+      const peerDisplay = 'Session a: hold the lease';
+      const peerRestore = vi.fn();
+      const peerDrain = vi
+        .fn<
+          () => {
+            entries: Array<{ modelText: string; displayText: string }>;
+            restore: () => void;
+          } | null
+        >()
+        .mockReturnValueOnce({
+          entries: [{ modelText: peerModelText, displayText: peerDisplay }],
+          restore: peerRestore,
+        })
+        .mockReturnValue(null);
+      const recordNotification = vi.fn();
+      mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+        recordNotification,
+      });
+      const {
+        result,
+        rerenderWithToolCalls,
+        leaderCallback,
+        completeToolRound,
+      } = renderBusyMultiRoundTask(
+        [createExecutingToolCall()],
+        goalQueueRef as never,
+        { current: peerDrain },
+      );
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+
+      // The boundary send throws before the history push (a hook that
+      // blocks the ToolResult prompt): the harness shim restores the
+      // carrier for exactly this shape, both batches go back, and the
+      // failed prompt becomes retryable. Later sends (the retry, then the
+      // Idle redelivery) stream normally.
+      const normalStream = () =>
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })();
+      mockSendMessageStream
+        .mockImplementation(normalStream)
+        .mockImplementationOnce(() => {
+          throw new Error('UserPromptSubmit hook blocked the boundary send');
+        });
+
+      const completed = createCompletedToolCall();
+      rerenderWithToolCalls([completed]);
+      await completeToolRound([completed]);
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+      // The blocked attempt carried the whole mixed batch — teammates first,
+      // peer tail last.
+      expect(mockSendMessageStream.mock.calls[0][0]).toEqual([
+        ...completed.response.responseParts,
+        { text: teammateModelText },
+        { text: peerModelText },
+      ]);
+      // Both batches went back: the peer's restore fired, and the restore
+      // path records nothing.
+      expect(peerRestore).toHaveBeenCalledTimes(1);
+      expect(recordNotification).not.toHaveBeenCalled();
+
+      // Clear the tool calls so streamingState settles to Idle; the goal
+      // gate still holds the Idle drain, so the restored batches stay
+      // queued across the retry.
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+      });
+
+      // Ctrl+Y retry of the failed continuation: the stored payload must be
+      // stripped of BOTH envelopes — they are back in their queues and will
+      // be delivered from there.
+      await act(async () => {
+        await result.current.retryLastPrompt();
+      });
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(mockSendMessageStream.mock.calls[1][0]).toEqual(
+        completed.response.responseParts,
+      );
+      expect(mockSendMessageStream.mock.calls[1][3]).toEqual(
+        expect.objectContaining({ type: SendMessageType.Retry }),
+      );
+
+      // Release the goal gate: the Idle fallback delivers the restored
+      // teammate exactly once — the batch genuinely returned to its queue
+      // rather than vanishing with the blocked send.
+      queuedUserMessages = false;
+      pendingSubmissionCount = 1;
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+      });
+      expect(mockSendMessageStream).toHaveBeenLastCalledWith(
+        teammateModelText,
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({
+          type: SendMessageType.Teammate,
+          notificationDisplayText: teammateDisplay,
+        }),
       );
     });
   });
@@ -8053,15 +8191,17 @@ describe('useLlmStream', () => {
 
     // The raw steer channel stays empty here: a peer envelope must reach the
     // model through its own structured path, never as steered user text. Its
-    // third argument is what the queue's barrier waits on, so the mock carries
-    // the full signature and the call below is type-checked.
+    // third argument is what the queue's barrier waits on, so the mock mirrors
+    // the queue's all-optional `drainQueue` shape. The file is on the
+    // typecheck exclude list (TODO(5691)), so the compiler does not enforce
+    // this; the shape is kept by convention.
     const midTurnDrainRef = {
       current: vi
         .fn<
           (
-            includeDeferred: boolean,
-            goalTurnActive: boolean,
-            peerMidTurnActive: boolean,
+            includeDeferred?: boolean,
+            goalTurnActive?: boolean,
+            peerMidTurnActive?: boolean,
           ) => string[]
         >()
         .mockReturnValue([]),
@@ -8162,6 +8302,157 @@ describe('useLlmStream', () => {
       ),
     ).toBe(false);
     expect(restore).not.toHaveBeenCalled();
+  });
+
+  it('threads the captured barrier verdict to the peer pop across the await gap', async () => {
+    // eligible() and the pop's budget read are two reads of one budget, and
+    // `hasAllowance` is monotone non-decreasing in `now` — stamps only age
+    // out. The boundary awaits between the two (resolving the steered user
+    // text), so a window rollover inside that gap flips a spent window into
+    // a payable one. The verdict is therefore captured once, before the gap,
+    // and handed to the pop: a pop that re-derives it would land the envelope
+    // in the same submission BEHIND the user text the barrier released — the
+    // exact overtake the barrier exists to prevent.
+    const T = 1_000_000;
+    let clock = T;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const budget = new PeerMidTurnBudget();
+    // The window is spent at T — one stamp, capacity 1 — so the boundary's
+    // capture must read false.
+    expect(budget.tryConsume(T, 1)).toBe(true);
+    const peerRestore = vi.fn();
+    const envelope =
+      '<cross_session_message from="/tmp/peer.sock" name="a">take the lead</cross_session_message>';
+    const projection = 'Session a: take the lead';
+    const peerDrain = vi.fn((options?: { barriered?: boolean }) => {
+      // Mirrors the container drain's contract: the boundary's captured
+      // verdict governs, and only a boundary that did NOT decline reaches
+      // the budget — whose read then lands on the rolled-over clock.
+      if (options?.barriered === false) return null;
+      if (!budget.tryConsume(Date.now(), 1)) return null;
+      return {
+        entries: [{ modelText: envelope, displayText: projection }],
+        restore: peerRestore,
+      };
+    });
+    Object.assign(peerDrain, {
+      eligible: () => budget.hasAllowance(Date.now(), 1),
+    });
+    const queueDrain = vi.fn<
+      (
+        includeDeferred?: boolean,
+        goalTurnActive?: boolean,
+        peerMidTurnActive?: boolean,
+      ) => string[]
+    >(() => {
+      // The await gap between the steer drain and the peer pop is the seam
+      // where the window rolls over in production; the mocked clock turns
+      // here — after the eligible read, before the pop's budget read.
+      clock = T + PEER_MID_TURN_WINDOW_MS;
+      return ['typed text'];
+    });
+    const midTurnDrainRef = { current: queueDrain };
+    const midTurnPeerDrainRef = { current: peerDrain };
+    const recordNotification = vi.fn();
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordNotification,
+    });
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-peer-barrier',
+        },
+        status: 'success',
+        responseSubmittedToLlm: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useLlmStream(
+        new MockedLlmClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        midTurnPeerDrainRef,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledTimes(1));
+    // The capture read the spent window: the boundary handed the queue drain
+    // a plain non-barrier call and asked the pop with the same captured
+    // verdict — which refused to pay the rolled-over window.
+    expect(queueDrain).toHaveBeenCalledWith(false, false, false);
+    expect(peerDrain).toHaveBeenCalledWith({ barriered: false });
+    expect(peerDrain).toHaveBeenCalledTimes(1);
+    // The user text still steered, and the envelope did not overtake it: it
+    // waits for the next boundary (or the idle drain) — nothing was popped,
+    // so nothing was lost and the budget was never spent twice.
+    expect(mockSendMessageStream).toHaveBeenCalledWith(
+      [...toolCallResponseParts, { text: 'typed text' }],
+      expect.any(AbortSignal),
+      'prompt-id-peer-barrier',
+      expect.objectContaining({ type: SendMessageType.ToolResult }),
+    );
+    expect(peerRestore).not.toHaveBeenCalled();
+    expect(recordNotification).not.toHaveBeenCalled();
+    nowSpy.mockRestore();
   });
 
   it('pushes an @-bearing cross-session envelope verbatim, never through the steer @path resolver', async () => {
@@ -8638,6 +8929,18 @@ describe('useLlmStream', () => {
       return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
     });
 
+    const midTurnDrainRef = {
+      current: vi
+        .fn<
+          (
+            includeDeferred?: boolean,
+            goalTurnActive?: boolean,
+            peerMidTurnActive?: boolean,
+          ) => string[]
+        >()
+        .mockReturnValue([]),
+    };
+
     renderHook(() =>
       useLlmStream(
         new MockedLlmClientClass(mockConfig),
@@ -8659,13 +8962,13 @@ describe('useLlmStream', () => {
         () => {},
         80,
         24,
-        { current: vi.fn<() => string[]>().mockReturnValue([]) },
+        midTurnDrainRef,
         undefined,
         undefined,
         undefined,
         undefined,
         undefined,
-        null,
+        { current: null },
       ),
     );
 
@@ -8683,6 +8986,11 @@ describe('useLlmStream', () => {
       expect.anything(),
     );
     expect(recordNotification).not.toHaveBeenCalled();
+    // No mid-turn peer delivery is wired, so the boundary's verdict is false
+    // — and the queue drain must be handed that false as its third argument
+    // rather than re-deriving the barrier at the queue. Hardcoding `true` at
+    // the boundary must fail here, not just at the queue layer.
+    expect(midTurnDrainRef.current).toHaveBeenCalledWith(false, false, false);
   });
 
   it('never consults the peer drain while a Goal turn owns the session', async () => {
