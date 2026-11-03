@@ -413,6 +413,46 @@ export default tseslint.config(
     },
   },
   {
+    // The reverse direction of the mid-turn-constants leaf guard: the config
+    // modules must not reach the peer runtime at all. The settings schema
+    // reads the mid-turn constants through the dependency-free leaf, and any
+    // other runtime import from `peerMessaging/` would evaluate the peer
+    // graph at schema-definition time and break the partially-mocking CLI
+    // suites at collection with an error naming a mock, not this import.
+    // Must sit below the cli-wide core-barrel block and carry its paths:
+    // flat config keeps only the last setting of a rule per file, so a
+    // patterns-only block would strip core-barrel coverage from the config
+    // files. Test files stay exempt, matching the core-barrel block
+    // (config.test.ts legitimately imports peerMessaging/enabled.js), and so
+    // do the legacy core-barrel files the cli-wide block still exempts.
+    files: ['packages/cli/src/config/**/*.{ts,tsx}'],
+    ignores: [
+      '**/*.{test,spec}.{ts,tsx}',
+      '**/__tests__/**',
+      '**/fixtures/**',
+      ...legacyCoreBarrelImports,
+    ],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          paths: coreBarrelPaths,
+          patterns: [
+            {
+              group: [
+                '**/peerMessaging/**',
+                '!**/peerMessaging/mid-turn-constants.js',
+              ],
+              allowTypeImports: true,
+              message:
+                'config must not import the peer runtime at runtime: the settings schema reads the mid-turn constants through the dependency-free leaf, and any other import evaluates the peer graph at schema-definition time and breaks partially-mocking CLI suites at collection. Import from mid-turn-constants.js, or move the unreadable-value reader into the leaf beside it.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     files: [
       'packages/web-shell/client/**/*.{ts,tsx}',
       'packages/web-shell/*.config.ts',
