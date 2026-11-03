@@ -123,6 +123,13 @@ entries are guarded before spreading. No input may throw.
   chunks through `TurnBoundaryCompactionEngine` with daemon-style adaptive
   growth — replay snapshot **31,746,417 bytes → 65,562 bytes (~484x)**; the
   fixed arm never breaches the default 8 MiB journal cap.
+- Real-daemon A/B (branch dist vs released 0.26.5, isolated daemons, real
+  model turns editing an ~870 KB file, 2026-11-03): during-turn session-open
+  peak **61,955,300 → 185,373 bytes**; browser-level `/load`
+  **72,830,493 bytes / 1,474 ms → 217,480 bytes / 99 ms**; first tool-card
+  render **2,931 → 821 ms**. After a daemon restart, the 18 warm and 18 cold
+  edit-result events are identical in content, rawOutput, and status; zero
+  turn errors across four turns per arm.
 - Suites: acp-bridge 2,866 passed; core compaction 58 passed; core
   chatRecordingService 187 passed; cli tool-call-emitter 72 passed.
 - Browser replay bundle: `packages/web-templates/src/export-html/build.mjs`

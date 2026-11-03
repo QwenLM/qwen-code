@@ -96,6 +96,12 @@ prompt；旧版本录制的字段更少），压缩工具被加固为全函数�
   式自适应增长的 `TurnBoundaryCompactionEngine` —— 回放快照
   **31,746,417 字节 → 65,562 字节（约 484 倍）**；修复臂从不突破默认 8 MiB journal
   上限。
+- 真实 daemon A/B（分支 dist 对已发布 0.26.5，隔离 daemon，真实模型 turn 编辑约
+  870 KB 文件，2026-11-03）：turn 运行中会话打开峰值
+  **61,955,300 → 185,373 字节**；浏览器级 `/load`
+  **72,830,493 字节 / 1,474 ms → 217,480 字节 / 99 ms**；首个工具卡片渲染
+  **2,931 → 821 ms**。重启 daemon 后，18 个热回放与 18 个冷回放编辑结果事件在
+  content、rawOutput、status 上完全一致；每臂 4 轮 turn 零错误。
 - 套件：acp-bridge 2,866 通过；core 压缩 58 通过；core chatRecordingService 187
   通过；cli tool-call-emitter 72 通过。
 - 浏览器回放 bundle：`packages/web-templates/src/export-html/build.mjs` 退出码
