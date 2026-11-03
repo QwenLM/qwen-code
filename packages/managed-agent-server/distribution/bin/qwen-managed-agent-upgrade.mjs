@@ -1090,7 +1090,14 @@ export async function migrationScripts(jar) {
       );
     }
     const content = entry.method === 8 ? inflateRawSync(data) : data;
-    scripts.set(script, createHash('sha256').update(content).digest('hex'));
+    const digest = createHash('sha256').update(content).digest('hex');
+    // The same path in the classes and a module, or in two modules, is one
+    // script to Flyway only when the copies match; otherwise which one the
+    // database gets depends on the class loader, so the row cannot tell.
+    if (scripts.has(script) && scripts.get(script) !== digest) {
+      throw new Error(`${jar} ships two different copies of ${script}`);
+    }
+    scripts.set(script, digest);
   };
   try {
     const { size } = await handle.stat();

@@ -821,6 +821,27 @@ test('reads the Flyway scripts out of the nested jar of a module', async (t) => 
     'db/managed-schema/V3__upper.SQL': sha256('insert;\n'),
   });
 
+  // One path shipped twice is one script when the copies match, and a
+  // misread when they do not.
+  const twice = (text) =>
+    zip([
+      ['BOOT-INF/classes/db/managed-schema/V1__base.sql', 'create table a;\n'],
+      [
+        'BOOT-INF/lib/qwen-managed-agent-persistence.jar',
+        zip([['db/managed-schema/V1__base.sql', text]]),
+        0,
+      ],
+    ]);
+  await writeFile(jar, twice('create table a;\n'));
+  assert.deepEqual(Object.fromEntries(await migrationScripts(jar)), {
+    'db/managed-schema/V1__base.sql': sha256('create table a;\n'),
+  });
+  await writeFile(jar, twice('create table b;\n'));
+  await assert.rejects(
+    migrationScripts(jar),
+    /^Error: .*server\.jar ships two different copies of db\/managed-schema\/V1__base\.sql$/,
+  );
+
   // A nested jar that is none, or whose directory runs past its end, is a
   // misread, not a module without scripts.
   await writeFile(jar, zip([['BOOT-INF/lib/broken.jar', 'not a jar', 0]]));
