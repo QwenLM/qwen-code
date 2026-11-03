@@ -6459,44 +6459,47 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(ch.cursor.dispatchedComments).toContain('C_1001');
     });
 
-    it('freezes the cursor when the publication audit is unreadable (R5-A1)', async () => {
-      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
-      boundSessions.listPrBindings.mockResolvedValue({
-        bindings: [],
-        partial: false,
-      });
-      // An unreadable audit (here: a directory at the audit path) must
-      // fail CLOSED on the whole poll: skipping the notification while
-      // the cursor commits would mark it read and never re-list it —
-      // permanent silent consumption instead of the promised retry.
-      const auditPath = inboundTaskPath().replace(
-        'github-inbound-tasks.json',
-        'github-audit.jsonl',
-      );
-      mkdirSync(auditPath, { recursive: true });
-      mockOctokit.paginate
-        .mockResolvedValueOnce([prNotification()])
-        .mockResolvedValueOnce([makeComment()]);
-      await pollOnce();
-      expect(channel.inboundEnvelopes).toHaveLength(0);
-      expect(existsSync(inboundTaskPath())).toBe(false);
-      expect(
-        mockOctokit.rest.activity.markNotificationsAsRead,
-      ).not.toHaveBeenCalled();
-      const ch = channel as unknown as {
-        cursor: { lastProcessedAt: string };
-      };
-      expect(ch.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
+    it.each([true, false])(
+      'freezes the cursor when the publication audit is unreadable, deliverToBoundSessions=%s (R5-A1)',
+      async (deliverToBoundSessions) => {
+        await initChannel({ deliverToBoundSessions }, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [],
+          partial: false,
+        });
+        // An unreadable audit (here: a directory at the audit path) must
+        // fail CLOSED on the whole poll: skipping the notification while
+        // the cursor commits would mark it read and never re-list it —
+        // permanent silent consumption instead of the promised retry.
+        const auditPath = inboundTaskPath().replace(
+          'github-inbound-tasks.json',
+          'github-audit.jsonl',
+        );
+        mkdirSync(auditPath, { recursive: true });
+        mockOctokit.paginate
+          .mockResolvedValueOnce([prNotification()])
+          .mockResolvedValueOnce([makeComment()]);
+        await pollOnce();
+        expect(channel.inboundEnvelopes).toHaveLength(0);
+        expect(existsSync(inboundTaskPath())).toBe(false);
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).not.toHaveBeenCalled();
+        const ch = channel as unknown as {
+          cursor: { lastProcessedAt: string };
+        };
+        expect(ch.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
 
-      // Once the audit is readable again, the SAME event delivers: the
-      // frozen cursor re-listed it.
-      rmSync(auditPath, { recursive: true, force: true });
-      mockOctokit.paginate
-        .mockResolvedValueOnce([prNotification()])
-        .mockResolvedValueOnce([makeComment()]);
-      await pollOnce();
-      expect(channel.inboundEnvelopes).toHaveLength(1);
-    });
+        // Once the audit is readable again, the SAME event delivers: the
+        // frozen cursor re-listed it.
+        rmSync(auditPath, { recursive: true, force: true });
+        mockOctokit.paginate
+          .mockResolvedValueOnce([prNotification()])
+          .mockResolvedValueOnce([makeComment()]);
+        await pollOnce();
+        expect(channel.inboundEnvelopes).toHaveLength(1);
+      },
+    );
 
     it('does not record the direct-lane key when the audit freeze refuses dispatch (R6-A1)', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });
