@@ -369,10 +369,12 @@ authority to certify the round.
    not public keys) and credential-bearing git config: URLs in
    `remote.*.url`, `remote.*.pushurl`, `submodule.*.url` or
    `url.*.insteadOf` (any userinfo on http(s), including a token used as the
-   username — the bare `git@` account name carries no secret and stays
-   benign, like `ssh://git@`), plus `http.*.extraheader` values carrying an
-   `Authorization` or `Proxy-Authorization` header. It leaves installed
-   dependencies and build output alone — a vendored git dependency under
+   username — the bare `git@` account name, in any spelling, carries no
+   secret and stays benign, like `ssh://git@`), plus `http.*.extraheader`
+   values carrying an `Authorization` or `Proxy-Authorization` header. The
+   config enumeration follows `include.path`, so a credential defined in an
+   included worktree file is refused too. It leaves installed dependencies
+   and build output alone — a vendored git dependency under
    `node_modules`/`dist` is excluded, not refused — and refuses a nested
    git repository outright: git does not descend into it, so a credential
    file inside one would otherwise pass silently. The abort is structural

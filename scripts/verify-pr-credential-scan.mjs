@@ -138,8 +138,13 @@ export function nestedGitRepos(root, { maxBuffer = 8 * 1024 * 1024 } = {}) {
  * RFC 7235 pair, `Authorization` and `Proxy-Authorization`; other header
  * names stay clean. On an http(s) URL any userinfo counts: a token
  * used as the username (`https://<pat>@…`) is as readable as `user:pass@`.
- * The bare conventional username `git@` carries no secret and stays benign,
- * matching `ssh://git@…` (SSH keys are not in the URL either).
+ * The bare conventional username `git@` carries no secret and stays benign
+ * in any spelling, matching `ssh://git@…` (SSH keys are not in the URL
+ * either). `--includes` is load-bearing for the same reason as in prepare's
+ * filter enumeration: `--local` alone names one file and skips
+ * `include.path`, while the `git config --get` PR code uses follows it — a
+ * credential defined in an included worktree file would otherwise be
+ * readable in the tree but invisible to the scan.
  */
 export function credentialBearingConfig(
   root,
@@ -152,6 +157,7 @@ export function credentialBearingConfig(
       root,
       'config',
       '--local',
+      '--includes',
       '--get-regexp',
       '^(remote\\..*\\.(url|pushurl)|url\\..*\\.insteadof|submodule\\..*\\.url|http\\..*\\.extraheader)$',
     ],
@@ -166,9 +172,10 @@ export function credentialBearingConfig(
   }
   const hasUserinfo = (value) => {
     const match = /^https?:\/\/([^/@\s]+)@/i.exec(value);
-    // `git` is the conventional account name, not a secret; any other
-    // username-only userinfo may be a token, so it stays refused.
-    return match !== null && match[1] !== 'git';
+    // `git` is the conventional account name, not a secret, and account
+    // names are case-insensitive; any other username-only userinfo may be
+    // a token, so it stays refused.
+    return match !== null && match[1].toLowerCase() !== 'git';
   };
   const isAuthHeader = (value) =>
     /^\s*(?:proxy-)?authorization\s*:/i.test(value);

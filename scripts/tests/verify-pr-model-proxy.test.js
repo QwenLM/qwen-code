@@ -748,6 +748,7 @@ describe('local container recipe pins', () => {
     expect(skill).toContain('`Authorization` or `Proxy-Authorization` header');
     expect(skill).toContain('bare `git@` account name');
     expect(skill).toMatch(/including one arriving through\s+`include\.path`/);
+    expect(skill).toContain('config enumeration follows `include.path`');
   });
 
   it('snapshots the previous report and pins both checker call sites', () => {

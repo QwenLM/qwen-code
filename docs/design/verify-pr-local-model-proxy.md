@@ -71,7 +71,9 @@ A host-side relay plus a recipe that names its trust boundaries.
   (trusted copy) rejects credential-shaped ignored files and
   credential-bearing git config — fetch, push and submodule URLs,
   `url.*.insteadOf` rewrites, and `Authorization`/`Proxy-Authorization`
-  extraheaders; that scan lists ignored files one by one and leaves
+  extraheaders — following `include.path` like prepare's filter
+  enumeration, so a credential defined in an included worktree file is
+  refused too; that scan lists ignored files one by one and leaves
   `node_modules`/`dist` alone, so a built tree is not refused. The round's
   engine is the released CLI unless the tree's own build is installed over
   it.
@@ -101,6 +103,12 @@ the real key.
   build in the tree and write its artifacts there. The trust boundary is
   enforced by running the privileged host steps from `<trusted-clone>` and by
   pinning the expected head from a host-held snapshot.
+- **Scan `credential.helper` commands for inline tokens.** Declined as out
+  of the URL/header contract: a helper is a command, and spotting an inline
+  token in one means parsing shell. Prepare's own git reads already disable
+  `credential.helper`, and the recipe re-clones rather than reusing a
+  PR-controlled `.git`; the residual shape is recorded here rather than
+  silently dropped.
 
 ## Acceptance
 
@@ -115,10 +123,12 @@ the real key.
   `.netrc` or `gha-creds-*.json` is refused (a `.pub` public key is not), as
   is any http(s) userinfo in `remote.*.url`, `remote.*.pushurl`,
   `submodule.*.url` or `url.*.insteadOf`, including a token used as the
-  username (the bare `git@` account name carries no secret and stays benign,
-  like `ssh://git@`), and any `http.*.extraheader` value carrying an
-  `Authorization` or `Proxy-Authorization` header (other header names stay
-  clean); installed `node_modules`/`dist` are ignored at any depth,
+  username (the bare `git@` account name carries no secret and stays benign
+  in any spelling, like `ssh://git@`), and any `http.*.extraheader` value
+  carrying an `Authorization` or `Proxy-Authorization` header (other header
+  names stay clean); a credential arriving through `include.path` is
+  refused on every enumerated key, and a credential-free include stays
+  clean; installed `node_modules`/`dist` are ignored at any depth,
   including inside a workspace package, and a vendored git repository under
   them is excluded rather than refused; enumeration is path-limited so a
   large ignored dependency tree is never buffered; a nested project git

@@ -251,6 +251,46 @@ describe('scanIgnoredCredentials', () => {
     expect(scanIgnoredCredentials(dir)).toEqual([]);
   });
 
+  // The credential-side twin of prepare's include.path filter bypass:
+  // `--local` alone names one file, while the `git config --get` PR code
+  // uses follows includes — an included credential must be refused too.
+  it('refuses credentials that arrive through include.path', () => {
+    const cases = [
+      '[remote "origin"]\n\turl = https://ghp_FAKEPAT@github.com/o/r.git\n',
+      '[remote "origin"]\n\tpushurl = https://ghp_FAKEPAT@github.com/o/r.git\n',
+      '[http "https://github.com/"]\n\textraheader = AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46Z2hwX0ZBS0VQQVQ=\n',
+    ];
+    for (const content of cases) {
+      const dir = makeRepo(['src/app.ts'], ['tmp/']);
+      mkdirSync(join(dir, 'tmp'), { recursive: true });
+      writeFileSync(join(dir, 'tmp', 'creds.inc'), content);
+      execFileSync(
+        'git',
+        ['config', '--local', 'include.path', '../tmp/creds.inc'],
+        { cwd: dir, env: gitEnv },
+      );
+      expect(() => scanIgnoredCredentials(dir), content).toThrow(
+        /credential-bearing git config/,
+      );
+      const result = run(dir);
+      expect(result.status, content).toBe(1);
+      expect(result.stderr, content).toContain('credential-bearing git config');
+    }
+    // A credential-free include is zero collateral: same shape, benign URL.
+    const dir = makeRepo(['src/app.ts'], ['tmp/']);
+    mkdirSync(join(dir, 'tmp'), { recursive: true });
+    writeFileSync(
+      join(dir, 'tmp', 'creds.inc'),
+      '[remote "origin"]\n\turl = https://github.com/o/r.git\n',
+    );
+    execFileSync(
+      'git',
+      ['config', '--local', 'include.path', '../tmp/creds.inc'],
+      { cwd: dir, env: gitEnv },
+    );
+    expect(scanIgnoredCredentials(dir)).toEqual([]);
+  });
+
   it('keeps ssh URLs, the bare git username and public keys out of the refusal', () => {
     const dir = makeRepo(['id_rsa.pub'], ['id_rsa*']);
     execFileSync(
@@ -279,6 +319,22 @@ describe('scanIgnoredCredentials', () => {
     );
     expect(scanIgnoredCredentials(dir2)).toEqual([]);
     expect(run(dir2).status).toBe(0);
+    // Account names are case-insensitive: the uppercase spellings carry
+    // the same non-secret and must not re-introduce the false refusal.
+    for (const spelling of ['GIT', 'Git']) {
+      execFileSync(
+        'git',
+        [
+          'config',
+          '--local',
+          'remote.origin.url',
+          `https://${spelling}@github.com/o/r.git`,
+        ],
+        { cwd: dir2, env: gitEnv },
+      );
+      expect(scanIgnoredCredentials(dir2), spelling).toEqual([]);
+      expect(run(dir2).status, spelling).toBe(0);
+    }
     // A password after the same username is still a credential.
     execFileSync(
       'git',
