@@ -194,14 +194,15 @@ cross-cutting "how the system works today" tour.
    nested records/constants resolve through inheritance (imports of nested
    types must name the owning role). A role-composition pin keeps the
    composite empty and owns no surface of its own. Consumer audit
-   (call-level, corrected after review): 18 single-role consumers inject
+   (call-level, corrected after review): 22 single-role consumers inject
    their role directly — lifecycle (`RenameEvidence`, `TurnInputEvidence`,
    `ChildLifecycleAdmissions`, `ActionResponseCoordinator`,
    `ContextCompressionCoordinator`, `ContextCompressionService`,
-   `ManagedTaskCancelService`, `OperationReconciler`), query
-   (`ManagedRuntimeCoordinator`,
+   `ManagedTaskCancelService`, `OperationReconciler`, `TaskCancelCoordinator`),
+   query (`ManagedRuntimeCoordinator`,
    `SessionRecoveryService`, `ManagedExtensionCommandVerifier`,
-   `ManagedSessionStore`), policy (`ManagedMcpManagementService`,
+   `ManagedSessionStore`, `ChildWorkspaceService`, `WorkspaceRuntimeResolver`,
+   `ManagedAutomationService`), policy (`ManagedMcpManagementService`,
    `ManagedExtensionManagementService`), event projection
    (`MessageMaterializer`, `ReplayFloorAdvancer`, `ManagedToolResultStore`),
    and turn execution (`SessionWorktreeService`). Most of the remaining
@@ -210,13 +211,11 @@ cross-cutting "how the system works today" tour.
    `EmbeddedRuntimeBroker` forwards the store only into
    `WorkspaceRuntimeResolver` and `ManagedRuntimeCoordinator`, which both
    take `SessionQueryStore`, so it is itself a candidate for the same
-   narrowing.
-   Four more single-role consumers were initially deferred because their
-   `this(...)` calls are constructor delegation within the same class, not
-   forwarding; they have since been narrowed too: `ChildWorkspaceService`,
-   `WorkspaceRuntimeResolver` and `ManagedAutomationService` to
-   `SessionQueryStore`, and `TaskCancelCoordinator` to
-   `SessionLifecycleStore`.
+   narrowing. Four of these — `ChildWorkspaceService`,
+   `WorkspaceRuntimeResolver`, `ManagedAutomationService` and
+   `TaskCancelCoordinator` — were initially deferred because their
+   `this(...)` calls are constructor delegation within the same class rather
+   than forwarding, and were narrowed in a follow-up to #15962.
    `AcceptanceEvidence.settle` now takes `SessionLifecycleStore` directly,
    which also let `OperationReconciler` narrow. Narrower
    injection spreads further as P1 splits the implementation along the same
