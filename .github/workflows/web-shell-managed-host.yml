@@ -77,12 +77,18 @@ jobs:
           npm config set fetch-timeout 300000
 
       # The entry bundles its own React and runtime dependencies, so it needs no
-      # sibling workspace `dist/`. Skipping `prepare` keeps this lane to the one
-      # pass it exists to check instead of rebuilding the monorepo first.
+      # sibling workspace `dist/` except core's: it imports one compiled core
+      # module. Skipping `prepare` keeps this lane to that single package
+      # instead of rebuilding the monorepo first.
       - name: 'Install dependencies'
         env:
           QWEN_SKIP_PREPARE: '1'
         run: 'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only'
+
+      # That core module is only resolvable through the package `exports` map,
+      # which points at `dist/` — nothing else in this lane produces it.
+      - name: 'Build core for the managed host entry'
+        run: 'corepack pnpm --filter @qwen-code/qwen-code-core build'
 
       - name: 'Build the managed host entry'
         run: 'npm run build:managed-host --workspace=@qwen-code/web-shell'
