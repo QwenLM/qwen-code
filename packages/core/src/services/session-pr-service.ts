@@ -47,7 +47,7 @@ export type SessionPrState = 'open' | 'merged' | 'closed';
 /**
  * Why a binding exists. The worktree slug/branch convention names the PR the
  * session EXISTS FOR; a gh-verified create names the PR the session CREATED;
- * a `/review` command names a PR it merely looked at.
+ * a `/review` or `/verify-pr` command names a PR it merely looked at.
  */
 export type SessionPrSource = 'create' | 'worktree' | 'review';
 
@@ -142,21 +142,35 @@ function isValidSessionPr(value: unknown): value is SessionPr {
 /**
  * Runtime shape check for a parsed sidecar object. Guards against partial
  * writes and manual edits (same rationale as the worktree sidecar check).
+ * An EMPTY list is a valid shape: replaceSessionPrs's explicit empty plan
+ * clears the bindings by writing {prs: []}, and that clear must read back
+ * as an authoritative "no bindings", not as corruption.
  */
 function isValidSessionPrList(value: unknown): value is SessionPrList {
   if (value === null || typeof value !== 'object') return false;
   const prs = (value as Record<string, unknown>)['prs'];
-  return Array.isArray(prs) && prs.length > 0 && prs.every(isValidSessionPr);
+  return Array.isArray(prs) && prs.every(isValidSessionPr);
 }
 
+export type SessionPrsReadResult =
+  | { status: 'ok'; prs: SessionPr[] }
+  | { status: 'absent' }
+  | { status: 'invalid' };
+
 /**
- * Read the sidecar. Returns null when the file does not exist, is invalid
- * JSON, or fails the shape check. Throws only on unexpected I/O errors.
+ * Read the sidecar, distinguishing an ABSENT file (the session was never
+ * bound, or its last binding was removed — an authoritative "no bindings")
+ * from an INVALID one (bad JSON or failed shape check — the bindings are
+ * unknown, not empty). A well-formed EMPTY list is a valid clear, not
+ * corruption: it reads back as ok with no entries, the same authoritative
+ * "no bindings" as an absent file. Callers that project bindings into
+ * authoritative snapshots need the distinction; a corrupt sidecar must not
+ * read as an unbind. Throws only on unexpected I/O errors.
  */
-export async function readSessionPrs(
+export async function readSessionPrsDetailed(
   filePath: string,
   options: { signal?: AbortSignal } = {},
-): Promise<SessionPr[] | null> {
+): Promise<SessionPrsReadResult> {
   let raw: string;
   try {
     options.signal?.throwIfAborted();
@@ -168,7 +182,9 @@ export async function readSessionPrs(
       : await fs.readFile(filePath, 'utf-8');
   } catch (error) {
     options.signal?.throwIfAborted();
-    if (isNodeError(error) && error.code === 'ENOENT') return null;
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return { status: 'absent' };
+    }
     throw error;
   }
   options.signal?.throwIfAborted();
@@ -176,11 +192,23 @@ export async function readSessionPrs(
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return null;
+    return { status: 'invalid' };
   }
   options.signal?.throwIfAborted();
-  if (!isValidSessionPrList(parsed)) return null;
-  return parsed.prs;
+  if (!isValidSessionPrList(parsed)) return { status: 'invalid' };
+  return { status: 'ok', prs: parsed.prs };
+}
+
+/**
+ * Read the sidecar. Returns null when the file does not exist, is invalid
+ * JSON, or fails the shape check. Throws only on unexpected I/O errors.
+ */
+export async function readSessionPrs(
+  filePath: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<SessionPr[] | null> {
+  const result = await readSessionPrsDetailed(filePath, options);
+  return result.status === 'ok' ? result.prs : null;
 }
 
 /** Writes the PR sidecar via `atomicWriteJSON`. */

@@ -273,6 +273,11 @@ function setupGoalClient() {
     getModel: vi.fn(() => 'test-model'),
     getSkipNextSpeakerCheck: vi.fn(() => false),
     getSkipLoopDetection: vi.fn(() => false),
+    getMaxToolCallsPerTurn: vi.fn(() => Number.POSITIVE_INFINITY),
+    getToolRegistry: vi.fn(() => ({
+      getAllToolNames: () => [],
+      getTool: () => undefined,
+    })),
     startActiveTodoWorkChain: vi.fn(),
     startAutomaticActiveTodoWorkChain: vi.fn(),
     endAutomaticActiveTodoWorkChain: vi.fn(),
@@ -771,6 +776,27 @@ describe('LlmClient Goal admission', () => {
     expect(runtime.dispatch).not.toHaveBeenCalled();
   });
 
+  it('leaves a host-owned proposal parked when its turn exits with a provider error', async () => {
+    const { client, config, runtime } = setupGoalClient();
+    vi.mocked(config.getGoalProposalHostSupported).mockReturnValue(true);
+    vi.mocked(config.getMaxSessionTurns).mockReturnValue(0);
+    withoutGoal(runtime);
+    const store = pendingGoalProposalStore();
+    useProposals(config, store.take, {
+      getSkipNextSpeakerCheck: vi.fn(() => true),
+    });
+    turnMocks.run.mockImplementationOnce(async function* () {
+      store.set(proposal('host proposal', 'host-failed-key'));
+      yield { type: LlmEventType.Error, value: { error: { status: 500 } } };
+    });
+
+    await drain(userQuery(client, 'set a goal for this', 'host-failed-key'));
+
+    // The host settles it when its turn ends and reports that it did not start.
+    expect(store.get()).toEqual(proposal('host proposal', 'host-failed-key'));
+    expect(runtime.dispatch).not.toHaveBeenCalled();
+  });
+
   it('drops a proposal when cancellation lands during runtime readiness', async () => {
     const { client, config, runtime } = setupGoalClient();
     // No Goal at the boundary, as in production: the only thing standing
@@ -1070,6 +1096,45 @@ describe('LlmClient Goal admission', () => {
     });
   });
 
+  it('leaves the runtime message of a Goal turn to a host that recorded it', async () => {
+    const { client, recorder, order } = setupGoalClient();
+
+    await drain(
+      goalTurn(client, 'Continue the Goal.', { userTurnRecordedByHost: true }),
+    );
+
+    expect(recorder.recordGoalRuntimeMessage).not.toHaveBeenCalled();
+    expect(order).toContain('finish');
+  });
+
+  it("continues a Goal turn under its permit from a host's stop policy", async () => {
+    const { client, runtime, order } = setupGoalClient();
+    const policy = {
+      continueAt: vi
+        .fn()
+        .mockResolvedValueOnce([{ text: 'Finish the todos.' }])
+        .mockResolvedValue(undefined),
+    };
+    const getInterruptedGoalPauseReason = vi.fn(() => 'host reason');
+    const sendSpy = vi.spyOn(client, 'sendMessageStream');
+
+    await drain(
+      goalTurn(client, 'Continue the Goal.', {
+        stopPolicies: [policy],
+        getInterruptedGoalPauseReason,
+      }),
+    );
+
+    expect(policy.continueAt).toHaveBeenCalledTimes(2);
+    expect(sendSpy.mock.calls[1]?.[3]).toMatchObject({
+      type: SendMessageType.Hook,
+      ...exactPermit,
+      getInterruptedGoalPauseReason,
+    });
+    expect(runtime.finishTurn).toHaveBeenCalledOnce();
+    expect(order.filter((step) => step === 'finish')).toHaveLength(1);
+  });
+
   it('fails closed before recording or sampling when an automatic permit is stale', async () => {
     const { client, runtime, recorder } = setupGoalClient();
     vi.mocked(runtime.permitForTurn).mockReturnValue(undefined);
@@ -1244,6 +1309,9 @@ describe('LlmClient Goal admission', () => {
       'Dependency completed',
       undefined,
       permit,
+      // The send path stamps every delivered notification turn entry, which
+      // is what lets recovery tell it apart from a cold pre-send record.
+      true,
     );
     expect(recorder.recordGoalRuntimeMessage).not.toHaveBeenCalled();
     expect(order).toEqual(['flush', 'finish']);

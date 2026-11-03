@@ -20,7 +20,10 @@ import {
   SessionNotArchivedError,
   SessionNotFoundError,
 } from '../acp-session-bridge.js';
-import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  LOG_LINE_UNSAFE_RE,
+  writeStderrLine,
+} from '../../utils/stdioHelpers.js';
 import { safeLogValue } from './request-helpers.js';
 import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import {
@@ -901,12 +904,6 @@ export function logSessionArchiveWarning(message: string): void {
   writeStderrLine(`qwen serve: ${sanitizeLogLine(message)}`);
 }
 
-// Control characters are intentionally stripped from daemon log lines.
-/* eslint-disable no-control-regex */
-const LOG_LINE_UNSAFE_RE =
-  /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g;
-/* eslint-enable no-control-regex */
-
 function sanitizeLogLine(message: string): string {
   return message.replace(LOG_LINE_UNSAFE_RE, ' ').slice(0, 4096);
 }
@@ -918,6 +915,7 @@ export async function archiveDaemonSessions(params: {
   coordinator: SessionArchiveCoordinator;
   coordinatorLockHeld?: boolean;
   resolveConflicts?: boolean;
+  requireIdle?: boolean;
   assertCanMutate?: () => void;
 }): Promise<DaemonArchiveSessionsResult> {
   const {
@@ -927,6 +925,7 @@ export async function archiveDaemonSessions(params: {
     coordinator,
     coordinatorLockHeld = false,
     resolveConflicts = false,
+    requireIdle = false,
     assertCanMutate,
   } = params;
   const uniqueSessionIds = [
@@ -945,9 +944,13 @@ export async function archiveDaemonSessions(params: {
           try {
             await bridge.closeSession(sessionId, undefined, {
               requireAgentClose: true,
+              requireIdle,
             });
           } catch (error) {
-            if (!isSessionNotFoundError(error)) {
+            if (
+              !isSessionNotFoundError(error) ||
+              (error as SessionNotFoundError).code === 'session_closing'
+            ) {
               return {
                 kind: 'error' as const,
                 error,

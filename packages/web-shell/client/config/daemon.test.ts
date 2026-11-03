@@ -878,3 +878,83 @@ describe('persistDaemonToken', () => {
     expect(mod.getDaemonToken()).toBe('mem-only');
   });
 });
+
+describe('fanout origins (#13727)', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  async function importAt(pageUrl: string) {
+    const url = new URL(pageUrl);
+    Object.defineProperty(window, 'location', {
+      value: {
+        origin: url.origin,
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port,
+        href: url.href,
+        search: url.search,
+      },
+      writable: true,
+      configurable: true,
+    });
+    return import('./daemon');
+  }
+
+  it('parses repeated validated origins, dedupes, and drops the page origin', async () => {
+    const mod = await importAt(
+      'http://localhost:5173/?fanout=https%3A%2F%2Fa.example' +
+        '&fanout=http%3A%2F%2F10.0.0.2%3A4170' +
+        '&fanout=https%3A%2F%2Fa.example' +
+        '&fanout=http%3A%2F%2Flocalhost%3A5173' +
+        '&fanout=file%3A%2F%2F%2Ftmp',
+    );
+    expect(mod.getFanoutOrigins()).toEqual([
+      'https://a.example',
+      'http://10.0.0.2:4170',
+    ]);
+  });
+
+  it('returns empty when no fanout params are present', async () => {
+    const mod = await importAt('http://localhost:5173/');
+    expect(mod.getFanoutOrigins()).toEqual([]);
+  });
+
+  it('syncFanoutParams rewrites only the fanout set via replaceState', async () => {
+    const mod = await importAt(
+      'http://localhost:5173/?daemon=https%3A%2F%2Ffocus.example' +
+        '&workspace=ws-1&fanout=https%3A%2F%2Fstale.example&token=sekret',
+    );
+    const spy = vi
+      .spyOn(window.history, 'replaceState')
+      .mockImplementation(() => {});
+    mod.syncFanoutParams([
+      'https://a.example',
+      'http://10.0.0.2:4170',
+      // The page origin never needs a param — CSP 'self' covers it.
+      'http://localhost:5173',
+    ]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    const next = new URL(spy.mock.calls[0][2] as string);
+    expect(next.searchParams.get('daemon')).toBe('https://focus.example');
+    expect(next.searchParams.get('workspace')).toBe('ws-1');
+    expect(next.searchParams.get('token')).toBe('sekret');
+    expect(next.searchParams.getAll('fanout')).toEqual([
+      'https://a.example',
+      'http://10.0.0.2:4170',
+    ]);
+    spy.mockRestore();
+  });
+
+  it('syncFanoutParams no-ops when the set is already in sync', async () => {
+    const mod = await importAt(
+      'http://localhost:5173/?fanout=https%3A%2F%2Fa.example',
+    );
+    const spy = vi
+      .spyOn(window.history, 'replaceState')
+      .mockImplementation(() => {});
+    mod.syncFanoutParams(['https://a.example', 'http://localhost:5173']);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+});

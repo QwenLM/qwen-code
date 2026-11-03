@@ -15,6 +15,7 @@ import {
 import type { AnyDeclarativeTool } from './tools.js';
 import {
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  describeBridgedArgumentError,
   resolveDeferredToolCall,
   ToolCallTool,
 } from './tool-call.js';
@@ -112,6 +113,19 @@ const NOT_AVAILABLE = refusal(
   ToolErrorType.EXECUTION_DENIED,
   'not available to this agent',
 );
+
+describe('describeBridgedArgumentError', () => {
+  it('names the target, the bridge and where to read the schema', () => {
+    expect(
+      describeBridgedArgumentError(
+        'web_fetch',
+        "params must have required property 'url'.",
+      ),
+    ).toBe(
+      `Deferred tool "web_fetch" (called through ${ToolNames.TOOL_CALL}) rejected the arguments: params must have required property 'url'. Pass arguments matching the schema returned by ${ToolNames.TOOL_SEARCH} for "web_fetch".`,
+    );
+  });
+});
 
 describe('ToolCallTool', () => {
   it('is an always-visible bridge with a stable generic schema', () => {

@@ -346,24 +346,31 @@ Code action kinds:
 
 ## Security
 
-Language servers run with the permissions of the Qwen Code process and can
-execute code. Project `.lsp.json` entries are always loaded with
-`trustRequired: true`, so a project file cannot opt itself out of the trust
-check. The check blocks a server only when the workspace is considered
-untrusted. Folder trust (`security.folderTrust.enabled`) is disabled by default;
-while disabled, every workspace is considered trusted and `/trust` is not
-available. An IDE may also report a workspace as untrusted.
+Language servers run with your user permissions and can execute code. Servers configured by a workspace's `.lsp.json` require **explicit folder trust**, including their executable availability probes and hot reloads. Enable `security.folderTrust.enabled` in user settings and trust the directory, or grant workspace trust through your IDE. Disabling folder trust does not authorize workspace LSP configurations, including in YOLO mode.
 
 ### Trust Controls
 
-- **Project `.lsp.json`**: The configured `trustRequired` value is ignored and
-  forced to `true`; it blocks startup only when the workspace is considered
-  untrusted
-- **Extension configuration**: An extension may set `trustRequired: false` for
-  an individual server, but the global folder-trust setting can still require
-  all servers to run only in trusted workspaces
+- **Explicitly Trusted Workspace**: Workspace LSP servers start if configured.
+- **No Explicit Trust**: Workspace `.lsp.json` servers are skipped. The repository cannot override this by setting `trustRequired: false` or declaring an extension source.
 
-When folder trust is enabled, use `/trust` to mark a workspace as trusted.
+After enabling folder trust in user settings, use the startup trust dialog or `/trust` to trust the directory. Restart after changing the CLI's trust decision.
+
+### Per-Server Trust Override
+
+Installed extensions retain their existing trust policy. An extension can declare `trustRequired: false` when the host permits LSP discovery in untrusted workspaces. This override is ignored in workspace `.lsp.json`:
+
+```json
+{
+  "safe-server": {
+    "command": "safe-language-server",
+    "args": ["--stdio"],
+    "trustRequired": false,
+    "extensionToLanguage": {
+      ".safe": "safe"
+    }
+  }
+}
+```
 
 ## Troubleshooting
 

@@ -92,6 +92,8 @@ describe('HookSystem', () => {
   beforeEach(() => {
     mockConfig = {
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      isTrustedFolder: vi.fn().mockReturnValue(true),
+      isExplicitlyTrustedFolder: vi.fn().mockReturnValue(false),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       getWorkingDir: vi.fn().mockReturnValue('/test/cwd'),
@@ -178,6 +180,7 @@ describe('HookSystem', () => {
         expect.any(SessionHooksManager),
         undefined,
         hookSystem.runtimeId,
+        undefined,
       );
     });
   });
@@ -234,6 +237,25 @@ describe('HookSystem', () => {
       expect(hookSystem.getAllHooks()).toEqual(mockHooks);
       expect(mockHookRegistry.getAllHooks).toHaveBeenCalled();
     });
+  });
+
+  it('matches project skill hooks only while explicitly trusted', () => {
+    hookSystem
+      .getSessionHooksManager()
+      .addSessionHook(
+        'test-session-id',
+        HookEventName.PreToolUse,
+        'Bash',
+        { type: HookType.Command, command: 'echo check' },
+        { trustGated: true },
+      );
+    expect(
+      hookSystem.hasHooksMatchingTool(HookEventName.PreToolUse, 'Bash'),
+    ).toBe(false);
+    vi.mocked(mockConfig.isExplicitlyTrustedFolder).mockReturnValue(true);
+    expect(
+      hookSystem.hasHooksMatchingTool(HookEventName.PreToolUse, 'Bash'),
+    ).toBe(true);
   });
 
   describe('hasHooksForEvent', () => {

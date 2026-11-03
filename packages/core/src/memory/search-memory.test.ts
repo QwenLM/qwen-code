@@ -779,7 +779,7 @@ describe('executeSearchMemory', () => {
     ]);
   });
 
-  it('reports a ref that disappears after the snapshot', async () => {
+  it('reports a ref unavailable or changed after the snapshot', async () => {
     vi.mocked(rereadAutoMemoryDocument).mockResolvedValueOnce(null);
 
     const result = expectContentResult(
@@ -791,7 +791,9 @@ describe('executeSearchMemory', () => {
     );
 
     expect(result.missingRefs).toEqual(['project:project/gone.md']);
-    expect(result.warnings?.[0]).toContain('disappeared');
+    expect(result.warnings?.[0]).toBe(
+      'Memory ref "project:project/gone.md" was unavailable or changed while being read. Search again to refresh the memory snapshot.',
+    );
   });
 
   it('stops when cancelled while rereading a selected document', async () => {

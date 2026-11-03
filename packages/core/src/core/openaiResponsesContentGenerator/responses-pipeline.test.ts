@@ -34,6 +34,7 @@ import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import type { ResponsesApiRequest } from './types.js';
 import { preloadRuntimeFetchModule } from '../../utils/runtimeFetchOptions.js';
 import { classifyRetryError } from '../../utils/retryErrorClassification.js';
+import { appendAutoMemoryContext } from '../../memory/request-context.js';
 import {
   collect,
   content,
@@ -137,6 +138,7 @@ function makeCliConfig(
   proxy?: string,
   sessionId: string | (() => string) = '',
   allowDynamicHeaderValues = false,
+  freeform = false,
 ): Config {
   // getSessionId() is typed `string` and never returns undefined, so neither
   // may the mock: the reachable "no usable session" state is ''. connect()
@@ -147,6 +149,7 @@ function makeCliConfig(
     getSessionId: typeof sessionId === 'function' ? sessionId : () => sessionId,
     getCliVersion: () => '9.9.9-test',
     getOutboundAllowDynamicHeaderValues: () => allowDynamicHeaderValues,
+    getFreeform: () => freeform,
   } as unknown as Config;
 }
 
@@ -322,6 +325,31 @@ describe('ResponsesPipeline', () => {
     }
   }
 
+  it.each([
+    { freeform: false, tool: 'function', call: 'function_call' },
+    { freeform: true, tool: 'custom', call: 'custom_tool_call' },
+  ])(
+    'uses $tool tools and matching history when Freeform=$freeform',
+    async ({ freeform, tool, call }) => {
+      const body = await sendBody(
+        pipe(undefined, makeCliConfig(undefined, '', false, freeform)),
+        {
+          model: 'gpt-6-astra',
+          contents: [
+            content('model', fnCall('exec', { source: 'text(1);' }, 'c1')),
+            content('user', fnResponse('exec', { output: '1' }, 'c1')),
+          ],
+          config: { tools: [{ functionDeclarations: [{ name: 'exec' }] }] },
+        },
+      );
+      expect(body.tools?.[0]?.type).toBe(tool);
+      expect(body.input.map((item) => item.type)).toEqual([
+        call,
+        `${call}_output`,
+      ]);
+    },
+  );
+
   it('POSTs to <baseUrl>/v1/responses with the converted request body', async () => {
     mockResponse([...deltaEvent('hi'), ...DONE_R1]);
     const chunks = await streamed(pipe(), textRequest('hello'), 'prompt-1');
@@ -415,6 +443,77 @@ describe('ResponsesPipeline', () => {
     expect(keys[0]).toBe('qwen-code:sess-abc');
     expect(keys[1]).toBe(keys[0]);
   });
+
+  it('caches the stable user text before the request-only memory catalog', async () => {
+    const contents = [userText('Keep all permission checks.')];
+    const body = await sendBody(pipe({ model: 'gpt-6.1-sol' }), {
+      model: 'gpt-6.1-sol',
+      contents: appendAutoMemoryContext(contents, 'Current memory catalog'),
+    });
+
+    expect(body.input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: 'Keep all permission checks.',
+            prompt_cache_breakpoint: { mode: 'explicit' },
+          },
+          { type: 'input_text', text: 'Current memory catalog' },
+        ],
+      },
+    ]);
+    expect(body.prompt_cache_options).toEqual({ mode: 'implicit' });
+    expect(contents).toEqual([userText('Keep all permission checks.')]);
+  });
+
+  it.each([
+    [{ baseUrl: 'https://proxy.example/v1' }, undefined],
+    [
+      { baseUrl: 'https://proxy.example/v1', enableCacheControl: true },
+      { mode: 'implicit' },
+    ],
+    [
+      {
+        baseUrl: 'https://proxy.example/v1',
+        extra_body: { prompt_cache_options: { mode: 'implicit', ttl: '12h' } },
+      },
+      { mode: 'implicit', ttl: '12h' },
+    ],
+    [
+      { extra_body: { prompt_cache_options: { mode: 'explicit' } } },
+      { mode: 'explicit' },
+    ],
+    [{ enableCacheControl: false }, undefined],
+  ] satisfies Array<
+    [
+      Partial<ContentGeneratorConfig>,
+      ResponsesApiRequest['prompt_cache_options'],
+    ]
+  >)(
+    'honors caller cache policy after extra_body merges: %j',
+    async (overrides, expected) => {
+      const body = await sendBody(
+        pipe({ model: 'gpt-6.1-sol', ...overrides }),
+        {
+          model: 'gpt-6.1-sol',
+          contents: appendAutoMemoryContext(
+            [userText('stable question')],
+            'catalog',
+          ),
+        },
+      );
+      expect(body.prompt_cache_options).toEqual(expected);
+      const serialized = JSON.stringify(body);
+      expect(serialized.includes('prompt_cache_breakpoint')).toBe(
+        expected?.mode === 'implicit',
+      );
+      expect(serialized).not.toContain('cacheBoundary');
+      expect(serialized).toContain('catalog');
+    },
+  );
 
   it('falls back to userPromptId as prompt_cache_key when the session id is empty', async () => {
     const body = await sendBody(pipe(), undefined, 'short-id');
@@ -1112,6 +1211,36 @@ describe('ResponsesPipeline', () => {
       expect(sentHeaders().get('user-agent')).toBe(
         `QwenCode/9.9.9-test (${process.platform}; ${process.arch})`,
       );
+    });
+
+    it.each([
+      [undefined, 'qwen-code-cli'],
+      ['CLI', 'qwen-code-cli'],
+      ['desktop', 'qwen-code-desktop'],
+    ])('attributes channel %s on the Token Plan wire', async (channel, t1) => {
+      await executeDone(
+        pipe(
+          {
+            baseUrl: 'https://token-plan.maas.qianwenaiapi.com/compatible-mode',
+            customHeaders: { 'X-DashScope-Source-Config': 'user' },
+          },
+          { ...makeCliConfig(), getChannel: () => channel } as Config,
+        ),
+      );
+
+      expect(sentHeaders().get('x-dashscope-source-config')).toBe(
+        JSON.stringify({
+          channel: 'qianwenai-inner-agents',
+          source: 'model',
+          tags: { t1 },
+        }),
+      );
+    });
+
+    it('sends no source attribution to other endpoints', async () => {
+      await executeDone();
+
+      expect(sentHeaders().get('x-dashscope-source-config')).toBeNull();
     });
 
     it('expands ${session_id} per request when the consent gate is on', async () => {

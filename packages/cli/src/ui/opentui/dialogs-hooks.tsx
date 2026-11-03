@@ -14,8 +14,10 @@
  * `/goal` and the SDK registered for this session.
  */
 
-import { useMemo, useState } from 'react';
-import { useKeyboard } from '@opentui/react';
+import { useMemo, useRef, useState } from 'react';
+import wrapAnsi from 'wrap-ansi';
+import type { ScrollBoxRenderable } from '@opentui/core';
+import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import {
   HookType,
@@ -42,14 +44,60 @@ import {
   DialogFrame,
   DialogSelect,
   FooterHint,
+  dialogContentWidth,
   useDialogSelect,
   type DialogListItem,
 } from './dialogs-shared.js';
+import {
+  chromeRows,
+  regionListWindow,
+  scrollDialogLayout,
+  wrappedRows,
+} from './dialogs-core.js';
+
+import { clampDialogHeight } from '../utils/layoutUtils.js';
+import {
+  clipToWidth,
+  getCachedStringWidth,
+  sanitizeTerminalLine,
+  truncateToWidth,
+} from '../utils/textUtils.js';
 import { readHooksEnabled } from './dialogs-misc.js';
 import { C } from './theme.js';
 
 const MAX_ROWS = 12;
 const DETAIL_LABEL_WIDTH = 18;
+
+function DetailText({
+  value,
+  width,
+  dim = false,
+  bold = false,
+}: {
+  value: string;
+  width: number;
+  dim?: boolean;
+  bold?: boolean;
+}) {
+  return (
+    <box width={width} flexDirection="column" flexShrink={0}>
+      {/* Separate physical rows avoid native multiline Text losing its tail when scrolled. */}
+      {wrapAnsi(value, width, { hard: true, trim: false })
+        .split('\n')
+        .map((line, index) => (
+          <text
+            key={index}
+            height={1}
+            flexShrink={0}
+            fg={dim ? C.dim : C.text}
+            attributes={bold ? 1 : 0}
+          >
+            {line}
+          </text>
+        ))}
+    </box>
+  );
+}
 
 export type HooksDialogView =
   | { step: 'events' }
@@ -257,6 +305,8 @@ export interface OpenTuiHooksDialogProps {
   onClose: () => void;
   /** Optional line under the title, for a status such as a reload. */
   notice?: string;
+  /** The popup region's row budget; every list step windows from it. */
+  availableTerminalHeight?: number;
 }
 
 export function OpenTuiHooksDialog({
@@ -264,6 +314,7 @@ export function OpenTuiHooksDialog({
   settings,
   onClose,
   notice,
+  availableTerminalHeight,
 }: OpenTuiHooksDialogProps) {
   // A snapshot for the life of the dialog: it remounts on every open.
   const listing = useMemo(
@@ -314,17 +365,116 @@ export function OpenTuiHooksDialog({
     [handlerRows],
   );
 
+  const regionHeight = clampDialogHeight(availableTerminalHeight);
+  const { width } = useTerminalDimensions();
+  const contentWidth = dialogContentWidth(width);
+  const noticeRows = notice
+    ? notice
+        .split('\n')
+        .reduce((rows, line) => rows + wrappedRows(line, contentWidth), 0)
+    : 0;
+  const banner = hooksBannerText(listing);
+  const bannerRows = banner ? 1 + wrappedRows(banner, contentWidth) : 0;
+  // The events step's read-only note wraps (95 columns at full width), so it
+  // is charged by the row, like the notice and the banner.
+  const eventsNoteRows = wrappedRows(
+    t(
+      'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.',
+    ),
+    contentWidth,
+  );
+  // Every chrome text run is measured at the content width instead of
+  // charged a flat row: the header's count, the step titles and — in the
+  // handlers step — the user-supplied matcher all wrap on narrow terminals,
+  // and a flat constant pays for one row where two paint.
+  const total = listing.rows.length;
+  const countText =
+    total === 1
+      ? t('{{count}} hook configured', { count: String(total) })
+      : t('{{count}} hooks configured', { count: String(total) });
+  const headerRows = wrappedRows(`${t('Hooks')} · ${countText}`, contentWidth);
+  const matchersHeaderRows =
+    matcherEvent === undefined
+      ? 1
+      : wrappedRows(`${matcherEvent} - ${t('Matchers')}`, contentWidth);
+  const handlersHeaderRows =
+    handlerEvent === undefined
+      ? 2
+      : wrappedRows(
+          handlerMatcher === undefined
+            ? handlerEvent
+            : `${handlerEvent} - ${t('Matcher:')} ${sanitizeTerminalLine(handlerMatcher)}`,
+          contentWidth,
+        ) + wrappedRows(getHookShortDescription(handlerEvent), contentWidth);
+  // The rows no run can wrap into: the frame (4), the body's margin row (1),
+  // the list's margin row (1) and the footer hint's margin (1). The footer
+  // hint is charged the rows it wraps into at the content width, like the
+  // header, the notice and the banner.
+  const footerText =
+    view.step === 'events'
+      ? t('Enter to select · Esc to cancel')
+      : view.step === 'detail'
+        ? t('Esc to go back')
+        : t('Enter to select · Esc to go back');
+  const listChrome = (measuredRows: number) => ({
+    fixed: 7,
+    runs: [{ text: footerText, width: contentWidth }],
+    measuredRows,
+  });
+  const eventsChrome = listChrome(
+    headerRows + noticeRows + bannerRows + eventsNoteRows,
+  );
+  const matchersChrome = listChrome(
+    headerRows + matchersHeaderRows + noticeRows + bannerRows,
+  );
+  const handlersChrome = listChrome(
+    headerRows + handlersHeaderRows + noticeRows + bannerRows,
+  );
+  const detailChrome = {
+    ...listChrome(headerRows + noticeRows + bannerRows),
+    fixed: 6,
+  };
+  const currentChrome =
+    view.step === 'events'
+      ? eventsChrome
+      : view.step === 'matchers'
+        ? matchersChrome
+        : view.step === 'handlers' ||
+            (view.step === 'detail' && !handlerRows[view.index])
+          ? handlersChrome
+          : detailChrome;
+  const bodyLayout = scrollDialogLayout(
+    regionHeight,
+    chromeRows(currentChrome),
+    MAX_ROWS,
+  );
+  const windowFor = (chrome: typeof eventsChrome, count: number) =>
+    regionListWindow(
+      regionHeight,
+      bodyLayout.compact ? { fixed: bodyLayout.border ? 2 : 0 } : chrome,
+      count,
+      MAX_ROWS,
+    );
+  const eventsWindow = windowFor(eventsChrome, eventItems.length);
+  const matchersWindow = windowFor(matchersChrome, matcherItems.length);
+  const handlersWindow = windowFor(handlersChrome, handlerItems.length);
+  const bodyScroll = useRef<ScrollBoxRenderable>(null);
+  // Every list row is charged one physical row in the windows above, so each
+  // label's runs clip to the columns the row actually owns: the content width
+  // minus DialogSelect's indicator and number columns.
+  const labelBudget = (itemCount: number) =>
+    Math.max(0, contentWidth - 4 - String(itemCount).length);
   const eventSelect = useDialogSelect({
     items: eventItems,
     focused: view.step === 'events',
-    maxItemsToShow: MAX_ROWS,
+    maxItemsToShow: eventsWindow.maxItemsToShow,
     onSelect: (event) => setView(openHookEvent(event)),
   });
   const matcherSelect = useDialogSelect({
     items: matcherItems,
     focused: view.step === 'matchers',
     resyncKey: `matchers:${matcherEvent ?? ''}`,
-    maxItemsToShow: MAX_ROWS,
+    maxItemsToShow: matchersWindow.maxItemsToShow,
     onSelect: (matcher) => {
       if (matcherEvent !== undefined) {
         setView({ step: 'handlers', event: matcherEvent, matcher });
@@ -335,7 +485,7 @@ export function OpenTuiHooksDialog({
     items: handlerItems,
     focused: view.step === 'handlers',
     resyncKey: `handlers:${handlerEvent ?? ''}:${handlerMatcher ?? ''}`,
-    maxItemsToShow: MAX_ROWS,
+    maxItemsToShow: handlersWindow.maxItemsToShow,
     onSelect: (index) => {
       if (handlerEvent !== undefined) {
         setView({
@@ -349,7 +499,17 @@ export function OpenTuiHooksDialog({
   });
 
   useKeyboard((key) => {
-    if (toOriginalKey(key).name !== 'escape') return;
+    const name = toOriginalKey(key).name;
+    if (bodyScroll.current) {
+      const scroll = bodyScroll.current;
+      if (name === 'up') scroll.scrollBy(-1);
+      if (name === 'down') scroll.scrollBy(1);
+      if (name === 'pageup') scroll.scrollBy(-bodyLayout.bodyRows);
+      if (name === 'pagedown') scroll.scrollBy(bodyLayout.bodyRows);
+      if (name === 'home') scroll.scrollTo(0);
+      if (name === 'end') scroll.scrollTo(scroll.scrollHeight);
+    }
+    if (name !== 'escape') return;
     const previous = previousHooksDialogView(view);
     if (previous) {
       setView(previous);
@@ -357,13 +517,6 @@ export function OpenTuiHooksDialog({
       onClose();
     }
   });
-
-  const total = listing.rows.length;
-  const countText =
-    total === 1
-      ? t('{{count}} hook configured', { count: String(total) })
-      : t('{{count}} hooks configured', { count: String(total) });
-  const banner = hooksBannerText(listing);
 
   const wheel =
     (
@@ -386,31 +539,51 @@ export function OpenTuiHooksDialog({
 
   const renderEvents = () => (
     <box flexDirection="column">
-      <text fg={C.dim}>
-        {t(
-          'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.',
-        )}
-      </text>
-      <box marginTop={1} flexDirection="column">
+      {!bodyLayout.compact ? (
+        <text fg={C.dim}>
+          {t(
+            'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.',
+          )}
+        </text>
+      ) : null}
+      <box marginTop={bodyLayout.compact ? 0 : 1} flexDirection="column">
         <DialogSelect
           items={eventItems}
           activeIndex={eventSelect.activeIndex}
           scrollOffset={eventSelect.scrollOffset}
-          maxItemsToShow={MAX_ROWS}
-          showScrollArrows
+          maxItemsToShow={eventsWindow.maxItemsToShow}
+          showScrollArrows={eventsWindow.showScrollArrows}
           focused={view.step === 'events'}
           onHover={eventSelect.highlightIndex}
           onWheel={wheel(eventSelect, eventItems.length)}
           onSelectIndex={eventSelect.selectIndex}
           renderLabel={(item, context) => {
             const summary = events.find((entry) => entry.event === item.value);
+            const budget = labelBudget(eventItems.length);
+            const nameRun = clipToWidth(item.value, budget);
+            const countRun =
+              summary && summary.count > 0
+                ? clipToWidth(
+                    ` (${summary.count})`,
+                    Math.max(0, budget - getCachedStringWidth(nameRun)),
+                  )
+                : '';
+            const descriptionRun = truncateToWidth(
+              `  ${summary?.description ?? ''}`,
+              Math.max(
+                0,
+                budget -
+                  getCachedStringWidth(nameRun) -
+                  getCachedStringWidth(countRun),
+              ),
+            );
             return (
               <box flexDirection="row">
-                <text fg={context.titleColor}>{item.value}</text>
-                {summary && summary.count > 0 ? (
-                  <text fg={C.green}>{` (${summary.count})`}</text>
+                <text fg={context.titleColor}>{nameRun}</text>
+                {countRun ? <text fg={C.green}>{countRun}</text> : null}
+                {descriptionRun ? (
+                  <text fg={C.dim}>{descriptionRun}</text>
                 ) : null}
-                <text fg={C.dim}>{`  ${summary?.description ?? ''}`}</text>
               </box>
             );
           }}
@@ -420,18 +593,28 @@ export function OpenTuiHooksDialog({
   );
 
   const renderEmpty = (message: string) => (
-    <box flexDirection="column">
-      <text fg={C.dim}>{message}</text>
-      <text fg={C.dim}>
-        {t('To add hooks, edit settings.json directly or ask Qwen.')}
-      </text>
-    </box>
+    <scrollbox
+      ref={bodyScroll}
+      key={`empty-${width}-${bodyLayout.bodyRows}-${bodyLayout.compact}`}
+      height={bodyLayout.bodyRows}
+      flexShrink={1}
+      stickyScroll={false}
+    >
+      <DetailText value={message} width={Math.max(1, contentWidth - 1)} dim />
+      <DetailText
+        value={t('To add hooks, edit settings.json directly or ask Qwen.')}
+        width={Math.max(1, contentWidth - 1)}
+        dim
+      />
+    </scrollbox>
   );
 
   const renderMatchers = (event: HookEventName) => (
     <box flexDirection="column">
-      <text fg={C.text}>{`${event} - ${t('Matchers')}`}</text>
-      <box marginTop={1} flexDirection="column">
+      {!bodyLayout.compact ? (
+        <text fg={C.text}>{`${event} - ${t('Matchers')}`}</text>
+      ) : null}
+      <box marginTop={bodyLayout.compact ? 0 : 1} flexDirection="column">
         {matcherItems.length === 0 ? (
           renderEmpty(t('No hooks configured for this event.'))
         ) : (
@@ -439,7 +622,8 @@ export function OpenTuiHooksDialog({
             items={matcherItems}
             activeIndex={matcherSelect.activeIndex}
             scrollOffset={matcherSelect.scrollOffset}
-            maxItemsToShow={MAX_ROWS}
+            maxItemsToShow={matchersWindow.maxItemsToShow}
+            showScrollArrows={matchersWindow.showScrollArrows}
             focused={view.step === 'matchers'}
             onHover={matcherSelect.highlightIndex}
             onWheel={wheel(matcherSelect, matcherItems.length)}
@@ -448,12 +632,19 @@ export function OpenTuiHooksDialog({
               const group = matchers.find(
                 (entry) => entry.matcher === item.value,
               );
+              const budget = labelBudget(matcherItems.length);
+              const nameRun = clipToWidth(
+                sanitizeTerminalLine(item.value),
+                budget,
+              );
+              const countRun = truncateToWidth(
+                `  · ${hookCountLabel(group?.count ?? 0)}`,
+                Math.max(0, budget - getCachedStringWidth(nameRun)),
+              );
               return (
                 <box flexDirection="row">
-                  <text fg={context.titleColor}>{item.value}</text>
-                  <text fg={C.dim}>
-                    {`  · ${hookCountLabel(group?.count ?? 0)}`}
-                  </text>
+                  <text fg={context.titleColor}>{nameRun}</text>
+                  {countRun ? <text fg={C.dim}>{countRun}</text> : null}
                 </box>
               );
             }}
@@ -465,13 +656,17 @@ export function OpenTuiHooksDialog({
 
   const renderHandlers = (event: HookEventName, matcher?: string) => (
     <box flexDirection="column">
-      <text fg={C.text}>
-        {matcher === undefined
-          ? event
-          : `${event} - ${t('Matcher:')} ${matcher}`}
-      </text>
-      <text fg={C.dim}>{getHookShortDescription(event)}</text>
-      <box marginTop={1} flexDirection="column">
+      {!bodyLayout.compact ? (
+        <>
+          <text fg={C.text}>
+            {matcher === undefined
+              ? event
+              : `${event} - ${t('Matcher:')} ${sanitizeTerminalLine(matcher)}`}
+          </text>
+          <text fg={C.dim}>{getHookShortDescription(event)}</text>
+        </>
+      ) : null}
+      <box marginTop={bodyLayout.compact ? 0 : 1} flexDirection="column">
         {handlerItems.length === 0 ? (
           renderEmpty(
             matcher === undefined
@@ -483,7 +678,8 @@ export function OpenTuiHooksDialog({
             items={handlerItems}
             activeIndex={handlerSelect.activeIndex}
             scrollOffset={handlerSelect.scrollOffset}
-            maxItemsToShow={MAX_ROWS}
+            maxItemsToShow={handlersWindow.maxItemsToShow}
+            showScrollArrows={handlersWindow.showScrollArrows}
             focused={view.step === 'handlers'}
             onHover={handlerSelect.highlightIndex}
             onWheel={wheel(handlerSelect, handlerItems.length)}
@@ -494,17 +690,33 @@ export function OpenTuiHooksDialog({
               const type = row.runsInBackground
                 ? `${row.hookType} async`
                 : row.hookType;
+              const budget = labelBudget(handlerItems.length);
+              const mainRun = clipToWidth(
+                sanitizeTerminalLine(`[${type}] ${row.displayText}`),
+                budget,
+              );
+              const sourceRun = clipToWidth(
+                `  · ${formatSourceLabel(row.source)}`,
+                Math.max(0, budget - getCachedStringWidth(mainRun)),
+              );
+              const disabledRun = row.enabled
+                ? ''
+                : truncateToWidth(
+                    `  ${t('disabled')}`,
+                    Math.max(
+                      0,
+                      budget -
+                        getCachedStringWidth(mainRun) -
+                        getCachedStringWidth(sourceRun),
+                    ),
+                  );
               return (
                 <box flexDirection="row">
-                  <text fg={context.titleColor}>
-                    {`[${type}] ${row.displayText}`}
-                  </text>
-                  <text
-                    fg={C.dim}
-                  >{`  · ${formatSourceLabel(row.source)}`}</text>
-                  {row.enabled ? null : (
-                    <text fg={C.yellow}>{`  ${t('disabled')}`}</text>
-                  )}
+                  <text fg={context.titleColor}>{mainRun}</text>
+                  {sourceRun ? <text fg={C.dim}>{sourceRun}</text> : null}
+                  {disabledRun ? (
+                    <text fg={C.yellow}>{disabledRun}</text>
+                  ) : null}
                 </box>
               );
             }}
@@ -514,52 +726,74 @@ export function OpenTuiHooksDialog({
     </box>
   );
 
-  const renderDetail = (row: HooksListingRow) => (
-    <box flexDirection="column">
-      <text fg={C.text} attributes={1}>
-        {t('Hook details')}
-      </text>
-      <box marginTop={1} flexDirection="column">
+  const renderDetail = (row: HooksListingRow) => {
+    // The native scrollbox reserves one column for its vertical scrollbar.
+    const scrollContentWidth = Math.max(1, contentWidth - 1);
+    const stacked = scrollContentWidth < DETAIL_LABEL_WIDTH + 2;
+    const valueWidth = stacked
+      ? scrollContentWidth
+      : scrollContentWidth - DETAIL_LABEL_WIDTH;
+    return (
+      <scrollbox
+        ref={bodyScroll}
+        key={`detail-${width}-${bodyLayout.bodyRows}-${bodyLayout.compact}`}
+        height={bodyLayout.bodyRows}
+        flexShrink={1}
+        stickyScroll={false}
+      >
+        {!bodyLayout.compact ? (
+          <DetailText
+            value={t('Hook details')}
+            width={scrollContentWidth}
+            bold
+          />
+        ) : null}
         {hookDetailFields(row).map(([label, value]) => (
-          <box key={label} flexDirection="row">
-            <box width={DETAIL_LABEL_WIDTH} flexShrink={0}>
-              <text fg={C.dim}>{label}</text>
-            </box>
-            <box flexGrow={1}>
-              <text fg={C.text}>{value}</text>
-            </box>
+          <box
+            key={label}
+            flexDirection={stacked ? 'column' : 'row'}
+            flexShrink={0}
+          >
+            <DetailText
+              value={label}
+              width={stacked ? scrollContentWidth : DETAIL_LABEL_WIDTH}
+              dim
+            />
+            <DetailText value={value} width={valueWidth} />
           </box>
         ))}
-      </box>
-      <box marginTop={1}>
-        <text fg={C.dim}>
-          {t(
-            'To modify or remove this hook, edit settings.json directly or ask Qwen to help.',
-          )}
-        </text>
-      </box>
-    </box>
-  );
+        <box marginTop={1}>
+          <DetailText
+            value={t(
+              'To modify or remove this hook, edit settings.json directly or ask Qwen to help.',
+            )}
+            width={scrollContentWidth}
+            dim
+          />
+        </box>
+      </scrollbox>
+    );
+  };
 
   let body;
   let footer: string;
   switch (view.step) {
     case 'events':
       body = renderEvents();
-      footer = t('Enter to select · Esc to cancel');
+      footer = footerText;
       break;
     case 'matchers':
       body = renderMatchers(view.event);
-      footer = t('Enter to select · Esc to go back');
+      footer = footerText;
       break;
     case 'handlers':
       body = renderHandlers(view.event, view.matcher);
-      footer = t('Enter to select · Esc to go back');
+      footer = footerText;
       break;
     case 'detail': {
       const row = handlerRows[view.index];
       body = row ? renderDetail(row) : renderHandlers(view.event, view.matcher);
-      footer = t('Esc to go back');
+      footer = footerText;
       break;
     }
     default: {
@@ -571,29 +805,33 @@ export function OpenTuiHooksDialog({
   }
 
   return (
-    <DialogFrame>
-      <box flexDirection="row">
-        <text fg={C.accent} attributes={1}>
-          {t('Hooks')}
-        </text>
-        <text fg={C.dim}>{` · ${countText}`}</text>
-      </box>
-      {notice
-        ? notice.split('\n').map((line, index) => (
-            <text key={`notice-${index}`} fg={C.dim}>
-              {line}
-            </text>
-          ))
-        : null}
-      {banner ? (
-        <box marginTop={1}>
-          <text fg={C.yellow}>{banner}</text>
-        </box>
+    <DialogFrame bodyLayout={bodyLayout}>
+      {!bodyLayout.compact ? (
+        <>
+          <text>
+            <span fg={C.accent} attributes={1}>
+              {t('Hooks')}
+            </span>
+            <span fg={C.dim}>{` · ${countText}`}</span>
+          </text>
+          {notice
+            ? notice.split('\n').map((line, index) => (
+                <text key={`notice-${index}`} fg={C.dim}>
+                  {line}
+                </text>
+              ))
+            : null}
+          {banner ? (
+            <box marginTop={1}>
+              <text fg={C.yellow}>{banner}</text>
+            </box>
+          ) : null}
+        </>
       ) : null}
-      <box marginTop={1} flexDirection="column">
+      <box marginTop={bodyLayout.compact ? 0 : 1} flexDirection="column">
         {body}
       </box>
-      <FooterHint text={footer} />
+      {!bodyLayout.compact ? <FooterHint text={footer} /> : null}
     </DialogFrame>
   );
 }

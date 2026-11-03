@@ -740,9 +740,13 @@ describe('modelConfigResolver', () => {
     });
 
     it('env-var-only path: contextWindowSize auto-detected for a model whose limit differs from the global default', () => {
-      // gpt-4o resolves to 131,072 ≠ DEFAULT_TOKEN_LIMIT (200,000), so this
-      // assertion fails if the fallback applies the generic default instead
-      // of the model-specific limit.
+      // This suite runs with the catalog off (packages/core/test-setup.ts),
+      // so 131,072 is the regex-table answer, not the shipped one — the
+      // catalog-on twin of this exact env-only path pins the production value
+      // (128,000) in model-catalog.test.ts ('uses the bundled gpt-4o limit on
+      // the env-only configuration path'). gpt-4o resolves to 131,072 ≠
+      // DEFAULT_TOKEN_LIMIT (200,000), so this assertion fails if the fallback
+      // applies the generic default instead of the model-specific limit.
       const result = envOnly('gpt-4o');
 
       expect(result.config.model).toBe('gpt-4o');

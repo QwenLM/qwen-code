@@ -8,6 +8,29 @@ import { describe, expect, it } from 'vitest';
 import { parseBwrapStatus, sandboxStatusError } from './bwrap-status.js';
 
 describe('bwrap execution receipts', () => {
+  it('accepts explicit bridge setup failure but keeps silent failures unknown', () => {
+    expect(parseBwrapStatus('{"state":"stdio-setup-failed"}\n', 125)).toEqual({
+      state: 'unconfirmed',
+      payloadExitObserved: false,
+    });
+    expect(parseBwrapStatus('', 125)).toEqual({ state: 'unconfirmed' });
+  });
+
+  it.each([
+    '{"state":"stdio-failed"}\n',
+    '{"child-pid":120}\n{"state":"stdio-failed"}\n',
+  ])('does not attest no-exec from a post-exec input failure: %s', (wire) => {
+    expect(parseBwrapStatus(wire, 125)).toEqual({ state: 'unconfirmed' });
+  });
+
+  it('retains observed payload execution when input accounting fails later', () => {
+    expect(
+      parseBwrapStatus(
+        '{"child-pid":120}\n{"exit-code":0}\n{"state":"stdio-failed"}\n',
+        125,
+      ),
+    ).toEqual({ state: 'unconfirmed', payloadExitObserved: true });
+  });
   it('turns uncertain and interrupted completion into errors, preserving confirmed nonzero exits', () => {
     expect(sandboxStatusError({ state: 'unconfirmed' })?.message).toContain(
       'may have run; do not automatically retry',

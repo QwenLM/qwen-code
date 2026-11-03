@@ -20,16 +20,27 @@ import type {
 } from './event-adapter.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
 import type { GoalLegacyCardData } from '../utils/goal-card-view.js';
+import { MAX_INLINE_IMAGES_PER_ITEM } from '../utils/inline-image-parts.js';
+import { stripSuppressOnRestore } from '../utils/resumeHistoryUtils.js';
+import { isSyntheticHistoryItem } from '../utils/historyUtils.js';
+import { ToolCallStatus } from '../types.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
-import type { ArenaAgentCardData, CompressionProps } from '../types.js';
+import type {
+  ArenaAgentCardData,
+  CompressionProps,
+  HistoryItem as CanonicalHistoryItem,
+  HistoryItemWithoutId as CanonicalHistoryItemWithoutId,
+} from '../types.js';
 
 export type ToolConfirmState = 'pending' | 'approved' | 'rejected';
 
 export type LiveToolItem = Extract<HistoryItem, { kind: 'tool' }> & {
+  renderId?: string;
   args?: string;
   /** Real invocation description (scheduler's getDescription, ink
    * mapToDisplay parity) — takes precedence over the args-based fallback. */
   description?: string;
+  detailedDisplay?: string;
   confirm?: ToolConfirmState;
   /** The scheduler reports the call as 'scheduled' — approved, but not
    * started because the batch still holds another approval. ink reads the
@@ -82,6 +93,7 @@ export type LiveInfoItem = {
   kind: 'info';
   id: string;
   text: string;
+  historyIsSynthetic?: false;
 };
 
 /** Error notice row (ink HistoryItemError + ErrorMessage: `✕` + error color,
@@ -186,11 +198,17 @@ export type LiveAssistantItem = Extract<HistoryItem, { kind: 'assistant' }> & {
   timestamp?: number;
 };
 
-export type LiveHistoryItem =
+type LiveHistoryItemData =
   | Exclude<
       HistoryItem,
-      { kind: 'tool' } | { kind: 'thinking' } | { kind: 'assistant' }
+      | { kind: 'tool' }
+      | { kind: 'thinking' }
+      | { kind: 'assistant' }
+      | { kind: 'user' }
     >
+  | (Extract<HistoryItem, { kind: 'user' }> & {
+      recallText?: string;
+    })
   | LiveAssistantItem
   | LiveThinkingItem
   | LiveToolItem
@@ -208,18 +226,27 @@ export type LiveHistoryItem =
   | LiveArenaSessionItem
   | LiveGoalItem;
 
+export type LiveHistoryItem = LiveHistoryItemData & {
+  historyId?: number;
+  canonicalHistoryItem?: CanonicalHistoryItem;
+  canonicalOnly?: true;
+  canonicalPending?: boolean;
+  canonicalResponseEnded?: true;
+  display?: CanonicalHistoryItem['display'];
+};
+
 let uid = 0;
 const nid = (p: string) => `${p}${++uid}`;
 
 function findToolIndex(items: readonly LiveHistoryItem[], id: string): number {
-  return items.findIndex((it) => it.kind === 'tool' && it.id === id);
+  return items.findLastIndex((it) => it.kind === 'tool' && it.id === id);
 }
 
 /**
  * Pure fold: returns the next items array for one event (input is never
  * mutated). Unknown tool ids are ignored.
  */
-export function foldLiveEvent(
+function foldLiveEventData(
   prev: readonly LiveHistoryItem[],
   ev: OpenTuiStreamEvent,
 ): readonly LiveHistoryItem[] {
@@ -227,19 +254,47 @@ export function foldLiveEvent(
   const last = items[items.length - 1];
 
   switch (ev.type) {
+    case 'history-expanded':
+      return items
+        .filter((item) => item.display?.kind !== 'collapse-summary')
+        .map(stripSuppressOnRestore);
     case 'user': {
-      // Both `addItem` implementations collapse a user item identical to the
-      // one before it, and this is the chokepoint the projected and live
-      // echoes share: two identical steers in a row are one row.
-      if (last?.kind === 'user' && last.text === ev.text) return prev;
+      if (ev.historyId !== undefined) {
+        const index = items.findIndex(
+          (item) => item.kind === 'user' && item.historyId === ev.historyId,
+        );
+        const existing = items[index];
+        if (existing?.kind === 'user') {
+          items[index] = {
+            ...existing,
+            text: ev.text,
+            recallText: ev.recallText,
+            promptId: ev.promptId,
+            sentToModel: ev.sentToModel,
+          };
+          return items;
+        }
+      }
+      // Repeated echoes can collapse; distinct identified turns cannot.
+      if (
+        last?.kind === 'user' &&
+        last.text === ev.text &&
+        last.recallText === ev.recallText &&
+        last.promptId === ev.promptId &&
+        last.historyId === ev.historyId
+      ) {
+        return prev;
+      }
       if (last?.kind === 'assistant' && last.streaming)
         items[items.length - 1] = { ...last, streaming: false };
       items.push({
         kind: 'user',
         id: nid('u'),
         text: ev.text,
+        ...(ev.recallText === undefined ? {} : { recallText: ev.recallText }),
         promptId: ev.promptId,
         sentToModel: ev.sentToModel,
+        ...(ev.historyId === undefined ? {} : { historyId: ev.historyId }),
       });
       return items;
     }
@@ -264,7 +319,7 @@ export function foldLiveEvent(
       return items;
     }
     case 'thinking-end': {
-      if (last?.kind === 'thinking')
+      if (last?.kind === 'thinking' && !last.done)
         items[items.length - 1] = {
           ...last,
           done: true,
@@ -288,7 +343,7 @@ export function foldLiveEvent(
     }
     case 'tool-start': {
       const i = findToolIndex(items, ev.id);
-      if (i >= 0) {
+      if (i >= 0 && !(items[i] as LiveToolItem).done) {
         // A confirmation card for this call already exists → approved.
         const t = items[i] as LiveToolItem;
         items[i] = {
@@ -304,6 +359,7 @@ export function foldLiveEvent(
       items.push({
         kind: 'tool',
         id: ev.id,
+        ...(i >= 0 ? { renderId: nid('tool-card') } : {}),
         tool: ev.tool,
         title: ev.title,
         output: '',
@@ -347,6 +403,7 @@ export function foldLiveEvent(
           todos: structured?.todos,
           ansi: structured?.ansi,
           subagentSummary: structured?.subagentSummary,
+          detailedDisplay: structured?.detailedDisplay,
         };
         if (ev.type === 'tool-result' && ev.visionBridgeNotice) {
           next.visionBridgeNotice = ev.visionBridgeNotice;
@@ -370,7 +427,7 @@ export function foldLiveEvent(
     }
     case 'confirm': {
       const i = findToolIndex(items, ev.id);
-      if (i >= 0) {
+      if (i >= 0 && !(items[i] as LiveToolItem).done) {
         const t = items[i] as LiveToolItem;
         items[i] = { ...t, title: ev.title, confirm: 'pending' };
         return items;
@@ -380,6 +437,7 @@ export function foldLiveEvent(
       items.push({
         kind: 'tool',
         id: ev.id,
+        ...(i >= 0 ? { renderId: nid('tool-card') } : {}),
         tool: ev.tool,
         title: ev.title,
         output: '',
@@ -459,7 +517,14 @@ export function foldLiveEvent(
       // content before addItem — settle a still-streaming assistant block.
       if (last?.kind === 'assistant' && last.streaming)
         items[items.length - 1] = { ...last, streaming: false };
-      items.push({ kind: 'info', id: nid('info'), text: ev.text });
+      items.push({
+        kind: 'info',
+        id: nid('info'),
+        text: ev.text,
+        ...(ev.historyIsSynthetic !== undefined
+          ? { historyIsSynthetic: ev.historyIsSynthetic }
+          : {}),
+      });
       return items;
     }
     case 'error': {
@@ -667,3 +732,423 @@ export {
   type GoalCardView,
   type LegacyGoalCardView,
 } from '../utils/goal-card-view.js';
+
+/** Snapshot-only rewind boundary: IDs remain positions in the full live list. */
+export function rewindBoundaryHistory(
+  items: readonly LiveHistoryItem[],
+): CanonicalHistoryItem[] {
+  return items.flatMap((item, id): CanonicalHistoryItem[] => {
+    if (item.kind === 'user')
+      return [
+        {
+          id,
+          type: 'user',
+          text: item.text,
+          promptId: item.promptId,
+          ...(item.canonicalHistoryItem?.type === 'user' &&
+          item.canonicalHistoryItem.rewindId
+            ? { rewindId: item.canonicalHistoryItem.rewindId }
+            : {}),
+          sentToModel: item.sentToModel,
+          display: item.display,
+        },
+      ];
+    if (item.kind === 'compaction')
+      return [
+        {
+          id,
+          type: 'compression',
+          compression: item.compression,
+          display: item.display,
+        },
+      ];
+    return [];
+  });
+}
+
+export function foldLiveEvent(
+  prev: readonly LiveHistoryItem[],
+  event: OpenTuiStreamEvent,
+): readonly LiveHistoryItem[] {
+  if (event.type === 'tool-history') {
+    const callIds = new Set(event.item.tools.map((tool) => tool.callId));
+    return prev.map((item) =>
+      item.kind === 'tool' &&
+      callIds.has(item.id) &&
+      (!item.canonicalHistoryItem ||
+        item.canonicalHistoryItem.id === event.item.id)
+        ? {
+            ...item,
+            historyId: event.item.id,
+            canonicalHistoryItem: event.item,
+            canonicalPending: event.pending,
+          }
+        : item,
+    );
+  }
+  if (event.type === 'canonical-history-replace') {
+    const first = prev.findIndex(
+      (item) => item.canonicalHistoryItem?.id === event.item.id,
+    );
+    const retained = prev.filter(
+      (item) => item.canonicalHistoryItem?.id !== event.item.id,
+    );
+    let replacement: readonly LiveHistoryItem[] = [];
+    for (const projected of event.events)
+      replacement = foldLiveEvent(replacement, {
+        ...projected,
+        historyId: event.item.id,
+        canonicalHistoryItem: event.item,
+      });
+    if (replacement.length === 0)
+      replacement = foldLiveEvent([], {
+        type: 'canonical-history',
+        historyId: event.item.id,
+        canonicalHistoryItem: event.item,
+      });
+    const index = first < 0 ? retained.length : first;
+    return [
+      ...retained.slice(0, index),
+      ...replacement,
+      ...retained.slice(index),
+    ];
+  }
+  const source = event.canonicalHistoryItem;
+  if (source) {
+    if (source.id <= nextCanonicalId) nextCanonicalId = source.id - 1;
+    const previous =
+      prev.at(-1)?.canonicalHistoryItem?.id === source.id
+        ? prev
+        : foldLiveEventData(foldLiveEventData(prev, { type: 'segment-end' }), {
+            type: 'thinking-end',
+          });
+    const first = previous.findIndex(
+      (item) => item.canonicalHistoryItem?.id === source.id,
+    );
+    const block = previous.filter(
+      (item) => item.canonicalHistoryItem?.id === source.id,
+    );
+    const retained = previous.filter(
+      (item) => item.canonicalHistoryItem?.id !== source.id,
+    );
+    const next =
+      event.type === 'canonical-history'
+        ? block.length
+          ? block
+          : [
+              {
+                kind: 'info' as const,
+                id: nid('canonical'),
+                text: '',
+                canonicalOnly: true as const,
+                ...(isSyntheticHistoryItem(source)
+                  ? {}
+                  : { historyIsSynthetic: false as const }),
+              },
+            ]
+        : foldLiveEventData(block, event);
+    const captured = next.map((item) => ({
+      ...item,
+      ...(item.kind === 'tool'
+        ? { renderId: item.renderId ?? `history-${source.id}` }
+        : {}),
+      historyId: source.id,
+      canonicalHistoryItem: source,
+      ...(event.historyDisplay ? { display: event.historyDisplay } : {}),
+    }));
+    const index = first < 0 ? retained.length : first;
+    return [...retained.slice(0, index), ...captured, ...retained.slice(index)];
+  }
+  const next = retainNativeCanonicalHistory(
+    prev,
+    foldLiveEventData(prev, event),
+    event,
+  );
+  if (event.type === 'history-expanded')
+    return next.map((item) => {
+      const source = item.canonicalHistoryItem;
+      if (!source) return item;
+      const expanded = stripSuppressOnRestore(source);
+      return expanded === source
+        ? item
+        : { ...item, canonicalHistoryItem: expanded };
+    });
+  if (event.historyId === undefined) return next;
+  const changed = next.findLastIndex((item, index) => item !== prev[index]);
+  if (changed < 0) return next;
+  return next.map((item, index) =>
+    index === changed
+      ? {
+          ...item,
+          historyId: event.historyId,
+          ...(event.historyDisplay ? { display: event.historyDisplay } : {}),
+        }
+      : item,
+  );
+}
+
+export function snapshotCanonicalHistory(
+  items: readonly LiveHistoryItem[],
+): CanonicalHistoryItem[] {
+  const seen = new Set<number>();
+  const history: CanonicalHistoryItem[] = [];
+  for (const item of items) {
+    // Countdown and running background-task cards are not committed history.
+    if (item.kind === 'retry' || item.kind === 'task') continue;
+    const source = item.canonicalHistoryItem;
+    if (!source)
+      throw new Error(`Checkpoint history missing canonical ${item.kind}`);
+    if (seen.has(source.id)) continue;
+    seen.add(source.id);
+    history.push(source);
+  }
+  return history;
+}
+
+let nextCanonicalId = 0;
+
+export function allocateCanonicalHistoryId(
+  items: readonly LiveHistoryItem[] = [],
+): number {
+  for (const item of items) {
+    const id = item.canonicalHistoryItem?.id ?? item.historyId;
+    if (id !== undefined && id <= nextCanonicalId) nextCanonicalId = id - 1;
+  }
+  return --nextCanonicalId;
+}
+
+function retainNativeCanonicalHistory(
+  prev: readonly LiveHistoryItem[],
+  next: readonly LiveHistoryItem[],
+  event: OpenTuiStreamEvent,
+): readonly LiveHistoryItem[] {
+  if (next === prev) return prev;
+  const targetIndex = next.findLastIndex((item, index) => item !== prev[index]);
+  let source: CanonicalHistoryItem | undefined;
+  let pending = false;
+  const target = next[targetIndex];
+  const existing = target?.canonicalHistoryItem;
+  const stamp = (
+    item: CanonicalHistoryItemWithoutId,
+  ): CanonicalHistoryItem => ({
+    ...item,
+    id: existing?.id ?? event.historyId ?? allocateCanonicalHistoryId(next),
+  });
+  const turnStart = prev.findLastIndex((item) => item.kind === 'user');
+  const responseEnd = prev.findLastIndex((item) => item.canonicalResponseEnded);
+  const turn = prev.slice(Math.max(0, turnStart, responseEnd + 1));
+  const continuation = turn.some((item) => {
+    const source = item.canonicalHistoryItem;
+    return (
+      (source?.type === 'gemini' || source?.type === 'gemini_content') &&
+      Boolean(
+        source.text.trim() || source.images?.length || source.omittedImageCount,
+      )
+    );
+  });
+  switch (event.type) {
+    case 'user':
+      source = stamp({
+        type: 'user',
+        text: event.text,
+        promptId: event.promptId,
+        sentToModel: event.sentToModel,
+      });
+      break;
+    case 'text': {
+      if (target?.kind !== 'assistant') break;
+      const previousText =
+        existing?.type === 'gemini' || existing?.type === 'gemini_content'
+          ? existing.text
+          : '';
+      const text = (previousText + event.delta).replace(
+        /^(?:[ \t]*\r?\n)+/,
+        '',
+      );
+      const type =
+        existing?.type === 'gemini' || existing?.type === 'gemini_content'
+          ? existing.type
+          : continuation
+            ? 'gemini_content'
+            : 'gemini';
+      source = stamp(
+        type === 'gemini'
+          ? {
+              type,
+              text,
+              timestamp:
+                existing?.type === 'gemini'
+                  ? existing.timestamp
+                  : target.timestamp,
+            }
+          : { type, text },
+      );
+      pending = true;
+      break;
+    }
+    case 'thinking': {
+      if (target?.kind !== 'thinking') break;
+      const text = (
+        (existing?.type === 'gemini_thought' ? existing.text : '') + event.delta
+      ).replace(/^(?:[ \t]*\r?\n)+/, '');
+      source = stamp({ type: 'gemini_thought', text, durationMs: 0 });
+      pending = true;
+      break;
+    }
+    case 'thinking-end':
+      if (target?.kind === 'thinking' && existing?.type === 'gemini_thought') {
+        source = { ...existing, durationMs: target.durationMs };
+      }
+      break;
+    case 'tool-end': {
+      if (
+        target?.kind !== 'tool' ||
+        !target.canonicalPending ||
+        existing?.type !== 'tool_group'
+      )
+        break;
+      const terminal = [
+        ToolCallStatus.Success,
+        ToolCallStatus.Error,
+        ToolCallStatus.Canceled,
+      ];
+      const tools = existing.tools.map((tool) =>
+        tool.callId !== event.id || terminal.includes(tool.status)
+          ? tool
+          : {
+              ...tool,
+              status: event.success
+                ? ToolCallStatus.Success
+                : event.summary === 'cancelled'
+                  ? ToolCallStatus.Canceled
+                  : ToolCallStatus.Error,
+            },
+      );
+      source = { ...existing, tools };
+      pending = tools.some((tool) => !terminal.includes(tool.status));
+      break;
+    }
+    case 'image': {
+      const seen = new Set<number>();
+      let displayed = 0;
+      for (const item of turn) {
+        const source = item.canonicalHistoryItem;
+        if (!source || seen.has(source.id)) continue;
+        seen.add(source.id);
+        if (source.type === 'gemini' || source.type === 'gemini_content')
+          displayed += source.images?.length ?? 0;
+      }
+      const previous = prev.at(-1)?.canonicalHistoryItem;
+      if (
+        displayed >= MAX_INLINE_IMAGES_PER_ITEM &&
+        (previous?.type === 'gemini' || previous?.type === 'gemini_content') &&
+        previous.omittedImageCount &&
+        !previous.text &&
+        !previous.images?.length
+      ) {
+        source = {
+          ...previous,
+          omittedImageCount: previous.omittedImageCount + 1,
+        };
+      } else {
+        const body =
+          displayed < MAX_INLINE_IMAGES_PER_ITEM
+            ? { images: [{ mimeType: event.mimeType, data: event.data }] }
+            : { omittedImageCount: 1 };
+        source = stamp(
+          continuation
+            ? { type: 'gemini_content', text: '', ...body }
+            : { type: 'gemini', text: '', timestamp: Date.now(), ...body },
+        );
+      }
+      pending = true;
+      break;
+    }
+    case 'info':
+      source = stamp({ type: 'info', text: event.text });
+      break;
+    case 'error':
+      source = stamp({ type: 'error', text: event.text, hint: event.hint });
+      break;
+    case 'warning':
+      source = stamp({ type: 'warning', text: event.text });
+      break;
+    case 'compaction':
+      source = stamp({ type: 'compression', compression: event.compression });
+      break;
+    case 'stop-hook-message':
+      source = stamp({
+        type: 'stop_hook_system_message',
+        message: event.message,
+      });
+      break;
+    case 'away-recap':
+      source = stamp({ type: 'away_recap', text: event.text });
+      break;
+    case 'user-shell':
+      source = stamp({ type: 'user_shell', text: event.text });
+      break;
+    case 'advisor':
+      source = stamp({ type: 'advisor', text: event.text, model: event.model });
+      break;
+    case 'arena-agent':
+      source = stamp({ type: 'arena_agent_complete', agent: event.agent });
+      break;
+    case 'arena-session':
+      source = stamp({
+        type: 'arena_session_complete',
+        sessionStatus: event.sessionStatus,
+        task: event.task,
+        totalDurationMs: event.totalDurationMs,
+        agents: event.agents,
+      });
+      break;
+    default:
+      break;
+  }
+  const retained = next.map((item, index) => {
+    const sameSource = source && item.canonicalHistoryItem?.id === source.id;
+    if (source && (index === targetIndex || sameSource)) {
+      return {
+        ...item,
+        canonicalHistoryItem: source,
+        canonicalPending: pending,
+      };
+    }
+    const canonical = item.canonicalHistoryItem;
+    if (
+      item.canonicalPending &&
+      (canonical?.type === 'gemini' || canonical?.type === 'gemini_content') &&
+      !canonical.text.trim() &&
+      !canonical.images?.length &&
+      !canonical.omittedImageCount
+    )
+      return { ...item, canonicalPending: true };
+    if (
+      item.canonicalPending &&
+      item.kind === 'thinking' &&
+      item.done &&
+      canonical?.type === 'gemini_thought'
+    )
+      return {
+        ...item,
+        canonicalHistoryItem: { ...canonical, durationMs: item.durationMs },
+        canonicalPending: false,
+      };
+    if (
+      item.canonicalPending &&
+      ((item.kind === 'assistant' && !item.streaming) ||
+        (item.kind === 'thinking' && item.done) ||
+        (item.kind === 'image' && event.type !== 'image'))
+    )
+      return { ...item, canonicalPending: false };
+    return item;
+  });
+  if (event.type === 'segment-end' && retained.length > 0)
+    return retained.map((item, index) =>
+      index === retained.length - 1
+        ? { ...item, canonicalResponseEnded: true }
+        : item,
+    );
+  return retained;
+}

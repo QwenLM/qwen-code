@@ -422,4 +422,32 @@ describe('AuthMessageHandler', () => {
     expect(types).toContain('authError');
     expect(types).not.toContain('authCancelled');
   });
+
+  it('lists QwenCloud as the first provider group in the picker', async () => {
+    mockShowQuickPick.mockResolvedValue(undefined);
+    const sendToWebView = vi.fn();
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      sendToWebView,
+    );
+
+    await handler.handle({ type: 'auth' });
+
+    const items = mockShowQuickPick.mock.calls[0][0] as Array<{
+      label: string;
+      value: string;
+      kind?: number;
+    }>;
+    // First separator should be QwenCloud, matching the daemon catalog order.
+    const separators = items.filter((i) => i.kind === -1);
+    expect(separators[0].label).toBe('QwenCloud');
+    // QwenCloud group should contain both presets.
+    const qwencloudItems = items.filter(
+      (i) =>
+        i.value === 'qwencloud-token-plan' || i.value === 'qwencloud-standard',
+    );
+    expect(qwencloudItems).toHaveLength(2);
+  });
 });

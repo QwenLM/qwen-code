@@ -156,7 +156,23 @@ describe('Tool v3 local worker routes', () => {
     await harness.ensureRunnable();
     const turnResult = await resources.publish(
       'managed-turn-result',
-      Buffer.from('{"state":"completed"}'),
+      Buffer.from(
+        JSON.stringify({
+          uuid: 'rec-turn-a',
+          parentUuid: null,
+          sessionId: sessionKey.sessionId,
+          timestamp: new Date(1).toISOString(),
+          type: 'system',
+          subtype: 'turn_result',
+          cwd: '/workspace',
+          version: 'test',
+          systemPayload: {
+            promptId: 'prompt-a',
+            state: 'completed',
+            stopReason: 'end_turn',
+          },
+        }),
+      ),
     );
     await session.authority.commitTurnComplete(
       command('settleTurn', 'settle-a'),
@@ -250,7 +266,12 @@ describe('Tool v3 local worker routes', () => {
     );
     registerManagedRuntimeToolRoutes(
       app,
-      { token: 'test-token', leaseId: 'lease-a', epoch: 1 },
+      {
+        token: 'test-token',
+        leaseId: 'lease-a',
+        epoch: 1,
+        runtimeIncarnation: 'incarnation-a',
+      },
       executor,
     );
     server = createServer(app);
@@ -376,6 +397,13 @@ describe('Tool v3 local worker routes', () => {
       deliveryStatus: 'committed',
       historyRevision: receiptEvent!.sequence,
     };
+    expect(
+      (
+        await post('acknowledge', {
+          receipt: { ...receipt, manifest: null, historyRevision: null },
+        })
+      ).status,
+    ).toBe(409);
     expect((await post('acknowledge', { receipt })).status).toBe(200);
     const changedAck = await post('acknowledge', {
       receipt: { ...receipt, historyRevision: receipt.historyRevision + 1 },
@@ -763,4 +791,69 @@ describe('Tool v3 local worker routes', () => {
       }),
     ).rejects.toThrow(/before dispatch/);
   }, 120_000);
+
+  it('admits a native Monitor payload into the Monitor admission family', async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-tool-v3-monitor-'));
+    executor = new ManagedToolExecutor(
+      async () => createManagedToolSet(root!, 'runtime-session-a'),
+      {} as never,
+    );
+    const app = express();
+    registerManagedRuntimeToolV3Routes(
+      app,
+      { token: 'test-token', leaseId: 'lease-a', epoch: 1 },
+      executor,
+    );
+    server = createServer(app);
+    await new Promise<void>((resolve) =>
+      server!.listen(0, '127.0.0.1', resolve),
+    );
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const post = (operation: string, body: Record<string, unknown>) =>
+      fetch(`${origin}/internal/managed-runtime/v3/${operation}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          protocolVersion: 3,
+          toolResult: 'managed-tool-result/1',
+          reference,
+          ...body,
+        }),
+      });
+    const capture = {
+      tenantId: sessionKey.tenantId,
+      sessionId: sessionKey.sessionId,
+      turnId: 'turn-a',
+      executionCallId: identity.executionCallId,
+      bindingGeneration: '1',
+      capturePolicy: 'complete_required',
+    };
+    const admitted = await post('execute', {
+      toolName: 'monitor',
+      input: { command: shellCommand },
+      capture,
+    });
+    expect(admitted.status).toBe(200);
+    // The payload ran as far as the monitor admission family; without a
+    // delegated cgroup root this exact Runtime accurately refuses the start
+    // rather than the payload.
+    expect(await admitted.json()).toMatchObject({
+      protocolVersion: 3,
+      state: 'settled',
+      result: {
+        executionStatus: 'not_started',
+        capture: null,
+        error: {
+          message:
+            'Monitor watch requires a delegated Linux cgroup v2 root on this Runtime.',
+        },
+      },
+    });
+    const refused = await post('execute', {
+      toolName: 'edit',
+      input: { command: shellCommand },
+      capture,
+    });
+    expect(refused.status).toBe(400);
+  });
 });

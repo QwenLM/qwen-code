@@ -33,8 +33,16 @@ import {
   estimateContextTextTokens,
   resolveSlimmingConfig,
   formatContextFileDisplayPath,
+  getAllMemoryFilenames,
+  isSubpath,
+  Storage,
   type CompactionThresholds,
 } from '@qwen-code/qwen-code-core';
+import {
+  AUTO_MEMORY_SNAPSHOT_METADATA,
+  getAutoMemorySnapshot,
+  withoutAutoMemorySnapshots,
+} from '@qwen-code/qwen-code-core/memory/request-context.js';
 import { t } from '../../i18n/index.js';
 import * as path from 'node:path';
 import { getSanitizedExtensionDisplayName } from '../../utils/extension-mention.js';
@@ -93,10 +101,28 @@ function parseMemoryFiles(
   memoryContent: string,
   workingDir: string,
   extensionOwners: ReadonlyMap<string, string> = new Map(),
+  admissionRoot: string = workingDir,
 ): ContextMemoryDetail[] {
   if (!memoryContent || memoryContent.trim().length === 0) return [];
 
   const results: ContextMemoryDetail[] = [];
+  // The preview resolves the owning workspace from the session's admission
+  // root (status.workspaceRoot), which stays put when session/cd relocates
+  // the live cwd. Gate on that same root — not the live working dir — so a
+  // row is a link exactly when the client can read it; a global memory file
+  // is read through the workspace-independent memory route. Normalize both
+  // sides of the global-dir comparison: getGlobalQwenDir() returns an
+  // absolute QWEN_HOME verbatim, trailing separator included, while
+  // path.dirname() never produces one.
+  const root = path.resolve(admissionRoot);
+  const globalDir = path.resolve(Storage.getGlobalQwenDir());
+  const memoryFilenames = new Set(getAllMemoryFilenames());
+  const openablePath = (absolutePath: string): string | undefined =>
+    isSubpath(root, absolutePath) ||
+    (path.resolve(path.dirname(absolutePath)) === globalDir &&
+      memoryFilenames.has(path.basename(absolutePath)))
+      ? absolutePath
+      : undefined;
   // Use backreference (\1) to ensure start/end path markers match
   const regex =
     /--- Context from: (.+?) ---\n([\s\S]*?)--- End of Context from: \1 ---/g;
@@ -111,12 +137,14 @@ function parseMemoryFiles(
     // global memory files don't render as `../../..` chains.
     const absolutePath = path.resolve(workingDir, filePath);
     const owner = extensionOwners.get(absolutePath);
+    const openPath = openablePath(absolutePath);
     results.push({
       // An extension's file is named by its extension rather than by a path
       // under the install directory, which is what makes the row actionable:
       // the reader can disable or migrate that extension.
       path: owner ?? formatContextFileDisplayPath(absolutePath, workingDir),
       tokens: estimateContextTextTokens(content),
+      ...(openPath !== undefined ? { absolutePath: openPath } : {}),
     });
   }
 
@@ -400,9 +428,14 @@ export async function collectContextData(
   // `getStartupContextLength` and bill the whole prelude to `messages`.
   const history =
     activeChat?.getHistoryShallow?.() ?? activeChat?.getHistory?.() ?? [];
+  // Determine the boundary before filtering; catalog-only entries can disappear.
   const preludeLength = getStartupContextLength(history);
-  const prelude = measureStartupPrelude(history.slice(0, preludeLength));
-  const conversationHistory = history.slice(preludeLength);
+  const prelude = measureStartupPrelude(
+    withoutAutoMemorySnapshots(history.slice(0, preludeLength)),
+  );
+  const conversationHistory = withoutAutoMemorySnapshots(
+    history.slice(preludeLength),
+  );
   // Skill-listing reminders appended after the prelude are listing cost, not
   // conversation, and are billed with the startup listing under `skills`.
   const tailSkillListings = measureTailSkillListings(conversationHistory);
@@ -456,16 +489,38 @@ export async function collectContextData(
   }
 
   const memoryContent = config.getUserMemory();
-  const memoryFiles = parseMemoryFiles(
+  const instructionFiles = parseMemoryFiles(
     memoryContent,
     config.getWorkingDir(),
     extensionContextFileOwners(config, config.getWorkingDir()),
+    config.storage.getProjectRoot(),
   );
-  const autoMemoryPrompt = config.getAutoMemoryPrompt();
-  if (autoMemoryPrompt) {
+  const memoryFiles: ContextMemoryDetail[] = [];
+  const instructionFilesTokens = instructionFiles.reduce(
+    (sum, f) => sum + f.tokens,
+    0,
+  );
+  const catalog = config.getAutoMemoryContext?.() ?? '';
+  // Older snapshots remain in the request too; suppression hides all of them.
+  const snapshots = catalog
+    ? history.flatMap((content) =>
+        (content.parts ?? []).filter(
+          (part) => part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true,
+        ),
+      )
+    : [];
+  const pendingSnapshot = getAutoMemorySnapshot(history, catalog);
+  if (pendingSnapshot) snapshots.push(pendingSnapshot);
+  const autoMemoryTokens =
+    estimateContextTextTokens(config.getAutoMemoryPrompt()) +
+    snapshots.reduce(
+      (sum, part) => sum + estimateContextTextTokens(part.text ?? ''),
+      0,
+    );
+  if (autoMemoryTokens > 0) {
     memoryFiles.push({
       path: t('auto memory'),
-      tokens: estimateContextTextTokens(autoMemoryPrompt),
+      tokens: autoMemoryTokens,
     });
   }
   const memoryFilesTokens = memoryFiles.reduce((sum, f) => sum + f.tokens, 0);
@@ -584,6 +639,7 @@ export async function collectContextData(
   const rawOverhead =
     systemPromptTokens +
     allToolsTokens +
+    instructionFilesTokens +
     memoryFilesTokens +
     skillListing.tokens +
     loadedBodiesTokens +
@@ -605,6 +661,7 @@ export async function collectContextData(
   let displaySystemPrompt: number;
   let displayBuiltinTools: number;
   let displayMcpTools: number;
+  let displayInstructionFiles: number;
   let displayMemoryFiles: number;
   let displaySkills: number;
   let displayStartupContext: number;
@@ -613,19 +670,50 @@ export async function collectContextData(
   let freeSpace: number;
   let detailBuiltinTools: ContextToolDetail[];
   let detailMcpTools: ContextToolDetail[];
+  let detailInstructionFiles: ContextMemoryDetail[];
   let detailMemoryFiles: ContextMemoryDetail[];
   let detailSkills: ContextSkillDetail[];
+
+  // `displayBuiltinTools` floors at 0, so when the billed Skill definition and
+  // the MCP schemas together exceed the declared tool list, that excess would
+  // push the estimate past the window, or come straight out of `messages`
+  // against a provider total.
+  // Charge it to `mcpTools`, and charge whatever the MCP schemas cannot absorb
+  // to the Skill definition `skills` carries, so the three rows still account
+  // for exactly `allToolsTokens` plus the listing and the loaded bodies.
+  const clampDeficit = Math.max(
+    0,
+    skillToolDefinitionTokens + mcpToolsTotalTokens - allToolsTokens,
+  );
+  const clampedMcpTools = Math.max(0, mcpToolsTotalTokens - clampDeficit);
+  const clampedSkills =
+    skillsTokens - Math.max(0, clampDeficit - mcpToolsTotalTokens);
+  const clampedBuiltinTools = Math.max(
+    0,
+    allToolsTokens - skillToolDefinitionTokens - clampedMcpTools,
+  );
+  // The MCP detail rows sit under the mcp row, so they carry its deficit too.
+  const mcpDetailShare =
+    mcpToolsTotalTokens > 0 ? clampedMcpTools / mcpToolsTotalTokens : 1;
+  const scaleTokens = <T extends { tokens: number }>(
+    items: T[],
+    factor: number,
+  ): T[] =>
+    factor < 1
+      ? items.map((item) => ({
+          ...item,
+          tokens: Math.round(item.tokens * factor),
+        }))
+      : items;
 
   if (!hasTokenCount) {
     totalTokens = 0;
     displaySystemPrompt = systemPromptTokens;
-    displaySkills = skillsTokens;
+    displaySkills = clampedSkills;
     displayStartupContext = startupContextTokens;
-    displayBuiltinTools = Math.max(
-      0,
-      allToolsTokens - skillToolDefinitionTokens - mcpToolsTotalTokens,
-    );
-    displayMcpTools = mcpToolsTotalTokens;
+    displayBuiltinTools = clampedBuiltinTools;
+    displayMcpTools = clampedMcpTools;
+    displayInstructionFiles = instructionFilesTokens;
     displayMemoryFiles = memoryFilesTokens;
     // Include the conversation: a `/model` switch, `/restore` or a resume
     // zeroes the provider count while leaving `this.history` intact, and such a
@@ -634,7 +722,8 @@ export async function collectContextData(
     messagesTokens = conversationTokens;
     freeSpace = Math.max(0, contextWindowSize - rawContent - autocompactBuffer);
     detailBuiltinTools = builtinTools;
-    detailMcpTools = mcpTools;
+    detailMcpTools = scaleTokens(mcpTools, mcpDetailShare);
+    detailInstructionFiles = instructionFiles;
     detailMemoryFiles = memoryFiles;
     detailSkills = skills;
   } else {
@@ -658,23 +747,6 @@ export async function collectContextData(
     // overshoot is absorbed by the `messages` cap below.
     const scale = rawOverhead > totalTokens ? totalTokens / rawOverhead : 1;
 
-    // `displayBuiltinTools` floors at 0, so when the billed Skill definition and
-    // the MCP schemas together exceed the declared tool list, that excess would
-    // be charged to the overhead and taken straight back out of `messages`.
-    // Charge it to `mcpTools`, and charge whatever the MCP schemas cannot absorb
-    // to the Skill definition `skills` carries, so the three rows still account
-    // for exactly `allToolsTokens` plus the listing and the loaded bodies.
-    const clampDeficit = Math.max(
-      0,
-      skillToolDefinitionTokens + mcpToolsTotalTokens - allToolsTokens,
-    );
-    const clampedMcpTools = Math.max(0, mcpToolsTotalTokens - clampDeficit);
-    const clampedSkills =
-      skillsTokens - Math.max(0, clampDeficit - mcpToolsTotalTokens);
-    const clampedBuiltinTools = Math.max(
-      0,
-      allToolsTokens - skillToolDefinitionTokens - clampedMcpTools,
-    );
     // The clamped categories partition `rawOverhead` before scaling. Flooring
     // each share keeps their sum at or below `totalTokens`; independently
     // rounding them can overshoot the total by a token with no negative row
@@ -682,6 +754,7 @@ export async function collectContextData(
     displaySystemPrompt = Math.floor(systemPromptTokens * scale);
     displayBuiltinTools = Math.floor(clampedBuiltinTools * scale);
     displayMcpTools = Math.floor(clampedMcpTools * scale);
+    displayInstructionFiles = Math.floor(instructionFilesTokens * scale);
     displayMemoryFiles = Math.floor(memoryFilesTokens * scale);
     displaySkills = Math.floor(clampedSkills * scale);
     displayStartupContext = Math.floor(startupContextTokens * scale);
@@ -690,6 +763,7 @@ export async function collectContextData(
       displaySystemPrompt +
       displayBuiltinTools +
       displayMcpTools +
+      displayInstructionFiles +
       displayMemoryFiles +
       displaySkills +
       displayStartupContext;
@@ -718,17 +792,10 @@ export async function collectContextData(
       contextWindowSize - totalTokens - autocompactBuffer,
     );
 
-    const scaleDetail = <T extends { tokens: number }>(items: T[]): T[] =>
-      scale < 1
-        ? items.map((item) => ({
-            ...item,
-            tokens: Math.round(item.tokens * scale),
-          }))
-        : items;
-
-    detailBuiltinTools = scaleDetail(builtinTools);
-    detailMcpTools = scaleDetail(mcpTools);
-    detailMemoryFiles = scaleDetail(memoryFiles);
+    detailBuiltinTools = scaleTokens(builtinTools, scale);
+    detailMcpTools = scaleTokens(mcpTools, scale * mcpDetailShare);
+    detailInstructionFiles = scaleTokens(instructionFiles, scale);
+    detailMemoryFiles = scaleTokens(memoryFiles, scale);
     detailSkills =
       scale < 1
         ? skills.map((item) => ({
@@ -766,6 +833,7 @@ export async function collectContextData(
     systemPrompt: displaySystemPrompt,
     builtinTools: displayBuiltinTools,
     mcpTools: displayMcpTools,
+    instructionFiles: displayInstructionFiles,
     memoryFiles: displayMemoryFiles,
     skills: displaySkills,
     startupContext: displayStartupContext,
@@ -786,6 +854,7 @@ export async function collectContextData(
     breakdown,
     builtinTools: showDetails ? detailBuiltinTools : [],
     mcpTools: showDetails ? detailMcpTools : [],
+    instructionFiles: showDetails ? detailInstructionFiles : [],
     memoryFiles: showDetails ? detailMemoryFiles : [],
     skills: showDetails
       ? detailSkills.filter(
@@ -802,6 +871,10 @@ export async function collectContextData(
  * Format token count for display (e.g. 1234 -> "1.2k", 123456 -> "123.5k")
  */
 function fmtTokens(tokens: number): string {
+  // 999,950 rounds to 1000.0k, so it belongs in the next unit.
+  if (tokens >= 999_950) {
+    return `${(tokens / 1_000_000).toFixed(1)}m`;
+  }
   if (tokens >= 1000) {
     return `${(tokens / 1000).toFixed(1)}k`;
   }
@@ -845,12 +918,15 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
     breakdown,
     builtinTools,
     mcpTools,
+    instructionFiles = [],
     memoryFiles,
     skills,
     isEstimated,
     showDetails,
   } = data;
   const hasTokenCount = totalTokens > 0;
+  const memoryLabel =
+    breakdown.instructionFiles === undefined ? 'Memory files' : 'Auto memory';
 
   const lines: string[] = [];
   lines.push('## Context Usage');
@@ -923,8 +999,17 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
       fmtCategoryRow('MCP tools', breakdown.mcpTools, contextWindowSize),
     );
   }
+  if (breakdown.instructionFiles !== undefined) {
+    lines.push(
+      fmtCategoryRow(
+        'Instruction files',
+        breakdown.instructionFiles,
+        contextWindowSize,
+      ),
+    );
+  }
   lines.push(
-    fmtCategoryRow('Memory files', breakdown.memoryFiles, contextWindowSize),
+    fmtCategoryRow(memoryLabel, breakdown.memoryFiles, contextWindowSize),
   );
   lines.push(fmtCategoryRow('Skills', breakdown.skills, contextWindowSize));
   if ((breakdown.startupContext ?? 0) > 0) {
@@ -978,9 +1063,19 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
         );
       }
     }
+    if (instructionFiles.length > 0) {
+      lines.push('', '**Instruction files**');
+      for (const file of [...instructionFiles].sort(
+        (a, b) => b.tokens - a.tokens,
+      )) {
+        lines.push(
+          fmtCategoryRow(file.path, file.tokens, contextWindowSize, '  └ '),
+        );
+      }
+    }
     if (sortedMemory.length > 0) {
       lines.push('');
-      lines.push('**Memory files**');
+      lines.push('**' + memoryLabel + '**');
       for (const file of sortedMemory) {
         lines.push(
           fmtCategoryRow(file.path, file.tokens, contextWindowSize, '  └ '),

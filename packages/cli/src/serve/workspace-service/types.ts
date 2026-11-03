@@ -17,6 +17,7 @@
 import type {
   ServeWorkspaceMcpStatus,
   ServeWorkspaceSkillsStatus,
+  ServeWorkspaceSkillsRefreshResult,
   ServeWorkspaceProvidersStatus,
   ServeWorkspaceExtensionsStatus,
   ServeWorkspaceHooksStatus,
@@ -104,7 +105,9 @@ export type InvokeWorkspaceCommandFn = <T>(
   opts?: { timeoutMs?: number },
 ) => Promise<T>;
 
-export type RefreshExtensionsForAllSessionsFn = () => Promise<{
+export type RefreshExtensionsForAllSessionsFn = (
+  sessionIds?: readonly string[],
+) => Promise<{
   refreshed: number;
   failed: number;
 }>;
@@ -125,6 +128,12 @@ export interface DaemonWorkspaceService {
   /** Skill status for the bound workspace. */
   getWorkspaceSkillsStatus(
     ctx: WorkspaceRequestContext,
+    /**
+     * Await a new observation, bypassing the warm snapshot path and read
+     * throttling. A retained observation may still answer if both fresh
+     * sources fail.
+     */
+    opts?: { requireFresh?: boolean },
   ): Promise<ServeWorkspaceSkillsStatus>;
 
   /** Live runtime Skills catalog without daemon-local fallback. */
@@ -195,6 +204,18 @@ export interface DaemonWorkspaceService {
     ctx: WorkspaceRequestContext,
     request: WorkspaceTrustChangeRequest,
   ): Promise<WorkspaceTrustChangeResult>;
+
+  /**
+   * Record the bound workspace as trusted in the local trusted-folders file.
+   *
+   * `requestWorkspaceTrustChange` only publishes an operator prompt; this
+   * writes the decision. The path is always the bound workspace, never
+   * caller-supplied, and the route reaching it sits behind the strict
+   * mutation gate, so the caller already holds operator authority.
+   */
+  grantWorkspaceTrust(
+    ctx: WorkspaceRequestContext,
+  ): Promise<WorkspaceTrustStatus>;
 
   /** Replace one permission rule list. */
   setWorkspacePermissionRules(
@@ -269,8 +290,13 @@ export interface DaemonWorkspaceService {
   /** Drop cached skill status so extension skill changes are re-enumerated. */
   invalidateWorkspaceSkillsStatus(): void;
 
-  /** Broadcast extension refresh to all active sessions (fire-and-forget). */
-  refreshExtensionsForAllSessions(): Promise<{
+  refreshWorkspaceSkills(
+    ctx: WorkspaceRequestContext,
+    sessionIds?: readonly string[],
+  ): Promise<ServeWorkspaceSkillsRefreshResult>;
+
+  /** Refresh selected sessions, or all active sessions when omitted. */
+  refreshExtensionsForAllSessions(sessionIds?: readonly string[]): Promise<{
     refreshed: number;
     failed: number;
   }>;
@@ -349,6 +375,23 @@ export class WorkspacePermissionRulesSessionRequiredError extends Error {
       'setWorkspacePermissionRules requires a live ACP session to update active permission rules',
     );
     this.name = 'WorkspacePermissionRulesSessionRequiredError';
+  }
+}
+
+/**
+ * A trust grant wrote its rule but the decision did not change: an
+ * equal-depth DO_NOT_TRUST rule under an alias spelling of the same
+ * directory, a settings error, or an IDE distrust of the daemon's own cwd
+ * wins over the new entry. The write is durably recorded; the failure is
+ * about the grant not taking effect, not about persistence.
+ */
+export class WorkspaceTrustGrantIneffectiveError extends Error {
+  constructor(state: string, source: string) {
+    super(
+      `Workspace trust grant did not take effect (state: ${state}, source: ${source}). ` +
+        'Check the workspace trust status and trust policy before retrying.',
+    );
+    this.name = 'WorkspaceTrustGrantIneffectiveError';
   }
 }
 

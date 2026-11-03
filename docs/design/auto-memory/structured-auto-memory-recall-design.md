@@ -191,6 +191,50 @@ The fast scorer and selector read the same snapshot but have different roles:
 4. A refined selector result is delivered at a later safe injection point and
    merged with fast results by ref. It never narrows the Complete Tree snapshot.
 
+Steps 2 and 4 are conditional while the experimental skip-selector knob
+(`QWEN_CODE_MEMORY_RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT`, off by default)
+is set: a single fast hit matching the query by title or keyword, whose body
+is not already in context, suppresses the selector — and only when that hit is
+also the unique title or keyword match in the pool the suppressed selector
+would have been handed, so a second match ranked below the published fast
+window keeps the selector. Metadata-only substring matches and already-present
+or stale bodies keep the selector. In this gate a non-CJK title or keyword of
+any length counts only on a token boundary, so a memory titled `ai` does not
+skip the selector for `explain`, one titled `log conventions` does not skip it
+for `catalog conventions`, and a keyword `log` does not skip it for `catalog`.
+CJK edges keep substring matching because they are written without word
+separators. Mixed-script values still require boundaries at non-CJK edges;
+an adjacent CJK character also separates a non-CJK token. `Git文档` must not skip the selector for `Legit文档`. The pool count includes ranking and strict matches so CJK-adjacent short
+keywords cannot be missed. Candidates are counted before prompt trimming so a second match cannot disappear from the guard. No refined
+result arrives after a skip; the shared client delivers it as the fast phase.
+This is an ablation experiment; default behavior is unchanged.
+
+Extraction cadence is unchanged by default. The #13004 cooldown implementation
+was removed from #13158: its shutdown tail and suspended oldest windows require
+durable replay before skipped facts can be preserved. Historical code remains
+at `a4568de26e49`. #13571 adds a default-off experiment instead:
+`QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS` (0–3) skips up to N turns after a
+run that successfully accessed memory and saved nothing, only while every unprocessed entry fits
+half of the extractor's 40-entry tail and the prompt is below the compaction
+warning tier. An ACP session close flushes skipped turns within the remaining
+close budget, but that flush is best-effort: the cache-safe slot it reads is
+process-global, so another session capturing the slot first drops it silently.
+Compaction — which the warning-tier condition only makes less likely, since the
+token-independent screenshot trigger and a forced `/compress` both compact below
+that tier —, `/clear`, `/resume`, `/branch`, process exit, a close flush that
+lost the shared cache-safe slot to another session, and a close flush whose own
+budget expired while it waited for that slot (the run is abandoned rather than
+left to fork after the close tore its Config down) do not flush: up to N skipped
+turns are lost there, and a switch drops both sessions' skip state. If a later
+turn grows beyond the tail window, the next extraction prepends the part of
+the bounded skipped slice its captured tail no longer holds — coverage is
+checked against the captured tail itself, measured from the slice's own base,
+not a raw count from the cursor. This preserves skipped turns without
+changing the persisted cursor's raw-history index space. These losses are what the paired runs must
+measure before the default can change; #13004 stays open. Selector-only
+validation must not be cited as extraction, quality, or token-savings
+acceptance.
+
 Short Latin keywords require token boundaries, so `ai` does not match
 `explain`. Han, Hiragana, Katakana, and Hangul use a shared CJK tokenizer. Body
 text is a low-weight fallback and cannot override clear metadata matches.

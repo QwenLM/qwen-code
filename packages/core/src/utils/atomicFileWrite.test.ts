@@ -16,6 +16,7 @@ import {
   renameWithRetry,
   renameWithRetrySync,
 } from './atomicFileWrite.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 type AsyncSeams = NonNullable<Parameters<typeof atomicWriteFile>[3]>;
 type SyncSeams = NonNullable<Parameters<typeof atomicWriteFileSync>[3]>;
@@ -373,12 +374,11 @@ describe('atomicWriteFile', () => {
   );
 
   it.skipIf(
-    process.platform === 'win32' ||
-      typeof process.geteuid !== 'function' ||
-      // chmod 0o000 against the file's real owner still succeeds via
-      // POSIX rename in CI/sandbox setups where the user is effectively
-      // root; only assert real EACCES when we own and can be denied.
-      process.geteuid() === 0,
+    typeof process.geteuid !== 'function' ||
+      // The in-place write is refused only where permission bits bind: not
+      // on Windows, nor for root with its DAC capabilities, which writes
+      // the 0o444 file anyway.
+      !arePermissionBitsEnforced(),
   )(
     'should surface EACCES when in-place fallback hits an unwritable file',
     async () => {

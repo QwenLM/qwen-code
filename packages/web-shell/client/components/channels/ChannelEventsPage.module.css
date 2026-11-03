@@ -1,0 +1,207 @@
+.page {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+  margin: -16px -20px 0;
+}
+
+.pageHeader {
+  display: flex;
+  min-height: 46px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 20px;
+  border-block-end: 1px solid var(--border);
+}
+
+.backButton {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  color: var(--muted-foreground);
+}
+
+.title {
+  min-width: 0;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  outline: none;
+}
+
+.pageBody {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px 24px 32px;
+}
+
+.subtitle {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.filters {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.channelSelect {
+  width: 200px;
+  min-width: 0;
+  min-height: 34px;
+  background: var(--background);
+}
+
+.typeFilters {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.refreshButton {
+  min-height: 34px;
+  margin-inline-start: auto;
+}
+
+.loadingState {
+  display: flex;
+  min-height: 120px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.truncated {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.eventList {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  list-style: none;
+  overflow: hidden;
+}
+
+.eventRow {
+  display: grid;
+  min-width: 0;
+  grid-template-columns:
+    68px minmax(90px, max-content) max-content minmax(80px, max-content)
+    minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-block-end: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.eventRow:last-child {
+  border-block-end: none;
+}
+
+.time {
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.channel {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.type {
+  white-space: nowrap;
+}
+
+.outcome {
+  color: var(--foreground);
+  white-space: nowrap;
+}
+
+.outcome[data-outcome='failed'] {
+  color: var(--destructive);
+}
+
+.target {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: var(--foreground);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actor {
+  color: var(--muted-foreground);
+}
+
+.marker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.markerCode {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+}
+
+.duration {
+  color: var(--muted-foreground);
+}
+
+.error {
+  grid-column: 1 / -1;
+  color: var(--destructive);
+  overflow-wrap: anywhere;
+}
+
+/* Six columns do not fit a phone-width panel: let the target and reason wrap
+   onto their own lines instead of clipping them. */
+@media (max-width: 720px) {
+  .eventRow {
+    grid-template-columns: max-content max-content minmax(0, 1fr);
+    row-gap: 4px;
+  }
+
+  .target,
+  .marker {
+    grid-column: 1 / -1;
+  }
+}

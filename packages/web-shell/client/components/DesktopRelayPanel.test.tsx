@@ -9,14 +9,24 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as relayClient from '../desktop-relay/desktop-relay-client';
 import { I18nProvider } from '../i18n';
 import type { WebShellLanguage } from '../i18n';
 import {
+  DesktopRelayControl,
   DesktopRelayPanel,
   deriveDesktopRelayStatus,
   retainLiveDesktopRelayProbe,
   type DesktopRelayStatus,
 } from './DesktopRelayControl';
+
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
+  useWorkspace: () => ({
+    baseUrl: 'https://devbox:4170/',
+    capabilities: { features: ['client_mcp_over_ws'] },
+  }),
+  useConnection: () => ({ sessionId: 's1', workspaceCwd: '/tmp' }),
+}));
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -312,4 +322,55 @@ describe('retainLiveDesktopRelayProbe', () => {
     const idle = { kind: 'ready' as const, version: '0.1.7' };
     expect(retainLiveDesktopRelayProbe(unknown, idle, 21)).toBe(idle);
   });
+});
+
+it('retains relay observation when its More trigger is removed and restored', async () => {
+  vi.stubGlobal('isSecureContext', true);
+  const probe = vi.spyOn(relayClient, 'probeDesktopRelay').mockResolvedValue({
+    kind: 'ready',
+    version: '0.1.6',
+    active: {
+      sessionId: 's1',
+      daemonUrl: 'https://devbox:4170/',
+      phase: 'connected',
+    },
+  });
+  const disconnect = vi.spyOn(relayClient, 'disconnectDesktopRelay');
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  const slot = document.createElement('div');
+  document.body.appendChild(slot);
+  const render = (target: HTMLElement | null) =>
+    root!.render(
+      <I18nProvider language="en">
+        <DesktopRelayControl triggerClassName="" portalContainer={target} />
+      </I18nProvider>,
+    );
+  try {
+    await act(async () => render(slot));
+    expect(probe).not.toHaveBeenCalled();
+    await act(async () =>
+      slot.querySelector<HTMLButtonElement>('button')!.click(),
+    );
+    expect(
+      document.querySelector('[data-web-shell-desktop-relay-panel]')
+        ?.textContent,
+    ).toContain('Connected');
+    await act(async () => render(null));
+    expect(slot.querySelector('button')).toBeNull();
+    expect(
+      document.querySelector('[data-web-shell-desktop-relay-panel]'),
+    ).toBeNull();
+    await act(async () => render(slot));
+    expect(slot.querySelector('button span')).not.toBeNull();
+    expect(disconnect).not.toHaveBeenCalled();
+  } finally {
+    act(() => root?.unmount());
+    root = null;
+    slot.remove();
+    probe.mockRestore();
+    disconnect.mockRestore();
+    vi.unstubAllGlobals();
+  }
 });

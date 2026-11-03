@@ -104,6 +104,7 @@ describe('CodeModeOnly exposure', () => {
     'exit_plan_mode',
     'structured_output',
     'create_sub_session',
+    'autofix_pr',
     'enter_worktree',
     'exit_worktree',
     'send_message',
@@ -180,7 +181,13 @@ describe('CodeModeOnly exposure', () => {
     )?.description;
     for (const name of migratedTools)
       expect(description).toContain(`tools.${name}(args:`);
-    expect(description).toContain('automatically retained');
+    expect(description).toContain(
+      'are not automatically added to the exec response',
+    );
+    expect(description).toContain('Use text(value) to return text');
+    expect(description).toContain(
+      'bare return values and successful script completion produce no output',
+    );
     expect(description).toContain('terminal update_goal');
   });
 

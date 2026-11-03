@@ -78,6 +78,10 @@ Creates a new query session with the Qwen Code.
 > [!note]
 > For `coreTools`, aliases like `Read`, `Edit`, and `Bash` also work, but invocation specifiers such as `Bash(git *)` are stripped. `coreTools` restricts tool registration, not invocation patterns.
 
+#### Empty core-tool allowlists
+
+An omitted or empty `coreTools` list is treated as unspecified; `coreTools: []` does **not** create a tool-free session. A non-empty list restricts core tools, not every tool category: MCP and other non-core tools have separate registration and permission rules. Use `excludeTools` to exclude named tools explicitly. `allowedTools` controls approval, not which tools are registered.
+
 ### Timeouts
 
 The SDK enforces the following default timeouts:
@@ -540,3 +544,9 @@ try {
   }
 }
 ```
+
+## Human-origin workflow hints
+
+Streaming `SDKUserMessage` input supports per-message `origin: { kind: 'human' }` for original human submissions. Messages without the declaration and string convenience prompts remain ordinary chat without keyword activation. See the [workflow intent contract](../users/workflow-intent.md) ([简体中文](../users/workflow-intent.zh-CN.md)) for examples and exclusions.
+
+For an explicit session preference, use `options.workflowMode`, `getWorkflowMode()` and `setWorkflowMode(enabled)`. This mode also applies to ordinary submissions without a human-origin declaration. See [session Workflow mode](../users/workflow-mode.md) ([简体中文](../users/workflow-mode.zh-CN.md)) for readiness, persistence, supported owners and ACP/daemon controls.

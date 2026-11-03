@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   MANAGED_SESSION_DOMAINS,
+  MANAGED_SESSION_LIFECYCLE_STATES,
   MANAGED_SESSION_LIMITS,
   ManagedSessionRecordError,
   assertManagedSessionEventActor,
@@ -67,6 +68,8 @@ const activationSubject = {
   activationId: 'act-1',
   epoch: 3,
 };
+
+const turnSubject = { type: 'turn', turnId: 'turn-1' };
 
 function harnessEvent(
   overrides: Record<string, unknown> = {},
@@ -447,6 +450,100 @@ describe('managed session shared field rules', () => {
     cycle['self'] = cycle;
     expectEventError(cancellation(cycle), /must not contain cycles/);
   });
+
+  it('walks a shared-reference graph once per distinct object', () => {
+    let shared: Record<string, unknown> = { leaf: 1 };
+    for (let level = 0; level < 24; level++) {
+      shared = { a: shared, b: shared };
+    }
+    // 25 distinct objects holding ~2^24 paths serialize to ~350 MB, and
+    // commit() stringifies before its byte check, so the expansion has to be
+    // refused here; a small shared graph stays legal.
+    expectEventError(
+      envelope('cancel.requested', 2, cancelPayload(shared)),
+      /expands past 8388608 bytes through shared references/,
+    );
+    let small: Record<string, unknown> = { leaf: 1 };
+    for (let level = 0; level < 8; level++) {
+      small = { a: small, b: small };
+    }
+    expect(() =>
+      parseManagedSessionEvent(
+        envelope('cancel.requested', 2, cancelPayload(small)),
+      ),
+    ).not.toThrow();
+
+    let chain: unknown = null;
+    for (let depth = 0; depth < 61; depth++) {
+      chain = { nested: chain };
+    }
+    // The second path to the shared chain ends one level past the bound, so
+    // the memo must not short-circuit the depth check.
+    expectEventError(
+      envelope(
+        'cancel.requested',
+        2,
+        cancelPayload({ first: chain, shell: { second: chain } }),
+      ),
+      /maximum JSON depth/,
+    );
+
+    // One object shorter, the second path ends exactly at the bound: the
+    // shared value must be accepted, as its unshared copy is.
+    const fits = (chain as { nested: unknown }).nested;
+    expect(() =>
+      parseManagedSessionEvent(
+        envelope(
+          'cancel.requested',
+          2,
+          cancelPayload({ first: fits, shell: { second: fits } }),
+        ),
+      ),
+    ).not.toThrow();
+
+    // Array-shaped sharing goes through the same memo: heights propagate,
+    // and expansion is bounded for arrays exactly as for objects.
+    let rows: unknown = [1];
+    for (let level = 0; level < 24; level++) {
+      rows = [rows, rows];
+    }
+    expectEventError(
+      envelope('cancel.requested', 2, cancelPayload(rows)),
+      /expands past 8388608 bytes through shared references/,
+    );
+    let smallRows: unknown = [1];
+    for (let level = 0; level < 8; level++) {
+      smallRows = [smallRows, smallRows];
+    }
+    expect(() =>
+      parseManagedSessionEvent(
+        envelope('cancel.requested', 2, cancelPayload(smallRows)),
+      ),
+    ).not.toThrow();
+
+    let rowChain: unknown = null;
+    for (let depth = 0; depth < 61; depth++) {
+      rowChain = [rowChain];
+    }
+    expectEventError(
+      envelope(
+        'cancel.requested',
+        2,
+        cancelPayload({ first: rowChain, shell: { second: rowChain } }),
+      ),
+      /maximum JSON depth/,
+    );
+    const fitsRows = (rowChain as unknown[])[0];
+    expect(() =>
+      parseManagedSessionEvent(
+        envelope(
+          'cancel.requested',
+          2,
+          cancelPayload({ first: fitsRows, shell: { second: fitsRows } }),
+        ),
+      ),
+    ).not.toThrow();
+  });
 });
 
 describe('managed session per-kind rules', () => {
@@ -524,6 +621,105 @@ describe('managed session per-kind rules', () => {
     expectEventError(activationEvent('paused'), /phase must be one of/);
   });
 
+  it('requires the payload subject to identify the activation it changes', () => {
+    expect(parseManagedSessionEvent(activationEvent('active')).kind).toBe(
+      'activation.changed',
+    );
+    // hook_operation is the hosted Hook caller's legal subject and must
+    // stay accepted.
+    expect(
+      parseManagedSessionEvent(
+        activationEvent('active', {
+          subject: {
+            type: 'hook_operation',
+            operationId: 'op-1',
+            occurrenceId: 'occ-1',
+          },
+        }),
+      ).kind,
+    ).toBe('activation.changed');
+    expectEventError(
+      activationEvent('active', {
+        subject: { type: 'turn', turnId: 'turn-9' },
+      }),
+      /subject must identify the activation it changes/,
+    );
+    expectEventError(
+      activationEvent('active', {
+        subject: { ...activationSubject, activationId: 'act-2' },
+      }),
+      /subject must identify the activation it changes/,
+    );
+    expectEventError(
+      activationEvent('active', {
+        subject: { ...activationSubject, epoch: 4 },
+      }),
+      /subject must identify the activation it changes/,
+    );
+  });
+
+  it('requires the envelope subject to match the payload subject', () => {
+    expect(
+      parseManagedSessionEvent({ ...wakeEvent(), subject: turnSubject }).kind,
+    ).toBe('wake.requested');
+    expect(
+      parseManagedSessionEvent({
+        ...activationEvent('active'),
+        subject: activationSubject,
+      }).kind,
+    ).toBe('activation.changed');
+    expectEventError(
+      { ...wakeEvent(), subject: { type: 'turn', turnId: 'turn-9' } },
+      /requires event.subject to match payload.subject/,
+    );
+    expectEventError(
+      { ...activationEvent('active'), subject: turnSubject },
+      /requires event.subject to match payload.subject/,
+    );
+    // Negative coverage for the hook_operation and activation comparison
+    // branches: each differing identity field on its own must fail.
+    const hookSubject = {
+      type: 'hook_operation',
+      operationId: 'op-1',
+      occurrenceId: 'occ-1',
+    };
+    expectEventError(
+      {
+        ...wakeEvent({ subject: hookSubject }),
+        subject: { ...hookSubject, operationId: 'op-2' },
+      },
+      /requires event.subject to match payload.subject/,
+    );
+    expectEventError(
+      {
+        ...wakeEvent({ subject: hookSubject }),
+        subject: { ...hookSubject, occurrenceId: 'occ-2' },
+      },
+      /requires event.subject to match payload.subject/,
+    );
+    expectEventError(
+      {
+        ...activationEvent('active'),
+        subject: { ...activationSubject, scopeId: 'scope-2' },
+      },
+      /requires event.subject to match payload.subject/,
+    );
+    expectEventError(
+      {
+        ...activationEvent('active'),
+        subject: { ...activationSubject, activationId: 'act-9' },
+      },
+      /requires event.subject to match payload.subject/,
+    );
+    expectEventError(
+      {
+        ...activationEvent('active'),
+        subject: { ...activationSubject, epoch: 9 },
+      },
+      /requires event.subject to match payload.subject/,
+    );
+  });
+
   it('ties the action decision reference to the decided state', () => {
     expect(parseManagedSessionEvent(actionEvent()).kind).toBe('action.changed');
     expectEventError(
@@ -579,6 +775,51 @@ describe('managed session per-kind rules', () => {
     );
   });
 
+  it('rejects a predecessor reference that cannot hold', () => {
+    expectEventError(
+      withPayload(eventForKind('message.committed'), {
+        parentMessageId: 'msg-1',
+      }),
+      /parentMessageId must not name itself/,
+    );
+    expectEventError(
+      withPayload(eventForKind('checkpoint.committed'), {
+        previousCheckpointId: 'checkpoint-1',
+      }),
+      /previousCheckpointId must not name itself/,
+    );
+    expectEventError(
+      withPayload(eventForKind('config.bound'), {
+        revision: 1,
+        previousRevision: 7,
+      }),
+      /previousRevision must precede payload.revision/,
+    );
+    expectEventError(
+      withPayload(eventForKind('config.bound'), {
+        revision: 5,
+        previousRevision: 5,
+      }),
+      /previousRevision must precede payload.revision/,
+    );
+    expectEventError(
+      withPayload(wakeEvent(), { sourceEventId: 'evt-2' }),
+      /sourceEventId must not name itself/,
+    );
+    expect(
+      parseManagedSessionEvent(
+        withPayload(eventForKind('config.bound'), {
+          revision: 2,
+          previousRevision: 1,
+        }),
+      ).kind,
+    ).toBe('config.bound');
+    expect(
+      parseManagedSessionEvent(eventForKind('message.committed')).kind,
+    ).toBe('message.committed');
+    expect(parseManagedSessionEvent(wakeEvent()).kind).toBe('wake.requested');
+  });
+
   it('rejects a compaction range whose end precedes its start', () => {
     expectEventError(
       envelope(
@@ -599,8 +840,9 @@ describe('managed session per-kind rules', () => {
   });
 
   it('registers the v1 domains including file history and session source', () => {
-    expect(MANAGED_SESSION_DOMAINS).toHaveLength(33);
-    expect(new Set(MANAGED_SESSION_DOMAINS).size).toBe(33);
+    expect(MANAGED_SESSION_DOMAINS).toHaveLength(35);
+    expect(new Set(MANAGED_SESSION_DOMAINS).size).toBe(35);
+    expect(MANAGED_SESSION_DOMAINS).toContain('session_command');
   });
 
   it('validates the lifecycle target state', () => {
@@ -706,13 +948,22 @@ describe('managed session lifecycle transitions', () => {
   });
 
   it('blocks every state except deleted and restores a legal stage', () => {
-    expectTransitions([
-      ['active', 'recovery_blocked', true],
-      ['deleted', 'recovery_blocked', false],
-      ['recovery_blocked', 'active', true],
-      ['recovery_blocked', 'deleted', false],
-      ['recovery_blocked', 'recovery_blocked', false],
-    ]);
+    expectTransitions(
+      MANAGED_SESSION_LIFECYCLE_STATES.flatMap(
+        (state): Array<[State, State, boolean]> => [
+          [
+            state,
+            'recovery_blocked',
+            state !== 'deleted' && state !== 'recovery_blocked',
+          ],
+          [
+            'recovery_blocked',
+            state,
+            state !== 'deleted' && state !== 'recovery_blocked',
+          ],
+        ],
+      ),
+    );
   });
 
   it('fails closed for invalid direct-call states and pins terminal transitions', () => {
@@ -745,16 +996,36 @@ describe('managed session header', () => {
   it('refuses a newer format or reader requirement', () => {
     headerError({ formatVersion: 2 }, /is not supported by this reader/);
     headerError(
-      { minimumReader: 'managed-session/2' },
+      { minimumReader: 'managed-session/3' },
       /is not supported by this reader/,
     );
   });
 
-  it('accepts an older minimum-reader requirement and returns its token', () => {
+  it('accepts supported minimum-reader requirements and returns their tokens', () => {
     expect(
       parseManagedSessionHeader(header({ minimumReader: 'managed-session/0' }))
         .minimumReader,
     ).toBe('managed-session/0');
+    expect(
+      parseManagedSessionHeader(header({ minimumReader: 'managed-session/1' }))
+        .minimumReader,
+    ).toBe('managed-session/1');
+    expect(
+      parseManagedSessionHeader(header({ minimumReader: 'managed-session/2' }))
+        .minimumReader,
+    ).toBe('managed-session/2');
+  });
+
+  it('refuses a malformed minimum-reader token', () => {
+    const malformed = [
+      'managed-session/01',
+      'managed-session/',
+      'managed-session/1 ',
+      'managed-session/1.0',
+    ];
+    for (const minimumReader of malformed) {
+      headerError({ minimumReader }, /is not supported by this reader/);
+    }
   });
 
   it('validates and preserves a base transcript proof', () => {
@@ -1019,5 +1290,90 @@ describe('managed session raw record parsing', () => {
     expect(parseJson(exact, cap)()).toBe('x'.repeat(cap - 2));
     const over = JSON.stringify('x'.repeat(cap - 1));
     expect(parseJson(over, cap)).toThrow(/exceeds 65536 UTF-8 bytes/);
+  });
+});
+
+describe('Hosted recovery envelopes', () => {
+  it('keeps old attempts readable and validates new references', () => {
+    expect(parseManagedSessionEvent(harnessEvent()).kind).toBe('model.attempt');
+    const payload = {
+      attemptId: 'a',
+      routeRef: ref(),
+      inputCheckpointRef: null,
+      state: 'started',
+      usageRef: null,
+      recoveryRef: ref('hosted-model-request'),
+    };
+    expect(
+      parseManagedSessionEvent(harnessEvent({ payload })).payload[
+        'recoveryRef'
+      ],
+    ).toEqual(payload.recoveryRef);
+    expect(() =>
+      parseManagedSessionEvent(
+        harnessEvent({ payload: { ...payload, recoveryRef: ref() } }),
+      ),
+    ).toThrow(/recoveryRef/);
+  });
+  it('requires a complete bounded retraction and ordered range', () => {
+    const event = (payload: unknown) =>
+      harnessEvent({ kind: 'message.retracted', payload });
+    const payload = { messageId: 'msg', turnId: 'turn', fromSequence: 2 };
+    expect(parseManagedSessionEvent(event(payload)).kind).toBe(
+      'message.retracted',
+    );
+    expect(() =>
+      parseManagedSessionEvent(event({ ...payload, throughSequence: 3 })),
+    ).toThrow(/together/);
+    const bounded = {
+      ...payload,
+      throughSequence: 3,
+      sourceBootId: 'boot',
+      sourceEventEpoch: 'epoch',
+    };
+    expect(parseManagedSessionEvent(event(bounded)).payload).toEqual(bounded);
+    expect(() =>
+      parseManagedSessionEvent(event({ ...bounded, throughSequence: 1 })),
+    ).toThrow(/range/);
+  });
+  it('validates batch plans and cleanup states under Harness ownership', () => {
+    for (const [kind, payload] of [
+      [
+        'hosted.batch.planned',
+        {
+          batchId: 'batch',
+          planRevision: 1,
+          planRef: ref('hosted-approval-continuation'),
+        },
+      ],
+      [
+        'hosted.cleanup',
+        {
+          cleanupId: 'cleanup',
+          descriptorRef: ref('hosted-turn-cleanup'),
+          state: 'owed',
+        },
+      ],
+    ] as const) {
+      const event = parseManagedSessionEvent(harnessEvent({ kind, payload }));
+      expect(() =>
+        assertManagedSessionEventActor(event, 'harness'),
+      ).not.toThrow();
+      expect(() =>
+        assertManagedSessionEventActor(event, 'trusted_entry'),
+      ).toThrow();
+    }
+    expect(() =>
+      parseManagedSessionEvent(
+        harnessEvent({
+          kind: 'hosted.cleanup',
+          payload: {
+            cleanupId: 'c',
+            descriptorRef: ref('hosted-turn-cleanup'),
+            state: 'released',
+          },
+        }),
+      ),
+    ).toThrow();
   });
 });

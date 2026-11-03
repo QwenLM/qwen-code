@@ -71,158 +71,62 @@ permissions:
   contents: 'read'
 
 env:
-  # Identity of the autofix bot. All open in-repo PRs authored by this bot are
-  # eligible for the review phase — not limited to autofix/issue-* branches.
+  # Autofix bot identity: ALL its open in-repo PRs are eligible, not just autofix/issue-*.
   AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
-  # Branch-name prefix used by the issue phase when creating PRs. Also used
-  # for duplicate-PR detection and issue-number extraction from branch names.
+  # Branch prefix for issue-phase PRs; also drives duplicate detection and issue-number extraction.
   BRANCH_PREFIX: 'autofix/issue-'
-  # The automated Qwen PR reviewer posts as this account; its review counts as
-  # actionable feedback even though it is not a human collaborator.
+  # The Qwen PR reviewer: its review counts as actionable feedback without collaborator status.
   REVIEW_BOT: 'qwen-code-ci-bot'
-  # Human reviews/comments only count when the author is a real maintainer. This
-  # is the prompt-injection trust gate: feedback from anyone else is ignored so a
-  # hostile commenter cannot steer the agent.
+  # Human feedback: maintainers only (prompt-injection gate). → qwen-autofix.md#af-160
   TRUSTED_ASSOC: '["OWNER", "MEMBER", "COLLABORATOR"]'
-  # Every lane this loop owns whose check runs attach to the PR head:
-  # excluded from the head-state classifiers (charge + wake) by name, or
-  # the loop reads its own red as the round's regression (af-157, R27-23).
-  # A test pins the names against the workflows' `name:` lines.
+  # Loop-owned lanes excluded from the head-state classifiers. → qwen-autofix.md#af-157
   LOOP_OWNED_LANES: '["Qwen Autofix","🧐 Qwen Pull Request Review","Qwen CI Failure Patrol","Qwen Autofix Fork Bridge","Qwen Autofix Fork Signal","Qwen Triage","Qwen Triage Finalize","PR self-report label","Qwen PR Safety Precheck","Comment Attachment Guard","PR Asset Branch Cleanup"]'
-  # The review bot's thread lifecycle replies `R<id> fixed by <what>` into a
-  # thread — a NOTE, never a finding: it carries its own marker
-  # (FIXED_RULING_MARKER in lib/review-footer.ts) at the end of its first
-  # line, and counting it selected a just-approved PR for a round with
-  # nothing to address (#9940 review, round 28). Matched by its posted SHAPE,
-  # anchored at the start, so a real Critical that QUOTES the marker (a
-  # review of the file defining it) leads with its severity marker and keeps
-  # counting — and so does one whose first line QUOTES a whole ruling and
-  # then carries on, which the start anchor alone let through under
-  # attribution off, where no severity marker leads the post (#9940
-  # review, round 30). The anchor spans the WHOLE body: a comment that
-  # quotes the note in full and then states its own finding underneath was
-  # dropped from the census wholesale, the live Critical with it — a real
-  # note is the note and, under attribution on, its footer, and anything
-  # carrying further prose fails closed toward COUNTING (#9940 review,
-  # round 31). `lib/review-footer.ts` exports the same shape as
-  # FIXED_RULING_SHAPE_RE for the TypeScript readers. Defined ONCE and handed to every jq site as `--arg frf`: an
-  # `--arg` value is the regex verbatim, so the class is spelled `[^\n]` with
-  # ONE backslash here — the `[^\\n]` a jq string literal needs compiled, as a
-  # shell value, to "neither backslash nor n" and let a `by` clause with an
-  # `n` in it count (#9940 review, round 29).
+  # Shape of the review bot's 'R<id> fixed by' note, which never counts as feedback (#9940). → qwen-autofix.md#af-160
   FIXED_RULING_FILTER: '^R[0-9]+-[0-9]+ fixed(?: by [^\r\n\x{2028}\x{2029}]*)? <!-- qwen-review-fixed-ruling -->[ \t]*(\r?\n[ \t\r\n]*_— ((?! via Qwen Code /review)[^\r\n\x{2028}\x{2029}])* via Qwen Code /review( \(v[A-Za-z0-9._+-]{0,200}…?\)?)?_[ \t]*)?([\r\n][ \t\r\n]*)?$'
-  # Hard cap on automated review-address rounds per PR. After this the bot stops
-  # and leaves the PR for a human. Raised from 5: across the last 40 bot PRs
-  # only 3 ever reached the cap and all 3 merged AT it (one having spent two of
-  # its five rounds on the verify-gate ENOENT that #7330 fixed), so the ceiling
-  # was near enough to bind on a bad day without any headroom for one. The cap
-  # exists to stop an unproductive LOOP, not to ration ordinary iteration —
-  # a genuinely stuck PR still stops, just later.
+  # Hard cap on automated review-address rounds per PR; a stuck PR stops later, not never. → qwen-autofix.md#af-160
   MAX_ROUNDS: '10'
-  # Suggestions may improve a PR, but continuing to implement them after five
-  # change-producing rounds expands the diff and creates fresh review churn.
-  # Full rationale → qwen-autofix.md#af-002
+  # Suggestions stop after CRITICAL_ONLY_AFTER_ROUND change-producing rounds. → qwen-autofix.md#af-002
   CRITICAL_ONLY_AFTER_ROUND: '5'
   # Per-author tail budget inside Critical-only mode.
   # Full rationale → qwen-autofix.md#af-074
   CRITICAL_ONLY_HUMAN_BATCHES: '2'
-  # Net-diff growth budgets per counting window — the SIZE sibling of the
-  # round brake above. CRITICAL_ONLY_AFTER_ROUND counts rounds, but one round
-  # Full rationale → qwen-autofix.md#af-003
+  # Net-diff growth budgets per counting window — the SIZE sibling of the round brake. → qwen-autofix.md#af-003
   GROWTH_BUDGET_SRC_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_SRC_LINES || 400 }}'
   GROWTH_BUDGET_TEST_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_TEST_LINES || 400 }}'
-  # Growth audit: a budget breach engages Critical-only AND makes the round a
-  # growth-audit round.
-  # Full rationale → qwen-autofix.md#af-075
+  # A budget breach engages Critical-only and makes the round a growth-audit round. → qwen-autofix.md#af-075
   API_AUTH_MAX_ROUNDS: '3'
-  # Checks the "wait for checks to settle" gate does NOT wait for. The gate
-  # exists so a FAILED check can be read as feedback, which is why build/test/
-  # lint are still waited for. `review-pr` is the LLM code review: its output
-  # is a REVIEW, delivered by its own real-time pull_request_review trigger and
-  # counted by the review path — the check conclusion carries nothing the loop
-  # acts on. Blocking on it bought nothing and cost a median 49 minutes per
-  # round (p90 123, max 158, over 32 completed runs), during which the PR was
-  # invisible to the scan even when it already had unaddressed feedback.
-  # Names must match job ids in qwen-code-pr-review.yml; a test pins that.
+  # Checks the settle gate skips: 'review-pr' carries nothing the loop acts on. → qwen-autofix.md#af-160
   NON_BLOCKING_CHECKS: '["review-pr"]'
-  # Failed-check annotation patterns that mean the INFRASTRUCTURE died, not the
-  # code — a self-hosted runner losing the server, the disk filling, a runner
-  # shutdown, or a git fetch/clone dying mid-transfer.
-  # Full rationale → qwen-autofix.md#af-076
-  INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed'
-  # Upper bound on review targets emitted per scan (fan-out defense-in-depth;
-  # excess is logged and deferred to the next scan).
-  # Full rationale → qwen-autofix.md#af-077
+  # Failed-check patterns that mean INFRASTRUCTURE died, not the code. → qwen-autofix.md#af-076
+  INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed|failed to be acquired|lock not acquired within'
+  # Max review targets per scan (fan-out defense). → qwen-autofix.md#af-077
   MAX_TARGETS_PER_SCAN: '${{ vars.QWEN_AUTOFIX_MAX_TARGETS_PER_SCAN || 30 }}'
-  # Upper bound on candidates INSPECTED per scan: idle candidates consume
-  # serial API calls even when they emit nothing, and takeover widens the
-  # candidate pool.
+  # Upper bound on candidates INSPECTED per scan.
   # Full rationale → qwen-autofix.md#af-078
   MAX_CANDIDATE_INSPECTIONS: '${{ vars.QWEN_AUTOFIX_MAX_CANDIDATE_INSPECTIONS || 60 }}'
-  # Maintainer-facing engagement labels (applying labels requires GitHub
-  # triage+, so the permission gate is GitHub's own): TAKEOVER opts a PR —
-  # including a human-authored one — into the loop; SKIP opts any PR out
-  # everywhere, and wins when both are present.
+  # TAKEOVER opts in; SKIP opts out and wins. → qwen-autofix.md#af-160
   TAKEOVER_LABEL: 'autofix/takeover'
   SKIP_LABEL: 'autofix/skip'
-  # Commit-status context stamped PENDING on a PR head when a scan dispatches
-  # a review-address leg for it, and re-stamped SUCCESS by the leg on
-  # checkout.
-  # Full rationale → qwen-autofix.md#af-079
+  # PENDING marker stamped on a PR head when a scan dispatches. → qwen-autofix.md#af-079
   DISPATCH_STATUS_CONTEXT: 'qwen-autofix/dispatch-pending'
   DISPATCH_STATUS_TTL_MINUTES: '30'
-  # Comment-command sugar over TAKEOVER_LABEL ('<cmd>' applies it, '<cmd>
-  # stop' removes it). Matched EXACTLY against the trimmed comment body —
-  # with ONE parameterized form, '<cmd> from N', which applies the label and
-  # additionally seeds this window's round counter at N (see
-  # CRITICAL_ONLY_AFTER_ROUND). The literal prefix still has to match this
-  # constant byte-for-byte; only a bounded 1-2 digit integer is read out of
-  # the body, and it reaches nothing but an integer comparison.
+  # Comment-command sugar: '<cmd>', 'stop', 'from N', 'for N' — exact match only. → qwen-autofix-round-seed.md
   TAKEOVER_COMMAND: '@qwen-code /takeover'
-  # Escalation label: applied when the loop STOPS on a PR (round cap,
-  # consecutive-failure or time-budget breaker) and a human must act —
-  # re-arm, split, merge, or close. It makes paused PRs filterable and lets
-  # the fleet shepherd age out unanswered stops. Removed wherever management
-  # resumes (engage/re-arm) or a human releases the PR.
+  # Escalation label applied when the loop STOPS and a human must act. → qwen-autofix.md#af-160
   NEEDS_HUMAN_LABEL: 'autofix/needs-human'
-  # Re-arm sugar. Recovering a stranded PR previously meant DELETING the
-  # bot's autofix-eval marker comment by hand (undiscoverable, destructive,
-  # and it erases the audit trail). This command instead posts an
-  # 'autofix-rearm' marker that supersedes the earlier evaluation markers:
-  # the scan re-reads the feedback from scratch and the round counter resets.
+  # Re-arm sugar: an 'autofix-rearm' marker supersedes earlier eval markers. → qwen-autofix.md#af-160
   RETRY_COMMAND: '@qwen-code /retry'
-  # Round cap while TAKEOVER_LABEL is present. Large managed PRs routinely
-  # need dozens of feedback rounds — that is the point of takeover — so the
-  # unattended cap (MAX_ROUNDS) would strangle it. The circuit breaker stays
-  # (a bot↔review-bot ping-pong is still bounded), it is just sized for
-  # explicitly delegated work; removing the label restores the strict cap,
-  # and re-engaging opens a fresh counting window (see REARM_KEY below).
+  # Round cap while TAKEOVER_LABEL is present; 'for N' may lower it. → qwen-autofix.md#af-160
   TAKEOVER_MAX_ROUNDS: '100'
-  # Consecutive-failure sub-cap, distinct from the total round cap above. The
-  # total cap bounds how many PRODUCTIVE rounds a PR may take; this bounds how
-  # many rounds may fail IN A ROW with nothing pushed.
-  # Full rationale → qwen-autofix.md#af-080
+  # Consecutive-failure sub-cap: rounds that may fail in a row with nothing pushed. → qwen-autofix.md#af-080
   CONSECUTIVE_FAILURE_CAP: '5'
-  # Cumulative agent-timeout sub-cap, the sibling of the consecutive cap for
-  # the failure shape it cannot see: timeouts INTERLEAVED with successful
-  # rounds.
-  # Full rationale → qwen-autofix.md#af-081
+  # Cumulative agent-timeout sub-cap. → qwen-autofix.md#af-081
   TIMEOUT_WINDOW_CAP: '3'
-  # Convergence-signal circuit breaker — the off-ramp the round and growth
-  # brakes cannot provide (#10107): N consecutive review rounds carrying a
-  # machine-readable non-convergence code, with no trusted-human response
-  # in between, pause the loop. Tunable without a code change; a malformed
-  # value falls back to its default at the read site.
-  # Full rationale → qwen-autofix.md#af-151
+  # Consecutive non-convergence rounds before the loop pauses. → qwen-autofix.md#af-151
   CONVERGENCE_BREAK_ROUNDS: '${{ vars.QWEN_AUTOFIX_CONVERGENCE_BREAK_ROUNDS || 3 }}'
-  # Which codes count as the signal (jq-ready JSON array). The vocabulary
-  # is the review CLI's RECOMMENDATION_CODES, published per round as `rec`
-  # in the posted ledger marker; a test pins this list inside it.
-  # 'land-and-defer' is deliberately absent — see af-151.
+  # Convergence signal codes. → qwen-autofix.md#af-151
   CONVERGENCE_SIGNAL_CODES: '["root-cause-triage","successor-chain","batch-fixes","stem-surface"]'
-  # In-round self-review A/B: off (default) | ab (odd PRs armed) | on —
-  # ONE bounded delta review before the round's commit, never a loop.
-  # Full rationale → qwen-autofix.md#af-156
+  # In-round self-review A/B: off (default) | ab (odd PRs armed) | on. → qwen-autofix.md#af-156
   SELF_REVIEW: "${{ vars.QWEN_AUTOFIX_SELF_REVIEW || 'off' }}"
   # Agent budget (ms) for an ARMED round; clamped in the address step.
   SELF_REVIEW_TIMEOUT_MS: '${{ vars.QWEN_AUTOFIX_SELF_REVIEW_TIMEOUT_MS || 10800000 }}'
@@ -265,6 +169,7 @@ jobs:
       ack_base: '${{ steps.decide.outputs.ack_base }}'
       takeover_cmd: '${{ steps.decide.outputs.takeover_cmd }}'
       takeover_from: '${{ steps.decide.outputs.takeover_from }}'
+      takeover_for: '${{ steps.decide.outputs.takeover_for }}'
       retry_pr: '${{ steps.decide.outputs.retry_pr }}'
       cmd_pr: '${{ steps.decide.outputs.cmd_pr }}'
       review_sender: '${{ github.event.review.user.login }}'
@@ -325,6 +230,8 @@ jobs:
           # parser below). Empty on every other path, which reads as "start
           # this window at round 0" — the pre-existing behaviour.
           TAKEOVER_FROM=''
+          # Engagement round budget from '<cmd> for N'; empty = takeover cap.
+          TAKEOVER_FOR=''
           CMD_PR=''
           RETRY_PR=''
           DRY_RUN="${DRY_RUN_INPUT:-false}"
@@ -417,8 +324,8 @@ jobs:
                 CMD=''
                 [[ "${BODY_TRIMMED}" == "${TAKEOVER_COMMAND}" ]] && CMD='add'
                 [[ "${BODY_TRIMMED}" == "${TAKEOVER_COMMAND} stop" ]] && CMD='remove'
-                # '<cmd> from N' — the ONE parameterized form, and the only
-                # place this workflow reads a value out of a comment body.
+                # '<cmd> from N' / 'for N' — the two parameterized forms,
+                # the only places this reads a value out of a comment body.
                 # Full rationale → qwen-autofix.md#af-007
                 # Operator guide → qwen-autofix-round-seed.md
                 if [[ "${BODY_TRIMMED}" =~ ^(.*)\ from\ ([0-9]{1,2})$ ]]; then
@@ -435,6 +342,18 @@ jobs:
                     # outright and drop the seed note. '00' lands on '0', the
                     # explicit no-seed spelling.
                     TAKEOVER_FROM="$((10#${BASH_REMATCH[2]}))"
+                  fi
+                fi
+                # '<cmd> for N' — the round-budget form. Unlike the seed, 0 is
+                # not a meaningful spelling (that is 'stop'), so it fails closed.
+                # Full rationale → qwen-autofix.md#af-159
+                if [[ "${BODY_TRIMMED}" =~ ^(.*)\ for\ ([0-9]{1,2})$ ]]; then
+                  if [[ "${BASH_REMATCH[1]}" == "${TAKEOVER_COMMAND}" ]]; then
+                    FOR_CAND="$((10#${BASH_REMATCH[2]}))"
+                    if [[ "${FOR_CAND}" -ge 1 ]]; then
+                      CMD='add'
+                      TAKEOVER_FOR="${FOR_CAND}"
+                    fi
                   fi
                 fi
                 # Re-arm shares the takeover command's authorization exactly:
@@ -643,6 +562,7 @@ jobs:
           # the only shape the marker reader accepts is a bare 1-2 digit
           # integer. sanitize_number rejects (and warns about) anything else.
           echo "takeover_from=$(sanitize_number "${TAKEOVER_FROM}")" >> "${GITHUB_OUTPUT}"
+          echo "takeover_for=$(sanitize_number "${TAKEOVER_FOR}")" >> "${GITHUB_OUTPUT}"
           echo "retry_pr=${RETRY_PR}" >> "${GITHUB_OUTPUT}"
           echo "cmd_pr=${CMD_PR}" >> "${GITHUB_OUTPUT}"
           echo "🧭 phase='${PHASE:-auto}' event='${EVENT_NAME}' issue='#${ISSUE_NUMBER:-n/a}' pr='#${PR_NUMBER_EVENT:-n/a}' schedule='${SCHEDULE:-n/a}' dry_run=${DRY_RUN} → issue=${DO_ISSUE} review=${DO_REVIEW}"
@@ -766,6 +686,11 @@ jobs:
             mkdir -p "${GIT_DIR_ABS:-.git}/hooks" 2>/dev/null || true
             git config --local --unset-all core.hooksPath 2>/dev/null || true
           fi
+
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -1724,6 +1649,7 @@ jobs:
       REPO: '${{ github.repository }}'
       CMD: '${{ needs.route.outputs.takeover_cmd }}'
       CMD_FROM: '${{ needs.route.outputs.takeover_from }}'
+      CMD_FOR: '${{ needs.route.outputs.takeover_for }}'
       PR: '${{ needs.route.outputs.cmd_pr }}'
       GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
     steps:
@@ -1838,12 +1764,22 @@ jobs:
             FROM_NOTE_REARM="$(printf ' This window'"'"'s round counter restarts at %s (rounds already spent on this PR), so the Critical-only brake engages after %s more change-producing round(s) instead of a full fresh %s.' "${CMD_FROM}" "${FROM_REMAIN}" "${CRITICAL_ONLY_AFTER_ROUND}")"
             FROM_NOTE_REARM_ZH="$(printf '本窗口轮次计数从 %s 重启（即本 PR 已消耗的轮次），因此再经过 %s 个产生改动的轮次即进入 Critical-only，而非重新计满 %s 轮。' "${CMD_FROM}" "${FROM_REMAIN}" "${CRITICAL_ONLY_AFTER_ROUND}")"
           fi
+          # Round budget carried by '<cmd> for N': its own marker on the seed's
+          # window anchor, and a CEILING the scan lowers EFF_MAX_ROUNDS to.
+          FOR_MARKER=''
+          FOR_NOTE=''
+          FOR_NOTE_ZH=''
+          if [[ -n "${CMD_FOR}" && "${CMD_FOR}" =~ ^[0-9]{1,2}$ && "${CMD_FOR}" != '0' ]]; then
+            FOR_MARKER="$(printf '\n<!-- autofix-round-budget %s -->' "${CMD_FOR}")"
+            FOR_NOTE="$(printf ' Budget: %s round(s). After round %s — pushed, no-op or failed — the loop removes the `%s` label (a bot-authored PR keeps it and pauses for a human instead).' "${CMD_FOR}" "${CMD_FOR}" "${TAKEOVER_LABEL}")"
+            FOR_NOTE_ZH="$(printf '本次托管预算 %s 轮：第 %s 轮结束（推送、无改动或失败）后自动移除 `%s` 标签（bot 创建的 PR 保留标签并转为人工作业）。' "${CMD_FOR}" "${CMD_FOR}" "${TAKEOVER_LABEL}")"
+          fi
           if [[ "${CMD}" == 'add' ]]; then
             if [[ "${HAS}" == 'true' ]]; then
               # Already managed: repeating the command is the ROUND-COUNTER
               # RESET. A fresh engage ack starts a new counting window (only
               # Full rationale → qwen-autofix.md#af-017
-              REARM_BODY="$(printf '🔄 Takeover re-armed: the round counter starts a fresh window%s; management continues.%s\n\n<details>\n<summary>中文说明</summary>\n\n🔄 已重新武装：轮次计数开启新窗口%s，托管继续。%s\n\n</details>\n\n<!-- takeover-ack engaged -->%s' "${REARM_FRESH_CLAUSE}" "${FROM_NOTE_REARM}" "${REARM_FRESH_CLAUSE_ZH}" "${FROM_NOTE_REARM_ZH}" "${FROM_MARKER}")"
+              REARM_BODY="$(printf '🔄 Takeover re-armed: the round counter starts a fresh window%s; management continues.%s%s\n\n<details>\n<summary>中文说明</summary>\n\n🔄 已重新武装：轮次计数开启新窗口%s，托管继续。%s%s\n\n</details>\n\n<!-- takeover-ack engaged -->%s%s' "${REARM_FRESH_CLAUSE}" "${FROM_NOTE_REARM}" "${FOR_NOTE}" "${REARM_FRESH_CLAUSE_ZH}" "${FROM_NOTE_REARM_ZH}" "${FOR_NOTE_ZH}" "${FROM_MARKER}" "${FOR_MARKER}")"
               gh pr comment "${PR}" --repo "${REPO}" --body "${REARM_BODY}" \
                 || { sleep 5; gh pr comment "${PR}" --repo "${REPO}" --body "${REARM_BODY}"; } \
                 || { echo "::error::re-arm ack comment failed on #${PR} after one retry — the round window was NOT reset and no seed landed; re-run the command"; exit 1; }
@@ -1879,7 +1815,7 @@ jobs:
               # only copy lives in this body, and the heal ack has no slot
               # to recover it — a transient 5xx must not silently un-seed
               # the window.
-              ENGAGE_BODY="$(printf '🤝 Takeover engaged: the autofix loop now manages this PR — it will address new review feedback and resolve base conflicts until the label is removed or the round cap is reached.%s%s Remove the `%s` label (or comment `%s stop`) to release.\n\n<details>\n<summary>中文说明</summary>\n\n🤝 已接管：autofix 循环现在管理此 PR —— 将持续处理新的评审反馈与 base 冲突，直到移除标签或达到轮次上限。%s%s移除 `%s` 标签（或评论 `%s stop`）即可释放。\n\n</details>\n\n<!-- takeover-ack engaged -->%s' "${FORK_NOTE}" "${FROM_NOTE}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${FORK_NOTE_ZH}" "${FROM_NOTE_ZH}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${FROM_MARKER}")"
+              ENGAGE_BODY="$(printf '🤝 Takeover engaged: the autofix loop now manages this PR — it will address new review feedback and resolve base conflicts until the label is removed or the round cap is reached.%s%s%s Remove the `%s` label (or comment `%s stop`) to release.\n\n<details>\n<summary>中文说明</summary>\n\n🤝 已接管：autofix 循环现在管理此 PR —— 将持续处理新的评审反馈与 base 冲突，直到移除标签或达到轮次上限。%s%s%s移除 `%s` 标签（或评论 `%s stop`）即可释放。\n\n</details>\n\n<!-- takeover-ack engaged -->%s%s' "${FORK_NOTE}" "${FROM_NOTE}" "${FOR_NOTE}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${FORK_NOTE_ZH}" "${FROM_NOTE_ZH}" "${FOR_NOTE_ZH}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${FROM_MARKER}" "${FOR_MARKER}")"
               gh pr comment "${PR}" --repo "${REPO}" --body "${ENGAGE_BODY}" \
                 || { sleep 5; gh pr comment "${PR}" --repo "${REPO}" --body "${ENGAGE_BODY}"; } \
                 || echo "::warning::engage ack comment failed on #${PR}; the scan's first-pickup ack heals it"
@@ -2868,31 +2804,20 @@ jobs:
             # Eval markers the bot left after a previous evaluation carry the
             # newest feedback timestamp it already considered, plus the round.
             # Only our own comments are trusted, so a spoofed marker is ignored.
-            # NOTE: this regex is POSITIONAL — group .[0]=ts, .[2]=round — and must
-            # match the marker string emitted at every write site verbatim (search
-            # `autofix-eval ts=`: the push/report success, noop, and handoff steps).
-            # Inserting or reordering a field here or at any write site silently
-            # corrupts round tracking; keep the `ts= acted= round=` order in lockstep.
+            # POSITIONAL: .[0]=ts .[2]=round .[3]=win .[4]=run; every write
+            # site must emit that order verbatim. → qwen-autofix.md#af-159
             MARKERS="$(jq -c --arg ab "${AUTOFIX_BOT}" '
               [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
-                | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))? -->") ] | .[]
-                | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none"), at: ($c.created_at // "")} ]' "${WORKDIR}/ic.json")"
-            # The watermark is GLOBAL across all markers — feedback already
-            # evaluated stays evaluated, no matter how counting windows move.
-            # The terminal-handoff SENTINEL ts is excluded: it is a flag, not
-            # an evaluation time, and letting it into the watermark would
-            # filter all future feedback forever — making a re-arm after a
-            # terminal handoff dead on arrival (terminal skipping itself is
-            # round-based and window-scoped, so re-arm properly clears it).
+                | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))?(?: run=([^ ]+))? -->") ] | .[]
+                | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none"), run: .[4], at: ($c.created_at // "")} ]' "${WORKDIR}/ic.json")"
+            # GLOBAL watermark; the terminal-handoff sentinel ts is a flag,
+            # not an evaluation time. → qwen-autofix.md#af-159
             REARM_AT="$(jq -r --arg ab "${AUTOFIX_BOT}" '
               [ .[] | select((.user.login // "") == $ab)
                 | select((.body // "") | contains("<!-- autofix-rearm -->"))
                 | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
-            # The head this PR's red checks were last reported against. Carried
-            # as its OWN marker inside the eval comment rather than a new field
-            # on autofix-eval, so none of the ts/acted/round parsers change —
-            # and the comment still matches the eval filter, so the agent never
-            # sees it as feedback.
+            # Last reported red head: its own marker, and it still matches the
+            # eval filter so the agent never sees it. → qwen-autofix.md#af-159
             RED_HEAD="$(jq -r --arg ab "${AUTOFIX_BOT}" '
               [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
                 | [ scan("<!-- autofix-redcheck head=([0-9a-f]+) -->") ] | .[]
@@ -2928,23 +2853,44 @@ jobs:
                 | ((.body // "") | [ scan("<!-- autofix-round-start ([0-9]{1,2}) -->") ] | .[] | .[0]) ]
               | last // "0"' "${WORKDIR}/ic.json" 2> /dev/null || echo '0')"
             [[ "${ROUND_START}" =~ ^[0-9]{1,2}$ ]] || ROUND_START=0
-            # Clamp strictly below the effective cap. The seed must be able to
-            # bring the Critical-only brake forward; it must NEVER be able to
-            # park a PR at its round cap on the very round it is taken over
-            # (which would stop the loop instead of starting it), and a seed
-            # is honoured on any PR whose window anchor carries the marker —
-            # including one whose takeover label was later removed, dropping
-            # EFF_MAX_ROUNDS back to the strict 10.
+            # Per ENGAGEMENT, not per window. → qwen-autofix.md#af-159
+            BUDGET_FLOOR="$(jq -r --arg ab "${AUTOFIX_BOT}" '[ .[] | select((.user.login // "") == $ab) | select((.body // "") as $b | ($b | contains("<!-- takeover-ack engaged -->")) or ($b | contains("<!-- takeover-ack released -->")) or (($b | contains("<!-- autofix-rearm -->")) and (($b | contains("<!-- autofix-eval ")) | not))) | .created_at ] | max // ""' "${WORKDIR}/ic.json" 2> /dev/null || echo '')"
+            ROUND_BUDGET="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg f "${BUDGET_FLOOR}" '[ .[] | select((.user.login // "") == $ab) | select((.created_at // "") >= $f) | ((.body // "") | [ scan("<!-- autofix-round-budget ([1-9][0-9]?) -->") ] | .[] | .[0]) ] | last // "0"' "${WORKDIR}/ic.json" 2> /dev/null || echo '0')"
+            [[ "${ROUND_BUDGET}" =~ ^[0-9]{1,2}$ ]] || ROUND_BUDGET=0
+            IS_BOT_AUTHOR="$(jq -r --arg ab "${AUTOFIX_BOT}" '((.author.login // "") == $ab)' <<< "${PR_META}")"
+            # One ATTEMPT = one run= identity, else the legacy ts|round pair.
+            BUDGET_USED="$(jq -r --arg f "${BUDGET_FLOOR}" '[ .[] | select(.win != "none" and .win >= $f) | (.run // "\(.ts)|\(.round)") ] | unique | length' <<< "${MARKERS}" 2> /dev/null || echo 0)"
+            [[ "${BUDGET_USED}" =~ ^[0-9]+$ ]] || BUDGET_USED=0
+            BUDGET_SPENT=false
+            [[ "${ROUND_BUDGET}" -gt 0 && "${BUDGET_USED}" -ge "${ROUND_BUDGET}" ]] && BUDGET_SPENT=true
+            # A SPENT budget outlives the label's automatic removal; unspent dies with it.
+            [[ "${HAS_TAKEOVER:-false}" == "true" || ( "${IS_BOT_AUTHOR}" == 'true' && "${BUDGET_SPENT}" == 'true' ) ]] || { ROUND_BUDGET=0; BUDGET_SPENT=false; }
+            if [[ "${ROUND_BUDGET}" -gt 0 && "${ROUND_BUDGET}" -lt "${EFF_MAX_ROUNDS}" ]]; then
+              EFF_MAX_ROUNDS="${ROUND_BUDGET}"
+            fi
+            # A seed clamps strictly below the cap: it must never park the PR on
+            # the round that takes it over. → qwen-autofix.md#af-105
             if [[ "${EFF_MAX_ROUNDS:-0}" -gt 0 && "${ROUND_START}" -ge "${EFF_MAX_ROUNDS}" ]]; then
               echo "🔢 #${PR}: round seed ${ROUND_START} clamped to $(( EFF_MAX_ROUNDS - 1 )) (effective cap ${EFF_MAX_ROUNDS})"
               ROUND_START=$(( EFF_MAX_ROUNDS - 1 ))
             fi
             ROUND="$(jq -r --arg key "${REARM_KEY}" --argjson start "${ROUND_START}" 'map(select(.win == $key)) | map(.round) | max // $start' <<< "${MARKERS}")"
+            # A breaker stop is NOT a spent budget: a sentinel in the engagement,
+            # a round past the attempts, or a convergence notice parks the PR.
+            # Idle (silent-sandbox) timeouts write the sentinel too, but the
+            # cumulative breaker excludes them (af-073): map their runs and
+            # drop them here as well.
+            BUDGET_IDLE_RUNS="$(jq -c --arg ab "${AUTOFIX_BOT}" '[ .[] | select((.user.login // "") == $ab) | select((.body // "") | contains("(idle-timeout")) | (.body // "") | scan("actions/runs/([0-9]+)") | .[0] ] | unique' "${WORKDIR}/ic.json" 2> /dev/null || echo '[]')"
+            BUDGET_SENTINELS="$(jq -r --arg f "${BUDGET_FLOOR}" --argjson idle "${BUDGET_IDLE_RUNS:-[]}" '[ .[] | select(.win != "none" and .win >= $f) | select(.ts == "9999-12-31T23:59:59Z") | select((.run // "") as $r | ($idle | index($r)) == null) ] | length' <<< "${MARKERS}" 2> /dev/null || echo 0)"
+            [[ "${BUDGET_SENTINELS}" =~ ^[0-9]+$ ]] || BUDGET_SENTINELS=0
+            BUDGET_HALTED=false
+            [[ "${ROUND}" -gt "$(( ROUND_START + BUDGET_USED ))" ]] && BUDGET_HALTED=true
+            [[ "${BUDGET_SENTINELS}" -ge "${TIMEOUT_WINDOW_CAP}" ]] && BUDGET_HALTED=true
+            BUDGET_CONV="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg rt "${REARM_KEY}" '[ .[] | select((.user.login // "") == $ab) | select((.body // "") | contains("<!-- autofix-convergence-break -->")) | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ic.json" 2> /dev/null || echo 0)"
+            [[ "${BUDGET_CONV}" =~ ^[0-9]+$ ]] || BUDGET_CONV=0
+            [[ "${BUDGET_CONV}" != '0' ]] && BUDGET_HALTED=true
             # No mention of the Critical-only threshold here, deliberately: the
-            # scan must stay ignorant of that brake. It keeps SELECTING fresh
-            # suggestions so a no-op report can still advance the watermark;
-            # only prepare hides them from the agent. A test pins the scan
-            # against the string.
+            # scan stays ignorant of that brake and only prepare hides it.
             [[ "${ROUND_START}" != '0' ]] && echo "🔢 #${PR}: window seeded at round ${ROUND_START} → effective round ${ROUND}/${EFF_MAX_ROUNDS}"
 
             # Effective watermark = what the agent has actually evaluated (its last
@@ -2960,9 +2906,60 @@ jobs:
               EFF_WM="${CREATED_WM}"
             fi
 
-            if [[ "${ROUND}" -ge "${EFF_MAX_ROUNDS}" ]]; then
-              echo "🚧 #${PR}: hit the round cap (${ROUND}/${EFF_MAX_ROUNDS}) — leaving for a human"
-              fleet_row "${PR}" 'round-capped' "round ${ROUND}/${EFF_MAX_ROUNDS} - needs a human or @qwen-code /retry"
+            if [[ "${ROUND}" -ge "${EFF_MAX_ROUNDS}" || "${BUDGET_SPENT}" == 'true' ]]; then
+              # Budget spent: human PR released, bot PR paused. → qwen-autofix.md#af-159
+              if [[ "${BUDGET_SPENT}" == 'true' && "${IS_BOT_AUTHOR}" != 'true' && "${BUDGET_HALTED}" != 'true' && ( -z "${FORCED_PR}" || "${EVENT_NAME}" != 'workflow_dispatch' ) ]]; then
+                BUDGET_RT="${REARM_KEY}"
+                [[ "${BUDGET_RT}" == "none" ]] && BUDGET_RT=''
+                BUDGET_NOTICED="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg rt "${BUDGET_RT}" '
+                  [ .[] | select((.user.login // "") == $ab)
+                    | select((.body // "") | contains("<!-- autofix-budget-reached -->"))
+                    | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ic.json")"
+                if [[ "${DRY_RUN}" == "true" ]]; then
+                  echo "🧪 DRY-RUN: would release ${TAKEOVER_LABEL} on #${PR} after its ${ROUND_BUDGET}-round budget"
+                  continue
+                fi
+                LIVE_LABELS_JSON="$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null || echo '')"
+                LIVE_LABELS="$(jq -r '[.labels[]?.name] | join(" ")' <<< "${LIVE_LABELS_JSON}" 2> /dev/null || echo '')"
+                if [[ -z "${SCAN_BOT_ACTOR:-}" ]]; then
+                  SCAN_BOT_ACTOR="$(gh api user --jq '.login' 2> /dev/null || echo 'unknown')"
+                fi
+                if [[ -z "${LIVE_LABELS_JSON}" ]]; then
+                  echo "🧭 budget release skipped: label state unreadable (fail closed) on #${PR}"
+                elif [[ " ${LIVE_LABELS} " == *" ${SKIP_LABEL} "* || " ${LIVE_LABELS} " != *" ${TAKEOVER_LABEL} "* ]]; then
+                  echo "🧭 budget spent on #${PR} but consent changed (labels: ${LIVE_LABELS:-none}) — nothing to release"
+                elif [[ "${SCAN_BOT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
+                  echo "::warning::budget release skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
+                else
+                  if [[ "${BUDGET_NOTICED}" == "0" ]]; then
+                    gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🏁 Takeover budget spent: %s round(s), %s attempt(s) used — the loop is releasing the PR now (removing the `%s` label); nothing here is waiting on a human. No-ops, errors, timeouts and crashes all count.\n\n<details>\n<summary>中文说明</summary>\n\n🏁 托管预算已用完：%s 轮预算、已用 %s 次尝试 —— 循环正在释放本 PR（移除 `%s` 标签），这里没有任何事情在等人处理。无改动、报错、超时或崩溃同样计数。\n\n</details>\n\n<!-- autofix-budget-reached -->' "${ROUND_BUDGET}" "${BUDGET_USED}" "${TAKEOVER_LABEL}" "${ROUND_BUDGET}" "${BUDGET_USED}" "${TAKEOVER_LABEL}")" \
+                      || { echo "::warning::budget-spent notice failed for #${PR}; will retry next scan"; continue; }
+                  fi
+                  # REST, URI-encoded segment, 404-tolerant — every release site.
+                  if ! BUDGET_DEL_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${TAKEOVER_LABEL}" '$l|@uri')" 2>&1)"; then
+                    [[ "${BUDGET_DEL_ERR}" == *"HTTP 404"* ]] || echo "::warning::${TAKEOVER_LABEL} removal after budget failed for #${PR} — ${BUDGET_DEL_ERR}"
+                  else
+                    echo "🏷️ released ${TAKEOVER_LABEL} from #${PR} after a ${ROUND_BUDGET}-round budget"
+                    # A deferred release paused first: clear that escalation.
+                    if ! NH_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" 2>&1)"; then
+                      [[ "${NH_ERR}" == *"HTTP 404"* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed after budget — ${NH_ERR}"
+                    fi
+                    fleet_row "${PR}" 'budget-spent' "budget ${BUDGET_USED}/${ROUND_BUDGET} spent - released"
+                  fi
+                fi
+                continue
+              fi
+              if [[ "${BUDGET_SPENT}" == 'true' ]]; then
+                echo "🚧 #${PR}: ${BUDGET_USED}/${ROUND_BUDGET} budget spent — leaving for a human"
+                fleet_row "${PR}" 'budget-spent' "budget ${BUDGET_USED}/${ROUND_BUDGET} spent - needs a human"
+              else
+                echo "🚧 #${PR}: hit the round cap (${ROUND}/${EFF_MAX_ROUNDS}) — leaving for a human"
+                fleet_row "${PR}" 'round-capped' "round ${ROUND}/${EFF_MAX_ROUNDS} - needs a human or @qwen-code /retry"
+              fi
+              # A spent budget arrives with ROUND below the cap (no-ops never
+              # advance it), so the notices quote the attempts instead.
+              CAP_ROUND="${ROUND}"
+              [[ "${BUDGET_SPENT}" == 'true' ]] && CAP_ROUND="${BUDGET_USED}"
               # A FORCED dispatch refused here answers OUT LOUD. Observed on
               # #7836: the fleet shepherd detected a merge conflict, posted
               # Full rationale → qwen-autofix.md#af-031
@@ -2989,7 +2986,7 @@ jobs:
                   fi
                   if [[ "${SCAN_BOT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
                     echo "::warning::cap-refused notice skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
-                  elif ! gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '⏸️ Dispatch refused: this PR has exhausted its automatic round cap (%s/%s), so the loop will not touch it — whatever triggered this dispatch (a merge conflict, new feedback) stays unhandled. Comment `%s` to re-arm a fresh window, or `%s` for the raised takeover cap; the next scheduled scan then picks it up.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 已拒绝本次调度：本 PR 的自动轮次上限已用完（%s/%s），循环不会介入——触发本次调度的事项（合并冲突、新反馈）仍未处理。评论 `%s` 可重置计数窗口，或 `%s` 获得更高的接管上限；随后下一次定时扫描会接手。\n\n</details>\n\n<!-- takeover-cap-refused -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}")"; then
+                  elif ! gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '⏸️ Dispatch refused: this PR has exhausted its automatic round cap (%s/%s), so the loop will not touch it — whatever triggered this dispatch (a merge conflict, new feedback) stays unhandled. Comment `%s` to re-arm a fresh window, or `%s` for the raised takeover cap; the next scheduled scan then picks it up.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 已拒绝本次调度：本 PR 的自动轮次上限已用完（%s/%s），循环不会介入——触发本次调度的事项（合并冲突、新反馈）仍未处理。评论 `%s` 可重置计数窗口，或 `%s` 获得更高的接管上限；随后下一次定时扫描会接手。\n\n</details>\n\n<!-- takeover-cap-refused -->' "${CAP_ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}" "${CAP_ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}")"; then
                     echo "::warning::cap-refused notice failed for #${PR}"
                   fi
                 fi
@@ -3024,8 +3021,7 @@ jobs:
               # A bot-authored PR released from takeover returns to STANDARD
               # management (its ack says so) — it is still managed, so at the
               # strict cap it deserves the same notice + escalation label as
-              # any managed PR (R4-5).
-              IS_BOT_AUTHOR="$(jq -r --arg ab "${AUTOFIX_BOT}" '((.author.login // "") == $ab)' <<< "${PR_META}")"
+              # any managed PR (R4-5). IS_BOT_AUTHOR is computed once above.
               if [[ "${DRY_RUN}" == "true" ]]; then
                 echo "🧪 DRY-RUN: would post cap-paused notice and apply ${NEEDS_HUMAN_LABEL} on #${PR}"
               else
@@ -3077,9 +3073,9 @@ jobs:
                   fi
                   if [[ "${CAP_NOTICED}" == "0" ]]; then
                     if [[ "${HAS_TAKEOVER}" == "true" ]]; then
-                      CAP_BODY="$(printf '⏸️ Takeover paused: this PR reached its round cap (%s/%s). Comment `%s` to re-arm a fresh window and continue management, or `%s stop` to release.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 托管已暂停：本 PR 达到轮次上限（%s/%s）。评论 `%s` 可重新武装、开启新窗口继续托管；或评论 `%s stop` 释放。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}")"
+                      CAP_BODY="$(printf '⏸️ Takeover paused: this PR reached its round cap (%s/%s). Comment `%s` to re-arm a fresh window and continue management, or `%s stop` to release.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 托管已暂停：本 PR 达到轮次上限（%s/%s）。评论 `%s` 可重新武装、开启新窗口继续托管；或评论 `%s stop` 释放。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${CAP_ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}" "${CAP_ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}")"
                     else
-                      CAP_BODY="$(printf '⏸️ AutoFix paused: this PR reached its automatic round cap (%s/%s) and the loop will not manage it further — new feedback and base conflicts stay unhandled. Comment `%s` to re-arm a fresh window under the same cap, or `%s` to take it over with the raised cap.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ AutoFix 已暂停：本 PR 达到自动轮次上限（%s/%s），循环不再管理——新反馈与 base 冲突将无人处理。评论 `%s` 可在同一上限下重置计数窗口，或评论 `%s` 以更高上限接管。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}")"
+                      CAP_BODY="$(printf '⏸️ AutoFix paused: this PR reached its automatic round cap (%s/%s) and the loop will not manage it further — new feedback and base conflicts stay unhandled. Comment `%s` to re-arm a fresh window under the same cap, or `%s` to take it over with the raised cap.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ AutoFix 已暂停：本 PR 达到自动轮次上限（%s/%s），循环不再管理——新反馈与 base 冲突将无人处理。评论 `%s` 可在同一上限下重置计数窗口，或评论 `%s` 以更高上限接管。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${CAP_ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}" "${CAP_ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}")"
                     fi
                     if ! gh pr comment "${PR}" --repo "${REPO}" --body "${CAP_BODY}"; then
                       echo "::warning::cap-paused notice failed for #${PR}; will retry next scan"
@@ -3189,17 +3185,9 @@ jobs:
             if [[ "${CONV_STREAK}" -ge "${CONVERGENCE_BREAK_ROUNDS}" ]]; then
               CONV_PARKED='true'
             else
-              # Release census = the park's own enumeration: a posted notice
-              # HOLDS the park until the boundary itself moves (a trusted-
-              # human response or a re-arm). Any clean round resets the
-              # streak — including the review a maintainer push triggers via
-              # synchronize — but must not silently release: the dedup
-              # counts notices newer than the boundary, so a release-then-
-              # re-trip would re-park under the stale notice with no fresh
-              # one. If the signal resumes, the streak census above re-parks
-              # loudly; this hold only keeps the quiet middle honest.
-              # Mirrored live in prepare and in the report guard; keep in
-              # lockstep. Full rationale → qwen-autofix.md#af-152
+              # Release census = the park's own enumeration: a posted notice HOLDS the park until
+              # the boundary moves. Mirrored in prepare and the report guard — keep in lockstep.
+              # Full rationale → qwen-autofix.md#af-152
               CONV_NOTICES="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg since "${CONV_SINCE}" '
                 [ .[] | select((.user.login // "") == $ab)
                   | select((.body // "") | contains("<!-- autofix-convergence-break -->"))
@@ -3593,6 +3581,11 @@ jobs:
             git config --local --unset-all core.hooksPath 2>/dev/null || true
           fi
 
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout trusted base'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -3808,6 +3801,11 @@ jobs:
             mkdir -p "${GIT_DIR_ABS:-.git}/hooks" 2>/dev/null || true
             git config --local --unset-all core.hooksPath 2>/dev/null || true
           fi
+
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
 
       - name: 'Checkout trusted base'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -4343,8 +4341,8 @@ jobs:
           STALE='false'
           LIVE_MARKS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
             [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
-              | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))? -->") ] | .[]
-              | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none"), at: ($c.created_at // "")} ]' "${WORKDIR}/ic.json")"
+              | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))?(?: run=([^ ]+))? -->") ] | .[]
+              | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none"), run: .[4], at: ($c.created_at // "")} ]' "${WORKDIR}/ic.json")"
           LIVE_REARM_AT="$(jq -r --arg ab "${AUTOFIX_BOT}" '
             [ .[] | select((.user.login // "") == $ab)
               | select((.body // "") | contains("<!-- autofix-rearm -->"))
@@ -4380,6 +4378,13 @@ jobs:
             LIVE_ROUND_START=$(( MAX_ROUNDS - 1 ))
           fi
           LIVE_MAX_ROUND="$(jq -r --arg key "${LIVE_REARM_KEY}" --argjson start "${LIVE_ROUND_START}" 'map(select(.win == $key)) | map(.round) | max // $start' <<< "${LIVE_MARKS}")"
+          LIVE_BUDGET_FLOOR="$(jq -r --arg ab "${AUTOFIX_BOT}" '[ .[] | select((.user.login // "") == $ab) | select((.body // "") as $b | ($b | contains("<!-- takeover-ack engaged -->")) or ($b | contains("<!-- takeover-ack released -->")) or (($b | contains("<!-- autofix-rearm -->")) and (($b | contains("<!-- autofix-eval ")) | not))) | .created_at ] | max // ""' "${WORKDIR}/ic.json" 2> /dev/null || echo '')"
+          LIVE_ROUND_BUDGET="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg f "${LIVE_BUDGET_FLOOR}" '[ .[] | select((.user.login // "") == $ab) | select((.created_at // "") >= $f) | ((.body // "") | [ scan("<!-- autofix-round-budget ([1-9][0-9]?) -->") ] | .[] | .[0]) ] | last // "0"' "${WORKDIR}/ic.json" 2> /dev/null || echo '0')"
+          LIVE_ATTEMPTS="$(jq -r --arg f "${LIVE_BUDGET_FLOOR}" '[.[] | select(.win != "none" and .win >= $f) | (.run // "\(.ts)|\(.round)")] | unique | length' <<< "${LIVE_MARKS}" 2> /dev/null || echo 0)"
+          [[ "${LIVE_ATTEMPTS}" =~ ^[0-9]+$ ]] || LIVE_ATTEMPTS=0
+          LIVE_BUDGET_SPENT=false
+          [[ "${LIVE_ROUND_BUDGET}" -gt 0 && "${LIVE_ATTEMPTS}" -ge "${LIVE_ROUND_BUDGET}" ]] && LIVE_BUDGET_SPENT=true
+          [[ "${LIVE_ROUND_BUDGET}" =~ ^[0-9]{1,2}$ && ( "${LIVE_TAKEOVER}" == 'true' || ( "${LIVE_AUTHOR}" == "${AUTOFIX_BOT}" && "${LIVE_BUDGET_SPENT}" == 'true' ) ) ]] || LIVE_ROUND_BUDGET=0
           # The head a sibling last judged, mirrored from the scan's RED_HEAD
           # parse. A no-op sibling records this marker while leaving BOTH ts and
           # round UNCHANGED — so the watermark/round triggers below never fire,
@@ -4394,7 +4399,7 @@ jobs:
           # the maintainer asked for a fresh start, so a queued old-window job
           # must discard instead of finishing and stamping an old-sequence
           # marker into the new window. Conflicts stay actionable.
-          if [[ "${STALE}" != "true" && "${WINDOW:-none}" != "${LIVE_REARM_KEY}" && "${CONFLICT}" != "true" ]]; then
+          if [[ "${STALE}" != "true" && "${WINDOW:-none}" != "${LIVE_REARM_KEY}" && ( "${CONFLICT}" != "true" || "${LIVE_ROUND_BUDGET}" -gt 0 ) ]]; then
             STALE='true'
             echo "🫥 window superseded: selected under key '${WINDOW:-none}' but the live window is '${LIVE_REARM_KEY}' (re-armed while queued) — discarding without action or marker"
           fi
@@ -4449,6 +4454,10 @@ jobs:
             STALE='true'
             echo "⛔ live round ${ROUND} already at MAX_ROUNDS (${MAX_ROUNDS}) — discarding without action or marker"
           fi
+          if [[ "${STALE}" != "true" && "${LIVE_ROUND_BUDGET}" -gt 0 && "${LIVE_ATTEMPTS}" -ge "${LIVE_ROUND_BUDGET}" ]]; then
+            STALE='true'
+            echo "⛔ attempt budget spent (${LIVE_ATTEMPTS}/${LIVE_ROUND_BUDGET}) — discarding without action or marker"
+          fi
           # Growth brake: measure the PR's net size (insertions minus
           # deletions vs the merge base), split into test lines and source
           # Full rationale → qwen-autofix.md#af-043
@@ -4491,27 +4500,18 @@ jobs:
           NET_SRC=$(( NET_TOTAL - NET_TEST ))
           [[ "${NET_MEASURED}" != 'true' ]] &&
             echo "📏 growth measurement UNAVAILABLE this round (no merge base or shadowed base) — brake skipped, no anchor written"
-          # The marker's window field is spelled `key=`, NOT `win=`: this
-          # marker can legitimately carry a different window key than its
-          # Full rationale → qwen-autofix.md#af-045
+          # Window field spelled `key=`, NOT `win=`. → qwen-autofix.md#af-045
           BASE_UPD_AT="$(jq -r --arg ab "${AUTOFIX_BOT}" '
             [ .[] | select((.user.login // "") == $ab)
               | select((.body // "") | contains("<!-- autofix-base-updated"))
               | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
-          # The instant THIS round's net was measured. Stamped into the
-          # growth-now marker so the census filters on measurement time,
-          # not the marker comment's created_at.
-          # Full rationale → qwen-autofix.md#af-118
+          # Growth-now marker carries the measurement instant. → qwen-autofix.md#af-118
           MEASURED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           [[ "${NET_MEASURED}" == 'true' ]] && echo "measured_at=${MEASURED_AT}" >> "${GITHUB_OUTPUT}"
-          # NOTE (#9114 R2-8/R6-3): re-anchoring on an EXTERNAL head move (an
-          # author push) is deliberately NOT done here.
+          # NOTE (#9114 R2-8/R6-3): an EXTERNAL head move is NOT re-anchored.
           # Full rationale → qwen-autofix.md#af-119
           GROWTH_NOW_CUTOFF="${BASE_UPD_AT}"
-          # KNOWN RESIDUAL (#9114): this sibling read still filters on the
-          # comment's created_at, not a prepare-time measured= like the
-          # growth-now read below.
-          # Full rationale → qwen-autofix.md#af-120
+          # KNOWN RESIDUAL (#9114): filters on created_at, not measured=. → qwen-autofix.md#af-120
           GROWTH_BASELINE="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" --arg baseupd "${BASE_UPD_AT}" '
             [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
               | [ scan("<!-- autofix-growth-base src=(-?[0-9]+) test=(-?[0-9]+) key=([^ ]+) -->") ] | .[]
@@ -4705,7 +4705,7 @@ jobs:
                 gsub("^(?:(?:\\s|<!--[\\s\\S]*?(?:-->|$)|\\p{Cf}))+"; ""; "s")
                 | startswith("**[Critical]**");
               ([ ($ic | add)[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
-                 | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))? -->") ] | .[]
+                 | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))?(?: run=([^ ]+))? -->") ] | .[]
                  | {ts: .[0], acted: .[1], round: (.[2] | tonumber), win: (.[3] // "none"), at: ($c.created_at // "")} ]
                | map(select(.win == $key) | select(.ts != "9999-12-31T23:59:59Z"))
                | sort_by(.at)) as $ms
@@ -5092,7 +5092,7 @@ jobs:
             PRIOR_TIMEOUTS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '
               [ .[] | select((.user.login // "") == $ab)
                 | select((.body // "") | contains("<!-- autofix-eval "))
-                | select(([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))? -->")) ] | map(.[0] // "none")) as $wins
+                | select(([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))?(?: run=[^ ]+)? -->")) ] | map(.[0] // "none")) as $wins
                     | ($wins | length) > 0 and (($wins | last) == $key))
               ] | sort_by(.created_at)
               | map((.body | gsub("\r"; "") | split("\n")[0]))
@@ -5141,7 +5141,7 @@ jobs:
           # ${RUNNER_TEMP}/qwen-bin ahead of /usr/bin here — pin PATH from
           # the stage-time capture BEFORE the first command word resolves
           # (the R6-3 doctrine the sibling PAT steps apply; the loop
-          # re-pins from the same capture). Full rationale → af-149
+          # re-pins from the same capture). Full rationale → qwen-autofix.md#af-149
           export PATH="${TRUSTED_PATH}"
           # The gh calls in this step (deep-link lookup, comment upsert) and
           # the heartbeat loop launched here all carry the bot PAT: take the
@@ -6381,18 +6381,8 @@ jobs:
                     if [[ -n "${MAIN_HEAD_R}" && -n "${REPORT_HEAD}" ]]; then
                       CMP_R="$(gh api "repos/${REPO}/compare/${MAIN_HEAD_R}...${REPORT_HEAD}" --jq '.status' 2> /dev/null || echo '')"
                       if [[ "${CMP_R}" == 'behind' || "${CMP_R}" == 'diverged' ]]; then
-                        # Review-in-flight hold for the loop's OWN report-time
-                        # head move (#10110), fail-open on probe errors. Wider
-                        # than the scan's dispatch gate (#8888), which holds
-                        # only on IN_PROGRESS now that a queued review can sit
-                        # out a whole closed `ecs-review` window; a hold here
-                        # only defers one stale-base merge the next round
-                        # retries. The probe sees LIFECYCLE runs only: a
-                        # command run executes against the base branch, so its
-                        # review-pr check never shows under this PR's rollup,
-                        # and the runs fallback is event-scoped to
-                        # pull_request_target — an in-flight command review
-                        # does NOT hold the refresh (af-155).
+                        # Review-in-flight hold for the report-time head move (#10110, af-155):
+                        # LIFECYCLE runs only, and fail-open on probe errors.
                         # Full rationale → qwen-autofix.md#af-155
                         ROLLUP_R="$(gh pr view "${PR}" --repo "${REPO}" --json statusCheckRollup --jq '.statusCheckRollup // []' 2> /dev/null || echo '[]')"
                         REVIEW_LIVE_R="$(jq -r '
@@ -6517,7 +6507,7 @@ jobs:
                 [.[] | select((.user.login // "") == $ab)
                      | select((.body // "") | contains("<!-- autofix-eval "))
                      | select(
-                         ([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))? -->")) ] | map(.[0] // "none")) as $wins
+                         ([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))?(?: run=[^ ]+)? -->")) ] | map(.[0] // "none")) as $wins
                          | ($wins | length) > 0 and (($wins | last) == $win))]
                 | sort_by(.created_at) | .[]
                 | (.body | gsub("\r"; "") | split("\n")[0])' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
@@ -6699,7 +6689,7 @@ jobs:
               echo "---"
               echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`${CLI_DISPLAY}"
               echo
-              echo "<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} win=${WINDOW:-none} -->"
+              echo "<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} win=${WINDOW:-none} run=${GITHUB_RUN_ID} -->"
               # Per-round growth history the census counts — same marker
               # the push/no-op report paths write, so an over-budget
               # round that timed out or was gate-rejected is not a gap. run=
@@ -6723,7 +6713,11 @@ jobs:
                 echo "<!-- autofix-regression round=${REGRESSED_ROUND} key=${WINDOW:-none} -->"
               fi
             } > "${WORKDIR}/report.md"
-            gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" || echo "::warning::Failed to post handoff comment on PR #${PR}"
+            # The handoff is the ONLY carrier for an error/timeout/crash round,
+            # so it retries like the re-arm ack: one lost post is a free attempt.
+            gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" \
+              || { sleep 5; gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md"; } \
+              || echo "::warning::Failed to post handoff comment on PR #${PR} after one retry — that round was not recorded"
           fi
           # A failed round must not lose verified deferred findings: the
           # agent's analysis is independent of whether this round's commit
@@ -6799,18 +6793,7 @@ jobs:
         if: |-
           ${{ always() && steps.prepare.outputs.stale != 'true' && needs.route.outputs.dry_run != 'true' }}
         env:
-          # Startup-channel pins, the gate steps' doctrine: BASH_ENV is
-          # sourced by bash at process STARTUP, before the launch below,
-          # and SHELLOPTS is the sibling option-import channel — a
-          # body-side unset is one hop late, so both are pinned empty at
-          # step level, which outranks any $GITHUB_ENV plant. The LD_*
-          # family is mapped by ld.so at startup the same way. These pins
-          # protect the parent shell that executes the launch; the
-          # BASH_FUNC_<name>%% channel no env: block can enumerate — the
-          # attacker chooses the name, and bash imports the entries as
-          # functions at startup even under --norc, ahead of builtins and
-          # PATH — is closed by the env -i clean child below (R9-1), the
-          # gate's R6-4 pattern.
+          # Startup-channel pins: BASH_ENV/SHELLOPTS/LD_* at step level, BASH_FUNC via the env -i child.
           # Full rationale → qwen-autofix.md#af-149
           BASH_ENV: ''
           SHELLOPTS: ''

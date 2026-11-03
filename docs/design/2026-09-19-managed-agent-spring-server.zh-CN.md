@@ -15,7 +15,7 @@ Qwen Code 已经具备 Hosted Harness Profile，以及访问其私有 HTTP/SSE �
 
 ## 2. 目标
 
-- 在 `packages/sdk-java/managed-agent-server` 增加可独立运行的 Spring Boot 应用。
+- 在 `packages/managed-agent-server` 增加可独立运行的 Spring Boot 应用。
 - Agent API 请求必须携带 `X-Qwen-Tenant-Id`，并将其作为数据库资源归属边界。
 - 不实现终端用户鉴权，也不解释公共 API 的 `Authorization`。
 - 在 MySQL 中持久化 Session、Turn、命令幂等、Harness generation fencing 和公共 Event 状态。

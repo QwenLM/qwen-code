@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import {
+  isInternalCodeModeToolResult,
   isTranscriptConversationRecord,
   prepareTranscriptRecords,
   projectUserTranscriptForDisplay,
@@ -64,6 +65,29 @@ function expectNoUnknownSubtype(prepared: Prepared, recordId?: string) {
 
 const errorWithCode = (code: TranscriptRecordPreparationError['code']) =>
   expect.objectContaining<Partial<TranscriptRecordPreparationError>>({ code });
+
+describe('isInternalCodeModeToolResult', () => {
+  it('requires both the tool-result type and internal subtype', () => {
+    expect(
+      isInternalCodeModeToolResult({
+        type: 'tool_result',
+        subtype: 'code_mode_tool_result',
+      }),
+    ).toBe(true);
+    expect(
+      isInternalCodeModeToolResult({
+        type: 'assistant',
+        subtype: 'code_mode_tool_result',
+      }),
+    ).toBe(false);
+    expect(
+      isInternalCodeModeToolResult({
+        type: 'tool_result',
+        subtype: 'other',
+      }),
+    ).toBe(false);
+  });
+});
 
 describe('prepareTranscriptRecords', () => {
   it.each([undefined, '', '   ', 42, { id: 'untrusted' }])(
@@ -439,6 +463,7 @@ describe('validateTranscriptRecord', () => {
   // host reads as unprovable ownership and refuses to restore.
   const RECORDED_SUBTYPES: Record<NonNullable<ChatRecord['subtype']>, true> = {
     chat_compression: true,
+    memory_catalog_snapshot: true,
     slash_command: true,
     ui_telemetry: true,
     at_command: true,
@@ -454,9 +479,12 @@ describe('validateTranscriptRecord', () => {
     omni_recall: true,
     session_model: true,
     session_approval_mode: true,
+    session_workflow_mode: true,
     rewind: true,
     agent_bootstrap: true,
     agent_launch_prompt: true,
+    agent_mention: true,
+    agent_message: true,
     agent_retry: true,
     agent_session_ready: true,
     file_history_snapshot: true,
@@ -468,8 +496,10 @@ describe('validateTranscriptRecord', () => {
     goal_state: true,
     goal_runtime: true,
     goal_turn_end: true,
+    code_mode_tool_result: true,
     realtime_message: true,
     turn_result: true,
+    turn_attempt: true,
     managed_session_header_v1: true,
     managed_session_event_v1: true,
     managed_session_commit_v1: true,

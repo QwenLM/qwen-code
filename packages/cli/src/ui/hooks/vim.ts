@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useReducer, useEffect, useRef } from 'react';
+import { useCallback, useState, useEffect, useRef } from 'react';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { Key } from './useKeypress.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
@@ -164,6 +164,9 @@ const vimReducer = (state: VimState, action: VimAction): VimState => {
 // Cached Linux clipboard tool to avoid repeated probe on every call.
 let linuxReadCmd: string[] | null | undefined;
 let linuxWriteCmd: string[] | null | undefined;
+// Set after a failed win32 read so a wedged clipboard degrades to "no
+// system clipboard" instead of freezing the TUI on every paste.
+let win32ClipboardUnavailable = false;
 
 /** Read system clipboard */
 function readClipboard(): string {
@@ -177,11 +180,29 @@ function readClipboard(): string {
       }).toString();
     }
     if (platform === 'win32') {
-      return execFileSync('powershell', ['-c', 'Get-Clipboard'], {
-        encoding: 'utf-8',
-        timeout: 200,
-        stdio: ['pipe', 'pipe', 'ignore'],
-      }).toString();
+      if (win32ClipboardUnavailable) {
+        return '';
+      }
+      // PowerShell startup can exceed 200 ms, and its console output appends
+      // a trailing CRLF that breaks linewise detection and leaves stray \r in
+      // the pasted text. Windows PowerShell also renders redirected stdout in
+      // the console code page, so the script pins UTF-8 output encoding.
+      return execFileSync(
+        'powershell',
+        [
+          '-NoProfile',
+          '-c',
+          '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Get-Clipboard',
+        ],
+        {
+          encoding: 'utf-8',
+          timeout: 5000,
+          stdio: ['pipe', 'pipe', 'ignore'],
+        },
+      )
+        .toString()
+        .replace(/\r\n/g, '\n')
+        .replace(/\n$/, '');
     }
     // Linux: probe once, then use cached tool
     if (linuxReadCmd === undefined) {
@@ -215,6 +236,9 @@ function readClipboard(): string {
     }
     return '';
   } catch (e) {
+    if (process.platform === 'win32') {
+      win32ClipboardUnavailable = true;
+    }
     debugLogger.warn('readClipboard failed:', e);
     return '';
   }
@@ -313,25 +337,46 @@ function findCharInLineReverse(
 
 // ── Hook ──
 
-export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
+export type VimBuffer = Pick<
+  TextBuffer,
+  | 'text'
+  | 'lines'
+  | 'cursor'
+  | 'replaceRange'
+  | 'undo'
+  | 'handleInput'
+  | Extract<keyof TextBuffer, `vim${string}`>
+>;
+
+export function useVim(
+  buffer: VimBuffer,
+  onSubmit?: (value: string) => void,
+  onPaste?: () => void,
+) {
   const { vimEnabled, vimMode } = useVimModeState();
   const { setVimMode } = useVimModeActions();
-  const [state, dispatch] = useReducer(vimReducer, initialVimState);
+  const [state, setState] = useState(initialVimState);
   const bufferRef = useRef(buffer);
-  const stateRef = useRef(state);
+  const stateRef = useRef(initialVimState);
+  const lastHandledEscapeKeyRef = useRef<Key | null>(null);
   bufferRef.current = buffer;
-  stateRef.current = state;
+
+  const dispatch = useCallback((action: VimAction) => {
+    // A terminal read can dispatch several keys before React renders again.
+    stateRef.current = vimReducer(stateRef.current, action);
+    setState(stateRef.current);
+  }, []);
 
   useEffect(() => {
     dispatch({ type: 'SET_MODE', mode: vimMode });
-  }, [vimMode]);
+  }, [vimMode, dispatch]);
 
   const updateMode = useCallback(
     (mode: VimMode) => {
       setVimMode(mode);
       dispatch({ type: 'SET_MODE', mode });
     },
-    [setVimMode],
+    [setVimMode, dispatch],
   );
 
   const getCurrentCount = useCallback(
@@ -364,7 +409,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       dispatch({ type: 'SET_YANK_REGISTER', text, linewise });
       writeClipboard(text);
     },
-    [],
+    [dispatch],
   );
 
   // ── Execute command (for dot-repeat) ──
@@ -671,7 +716,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       }
       return true;
     },
-    [buffer, updateMode, yankRange],
+    [buffer, updateMode, yankRange, dispatch],
   );
 
   // ── Word boundary helpers (for yank) ──
@@ -853,7 +898,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
 
   const handleCharRead = useCallback(
     (char: string) => {
-      const readType = state.pendingCharRead;
+      const readType = stateRef.current.pendingCharRead;
       if (!readType) return false;
 
       dispatch({ type: 'SET_PENDING_CHAR_READ', value: null });
@@ -894,7 +939,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           return false;
       }
     },
-    [state.pendingCharRead, buffer, dispatch, executeFind],
+    [buffer, dispatch, executeFind],
   );
 
   // ── Handle INSERT mode ──
@@ -936,7 +981,6 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       ) {
         if (buffer.text.trim() && onSubmit) {
           const submittedValue = buffer.text;
-          buffer.setText('');
           onSubmit(submittedValue);
           return true;
         }
@@ -1101,10 +1145,27 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
     [getCurrentCount, executeCommand, dispatch],
   );
 
+  const ownsEscape = useCallback(
+    (key: Key): boolean => {
+      if (!vimEnabled || key.name !== 'escape') {
+        return false;
+      }
+      const s = stateRef.current;
+      return (
+        lastHandledEscapeKeyRef.current === key ||
+        s.mode === 'INSERT' ||
+        s.pendingCharRead !== null ||
+        s.pendingOperator !== null
+      );
+    },
+    [vimEnabled],
+  );
+
   // ── Main key handler ──
 
   const handleInput = useCallback(
     (key: Key): boolean => {
+      lastHandledEscapeKeyRef.current = null;
       if (!vimEnabled) {
         return false;
       }
@@ -1121,12 +1182,17 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
 
       // ── INSERT mode ──
       if (s.mode === 'INSERT') {
-        return handleInsertModeInput(normalizedKey);
+        const handled = handleInsertModeInput(normalizedKey);
+        if (handled && normalizedKey.name === 'escape') {
+          lastHandledEscapeKeyRef.current = key;
+        }
+        return handled;
       }
 
       // ── Pending char read (r, f, F, t, T) ──
       if (s.pendingCharRead && s.mode === 'NORMAL') {
         if (normalizedKey.name === 'escape') {
+          lastHandledEscapeKeyRef.current = key;
           dispatch({ type: 'CLEAR_PENDING_STATES' });
           return true;
         }
@@ -1153,6 +1219,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
 
         if (normalizedKey.name === 'escape') {
           if (s.pendingOperator) {
+            lastHandledEscapeKeyRef.current = key;
             dispatch({ type: 'CLEAR_PENDING_STATES' });
             return true;
           }
@@ -1724,6 +1791,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               isLinewise = text.includes('\n');
             }
             if (text) {
+              onPaste?.();
               const [row, col] = buffer.cursor;
               const line = buffer.lines[row] ?? '';
               if (isLinewise) {
@@ -1772,6 +1840,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               isLinewise = text.includes('\n');
             }
             if (text) {
+              onPaste?.();
               const [row, col] = buffer.cursor;
               if (isLinewise) {
                 const repeated = preparePasteText(text, repeatCount);
@@ -1815,7 +1884,6 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             ) {
               if (buffer.text.trim() && onSubmit) {
                 const submittedValue = buffer.text;
-                buffer.setText('');
                 onSubmit(submittedValue);
               }
               dispatch({ type: 'CLEAR_COUNT' });
@@ -1884,6 +1952,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       updateMode,
       executeFind,
       onSubmit,
+      onPaste,
     ],
   );
 
@@ -1891,5 +1960,6 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
     mode: state.mode,
     vimModeEnabled: vimEnabled,
     handleInput,
+    ownsEscape,
   };
 }

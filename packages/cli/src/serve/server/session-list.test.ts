@@ -421,4 +421,82 @@ describe('merged session catalog pagination', () => {
     );
     expect(result.nextCursor).toBeUndefined();
   });
+
+  describe('PR sidecar read failures (R2-3)', () => {
+    async function writePrSidecar(
+      session: BridgeSessionSummary,
+      content: string,
+    ): Promise<void> {
+      const chats = path.join(
+        new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+        'chats',
+      );
+      await fs.mkdir(chats, { recursive: true });
+      await fs.writeFile(
+        path.join(chats, `${session.sessionId}.pr.json`),
+        content,
+      );
+    }
+
+    // Both corruption forms must read as UNKNOWN bindings: broken JSON and
+    // a shape-check failure. A well-formed empty list is NOT corruption —
+    // it is an authoritative clear and must keep reading as prs: [].
+    it.each(['{not json', '{"prs":[{"number":1}]}'])(
+      'flags a corrupt persisted PR sidecar as prsReadFailed, not an authoritative clear: %s',
+      async (content) => {
+        const corrupt = summary(0);
+        const cleared = summary(1);
+        const unbound = summary(2);
+        await Promise.all([
+          persist(corrupt),
+          persist(cleared),
+          persist(unbound),
+        ]);
+        await writePrSidecar(corrupt, content);
+        await writePrSidecar(cleared, JSON.stringify({ prs: [] }));
+        const { bridge } = bridgeFor([]);
+
+        const result = await listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          {},
+          { runtimeBaseDir },
+        );
+
+        const byId = new Map(
+          result.sessions.map((session) => [session.sessionId, session]),
+        );
+        // A corrupt sidecar must not emit an authoritative tombstone
+        // (prs: [] without the flag): the PR-bindings snapshot would prune
+        // the binding and misroute private delivery to the public path.
+        expect(byId.get(corrupt.sessionId)?.prsReadFailed).toBe(true);
+        expect(byId.get(corrupt.sessionId)?.prs).toBeUndefined();
+        expect(byId.get(cleared.sessionId)?.prs).toEqual([]);
+        expect(byId.get(cleared.sessionId)?.prsReadFailed).toBeUndefined();
+        expect(byId.get(unbound.sessionId)?.prs).toBeUndefined();
+        expect(byId.get(unbound.sessionId)?.prsReadFailed).toBeUndefined();
+      },
+    );
+
+    it.each(['{not json', '{"prs":[{"number":1}]}'])(
+      'flags a corrupt PR sidecar on a live-only session as prsReadFailed: %s',
+      async (content) => {
+        const live = summary(7);
+        await writePrSidecar(live, content);
+        const { bridge } = bridgeFor([live]);
+
+        const result = await listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          {},
+          { runtimeBaseDir },
+        );
+
+        expect(result.sessions).toHaveLength(1);
+        expect(result.sessions[0]?.sessionId).toBe(live.sessionId);
+        expect(result.sessions[0]?.prsReadFailed).toBe(true);
+        expect(result.sessions[0]?.prs).toBeUndefined();
+      },
+    );
+  });
 });

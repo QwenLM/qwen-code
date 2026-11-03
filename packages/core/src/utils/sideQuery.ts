@@ -34,7 +34,12 @@ export interface SideQueryJsonOptions<TResponse> {
    * Caller-supplied generation config. `thinkingConfig.includeThoughts`
    * defaults to `false` for all side queries; pass
    * `thinkingConfig: { includeThoughts: true }` here if reasoning output is
-   * required.
+   * required. Omitting `maxOutputTokens` gets a best-effort budget from
+   * `BaseLlmClient` against the target's resolved context window (#13208);
+   * when no window is declared or configured and the id is in neither the
+   * catalog nor the curated tables, that term falls back to a fabricated
+   * 200 000 (`DEFAULT_TOKEN_LIMIT`) and does not bind. A value supplied here
+   * is sent as given, so budget it against the receiving model yourself.
    */
   config?: Omit<
     GenerateContentConfig,
@@ -49,6 +54,7 @@ export interface SideQueryJsonOptions<TResponse> {
    * pass `1` to avoid burning attempts on failures the user will never see.
    */
   maxAttempts?: number;
+  boundedRetries?: boolean;
   /**
    * Skip appending the user's `output-language.md` rule. Defaults to false so
    * new user-visible side queries honor the preference automatically.
@@ -81,7 +87,12 @@ export interface SideQueryTextOptions {
    * Caller-supplied generation config. `thinkingConfig.includeThoughts`
    * defaults to `false` for all side queries; pass
    * `thinkingConfig: { includeThoughts: true }` here if reasoning output is
-   * required.
+   * required. Omitting `maxOutputTokens` gets a best-effort budget from
+   * `BaseLlmClient` against the target's resolved context window (#13208);
+   * when no window is declared or configured and the id is in neither the
+   * catalog nor the curated tables, that term falls back to a fabricated
+   * 200 000 (`DEFAULT_TOKEN_LIMIT`) and does not bind. A value supplied here
+   * is sent as given, so budget it against the receiving model yourself.
    */
   config?: Omit<
     GenerateContentConfig,
@@ -233,6 +244,9 @@ export async function runSideQuery<TResponse>(
       systemInstruction,
       promptId,
       config: requestConfig,
+      ...(options.boundedRetries !== undefined && {
+        boundedRetries: options.boundedRetries,
+      }),
       ...(options.maxAttempts !== undefined && {
         maxAttempts: options.maxAttempts,
       }),

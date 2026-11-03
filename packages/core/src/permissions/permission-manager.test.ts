@@ -31,9 +31,33 @@ import { PermissionManager } from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
 import type { PermissionCheckContext, PermissionRule } from './types.js';
 import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
-import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
+import {
+  generateLegacyMcpToolName,
+  normalizeToolNameForProvider,
+} from '../utils/tool-name-utils.js';
+import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
+import type { CallableTool } from '@google/genai';
 import { ToolNames, ToolDisplayNames } from '../tools/tool-names.js';
 import { ToolMode } from '../tools/code-mode.js';
+
+// Builds the tool exactly as MCP discovery builds it, so the permission
+// aliases under test are the tool's own advertised `permissionAliases` — the
+// exact raw identity first, then the legacy spelling — never a hand-written
+// stand-in that could drift from the producer (same pattern as
+// mcp-server-rule-collision.test.ts).
+const callableTool = { callTool: async () => [] } as unknown as CallableTool;
+function prodTool(
+  serverName: string,
+  serverToolName: string,
+): DiscoveredMCPTool {
+  return new DiscoveredMCPTool(
+    callableTool,
+    serverName,
+    serverToolName,
+    'test tool',
+    {},
+  );
+}
 
 const debugLoggerMock = vi.hoisted(() => ({
   isEnabled: vi.fn().mockReturnValue(false),
@@ -144,13 +168,15 @@ type PmOpts = Partial<{
    * tool. Independent of the permission rules (#10075).
    */
   eagerTools: string[];
-  /** Live folder trust; absent reads as trusted. */
-  isTrustedFolder: () => boolean;
+  /** Live explicit folder trust; absent denies repository grants. */
+  isExplicitlyTrustedFolder: () => boolean;
 }>;
 
 function makeConfig(opts: PmOpts = {}): PermissionManagerConfig {
   return {
-    ...(opts.isTrustedFolder ? { isTrustedFolder: opts.isTrustedFolder } : {}),
+    ...(opts.isExplicitlyTrustedFolder
+      ? { isExplicitlyTrustedFolder: opts.isExplicitlyTrustedFolder }
+      : {}),
     getPermissionsAllow: () => opts.permissionsAllow,
     getPermissionsAsk: () => opts.permissionsAsk,
     getPermissionsDeny: () => opts.permissionsDeny,
@@ -1162,8 +1188,6 @@ describe('matchesDomainPattern', () => {
 // ─── matchesRule (unified) ───────────────────────────────────────────────────
 
 describe('matchesRule', () => {
-  const uniprot = normalizeToolNameForProvider('mcp__zybio.db__query_uniprot');
-
   it('simple tool-name rule matches any invocation', async () => {
     const rule = parseRule('ShellTool');
     expect(matchesRule(rule, 'run_shell_command')).toBe(true);
@@ -1277,7 +1301,24 @@ describe('matchesRule', () => {
     const providerSafeName = normalizeToolNameForProvider(legacyName);
 
     expect(providerSafeName).not.toBe(legacyName);
-    expect(matchesRule(parseRule(legacyName), providerSafeName)).toBe(true);
+    // Production supplies the tool's advertised `permissionAliases` with the
+    // evaluation; for this name the legacy reduction is lossless, so the
+    // alias IS the exact raw spelling the matcher compares literally
+    // (#10199). Without the alias channel the registered name alone cannot
+    // vouch for a legacy unsafe spelling.
+    expect(
+      matchesRule(
+        parseRule(legacyName),
+        providerSafeName,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        [legacyName],
+      ),
+    ).toBe(true);
   });
 
   it('keeps exact provider-safe MCP permission matches collision-safe', () => {
@@ -1287,8 +1328,39 @@ describe('matchesRule', () => {
     const slashedProviderName = normalizeToolNameForProvider(slashedName);
 
     expect(dottedProviderName).not.toBe(slashedProviderName);
-    expect(matchesRule(parseRule(dottedName), dottedProviderName)).toBe(true);
-    expect(matchesRule(parseRule(dottedName), slashedProviderName)).toBe(false);
+    expect(
+      matchesRule(
+        parseRule(dottedName),
+        dottedProviderName,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        [dottedName],
+      ),
+    ).toBe(true);
+    // The negative arm threads the alias channel too. Unthreaded it returns
+    // `false` for the same structural reason the positive arm does, so it would
+    // not be comparing two aliased tools at all and the `.`-versus-`/`
+    // invariant this test is named for would go unobserved: both raws sanitize
+    // to the identical body `mcp__zybio__literature_search` and differ only in
+    // the FNV hash, so admitting a reduced spelling to the comparison has to be
+    // caught here.
+    expect(
+      matchesRule(
+        parseRule(dottedName),
+        slashedProviderName,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        [slashedName],
+      ),
+    ).toBe(false);
   });
 
   it('MCP server-level match (2-part pattern)', async () => {
@@ -1300,7 +1372,23 @@ describe('matchesRule', () => {
 
   it('matches a legacy dotted MCP server rule against provider-safe names', () => {
     const rule = parseRule('mcp__zybio.db');
-    expect(matchesRule(rule, uniprot)).toBe(true);
+
+    // Production supplies the tool's own `permissionAliases` with the
+    // evaluation; the alias carries the raw spelling the registered name
+    // lost (#10199).
+    expect(
+      matchesRule(
+        rule,
+        normalizeToolNameForProvider('mcp__zybio.db__query_uniprot'),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        ['mcp__zybio.db__query_uniprot'],
+      ),
+    ).toBe(true);
     expect(matchesRule(rule, 'mcp__other__query_uniprot')).toBe(false);
   });
 
@@ -1312,7 +1400,20 @@ describe('matchesRule', () => {
 
   it('matches a legacy dotted MCP wildcard rule against provider-safe names', () => {
     const rule = parseRule('mcp__zybio.db__*');
-    expect(matchesRule(rule, uniprot)).toBe(true);
+
+    expect(
+      matchesRule(
+        rule,
+        normalizeToolNameForProvider('mcp__zybio.db__query_uniprot'),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        ['mcp__zybio.db__query_uniprot'],
+      ),
+    ).toBe(true);
     expect(matchesRule(rule, 'mcp__other__query_uniprot')).toBe(false);
   });
 
@@ -1463,20 +1564,71 @@ describe('PermissionManager', () => {
       expect(await pm.evaluate({ toolName })).toBe(expected);
     });
 
-    it('matches a legacy truncated MCP permission alias', async () => {
-      const rawName = `mcp__server__${'x'.repeat(80)}`;
-      const legacyName = rawName.slice(0, 28) + '___' + rawName.slice(-32);
-      const toolName = normalizeToolNameForProvider(rawName);
-      const pm2 = makePm({ permissionsAllow: [legacyName] });
-      const ctx = { toolName, toolAliases: [legacyName] };
-      expect(await pm2.evaluate(ctx)).toBe('allow');
+    it('refuses a legacy truncated MCP permission alias on an exact entry', async () => {
+      // Built through the real producer: the 31-character server key pushes
+      // the raw identity past the 63-character budget, so registration
+      // truncates and hashes, and the legacy reduction middle-truncates at
+      // slice(0, 28) — keeping only the key's first 23 characters. A cut
+      // that reached the server segment vouches for no server, so the
+      // producer advertises only the exact raw identity (R12-1), and a
+      // persisted allow in the truncated spelling fails closed instead of
+      // auto-approving the tool; see mcp-server-rule-collision.test.ts
+      // (R8-1) for the two-servers-one-spelling witnesses.
+      const tool = prodTool(
+        'weather-forecast-server-premium',
+        'get_extended_forecast_for_next_week',
+      );
+      const legacyName = generateLegacyMcpToolName(
+        'mcp__weather-forecast-server-premium__get_extended_forecast_for_next_week',
+      );
+      expect(tool.permissionAliases).not.toContain(legacyName);
+      const pm2 = new PermissionManager(
+        makeConfig({ permissionsAllow: [legacyName] }),
+      );
+      pm2.initialize();
+
+      expect(
+        await pm2.evaluate({
+          toolName: tool.name,
+          toolAliases: tool.permissionAliases,
+        }),
+      ).toBe('default');
+
+      // Control: the same rule in the exact raw identity still names it.
+      const rawPm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: [
+            'mcp__weather-forecast-server-premium__get_extended_forecast_for_next_week',
+          ],
+        }),
+      );
+      rawPm.initialize();
+      expect(
+        await rawPm.evaluate({
+          toolName: tool.name,
+          toolAliases: tool.permissionAliases,
+        }),
+      ).toBe('allow');
     });
 
     it('honors legacy MCP wildcard deny rules for provider-safe names', async () => {
       const legacyName = 'mcp__server__literature.search_pubmed';
-      const toolName = normalizeToolNameForProvider(legacyName);
-      const pm2 = makePm({ permissionsDeny: ['mcp__server__literature.*'] });
-      expect(await pm2.evaluate({ toolName })).toBe('deny');
+      const providerSafeName = normalizeToolNameForProvider(legacyName);
+      const pm2 = new PermissionManager(
+        makeConfig({ permissionsDeny: ['mcp__server__literature.*'] }),
+      );
+      pm2.initialize();
+
+      // Production supplies the tool's own `permissionAliases` with the
+      // evaluation; the alias carries the raw spelling the registered name
+      // lost (#10199). For this name the legacy reduction is lossless, so
+      // the alias equals the raw spelling.
+      expect(
+        await pm2.evaluate({
+          toolName: providerSafeName,
+          toolAliases: [legacyName],
+        }),
+      ).toBe('deny');
     });
 
     it('deny takes precedence over ask and allow', async () => {
@@ -2112,6 +2264,14 @@ describe('PermissionManager', () => {
       expect(await enabled('loop_wakeup')).toBe(true);
     });
 
+    it('coreTools allowlist gates autofix_pr, which pushes and replies', async () => {
+      pm = makePm({ coreTools: ['read_file'] });
+      expect(await enabled('autofix_pr')).toBe(false);
+
+      pm = makePm({ coreTools: ['AutofixPr'] });
+      expect(await enabled('autofix_pr')).toBe(true);
+    });
+
     it('coreTools allowlist gates managed memory tools', async () => {
       pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
       pm.initialize();
@@ -2522,7 +2682,7 @@ describe('PermissionManager', () => {
       // so a mid-session revocation applies at the next call and a later
       // grant restores the rule (the second side of the gate on the way in).
       let trusted = true;
-      pm = makePm({ isTrustedFolder: () => trusted });
+      pm = makePm({ isExplicitlyTrustedFolder: () => trusted });
       const call = sh('git commit');
       pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
       pm.addSessionAllowRule('Bash(npm *)'); // the user's own grant
@@ -2546,7 +2706,7 @@ describe('PermissionManager', () => {
       // the user's, which no folder trust suspends. A gated re-arrival (skill
       // reload) stays a skip.
       let trusted = true;
-      pm = makePm({ isTrustedFolder: () => trusted });
+      pm = makePm({ isExplicitlyTrustedFolder: () => trusted });
       const call = sh('git commit');
       pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
       pm.addSessionAllowRule('Bash(git *)'); // the user-level skill's grant
@@ -2559,9 +2719,9 @@ describe('PermissionManager', () => {
       expect(sessionAllowRules(pm)).toHaveLength(1);
     });
 
-    it('a trust-gated rule stays in force when the config reports no trust probe', async () => {
+    it('a trust-gated rule is withheld when the config reports no trust probe', async () => {
       pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
-      expect(await pm.evaluate(sh('git commit'))).toBe('allow');
+      expect(await pm.evaluate(sh('git commit'))).toBe('ask');
     });
 
     it('clearSessionAllowRules drops live and AUTO-stashed session grants', async () => {
@@ -2594,6 +2754,31 @@ describe('PermissionManager', () => {
       pm.addSessionDenyRule('Bash(rm -rf /)*');
       // Should NOT deny — the malformed rule must not act as catch-all
       expect(await pm.evaluate(sh('git status'))).not.toBe('deny');
+    });
+
+    it('tells the operator when a malformed deny rule is dropped', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        pm.addSessionDenyRule('Bash(rm -rf /)*');
+        // A deny rule that protects nothing is the dangerous direction: the
+        // operator's model says "blocked" while the runtime has no rule.
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0]![0]).toContain('deny rule');
+        expect(warn.mock.calls[0]![0]).toContain('Bash(rm -rf /)*');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('tells the operator when a malformed ask rule is dropped', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        pm.addSessionAskRule('Bash(git commit');
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0]![0]).toContain('ask rule');
+      } finally {
+        warn.mockRestore();
+      }
     });
   });
 
@@ -2984,6 +3169,107 @@ describe('buildHumanReadableRuleLabel', () => {
   });
 });
 
+describe('PermissionManager.removePersistentRule', () => {
+  it.each(['allow', 'ask', 'deny'] as const)(
+    'removes a persistent %s rule from subsequent permission decisions',
+    async (type) => {
+      const pm = makePm();
+      pm.addPersistentRule('Agent(review)', type);
+      pm.addPersistentRule('Agent(deploy)', type);
+      expect(await pm.evaluate(agentCtx({}, 'review'))).toBe(type);
+
+      expect(pm.removePersistentRule('Agent(review)', type)).toBe(true);
+      expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('default');
+      expect(await pm.evaluate(agentCtx({}, 'deploy'))).toBe(type);
+      expect(pm.removePersistentRule('Agent(review)', type)).toBe(false);
+      expect(await pm.evaluate(agentCtx({}, 'deploy'))).toBe(type);
+    },
+  );
+
+  it('preserves other persistent rule types and matching session rules', async () => {
+    const raw = 'Agent(review)';
+    const pm = makePm({
+      permissionsAllow: [raw],
+      permissionsAsk: [raw],
+      permissionsDeny: [raw],
+    });
+    pm.addSessionAllowRule(raw);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('deny');
+
+    expect(pm.removePersistentRule(raw, 'deny')).toBe(true);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('ask');
+    expect(pm.removePersistentRule(raw, 'ask')).toBe(true);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('allow');
+    expect(pm.removePersistentRule(raw, 'allow')).toBe(true);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('allow');
+    expect(pm.listRules()).toEqual([
+      { rule: parseRule(raw), type: 'allow', scope: 'session' },
+    ]);
+  });
+
+  it('leaves rules active when the raw string or rule type does not match', async () => {
+    const pm = makePm({ permissionsAllow: ['Agent(review)'] });
+
+    expect(pm.removePersistentRule('agent(review)', 'allow')).toBe(false);
+    expect(pm.removePersistentRule('Agent(review)', 'deny')).toBe(false);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('allow');
+  });
+
+  it('requires the exact stored raw, so a padded argument does not match', async () => {
+    // Deliberate contract pin: `parseRule` stores the trimmed raw while this
+    // method compares the caller's argument with `===`, so a padded argument
+    // is a no-op even though `addPersistentRule` accepts it. Pinned here so
+    // the asymmetry is a written-down choice rather than an accident.
+    const pm = makePm({ permissionsAllow: ['Agent(review)'] });
+
+    expect(pm.removePersistentRule(' Agent(review) ', 'allow')).toBe(false);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('allow');
+
+    expect(pm.removePersistentRule('Agent(review)', 'allow')).toBe(true);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('default');
+  });
+
+  it('removes only the first of two identical raw rules', async () => {
+    // Seeding through config bypasses `addPersistentRule`'s raw dedupe: cli
+    // `config.ts` concatenates `permissions.allow` with the deprecated
+    // `tools.allowed`, so one raw can arrive twice.
+    const pm = makePm({
+      permissionsAllow: ['Agent(review)', 'Agent(review)'],
+    });
+    expect(pm.listRules().filter((r) => r.type === 'allow')).toHaveLength(2);
+
+    expect(pm.removePersistentRule('Agent(review)', 'allow')).toBe(true);
+    // The surviving copy still auto-approves.
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('allow');
+    expect(pm.listRules().filter((r) => r.type === 'allow')).toHaveLength(1);
+
+    expect(pm.removePersistentRule('Agent(review)', 'allow')).toBe(true);
+    expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('default');
+  });
+
+  it('cannot reach a rule AUTO mode has stashed, until it is restored', async () => {
+    // Deliberate contract pin: `initialize()` strips the wildcard into
+    // `strippedAllowRules.persistent`, which this method does not scan, so it
+    // reports false while the grant is still live after `restoreDangerousRules`.
+    const pm = makePm({
+      approvalMode: 'auto',
+      permissionsAllow: ['Bash(python:*)'],
+    });
+    expect(
+      pm.getStrippedDangerousRules()?.persistent.map((r) => r.raw),
+    ).toEqual(['Bash(python:*)']);
+    expect(await pm.evaluate(sh('python foo.py'))).toBe('ask');
+
+    expect(pm.removePersistentRule('Bash(python:*)', 'allow')).toBe(false);
+    expect(
+      pm.getStrippedDangerousRules()?.persistent.map((r) => r.raw),
+    ).toEqual(['Bash(python:*)']);
+
+    pm.restoreDangerousRules();
+    expect(await pm.evaluate(sh('python foo.py'))).toBe('allow');
+  });
+});
+
 // ─── PermissionManager.findMatchingDenyRule ──────────────────────────────────
 
 describe('PermissionManager.findMatchingDenyRule', () => {
@@ -3158,6 +3444,11 @@ describe('PermissionManager — compound shell write attribution', () => {
     expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
   });
 
+  it('deny rule matches a redirect on the `cd` segment itself', async () => {
+    const ctx = sh('cd .qwen > .qwen/settings.json', '/repo');
+    expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
+  });
+
   it('deny rule matches a write through a `bash -lc` wrapper after `cd`', async () => {
     const ctx = sh("cd .qwen && bash -lc 'echo {} > settings.json'", '/repo');
     expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
@@ -3176,6 +3467,83 @@ describe('PermissionManager — compound shell write attribution', () => {
     const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
     const ctx = sh("cd .qwen && bash -lc 'echo {} > settings.json'", '/repo');
     expect(await pm.evaluate(ctx)).toBe('deny');
+  });
+
+  // #15600: `>&file` writes `file`, so it must hit that file's deny rule, while
+  // fd duplication (`2>&1`, `>&2`) writes nothing and must not be denied.
+  it.each<[command: string, expected: 'allow' | 'deny']>([
+    ['printf TXT > protected.txt', 'deny'],
+    ['printf TXT &>protected.txt', 'deny'],
+    ['printf TXT >&protected.txt', 'deny'],
+    ['printf TXT 1>&protected.txt', 'deny'],
+    ['df -hT / 2>&1', 'allow'],
+    ['df -hT / >&2', 'allow'],
+    ['printf TXT > other.txt', 'allow'],
+  ])('Bash(*) allow + file deny: %s → %s', async (command, expected) => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)'],
+      permissionsDeny: ['WriteFileTool(protected.txt)'],
+    });
+    expect(await pm.evaluate(sh(command, '/repo'))).toBe(expected);
+  });
+
+  // A quoted or escaped `&` is part of the file name (`>"&1"` writes `&1`),
+  // so it must stay a write that the deny rule sees.
+  it.each<[command: string, deny: string, expected: 'allow' | 'deny']>([
+    ['printf TXT >"&1"', 'Edit', 'deny'],
+    ["printf TXT >'&1'", 'Edit', 'deny'],
+    ['printf TXT >\\&1', 'Edit', 'deny'],
+    ['printf TXT 2>"&1"', 'Edit', 'deny'],
+    ['printf TXT >"&"', 'Edit', 'deny'],
+    ['df -hT / 2>&1', 'Edit', 'allow'],
+    ['printf TXT >"&protected.txt"', 'WriteFileTool(&protected.txt)', 'deny'],
+    ['printf TXT >\\&protected.txt', 'WriteFileTool(&protected.txt)', 'deny'],
+    ['printf TXT >&protected.txt', 'WriteFileTool(&protected.txt)', 'allow'],
+    // A quoted `-` after `>&` is a file name; an unquoted one closes the
+    // descriptor and the rest of the word is an argument (`rm` removes it).
+    ['printf TXT >&"-x"', 'Edit', 'deny'],
+    ['printf TXT >&\\-x', 'Edit', 'deny'],
+    ['printf TXT >&-x', 'Edit', 'deny'],
+    ['rm >&-notes.txt', 'Edit', 'deny'],
+    ['rm >&-notes.txt', 'Edit(notes.txt)', 'deny'],
+    ['rm 2>&-notes.txt', 'Edit(notes.txt)', 'deny'],
+    ['cat <&-notes.txt', 'Read', 'deny'],
+    ['cat <&-notes.txt', 'Read(notes.txt)', 'deny'],
+    // The command decides what the rest of the word is, so the whole word
+    // stays a file operation: these stay denied under a bare deny.
+    ['tee >&-2', 'Edit', 'deny'],
+    ['tee >&-$HOME/.bashrc', 'Edit', 'deny'],
+    ['cat <&-2', 'Read', 'deny'],
+    ['my-tool >&-notes.txt', 'Edit', 'deny'],
+    ['rm -- >&--x', 'Edit', 'deny'],
+    ['df -hT / >&/dev/null', 'Edit', 'allow'],
+    // A chain of closes: the last word is still an argument.
+    ['rm >&->&-notes.txt', 'Edit(notes.txt)', 'deny'],
+    ['rm >&->&-notes.txt', 'Edit', 'deny'],
+    // A quoted or escaped `)` is part of the file name.
+    ['printf TXT >"notes)"', 'WriteFileTool(notes))', 'deny'],
+    ['printf TXT >notes\\)', 'WriteFileTool(notes))', 'deny'],
+    ['printf TXT >&"y)"', 'WriteFileTool(y))', 'deny'],
+  ])(
+    'Bash(*) allow, %s with %s denied → %s',
+    async (command, deny, expected) => {
+      const pm = repoPm({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: [deny],
+      });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe(expected);
+    },
+  );
+
+  // A long chain of closes in one word must still get a verdict, not a
+  // stack overflow out of the permission check.
+  it('Bash(*) allow, a long >&- chain with Edit(notes.txt) denied → deny', async () => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)'],
+      permissionsDeny: ['Edit(notes.txt)'],
+    });
+    const command = `rm ${'>&-'.repeat(20000)}notes.txt`;
+    expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
   });
 
   // #11865: a redirect target of non-separator characters (one NBSP here) is a
