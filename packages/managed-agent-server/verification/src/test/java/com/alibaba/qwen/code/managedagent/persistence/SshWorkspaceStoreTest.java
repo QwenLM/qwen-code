@@ -161,9 +161,12 @@ class SshWorkspaceStoreTest {
         properties.setDefinitionToolProfiles(List.of(WorkspaceToolProfiles.MCP));
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(
                 new ManagedAgentProperties.RuntimeBroker.WorkspaceMount("tenant", "local", "/local")));
-        var sessions = sessions(properties);
         var definitions = new ManagedAgentDefinitionStore(jdbc, new RequestDigests());
-        sessions.setManagedAgentDefinitionStore(definitions);
+        var registry = new ManagedWorkspaceRegistry(jdbc);
+        registry.configureSsh(properties);
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
+                jdbc, new com.fasterxml.jackson.databind.ObjectMapper(), Clock.systemUTC(), ignored -> {},
+                registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), definitions, null);
         var transaction = new org.springframework.transaction.support.TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
         String agent = "agent_" + "a".repeat(32);
         transaction.executeWithoutResult(ignored -> definitions.create("tenant", "definition", "digest", agent, "d".repeat(64),
@@ -225,8 +228,8 @@ class SshWorkspaceStoreTest {
     private ManagedAgentStore sessions(ManagedAgentProperties properties) {
         var registry = new ManagedWorkspaceRegistry(jdbc);
         registry.configureSsh(properties);
-        return com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new com.fasterxml.jackson.databind.ObjectMapper(),
-                Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new com.fasterxml.jackson.databind.ObjectMapper(),
+                Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 
     @Test

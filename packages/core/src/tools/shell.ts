@@ -691,8 +691,8 @@ const COMMIT_RECOGNITION_LEADING_NOISE: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The program recogniser shared by `gitCommitContext` and
- * `findAttributableCommitSegment` (#12514): skip leading
+ * The program recogniser shared by `gitCommitContext`,
+ * `findAttributableCommitSegment` and `isAmendCommit` (#12514): skip leading
  * control-flow/noise keywords and match the program on its
  * basename (see `programBasename`), so `then git commit`,
  * `time git commit`, `! git commit` and `/usr/bin/git commit` all
@@ -940,13 +940,19 @@ function cdTargetMayChangeRepo(tokens: string[], cwd: string): boolean {
  * shell tool counts. `git -C ../other commit --amend && git commit -m x`
  * must not flip the diff range for the second (fresh) commit, since
  * `preHead` would be the inner repo's SHA there, not ours.
+ *
+ * Recognition matches the other commit walks: leading shell
+ * control-flow/noise keywords are skipped and the program is matched on
+ * its basename, so a loose spelling still gets the amend-range diff.
  */
 function isAmendCommit(command: string, cwd: string): boolean {
   let cwdShifted = false;
   for (const sub of splitCommands(command)) {
-    const tokens = tokeniseSegment(sub);
-    if (!tokens || tokens.length === 0) continue;
-    const program = tokens[0]!;
+    const rawTokens = tokeniseSegment(sub);
+    if (!rawTokens || rawTokens.length === 0) continue;
+    const tokens = skipCommitRecognitionNoise(rawTokens);
+    if (!tokens) continue;
+    const program = programBasename(tokens[0]!);
     if (program === 'cd' || program === 'pushd') {
       if (!cwdShifted && cdTargetMayChangeRepo(tokens, cwd)) cwdShifted = true;
       continue;

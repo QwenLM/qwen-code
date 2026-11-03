@@ -61,5 +61,21 @@ export function getWorkflowModeControlState(
     .filter(Boolean)
     .join(' ');
 
-  return { mode, disabled, description, messages, status, pending };
+  const short = messages.short;
+  const summary =
+    status === 'unbound'
+      ? short.unbound
+      : pending
+        ? short.updating
+        : status === 'syncing'
+          ? short.syncing
+          : status === 'unknown' || !mode
+            ? short.unknown
+            : mode.available
+              ? messages.menuDescription
+              : mode.requested
+                ? short.onUnavailable
+                : short.unavailable;
+
+  return { mode, disabled, description, summary, messages, status, pending };
 }

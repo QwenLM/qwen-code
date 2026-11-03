@@ -23,6 +23,10 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonUnwrapped;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -45,6 +49,8 @@ public class ManagedSessionStoreController {
     private final ManagedSessionStore store;
     private final ManagedUserMessageStore userMessages;
     private final ManagedNativeJournalSnapshots snapshots;
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.alibaba.qwen.code.managedagent.persistence.ManagedSessionModelConfigs modelConfigs;
 
     public ManagedSessionStoreController(ManagedSessionStore store, ManagedUserMessageStore userMessages,
             ManagedNativeJournalSnapshots snapshots) {
@@ -54,6 +60,33 @@ public class ManagedSessionStoreController {
     }
 
     public record QueueClaim(String workspaceId, String writerId, long writerGeneration, String promptId, boolean initialOnly) { }
+
+    public record ModelConfigQuery(
+            @NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 512) String writerId,
+            @Min(1) @Max(ManagedSessionStoreModels.MAX_SAFE_COUNTER) long writerGeneration,
+            String expectedDigest, String kind) { }
+
+    @PostMapping("/model-config:query")
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<Object> modelConfig(TenantContext tenant, @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody ModelConfigQuery request, @RequestHeader HttpHeaders headers) {
+        var authority = lifecycleAuthority(headers);
+        if (request.kind() != null && !"legacy-close".equals(request.kind())) {
+            throw new ManagedAgentException(400, "invalid_model_config_query", "Invalid model configuration query.");
+        }
+        var owner = new ManagedSessionStoreModels.AuthorizeLifecycleRequest(
+                request.workspaceId(), request.writerId(), request.writerGeneration(), authority == null ? request.kind() : null);
+        if (authority == null) {
+            store.authorizeOrdinary(tenant.tenantId(), sessionId, writerToken, owner);
+        } else {
+            store.authorizeLifecycle(tenant.tenantId(), sessionId, writerToken, owner, authority);
+        }
+        var config = modelConfigs.read(tenant.tenantId(), sessionId, request.expectedDigest());
+        return ResponseEntity.ok().cacheControl(org.springframework.http.CacheControl.noStore())
+                .body(java.util.Map.of("digest", config.digest(), "config", config.wireValue()));
+    }
 
     @PostMapping("/user-messages:claim")
     @org.springframework.transaction.annotation.Transactional

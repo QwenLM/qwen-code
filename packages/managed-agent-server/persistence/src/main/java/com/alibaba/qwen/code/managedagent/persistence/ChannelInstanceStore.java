@@ -258,7 +258,7 @@ public class ChannelInstanceStore
         // The ordering index can scan all completed deliveries before finding a due row.
         return jdbc.query("SELECT session_id, record_id, revision,"
                         + " delivery_state, record_resource_id"
-                        + " FROM ma_session_record USE INDEX (ix_ma_record_session_delivery)"
+                        + " FROM ma_session_record USE INDEX (idx_ma_record_session_delivery)"
                         + " WHERE record_kind = 'DOMAIN' AND session_scope_key = ?"
                         + " AND domain = 'channel_delivery'"
                         + " AND delivery_state IN ('planned', 'partial')"

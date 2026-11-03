@@ -29,13 +29,28 @@ import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.ReflectionUtils;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.lang.reflect.Field;
+import java.net.BindException;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.Principal;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.IntSupplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -48,18 +63,123 @@ import static org.assertj.core.api.Assertions.assertThat;
 public final class HostedGateTestSupport {
     private static final ObjectMapper JSON = new ObjectMapper();
 
+    // Bounds of reservePort's window: below the default ephemeral ranges of
+    // Linux (32768-60999) and macOS (49152-65535).
+    static final int PORT_FLOOR = 20_000;
+    static final int PORT_CEILING = 28_000;
+
+    // Every consumer binds this address, so the probes do too.
+    private static final String LOOPBACK = "127.0.0.1";
+
+    // One counter for the fork. Two forks on one host can walk overlapping
+    // numbers; the random start makes it unlikely that both hand out the same
+    // one at the same moment, and the probe skips one already listening.
+    private static final AtomicInteger NEXT_PORT = new AtomicInteger(PORT_FLOOR
+            + ThreadLocalRandom.current().nextInt(PORT_CEILING - PORT_FLOOR));
+
+    // The window helps only while it lies below the host's ephemeral range.
+    // Linux publishes that range; a host tuned to start it lower falls back
+    // to kernel-chosen ports.
+    private static final boolean WINDOW_BELOW_EPHEMERAL = windowBelow(ephemeralFloor(
+            Path.of("/proc/sys/net/ipv4/ip_local_port_range")));
+    private static final AtomicBoolean FALLBACK_REPORTED = new AtomicBoolean();
+    private static final Set<Integer> KERNEL_PORTS = ConcurrentHashMap.newKeySet();
+
     private HostedGateTestSupport() {
     }
 
-    // A Hosted IT advertises ports it probed by binding an ephemeral port
-    // and closing it again. Anything that binds in between -- a MySQL
-    // connection's local port, a worker left by an earlier test in the same
-    // fork, a neighbour process on a shared host -- can take the number back,
-    // and the application's own bind then fails with "Address already in
-    // use". That is the boot failure recorded on the Hook reload, extensions
-    // and MCP restart gates across nightly runs. Probe again and retry a
-    // bounded number of times instead of trusting a port the OS may already
-    // have handed out; a bind conflict is the only retried failure.
+    // A Hosted IT advertises ports before the process that binds them is up:
+    // Spring and the Harness each need the other's address at boot. Probing
+    // with port 0 and closing the socket leaves the number in the kernel's
+    // ephemeral range, where the kernel can hand it straight back out -- to
+    // the local end of an outgoing connection, or to anyone else binding
+    // port 0 -- before its owner binds it. The boot then fails with "Address
+    // already in use". Below the ephemeral range the kernel never picks a
+    // port on its own, so only a bind by number can take one, and the counter
+    // gives no number to two reservations in the fork until it wraps after
+    // 8000. The probe skips a number some process already listens on at
+    // 127.0.0.1, where consumers bind, or on Linux at the wildcard address.
+    // On a host whose ephemeral range starts below the window's ceiling, the
+    // numbers come from the kernel as they used to, still never one handed
+    // out before in the fork.
+    static int reservePort() {
+        if (WINDOW_BELOW_EPHEMERAL) {
+            return reservePort(NEXT_PORT);
+        }
+        if (FALLBACK_REPORTED.compareAndSet(false, true)) {
+            System.err.println("reservePort: this host's ephemeral port range"
+                    + " starts below " + PORT_CEILING + ", so reserved ports"
+                    + " come from the kernel and can be taken before their"
+                    + " owner binds them");
+        }
+        return kernelPort(KERNEL_PORTS, HostedGateTestSupport::kernelChosenPort);
+    }
+
+    static int reservePort(AtomicInteger next) {
+        BindException last = null;
+        for (int attempt = 0; attempt < PORT_CEILING - PORT_FLOOR; attempt++) {
+            int candidate = next.getAndUpdate(HostedGateTestSupport::followingPort);
+            try (ServerSocket probe = new ServerSocket()) {
+                probe.bind(new InetSocketAddress(LOOPBACK, candidate));
+                return candidate;
+            } catch (BindException occupied) {
+                // Bound by a process outside this counter; try the next one.
+                last = occupied;
+            } catch (IOException error) {
+                throw new UncheckedIOException(error);
+            }
+        }
+        throw new IllegalStateException("No free loopback port in ["
+                + PORT_FLOOR + ", " + PORT_CEILING + ")", last);
+    }
+
+    static int followingPort(int port) {
+        return port + 1 >= PORT_CEILING ? PORT_FLOOR : port + 1;
+    }
+
+    // The kernel can return a number it returned a moment ago once that
+    // probe has closed; skip any number already handed out in the fork.
+    static int kernelPort(Set<Integer> handedOut, IntSupplier kernel) {
+        for (int attempt = 0; attempt < 1000; attempt++) {
+            int port = kernel.getAsInt();
+            if (handedOut.add(port)) {
+                return port;
+            }
+        }
+        throw new IllegalStateException("The kernel kept returning reserved ports");
+    }
+
+    private static int kernelChosenPort() {
+        try (ServerSocket probe = new ServerSocket()) {
+            probe.bind(new InetSocketAddress(LOOPBACK, 0));
+            return probe.getLocalPort();
+        } catch (IOException error) {
+            throw new UncheckedIOException(error);
+        }
+    }
+
+    static boolean windowBelow(int ephemeralFloor) {
+        return ephemeralFloor >= PORT_CEILING;
+    }
+
+    // The low bound of a Linux ip_local_port_range file, or MAX_VALUE where
+    // there is none to read. Integer sysctls answer only a read at offset 0,
+    // and Files.readString starts a size-0 file with a one-byte read, so read
+    // with a buffer that takes the whole line at once.
+    static int ephemeralFloor(Path range) {
+        try (InputStream in = Files.newInputStream(range)) {
+            String text = new String(in.readAllBytes(), StandardCharsets.US_ASCII);
+            return Integer.parseInt(text.trim().split("\\s+")[0]);
+        } catch (IOException | NumberFormatException unreadable) {
+            return Integer.MAX_VALUE;
+        }
+    }
+
+    // Something can still bind a reserved number between the probe and the
+    // application's own bind: a process outside the fork, or, on a host that
+    // takes the kernel fallback, anything binding port 0 or connecting out.
+    // Retry such a boot with fresh ports a bounded number of times; a bind
+    // conflict is the only retried failure.
     static ConfigurableApplicationContext bootWithFreshPorts(Runnable probe,
             java.util.function.Supplier<ConfigurableApplicationContext> boot) {
         for (int attempt = 1; ; attempt++) {

@@ -1166,8 +1166,8 @@ class WorkspaceRuntimeTest {
         authority.claim(session.workspace(), fixture.record());
         var closeProperties = new ManagedAgentProperties();
         closeProperties.getHarness().setWorkspaceFilesEnabled(true);
-        var closeStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), java.time.Clock.systemUTC(), ignored -> {},
-                new com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry(jdbc), closeProperties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var closeStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), java.time.Clock.systemUTC(), ignored -> {},
+                new com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry(jdbc), closeProperties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         new TransactionTemplate(new DataSourceTransactionManager(dataSource)).execute(status -> {
             var admittedClose = closeStore.beginWorkspaceClose(session.tenantId(), session.sessionId(), "actor", "actor", "close", "digest", true);
             return closeStore.claimOperation(session.tenantId(), session.sessionId(), admittedClose.operation().operationId(),

@@ -20,9 +20,12 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  GIT_HARDENING,
   artifactDirName,
   detectCredentialSignals,
   detectIsolation,
+  gitStatusArgs,
+  localFilterOverrides,
   parseArgs,
   parseRepo,
   validateContext,
@@ -213,6 +216,264 @@ describe('detectCredentialSignals', () => {
         '/home/t',
       ),
     ).toEqual(['SANDBOX_MOUNTS']);
+    // The recipe's proxy credential must stay outside the signal set, or a
+    // container round would fail the gate before it starts.
+    expect(
+      detectCredentialSignals(
+        { QWEN_VERIFY_PROXY_TOKEN: 'x' },
+        () => false,
+        '/home/t',
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe('git hardening', () => {
+  it('disables fsmonitor, hooks, credential helpers and excludesFile on every git read', () => {
+    expect(GIT_HARDENING).toEqual([
+      '-c',
+      'core.fsmonitor=false',
+      '-c',
+      'core.hooksPath=/dev/null',
+      '-c',
+      'credential.helper=',
+      '-c',
+      'core.excludesFile=/dev/null',
+    ]);
+    const { dir } = makeRepo();
+    expect(localFilterOverrides(dir)).toEqual([]);
+    expect(gitStatusArgs(dir)).toEqual([
+      ...GIT_HARDENING,
+      '-C',
+      dir,
+      'status',
+      '--porcelain',
+      '--untracked-files=normal',
+    ]);
+  });
+
+  // A filter VALUE may contain newlines; parsing the rendered `key value`
+  // output would accept the second line as a key and forge a `-c` that
+  // outranks the hardening (git applies the last -c for a key).
+  it('does not let a newline-bearing filter value forge overrides', () => {
+    const { dir } = makeRepo();
+    const hooks = join(dir, '.githooks');
+    mkdirSync(hooks, { recursive: true });
+    const marker = join(dir, 'hook-fired');
+    writeFileSync(
+      join(hooks, 'post-checkout'),
+      `#!/bin/sh\necho fired > ${marker}\n`,
+    );
+    chmodSync(join(hooks, 'post-checkout'), 0o755);
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--local',
+        'filter.decoy.clean',
+        `harmless\ncore.hooksPath=${hooks}`,
+      ],
+      { cwd: dir, env: gitEnv },
+    );
+    mkdirSync(join(dir, '.git', 'info'), { recursive: true });
+    writeFileSync(join(dir, '.git', 'info', 'attributes'), '* filter=decoy\n');
+    expect(localFilterOverrides(dir)).toEqual(['-c', 'filter.decoy.clean=']);
+    // The forged hooksPath must not reach git: the name list never contained
+    // it, and the fixed hardening is applied last in any case.
+    const args = gitStatusArgs(dir);
+    expect(args.filter((a) => a === 'core.hooksPath=/dev/null')).toHaveLength(
+      1,
+    );
+    expect(args.join(' ')).not.toContain(hooks);
+    spawnSync('git', args, { encoding: 'utf8' });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  // git allows '=' inside a filter subsection (filter.a=b.clean), but -c
+  // splits its argument at the FIRST '=': the override would set a different
+  // key and leave the real filter armed. Such a name must be refused before
+  // any guarded status could run it, not emitted as a broken override.
+  it('refuses a filter name containing = instead of emitting a broken override', () => {
+    const { dir } = makeRepo();
+    const marker = join(dir, 'filter-fired');
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--local',
+        'filter.a=b.clean',
+        `sh -c 'echo fired > ${marker} && cat'`,
+      ],
+      { cwd: dir, env: gitEnv },
+    );
+    mkdirSync(join(dir, '.git', 'info'), { recursive: true });
+    writeFileSync(join(dir, '.git', 'info', 'attributes'), '* filter=a=b\n');
+    // Same-byte-length change: a size change would let git skip the clean
+    // conversion and the positive control would prove nothing.
+    writeFileSync(join(dir, 'base.txt'), 'BaSe\n');
+    spawnSync('git', [...GIT_HARDENING, '-C', dir, 'status', '--porcelain'], {
+      encoding: 'utf8',
+    });
+    expect(existsSync(marker)).toBe(true);
+    rmSync(marker);
+    expect(() => localFilterOverrides(dir)).toThrow(
+      /cannot be safely disabled/,
+    );
+    expect(() => gitStatusArgs(dir)).toThrow(/cannot be safely disabled/);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  // extensions.worktreeConfig makes git status read .git/config.worktree,
+  // which --local never reads; a filter planted there must be emptied too.
+  it('empties a filter planted in .git/config.worktree', () => {
+    const { dir } = makeRepo();
+    const marker = join(dir, 'filter-fired');
+    execFileSync(
+      'git',
+      ['config', '--local', 'extensions.worktreeConfig', 'true'],
+      { cwd: dir, env: gitEnv },
+    );
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--worktree',
+        'filter.wt.clean',
+        `sh -c 'echo fired > ${marker} && cat'`,
+      ],
+      { cwd: dir, env: gitEnv },
+    );
+    mkdirSync(join(dir, '.git', 'info'), { recursive: true });
+    writeFileSync(join(dir, '.git', 'info', 'attributes'), '* filter=wt\n');
+    // Same byte length as 'base\n': a size change lets git skip the clean
+    // conversion, which makes the positive control depend on racy timing.
+    writeFileSync(join(dir, 'base.txt'), 'BaSe\n');
+    // Positive control: without the worktree-scope override the filter runs.
+    spawnSync(
+      'git',
+      [
+        '-c',
+        'core.fsmonitor=false',
+        '-c',
+        'core.hooksPath=/dev/null',
+        '-C',
+        dir,
+        'status',
+        '--porcelain',
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(existsSync(marker)).toBe(true);
+    rmSync(marker);
+    expect(localFilterOverrides(dir)).toEqual(['-c', 'filter.wt.clean=']);
+    spawnSync('git', gitStatusArgs(dir), { encoding: 'utf8' });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  // The extension does not require config.worktree to exist. prepare's
+  // --get-regexp enumeration already treats the absent file as no matches
+  // (exit 1); pin that so a future switch to --list (exit 128 on absence)
+  // cannot silently false-refuse a clean repo the way the scan once did.
+  it('tolerates an enabled worktree extension with no config.worktree file', () => {
+    const { dir, base, head } = makeRepo();
+    execFileSync(
+      'git',
+      ['config', '--local', 'extensions.worktreeConfig', 'true'],
+      { cwd: dir, env: gitEnv },
+    );
+    expect(localFilterOverrides(dir)).toEqual([]);
+    const status = spawnSync('git', gitStatusArgs(dir), { encoding: 'utf8' });
+    expect(status.status).toBe(0);
+
+    const env = installFakeGh(snapshotFor({ base, head }));
+    const result = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(result.status).toBe(0);
+  });
+
+  // core.excludesFile is steerable from the same PR-controlled config; the
+  // hardened status must see untracked files even when it points at a
+  // catch-all exclude file.
+  it('sees untracked files through a hostile core.excludesFile', () => {
+    const { dir } = makeRepo();
+    writeFileSync(join(dir, '.git', 'info', 'leave'), '*\n');
+    execFileSync(
+      'git',
+      ['config', '--local', 'core.excludesFile', '.git/info/leave'],
+      { cwd: dir, env: gitEnv },
+    );
+    writeFileSync(join(dir, 'leftover-modified.ts'), 'export {};\n');
+    const steered = spawnSync(
+      'git',
+      ['-C', dir, 'status', '--porcelain', '--untracked-files=normal'],
+      { encoding: 'utf8', env: gitEnv },
+    );
+    expect(steered.stdout.trim()).toBe('');
+    const hardened = spawnSync('git', gitStatusArgs(dir), {
+      encoding: 'utf8',
+      env: gitEnv,
+    });
+    expect(hardened.stdout).toContain('?? leftover-modified.ts');
+  });
+
+  it('empties a planted clean filter before reading status', () => {
+    const { dir } = makeRepo();
+    const marker = join(dir, 'filter-fired');
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--local',
+        'filter.pwn.clean',
+        `sh -c 'echo fired > ${marker}'`,
+      ],
+      { cwd: dir, env: gitEnv },
+    );
+    mkdirSync(join(dir, '.git', 'info'), { recursive: true });
+    writeFileSync(join(dir, '.git', 'info', 'attributes'), '* filter=pwn\n');
+    // Same byte length as 'base\n': a size change lets git skip the clean
+    // conversion, which makes the positive control depend on racy timing.
+    writeFileSync(join(dir, 'base.txt'), 'BaSe\n');
+    // Positive control: without the filter overrides the planted filter runs
+    // on the host during an ordinary status.
+    spawnSync('git', [...GIT_HARDENING, '-C', dir, 'status', '--porcelain'], {
+      encoding: 'utf8',
+    });
+    expect(existsSync(marker)).toBe(true);
+    rmSync(marker);
+    expect(localFilterOverrides(dir)).toEqual(['-c', 'filter.pwn.clean=']);
+    spawnSync('git', gitStatusArgs(dir), { encoding: 'utf8' });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  // --local alone names one file and skips include.path, while the config
+  // parsing `git status` uses follows it: a filter defined in an included
+  // worktree file must be enumerated too, or it runs on the host unopposed.
+  it('empties a clean filter that arrives through include.path', () => {
+    const { dir } = makeRepo();
+    const marker = join(dir, 'filter-fired');
+    writeFileSync(
+      join(dir, 'evil.inc'),
+      `[filter "pwn"]\n\tclean = sh -c 'echo fired > ${marker}'\n`,
+    );
+    execFileSync('git', ['config', '--local', 'include.path', '../evil.inc'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    mkdirSync(join(dir, '.git', 'info'), { recursive: true });
+    writeFileSync(join(dir, '.git', 'info', 'attributes'), '* filter=pwn\n');
+    // Same byte length as 'base\n': a size change lets git skip the clean
+    // conversion, which makes the positive control depend on racy timing.
+    writeFileSync(join(dir, 'base.txt'), 'BaSe\n');
+    // Positive control: an ordinary hardened status follows the include and
+    // executes the planted filter on the host.
+    spawnSync('git', [...GIT_HARDENING, '-C', dir, 'status', '--porcelain'], {
+      encoding: 'utf8',
+    });
+    expect(existsSync(marker)).toBe(true);
+    rmSync(marker);
+    expect(localFilterOverrides(dir)).toEqual(['-c', 'filter.pwn.clean=']);
+    spawnSync('git', gitStatusArgs(dir), { encoding: 'utf8' });
+    expect(existsSync(marker)).toBe(false);
   });
 });
 
@@ -545,6 +806,49 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(existsSync(join(realpathSync(dir), 'tmp'))).toBe(false);
   });
 
+  // The refusal must reach the CLI as a clean exit 3 with its own remedy,
+  // before any guarded status runs — not as an uncaught enumeration stack.
+  it('refuses a tree whose filter name cannot be safely disabled', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    execFileSync('git', ['config', '--local', 'filter.a=b.clean', 'true'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+
+    const result = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(result.status).toBe(3);
+    expect(result.stderr).toContain("contains '='");
+    expect(result.stderr).toContain('cannot be safely disabled');
+    expect(existsSync(join(realpathSync(dir), 'tmp'))).toBe(false);
+  });
+
+  // .git/info/exclude has no -c override: active patterns there could hide
+  // untracked files from the clean-tree check, so the gate refuses the file
+  // itself. A fresh clone carries only git's commented default.
+  it('refuses a .git/info/exclude with active patterns', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    mkdirSync(join(dir, '.git', 'info'), { recursive: true });
+    writeFileSync(join(dir, '.git', 'info', 'exclude'), '*\n');
+    writeFileSync(join(dir, 'hidden.ts'), 'export {};\n');
+
+    const refused = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(refused.status).toBe(3);
+    expect(refused.stderr).toContain('.git/info/exclude');
+    expect(refused.stderr).toContain('re-clone');
+    expect(existsSync(join(realpathSync(dir), 'tmp'))).toBe(false);
+
+    // The commented default a fresh clone ships with must pass.
+    writeFileSync(
+      join(dir, '.git', 'info', 'exclude'),
+      '# git ls-files --others --exclude-standard\n# *.[oa]\n',
+    );
+    rmSync(join(dir, 'hidden.ts'));
+    const clean = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(clean.status).toBe(0);
+  });
+
   // git status trusts the index: skip-worktree / assume-unchanged entries
   // (a sparse checkout sets them en masse) hide tracked divergence, so the
   // gate must refuse them instead of stamping a partial tree as clean.
@@ -607,6 +911,16 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     const result = runPrepare(dir, ['42'], gitEnv);
     expect(result.status).toBe(2);
     expect(result.stderr).toContain('--repo <owner>/<repo> is required');
+  });
+
+  // Outside a worktree the filter enumeration fails before any git read;
+  // the refusal must stay the clean exit 3, not an uncaught stack trace.
+  it('refuses a non-git cwd with the worktree message, not a stack trace', () => {
+    const dir = makeTmpDir();
+    const result = runPrepare(dir, ['42', '--repo', REPO], gitEnv);
+    expect(result.status).toBe(3);
+    expect(result.stderr).toContain('not inside a git worktree');
+    expect(result.stderr).not.toContain('Error: could not enumerate');
   });
 });
 

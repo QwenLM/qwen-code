@@ -393,6 +393,13 @@ describe('SDK Java self-hosted workflow guards', () => {
       'qwen-managed-agent-parent',
       'qwen-managed-agent-persistence',
       'qwen-managed-agent-runtime-broker',
+      'qwen-managed-agent-runtime-external',
+      'qwen-managed-agent-runtime-host',
+      'qwen-managed-agent-runtime-http',
+      'qwen-managed-agent-runtime-kubernetes',
+      'qwen-managed-agent-runtime-local',
+      'qwen-managed-agent-runtime-ssh',
+      'qwen-managed-agent-runtime-static',
       'qwen-managed-agent-server',
       'qwen-managed-agent-verification',
       'qwencode-sdk',
@@ -528,6 +535,13 @@ describe('SDK Java self-hosted workflow guards', () => {
             'qwen-managed-agent-contracts',
             'qwen-managed-agent-control-plane',
             'qwen-managed-agent-runtime-broker',
+            'qwen-managed-agent-runtime-external',
+            'qwen-managed-agent-runtime-host',
+            'qwen-managed-agent-runtime-http',
+            'qwen-managed-agent-runtime-kubernetes',
+            'qwen-managed-agent-runtime-local',
+            'qwen-managed-agent-runtime-ssh',
+            'qwen-managed-agent-runtime-static',
             'qwen-managed-agent-persistence',
             'qwen-managed-agent-adapters',
             'qwen-managed-agent-server',
@@ -584,6 +598,13 @@ describe('SDK Java self-hosted workflow guards', () => {
             'qwen-managed-agent-contracts',
             'qwen-managed-agent-control-plane',
             'qwen-managed-agent-runtime-broker',
+            'qwen-managed-agent-runtime-external',
+            'qwen-managed-agent-runtime-host',
+            'qwen-managed-agent-runtime-http',
+            'qwen-managed-agent-runtime-kubernetes',
+            'qwen-managed-agent-runtime-local',
+            'qwen-managed-agent-runtime-ssh',
+            'qwen-managed-agent-runtime-static',
             'qwen-managed-agent-persistence',
             'qwen-managed-agent-adapters',
             'qwen-managed-agent-server',
@@ -2177,7 +2198,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // artifact in the shared cache the next seed hardlinks from.
     expect(step.run).toContain('cd "${RUNNER_TEMP}/m2-repo"');
     expect(step.run).toContain(
-      "timeout 300 find . \\( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \\) -prune -o -type f -links 1 -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?",
+      "timeout 300 find . \\( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-runtime-external -o -path ./com/alibaba/qwen-managed-agent-runtime-host -o -path ./com/alibaba/qwen-managed-agent-runtime-http -o -path ./com/alibaba/qwen-managed-agent-runtime-local -o -path ./com/alibaba/qwen-managed-agent-runtime-kubernetes -o -path ./com/alibaba/qwen-managed-agent-runtime-ssh -o -path ./com/alibaba/qwen-managed-agent-runtime-static -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \\) -prune -o -type f -links 1 -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?",
     );
     expect(step.run).not.toMatch(/tar [^\n]*-xf/);
     expect(step.run).toContain(
