@@ -13,7 +13,13 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -278,6 +284,14 @@ const allowOnce = () => ({
         ? CONTAINER_SANDBOX_NO_PROXY
         : '127.0.0.1,localhost';
       const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
+      writeFileSync(
+        join(qwenHome, 'settings.json'),
+        JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+      );
+      writeFileSync(
+        join(qwenHome, 'trustedFolders.json'),
+        JSON.stringify({ [realpathSync(dir)]: 'TRUST_FOLDER' }),
+      );
       const env: NodeJS.ProcessEnv = {
         ...process.env,
         OPENAI_API_KEY: 'fake-key',
