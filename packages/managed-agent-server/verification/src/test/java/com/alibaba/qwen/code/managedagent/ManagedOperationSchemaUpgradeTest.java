@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -27,13 +26,13 @@ class ManagedOperationSchemaUpgradeTest {
         ManagedSchema.initialize(source);
         var jdbc = new JdbcTemplate(source);
         var store =
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
                         jdbc,
                         new ObjectMapper(),
                         Clock.systemUTC(),
                         ignored -> {},
                         new ManagedWorkspaceRegistry(jdbc),
-                        new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                        new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("t", "s");
         jdbc.update(
                 "INSERT INTO ma_operation"

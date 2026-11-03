@@ -226,11 +226,13 @@ is never vacuous against a history-dropping endpoint.
 | `webshell-monitor-resume` | Same over the WebShell stream                                        | Same assertions                                                                                                                          |
 | `cursor-expired-resync`   | Resume with a cursor older than the replay window                    | A single `agent.session.resync_required` frame, then close; no fabricated replay                                                         |
 
-`cursor-expired-resync` is deferred out of the slice-1 letter: the replay
+`cursor-expired-resync` was deferred out of the slice-1 letter: the replay
 floor only advances when a session snapshot lands, so an honestly expired
-cursor needs the replay-floor mechanics driven to that point first; the
-case lands with slice 2, and its mutation (2 below) moves with it. The
-shipped FG8e letter covers the four abort/resume cases.
+cursor needs the replay-floor mechanics driven to that point first. It was
+later delivered in FG9e
+(`docs/design/2026-10-15-session-relay-fault-gates.md`) as the cell carried
+by #15750, and its mutation moved with it. The shipped FG8e letter covers
+the four abort/resume cases.
 
 A fixture note that cost a flake: the 60 s events poll/heartbeat interval
 (which forces the live hub to carry delivery) can hold a WebShell resume
@@ -364,9 +366,9 @@ the merged #14021 / #13986 / #13918 semantics when they land.
 
 1. FG8e — the public replay's cursor tiebreak weakened to include the
    cursor row: `public-run-resume` red (duplicate at the resume boundary).
-2. Deferred with its case: FG8e — the expired-cursor branch streaming from
-   sequence 0 instead of answering `resync_required`:
-   `cursor-expired-resync` red. Lands with slice 2.
+2. Deferred with its case; delivered in FG9e as #15750's residual cell:
+   FG8e — the expired-cursor branch streaming from sequence 0 instead of
+   answering `resync_required`: `cursor-expired-resync` red.
 3. FG8e — the WebShell replay window off by one at the `afterSequence`
    boundary: `webshell-run-resume` red (gap or duplicate at the boundary).
 4. FG8f — the resume watermark dropped to 0 (resume re-arms only once the

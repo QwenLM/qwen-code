@@ -212,7 +212,7 @@ import { logApiRetry } from '../telemetry/loggers.js';
 import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
 import {
   createUserPromptSubmitContextPart,
-  hasUserPromptSubmitContext,
+  deliveredUserPromptSubmitContexts,
 } from '../hooks/user-prompt-submit-context.js';
 import {
   TrustedUserAnswers,
@@ -315,18 +315,31 @@ export interface SendMessageOptions {
   onPromptAdmitted?: () => void;
   /**
    * {@link LlmClient.admitUserPrompt}'s verdict on this prompt, applied in
-   * place of running UserPromptSubmit again. It is spent by the UserQuery with
-   * the prompt id it was issued for; any other use throws.
+   * place of running UserPromptSubmit again. It is spent by the UserQuery or
+   * Retry with the prompt id it was issued for; any other use throws.
    */
   promptAdmission?: UserPromptAdmission;
+  /**
+   * What the Mods' `prompt.submit` hooks attached for the model to read
+   * beside this UserQuery's prompt. It joins UserPromptSubmit's context in
+   * the hidden block the person never sees, ahead of it.
+   */
+  promptContext?: readonly string[];
   /** A UserQuery running beside an active turn, without replacing its state. */
   isConcurrentSideQuery?: boolean;
   /**
    * The host already recorded this UserQuery's user message, started its todo
    * work chain and took its file-history snapshot, as ACP does when it admits
-   * a prompt, so the client does none of them.
+   * a prompt, so the client does none of them. On a Retry, the host started
+   * the todo work chain and keeps the attempt's recorded user message, so the
+   * client neither starts the chain nor records the message again.
    */
   userTurnRecordedByHost?: boolean;
+  /**
+   * The rewindable identity a Retry's request carries in history: that of the
+   * attempt it replaces. Spent by the first request.
+   */
+  historyPromptId?: string;
   /** Also yield `ToolCallPreparation` for calls the model starts streaming. */
   toolCallPreparations?: boolean;
   /**
@@ -1106,6 +1119,16 @@ export class LlmClient {
    * Host-supported sessions settle after classifying their own protective
    * exits, so core must leave their single-take proposal latch untouched.
    */
+  /**
+   * Drops the turn's parked Goal proposal when the send ends abnormally. A
+   * host that settles proposals itself takes it when its turn ends, so it can
+   * still report that the Goal did not start.
+   */
+  private dropUnsettledGoalProposal(promptId: string): void {
+    if (this.config.getGoalProposalHostSupported?.()) return;
+    this.config.takePendingGoalProposal?.(promptId);
+  }
+
   private async settlePendingGoalProposal(
     turnEnded: boolean,
     signal: AbortSignal,
@@ -3686,8 +3709,8 @@ export class LlmClient {
 
   /**
    * Runs UserPromptSubmit on a prompt before the caller expands it, so a block
-   * also stops the expansion. The prompt's first UserQuery send takes the
-   * result as `promptAdmission` and applies it instead of running the hook on
+   * also stops the expansion. The prompt's first UserQuery or Retry send takes
+   * the result as `promptAdmission` and applies it instead of running the hook on
    * the expanded text, so hooks registered during the expansion do not check
    * this prompt, even when none was configured here.
    */
@@ -3741,7 +3764,8 @@ export class LlmClient {
     const owner = captureHookExecutionOwner(this.config);
     if (
       !issued ||
-      messageType !== SendMessageType.UserQuery ||
+      (messageType !== SendMessageType.UserQuery &&
+        messageType !== SendMessageType.Retry) ||
       issued.promptId !== promptId ||
       issued.sessionId !== this.config.getSessionId() ||
       issued.owner?.runtimeId !== owner?.runtimeId ||
@@ -3811,12 +3835,14 @@ export class LlmClient {
       !options.isConcurrentSideQuery &&
       isTopLevelSession();
     const onPromptAdmitted = options?.onPromptAdmitted;
+    const historyPromptId = options?.historyPromptId;
     if (
       options &&
       (options.humanInput ||
         onWorkflowIntentApplied ||
         options.workflowModeEligible ||
-        onPromptAdmitted)
+        onPromptAdmitted ||
+        historyPromptId !== undefined)
     ) {
       options = {
         ...options,
@@ -3824,6 +3850,7 @@ export class LlmClient {
         onWorkflowIntentApplied: undefined,
         workflowModeEligible: undefined,
         onPromptAdmitted: undefined,
+        historyPromptId: undefined,
       };
     }
     const startsInteraction =
@@ -4208,6 +4235,8 @@ export class LlmClient {
     let userPromptRecordPayload: UserPromptRecordPayload | undefined;
     /** Hook context appended to this turn's request, if any. */
     let appendedHookContext: string | undefined;
+    /** The separate contexts `appendedHookContext` joins. */
+    let appendedHookContexts: readonly string[] | undefined;
     /** Hook context suppressed as already delivered; compression may need it back. */
     let suppressedHookContext: string | undefined;
     let hooksEnabled: boolean;
@@ -4223,6 +4252,14 @@ export class LlmClient {
           ? options.submittedPrompt
           : undefined;
       let verdict: (UserPromptSubmitDecision & { prompt: string }) | undefined;
+      const promptContext =
+        messageType === SendMessageType.UserQuery
+          ? options?.promptContext?.filter((text) => text.trim())
+          : undefined;
+      if (options?.promptContext) {
+        // Spent here, as the admission below is.
+        options = { ...options, promptContext: undefined };
+      }
       if (options?.promptAdmission) {
         const { promptAdmission } = options;
         // Spent here: the continuation sends below re-spread `options`.
@@ -4260,8 +4297,8 @@ export class LlmClient {
         };
       }
 
-      if (verdict) {
-        if (verdict.blockReason !== undefined) {
+      if (verdict || promptContext?.length) {
+        if (verdict?.blockReason !== undefined) {
           if (goalPermit) {
             userPromptSubmitFailureMessage = 'Goal turn finalization failed';
             const runtime = await loadGoalRuntime(true);
@@ -4308,7 +4345,9 @@ export class LlmClient {
           // A blocked send never reaches the history push: settle the
           // attached carrier by unconditional restore, never by the push
           // counter (a concurrent push inside the hook window above would
-          // otherwise masquerade as this send's acceptance).
+          // otherwise masquerade as this send's acceptance). A blocked Retry
+          // puts back the attempt it stripped above.
+          restoreStrippedRetryEntries();
           settleSteerInput(attachedSteerInput);
           return new Turn(this.getChat(), prompt_id);
         }
@@ -4318,39 +4357,66 @@ export class LlmClient {
         // distinguishable from user-authored text in model history, resume,
         // and offline transcript analysis. `getAdditionalContext()` escapes
         // `<`/`>`, so hook output cannot forge the closing tag.
-        // An unchanged payload is already in history from an earlier turn, so
-        // re-appending it would duplicate it once per turn for the rest of the
-        // session; the earlier copy still carries the same text. History is
-        // scanned newest-first over the raw entries, so the check stays off
-        // the deep-cloning accessor on this per-turn path.
+        // A context already in history from an earlier turn is not sent
+        // again, or it would repeat once per turn for the rest of the
+        // session; the earlier copy still carries the same text. Each context
+        // counts on its own, the Mods' contexts and UserPromptSubmit's, so a
+        // Mod whose context changes every turn does not make an unchanged
+        // UserPromptSubmit context repeat. History is scanned newest-first
+        // over the raw entries, so the check stays off the deep-cloning
+        // accessor on this per-turn path.
         // A request with no parts of its own keeps the block, which is then
         // all that keeps it non-empty (`toParts` rejects an empty array).
-        const additionalContext = verdict.additionalContext;
-        if (additionalContext) {
+        // The Mods' context comes first, as their hooks run above the
+        // settings hooks, and is escaped the same way.
+        const contexts = [
+          ...new Set([
+            ...(promptContext ?? []).map((text) =>
+              text.replace(/</g, '&lt;').replace(/>/g, '&gt;'),
+            ),
+            ...(verdict?.additionalContext ? [verdict.additionalContext] : []),
+          ]),
+        ];
+        if (contexts.length > 0) {
           const requestArray = Array.isArray(request) ? request : [request];
-          const alreadyDelivered =
-            requestArray.length > 0 &&
-            Boolean(
-              this.getChat().findLastHistoryEntry((entry) =>
-                hasUserPromptSubmitContext(entry, additionalContext),
-              ),
-            );
-          if (!alreadyDelivered) {
+          const undelivered = new Set(contexts);
+          if (requestArray.length > 0) {
+            this.getChat().findLastHistoryEntry((entry) => {
+              for (const context of deliveredUserPromptSubmitContexts(entry)) {
+                undelivered.delete(context);
+              }
+              return undelivered.size === 0;
+            });
+          }
+          const pending = contexts.filter((context) =>
+            undelivered.has(context),
+          );
+          const delivered = contexts.filter(
+            (context) => !undelivered.has(context),
+          );
+          const additionalContext = pending.join('\n\n');
+          if (pending.length > 0) {
             request = [
               ...requestArray,
-              createUserPromptSubmitContextPart(additionalContext),
+              createUserPromptSubmitContextPart(additionalContext, pending),
             ];
             appendedHookContext = additionalContext;
-          } else {
-            suppressedHookContext = additionalContext;
+            appendedHookContexts = pending;
+          }
+          if (delivered.length > 0) {
+            suppressedHookContext = delivered.join('\n\n');
           }
           if (messageType === SendMessageType.UserQuery) {
             // A suppressed turn appends nothing, so it records no
             // hookContext, but the user-authored projection still belongs in
             // the transcript.
             userPromptRecordPayload = {
-              displayText: submittedPrompt ?? verdict.prompt,
-              hookContext: alreadyDelivered ? '' : additionalContext,
+              displayText:
+                submittedPrompt ??
+                verdict?.prompt ??
+                preHookUserPromptText ??
+                '',
+              hookContext: additionalContext,
             };
           }
         }
@@ -4361,7 +4427,7 @@ export class LlmClient {
         signal.aborted ? undefined : userPromptSubmitFailureMessage,
         signal.aborted ? undefined : getErrorType(error),
       );
-      this.config.takePendingGoalProposal?.(prompt_id);
+      this.dropUnsettledGoalProposal(prompt_id);
       for (const goalEvent of await finalizeInterruptedGoalTurn(
         undefined,
         getErrorMessage(error),
@@ -4373,9 +4439,8 @@ export class LlmClient {
       // never pushed: settle the attached carrier here by unconditional
       // restore instead of leaving it to caller-side failure handling.
       // Symmetric with the Goal-admission catch below: re-add any Retry
-      // orphan entries popped above (a no-op today — hooks never fire for
-      // Retry, the only type that populates the entries — but keeps this
-      // exit safe under future hook-scope changes).
+      // orphan entries popped above (a Retry reaches this try when the host
+      // admitted its prompt).
       restoreStrippedRetryEntries();
       settleSteerInput(attachedSteerInput);
       throw error;
@@ -4441,7 +4506,7 @@ export class LlmClient {
         signal.aborted ? undefined : 'Goal turn admission failed',
         signal.aborted ? undefined : getErrorType(error),
       );
-      this.config.takePendingGoalProposal?.(prompt_id);
+      this.dropUnsettledGoalProposal(prompt_id);
       for (const goalEvent of await finalizeInterruptedGoalTurn(
         undefined,
         getErrorMessage(error),
@@ -4519,10 +4584,12 @@ export class LlmClient {
       }
       this.activeTodoWorkChainPromptId = prompt_id;
     } else if (messageType === SendMessageType.Retry) {
-      this.config.startActiveTodoWorkChain(
-        prompt_id,
-        this.activeTodoWorkChainPromptId,
-      );
+      if (!options?.userTurnRecordedByHost) {
+        this.config.startActiveTodoWorkChain(
+          prompt_id,
+          this.activeTodoWorkChainPromptId,
+        );
+      }
       this.activeTodoWorkChainPromptId = prompt_id;
     } else if (
       messageType === SendMessageType.Cron ||
@@ -4569,6 +4636,11 @@ export class LlmClient {
     let memoryDeliveryToCommit: MemoryDeliveryResult | null = null;
     let memoryDeliveryStateInvalidated = false;
     let modelRequestAccepted = false;
+    // Set when this send took a loop-protection reminder into requestToSend;
+    // cleared when the model accepts the request (commit) or on exit
+    // (abandon), so the `reminded` accounting and the pending state settle at
+    // the real delivery boundary instead of the draft request assembly.
+    let loopReminderPrepared = false;
     // A concurrent `/btw` side query runs through this same client and its
     // tool-result continuation is submitted without the flag, so ownership is
     // carried by the prompt id the interaction claimed at its start: a
@@ -4908,9 +4980,15 @@ export class LlmClient {
         this.getChat(),
         prompt_id,
         goalPermit,
-        // Only a first-party user prompt opens a rewindable identity. Re-entry
-        // stays unmarked, so a replaced identified turn fails closed.
-        messageType === SendMessageType.UserQuery ? prompt_id : undefined,
+        // Only a first-party user prompt opens a rewindable identity, or a
+        // retry the host gives the identity of the attempt it replaces.
+        // Other re-entry stays unmarked, so a replaced identified turn fails
+        // closed.
+        messageType === SendMessageType.UserQuery
+          ? prompt_id
+          : messageType === SendMessageType.Retry
+            ? historyPromptId
+            : undefined,
         options?.retractDeliveredOutputOnRetry,
         options?.onPreparedRequest,
         options?.toolCallPreparations,
@@ -4929,7 +5007,10 @@ export class LlmClient {
         // that history carries the same provenance resume restores from the
         // recorded payload.
         requestToSend[requestToSend.length - 1] =
-          createUserPromptSubmitContextPart(appendedHookContext);
+          createUserPromptSubmitContextPart(
+            appendedHookContext,
+            appendedHookContexts,
+          );
       }
       if (ideContextText) {
         const firstText = requestToSend.find(
@@ -5304,7 +5385,10 @@ export class LlmClient {
         const loopReminder = ownsExplorationBudget
           ? this.loopDetector.takeLoopReminder()
           : undefined;
-        if (loopReminder) requestToSend.push({ text: loopReminder });
+        if (loopReminder) {
+          requestToSend.push({ text: loopReminder });
+          loopReminderPrepared = true;
+        }
         if (activeTodoReminder) {
           const insertAt = requestToSend.findIndex(
             (part) =>
@@ -5409,6 +5493,15 @@ export class LlmClient {
                 .reconcileMemoryBodiesPresentInHistory(
                   collectResidentMemoryBodies(this.getHistoryShallow()),
                 );
+            }
+            if (loopReminderPrepared) {
+              // First model-accepted event: the request carrying the prepared
+              // loop-protection reminder is being consumed, so commit its
+              // delivery accounting here — not at take time, where a draft
+              // request cancelled at a yield or failed before acceptance
+              // would credit telemetry for a warning the model never saw.
+              this.loopDetector.commitLoopReminderDelivery();
+              loopReminderPrepared = false;
             }
           }
           if (!steerInputSettled) {
@@ -6240,6 +6333,15 @@ export class LlmClient {
       throw error;
     } finally {
       settleMemoryDelivery();
+      if (loopReminderPrepared) {
+        // The send exited before the model accepted the request that carried
+        // the prepared loop-protection reminder (cancelled at a yield, failed
+        // before any model event, ...): put it back so the streak's warning
+        // stays eligible for the next real send instead of being lost while
+        // the telemetry already counted it.
+        this.loopDetector.abandonLoopReminderDelivery();
+        loopReminderPrepared = false;
+      }
       if (messageType === SendMessageType.ToolResult && !modelRequestAccepted) {
         this.restoreMemoryBodyStateFromHistory();
       }
@@ -6283,7 +6385,7 @@ export class LlmClient {
         // Only a natural end can hand a hook-forced turn's tool calls back to
         // the caller for a ToolResult re-entry; any other exit ends it.
         this.clearStopHookChain(prompt_id);
-        this.config.takePendingGoalProposal?.(prompt_id);
+        this.dropUnsettledGoalProposal(prompt_id);
         this.cancelPendingMemoryPrefetch(
           signal?.aborted ? 'abort' : 'no_safe_delivery_point',
         );

@@ -383,7 +383,7 @@ class MessageProjectionGapHealTest {
         jdbc = new ManagedSchemaJdbcTemplate(dataSource);
         transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(dataSource));
-        return com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), new Clock() {
+        return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), new Clock() {
             @Override
             public ZoneId getZone() {
                 return ZoneOffset.UTC;
@@ -398,6 +398,6 @@ class MessageProjectionGapHealTest {
             public Instant instant() {
                 return Instant.ofEpochMilli(now.get());
             }
-        }, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        }, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 }
