@@ -18407,6 +18407,53 @@ describe('Session', () => {
         ).toBe(false);
       });
 
+      it('consumes same-turn monitor and workflow results under a bridge invocation context', async () => {
+        const notifyMonitor = monitorNotification();
+        const notifyWorkflow = workflowNotification();
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementationOnce(async () => {
+            const sourceTurnId = 'bridge-turn';
+            notifyMonitor('monitor complete', 'BRIDGE_TURN_MONITOR', {
+              monitorId: 'bridge-monitor',
+              status: 'completed',
+              sourceTurnId,
+            });
+            notifyWorkflow('workflow complete', 'BRIDGE_TURN_WORKFLOW', {
+              runId: 'bridge-workflow',
+              status: 'completed',
+              sourceTurnId,
+            });
+            return completedText('Initial response');
+          })
+          .mockResolvedValue(completedText('Results incorporated'));
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'start' }],
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'bridge-turn',
+          },
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(
+          vi.mocked(mockChat.sendMessageStream).mock.calls[1][1].message,
+        ).toEqual(
+          expect.arrayContaining([
+            { text: 'BRIDGE_TURN_MONITOR' },
+            { text: 'BRIDGE_TURN_WORKFLOW' },
+          ]),
+        );
+        expect(
+          vi
+            .mocked(mockClient.extMethod)
+            .mock.calls.some(([method]) => method === '_qwencode/start_turn'),
+        ).toBe(false);
+      });
+
       it('consumes a same-turn shell result without an automatic rerun', async () => {
         const notifyShell = mockBackgroundShellRegistry.setNotificationCallback
           .mock.calls[0][0] as (
