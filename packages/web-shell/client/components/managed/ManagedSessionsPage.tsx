@@ -109,6 +109,9 @@ interface PendingPrompt {
   draftText?: string;
   queued?: boolean;
   sessionId?: string;
+  // Captured at submit time: the owner can be absent from the filtered or
+  // paginated session page, so the page cannot re-derive it.
+  workspaceId?: string;
   input?: ManagedInputBlock[];
 }
 
@@ -160,6 +163,11 @@ function readPending(
     if (
       pending['draftText'] !== undefined &&
       typeof pending['draftText'] !== 'string'
+    )
+      return undefined;
+    if (
+      pending['workspaceId'] !== undefined &&
+      typeof pending['workspaceId'] !== 'string'
     )
       return undefined;
     return value as PendingPrompt;
@@ -1097,6 +1105,7 @@ function ManagedSessionsContent({
         text: submittedText,
         draftText: composerRef.current?.getText(),
         sessionId,
+        workspaceId: detail.summary?.workspace?.workspaceId,
         ...(input.some(
           (block) =>
             block.type !== 'input_text' || block.text !== submittedText,
@@ -2071,8 +2080,12 @@ function ManagedSessionsContent({
                   }
                   openSession(
                     owner,
-                    sessions.find((item) => item.sessionId === owner)?.workspace
-                      ?.workspaceId,
+                    // The owner may not be on the current (filtered,
+                    // paginated, or host-mode empty) page, so prefer the
+                    // workspace captured when the request was submitted.
+                    pending?.workspaceId ??
+                      sessions.find((item) => item.sessionId === owner)
+                        ?.workspace?.workspaceId,
                   );
                 }}
               >

@@ -85,6 +85,15 @@ describe('ManagedAgentWebShell', () => {
     ).toBe(true);
   });
 
+  it('accepts an empty base URL as the supported same-origin value', async () => {
+    // `new URL('', origin)` resolves to the page origin, which is what the
+    // client and its storage key already assume, so `''` is a present prop.
+    await act(async () => {
+      root.render(<ManagedAgentWebShell baseUrl="" />);
+    });
+    expect(container.querySelector('[data-web-shell-root]')).not.toBeNull();
+  });
+
   it('uses the injected provider and resets host selection when its identity scope changes', async () => {
     const fetchImpl = vi.fn();
     const first = { storageKey: 'tenant-a:actor-a' } as ManagedAgentProvider;

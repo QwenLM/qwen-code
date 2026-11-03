@@ -92,13 +92,17 @@ export function ManagedArchivedSessions({
   const statusCount = page.sessions.length;
   const statusLoading = page.loading;
   const statusError = Boolean(page.error);
+  // Presence, not identity: a host may supply the callback only after the
+  // list has settled (a props update or `shell.update`), and the ref alone
+  // would never deliver the current status to it.
+  const hasStatusChange = onStatusChange !== undefined;
   useEffect(() => {
     statusChange.current?.({
       count: statusCount,
       loading: statusLoading,
       error: statusError,
     });
-  }, [statusCount, statusLoading, statusError]);
+  }, [statusCount, statusLoading, statusError, hasStatusChange]);
 
   return (
     <div data-managed-archived-sessions>

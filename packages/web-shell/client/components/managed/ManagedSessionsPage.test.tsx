@@ -2019,6 +2019,32 @@ describe('ManagedSessionsPage', () => {
     expect(onSelect).toHaveBeenCalledWith('s2', 'ws-2');
   });
 
+  it('opens a pending owner that the served session page does not contain', async () => {
+    // Filtered, paginated and host-only pages can all omit the owner, so the
+    // workspace has to come from the request captured at submit time.
+    mocks.client.listSessions.mockResolvedValue({ sessions: [summary()] });
+    const key = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}`;
+    sessionStorage.setItem(
+      key,
+      JSON.stringify({
+        idempotencyKey: 'pending-owner-absent',
+        text: 'queued elsewhere',
+        sessionId: 's2',
+        workspaceId: 'ws-2',
+      }),
+    );
+    await render('s1');
+    const open = [...container.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Open the original conversation',
+    );
+    expect(open).toBeTruthy();
+    await act(async () => {
+      open!.click();
+      await flush();
+    });
+    expect(onSelect).toHaveBeenCalledWith('s2', 'ws-2');
+  });
+
   it.each([
     JSON.stringify({ storage: 'indexeddb', pendingId: 'missing' }),
     '{',

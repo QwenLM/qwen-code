@@ -187,3 +187,36 @@ it('settles when the host re-renders with a fresh inline status callback', async
   ).toBe('1');
   expect(seen.at(-1)).toEqual({ count: 1, loading: false, error: false });
 });
+
+it('delivers the settled status to a callback supplied after the list settled', async () => {
+  listSessions.mockResolvedValue({ sessions: [summary('a')] });
+  const late = vi.fn();
+  const tree = (onStatusChange?: (status: {
+    count: number;
+    loading: boolean;
+    error: boolean;
+  }) => void) => (
+    <I18nProvider language="en">
+      <ManagedArchivedSessions
+        provider={provider}
+        clientId="client-archive"
+        active={false}
+        onSelectSession={onSelectSession}
+        renderSessionActions={(session) => <span>{session.sessionId}</span>}
+        onSessionsChange={onSessionsChange}
+        onStatusChange={onStatusChange}
+      />
+    </I18nProvider>
+  );
+
+  await act(async () => root.render(tree(undefined)));
+  expect(container.textContent).toContain('Archive a');
+  expect(late).not.toHaveBeenCalled();
+
+  // A host that only learns the count after mounting supplies the callback
+  // later; the settled list will not change again, so this transition is the
+  // only chance to deliver it.
+  await act(async () => root.render(tree(late)));
+  expect(late).toHaveBeenCalledTimes(1);
+  expect(late).toHaveBeenCalledWith({ count: 1, loading: false, error: false });
+});
