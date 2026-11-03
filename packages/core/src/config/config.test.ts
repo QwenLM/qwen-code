@@ -43,6 +43,7 @@ import {
 } from './config.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { Storage } from './storage.js';
+import { ideContextStore } from '../ide/ideContext.js';
 import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
@@ -10725,6 +10726,41 @@ describe('Server Config (config.ts)', () => {
         subagentRegistry.__mcpManagerMock.setOnBudgetEvent,
       ).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('explicit folder trust for repository execution', () => {
+  afterEach(() => ideContextStore.clear());
+
+  it.each([
+    [false, undefined, true, false],
+    [false, true, true, false],
+    [true, undefined, false, false],
+    [true, false, false, false],
+    [true, true, true, true],
+  ] as const)(
+    'distinguishes enabled=%s, trusted=%s from implicit trust',
+    (folderTrust, trustedFolder, legacy, explicit) => {
+      ideContextStore.clear();
+      const config = new Config({
+        ...MINIMAL_PARAMS,
+        folderTrust,
+        trustedFolder,
+      });
+      expect(config.isTrustedFolder()).toBe(legacy);
+      expect(config.isExplicitlyTrustedFolder()).toBe(explicit);
+    },
+  );
+
+  it('honors live IDE trust, including denial and disconnect', () => {
+    const config = new Config({ ...MINIMAL_PARAMS, folderTrust: false });
+    ideContextStore.set({ workspaceState: { isTrusted: true } });
+    expect(config.isExplicitlyTrustedFolder()).toBe(true);
+    ideContextStore.set({ workspaceState: { isTrusted: false } });
+    expect(config.isExplicitlyTrustedFolder()).toBe(false);
+    ideContextStore.clear();
+    expect(config.isTrustedFolder()).toBe(true);
+    expect(config.isExplicitlyTrustedFolder()).toBe(false);
   });
 });
 

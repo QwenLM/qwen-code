@@ -11944,6 +11944,13 @@ export class Config {
     return this.trustedFolder ?? !this.folderTrust;
   }
 
+  isExplicitlyTrustedFolder(): boolean {
+    const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+    return (
+      (this.folderTrust || ideTrust !== undefined) && this.isTrustedFolder()
+    );
+  }
+
   setIdeMode(value: boolean): void {
     if (this.shellExecutionSandbox && value)
       throw new Error(
