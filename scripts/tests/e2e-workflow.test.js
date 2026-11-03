@@ -1119,10 +1119,14 @@ describe('e2e workflow', () => {
       // Three conditions hold the override back, and dropping any one is a real
       // regression: a healthy default host keeps its source, a mirror has to be
       // fast in absolute terms rather than merely faster than a broken default,
-      // and it has to beat the default decisively.
-      expect(e2eRunScript).toContain('slow_default');
+      // and it has to beat the default decisively. The literals are pinned, not
+      // just the variable names: a 10x mutation of either threshold leaves the
+      // structure intact but flips the both-slow shape onto a still-slow mirror.
+      // \b, not toContain: 'slow_default=250000' is a substring of the 10x
+      // mutation 'slow_default=2500000', which would keep a naive pin green.
+      expect(e2eRunScript).toMatch(/slow_default=250000\b/);
       expect(e2eRunScript).toMatch(/-lt "\$\{slow_default\}" \]/);
-      expect(e2eRunScript).toContain('fast_mirror');
+      expect(e2eRunScript).toMatch(/fast_mirror=1000000\b/);
       expect(e2eRunScript).toMatch(/-gt "\$\{fast_mirror\}" \]/);
       expect(e2eRunScript).toMatch(/-gt \$\(\(default_rate \* 4\)\)/);
       // The measurements have to reach the log, or the next slow build is
