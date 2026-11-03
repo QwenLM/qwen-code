@@ -257,6 +257,25 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar workspace order', () => {
+  it('does not reread saved expansion preferences on unrelated renders', async () => {
+    const prefix = 'qwen.web-shell.sidebar.workspace-expanded:';
+    for (const entry of capabilities.workspaces) {
+      const id = entry.primary ? `primary:${entry.cwd}` : entry.id;
+      localStorage.setItem(`${prefix}${id}`, 'false');
+    }
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelector('button[aria-label="Expand all workspaces"]'),
+    ).not.toBeNull();
+    const getItem = vi.spyOn(Storage.prototype, 'getItem');
+    renderSidebar();
+    await flushSidebar();
+    const reads = getItem.mock.calls.filter(([key]) => key.startsWith(prefix));
+    getItem.mockRestore();
+    expect(reads).toEqual([]);
+  });
+
   it('reloads the server order after a primary change at the same host', async () => {
     workspace.capabilities = {
       ...capabilities,

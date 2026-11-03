@@ -2309,11 +2309,15 @@ export function WebShellSidebar({
     canReorderWorkspaces,
     lockedWorkspaceCwd,
   ]);
-  const anyWorkspaceExpanded = projectWorkspaces.some((entry) =>
-    entry.primary
-      ? projectExpanded
-      : (secondaryWorkspaceExpanded[entry.id] ??
-        readWorkspaceExpanded(entry.id)),
+  const anyWorkspaceExpanded = useMemo(
+    () =>
+      projectWorkspaces.some((entry) =>
+        entry.primary
+          ? projectExpanded
+          : (secondaryWorkspaceExpanded[entry.id] ??
+            readWorkspaceExpanded(entry.id)),
+      ),
+    [projectWorkspaces, projectExpanded, secondaryWorkspaceExpanded],
   );
   const toggleAllWorkspaces = () => {
     const expanded = !anyWorkspaceExpanded;

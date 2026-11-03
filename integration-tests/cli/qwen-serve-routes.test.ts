@@ -520,6 +520,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_channel_observed_contacts',
       'dynamic_workspace_registration',
       'persistent_workspace_registration',
+      'workspace_order',
       'workspace_display_name',
       'scratch_workspace_registration',
       ...(gitAvailableAtBoot ? ['git_workspace_clone'] : []),
