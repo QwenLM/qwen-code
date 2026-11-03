@@ -5,6 +5,7 @@
  */
 
 import type { Application, Request, RequestHandler } from 'express';
+import { writeStderrLineSafe } from '../../utils/stdioHelpers.js';
 import { requestHasOperatorAuthority } from '../auth.js';
 import { isLoopbackAddress, isLoopbackBind } from '../loopback-binds.js';
 import { listenerIdentityOf } from '../local-control/listener-identity.js';
@@ -116,15 +117,24 @@ export function registerRemoteAccessRoutes(
                     : deps.service.reveal();
           res.json({ ...status, canManage: true, externallyConfigured });
         } catch (error) {
-          res.status(error instanceof RemoteAccessError ? 409 : 500).json({
-            code:
-              error instanceof RemoteAccessError
-                ? error.code
-                : 'remote_access_failed',
-            error:
+          if (error instanceof RemoteAccessError) {
+            res.status(409).json({ code: error.code, error: error.message });
+            return;
+          }
+          // An unexpected failure (e.g. a cert file removed after boot) can
+          // carry internal detail such as an absolute server path. Log it for
+          // the operator and answer the client with a generic message instead
+          // of echoing the raw error (R1-6).
+          writeStderrLineSafe(
+            `qwen serve: remote access operation failed: ${
               error instanceof Error
-                ? error.message
-                : 'Remote access operation failed.',
+                ? (error.stack ?? error.message)
+                : String(error)
+            }`,
+          );
+          res.status(500).json({
+            code: 'remote_access_failed',
+            error: 'Remote access operation failed.',
           });
         }
       },
