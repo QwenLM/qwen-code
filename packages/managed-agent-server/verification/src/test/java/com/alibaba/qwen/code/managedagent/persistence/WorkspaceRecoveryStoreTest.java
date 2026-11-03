@@ -46,6 +46,7 @@ class WorkspaceRecoveryStoreTest {
 
     @TempDir Path temporary;
     private JdbcTemplate jdbc;
+    private StoreLockTrace trace;
     private DataSourceTransactionManager manager;
     private WorkspaceStorageGuard guard;
     private ManagedAgentStore sessions;
@@ -55,7 +56,8 @@ class WorkspaceRecoveryStoreTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        var source = recoveryDataSource();
+        var source = new StoreLockTrace(recoveryDataSource());
+        trace = source;
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
@@ -229,7 +231,7 @@ class WorkspaceRecoveryStoreTest {
             request.put("mountRevision", revision);
         }
         long committedRevision = revision;
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String token = "a".repeat(64);
         String records = "{\"subtype\":\"session_execution_engine\"}\n{\"subtype\":\"managed_session_header_v1\"}\n";
         byte[] bytes = records.getBytes(StandardCharsets.UTF_8);
@@ -270,7 +272,9 @@ class WorkspaceRecoveryStoreTest {
         String operation = retireSession(session);
         var before = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE session_id = ?", session);
         var retirement = jdbc.queryForMap("SELECT retirement_operation_id, retirement_generation, retired_at, recovery_protected FROM ma_session WHERE session_id = ?", session);
+        trace.clear();
         JsonNode source = call(capture(), "sessions").path("sessions").get(0).path("source");
+        trace.assertSessionBeforeTurn("tenant", session);
         assertThat(source.path("retirement").path("operationId").asText()).isEqualTo(operation);
         assertThat(source.path("retirement").path("tenantId").asText()).isEqualTo("tenant");
         assertThat(source.path("retirement").path("sessionId").asText()).isEqualTo(session);
@@ -446,11 +450,11 @@ class WorkspaceRecoveryStoreTest {
         head(pinned);
         jdbc.update("UPDATE ma_session_head SET workspace_id = X'776f726b73706163652d62'"
                 + " WHERE session_id = ?", pinned);
-        var instructions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).publishAgentInstructions(
+        var instructions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).publishAgentInstructions(
                 "tenant", "workspace-b", pinned, "Keep the agent instructions. 保留指令。");
         var skillCatalog = List.<Map<String, Object>>of(Map.of(
                 "name", "review", "description", "Review", "body", "Check the diff. 检查差异。"));
-        var skills = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).publishAgentSkills(
+        var skills = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).publishAgentSkills(
                 "tenant", "workspace-b", pinned, skillCatalog);
         JsonNode sources = call(capture(), "sessions").path("sessions");
         assertThat(sources).hasSize(3);

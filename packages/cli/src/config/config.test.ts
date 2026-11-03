@@ -2085,6 +2085,25 @@ describe('loadCliConfig', () => {
     });
   });
 
+  it.each([undefined, false, true])(
+    'passes the model catalog refresh setting to Config: %s',
+    async (catalogRefresh) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await loadCliConfig(
+        catalogRefresh === undefined ? {} : { model: { catalogRefresh } },
+        argv,
+      );
+
+      expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          modelCatalogRefreshEnabled: catalogRefresh,
+        }),
+      );
+    },
+  );
+
   describe('model.goalTokenBudget', () => {
     it('carries the setting into the Goal budget grant', async () => {
       process.argv = ['node', 'script.js'];
