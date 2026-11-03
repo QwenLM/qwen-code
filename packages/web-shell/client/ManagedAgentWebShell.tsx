@@ -221,8 +221,10 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
     // Adjust during render (React's adjusting-state-when-props-change
     // pattern): an external switch is visible on this commit — an effect
     // would paint one stale frame first. Only an id carried over from the
-    // previous identity is dropped, never an explicit new selection.
+    // previous identity is dropped, never an explicit new selection. Without a
+    // provider there is no previous identity to carry an id over from.
     selectedSessionId =
+      selection.storageKey !== undefined &&
       selection.storageKey !== provider?.storageKey &&
       sessionId === selection.externalSessionId
         ? undefined
@@ -238,22 +240,15 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
   }
   const [portalRoot, setPortalRoot] = useState<HTMLDivElement | null>(null);
   const shellRootRef = useRef<HTMLDivElement | null>(null);
-  // Track the wrappers this entry actually rendered. A host slot may already
-  // contain host chrome, and both slots may name the same element, so neither
-  // "first child" nor a per-target lookup identifies our own node.
-  const hostSlotsRef = useRef(new Set<HTMLDivElement>());
-  const registerHostSlot = useCallback((element: HTMLDivElement | null) => {
-    if (element) hostSlotsRef.current.add(element);
-  }, []);
-  const syncHostSlots = useCallback(() => {
-    const root = shellRootRef.current;
-    if (!root) return;
-    const computed = getComputedStyle(root);
-    for (const slot of hostSlotsRef.current) {
-      if (!slot.isConnected) {
-        hostSlotsRef.current.delete(slot);
-        continue;
-      }
+  // A wrapper can mount in a commit where none of the sync effect's deps
+  // changed (the provider arrives later, hostSessionOnly flips, the provider
+  // identity remounts the page), so the ref callback themes the element it
+  // just saw instead of relying on the effect to notice the mount.
+  const syncSlot = useCallback(
+    (slot: HTMLElement) => {
+      const root = shellRootRef.current;
+      if (!root) return;
+      const computed = getComputedStyle(root);
       slot.classList.toggle('dark', theme === WebShellThemeId.Dark);
       slot.lang = resolvedLanguage;
       for (let index = 0; index < computed.length; index += 1) {
@@ -261,16 +256,28 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
         if (name.startsWith('--'))
           slot.style.setProperty(name, computed.getPropertyValue(name));
       }
+    },
+    [theme, resolvedLanguage],
+  );
+  const registerHostSlot = useCallback(
+    (element: HTMLDivElement | null) => {
+      if (element) syncSlot(element);
+    },
+    [syncSlot],
+  );
+  // Our own wrappers are the only nodes carrying the portal-scope marker, so
+  // the host slot's own chrome is never themed and a wrapper that outlives a
+  // detach is picked up again instead of being dropped from a registry.
+  const syncHostSlots = useCallback(() => {
+    for (const target of [navigationTarget, archivedNavigationTarget]) {
+      if (!target) continue;
+      for (const slot of target.querySelectorAll<HTMLElement>(
+        '[data-web-shell-portal-root]',
+      ))
+        syncSlot(slot);
     }
-  }, [theme, resolvedLanguage]);
-  // A slot swap mounts a new wrapper, so the ref callback re-runs before this
-  // effect; the target identities themselves are not read here.
-  useLayoutEffect(syncHostSlots, [
-    syncHostSlots,
-    portalRoot,
-    navigationTarget,
-    archivedNavigationTarget,
-  ]);
+  }, [syncSlot, navigationTarget, archivedNavigationTarget]);
+  useLayoutEffect(syncHostSlots, [syncHostSlots, style, portalRoot]);
   const emptyMap = useMemo(() => new Map(), []);
 
   return (

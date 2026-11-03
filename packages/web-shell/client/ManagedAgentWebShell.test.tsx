@@ -237,6 +237,83 @@ describe('ManagedAgentWebShell', () => {
     }
   });
 
+  it('themes a wrapper that mounts after a commit the sync effect does not watch', async () => {
+    const provider = { storageKey: 'slot-late' } as ManagedAgentProvider;
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    try {
+      // No provider: the page — and with it the slot wrapper — does not exist
+      // yet, so the wrapper mounts in a later commit.
+      await act(async () =>
+        root.render(
+          <ManagedAgentWebShell
+            navigationTarget={target}
+            language="zh-CN"
+            style={{ ['--background' as string]: 'oklch(0.2 0 0)' }}
+          />,
+        ),
+      );
+      expect(target.querySelector('[data-web-shell-portal-root]')).toBeNull();
+      await act(async () =>
+        root.render(
+          <ManagedAgentWebShell
+            managedAgentProvider={provider}
+            navigationTarget={target}
+            language="zh-CN"
+            style={{ ['--background' as string]: 'oklch(0.2 0 0)' }}
+          />,
+        ),
+      );
+      const wrapper = target.querySelector<HTMLElement>(
+        '[data-web-shell-portal-root]',
+      )!;
+      expect(wrapper.classList.contains('dark')).toBe(true);
+      expect(wrapper.lang).toBe('zh-CN');
+      expect(wrapper.style.getPropertyValue('--background')).toBe(
+        'oklch(0.2 0 0)',
+      );
+      // A host token that changes without a theme or language change must
+      // still reach the wrapper.
+      await act(async () =>
+        root.render(
+          <ManagedAgentWebShell
+            managedAgentProvider={provider}
+            navigationTarget={target}
+            language="zh-CN"
+            style={{ ['--background' as string]: 'oklch(0.9 0 0)' }}
+          />,
+        ),
+      );
+      expect(wrapper.style.getPropertyValue('--background')).toBe(
+        'oklch(0.9 0 0)',
+      );
+    } finally {
+      target.remove();
+    }
+  });
+
+  it('keeps an explicit host sessionId when the provider arrives later', async () => {
+    const provider = { storageKey: 'late-provider' } as ManagedAgentProvider;
+    // The host mounts with neither `managedAgentProvider` nor `baseUrl`: there
+    // is no previous identity to carry an id over from.
+    await act(async () =>
+      root.render(<ManagedAgentWebShell hostSessionOnly sessionId="s1" />),
+    );
+    await act(async () =>
+      root.render(
+        <ManagedAgentWebShell
+          managedAgentProvider={provider}
+          hostSessionOnly
+          sessionId="s1"
+        />,
+      ),
+    );
+    expect(captured.props).toMatchObject({
+      managedAgentProvider: provider,
+      sessionId: 's1',
+    });
+  });
+
   it('styles both wrappers when the host reuses one slot element', async () => {
     const provider = { storageKey: 'slot-reused' } as ManagedAgentProvider;
     const target = document.createElement('div');
