@@ -255,7 +255,7 @@ class WorkspaceMigrationMySqlIT {
         var manager = new DataSourceTransactionManager(data);
         var transaction = new TransactionTemplate(manager);
         transaction.setIsolationLevel(Connection.TRANSACTION_REPEATABLE_READ);
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String token = "a".repeat(64);
         transaction.execute(status -> sessions.acquireWriter("tenant-b", "m-successor", token,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 30000L)));

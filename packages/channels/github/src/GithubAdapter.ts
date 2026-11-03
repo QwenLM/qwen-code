@@ -535,6 +535,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     return { lastProcessedAt: new Date().toISOString() };
   }
 
+  /**
+   * GitHub repository paths are case-insensitive, but the notification API
+   * reports the canonical `owner/repo` spelling. Match configured groups
+   * case-insensitively so an allowlist typed in any case still admits the
+   * repository — and still applies that repository's sender policy.
+   */
+  protected override normalizeGroupId(groupId: string): string {
+    return groupId.toLowerCase();
+  }
+
   protected override validateCursor(parsed: unknown): GithubCursor | null {
     const base = super.validateCursor(parsed);
     if (!base || typeof base.lastProcessedAt !== 'string') return null;

@@ -103,8 +103,11 @@ public final class WorkspaceCsiRuntimeMain {
                 required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY")));
         var sessions = new JdbcRuntimeSessionRepository(source);
         var http = new HttpRuntimeTransport();
-        var nativeStore = new ManagedSessionStore(jdbc);
-        nativeStore.setCsiBindings(bindings);
+        var nativeStore = new ManagedSessionStore(jdbc,
+                new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(jdbc), null, null,
+                com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(),
+                null, null, null, null, null,
+                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), bindings);
         var application = new WorkspaceCsiApplicationStore(jdbc, manager, nativeStore, bindings, sessions, new com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport());
         var access = new WorkspaceCsiRuntimeAccess(jdbc, manager, json, properties, request.registration(),
                 request.sessionId(), request.runtimeRequestKey(), bindings, sessions, http, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());

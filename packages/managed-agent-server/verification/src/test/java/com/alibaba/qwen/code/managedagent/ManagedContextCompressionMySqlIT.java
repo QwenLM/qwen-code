@@ -69,7 +69,7 @@ class ManagedContextCompressionMySqlIT extends ManagedContextCompressionOperatio
     @Test
     void projectionBackfillAndNativeCompactionCommitRemainMonotonic() throws Exception {
         var records = new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(jdbc, store);
-        var nativeStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore(jdbc, records));
+        var nativeStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc, records);
         var journal = tx(() -> new ExtensionRecordJournal(nativeStore, "tenant", "workspace", session).open());
         var summary = "{}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         var resource = ManagedExtensionRecordStoreTest.hookResource("race-summary", "managed-message", summary);

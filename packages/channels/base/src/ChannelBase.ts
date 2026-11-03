@@ -1451,6 +1451,7 @@ export abstract class ChannelBase {
       config.groupPolicy,
       config.groups,
       pairingStore,
+      (groupId) => this.normalizeGroupId(groupId),
     );
     this.dmGate = new DmGate(
       this.privatePolicy === 'disabled' ? 'disabled' : 'open',
@@ -6169,7 +6170,7 @@ export abstract class ChannelBase {
     if (!envelope.isGroup) {
       return 0;
     }
-    const groupCfg = this.config.groups[envelope.chatId];
+    const groupCfg = this.groupConfigFor(envelope.chatId);
     const wildcardGroupCfg = this.config.groups['*'];
     const configured =
       groupCfg?.groupHistoryLimit ??
@@ -6345,7 +6346,22 @@ export abstract class ChannelBase {
 
   private groupConfigFor(key: string): GroupConfig | undefined {
     const groups = this.config.groups;
-    return Object.hasOwn(groups, key) ? groups[key] : undefined;
+    if (Object.hasOwn(groups, key)) return groups[key];
+    const normalized = this.normalizeGroupId(key);
+    for (const [groupId, group] of Object.entries(groups)) {
+      if (this.normalizeGroupId(groupId) === normalized) return group;
+    }
+    return undefined;
+  }
+
+  /**
+   * Group IDs are matched verbatim. A platform whose IDs are case-insensitive
+   * (GitHub repository full names) overrides this so the spelling an operator
+   * configured still matches the canonical ID the platform reports — for the
+   * allowlist, the sender policy and the per-group overrides alike.
+   */
+  protected normalizeGroupId(groupId: string): string {
+    return groupId;
   }
 
   protected preflightInbound(
