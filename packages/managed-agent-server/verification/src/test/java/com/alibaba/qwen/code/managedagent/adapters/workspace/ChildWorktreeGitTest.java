@@ -1394,6 +1394,53 @@ public class ChildWorktreeGitTest {
     }
 
     @Test
+    public void anInterruptedCommandReapsEveryLevelAndRestoresTheInterrupt() throws Exception {
+        Path pid = temp.resolve("interrupted-pid");
+        Path childPid = temp.resolve("interrupted-child");
+        Path leafPid = temp.resolve("interrupted-leaf");
+        Path child = script("nested-child", "echo $$ > '" + childPid + "'\nsleep 30 &\necho $! > '" + leafPid + "'\nwait");
+        Path parent = script("nested-parent", "echo $$ > '" + pid + "'\n'" + child + "' &\nwait\nexec git \"$@\"");
+        var nestedGit = new ChildWorktreeGit(parent.toString(), Duration.ofSeconds(60));
+        var failure = new java.util.concurrent.atomic.AtomicReference<ChildWorkspaceException>();
+        var interrupted = new java.util.concurrent.atomic.AtomicBoolean();
+        Thread worker = new Thread(() -> {
+            try {
+                nestedGit.open(root, "project");
+            } catch (ChildWorkspaceException error) {
+                failure.set(error);
+                interrupted.set(Thread.currentThread().isInterrupted());
+            }
+        });
+        worker.start();
+        try {
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+            while ((!Files.exists(leafPid) || Files.readString(leafPid).isBlank())
+                    && worker.isAlive() && System.nanoTime() < deadline) {
+                Thread.sleep(10);
+            }
+            assertThat(leafPid).exists();
+            assertThat(Files.readString(pid).strip()).matches("[0-9]+");
+            assertThat(Files.readString(childPid).strip()).matches("[0-9]+");
+            assertThat(Files.readString(leafPid).strip()).matches("[0-9]+");
+            worker.interrupt();
+            worker.join(5000);
+            assertThat(worker.isAlive()).isFalse();
+            assertThat(failure.get()).isNotNull();
+            assertThat(failure.get().code()).isEqualTo(ChildWorkspaceException.GIT);
+            assertThat(failure.get().retryable()).isTrue();
+            assertThat(failure.get().getMessage()).contains("interrupted");
+            assertThat(interrupted.get()).isTrue();
+            assertStopped(pid);
+            assertStopped(childPid);
+            assertStopped(leafPid);
+        } finally {
+            worker.interrupt();
+            worker.join(5000);
+            nestedGit.close();
+        }
+    }
+
+    @Test
     public void outputPastItsBoundIsRefusedWhileTheCommandRuns() throws Exception {
         // A slow, endless writer: it never exits, so only the bound checked
         // while it runs can stop it before the time bound does.

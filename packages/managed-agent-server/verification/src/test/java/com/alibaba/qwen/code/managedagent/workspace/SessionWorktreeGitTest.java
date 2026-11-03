@@ -230,8 +230,13 @@ class SessionWorktreeGitTest {
         Plan plan = plan("project", null);
         Path container = Files.createDirectory(root.resolve(SessionWorktreeGit.CONTAINER));
         Files.write(container.resolve(plan.worktreeId() + ".json"), new ObjectMapper().writeValueAsBytes(plan));
-        Process checkout = new ProcessBuilder("git", "-c", "core.hooksPath=/dev/null", "-C", repository.toString(),
-                "worktree", "add", "-b", plan.branch(), "--", target(plan).toString(), plan.baseCommit())
+        // Register the worktree first: worktree add removes its incomplete
+        // target when its child checkout fails. Own the actual checkout
+        // directly so stopping it preserves the interrupted files.
+        run(repository, "worktree", "add", "--no-checkout", "-b", plan.branch(),
+                "--", target(plan).toString(), plan.baseCommit());
+        Process checkout = new ProcessBuilder("git", "-c", "core.hooksPath=/dev/null", "-C", target(plan).toString(),
+                "reset", "--hard", plan.baseCommit())
                 .redirectErrorStream(true).redirectOutput(root.resolve("checkout.log").toFile()).start();
         List<ProcessHandle> descendants = List.of();
         try {
@@ -247,12 +252,15 @@ class SessionWorktreeGitTest {
                     + ",children=" + descendants.stream().map(child ->
                             com.alibaba.qwen.code.managedagent.VerificationFixtures.processState(child.pid())).toList());
             try {
-                checkout.destroyForcibly();
-                descendants.forEach(ProcessHandle::destroyForcibly);
-                assertThat(checkout.waitFor(5, TimeUnit.SECONDS)).isTrue();
-                for (ProcessHandle child : descendants) {
-                    child.onExit().get(5, TimeUnit.SECONDS);
+                try {
+                    descendants.forEach(ProcessHandle::destroyForcibly);
+                    for (ProcessHandle child : descendants) {
+                        child.onExit().get(5, TimeUnit.SECONDS);
+                    }
+                } finally {
+                    checkout.destroyForcibly();
                 }
+                assertThat(checkout.waitFor(5, TimeUnit.SECONDS)).isTrue();
             } finally {
                 System.err.println("checkout-after-stop parent="
                         + com.alibaba.qwen.code.managedagent.VerificationFixtures.processState(checkout.pid())

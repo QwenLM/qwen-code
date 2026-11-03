@@ -394,16 +394,24 @@ try {
     }),
   );
 } finally {
+  console.error('native-generator-cleanup: requests; node=' + process.version);
   await writeFile(
     new URL('all-http-requests-final.json', evidence),
     JSON.stringify(requests, null, 2) + '\n',
   );
   if (stores)
     try {
+      console.error('native-generator-cleanup: stores');
       await stores.close();
     } catch {
       // Collector shutdown must still run when store cleanup fails.
     }
-  await new Promise((resolve) => server.close(resolve));
+  console.error('native-generator-cleanup: collector');
+  const collectorClosed = new Promise((resolve) => server.close(resolve));
   server.closeAllConnections();
+  await collectorClosed;
+  console.error(
+    'native-generator-cleanup: complete; activeResources=' +
+      JSON.stringify(process.getActiveResourcesInfo()),
+  );
 }
