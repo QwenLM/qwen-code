@@ -705,7 +705,12 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
   ];
 
   function releaseFixture() {
-    const fixed = repairPaths.map((file) =>
+    // The patches still target the released layout after source moves.
+    const currentPaths = [
+      'packages/managed-agent-server/runtime-external/src/main/java/com/alibaba/qwen/code/runtimebroker/provisioning/external/ExternalRuntimeProvisioner.java',
+      ...repairPaths.slice(1),
+    ];
+    const fixed = currentPaths.map((file) =>
       fs.readFileSync(path.join(root, file), 'utf8'),
     );
     for (const [index, file] of repairPaths.entries()) {
