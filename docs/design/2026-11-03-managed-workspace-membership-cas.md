@@ -138,8 +138,9 @@ write paths listed in D4 may change it.
 
 ### D2. No tenant guard on per-call membership
 
-This applies to Runtime execution membership. Upload receipt admission and
-completion retain their existing short tenant-guard transactions.
+This applies to Runtime execution membership and to upload admission and
+completion (`WorkspaceFileUploadStore.admit` and `finish`); see the
+[shared uploads design](2026-11-03-managed-shared-workspace-uploads.md).
 
 `claim`, `release` (including mount handback), `beginRewind`, and `endRewind`
 stop calling `WorkspaceStorageKindGuard.lockDomain` on the LOCAL and
@@ -205,7 +206,7 @@ filesystem checks happen before it opens.
 
 | Path                                              | Member rows                                                 | Directory row, same transaction                                                                 |
 | ------------------------------------------------- | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `WorkspaceFileUploadStore.admit`                  | inserts one running upload operation                        | `member_count + 1` with no holder, maintenance or exclusive rewind                              |
+| `WorkspaceFileUploadStore.admit`                  | inserts one running upload operation                        | `member_count + 1` at the scope's `mount_revision`; no holder, maintenance or rewind            |
 | `WorkspaceFileUploadStore.finish`                 | settles one running upload operation                        | `member_count - 1`; a terminal replay changes neither row                                       |
 | `WorkspaceExecutionStore.claim`                   | sets `execution_storage_key` for one session                | `member_count + 1` under the D3 predicate                                                       |
 | `WorkspaceExecutionStore.release`                 | clears the key and `is_execution_exclusive` for one session | `member_count - N`; clears `exclusive_member_key` when it equals this member and `N > 0`        |
@@ -307,7 +308,9 @@ another order today are:
   row; its binding-then-session order already matches.
 
 The remaining multi-row transactions in this domain already follow the order:
-`fence` and `restoreOriginal` lock the guard, then alias rows through
+upload `admit` locks the alias row, then the directory row, then inserts its
+operation row, and upload `finish` locks the directory row before its operation
+row; `fence` and `restoreOriginal` lock the guard, then alias rows through
 `LocalStorageOwners.lockCovered`, then the directory row; registration and
 migration source reads do the same; `releaseLost` locks the guard, the
 directory row, then the binding row.
@@ -397,7 +400,8 @@ rows. "Change" names the reordering D7 requires; the others already match.
 | `compareAndSet`, `recoverLost`                   | binding control, guard, slot, binding              | none                                          |
 | `WorkspaceOperatorRecoveryStore.prepare`         | guard, binding, directory, session                 | directory before the binding                  |
 | `WorkspaceStorageGuard.fence`, `restoreOriginal` | guard, aliases, directory, then the member scan    | member scan replaced by the summary           |
-| `WorkspaceFileUploadStore.admit`                 | guard, operation, directory, then the member scan  | member scan replaced by the summary           |
+| `WorkspaceFileUploadStore.admit`                 | guard, operation, directory, then the member scan  | drop the guard; alias, directory, operation   |
+| `WorkspaceFileUploadStore.finish`                | guard, operation, directory                        | drop the guard; directory before operation    |
 | `WorkspaceMigrationStore` fence installation     | guard, alias fence row                             | none                                          |
 | `JdbcRuntimeRetention` sweep                     | guard, slot, binding, executions, sessions         | none; the session delete excludes member rows |
 

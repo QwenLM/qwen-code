@@ -116,7 +116,8 @@ retention、丢失 worker 清理、运维恢复、停止后的 Session 释放、
 
 ### D2. 每次调用的成员操作不再拿租户 guard
 
-这适用于 Runtime 执行成员操作。上传回执的准入和完成仍保留现有的租户 guard 短事务。
+这适用于 Runtime 执行成员操作，以及上传的准入和完成（`WorkspaceFileUploadStore.admit`
+与 `finish`）；参见[共享上传设计](2026-11-03-managed-shared-workspace-uploads.zh-CN.md)。
 
 `claim`、`release`（含 mount handback）、`beginRewind` 和 `endRewind` 在
 LOCAL 与 SSH_LOCAL 路径上不再调用 `WorkspaceStorageKindGuard.lockDomain`。
@@ -177,7 +178,7 @@ UPDATE ma_runtime_session
 
 | 路径                                              | 成员行                                              | 同一事务里的目录行                                                                |
 | ------------------------------------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------- |
-| `WorkspaceFileUploadStore.admit`                  | 插入一个运行中的上传操作                            | 没有 holder、维护和独占 rewind 时 `member_count + 1`                              |
+| `WorkspaceFileUploadStore.admit`                  | 插入一个运行中的上传操作                            | `mount_revision` 未变且无 holder、维护和独占 rewind 时 `member_count + 1`         |
 | `WorkspaceFileUploadStore.finish`                 | 结束一个运行中的上传操作                            | `member_count - 1`；重放终态时两行均不修改                                        |
 | `WorkspaceExecutionStore.claim`                   | 为一个 session 设置 `execution_storage_key`         | 在 D3 的谓词下 `member_count + 1`                                                 |
 | `WorkspaceExecutionStore.release`                 | 清除一个 session 的 key 和 `is_execution_exclusive` | `member_count - N`；当 `exclusive_member_key` 等于该成员且 `N > 0` 时一并清除     |
@@ -261,7 +262,8 @@ retention 删除 session 行时不经过成员写路径，所以它的删除谓�
   binding 行。它只需要目录的 `mount_state`，因此目录锁是点锁，前面不必先锁
   别名行。`admitSession` 不锁目录行，它先 binding 后 session 的顺序已经符合。
 
-本领域其余的多行事务已经符合这个顺序：`fence` 和 `restoreOriginal` 先锁
+本领域其余的多行事务已经符合这个顺序：上传 `admit` 先锁别名行，再锁目录行，最后插入
+操作行，上传 `finish` 先锁目录行再锁操作行；`fence` 和 `restoreOriginal` 先锁
 guard，再经 `LocalStorageOwners.lockCovered` 锁别名行，然后锁目录行；注册和
 迁移来源的读取同样如此；`releaseLost` 先锁 guard 和目录行，再锁 binding 行。
 
@@ -332,7 +334,8 @@ fence 会阻塞在这行上。别名改指向在持有别名行时更新别名�
 | `compareAndSet`、`recoverLost`                   | binding control、guard、slot、binding      | 无                         |
 | `WorkspaceOperatorRecoveryStore.prepare`         | guard、binding、目录、session              | 目录行先于 binding         |
 | `WorkspaceStorageGuard.fence`、`restoreOriginal` | guard、别名们、目录，然后成员扫描          | 成员扫描改为读汇总         |
-| `WorkspaceFileUploadStore.admit`                 | guard、operation、目录，然后成员扫描       | 成员扫描改为读汇总         |
+| `WorkspaceFileUploadStore.admit`                 | guard、operation、目录，然后成员扫描       | 去掉 guard；别名先于目录   |
+| `WorkspaceFileUploadStore.finish`                | guard、operation、目录                     | 去掉 guard；目录先于操作   |
 | `WorkspaceMigrationStore` 的 fence 安装          | guard、别名 fence 行                       | 无                         |
 | `JdbcRuntimeRetention` 清扫                      | guard、slot、binding、execution、session   | 无；session 删除排除成员行 |
 

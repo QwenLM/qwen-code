@@ -547,6 +547,71 @@ class WorkspaceFileUploadStoreTest {
         }
     }
 
+    @Test
+    void admissionAndSettlementDoNotWaitForTheTenantPlacementGuard() throws Exception {
+        String revision = revision();
+        try (var holder = jdbc.getDataSource().getConnection(); var process = mockStatic(WorkspaceFileProcess.class)) {
+            holder.setAutoCommit(false);
+            JdbcRuntimeBindingRepository.lockPlacementDomain(holder, "tenant");
+            try {
+                process.when(() -> WorkspaceFileProcess.upload(anyString(), anyString(), any()))
+                        .thenAnswer(call -> response(call.getArgument(2), "completed", null));
+                assertThat(upload(UUID.randomUUID().toString(), "guarded.bin", revision, new byte[0]).sizeBytes()).isZero();
+                assertSharedMembers(0);
+            } finally {
+                holder.rollback();
+            }
+        }
+    }
+
+    @Test
+    void concurrentReceiptsForOneUploadIdAdmitOnceAndReleaseOnce() throws Exception {
+        Path entry = temp.resolve("counting-upload.mjs");
+        Files.writeString(entry, """
+                import fs from 'node:fs/promises';
+                if(process.argv.includes('--help')) console.log(JSON.stringify({protocolVersion:1,capabilities:{workspaceFileUpload:1}}));
+                else {
+                  let input=''; for await (const bytes of process.stdin) input+=bytes;
+                  const request=JSON.parse(input);
+                  const done=new URL('./uploaded', import.meta.url);
+                  let state='completed';
+                  if(request.files.operation==='upload') await fs.appendFile(done, 'x');
+                  else { try { await fs.access(done); } catch { state='pending'; } }
+                  const {operation,data,...file}=request.files;
+                  console.log(JSON.stringify({protocolVersion:1,ok:true,result:{files:{...file,state}}}));
+                }
+                """);
+        properties.getRuntimeBroker().setWorkerEntry(entry.toString());
+        String id = UUID.randomUUID().toString();
+        String revision = revision();
+        var start = new java.util.concurrent.CountDownLatch(1);
+        var completed = new AtomicInteger();
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            var receipts = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+            for (int index = 0; index < 4; index++) {
+                receipts.add(executor.submit(() -> {
+                    start.await();
+                    try {
+                        assertThat(upload(id, "same.bin", revision, new byte[] {1}).sizeBytes()).isOne();
+                        completed.incrementAndGet();
+                    } catch (ManagedAgentException pending) {
+                        assertThat(pending.getCode()).isEqualTo("workspace_upload_pending");
+                    }
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (var receipt : receipts) {
+                receipt.get(20, TimeUnit.SECONDS);
+            }
+        }
+        assertThat(completed.get()).isPositive();
+        assertThat(Files.readString(temp.resolve("uploaded"))).isEqualTo("x");
+        assertThat(uploads.query("tenant", "actor", id).state()).isEqualTo("completed");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'WORKSPACE_UPLOAD'", Long.class)).isOne();
+        assertSharedMembers(0);
+    }
+
     private RuntimeSessionRecord runtime() {
         var source = jdbc.getDataSource();
         var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));

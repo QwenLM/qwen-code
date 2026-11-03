@@ -23,8 +23,27 @@ operations with that `physical_key`. No new schema field or lock service is need
 Upload admission registers the operation and increments the count in the same
 transaction. It permits other members, requires a ready directory, and rejects
 an exclusive rewind, maintenance or physical owner. It does not set `holder_key`.
-The existing short transaction and its serialization of upload receipts remain;
-file I/O continues after commit.
+File I/O continues after commit.
+
+Neither admission nor settlement takes the tenant placement guard. Like Runtime
+`claim`, admission is decided by row locks taken in the directory-membership lock
+order: the alias row, then the directory row, then the new operation row. The
+count update also requires the `mount_revision` that produced the scope revision,
+so a fence, restore or re-registration after that read rejects the receipt.
+Settlement locks the directory row before its operation row. Uploads to different
+directories, and uploads alongside Runtime placement in the same tenant, no longer
+wait for each other; receipts for one directory still serialize briefly on its
+alias and directory rows.
+
+Upload IDs remain idempotent without the guard. Admission reads the existing
+receipt without a lock, and the unique operation key decides concurrent first
+receipts. A losing receipt rolls back, rereads the committed receipt and replays
+it under the same actor and request-digest checks.
+
+The guard previously also ordered upload admission against Session worktree
+removal. Removal now relies on its maintenance hold, which requires zero members
+and re-checks unfinished uploads while held; an admitted upload therefore delays
+removal and a held removal rejects new uploads.
 
 A confirmed terminal result decrements the count and settles that exact operation
 in one transaction. Replays of settled operations do not decrement again. A pending
@@ -45,7 +64,9 @@ this change adds no cross-session file merging guarantee.
 
 ## Affected components
 
-- `WorkspaceFileUploadStore`: shared admission and exactly-once membership release.
+- `WorkspaceFileUploadStore`: shared admission and exactly-once membership release,
+  without the tenant placement guard.
+- `WorkspaceFileStore`: the upload scope carries the `mount_revision` it read.
 - Storage owner schema comment: document the combined member count.
 - Upload and membership verification: count live Runtime members and upload operations.
 - Upload and directory-membership designs: describe shared upload membership.
@@ -65,6 +86,10 @@ unsupported. This increment is based on PR #16205.
    Runtime memberships and running upload operations. Repeated terminal responses
    do not subtract twice.
 5. Existing actor, changed-request, backend-selection and frozen-target tests pass.
+6. Upload admission and settlement complete while another transaction holds the
+   tenant placement guard.
+7. Concurrent first receipts for one upload ID write the file once, leave one
+   operation, and release membership once.
 
 Use focused Java and real MySQL tests within the module's shared local verification
 budget. Keep full MySQL and Hosted/fault gates in CI. Record executed checks and
