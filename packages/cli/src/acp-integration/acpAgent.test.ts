@@ -18062,6 +18062,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         toolInvocationGuard: expect.any(Function),
       }),
       expect.any(Function),
+      // projectHooksApprovalProvider: live settings for the YOLO-exit re-gate
+      expect.any(Function),
     );
 
     mockConnectionState.resolve();

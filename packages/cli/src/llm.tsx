@@ -1120,6 +1120,9 @@ export async function main() {
           }
         : undefined,
       buildEnabledSkillNamesProvider(settings),
+      // Close over the live LoadedSettings: the YOLO-exit re-gate must see
+      // blocks a `/hooks` reload replaced, not the startup snapshot.
+      () => getProjectHooksForApproval(settings),
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');

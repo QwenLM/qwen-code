@@ -1917,6 +1917,8 @@ describe('llm.tsx main function', () => {
       undefined,
       { workflowAncestorTrustProvider: expect.any(Function) },
       expect.any(Function),
+      // projectHooksApprovalProvider: live settings for the YOLO-exit re-gate
+      expect.any(Function),
     );
   });
 

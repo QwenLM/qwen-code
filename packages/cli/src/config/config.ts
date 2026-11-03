@@ -1793,6 +1793,16 @@ export async function loadCliConfig(
     onManagedEngineQuarantine?: ConfigParameters['onManagedEngineQuarantine'];
   },
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
+  /**
+   * Live-read provider for the project hooks block the approval gate covers.
+   * The YOLO-exit transition re-gates against what the settings hold NOW, not
+   * the startup snapshot: a `/hooks` reload while YOLO-exempt can replace the
+   * block without re-gating. Like `disabledSkillNamesProvider`, callers MUST
+   * close over the live `LoadedSettings` instance, not the merged snapshot.
+   * Callers without one never reload settings mid-session, so the startup
+   * approval stays accurate for them.
+   */
+  projectHooksApprovalProvider?: () => ProjectHooksApproval | undefined,
 ): Promise<Config> {
   const modelConfiguration = hostPolicy?.modelConfiguration;
   if (modelConfiguration) {
@@ -3112,12 +3122,18 @@ export async function loadCliConfig(
   const config = new Config(configParams);
   if (gateHooks && commandLineYolo) {
     // Leaving YOLO ends the exemption: gate the hooks now, not on the next
-    // `/hooks` reload.
+    // `/hooks` reload. Re-gate against the live block: a `/hooks` reload while
+    // YOLO-exempt skips the gate, so the startup snapshot may be stale. Keep
+    // listening — re-entering and leaving YOLO again must re-gate too.
     const approval = hooksConfig?.projectHooksApproval;
-    const stop = config.onApprovalModeChange((mode) => {
+    config.onApprovalModeChange((mode) => {
       if (mode === ApprovalMode.YOLO) return;
-      stop();
-      const state = applyProjectHooksApproval(config, approval);
+      const state = applyProjectHooksApproval(
+        config,
+        projectHooksApprovalProvider
+          ? projectHooksApprovalProvider()
+          : approval,
+      );
       void config.getHookSystem()?.reload();
       if (state === 'pending') {
         appEvents.emit(AppEvent.ProjectHooksPendingApprovalChanged);
