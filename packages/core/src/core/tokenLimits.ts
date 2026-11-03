@@ -170,7 +170,7 @@ export function normalize(model: string): string {
   // `ollama run hf.co/<user>/<repo>-GGUF:Q4_K_M` ids put a bare
   // quantization tag after the colon, with no size in front of it for the
   // tag pattern above to anchor on.
-  s = s.replace(/:(?:ud-)?(?:i?q\d+(?:_[a-z0-9]+)*|b?f16|f32)$/, '');
+  s = s.replace(/:(?:ud-)?(?:i?q\d+(?:_[a-z0-9]+)*|b?f16|fp16|f32|mxfp4)$/, '');
 
   s = s.split(':').pop() ?? s;
 
@@ -227,6 +227,8 @@ export function normalize(model: string): string {
   }
 
   // remove quantization / numeric / precision suffixes common in local/community models
+  // `-gguf` is the repo-name suffix of Hugging Face GGUF uploads
+  // (`Qwen3-Coder-30B-A3B-Instruct-GGUF`), not part of the model name.
   s = s.replace(/-(?:\d?bit|int[48]|bf16|fp16|q[45]|quantized|gguf)$/g, '');
 
   return s;
