@@ -94,6 +94,14 @@ describe('managed host build lane', () => {
     expect(stepNamed('Install dependencies').env.QWEN_SKIP_PREPARE).toBe('1');
   });
 
+  it('builds every workspace dist the entry imports', () => {
+    // The client imports `@qwen-code/sdk/daemon`, whose `exports` points into
+    // that package's `dist/`; building only core left the lane red.
+    expect(stepNamed('Build the SDK for the managed host entry').run).toBe(
+      'corepack pnpm --filter @qwen-code/sdk build',
+    );
+  });
+
   it('asserts an emitted bundle rather than trusting a green exit code', () => {
     const verify = stepNamed('Verify the host entry emitted a usable bundle');
     expect(verify.run).toContain('dist-managed-host/index.js');
