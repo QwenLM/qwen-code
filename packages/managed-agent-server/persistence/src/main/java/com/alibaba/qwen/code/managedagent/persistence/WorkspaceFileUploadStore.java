@@ -241,12 +241,12 @@ public class WorkspaceFileUploadStore {
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenant, scope.binding().getStorageId());
             String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage WHERE alias_key = ?", String.class,
                     JdbcRuntimeBindingRepository.storageAliasKey(tenant, scope.binding().getStorageId()));
-            var owners = jdbc.queryForList("SELECT holder_key, maintenance_id, mount_state FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE", physical);
+            var owners = jdbc.queryForList("SELECT holder_key, maintenance_id, mount_state, member_count FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE", physical);
             if (owners.size() != 1 || !"READY".equals(owners.getFirst().get("mount_state"))) {
                 throw changed();
             }
             if (owners.getFirst().get("holder_key") != null || owners.getFirst().get("maintenance_id") != null
-                    || WorkspaceExecutionStore.hasExecutionMembers(jdbc, physical)) {
+                    || owners.getFirst().get("member_count") instanceof Number members && members.longValue() > 0) {
                 throw busy();
             }
             Map<String, Object> request = null;
@@ -278,7 +278,7 @@ public class WorkspaceFileUploadStore {
                     scope.binding().getStorageId().getBytes(StandardCharsets.UTF_8),
                     JdbcRuntimeBindingRepository.storageAliasKey(tenant, scope.binding().getStorageId()), physical,
                     com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, actor), digest, encode(target));
-            if (jdbc.update("UPDATE ma_storage_owner SET holder_key = ? WHERE storage_key = ? AND holder_key IS NULL AND maintenance_id IS NULL", key, physical) != 1) {
+            if (jdbc.update("UPDATE ma_storage_owner SET holder_key = ? WHERE storage_key = ? AND holder_key IS NULL AND maintenance_id IS NULL AND member_count = 0", key, physical) != 1) {
                 throw busy();
             }
             return new Operation(key, digest, target, null, true);
