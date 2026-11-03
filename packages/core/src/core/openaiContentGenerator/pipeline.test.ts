@@ -4643,6 +4643,10 @@ describe('ContentGenerationPipeline', () => {
     it('carries the modalities source into the request context', async () => {
       mockCliConfig = {
         getModel: () => 'test-model',
+        // The real Config answers with the config the running generator is
+        // built for; the pipeline compares the two configs to decide whose
+        // sources apply.
+        getContentGeneratorConfig: () => ({ model: 'test-model' }),
         getContentGeneratorConfigSources: () => ({
           modalities: { kind: 'computed' },
         }),
@@ -4685,6 +4689,34 @@ describe('ContentGenerationPipeline', () => {
       expect(convert.mock.calls.at(-1)![1]).toMatchObject({
         model: 'test-model',
       });
+      expect(convert.mock.calls.at(-1)![1]).not.toHaveProperty(
+        'modalitiesSourceKind',
+      );
+    });
+
+    it('omits the primary source for a generator running under a subagent’s runtime view', async () => {
+      // Inside a sub-agent frame `getModel()` already answers with the
+      // subagent's model, so a name comparison makes the pipeline's own
+      // generator look like the primary's; the config identity decides
+      // (QwenLM/qwen-code#16185).
+      mockCliConfig = {
+        getModel: () => 'test-model',
+        getContentGeneratorConfig: () => ({ model: 'subagent-model' }),
+        getContentGeneratorConfigSources: () => ({
+          modalities: { kind: 'modelProviders' },
+        }),
+      } as unknown as Config;
+      mockConfig = { ...mockConfig, cliConfig: mockCliConfig };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const convert = vi
+        .spyOn(mockConverter, 'convertLlmRequestToOpenAI')
+        .mockReturnValue([{ role: 'user', content: 'ok' }]);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        choices: [{ index: 0, message: { role: 'assistant', content: '' } }],
+      });
+
+      await pipeline.execute(userRequest(), 'p');
+
       expect(convert.mock.calls.at(-1)![1]).not.toHaveProperty(
         'modalitiesSourceKind',
       );

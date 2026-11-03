@@ -2016,12 +2016,22 @@ export class ContentGenerationPipeline {
     // The sources belong to the cliConfig's own (primary) model. A generator
     // built for another model — a sub-agent, a side query — must not report
     // the primary's modalities source in its own refusal.
-    const modalitiesSourceKind =
-      effectiveModel === this.config.cliConfig.getModel?.()
-        ? this.config.cliConfig.getContentGeneratorConfigSources?.()[
-            'modalities'
-          ]?.kind
-        : undefined;
+    //
+    // The identity test compares the generator's own config with the one the
+    // cliConfig reports as current, never model names: inside a runtime view
+    // `cliConfig.getModel()` already answers with the view's model, so a name
+    // comparison makes a sub-agent's generator match itself and inherit the
+    // primary's source (QwenLM/qwen-code#16185).
+    const currentConfig = this.config.cliConfig.getContentGeneratorConfig?.();
+    const onPrimaryModel =
+      currentConfig?.model !== undefined &&
+      this.contentGeneratorConfig.model === currentConfig.model &&
+      (currentConfig.authType === undefined ||
+        this.contentGeneratorConfig.authType === currentConfig.authType);
+    const modalitiesSourceKind = onPrimaryModel
+      ? this.config.cliConfig.getContentGeneratorConfigSources?.()['modalities']
+          ?.kind
+      : undefined;
     const toolCallParser = isStreaming
       ? new StreamingToolCallParser()
       : undefined;

@@ -12067,6 +12067,68 @@ describe('Model Switching and Config Updates', () => {
         },
       );
     });
+
+    it('reports the runtime view’s own config sources, not the session’s', async () => {
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
+      const config = configWithInstanceFields(generator(), {
+        model: 'parent-model',
+        authType: AuthType.QWEN_OAUTH,
+      } as ContentGeneratorConfig);
+      (config as unknown as Record<string, unknown>)[
+        'contentGeneratorConfigSources'
+      ] = { modalities: { kind: 'settings' } };
+
+      await runWithRuntimeContentGenerator(
+        {
+          contentGenerator: generator(),
+          contentGeneratorConfig: {
+            model: 'agent-model',
+            authType: AuthType.USE_OPENAI,
+          } as ContentGeneratorConfig,
+          configSources: { modalities: { kind: 'computed' } },
+        },
+        async () => {
+          expect(
+            config.getContentGeneratorConfigSources()['modalities']?.kind,
+          ).toBe('computed');
+        },
+      );
+
+      // Outside the frame the session's own map is back.
+      expect(
+        config.getContentGeneratorConfigSources()['modalities']?.kind,
+      ).toBe('settings');
+    });
+
+    it('keeps the session’s sources for a view that carries none', async () => {
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
+      const config = configWithInstanceFields(generator(), {
+        model: 'parent-model',
+        authType: AuthType.QWEN_OAUTH,
+      } as ContentGeneratorConfig);
+      (config as unknown as Record<string, unknown>)[
+        'contentGeneratorConfigSources'
+      ] = { modalities: { kind: 'settings' } };
+
+      await runWithRuntimeContentGenerator(
+        {
+          contentGenerator: generator(),
+          contentGeneratorConfig: {
+            model: 'parent-model',
+            authType: AuthType.QWEN_OAUTH,
+          } as ContentGeneratorConfig,
+        },
+        async () => {
+          expect(
+            config.getContentGeneratorConfigSources()['modalities']?.kind,
+          ).toBe('settings');
+        },
+      );
+    });
   });
 
   /** An initialized-looking Config with `mcpServers` in its settings layer. */

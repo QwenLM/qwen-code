@@ -27,7 +27,12 @@ import {
   AUTH_ENV_MAPPINGS,
   MODEL_GENERATION_CONFIG_FIELDS,
 } from './constants.js';
-import type { ResolvedModelConfig } from './types.js';
+import { resolveModelProtocol } from './modelRegistry.js';
+import type { ModelConfig, ResolvedModelConfig } from './types.js';
+import type {
+  ContentGeneratorConfigSource,
+  ContentGeneratorConfigSources,
+} from '../core/contentGenerator.js';
 import {
   clampReasoningEffort,
   getGptReasoningCapabilities,
@@ -203,6 +208,72 @@ function applyAgentReasoningEffort(
   }
 }
 
+/**
+ * Track where a per-agent config's `modalities` came from.
+ *
+ * The session's sources map describes the primary model and only the primary
+ * model; reusing it for an agent on another model makes a refusal name a
+ * setting the agent never read (QwenLM/qwen-code#16185). Resolution here
+ * mirrors the two layers the builder applies, in the same order, so the answer
+ * matches the value actually on the agent's config.
+ *
+ * Registry-vs-raw is decided on the model's own `generationConfig` entry, not
+ * on `ResolvedModelConfig.generationConfig`: the registry fills a missing
+ * modalities with the name-based default, which would make every model look
+ * provider-declared.
+ */
+function resolveAgentModalitiesSource(
+  base: Config,
+  authOverrides: AuthOverrides,
+  model: string,
+  resolvedModel?: ResolvedModelConfig,
+): ContentGeneratorConfigSource {
+  const providers = base.getModelProvidersConfig?.();
+  if (resolvedModel && providers) {
+    const declared = findProviderEntry(providers, resolvedModel);
+    if (declared?.generationConfig?.modalities !== undefined) {
+      return {
+        kind: 'modelProviders',
+        authType: resolvedModel.authType,
+        modelId: resolvedModel.id,
+        detail: 'generationConfig.modalities',
+      };
+    }
+  }
+  // Same provider with no registry route: the builder kept the parent's
+  // settings-declared modalities, which the session's map already describes.
+  if (!resolvedModel && base.getAuthType?.() === authOverrides.authType) {
+    return base.getContentGeneratorConfigSources?.()['modalities'] ?? COMPUTED;
+  }
+  // Everything else was either name-detected by the registry or left as the
+  // field's default; neither was read from a setting that names this model.
+  return { ...COMPUTED, detail: `auto-detected from '${model}'` };
+}
+
+const COMPUTED: ContentGeneratorConfigSource = { kind: 'computed' };
+
+/** The raw provider entry the agent's route was built from, if any. */
+function findProviderEntry(
+  providers: Record<string, ModelConfig[]>,
+  resolvedModel: ResolvedModelConfig,
+): ModelConfig | undefined {
+  for (const [providerId, entries] of Object.entries(providers)) {
+    if (!Array.isArray(entries)) continue;
+    const entry = entries.find(
+      (candidate) =>
+        candidate.id === resolvedModel.id &&
+        (candidate.baseUrl ?? undefined) === resolvedModel.registryBaseUrl,
+    );
+    if (!entry) continue;
+    // A provider that maps to no protocol still owns the entry; the agent's
+    // resolved authType is what that mapping produced.
+    const protocol =
+      resolveModelProtocol(providerId, entry) ?? resolvedModel.authType;
+    if (protocol === resolvedModel.authType) return entry;
+  }
+  return undefined;
+}
+
 function buildInheritedAgentContentGeneratorConfig(
   base: Config,
   modelId: string | undefined,
@@ -320,6 +391,25 @@ export async function createRuntimeContentGeneratorView(
     authOverrides,
     options,
   );
+  const sameProvider =
+    authOverrides.authType === base.getContentGeneratorConfig().authType;
+  // The session's source map describes the primary model only; an agent on a
+  // different model must carry its own, or a refusal quotes a setting the
+  // agent never read (QwenLM/qwen-code#16185).
+  const configSources: ContentGeneratorConfigSources =
+    modelId === undefined && sameProvider
+      ? // Same model, same provider: the session's sources describe this copy.
+        { ...(base.getContentGeneratorConfigSources?.() ?? {}) }
+      : {
+          modalities: resolveAgentModalitiesSource(
+            base,
+            authOverrides,
+            contentGeneratorConfig.model,
+            modelId
+              ? resolveRouteModel(base, modelId, authOverrides)
+              : undefined,
+          ),
+        };
   const contentGenerator = options.requireCachedCredentials
     ? await createContentGenerator(
         contentGeneratorConfig,
@@ -331,7 +421,23 @@ export async function createRuntimeContentGeneratorView(
         contentGeneratorConfig,
         contentGeneratorOwner,
       );
-  return { contentGenerator, contentGeneratorConfig };
+  return { contentGenerator, contentGeneratorConfig, configSources };
+}
+
+/** The registry entry `buildAgentContentGeneratorConfig` resolves for `modelId`. */
+function resolveRouteModel(
+  base: Config,
+  modelId: string,
+  authOverrides: AuthOverrides,
+): ResolvedModelConfig | undefined {
+  const modelsConfig = base.getModelsConfig?.();
+  return modelsConfig?.getResolvedModel?.(
+    authOverrides.authType as AuthType,
+    modelId,
+    authOverrides.registryBaseUrl !== undefined
+      ? authOverrides.registryBaseUrl
+      : authOverrides.baseUrl,
+  );
 }
 
 function applyResolvedModelConfig(

@@ -6909,6 +6909,14 @@ export class Config {
   }
 
   getContentGeneratorConfigSources(): ContentGeneratorConfigSources {
+    // A runtime view on another model carries its own sources. Falling back to
+    // the session's map there would attribute the primary model's settings —
+    // its `modalities` source, which names the deciding setting — to a model
+    // that was never resolved from them (QwenLM/qwen-code#16185).
+    const runtimeSources = getRuntimeContentGenerator()?.configSources;
+    if (runtimeSources) {
+      return runtimeSources;
+    }
     // If contentGeneratorConfigSources is empty (before initializeAuth),
     // get sources from ModelsConfig
     if (
