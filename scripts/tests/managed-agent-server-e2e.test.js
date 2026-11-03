@@ -76,6 +76,75 @@ describe('managed-agent-server e2e runner', () => {
     }
   });
 
+  it('names only real ma_public_event columns in its single-table SQL (R4-1)', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    const baseline = read(
+      'packages/managed-agent-server/persistence/src/main/resources/db/managed-schema/V1__managed_schema.sql',
+    );
+    const tableBody =
+      baseline
+        .split('CREATE TABLE ma_public_event (')[1]
+        ?.split(') ENGINE=')[0] ?? '';
+    const columns = new Set(
+      [...tableBody.matchAll(/^\s+([a-z_]+)\s/gm)].map((match) => match[1]),
+    );
+    expect(columns.has('is_terminal')).toBe(true);
+    const keywords = new Set([
+      'select',
+      'from',
+      'where',
+      'and',
+      'or',
+      'not',
+      'order',
+      'group',
+      'by',
+      'count',
+      'sum',
+      'distinct',
+      'hex',
+      'sha2',
+      'limit',
+      'desc',
+      'asc',
+      'true',
+      'false',
+      'null',
+      'as',
+      'on',
+      'in',
+      'is',
+      'case',
+      'when',
+      'then',
+      'else',
+      'end',
+      'qwen_managed_agent',
+      'ma_public_event',
+    ]);
+    const named = new Set();
+    for (const match of source.matchAll(/`([^`]*ma_public_event[^`]*)`/g)) {
+      const sql = match[1];
+      const tables = [...sql.matchAll(/qwen_managed_agent\.(\w+)/g)].map(
+        (m) => m[1],
+      );
+      // Multi-table dumps name other tables' columns too; only reconcile the
+      // single-table ma_public_event queries.
+      if (tables.some((table) => table !== 'ma_public_event')) continue;
+      const cleaned = sql.replace(/\$\{[^}]*\}/g, ' ? ');
+      for (const token of cleaned.matchAll(/[a-z][a-z_]+/g)) {
+        if (!keywords.has(token[0])) named.add(token[0]);
+      }
+    }
+    expect(named.size).toBeGreaterThan(0);
+    for (const column of named) {
+      expect(
+        columns.has(column),
+        `ma_public_event column ${column} is absent from canonical V1`,
+      ).toBe(true);
+    }
+  });
+
   const extracted = (names) => {
     const source = createSourceFile(
       'runner.ts',

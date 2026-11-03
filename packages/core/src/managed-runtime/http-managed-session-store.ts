@@ -1498,14 +1498,25 @@ class ManagedSessionStoreHttpClient {
         if (transaction['journalRevision'] !== after + 1)
           throw corrupt('native snapshot transaction revision conflicts.');
         const declared = append(transaction).refs;
+        const nested: typeof declared = [];
         for (const resource of added) {
           const body = await this.readResource(resource);
-          declared.push(...collectNestedResourceRefs(resource, body));
+          nested.push(...collectNestedResourceRefs(resource, body));
         }
+        // Direct references are the transaction's own census: a missing one is
+        // corrupt, exactly like the inspection walk's direct-reference guard.
         for (const resource of declared) {
-          // A bundle committed before the contributions closure edge shipped
-          // names a contributions child the snapshot never staged; degrade
-          // exactly like the inspection walk instead of condemning it (R3-1).
+          if (!isDeepStrictEqual(resources.get(resource.resourceId), resource))
+            throw corrupt(
+              'native resource dependency is missing or conflicting.',
+            );
+        }
+        // Transitive refs collected from resource bodies: a bundle committed
+        // before the contributions closure edge shipped names a contributions
+        // child the snapshot never staged. Degrade only those absent children,
+        // mirroring the inspection walk's tolerance (R3-1 / R4-6); a directly
+        // declared contributions ref stays on the strict path above.
+        for (const resource of nested) {
           if (
             resource.kind === 'managed-extension-contributions' &&
             !resources.has(resource.resourceId)

@@ -6852,7 +6852,7 @@ try {
     }
     const durable = runMysql(
       mysqlPort,
-      `SELECT COUNT(*), COUNT(DISTINCT sequence_id), SUM(terminal) FROM qwen_managed_agent.ma_public_event WHERE tenant_id='${tenant}' AND session_id='${session.id}' AND stream_kind='SESSION' AND stream_id=X''`,
+      `SELECT COUNT(*), COUNT(DISTINCT sequence_id), SUM(is_terminal) FROM qwen_managed_agent.ma_public_event WHERE tenant_id='${tenant}' AND session_id='${session.id}' AND stream_kind='SESSION' AND stream_id=X''`,
     ).split('\t');
     if (
       durable.length !== 3 ||
