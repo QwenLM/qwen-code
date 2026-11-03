@@ -1080,7 +1080,11 @@ CREATE TABLE ma_storage_owner (
     maintenance_generation BIGINT UNSIGNED COMMENT 'Maintenance generation fencing stale maintenance owners.',
     INDEX idx_execution_lease_maintenance (maintenance_id),
     physical_key CHAR(64) COMMENT 'Canonical physical storage identity shared by logical aliases.',
+    member_count BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Number of Runtime Session memberships and running uploads on this storage.',
+    exclusive_member_key CHAR(64) COMMENT 'Identity of the execution member holding exclusive rewind access.',
     CONSTRAINT uk_ma_storage_owner_physical UNIQUE (physical_key),
+    CONSTRAINT ck_ma_storage_owner_members CHECK (member_count >= 0),
+    CONSTRAINT ck_ma_storage_owner_exclusive CHECK (exclusive_member_key IS NULL OR member_count >= 1),
     CONSTRAINT uk_ma_storage_owner_business_key UNIQUE (storage_key),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_storage_owner_id PRIMARY KEY (id)

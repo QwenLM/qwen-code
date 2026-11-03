@@ -155,6 +155,7 @@ import { registerPermissionRoutes } from './routes/permission.js';
 import { registerSessionRoutes } from './routes/session.js';
 import { registerSessionCatalogRoutes } from './routes/session-catalog.js';
 import { registerSessionPrBackfillRoutes } from './routes/session-pr-backfill.js';
+import { registerSessionPrBindingsRoutes } from './routes/session-pr-bindings.js';
 import { registerStandaloneSessionRoutes } from './routes/standalone-sessions.js';
 import {
   createRequestedSessionIdAdmission,
@@ -3056,6 +3057,12 @@ export function createServeApp(
     sendBridgeError,
     mutate,
     archiveCoordinator,
+  });
+  // Read-only reverse lookup (PR bindings → sessions) for channel workers
+  // that deliver GitHub events into the session following a PR.
+  registerSessionPrBindingsRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
   });
 
   // Workspace memory + agents CRUD routes.

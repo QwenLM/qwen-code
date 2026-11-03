@@ -161,7 +161,8 @@ public enum ManagedSchemaProjection {
                     + "mount_completed_operation_id, mount_root, mount_host_id, mount_device, mount_inode, "
                     + "mount_birth_time, mount_registration_id, storage_kind, csi_phase, csi_revision, "
                     + "csi_reservation_id, csi_registration_key, csi_registration_revision, "
-                    + "csi_provision_request_id, maintenance_id, maintenance_generation, physical_key"),
+                    + "csi_provision_request_id, maintenance_id, maintenance_generation, physical_key, "
+                    + "member_count, exclusive_member_key"),
     TENANT_GUARD(
             "tenant_key, tenant_id, guard_domain"),
     TOOL_EXECUTION(

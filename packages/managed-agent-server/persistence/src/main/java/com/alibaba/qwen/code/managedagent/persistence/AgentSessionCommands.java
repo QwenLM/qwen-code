@@ -69,11 +69,12 @@ final class AgentSessionCommands {
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest,
             String actorId) {
-        // A per-turn admission: a long holder of the tenant's placement row
-        // answers tenant_guard_contended within the hot-path bound instead
-        // of parking the submit past the caller's budget (#13800).
-        ManagedSessionStore.lockBounded(() -> WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId,
-                ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        // A per-turn admission takes no tenant guard. The Session row orders it
+        // against lifecycle begin, requireOpen's locking reads of this storage's
+        // alias (fence) and directory rows order it against migration fence
+        // installation and physical fencing, and nothing later in this
+        // transaction takes the guard. The Session lock comes first, so this
+        // transaction's snapshot is taken after it.
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         sessionPolicies.requirePublicChildImmutable(session);
         // A bound Session's later Turn needs the same deployment opt-in as
