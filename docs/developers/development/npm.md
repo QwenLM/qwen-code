@@ -89,7 +89,7 @@ If any step in the release workflow fails, it will automatically create a new is
 
 Hosted concurrency is account-wide and shared with the PR review, autofix, and triage automation, so these hosted steps queue behind that traffic. A queued step is not a failed release: GitHub has not assigned it a runner, its log is still empty, and `timeout-minutes` only starts counting once it runs. On 2026-11-01 a publish waited 2h33m for a runner and then finished in 5m37s, while the nightlies around it were dispatched 3–4s after their build finished. Prefer the nightly, or dispatch outside the Asia/Shanghai working-day peak, when a manual release is timing-sensitive.
 
-See [Release Jobs Off the Hosted Pool](../../design/2026-10-16-release-jobs-off-hosted-pool.md) for the pool analysis and for which release jobs were already moved off hosted runners.
+See [Release runner slots](../../design/2026-10-28-release-queue-optimization.md) for the pool analysis and for which release jobs were already moved off hosted runners.
 
 ## Release Validation
 
