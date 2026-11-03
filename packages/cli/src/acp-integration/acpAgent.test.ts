@@ -12905,6 +12905,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           id: 'main-model',
           label: 'Main Model',
           authType: 'api-key',
+          contextWindowSize: 1_000_000,
+          modalities: { image: true, video: true, pdf: false },
+          baseUrl: 'https://user:secret@models.example/v1',
+          envKey: 'MODEL_API_KEY',
         },
         {
           id: 'fast-model',
@@ -12962,6 +12966,23 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(
       context.state.models.availableModels.map((model) => model.modelId),
     ).toEqual(['main-model(api-key)']);
+    for (const models of [
+      session.models.availableModels,
+      context.state.models.availableModels,
+    ]) {
+      expect(models[0]).toMatchObject({
+        _meta: {
+          contextLimit: 1_000_000,
+          authType: 'api-key',
+          baseModelId: 'main-model',
+          modalities: { image: true, video: true, pdf: false },
+          baseUrl: 'https://models.example/v1',
+          envKey: 'MODEL_API_KEY',
+          isRuntime: false,
+        },
+      });
+      expect(JSON.stringify(models)).not.toContain('secret');
+    }
 
     mockConnectionState.resolve();
     await agentPromise;

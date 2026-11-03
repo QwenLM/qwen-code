@@ -19,6 +19,7 @@ import {
   getReplayTokenCount,
   getReplayTokenUsage,
   mapProviderStatus,
+  mapSessionContextModels,
   mapReasoningControls,
   mapWorkspaceSkills,
   selectGoalState,
@@ -26,6 +27,53 @@ import {
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
 import type { DaemonConnectionState } from './types.js';
+
+it('preserves resolved model details from the session catalog', () => {
+  const details = {
+    authType: 'openai',
+    baseModelId: 'qwen3.7-max',
+    contextLimit: 1_000_000,
+    modalities: { image: true, video: true, audio: false, pdf: false },
+    baseUrl: 'https://models.example/v1',
+    envKey: 'MODEL_API_KEY',
+    isRuntime: true,
+  };
+  const result = mapSessionContextModels({
+    v: 1,
+    sessionId: 'session-models',
+    workspaceCwd: '/workspace',
+    state: {
+      models: {
+        currentModelId: 'qwen-route:v1:one',
+        availableModels: [
+          { modelId: 'qwen-route:v1:one', name: 'First route', _meta: details },
+          {
+            modelId: 'qwen-route:v1:two',
+            name: 'Text route',
+            _meta: { ...details, modalities: {}, isRuntime: false },
+          },
+        ],
+      },
+    },
+  });
+  const { contextLimit, ...expectedDetails } = details;
+  expect(result?.models).toEqual([
+    {
+      id: 'qwen-route:v1:one',
+      label: 'First route',
+      ...expectedDetails,
+      contextWindow: contextLimit,
+    },
+    {
+      id: 'qwen-route:v1:two',
+      label: 'Text route',
+      ...expectedDetails,
+      contextWindow: contextLimit,
+      modalities: {},
+      isRuntime: false,
+    },
+  ]);
+});
 
 it.each([false, true])(
   'respects an explicit empty catalog while retaining a partial snapshot (catalog: %s)',

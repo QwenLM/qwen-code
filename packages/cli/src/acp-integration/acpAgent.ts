@@ -17666,6 +17666,16 @@ class QwenAgent implements Agent {
       description: model.description ?? null,
       _meta: {
         contextLimit: model.contextWindowSize ?? tokenLimit(model.id),
+        authType: model.authType,
+        baseModelId: model.id,
+        ...(model.modalities !== undefined
+          ? { modalities: model.modalities }
+          : {}),
+        ...(model.baseUrl !== undefined
+          ? { baseUrl: sanitizeProviderBaseUrl(model.baseUrl) }
+          : {}),
+        ...(model.envKey !== undefined ? { envKey: model.envKey } : {}),
+        isRuntime: model.isRuntimeModel === true,
       },
     }));
 

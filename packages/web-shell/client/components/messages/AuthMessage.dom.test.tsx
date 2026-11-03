@@ -651,6 +651,72 @@ describe('host model management', () => {
 });
 
 describe('subscription development entry', () => {
+  it('navigates provider choices with arrows and confirms with Enter in the desktop dialog', async () => {
+    actions.getSubscriptionConfig.mockResolvedValue({ enabled: true });
+    actions.getAuthProviders.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/workspace',
+      groups: [
+        {
+          id: 'qwencloud',
+          label: 'QwenCloud',
+          description: '',
+          providerIds: ['first', 'second'],
+        },
+      ],
+      providers: [
+        { id: 'first', label: 'First', protocol: 'openai', steps: [] },
+        {
+          id: 'second',
+          label: 'Second',
+          protocol: 'openai',
+          protocolOptions: ['openai', 'anthropic'],
+          steps: ['protocol', 'baseUrl', 'apiKey'],
+          baseUrl: [
+            { label: 'Endpoint A', url: 'https://a.example/v1' },
+            { label: 'Endpoint B', url: 'https://b.example/v1' },
+          ],
+        },
+      ],
+    });
+    await openAuth(true);
+    const press = async (key: string, init: KeyboardEventInit = {}) => {
+      await act(async () => {
+        document.activeElement?.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key,
+            bubbles: true,
+            cancelable: true,
+            ...init,
+          }),
+        );
+      });
+    };
+    await press('ArrowDown');
+    expect(document.activeElement?.tagName).toBe('BUTTON');
+    expect(document.activeElement?.textContent).toBe('QwenCloud');
+    await press('ArrowUp');
+    expect(document.activeElement?.textContent).toContain('Qwen Account');
+    await press('ArrowDown', { shiftKey: true });
+    expect(document.activeElement?.textContent).toContain('Qwen Account');
+    await press('ArrowDown');
+    await press('Enter', { isComposing: true });
+    expect(document.activeElement?.textContent).toContain('QwenCloud');
+    await press('Enter');
+    await press('ArrowDown');
+    expect(document.activeElement?.textContent).toBe('Second');
+    await press('Enter');
+    await press('ArrowDown');
+    expect(document.activeElement?.textContent).toContain('Anthropic');
+    await press('ArrowUp');
+    await press('Enter');
+    await press('ArrowDown');
+    expect(document.activeElement?.textContent).toContain('Endpoint B');
+    await press('Enter');
+    expect(document.querySelector('input[type="password"]')).not.toBeNull();
+    expect(actions.installAuthProvider).not.toHaveBeenCalled();
+  });
+
   it('uses the configured subscription entry in a Chinese desktop host', async () => {
     actions.getAuthProviders.mockResolvedValue({
       v: 1,

@@ -133,6 +133,17 @@ export function mapSessionContextModels(
         getString(model, 'value');
       if (!modelId) continue;
       const meta = getRecord(model?.['_meta']);
+      const rawModalities = getRecord(meta?.['modalities']);
+      const modalities: DaemonModelInfo['modalities'] = rawModalities
+        ? {}
+        : undefined;
+      if (rawModalities && modalities) {
+        for (const key of ['image', 'pdf', 'audio', 'video'] as const) {
+          if (typeof rawModalities[key] === 'boolean') {
+            modalities[key] = rawModalities[key];
+          }
+        }
+      }
       const modelContextWindow =
         getNumber(meta, 'contextLimit') ??
         getNumber(meta, 'contextWindow') ??
@@ -148,10 +159,25 @@ export function mapSessionContextModels(
       models.push({
         id: modelId,
         baseModelId:
-          getString(model, 'baseModelId') ?? stripAcpAuthSuffix(modelId),
+          getString(meta, 'baseModelId') ??
+          getString(model, 'baseModelId') ??
+          stripAcpAuthSuffix(modelId),
         label: getString(model, 'name') ?? getString(model, 'label') ?? modelId,
+        ...(getString(meta, 'authType') !== undefined
+          ? { authType: getString(meta, 'authType') }
+          : {}),
         ...(modelContextWindow !== undefined
           ? { contextWindow: modelContextWindow }
+          : {}),
+        ...(modalities !== undefined ? { modalities } : {}),
+        ...(getString(meta, 'baseUrl') !== undefined
+          ? { baseUrl: getString(meta, 'baseUrl') }
+          : {}),
+        ...(getString(meta, 'envKey') !== undefined
+          ? { envKey: getString(meta, 'envKey') }
+          : {}),
+        ...(typeof meta?.['isRuntime'] === 'boolean'
+          ? { isRuntime: meta['isRuntime'] }
           : {}),
       });
     }

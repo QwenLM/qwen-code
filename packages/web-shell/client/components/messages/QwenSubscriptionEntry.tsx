@@ -10,17 +10,21 @@ import { useI18n } from '../../i18n';
 export function QwenSubscriptionEntry({
   selected,
   onClick,
+  onFocus,
 }: {
   selected: boolean;
   onClick: () => void;
+  onFocus: () => void;
 }) {
   const { t } = useI18n();
   return (
     <button
       type="button"
+      data-web-shell-auth-option
       aria-label={t('subscription.entryTitle')}
       className={`${styles.option} ${selected ? styles.optionActive : ''}`}
       onClick={onClick}
+      onFocus={onFocus}
     >
       <div className={styles.optionText}>
         <div className={styles.label}>

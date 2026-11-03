@@ -214,6 +214,7 @@ export function AuthMessage({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     workspaceActions
@@ -276,6 +277,27 @@ export function AuthMessage({
     (currentStep === 'baseUrl' && !Array.isArray(provider?.baseUrl));
 
   const [optionIndex, setOptionIndex] = useState(0);
+
+  useEffect(() => {
+    const index =
+      view === 'groups'
+        ? groupIndex
+        : view === 'providers'
+          ? providerIndex
+          : optionIndex;
+    bodyRef.current
+      ?.querySelectorAll<HTMLButtonElement>('[data-web-shell-auth-option]')
+      [index]?.focus({ preventScroll: true });
+  }, [
+    view,
+    groupIndex,
+    providerIndex,
+    optionIndex,
+    currentStep,
+    loading,
+    hasSubscriptionEntry,
+    subscriptionReal,
+  ]);
 
   useEffect(() => {
     if (currentStep === 'wireApi') {
@@ -763,8 +785,10 @@ export function AuthMessage({
         <button
           type="button"
           key={option.value}
+          data-web-shell-auth-option
           disabled={saving}
           className={`${styles.option} ${selected === index ? styles.optionActive : ''}`}
+          onFocus={() => onSelect(index)}
           onClick={() => {
             onSelect(index);
             activateAtIndex(index);
@@ -1185,6 +1209,7 @@ export function AuthMessage({
           {hasSubscriptionEntry && (
             <QwenSubscriptionEntry
               selected={groupIndex === 0}
+              onFocus={() => setGroupIndex(0)}
               onClick={() => {
                 setGroupIndex(0);
                 setSubscriptionReal(true);
@@ -1333,7 +1358,65 @@ export function AuthMessage({
     );
 
   const content = (
-    <div className={styles.panel}>
+    <div
+      className={styles.panel}
+      onKeyDown={(event) => {
+        if (
+          loading ||
+          saving ||
+          event.defaultPrevented ||
+          event.nativeEvent.isComposing ||
+          event.nativeEvent.keyCode === 229 ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.altKey ||
+          event.shiftKey
+        )
+          return;
+        const options = Array.from(
+          bodyRef.current?.querySelectorAll<HTMLButtonElement>(
+            '[data-web-shell-auth-option]',
+          ) ?? [],
+        );
+        if (options.length === 0) return;
+        const target = event.target as HTMLElement;
+        const focusedOption = target.closest<HTMLButtonElement>(
+          '[data-web-shell-auth-option]',
+        );
+        if (
+          !focusedOption &&
+          target.closest('button, a, input, textarea, select')
+        )
+          return;
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          event.stopPropagation();
+          if (focusedOption) focusedOption.click();
+          else activate();
+        } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          event.preventDefault();
+          event.stopPropagation();
+          const current =
+            view === 'groups'
+              ? groupIndex
+              : view === 'providers'
+                ? providerIndex
+                : optionIndex;
+          const index = Math.max(
+            0,
+            Math.min(
+              options.length - 1,
+              current + (event.key === 'ArrowDown' ? 1 : -1),
+            ),
+          );
+          if (view === 'groups') setGroupIndex(index);
+          else if (view === 'providers') setProviderIndex(index);
+          else setOptionIndex(index);
+          options[index]?.focus({ preventScroll: true });
+          options[index]?.scrollIntoView({ block: 'nearest' });
+        }
+      }}
+    >
       <div className={styles.steps}>
         {stepItems.map((label, index) => {
           const stepNumber = index + 1;
@@ -1350,7 +1433,9 @@ export function AuthMessage({
           );
         })}
       </div>
-      <div className={styles.body}>{body}</div>
+      <div ref={bodyRef} className={styles.body}>
+        {body}
+      </div>
       {error && (
         <div className={styles.error} role="alert">
           {error}
