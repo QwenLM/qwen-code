@@ -73,7 +73,7 @@ function longText(lines: number): string {
   return `${Array.from({ length: lines }, (_, i) => `line ${i}`).join('\n')}\n`;
 }
 
-test('distinguishes copied image URLs from PPT text @smoke', async ({
+test('distinguishes copied image URLs from PPT text and command arguments @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -81,10 +81,12 @@ test('distinguishes copied image URLs from PPT text @smoke', async ({
   await gotoSession(page, scenario, daemon);
   const editor = page.locator(COMPOSER_EDITOR);
 
-  for (const text of [
-    'https://example.com/image.png',
-    'PPT editable text\nSecond line',
+  for (const { draft, text } of [
+    { draft: '', text: 'https://example.com/image.png' },
+    { draft: '', text: 'PPT editable text\nSecond line' },
+    { draft: '/fork ', text: 'https://example.com/image.png' },
   ]) {
+    await editor.fill(draft);
     await editor.evaluate((element, pasted) => {
       const clipboard = new DataTransfer();
       const bytes = Uint8Array.from(
@@ -106,7 +108,7 @@ test('distinguishes copied image URLs from PPT text @smoke', async ({
       );
     }, text);
     const images = page.locator('[data-web-shell-composer-images] img');
-    if (text.startsWith('https:')) {
+    if (!draft && text.startsWith('https:')) {
       await expect(images).toHaveCount(1);
       await expect(editor).not.toContainText(text);
       await page.screenshot({
@@ -115,6 +117,9 @@ test('distinguishes copied image URLs from PPT text @smoke', async ({
       await page
         .getByRole('button', { name: 'Remove image', exact: true })
         .click();
+    } else if (draft) {
+      await expect(editor).toContainText(draft + text);
+      await expect(images).toHaveCount(0);
     } else {
       await expect(editor).toContainText('PPT editable text');
       await expect(editor).toContainText('Second line');

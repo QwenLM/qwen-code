@@ -1310,6 +1310,37 @@ describe('useComposerCore paste', () => {
     },
   );
 
+  it.each(['/fork ', '  /extensions install ', '!curl '])(
+    'keeps image URL arguments inline in command drafts: %s',
+    async (draft) => {
+      const { onSubmit } = await mount();
+      act(() => {
+        latest!.setText(draft);
+        latest!.viewRef.current!.dispatch({
+          selection: { anchor: draft.length },
+        });
+      });
+      const text = 'https://example.com/image.png';
+      const image = new File(['png'], 'image.png', { type: 'image/png' });
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: {
+          files: [image],
+          items: [],
+          types: ['Files', 'text/plain'],
+          getData: () => text,
+        },
+      });
+      act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+      await waitForImageIngestion();
+      expect(latest!.getText()).toBe(draft + text);
+      expect(latest!.pastedImages).toEqual([]);
+      act(() => latest!.submitText());
+      expect(onSubmit.mock.calls[0]![0]).toBe((draft + text).trim());
+      expect(onSubmit.mock.calls[0]![1]).toBeUndefined();
+    },
+  );
+
   it.each(['disabled', 'shell', 'attachments-disabled', 'other-control'])(
     'keeps URL text editable for %s',
     async (mode) => {

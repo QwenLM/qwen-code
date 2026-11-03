@@ -2404,6 +2404,9 @@ export function useComposerCore(
             attachmentsEnabledRef.current &&
             /^https?:\/\/\S+$/iu.test(pastedText.trim())
           ) {
+            const draft =
+              viewRef.current?.state.doc.toString() ?? mobileTextRef.current;
+            if (/^[!/]/.test(draft.trimStart())) return;
             const transfer = extractFileTransfer(event.clipboardData, 'paste');
             // A copied image can carry its source URL alongside the bitmap.
             if (

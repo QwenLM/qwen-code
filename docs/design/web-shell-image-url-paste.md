@@ -14,7 +14,8 @@ for every mixed clipboard would regress that behavior.
 ## Decision
 
 Prefer the image only when a paste targets the editor, the composer is enabled,
-attachments are enabled, shell mode is off, and the clipboard contains exactly
+attachments are enabled, shell mode is off, the draft does not start with `/` or
+`!` after leading whitespace, and the clipboard contains exactly
 one image file candidate, no other file candidates or rejected items, and
 plain text consisting of one HTTP(S) URL after trimming surrounding whitespace.
 Use the existing attachment queue and consume the event. All other mixed
@@ -42,7 +43,8 @@ clipboard API, daemon change, or dependency is introduced.
 - URL plus one image attaches the image without inserting its URL.
 - PPT text plus a bitmap remains editable text without an image attachment.
 - Image-only paste works; a plain URL without an image remains text.
-- Disabled attachments, shell mode, and other text controls retain text behavior.
+- Disabled attachments, shell mode, command drafts, and other text controls retain
+  text behavior, including URL arguments accompanied by a bitmap.
 - Advertised but unavailable file paste emits the existing warning once.
 - Utility and desktop/touch DOM regressions cover the decisions above. Browser
   E2E uses synthetic clipboard events and a mock daemon; it does not establish

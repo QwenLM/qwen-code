@@ -593,11 +593,17 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(document.activeElement).toBe(content);
   });
 
-  it.each([false, true])(
-    'attaches an image with a source URL in the touch composer (expanded: %s)',
-    async (expanded) => {
+  it.each([
+    { expanded: false, draft: '' },
+    { expanded: true, draft: '' },
+    { expanded: false, draft: '/fork ' },
+    { expanded: true, draft: '/fork ' },
+  ])(
+    'handles image source URLs in the touch composer (expanded: $expanded, draft: $draft)',
+    async ({ expanded, draft }) => {
       mockTouchDevice();
       await mount({ expanded });
+      act(() => latest!.setText(draft));
       const image = new File(['png'], 'image.png', { type: 'image/png' });
       const event = new Event('paste', { bubbles: true, cancelable: true });
       Object.defineProperty(event, 'clipboardData', {
@@ -619,9 +625,9 @@ describe('useComposerCore mobile textarea backend', () => {
         });
         expect(latest!.pendingImageBatchCount).toBe(0);
       });
-      expect(event.defaultPrevented).toBe(true);
-      expect(latest!.pastedImages).toHaveLength(1);
-      expect(latest!.mobileComposer!.value).toBe('');
+      expect(event.defaultPrevented).toBe(draft === '');
+      expect(latest!.pastedImages).toHaveLength(draft ? 0 : 1);
+      expect(latest!.mobileComposer!.value).toBe(draft);
     },
   );
 
