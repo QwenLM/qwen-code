@@ -21,6 +21,7 @@ import { GenerateContentResponse, FinishReason } from '@google/genai';
 import type OpenAI from 'openai';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { unsupportedModalityReason } from '../../utils/unsupported-modality.js';
 import { markToolCallArgumentsIncomplete } from '../incomplete-tool-call-args.js';
 import { createOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 import {
@@ -1163,7 +1164,11 @@ function unsupportedModalityPlaceholder(
     hint =
       'This model does not support PDF input directly. The read_file tool cannot extract PDF content either. To extract text from the PDF file, try using skills if applicable, or guide user to install pdf skill by running this slash command:\n/extensions install https://github.com/anthropics/skills:document-skills';
   } else {
-    hint = `This model does not support ${modality} input. The read_file tool cannot process this type of file either. To handle this file, try using skills if applicable, or any tools installed at system wide, or let the user know you cannot process this type of file.`;
+    hint = `${unsupportedModalityReason(
+      modality,
+      requestContext.model,
+      requestContext.modalitiesSourceKind,
+    )} The read_file tool cannot process this type of file either. To handle this file, try using skills if applicable, or any tools installed at system wide, or let the user know you cannot process this type of file.`;
   }
   return {
     type: 'text' as const,

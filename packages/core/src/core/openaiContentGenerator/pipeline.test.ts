@@ -4640,6 +4640,56 @@ describe('ContentGenerationPipeline', () => {
       await streamed(chunkOf({ content: 'Hello' }, 'stop'));
     });
 
+    it('carries the modalities source into the request context', async () => {
+      mockCliConfig = {
+        getModel: () => 'test-model',
+        getContentGeneratorConfigSources: () => ({
+          modalities: { kind: 'computed' },
+        }),
+      } as unknown as Config;
+      mockConfig = { ...mockConfig, cliConfig: mockCliConfig };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const convert = vi
+        .spyOn(mockConverter, 'convertLlmRequestToOpenAI')
+        .mockReturnValue([{ role: 'user', content: 'ok' }]);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        choices: [{ index: 0, message: { role: 'assistant', content: '' } }],
+      });
+
+      await pipeline.execute(userRequest(), 'p');
+
+      expect(convert.mock.calls.at(-1)![1]).toMatchObject({
+        model: 'test-model',
+        modalitiesSourceKind: 'computed',
+      });
+    });
+
+    it('omits the modalities source for a generator on another model', async () => {
+      mockCliConfig = {
+        getModel: () => 'primary-model',
+        getContentGeneratorConfigSources: () => ({
+          modalities: { kind: 'computed' },
+        }),
+      } as unknown as Config;
+      mockConfig = { ...mockConfig, cliConfig: mockCliConfig };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      const convert = vi
+        .spyOn(mockConverter, 'convertLlmRequestToOpenAI')
+        .mockReturnValue([{ role: 'user', content: 'ok' }]);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        choices: [{ index: 0, message: { role: 'assistant', content: '' } }],
+      });
+
+      await pipeline.execute(userRequest(), 'p');
+
+      expect(convert.mock.calls.at(-1)![1]).toMatchObject({
+        model: 'test-model',
+      });
+      expect(convert.mock.calls.at(-1)![1]).not.toHaveProperty(
+        'modalitiesSourceKind',
+      );
+    });
+
     it('should collect all OpenAI chunks for logging even when Gemini responses are filtered', async () => {
       const finalResponse = responseOf(
         [fnCall('test_function', { param: 'value' }, 'call_123')],

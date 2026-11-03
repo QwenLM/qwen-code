@@ -47,6 +47,12 @@ export interface StreamingTextDeltaState {
 export interface RequestContext {
   model: string;
   modalities: InputModalities;
+  /**
+   * Source the resolved `modalities` came from, when known. A media refusal
+   * names it, because a value guessed from the model name and one the user
+   * declared need different next steps (QwenLM/qwen-code#16178).
+   */
+  modalitiesSourceKind?: string;
   startTime: number;
   /**
    * Effective output-token ceiling sent on the wire (`max_tokens` or a

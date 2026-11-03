@@ -2013,6 +2013,15 @@ export class ContentGenerationPipeline {
     );
     const providerOverrides =
       this.config.provider.getRequestContextOverrides?.() ?? {};
+    // The sources belong to the cliConfig's own (primary) model. A generator
+    // built for another model — a sub-agent, a side query — must not report
+    // the primary's modalities source in its own refusal.
+    const modalitiesSourceKind =
+      effectiveModel === this.config.cliConfig.getModel?.()
+        ? this.config.cliConfig.getContentGeneratorConfigSources?.()[
+            'modalities'
+          ]?.kind
+        : undefined;
     const toolCallParser = isStreaming
       ? new StreamingToolCallParser()
       : undefined;
@@ -2026,6 +2035,7 @@ export class ContentGenerationPipeline {
     return {
       model: effectiveModel,
       modalities: this.contentGeneratorConfig.modalities ?? {},
+      ...(modalitiesSourceKind ? { modalitiesSourceKind } : {}),
       startTime: Date.now(),
       splitToolMedia:
         providerOverrides.splitToolMedia ??

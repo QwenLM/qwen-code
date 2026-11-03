@@ -4479,6 +4479,22 @@ describe('modality filtering', () => {
     return Array.isArray(userMsg?.content) ? wireParts(userMsg) : [];
   }
 
+  function userContentPartsWithSource(
+    model: string,
+    modalities: RequestContext['modalities'],
+    modalitiesSourceKind: string,
+    part: Part,
+  ): WirePart[] {
+    const userMsg = findRole(
+      OpenAIContentConverter.convertLlmRequestToOpenAI(
+        { model: 'test-model', contents: [content('user', part)] },
+        { model, modalities, modalitiesSourceKind, startTime: 0 },
+      ),
+      'user',
+    );
+    return Array.isArray(userMsg?.content) ? wireParts(userMsg) : [];
+  }
+
   it.each<[string, string, RequestContext['modalities'], Part, string[]]>([
     [
       'replaces image with placeholder when image modality is disabled',
@@ -4526,6 +4542,16 @@ describe('modality filtering', () => {
     for (const fragment of fragments) {
       expect(parts[0].text).toContain(fragment);
     }
+  });
+
+  it('names the model and the modalities source in the image placeholder', () => {
+    const parts = userContentPartsWithSource('deepseek-chat', {}, 'computed', {
+      inlineData: { mimeType: 'image/png', data: 'abc123' },
+      displayName: 'screenshot.png',
+    } as unknown as Part);
+
+    expect(parts[0].text).toContain("Model 'deepseek-chat'");
+    expect(parts[0].text).toContain('inferred from the model name');
   });
 
   it('keeps BMP image data when image modality is enabled', () => {
