@@ -12,7 +12,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from 'react';
-import { CheckCircle2Icon, KeyRoundIcon } from 'lucide-react';
+import { CheckCircle2Icon, ChevronDownIcon, KeyRoundIcon } from 'lucide-react';
 import type {
   DaemonChannelConfigFieldDescriptor,
   DaemonChannelInstanceSnapshot,
@@ -30,6 +30,11 @@ import { extractErrorDetail } from '../../utils/errorDetail';
 import { workspaceLabel } from '../../utils/workspace';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
 import { Button } from '../ui/button';
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '../ui/collapsible';
 import {
   Dialog,
   DialogContent,
@@ -151,6 +156,20 @@ const ROUTING_FIELD_KEYS = new Set([
   'messageRoutes',
   'defaultMessageRoute',
 ]);
+/**
+ * Rarely changed tuning, collapsed into one disclosure panel. `wsUrl` stays
+ * out: it is WeCom's primary endpoint, not a tuning knob.
+ */
+const ADVANCED_FIELD_KEYS = new Set([
+  'baseUrl',
+  'pollInterval',
+  'reasonFilter',
+  'messageRoutes',
+  'defaultMessageRoute',
+  'multiSession',
+  'instructions',
+  'operators',
+]);
 
 /** Every repository starts fully inheriting; nothing is materialized. */
 const EMPTY_GROUP_OVERRIDE: ChannelGroupOverrideDraft = {
@@ -208,6 +227,31 @@ function configuredAllowedUsers(instance?: DaemonChannelInstanceSnapshot) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Whether a draft record value holds at least one route, as assignField writes it. */
+function recordHasRoute(value: string | boolean | undefined): boolean {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return (
+      isRecord(parsed) &&
+      Object.values(parsed).some(
+        (entry) => typeof entry === 'string' && entry.trim() !== '',
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isAdvancedFieldConfigured(
+  field: DaemonChannelConfigFieldDescriptor,
+  value: string | boolean | undefined,
+): boolean {
+  if (field.kind === 'boolean') return value === true;
+  if (field.kind === 'record') return recordHasRoute(value);
+  return typeof value === 'string' && value.trim() !== '';
 }
 
 function FieldShell({
@@ -280,14 +324,22 @@ export function ChannelEditorDialog({
   const [submitError, setSubmitError] = useState<string>();
   const [saving, setSaving] = useState(false);
   const [reloading, setReloading] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const dismissedRef = useRef(false);
   /** The token draft as it stood before local gh auth overrode it. */
   const tokenBeforeLocalGh = useRef<ChannelSecretDraft | undefined>(undefined);
-  const accessFields = descriptor.fields.filter((field) =>
-    SHARED_ACCESS_FIELD_KEYS.has(field.key),
+  const accessFields = descriptor.fields.filter(
+    (field) =>
+      SHARED_ACCESS_FIELD_KEYS.has(field.key) &&
+      !ADVANCED_FIELD_KEYS.has(field.key),
   );
-  const sessionFields = descriptor.fields.filter((field) =>
-    SHARED_SESSION_FIELD_KEYS.has(field.key),
+  const sessionFields = descriptor.fields.filter(
+    (field) =>
+      SHARED_SESSION_FIELD_KEYS.has(field.key) &&
+      !ADVANCED_FIELD_KEYS.has(field.key),
+  );
+  const advancedFields = descriptor.fields.filter((field) =>
+    ADVANCED_FIELD_KEYS.has(field.key),
   );
   const sessionScopeField = sessionFields.find(
     (field) => field.key === 'sessionScope' && field.kind === 'enum',
@@ -306,14 +358,24 @@ export function ChannelEditorDialog({
   const credentialFields = descriptor.fields.filter(
     (field) =>
       !SHARED_ACCESS_FIELD_KEYS.has(field.key) &&
-      !SHARED_SESSION_FIELD_KEYS.has(field.key),
+      !SHARED_SESSION_FIELD_KEYS.has(field.key) &&
+      !ADVANCED_FIELD_KEYS.has(field.key),
   );
 
   useEffect(() => {
     if (!open) return;
     dismissedRef.current = false;
     tokenBeforeLocalGh.current = undefined;
-    setDraft(createChannelEditorDraft(descriptor, instance));
+    const fresh = createChannelEditorDraft(descriptor, instance);
+    setDraft(fresh);
+    // Configured tuning must not hide behind a collapsed panel on open.
+    setAdvancedOpen(
+      descriptor.fields.some(
+        (field) =>
+          ADVANCED_FIELD_KEYS.has(field.key) &&
+          isAdvancedFieldConfigured(field, fresh.values[field.key]),
+      ),
+    );
     setErrors({});
     setSubmitError(undefined);
   }, [descriptor, instance, open]);
@@ -322,6 +384,20 @@ export function ChannelEditorDialog({
     setErrors({});
     setSubmitError(undefined);
   }, [workspaceCwd]);
+
+  const isFieldVisible = (field: DaemonChannelConfigFieldDescriptor) => {
+    // A stored default route must stay repairable even with no routes left.
+    if (field.key === 'defaultMessageRoute')
+      return (
+        recordHasRoute(draft.values['messageRoutes']) ||
+        String(draft.values['defaultMessageRoute'] ?? '').trim() !== ''
+      );
+    return true;
+  };
+
+  const advancedConfiguredCount = advancedFields.filter((field) =>
+    isAdvancedFieldConfigured(field, draft.values[field.key]),
+  ).length;
 
   const fieldLabel = (field: DaemonChannelConfigFieldDescriptor) => {
     const key =
@@ -412,6 +488,10 @@ export function ChannelEditorDialog({
       instance,
     );
     if (Object.keys(validation).length > 0) {
+      // An error on a collapsed field would otherwise be invisible.
+      if (Object.keys(validation).some((key) => ADVANCED_FIELD_KEYS.has(key))) {
+        setAdvancedOpen(true);
+      }
       setErrors(
         Object.fromEntries(
           Object.entries(validation).map(([key, code]) => [
@@ -1189,7 +1269,8 @@ export function ChannelEditorDialog({
             {(['credentials', 'connection', 'routing'] as const).map(
               (section) => {
                 const sectionFields = credentialFields.filter(
-                  (field) => fieldSectionKey(field) === section,
+                  (field) =>
+                    fieldSectionKey(field) === section && isFieldVisible(field),
                 );
                 if (sectionFields.length === 0) return null;
                 return (
@@ -1508,6 +1589,38 @@ export function ChannelEditorDialog({
                 </section>
               );
             })()}
+
+            {advancedFields.length > 0 ? (
+              <Collapsible
+                open={advancedOpen}
+                onOpenChange={setAdvancedOpen}
+                className={styles.settingsPanel}
+              >
+                <CollapsibleTrigger className={styles.advancedTrigger}>
+                  <ChevronDownIcon
+                    size={15}
+                    className={styles.advancedChevron}
+                    aria-hidden="true"
+                  />
+                  <span className={styles.settingsPanelTitle}>
+                    {t('channels.editor.section.advanced')}
+                  </span>
+                  {!advancedOpen && advancedConfiguredCount > 0 ? (
+                    <span className={styles.advancedBadge}>
+                      {t('channels.editor.section.advanced.configuredCount', {
+                        count: advancedConfiguredCount,
+                      })}
+                    </span>
+                  ) : null}
+                </CollapsibleTrigger>
+                <CollapsibleContent className={styles.advancedContent}>
+                  <p className={styles.settingsPanelDescription}>
+                    {t('channels.editor.section.advanced.description')}
+                  </p>
+                  {advancedFields.filter(isFieldVisible).map(renderField)}
+                </CollapsibleContent>
+              </Collapsible>
+            ) : null}
           </div>
           <DialogFooter className="mt-4">
             <Button

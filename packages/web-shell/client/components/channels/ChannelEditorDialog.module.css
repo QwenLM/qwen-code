@@ -90,6 +90,43 @@
   line-height: 1.5;
 }
 
+.advancedTrigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.advancedChevron {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  transition: transform 120ms ease;
+}
+
+.advancedTrigger[data-state='open'] .advancedChevron {
+  transform: rotate(180deg);
+}
+
+.advancedBadge {
+  margin-left: auto;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.advancedContent {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
 .field {
   display: flex;
   flex-direction: column;
