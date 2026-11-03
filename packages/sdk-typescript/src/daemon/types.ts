@@ -5021,6 +5021,47 @@ export interface DaemonChannelsSnapshot {
   instances: Record<string, DaemonChannelInstanceSnapshot>;
 }
 
+export type DaemonChannelEventType = 'inbound' | 'outbound' | 'task' | 'poll';
+
+/**
+ * One entry of a Channel's event journal: what the Channel did, not what a
+ * message said. Records never carry message text.
+ */
+export interface DaemonChannelEvent {
+  at: string;
+  channel: string;
+  type: DaemonChannelEventType;
+  outcome: string;
+  reason?: string;
+  triggerKind?: string;
+  repository?: string;
+  thread?: string;
+  number?: number;
+  actor?: string;
+  sessionId?: string;
+  messageId?: string;
+  durationMs?: number;
+  error?: string;
+  detail?: Record<string, string | number | boolean>;
+}
+
+export interface DaemonChannelEventsSnapshot {
+  events: DaemonChannelEvent[];
+  /**
+   * True when older events are missing: the record limit was reached, a
+   * journal was left out by the route's read bounds, or a journal was taller
+   * than the tail window the route reads.
+   */
+  truncated: boolean;
+}
+
+export interface DaemonChannelEventsQuery {
+  limit?: number;
+  types?: readonly DaemonChannelEventType[];
+  channels?: readonly string[];
+  since?: string;
+}
+
 export type DaemonChannelSecretUpdate =
   | { operation: 'preserve' }
   | { operation: 'replace'; value: string }

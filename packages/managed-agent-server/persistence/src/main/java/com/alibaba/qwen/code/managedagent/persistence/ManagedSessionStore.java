@@ -160,7 +160,7 @@ public class ManagedSessionStore
     @Transactional
     public WriterGrant acquireWriter(String tenantId, String sessionId,
             String writerToken, AcquireWriterRequest request) {
-        return writerLifecycle.acquireWriter(tenantId, sessionId, writerToken, request);
+        return writerLifecycle.acquireWriter(tenantId, sessionId, writerToken, request, null);
     }
 
     @Transactional
@@ -172,7 +172,7 @@ public class ManagedSessionStore
     @Transactional
     public WriterGrant renewWriter(String tenantId, String sessionId,
             String writerToken, RenewWriterRequest request) {
-        return writerLifecycle.renewWriter(tenantId, sessionId, writerToken, request);
+        return writerLifecycle.renewWriter(tenantId, sessionId, writerToken, request, null);
     }
 
     @Transactional
@@ -184,7 +184,7 @@ public class ManagedSessionStore
     @Transactional
     public SealReceipt sealWriter(String tenantId, String sessionId,
             String writerToken, SealWriterRequest request) {
-        return writerLifecycle.sealWriter(tenantId, sessionId, writerToken, request);
+        return writerLifecycle.sealWriter(tenantId, sessionId, writerToken, request, null);
     }
 
     @Transactional
@@ -215,7 +215,7 @@ public class ManagedSessionStore
     @Transactional
     public CommitReceipt commit(String tenantId, String sessionId,
             String writerToken, CommitTransactionRequest request) {
-        return commits.commit(tenantId, sessionId, writerToken, request);
+        return commits.commit(tenantId, sessionId, writerToken, request, null);
     }
 
     @Transactional
@@ -293,7 +293,7 @@ public class ManagedSessionStore
     @Transactional
     public ToolResultResourceRef publishToolResult(String tenantId, String sessionId,
             String writerToken, PublishToolResultRequest request) {
-        return resourceWrites.publishToolResult(tenantId, sessionId, writerToken, request);
+        return resourceWrites.publishToolResult(tenantId, sessionId, writerToken, request, null);
     }
 
     @Transactional

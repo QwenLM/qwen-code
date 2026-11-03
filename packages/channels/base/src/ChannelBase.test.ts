@@ -1,4 +1,12 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  afterAll,
+  beforeAll,
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+} from 'vitest';
 import { EventEmitter } from 'node:events';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -39,6 +47,19 @@ import {
 } from './ChannelProactiveDeliveryError.js';
 import { PairingStore } from './PairingStore.js';
 import type { CreatePairingRequestResult } from './PairingStore.js';
+
+// Channel event journals are written from the message path; keep them out of
+// the developer's real ~/.qwen while these tests drive rejections.
+const testQwenHome = mkdtempSync(join(tmpdir(), 'channel-base-home-'));
+const savedQwenHome = process.env['QWEN_HOME'];
+beforeAll(() => {
+  process.env['QWEN_HOME'] = testQwenHome;
+});
+afterAll(() => {
+  rmSync(testQwenHome, { recursive: true, force: true });
+  if (savedQwenHome === undefined) delete process.env['QWEN_HOME'];
+  else process.env['QWEN_HOME'] = savedQwenHome;
+});
 
 // Concrete test implementation
 class TestChannel extends ChannelBase {

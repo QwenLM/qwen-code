@@ -65,11 +65,6 @@ final class JournalCommit {
         this.actions = actions;
     }
 
-    CommitReceipt commit(String tenantId, String sessionId,
-            String writerToken, CommitTransactionRequest request) {
-        return commit(tenantId, sessionId, writerToken, request, null);
-    }
-
     CommitReceipt commit(String tenantId, String sessionId, String writerToken,
             CommitTransactionRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
@@ -103,7 +98,7 @@ final class JournalCommit {
         if (csiOriginal != null) {
             csiOriginal.requireContinuation();
         }
-        JournalStoreRows.HeadRow csiHead = csiOriginal == null ? null : storeRows.requireHeadForUpdate(tenantId, sessionId);
+        JournalStoreRows.HeadRow csiHead = csiOriginal == null ? null : fencing.requireHeadAfterCsiCheck(tenantId, sessionId);
         JournalFencing.requireCsiWriter(csiOriginal, csiHead);
         if (csiOriginal != null
                 && ("commitFileHistory".equals(request.operation())
@@ -154,7 +149,8 @@ final class JournalCommit {
                     writerToken);
         }
         fencing.requirePhysicalSessionOpen(tenantId, request.workspaceId(), sessionId);
-        JournalStoreRows.HeadRow head = storeRows.requireHeadForUpdate(tenantId, sessionId);
+        JournalStoreRows.HeadRow head = csiHead == null
+                ? fencing.requireHeadAfterCsiCheck(tenantId, sessionId) : csiHead;
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         if (authority == null) {
             fencing.requireNoLifecycleClaim(tenantId, sessionId);
@@ -354,7 +350,7 @@ final class JournalCommit {
                 continuation, head, request.writerId(), request.writerGeneration(), writerToken);
         jdbc.update("UPDATE ma_session_head SET"
                         + " journal_revision = ?, committed_sequence = ?,"
-                        + " wake_pending = wake_pending OR ?,"
+                        + " is_wake_pending = is_wake_pending OR ?,"
                         + " wake_head_revision = CASE WHEN wake_head_revision = ? THEN ? ELSE wake_head_revision END,"
                         + " cleanup_head_revision = CASE WHEN cleanup_head_revision = ? THEN ? ELSE cleanup_head_revision END,"
                         + " last_commit_digest = ?, activation_epoch = ?,"

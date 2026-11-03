@@ -62,14 +62,7 @@ final class AgentSessionCommands {
         return kind == SessionMutationKind.RENAME && workspaceFilesEnabled;
     }
 
-    Admission insertTurnCommand(String tenantId, String operation,
-            String idempotencyKey, String requestDigest, String sessionId,
-            List<Map<String, Object>> input, String payloadDigest) {
-        return insertTurnCommand(tenantId, operation, idempotencyKey,
-                requestDigest, sessionId, input, payloadDigest, null);
-    }
-
-    // The actor-carrying variant records the caller on the command
+    // Input admission records the supplied caller on the command
     // receipt, so the receipt's replay answers the actor who recorded it —
     // an OPERATOR's own retry of his own key — and not only the creator.
     Admission insertTurnCommand(String tenantId, String operation,
@@ -93,7 +86,7 @@ final class AgentSessionCommands {
         // The replay probe must not lock: a FOR UPDATE read that misses
         // next-key-locks a gap of the tenant-shared command index, and
         // concurrent admissions holding such gap locks deadlock when they
-        // all try to insert into the same gap. The PRIMARY KEY deduplicates
+        // all try to insert into the same gap. The unique business key deduplicates
         // racing inserts instead, and the service replays on
         // DuplicateKeyException.
         Optional<CommandRecord> existing = findCommand(tenantId, operation,
@@ -166,14 +159,7 @@ final class AgentSessionCommands {
         return new Admission(sessionId, turnId, false, true, operationId);
     }
 
-    Admission insertCancelCommand(String tenantId, String operation,
-            String idempotencyKey, String requestDigest, String sessionId,
-            String turnId) {
-        return insertCancelCommand(tenantId, operation, idempotencyKey,
-                requestDigest, sessionId, turnId, null);
-    }
-
-    // The actor-carrying twin of insertTurnCommand's overload.
+    // Cancellation receipts preserve the caller just as input receipts do.
     Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String actorId) {
@@ -226,12 +212,6 @@ final class AgentSessionCommands {
         }
         return new Admission(sessionId, turnId, false, commandEffect,
                 operationId);
-    }
-
-    SessionMutationCommand beginSessionRename(String tenantId, String key,
-            String digest, String sessionId, String title) {
-        return beginSessionRename(tenantId, key, digest, sessionId, title,
-                null);
     }
 
     SessionMutationCommand beginSessionRename(String tenantId, String key,
@@ -471,15 +451,15 @@ final class AgentSessionCommands {
         String unanswered = "(state = 'RUNNING' AND phase = 'SUBMITTED' AND claim_until <= "
                 + ManagedSchemaTime.SQL_NOW + ")";
         for (Map<String, Object> row : jdbc.queryForList(
-                "SELECT operation_key, tenant_id, session_id, idempotency_key FROM ma_operation WHERE operation_kind = 'RENAME' AND " + unanswered + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.csi_guard = FALSE) LIMIT 100")) {
+                "SELECT operation_key, tenant_id, session_id, idempotency_key FROM ma_operation WHERE operation_kind = 'RENAME' AND " + unanswered + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.is_csi_guard = FALSE) LIMIT 100")) {
             parkRename(row, unanswered);
         }
         jdbc.update(
-                "UPDATE ma_operation SET state = 'PENDING', delivery_state = 'PENDING', phase = 'ADMITTED', available_at = ?, claim_owner = NULL, claim_until = NULL, gmt_modified = ? WHERE operation_kind = 'RENAME' AND state = 'RUNNING' AND phase = 'PREPARING' AND claim_until <= " + ManagedSchemaTime.SQL_NOW + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.csi_guard = FALSE) LIMIT 100",
+                "UPDATE ma_operation SET state = 'PENDING', delivery_state = 'PENDING', phase = 'ADMITTED', available_at = ?, claim_owner = NULL, claim_until = NULL, gmt_modified = ? WHERE operation_kind = 'RENAME' AND state = 'RUNNING' AND phase = 'PREPARING' AND claim_until <= " + ManagedSchemaTime.SQL_NOW + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.is_csi_guard = FALSE) LIMIT 100",
                 now,
                 now);
         return jdbc.query(
-                "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'RENAME' AND delivery_state = 'PENDING' AND state = 'PENDING' AND available_at <= ? AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.csi_guard = FALSE) ORDER BY available_at LIMIT 100",
+                "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'RENAME' AND delivery_state = 'PENDING' AND state = 'PENDING' AND available_at <= ? AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.is_csi_guard = FALSE) ORDER BY available_at LIMIT 100",
                 this::renameDelivery,
                 now);
     }
@@ -589,14 +569,7 @@ final class AgentSessionCommands {
                 "rename:" + revision);
     }
 
-    SessionMutationCommand beginSessionMutation(String tenantId,
-            String operation, String idempotencyKey, String requestDigest,
-            String sessionId, SessionMutationKind kind) {
-        return beginSessionMutation(tenantId, operation, idempotencyKey,
-                requestDigest, sessionId, kind, null);
-    }
-
-    // The actor-carrying twin of insertTurnCommand's overload.
+    // Mutation receipts preserve the caller just as input receipts do.
     SessionMutationCommand beginSessionMutation(String tenantId,
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind, String actorId) {
@@ -889,7 +862,7 @@ final class AgentSessionCommands {
         // to a (kind, state) index whose range holds every Session's pending
         // rows, and two Sessions' settles then deadlock. H2 skips the hint.
         for (String operationKey : jdbc.queryForList("SELECT operation_key"
-                        + " FROM ma_operation /*! FORCE INDEX (uq_ma_operation_identity) */"
+                        + " FROM ma_operation /*! FORCE INDEX (uk_ma_operation_identity) */"
                         + " WHERE scope_key = ? AND"
                         + " operation_kind = ? AND target_key = ? AND state ="
                         + " 'PENDING' FOR UPDATE",
@@ -956,7 +929,7 @@ final class AgentSessionCommands {
             String payloadDigest, long now) {
         jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
-                        + " status, gmt_create, gmt_modified, model_id, model_revision, approval_mode, approval_revision, plan_enabled, permission_rules_json) SELECT"
+                        + " status, gmt_create, gmt_modified, model_id, model_revision, approval_mode, approval_revision, is_plan_enabled, permission_rules_json) SELECT"
                         + " ?, ?, ?, ?, ?, ?, 'ACCEPTED', ?, ?, model_id,"
                         + " CASE WHEN model_id IS NULL THEN NULL ELSE model_revision END,"
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
@@ -973,7 +946,7 @@ final class AgentSessionCommands {
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
                         + " 'hosted-workspace-shell/1','hosted-workspace-files/3')"
-                        + " THEN plan_enabled ELSE NULL END,"
+                        + " THEN is_plan_enabled ELSE NULL END,"
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"

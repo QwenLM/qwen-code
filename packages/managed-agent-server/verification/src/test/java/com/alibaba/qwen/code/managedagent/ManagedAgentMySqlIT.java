@@ -1087,7 +1087,7 @@ class ManagedAgentMySqlIT {
                                 scopeKey,
                                 sha256("command-7")))
                 .extracting(row -> row.get("key"))
-                .containsExactly("ix_ma_record_operation");
+                .containsExactly("idx_ma_record_operation");
     }
 
     @Test
@@ -1932,19 +1932,19 @@ class ManagedAgentMySqlIT {
         for (Object[] lookup :
                 List.of(
                         new Object[] {
-                            "uq_ma_hook_once", "hook_once_key_hash = ?", sha256("once-7")
+                            "uk_ma_hook_once", "hook_once_key_hash = ?", sha256("once-7")
                         },
                         new Object[] {
-                            "uq_ma_hook_occurrence",
+                            "uk_ma_hook_occurrence",
                             "hook_occurrence_hash = ? AND hook_ordinal = ?",
                             sha256("occurrence-7"),
                             1
                         },
                         new Object[] {
-                            "uq_ma_hook_occurrence", "hook_occurrence_hash = ?", sha256("occurrence-7")
+                            "uk_ma_hook_occurrence", "hook_occurrence_hash = ?", sha256("occurrence-7")
                         },
                         new Object[] {
-                            "ix_ma_hook_definition",
+                            "idx_ma_hook_definition",
                             "hook_definition_hash = ?",
                             sha256("catalog-1\u00001")
                         })) {

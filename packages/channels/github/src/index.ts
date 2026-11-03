@@ -1,6 +1,10 @@
 import { MAX_POLL_INTERVAL_MS } from '@qwen-code/channel-base';
 import type { ChannelPlugin } from '@qwen-code/channel-base';
-import { GithubChannel } from './GithubAdapter.js';
+import {
+  GithubChannel,
+  validateBoundSessionConfig,
+  PR_WATCH_EVENTS,
+} from './GithubAdapter.js';
 
 export { GithubChannel };
 
@@ -64,8 +68,8 @@ export const plugin: ChannelPlugin = {
         label: 'Reason Filter',
         kind: 'string-list',
         description:
-          'Optional. Comma-separated notification reasons to process. ' +
-          'Leave empty to process all.',
+          'Optional. Only notifications with a selected reason are processed. ' +
+          'Leave every reason unselected to process all of them.',
         options: [
           { value: 'mention', label: 'mention' },
           { value: 'review_requested', label: 'review_requested' },
@@ -90,6 +94,24 @@ export const plugin: ChannelPlugin = {
           },
         ],
       },
+      {
+        key: 'deliverToBoundSessions',
+        label: 'Deliver To PR-Bound Sessions',
+        kind: 'boolean',
+        description:
+          'Deliver events for PRs bound to a live session into that session as a prompt, instead of a channel-owned session. Requires a daemon-managed channel.',
+        default: 'false',
+      },
+      {
+        key: 'prWatchEvents',
+        label: 'PR Watch Events',
+        kind: 'string-list',
+        description:
+          'Optional. State transitions to watch for bound PRs (requires Deliver To PR-Bound Sessions). Leave empty to disable.',
+        // Built from the adapter's exported vocabulary so the UI options can
+        // never drift from the validator/emit path (R2-18).
+        options: PR_WATCH_EVENTS.map((value) => ({ value, label: value })),
+      },
     ],
     validateConfig: (config) => {
       const token =
@@ -97,7 +119,7 @@ export const plugin: ChannelPlugin = {
       if (!token && config['useLocalGh'] !== true) {
         return 'Channel requires a token or local GitHub CLI authentication (useLocalGh).';
       }
-      return undefined;
+      return validateBoundSessionConfig(config, 'github');
     },
   },
   createChannel: (name, config, bridge, options) =>

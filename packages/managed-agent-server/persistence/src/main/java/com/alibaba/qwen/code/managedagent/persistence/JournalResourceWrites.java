@@ -108,11 +108,6 @@ final class JournalResourceWrites {
     }
 
     ToolResultResourceRef publishToolResult(String tenantId, String sessionId,
-            String writerToken, PublishToolResultRequest request) {
-        return publishToolResult(tenantId, sessionId, writerToken, request, null);
-    }
-
-    ToolResultResourceRef publishToolResult(String tenantId, String sessionId,
             String writerToken, PublishToolResultRequest request,
             com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
@@ -153,7 +148,7 @@ final class JournalResourceWrites {
         if (csiOriginal != null) {
             csiOriginal.requireContinuation();
         }
-        JournalStoreRows.HeadRow head = storeRows.requireHeadForUpdate(tenantId, sessionId);
+        JournalStoreRows.HeadRow head = fencing.requireHeadAfterCsiCheck(tenantId, sessionId);
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         // Unlike the other writer paths, a v2 claim fences this lane even
         // for the claiming lifecycle authority: tool results are never

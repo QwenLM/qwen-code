@@ -21,6 +21,7 @@ import {
 import {
   getAllowedDaemonOrigin,
   getDaemonToken,
+  isDaemonMixedContent,
   navigateToDaemon,
 } from '../../config/daemon';
 import {
@@ -32,6 +33,8 @@ import {
 } from '../../config/remote-connections';
 import { useI18n } from '../../i18n';
 import { ErrorBoundary } from '../ErrorBoundary';
+import { DaemonConnectionHelp } from '../DaemonConnectionHelp';
+import { RemoteAccessSettingsCard } from '../RemoteAccessSettingsCard';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Label } from '../ui/label';
@@ -640,7 +643,7 @@ function DaemonStatusDialogInner({
   onAddConnection?: (daemonOrigin: string, token?: string) => boolean | void;
   connectionsOnly?: boolean;
 }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const workspace = useWorkspace();
   // Switching targets navigates the page, which only the standalone shell
   // owns; embedders keep a read-only view of the connection.
@@ -830,6 +833,11 @@ function DaemonStatusDialogInner({
               setConnectionError(t('daemon.connection.invalid'));
               return;
             }
+            if (isDaemonMixedContent(daemonOrigin)) {
+              retireConnectionProbe();
+              setConnectionError(t('daemon.connection.mixedContent'));
+              return;
+            }
             const token =
               connectionToken.trim() || getDaemonToken(daemonOrigin);
             // A changed target keeps the write-then-navigate switch
@@ -876,7 +884,9 @@ function DaemonStatusDialogInner({
                   setConnectionError(
                     response.status === 401
                       ? t('daemon.connection.authFailed')
-                      : t('daemon.connection.notReady'),
+                      : response.status === 403
+                        ? t('daemon.connection.policyBlocked')
+                        : t('daemon.connection.notReady'),
                   );
                   return;
                 }
@@ -897,13 +907,9 @@ function DaemonStatusDialogInner({
               })
               .catch(() => {
                 if (!owned()) return;
-                // A rejection means no answer arrived — including this
-                // handler's own 10 s abort, so "the daemon did not
-                // answer" is conclusive rather than inconclusive. Report
-                // it and leave the stored credential alone: navigating
-                // here would overwrite a working token with one nothing
-                // accepted and read as a successful switch.
-                setConnectionError(t('daemon.connection.notReady'));
+                // Fetch hides CORS failures behind the same error as network
+                // failures. Preserve the credential and offer both checks.
+                setConnectionError(t('daemon.connection.unreachable'));
               })
               .finally(() => {
                 window.clearTimeout(timeout);
@@ -941,6 +947,7 @@ function DaemonStatusDialogInner({
               retireConnectionProbe();
               setConnectionAddress(event.target.value);
               setConnectionToken('');
+              setConnectionError('');
             }}
           />
           {connectionError && (
@@ -984,13 +991,22 @@ function DaemonStatusDialogInner({
                     : 'daemon.connection.connect',
                 )}
           </Button>
+          <DaemonConnectionHelp
+            language={language}
+            expanded={Boolean(connectionError)}
+          />
         </form>
       )}
     </Card>
   );
 
   if (connectionsOnly) {
-    return <div className={styles.dialog}>{connectionCard}</div>;
+    return (
+      <div className={styles.dialog}>
+        <RemoteAccessSettingsCard />
+        {connectionCard}
+      </div>
+    );
   }
 
   if (!report) {

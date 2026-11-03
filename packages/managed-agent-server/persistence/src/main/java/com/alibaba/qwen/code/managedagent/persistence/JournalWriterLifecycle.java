@@ -107,7 +107,7 @@ final class JournalWriterLifecycle {
         if (csiOriginal != null) {
             csiOriginal.requireAdmission();
         }
-        JournalStoreRows.HeadRow head = storeRows.requireHeadForUpdate(tenant, session);
+        JournalStoreRows.HeadRow head = fencing.requireHeadAfterCsiCheck(tenant, session);
         storeRows.requireHeadScope(head, tenant, workspace, session);
         Timestamp now = storeRows.databaseNow();
         fencing.requireWriter(head, writer, generation, token, now, true);
@@ -117,11 +117,6 @@ final class JournalWriterLifecycle {
                 head.latestCheckpointResourceId(), head.recoveryStatus(), head.activationId(),
                 head.activationPhase(), head.activationEventEpoch(), head.activationExpiresAt(),
                 head.activationHeadRevision());
-    }
-
-    WriterGrant acquireWriter(String tenantId, String sessionId,
-            String writerToken, AcquireWriterRequest request) {
-        return acquireWriter(tenantId, sessionId, writerToken, request, null);
     }
 
     WriterGrant acquireWriter(String tenantId, String sessionId, String writerToken,
@@ -295,11 +290,6 @@ final class JournalWriterLifecycle {
                 head.lastCommitDigest(), head.activationEpoch(), false);
     }
 
-    WriterGrant renewWriter(String tenantId, String sessionId,
-            String writerToken, RenewWriterRequest request) {
-        return renewWriter(tenantId, sessionId, writerToken, request, null);
-    }
-
     WriterGrant renewWriter(String tenantId, String sessionId, String writerToken,
             RenewWriterRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
@@ -315,7 +305,7 @@ final class JournalWriterLifecycle {
         if (csiOriginal != null) {
             csiOriginal.requireContinuation();
         }
-        JournalStoreRows.HeadRow head = continuation == null ? storeRows.requireHeartbeatHead(tenantId, sessionId) : storeRows.requireHeadForUpdate(tenantId, sessionId);
+        JournalStoreRows.HeadRow head = continuation == null ? storeRows.requireHeartbeatHead(tenantId, sessionId) : fencing.requireHeadAfterCsiCheck(tenantId, sessionId);
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         if (authority == null) {
             fencing.requireNoLifecycleClaim(tenantId, sessionId);
@@ -377,11 +367,6 @@ final class JournalWriterLifecycle {
         return grant(head, leaseUntil, false);
     }
 
-    SealReceipt sealWriter(String tenantId, String sessionId,
-            String writerToken, SealWriterRequest request) {
-        return sealWriter(tenantId, sessionId, writerToken, request, null);
-    }
-
     SealReceipt sealWriter(String tenantId, String sessionId, String writerToken,
             SealWriterRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
         JournalStoreRows.validateScope(tenantId, request.workspaceId(), sessionId);
@@ -396,7 +381,7 @@ final class JournalWriterLifecycle {
                     "csi_finalize_required",
                     "The original CSI writer requires retirement finalization.");
         }
-        JournalStoreRows.HeadRow head = storeRows.requireHeadForUpdate(tenantId, sessionId);
+        JournalStoreRows.HeadRow head = fencing.requireHeadAfterCsiCheck(tenantId, sessionId);
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         if (authority == null) {
             fencing.requireNoLifecycleClaim(tenantId, sessionId);
@@ -556,7 +541,7 @@ final class JournalWriterLifecycle {
         if (csiOriginal != null) {
             csiOriginal.requireContinuation();
         }
-        JournalStoreRows.HeadRow head = storeRows.requireHeadForUpdate(tenantId, sessionId);
+        JournalStoreRows.HeadRow head = fencing.requireHeadAfterCsiCheck(tenantId, sessionId);
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         JournalFencing.requireCsiWriter(csiOriginal, head);
         Timestamp now = storeRows.databaseNow();

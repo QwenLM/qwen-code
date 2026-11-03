@@ -2,7 +2,10 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.core.annotation.AnnotationUtils;
 import org.springframework.stereotype.Component;
+import org.springframework.stereotype.Repository;
+import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.lang.reflect.Modifier;
@@ -11,9 +14,11 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ManagedStoreDecompositionTest {
     private static final Set<Class<?>> COMPONENTS = Set.of(
@@ -42,7 +47,7 @@ class ManagedStoreDecompositionTest {
             assertThat(Modifier.isFinal(component.getModifiers())).as(component.getSimpleName()).isTrue();
             assertThat(Modifier.isPublic(component.getModifiers())).isFalse();
             assertThat(component.getInterfaces()).isEmpty();
-            assertThat(component.isAnnotationPresent(Component.class)).isFalse();
+            assertNoSpringComponent(component);
             for (var field : component.getDeclaredFields()) {
                 assertThat(Modifier.isFinal(field.getModifiers())).as(field.toString()).isTrue();
                 assertThat(field.getType()).isNotIn(ManagedAgentStore.class, ManagedSessionStore.class);
@@ -51,6 +56,26 @@ class ManagedStoreDecompositionTest {
                     .noneMatch(method -> method.isAnnotationPresent(Transactional.class));
             requireAcyclic(component, new HashSet<>());
         }
+    }
+
+    @Test
+    void componentGuardRejectsDirectAndComposedStereotypes() {
+        @Component
+        final class DirectComponent {}
+        @Service
+        final class ServiceComponent {}
+        @Repository
+        final class RepositoryComponent {}
+
+        for (Class<?> component : List.of(DirectComponent.class, ServiceComponent.class, RepositoryComponent.class)) {
+            assertThatThrownBy(() -> assertNoSpringComponent(component))
+                    .isInstanceOf(AssertionError.class).hasMessageContaining("Spring component");
+        }
+    }
+
+    private static void assertNoSpringComponent(Class<?> component) {
+        assertThat(AnnotationUtils.findAnnotation(component, Component.class))
+                .as("%s must not be a Spring component", component.getSimpleName()).isNull();
     }
 
     private static void requireAcyclic(Class<?> component, Set<Class<?>> visiting) {
@@ -67,6 +92,7 @@ class ManagedStoreDecompositionTest {
     void facadesKeepTheExistingEntryAndTransactionPopulation() {
         assertEntries(ManagedAgentStore.class, """
                 findSessionWorktree/2:- findSessionWorktrees/2:- insertSessionCommand/10::REQUIRED:DEFAULT:false
+                insertSessionCommand/11::REQUIRED:DEFAULT:false
                 insertWorkspaceSessionCommand/1::REQUIRED:DEFAULT:false insertInternalTeamLeadSessionCommand/6::REQUIRED:DEFAULT:false findWorkspaceCreateReplay/4:-
                 replayWorkspaceSessionCommand/4::REQUIRED:DEFAULT:false insertCsiSessionCommand/7:- requireCsiRequest/2:-
                 insertChildSessionCommand/8::REQUIRED:DEFAULT:false insertChildSessionCommand/9::REQUIRED:DEFAULT:false findChildWorkspaceCwd/3:-
@@ -155,8 +181,20 @@ class ManagedStoreDecompositionTest {
         Path sources = Path.of("..", "persistence", "src", "main", "java")
                 .resolve(ManagedAgentStore.class.getPackageName().replace('.', '/'));
         for (Class<?> facade : List.of(ManagedAgentStore.class, ManagedSessionStore.class)) {
-            assertThat(Files.readString(sources.resolve(facade.getSimpleName() + ".java")))
-                    .doesNotContain("SELECT ", "INSERT INTO ", "UPDATE ma_", "DELETE FROM ");
+            assertNoBusinessSql(Files.readString(sources.resolve(facade.getSimpleName() + ".java")));
         }
+    }
+
+    @Test
+    void sqlGuardRejectsLowerAndMixedCaseStatements() {
+        for (String sql : List.of("select * from ma_session", "iNsErT iNtO ma_session values (?)",
+                "Update ma_session set title = ?", "delete from ma_session")) {
+            assertThatThrownBy(() -> assertNoBusinessSql(sql)).isInstanceOf(AssertionError.class);
+        }
+    }
+
+    private static void assertNoBusinessSql(String source) {
+        assertThat(source.toUpperCase(Locale.ROOT))
+                .doesNotContain("SELECT ", "INSERT INTO ", "UPDATE MA_", "DELETE FROM ");
     }
 }

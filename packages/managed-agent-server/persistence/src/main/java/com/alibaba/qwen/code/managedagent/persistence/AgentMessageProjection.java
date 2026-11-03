@@ -47,7 +47,7 @@ final class AgentMessageProjection {
         this.objectMapper = objectMapper;
         this.clock = clock;
         this.itemMapper = (result, row) ->
-                        new ItemRow(
+                        new ItemRecord(
                                 result.getString("tenant_id"),
                                 result.getString("session_id"),
                                 result.getString("item_id"),
@@ -72,18 +72,13 @@ final class AgentMessageProjection {
 
     static final long MESSAGE_PAGE_BYTES = 8L * 1024 * 1024;
 
-    final RowMapper<ItemRow> itemMapper;
-
-    StoreModels.MessagePage findMessagePage(String tenantId, String sessionId,
-            String cursor, int limit, boolean backward) {
-        return findMessagePage(tenantId, sessionId, cursor, limit, backward, 0);
-    }
+    final RowMapper<ItemRecord> itemMapper;
 
     StoreModels.MessagePage findMessagePage(String tenantId, String sessionId,
             String cursor, int limit, boolean backward, long afterSequence) {
         storeRows.requireSession(tenantId, sessionId);
         ManagedLegacySessionGuard.requireLegacyMutation(Boolean.TRUE.equals(jdbc.queryForObject(
-                "SELECT csi_guard FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                "SELECT is_csi_guard FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 Boolean.class, tenantId, sessionId)));
         if (limit < 1 || limit > 100) {
             throw new ManagedAgentException(400, "invalid_limit",
@@ -153,7 +148,7 @@ final class AgentMessageProjection {
         selected.forEach(item -> arguments.add(
                 ManagedSchemaKeys.identity(item.id())));
         // Bodies are fetched only after the metadata-only lookahead has selected a bounded page.
-        List<ItemRecord> rows = withParts(jdbc.query(
+        List<ItemRecord> rows = List.copyOf(jdbc.query(
                 "SELECT " + ManagedSchemaProjection.MESSAGE.columns() + " FROM ma_message WHERE tenant_id = ?"
                         + " AND session_id = ? AND item_id IN (" + AgentStoreRows.placeholders(selected.size())
                         + ") ORDER BY first_sequence ASC, item_id ASC", itemMapper, arguments.toArray()));
@@ -298,7 +293,7 @@ final class AgentMessageProjection {
                     + " AND s.covered_sequence > s.replay_floor_sequence"
                     + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE"
                     + " private_scope.tenant_id = s.tenant_id AND private_scope.session_id = s.session_id"
-                    + " AND private_scope.csi_guard = FALSE)"
+                    + " AND private_scope.is_csi_guard = FALSE)"
                     + " AND NOT EXISTS (SELECT 1 FROM ma_turn t JOIN ma_public_event e ON"
                     + " e.tenant_id = t.tenant_id AND e.session_id = t.session_id AND e.turn_id = t.turn_id"
                     + " WHERE t.tenant_id = s.tenant_id AND t.session_id = s.session_id"
@@ -344,7 +339,7 @@ final class AgentMessageProjection {
 
     List<MaterializationTarget> findMaterializationTargets(int limit) {
         return jdbc.query(
-                "SELECT s.tenant_id, s.session_id FROM ma_session s JOIN ma_event_stream p ON p.tenant_id = s.tenant_id AND p.session_id = s.session_id AND p.stream_kind = 'SESSION' AND p.stream_id = X'' WHERE s.session_kind = 'PUBLIC' AND s.csi_guard = FALSE AND s.retired_at IS NULL AND s.status <> 'DELETED' AND p.projection_pending = TRUE ORDER BY p.gmt_modified ASC LIMIT ?",
+                "SELECT s.tenant_id, s.session_id FROM ma_session s JOIN ma_event_stream p ON p.tenant_id = s.tenant_id AND p.session_id = s.session_id AND p.stream_kind = 'SESSION' AND p.stream_id = X'' WHERE s.session_kind = 'PUBLIC' AND s.is_csi_guard = FALSE AND s.retired_at IS NULL AND s.status <> 'DELETED' AND p.is_projection_pending = TRUE ORDER BY p.gmt_modified ASC LIMIT ?",
                 (result, row) ->
                         new MaterializationTarget(
                                 result.getString("tenant_id"), result.getString("session_id")),
@@ -938,17 +933,6 @@ final class AgentMessageProjection {
         }
     }
 
-    List<ItemRecord> allItems(String tenantId, String sessionId) {
-        return withParts(jdbc.query("SELECT " + ManagedSchemaProjection.MESSAGE.columns() + " FROM ma_message WHERE"
-                        + " tenant_id = ? AND session_id = ? ORDER BY"
-                        + " first_sequence ASC",
-                itemMapper, tenantId, sessionId));
-    }
-
-    List<ItemRecord> withParts(List<ItemRow> rows) {
-        return rows.stream().map(ItemRow::toRecord).toList();
-    }
-
     static String string(Object value) {
         return value instanceof String ? (String) value : null;
     }
@@ -971,17 +955,5 @@ final class AgentMessageProjection {
             input.add(Map.copyOf(block));
         }
         return List.copyOf(input);
-    }
-
-    record ItemRow(String tenantId, String sessionId, String itemId,
-            String turnId, String type, String role, String status,
-            Map<String, Object> attributes, long firstSequence,
-            long lastSequence, long createdAt, long updatedAt,
-            long revision, List<ItemPartRecord> content) {
-        private ItemRecord toRecord() {
-            return new ItemRecord(tenantId, sessionId, itemId, turnId, type,
-                    role, status, attributes, firstSequence, lastSequence,
-                    createdAt, updatedAt, revision, content);
-        }
     }
 }

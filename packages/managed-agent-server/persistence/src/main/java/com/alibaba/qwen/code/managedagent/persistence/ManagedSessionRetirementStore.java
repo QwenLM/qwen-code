@@ -210,7 +210,7 @@ final class ManagedSessionRetirementStore {
         }
         var roots =
                 jdbc.queryForList(
-                        "SELECT retired_at, retirement_generation, recovery_protected FROM"
+                        "SELECT retired_at, retirement_generation, is_recovery_protected FROM"
                                 + " ma_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
                         tenant,
                         session);
@@ -218,7 +218,7 @@ final class ManagedSessionRetirementStore {
                 || roots.getFirst().get("retired_at") == null
                 || ToolPublicationRetentionStore.number(roots.getFirst(), "retirement_generation")
                         < 1
-                || ToolPublicationRetentionStore.flag(roots.getFirst(), "recovery_protected")) {
+                || ToolPublicationRetentionStore.flag(roots.getFirst(), "is_recovery_protected")) {
             throw new IllegalStateException("Session retirement is incomplete");
         }
         var heads =
@@ -276,7 +276,7 @@ final class ManagedSessionRetirementStore {
             throw new IllegalStateException("Session collection is not settled");
         }
         if (jdbc.update(
-                        "UPDATE ma_session SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", resource_gc_completed = TRUE WHERE tenant_id = ? AND session_id = ? AND retired_at IS NOT NULL",
+                        "UPDATE ma_session SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", is_resource_gc_completed = TRUE WHERE tenant_id = ? AND session_id = ? AND retired_at IS NOT NULL",
                         tenant,
                         session)
                 != 1) {

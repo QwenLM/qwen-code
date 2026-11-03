@@ -317,11 +317,6 @@ final class AgentLifecycleOperations {
     }
 
     OperationAdmission beginLifecycle(String tenantId, String sessionId, OperationKind kind,
-            String actorDigest, String idempotencyKey, String requestDigest, String actorId, boolean supported, int protocolVersion) {
-        return beginLifecycle(tenantId, sessionId, kind, actorDigest, idempotencyKey, requestDigest, actorId, supported, protocolVersion, true);
-    }
-
-    OperationAdmission beginLifecycle(String tenantId, String sessionId, OperationKind kind,
             String actorDigest, String idempotencyKey, String requestDigest, String actorId, boolean supported, int protocolVersion,
             boolean publicLifecycle) {
         return beginLifecycle(tenantId, sessionId, kind, actorDigest, idempotencyKey, requestDigest,
@@ -589,7 +584,7 @@ final class AgentLifecycleOperations {
                                     + " 'BLOCKED') AND available_at <= ? AND EXISTS (SELECT 1 FROM"
                                     + " ma_session private_scope WHERE private_scope.tenant_id ="
                                     + " ma_operation.tenant_id AND private_scope.session_id ="
-                                    + " ma_operation.session_id AND private_scope.csi_guard ="
+                                    + " ma_operation.session_id AND private_scope.is_csi_guard ="
                                     + " FALSE) ORDER BY available_at LIMIT ?",
                                 operationTargetMapper,
                                 now,
@@ -597,7 +592,7 @@ final class AgentLifecycleOperations {
         if (targets.size() < limit) {
             targets.addAll(
                     jdbc.query(
-                            "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE') AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_until < " + ManagedSchemaTime.SQL_NOW + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.csi_guard = FALSE) ORDER BY claim_until LIMIT ?",
+                            "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE') AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_until < " + ManagedSchemaTime.SQL_NOW + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.is_csi_guard = FALSE) ORDER BY claim_until LIMIT ?",
                             operationTargetMapper,
                             limit - targets.size()));
         }
@@ -844,12 +839,6 @@ final class AgentLifecycleOperations {
     }
 
     void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
-            String owner, long generation, String failureCode, long availableAt) {
-        blockLifecycleOperation(tenantId, sessionId, operationId, owner,
-                generation, failureCode, availableAt, false);
-    }
-
-    void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
             String owner, long generation, String failureCode, long availableAt,
             boolean budgetExempt) {
         WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
@@ -892,13 +881,6 @@ final class AgentLifecycleOperations {
                     operationId,
                     generation);
         }
-    }
-
-    void retryOperation(String tenantId, String sessionId,
-            String operationId, String owner, long claimGeneration,
-            long availableAt) {
-        retryOperation(tenantId, sessionId, operationId, owner,
-                claimGeneration, availableAt, false);
     }
 
     void retryOperation(String tenantId, String sessionId,
