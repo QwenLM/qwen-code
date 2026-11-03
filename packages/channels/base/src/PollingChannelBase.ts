@@ -8,6 +8,7 @@ import { ChannelBase } from './ChannelBase.js';
 import type { ChannelEventDetail } from './channel-events.js';
 import type { ChannelConfig } from './types.js';
 import { getGlobalQwenDir } from './paths.js';
+import { sanitizeLogText } from './sanitize.js';
 
 const INITIAL_BACKOFF = 2_000;
 const MAX_BACKOFF = 30_000;
@@ -127,14 +128,18 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
         );
         const detail = this.pollEventDetail;
         this.pollEventDetail = undefined;
+        const message = sanitizeLogText(
+          err instanceof Error ? err.message : String(err),
+          200,
+        );
         process.stderr.write(
-          `[Channel:${this.name}] poll error (attempt ${this.consecutiveErrors}), backing off ${backoff}ms: ${err}\n`,
+          `[Channel:${this.name}] poll error (attempt ${this.consecutiveErrors}), backing off ${backoff}ms: ${message}\n`,
         );
         this.recordChannelEvent({
           type: 'poll',
           outcome: 'failed',
           durationMs: Date.now() - startedAt,
-          error: err instanceof Error ? err.message : String(err),
+          error: message,
           detail: {
             ...(detail ?? {}),
             consecutiveErrors: this.consecutiveErrors,

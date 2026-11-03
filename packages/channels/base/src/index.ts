@@ -40,7 +40,10 @@ export type {
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
-export { CHANNEL_PROMPT_META_KEY } from './ChannelAgentBridge.js';
+export {
+  CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+} from './ChannelAgentBridge.js';
 export type { AcpBridgeOptions } from './AcpBridge.js';
 export { DaemonChannelBridge } from './DaemonChannelBridge.js';
 export type {
@@ -61,6 +64,11 @@ export {
   isChannelProactiveDeliveryError,
 } from './ChannelProactiveDeliveryError.js';
 export type { ChannelProactiveDeliveryDisposition } from './ChannelProactiveDeliveryError.js';
+export {
+  BoundSessionGoneError,
+  BoundSessionQueueFullError,
+  BoundSessionUnavailableError,
+} from './bound-session-delivery.js';
 export type {
   ChannelBaseOptions,
   ChannelMemoryRecallCacheStatus,
@@ -137,6 +145,7 @@ export type {
 } from './background-output-coordinator.js';
 export type {
   Attachment,
+  ChannelBoundSessions,
   ChannelConfig,
   ChannelConfigEnumFieldDescriptor,
   ChannelConfigFieldDescriptor,
@@ -174,6 +183,9 @@ export type {
   Envelope,
   GroupConfig,
   GroupPolicy,
+  PrBindingEntry,
+  PrBindingsSnapshot,
+  PrBindingSummary,
   PrivatePolicy,
   GroupSenderPolicy,
   ObservedChannelIdentity,

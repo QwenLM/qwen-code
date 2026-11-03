@@ -80,15 +80,17 @@ Local `gh` authentication requires an HTTPS `baseUrl` so the daemon host credent
 
 ## Configuration Options
 
-| Option                    | Default                  | Description                                                                                                                                      |
-| ------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `token`                   | unset                    | Optional classic PAT with `notifications` scope; overrides local `gh` authentication                                                             |
-| `useLocalGh`              | `false`                  | Explicitly reuse the daemon host's account-wide GitHub CLI authentication                                                                        |
-| `pollInterval`            | `60000`                  | Poll interval in ms                                                                                                                              |
-| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                                                                           |
-| `groupPolicy`             | `"disabled"`             | Must be `"open"`, `"allowlist"` with the repo (`owner/repo`) listed in `groups`, or `"pairing"` with the repo approved for notifications to flow |
-| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run                                                                 |
-| `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                                                                                     |
+| Option                    | Default                  | Description                                                                                                                                         |
+| ------------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `token`                   | unset                    | Optional classic PAT with `notifications` scope; overrides local `gh` authentication                                                                |
+| `useLocalGh`              | `false`                  | Explicitly reuse the daemon host's account-wide GitHub CLI authentication                                                                           |
+| `pollInterval`            | `60000`                  | Poll interval in ms                                                                                                                                 |
+| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                                                                              |
+| `groupPolicy`             | `"disabled"`             | Must be `"open"`, `"allowlist"` with the repo (`owner/repo`) listed in `groups`, or `"pairing"` with the repo approved for notifications to flow    |
+| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run                                                                    |
+| `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                                                                                        |
+| `deliverToBoundSessions`  | `false`                  | Deliver events for PRs bound to a live session into that session as a prompt instead of a channel-owned session (daemon-managed channels only)      |
+| `prWatchEvents`           | unset                    | Optional state transitions to watch for bound PRs: `ci_failure`, `merge_conflict`, `head_change`, `state_change`. Requires `deliverToBoundSessions` |
 
 Use `reasonFilter` to drop noisy notification classes such as `ci_activity` or `state_change`. Do not use `reasonFilter: ["mention"]` as a replacement for `groups.*.requireMention`: GitHub's `mention` reason is sticky at the thread level, so real new @mentions can arrive later under `comment`, `subscribed`, `author`, or other reasons and would be skipped.
 
@@ -125,7 +127,7 @@ The adapter uses GitHub's Notifications API as a wake-up signal:
 
 The comment window is `(previousCursor, currentMaxUpdatedAt]`. Accepted, running, and failed tasks are stored under `~/.qwen/channels/<workspace-scope>/` with private file permissions. On restart, the channel recovers those tasks before polling GitHub again. Failed tasks are attempted up to three times, then become terminal; cancelled tasks are terminal and are not rerun. A task whose final reply was already posted, suppressed, or queued for definite no-write retry is not rerun.
 
-The notification cursor does not advance while recoverable tasks remain, or when inbound task state cannot be read or written. This prevents a crash or agent failure from losing an accepted comment and preserves the deduplication keys needed to avoid a second dispatch from the notification feed.
+The notification cursor does not advance while recoverable tasks remain, or when inbound task state cannot be read or written. This prevents a crash or agent failure from losing an accepted comment and preserves the deduplication keys needed to avoid a second dispatch from the notification feed. There are two deliberate exceptions. **Bound-session backpressure** (see below): a deferred bound delivery has its own durable retry and a bounded deferral horizon, so it does not hold the shared cursor — its notification is marked read while the event stays recoverable in the task store. **Watch tasks while pending-event reconciliation is blocked** (for example an unreadable watch state file): they cannot make progress until a reconciliation succeeds, and watch events are detected from PR state rather than notifications, so they leave the cursor free as well — unrelated comments keep flowing, and the watch events deliver exactly once after the state file recovers.
 
 Non-comment activity (push, label changes) bumps the notification's `updated_at` but produces zero new comments in the window, so re-fetched threads are skipped without triggering the agent.
 
@@ -144,6 +146,94 @@ with private file permissions and retries it on the next channel start. The
 corresponding inbound task remains in `reply_pending` state until that delivery
 succeeds or reaches a definite terminal failure. Ambiguous delivery failures are
 not retried automatically because GitHub may have created the comment.
+
+## PR-Bound Session Delivery
+
+By default every event is handled by a channel-owned session. With
+`deliverToBoundSessions: true`, events for a PR that is bound to a live session
+(the PR bindings shown in the Web Shell sidebar, registered when a session
+creates or reviews a PR) are delivered into that session as a prompt instead,
+so the session that follows the PR handles the event with its existing context.
+
+- The injected prompt marks all GitHub content as untrusted event data. The
+  session's reply stays in the session; it is **not** published to GitHub
+  automatically, and the session may act on GitHub through its own tools.
+- Comment sender gates still apply before delivery. When several sessions are
+  bound to the same PR, the most recently updated non-archived session wins;
+  channel-owned sessions are never candidates.
+- When no bound session exists (or it cannot be restored), **comment** events
+  fall back to the normal channel path and its public-reply contract — on a
+  complete binding snapshot; while the snapshot is partial or its refresh is
+  failing, the fallback defers until a complete snapshot establishes that no
+  follower exists. A bound
+  session that is dormant after a daemon restart is woken automatically for
+  the delivery, so restarts do not divert events into public replies.
+  **Watch events (below) are private-only**: with no bound target they are
+  logged and retired, never published as PR comments.
+- A full prompt queue, a rate-limited daemon (HTTP 429), or a temporarily
+  unavailable session defers the event without consuming the retry budget;
+  the deferral is bounded (240 consecutive deferrals — ~4 hours at the
+  default 60s poll, and proportionally longer with a larger `pollInterval`),
+  and events that exhaust it are retired to a private dead-letter log
+  (`~/.qwen/channels/<workspace-scope>/<channel>-<name-hash>-github-bound-deadletter.jsonl`)
+  with a stderr alert rather than silently dropped. If the dead-letter write
+  itself fails, the task is kept (not removed) so the event stays recoverable.
+  Deferred bound events do not hold the shared notification cursor: their
+  notifications are marked read while the durable task keeps retrying.
+- **Two operator-visible states stop bound delivery from processing events.**
+  (1) _Cold start_: with `deliverToBoundSessions` on, the comment lane waits
+  for the first successful binding lookup. While the lookup has never
+  succeeded — or keeps answering an **empty partial** snapshot (a draining or
+  unreadable workspace) — `pollOnce` returns before fetching notifications, so
+  no GitHub event is processed; a throttled stderr line names the
+  state. The empty-partial deferral is bounded (30 consecutive polls): after
+  that the lane opens, and events whose PR is still absent from the incomplete
+  snapshot defer per-event (backpressure above) instead of taking the public
+  path — an incomplete scan never establishes that a PR is unbound. That
+  per-event deferral is PR-scoped: bindings are PR-only, so once the lane is
+  open an issue event is never deferred by it (its absence needs no snapshot)
+  and routes publicly even under a permanently partial scan. A permanently
+  partial snapshot has a steady-state cause besides a degraded workspace: the
+  binding scan reads at most 100 sessions per page and flags any multi-page
+  scan partial, so a workspace with more than 100 active sessions never
+  produces a complete snapshot. In that state a comment on a PR that no
+  session follows defers per-event until the dead-letter horizon (~4 hours at
+  the default poll) rather than falling back to the channel; issue events are
+  unaffected, since the per-event absence gate is PR-scoped. The lane-level
+  cold start above still holds every notification, issue events included,
+  until the first successful binding lookup. Once a complete snapshot lands,
+  deferred events are re-resolved: delivered privately to a follower, or
+  publicly once the complete snapshot establishes there is none. (2) _Backpressure_: a deferred bound event keeps its own durable
+  retry (previous bullet) while the rest of the channel continues normally.
+- The injected prompt names the comment author and marks truncation
+  explicitly at every level: comment content is capped at 6,000 code points
+  with an `[prompt truncated: N more characters omitted]` notice, an
+  aggregate batch that drops older comments says so, and each aggregated
+  comment's 400-character display cap carries its own
+  `[comment truncated: N more characters]` marker — no tail is silently
+  consumed.
+- This feature requires a daemon-managed channel; standalone
+  `qwen channel start` ignores the setting with a warning.
+
+With `prWatchEvents`, the channel additionally watches bound PRs for state
+transitions the Notifications API cannot deliver, inside its existing poll
+cycle: `ci_failure` (checks turn red on a head, once per head — including
+`startup_failure`), `merge_conflict` (`mergeable_state` becomes `dirty`,
+edge-triggered: `dirty → clean → dirty` fires again), `head_change` (new commits
+pushed, including a force-push revisit of a recent SHA), and `state_change`
+(PR merged or closed; close → reopen → close fires again). Detection is
+API-level and spends no model tokens until a transition fires. A quiet PR with
+settled CI costs one API call per poll; a PR whose CI is still pending is
+re-checked every 5 minutes until it settles, and settled heads are re-checked
+every 10 minutes (GitHub does not advance a PR's `updated_at` on check
+re-runs, so the periodic re-check is what catches a re-run turning red). At
+most 30 bound PRs are actively polled. A credential failure or rate limit
+(401/403/429) aborts the whole watch pass for that poll — one shared failure
+must not issue one doomed request per watched PR — while a per-PR permanent
+status (404/410/451) only skips that PR. A failing Checks endpoint never
+suppresses the other three detections: their data comes from `pulls.get`,
+and the last known CI aggregate stands until a fetch succeeds again.
+Transitions are persisted before delivery, so restarts do not re-fire them.
 
 ## Known Limitations
 
