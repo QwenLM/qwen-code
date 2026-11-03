@@ -92,7 +92,7 @@ class ManagedAgentDefinitionAdmissionTest {
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setWorkspaceShellEnabled(true);
-        var selected = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var selected = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var transactions = new TransactionTemplate(transactionManager);
         String id = transactions.execute(status -> selected.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                 .tenantId(tenant)
@@ -146,8 +146,7 @@ class ManagedAgentDefinitionAdmissionTest {
         properties.getHarness().setWorkspaceShellEnabled(true);
         properties.getHarness().setApprovalMode("default");
         properties.setDefinitionToolProfiles(List.of("hosted-workspace-shell/1"));
-        var selected = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
-        selected.setManagedAgentDefinitionStore(definitions);
+        var selected = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), definitions, null);
         String agent = definition.get("id").asText();
         assertThat(selected.workspaceSessionOptions(tenant, agent).planModeSupported()).isFalse();
         var transactions = new TransactionTemplate(transactionManager);
@@ -196,9 +195,8 @@ class ManagedAgentDefinitionAdmissionTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setWorkspaceShellEnabled(shellEnabled);
         properties.getHarness().setApprovalMode("default");
-        var selected = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(),
-                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
-        selected.setManagedAgentDefinitionStore(definitions);
+        var selected = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(),
+                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), definitions, null);
         var transaction = new TransactionTemplate(transactionManager);
         var workspace = new WorkspaceSelection("ws-a", ".");
         String builtin = transaction.execute(status ->
@@ -250,9 +248,8 @@ class ManagedAgentDefinitionAdmissionTest {
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(
                 new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
                         tenant, "storage-a", "/workspace")));
-        var enabled = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(),
-                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
-        enabled.setManagedAgentDefinitionStore(definitions);
+        var enabled = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(),
+                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), definitions, null);
         var transaction = new TransactionTemplate(transactionManager);
         var workspace = new WorkspaceSelection("ws-a", ".");
         var input = List.<Map<String, Object>>of(
@@ -271,9 +268,8 @@ class ManagedAgentDefinitionAdmissionTest {
         assertThat(enabled.requireSession(tenant, initial.sessionId()).approvalMode())
                 .isEqualTo(mode);
         properties.getHarness().setWorkspaceShellEnabled(false);
-        var disabled = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(),
-                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
-        disabled.setManagedAgentDefinitionStore(definitions);
+        var disabled = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(),
+                ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), definitions, null);
         var empty = transaction.execute(status -> disabled.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                 .tenantId(tenant)
                 .actorId("actor")
@@ -611,7 +607,7 @@ class ManagedAgentDefinitionAdmissionTest {
         var definitions = new com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore(jdbc, new RequestDigests());
         assertThat(definitions.pinnedContent(session).get("instructions"))
                 .isEqualTo("Review in Chinese.");
-        var resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore(jdbc));
+        var resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         var first = resources.publishAgentInstructions(tenant, "workspace", session.sessionId(),
                 "Review in Chinese.");
         assertThat(resources.publishAgentInstructions(tenant, "workspace", session.sessionId(),

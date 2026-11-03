@@ -32,7 +32,7 @@
 
 - `assertions.json` 在 `fail` 非零时带 `failures: [{ id, attribution }]`，每条失败断言一项，归因为 `pr`、`harness` 或 `environment`。若 `findings`/`blocked` 的账本里没有任何一条归因为 `pr`，报错；账本长度与 `fail` 不一致，同样报错。有失败但没有账本只报警告，因此旧产物仍能通过。
 - `mutations.json` 可以声明 `coverageClaim: "per-commit"`，并给出来自 `git log --no-merges <previous>..<head> --not <target>` 的 `productionCommits` 与 `rows[].commit`。列出的提交没有对应行时报错，并点名这些提交；列表为空同样报错——对空集合做的声明恒真。
-- `assertions.json` 可以带 `gates: [{ suite, pass, fail, skipped? }]`，轮次作为定向门禁运行的每个已有测试套件一项。这些计数不进 `pass`/`fail`/`total`——后者只统计本轮自己写的检查；发布端把门禁合计单独印成一行。列表格式不对报错。断言超过 1000 条却没有 `gates` 只报警告：最近 18 份 CI 产物里这样的 4 轮都把整个 workspace 的测试套件算了进去。
+- `assertions.json` 可以带 `gates: [{ suite, pass, fail, skipped? }]`，轮次作为定向门禁运行的每个已有测试套件一项。这些计数不进 `pass`/`fail`/`total`——后者只统计本轮自己写的检查，每次套件运行算其中一条；发布端把门禁合计单独印成一行。列表格式不对报错。断言超过 1000 条却没有记录任何门禁结果只报警告：最近 18 份 CI 产物里这样的 4 轮都把整个 workspace 的测试套件算了进去。
 
 每个已准备的产物目录保存带完整坐标的 `context.json`——`repo`、`pr`、`baseRefOid` 与 `headRefOid`——本地轮次因此从一个文件读出两个 OID，而不是从 `HEAD` 推导。prepare 只在当前树是 `headRefOid` 的干净检出时才写它：轮次复用这棵树作为 A/B 的 head 侧，所以 HEAD 不对会退出 3 并点名要跑的 `git checkout`，树脏会退出 3 并要求维护者自己提交或 stash——脚本绝不代为 stash，且拒绝时不创建任何产物目录。检查器优先使用该轮快照，并注明实际使用的来源。旧目录回退到按 PR 共享的快照；该轮快照不可读或无效时只报警告，不会改用后续轮次的共享提交号。
 
