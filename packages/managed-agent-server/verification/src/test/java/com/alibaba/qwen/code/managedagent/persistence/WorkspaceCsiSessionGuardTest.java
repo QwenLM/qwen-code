@@ -87,14 +87,14 @@ class WorkspaceCsiSessionGuardTest {
         sessionId = com.alibaba.qwen.code.managedagent.persistence.PrivateCsiFixture.create(jdbc, manager, json, properties,
                 new com.alibaba.qwen.code.managedagent.contracts.workspace.PrivateCsiSession.Request(registration, "actor", "create", null, null,
                         new WorkspaceSelection("workspace", "."))).sessionId();
-        var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
+                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         request = transaction.execute(status -> managed.requireCsiRequest(registration, sessionId));
         bindings = new JdbcRuntimeBindingRepository(source,
                 new AesGcmSecretProtector("test", new byte[32]));
         sessions = new JdbcRuntimeSessionRepository(source);
         executions = new JdbcToolExecutionRepository(source);
-        journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
     }
 
     @ParameterizedTest
@@ -102,8 +102,8 @@ class WorkspaceCsiSessionGuardTest {
     void publicLifecycleCannotFenceAnOriginalPrivateCsiSession(StoreModels.OperationKind kind) {
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
+                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var before = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session WHERE session_id = ?", sessionId);
         var ownership = reservations.inspect(registration);
         assertApiCode(() -> transaction.execute(status -> managed.beginWorkspaceLifecycle("tenant", sessionId,

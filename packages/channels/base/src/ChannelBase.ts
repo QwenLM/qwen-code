@@ -338,6 +338,7 @@ type CommandHandler = (envelope: Envelope, args: string) => Promise<boolean>;
 type PendingPermission = {
   requestId: string;
   sessionId: string;
+  runId?: string;
   target: SessionTarget;
   request: PermissionRequestEvent['request'];
   sourceLabel?: string;
@@ -959,6 +960,7 @@ export abstract class ChannelBase {
     const pending: PendingPermission = {
       requestId: event.requestId,
       sessionId: event.sessionId,
+      runId: this.activePrompts.get(event.sessionId)?.runId,
       target,
       request: event.request,
       ...(sourceLabel ? { sourceLabel } : {}),
@@ -1449,6 +1451,7 @@ export abstract class ChannelBase {
       config.groupPolicy,
       config.groups,
       pairingStore,
+      (groupId) => this.normalizeGroupId(groupId),
     );
     this.dmGate = new DmGate(
       this.privatePolicy === 'disabled' ? 'disabled' : 'open',
@@ -3341,6 +3344,7 @@ export abstract class ChannelBase {
   private pendingPermissionForEnvelope(
     envelope: Envelope,
     args: string,
+    requireOwner: boolean,
     selectedSessionId?: string | null,
   ): PendingPermissionLookup {
     const trimmed = args.trim();
@@ -3348,7 +3352,11 @@ export abstract class ChannelBase {
       const explicit = this.pendingPermissions.get(trimmed);
       if (
         explicit &&
-        this.canEnvelopeAnswerPendingPermission(envelope, explicit)
+        this.canEnvelopeAnswerPendingPermission(
+          envelope,
+          explicit,
+          requireOwner,
+        )
       ) {
         return { kind: 'found', pending: explicit };
       }
@@ -3367,7 +3375,11 @@ export abstract class ChannelBase {
           pending !== undefined &&
           (selectedSessionId === undefined ||
             pending.sessionId === selectedSessionId) &&
-          this.canEnvelopeAnswerPendingPermission(envelope, pending),
+          this.canEnvelopeAnswerPendingPermission(
+            envelope,
+            pending,
+            requireOwner,
+          ),
       );
     if (matching.length === 0) {
       return { kind: 'none', explicit: false };
@@ -3384,7 +3396,21 @@ export abstract class ChannelBase {
   private canEnvelopeAnswerPendingPermission(
     envelope: Envelope,
     pending: PendingPermission,
+    requireOwner: boolean,
   ): boolean {
+    if (requireOwner) {
+      const active = this.activePrompts.get(pending.sessionId);
+      if (
+        !active ||
+        pending.runId !== active.runId ||
+        active.owner?.id !== envelope.senderId ||
+        active.cancelled ||
+        active.loopPrompt ||
+        pending.target.senderId !== envelope.senderId
+      ) {
+        return false;
+      }
+    }
     return (
       pending.target.chatId === envelope.chatId &&
       pending.target.threadId === envelope.threadId &&
@@ -3620,7 +3646,8 @@ export abstract class ChannelBase {
     args: string,
     decision: 'approve' | 'approve-always' | 'deny',
   ): Promise<boolean> {
-    if (!this.isAuthorizedForSharedSession(envelope)) {
+    const requireOwner = !this.isAuthorizedForSharedSession(envelope);
+    if (requireOwner && decision === 'approve-always') {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
@@ -3644,8 +3671,17 @@ export abstract class ChannelBase {
     const lookup = this.pendingPermissionForEnvelope(
       envelope,
       args,
+      requireOwner,
       bareNamedCommand ? (selectedTask?.sessionId ?? null) : undefined,
     );
+    if (lookup.kind === 'none' && requireOwner) {
+      await this.sendThreadMessage(
+        envelope.chatId,
+        envelope.threadId,
+        'Only authorized members can answer permission requests in this shared session.',
+      );
+      return true;
+    }
     if (lookup.kind === 'ambiguous') {
       const requestList = lookup.requestIds
         .slice(0, 6)
@@ -6134,7 +6170,7 @@ export abstract class ChannelBase {
     if (!envelope.isGroup) {
       return 0;
     }
-    const groupCfg = this.config.groups[envelope.chatId];
+    const groupCfg = this.groupConfigFor(envelope.chatId);
     const wildcardGroupCfg = this.config.groups['*'];
     const configured =
       groupCfg?.groupHistoryLimit ??
@@ -6310,7 +6346,22 @@ export abstract class ChannelBase {
 
   private groupConfigFor(key: string): GroupConfig | undefined {
     const groups = this.config.groups;
-    return Object.hasOwn(groups, key) ? groups[key] : undefined;
+    if (Object.hasOwn(groups, key)) return groups[key];
+    const normalized = this.normalizeGroupId(key);
+    for (const [groupId, group] of Object.entries(groups)) {
+      if (this.normalizeGroupId(groupId) === normalized) return group;
+    }
+    return undefined;
+  }
+
+  /**
+   * Group IDs are matched verbatim. A platform whose IDs are case-insensitive
+   * (GitHub repository full names) overrides this so the spelling an operator
+   * configured still matches the canonical ID the platform reports — for the
+   * allowlist, the sender policy and the per-group overrides alike.
+   */
+  protected normalizeGroupId(groupId: string): string {
+    return groupId;
   }
 
   protected preflightInbound(

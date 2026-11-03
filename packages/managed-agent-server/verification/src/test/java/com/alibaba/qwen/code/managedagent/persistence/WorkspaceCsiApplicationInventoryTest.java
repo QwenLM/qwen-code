@@ -81,8 +81,8 @@ class WorkspaceCsiApplicationInventoryTest {
         session = com.alibaba.qwen.code.managedagent.persistence.PrivateCsiFixture.create(jdbc, manager, json, properties,
                 new com.alibaba.qwen.code.managedagent.contracts.workspace.PrivateCsiSession.Request(registration, "actor", "create", null, null,
                         new WorkspaceSelection("workspace", "."))).sessionId();
-        var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
+                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var transaction = new TransactionTemplate(manager);
         var request = transaction.execute(status -> managed.requireCsiRequest(registration, session));
         var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
@@ -1540,7 +1540,7 @@ class WorkspaceCsiApplicationInventoryTest {
             catalog.add(Map.of("name", "imported-" + i, "description", "Imported Skill",
                     "body", i == 0 ? "x".repeat(404465) : "Instruction", "model_invocable", false));
         }
-        var resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         resources.publishAgentSkills("foreign", "foreign-workspace", "foreign-session", catalog);
         assertThat(readHistory(expected, new java.util.ArrayList<>(), true).blockers()).isEmpty();
         resources.publishAgentSkills("foreign", "foreign-workspace", "foreign-session", List.of(

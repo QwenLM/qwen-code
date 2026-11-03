@@ -74,6 +74,34 @@ describe('getWorkflowModeControlState', () => {
     );
   });
 
+  it.each([
+    [{ workflowModeStatus: 'ready' as const }, 'Let new tasks use workflows'],
+    [
+      { workflowModeStatus: 'ready' as const, workflowModePending: true },
+      'Updating…',
+    ],
+    [{ workflowModeStatus: 'syncing' as const }, 'Syncing…'],
+  ])('summarizes an available mode in one line (%o)', (props, summary) => {
+    expect(
+      getWorkflowModeControlState(
+        { workflowMode: availableOff, ...props },
+        'en',
+      )?.summary,
+    ).toBe(summary);
+  });
+
+  it('summarizes an unavailable saved preference by its state', () => {
+    expect(
+      getWorkflowModeControlState(
+        {
+          workflowModeStatus: 'ready',
+          workflowMode: { requested: true, available: false, effective: false },
+        },
+        'zh-CN',
+      )?.summary,
+    ).toBe('已开启，当前不可用');
+  });
+
   it('disables enabling an unavailable mode', () => {
     const control = getWorkflowModeControlState(
       {
