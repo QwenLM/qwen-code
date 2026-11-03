@@ -1448,6 +1448,12 @@ export interface ConfigParameters {
   /** Consent gate for the propose_goal tool; see ProposeGoalTool. */
   modelProposedGoals?: ModelProposedGoalsMode;
   artifactEnabled?: boolean;
+  /**
+   * False for hosts that expose no `record_artifact` tool and forward no
+   * artifact metadata, such as tool workers. Unlike `artifactEnabled`, the
+   * artifact env flags cannot turn recording back on.
+   */
+  artifactRecordingSupported?: boolean;
   artifactAutoOpen?: boolean;
   artifactPublisher?: 'local' | 'host' | 'oss';
   artifactHost?: ArtifactHostConfig;
@@ -3196,6 +3202,7 @@ export class Config {
   private readonly unifiedAgentLoopEnabled: boolean = false;
   private readonly agentCollaborationEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
+  private readonly artifactRecordingSupported: boolean = true;
   private artifactSnapshotsEnabled = false;
   private readonly artifactAutoOpen: boolean = true;
   private readonly artifactPublisher: 'local' | 'host' | 'oss' = 'local';
@@ -3651,6 +3658,7 @@ export class Config {
     this.unifiedAgentLoopEnabled = params.unifiedAgentLoopEnabled ?? false;
     this.agentCollaborationEnabled = params.agentCollaborationEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
+    this.artifactRecordingSupported = params.artifactRecordingSupported ?? true;
     this.artifactAutoOpen = params.artifactAutoOpen ?? true;
     this.artifactPublisher = params.artifactPublisher ?? 'local';
     this.artifactHost = params.artifactHost;
@@ -10576,6 +10584,7 @@ export class Config {
   }
 
   isRecordArtifactEnabled(): boolean {
+    if (!this.artifactRecordingSupported) return false;
     if (process.env['QWEN_CODE_DISABLE_ARTIFACT'] === '1') return false;
     if (this.sdkMode) return false;
     if (process.env['QWEN_CODE_ENABLE_ARTIFACT'] === '1') return true;
