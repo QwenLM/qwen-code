@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   isPluginShadowPanel,
   installWebShellShadowStyles,
@@ -78,5 +78,43 @@ describe('installWebShellShadowStyles', () => {
     cleanup();
     packageStyle.remove();
     expect(shadowRoot.querySelector('style')).toBeNull();
+  });
+
+  it('does not release a shared constructable sheet while another shell uses it', () => {
+    const replaceSync = vi.fn();
+    vi.stubGlobal(
+      'CSSStyleSheet',
+      class {
+        replaceSync(css: string) {
+          replaceSync(css);
+        }
+      },
+    );
+    const packageStyle = document.createElement('style');
+    packageStyle.dataset.qwenWebShell = 'component';
+    packageStyle.textContent = '[data-web-shell-root] { color: green; }';
+    document.head.appendChild(packageStyle);
+    const host = document.createElement('div');
+    const shadow = host.attachShadow({ mode: 'open' });
+    let sheets: CSSStyleSheet[] = [];
+    Object.defineProperty(shadow, 'adoptedStyleSheets', {
+      get: () => sheets,
+      set: (next: CSSStyleSheet[]) => {
+        sheets = next;
+      },
+    });
+    try {
+      const releaseFirst = installWebShellShadowStyles(shadow);
+      const releaseSecond = installWebShellShadowStyles(shadow);
+      expect(replaceSync).toHaveBeenCalledWith(packageStyle.textContent);
+      expect(sheets).toHaveLength(1);
+      releaseFirst();
+      expect(sheets).toHaveLength(1);
+      releaseSecond();
+      expect(sheets).toHaveLength(0);
+    } finally {
+      packageStyle.remove();
+      vi.unstubAllGlobals();
+    }
   });
 });

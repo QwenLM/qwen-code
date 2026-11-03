@@ -19,10 +19,13 @@ import org.springframework.boot.context.properties.source.ConfigurationPropertyS
 import org.springframework.boot.convert.ApplicationConversionService;
 import org.springframework.boot.env.EnvironmentPostProcessorApplicationListener;
 import org.springframework.boot.logging.LoggingSystem;
+import org.springframework.boot.web.server.Ssl;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.PropertySource;
 import org.springframework.core.env.SimpleCommandLinePropertySource;
 
+import java.net.Inet6Address;
+import java.net.InetAddress;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -50,6 +53,7 @@ public final class ResolvedConfiguration {
     private static final Pattern PLACEHOLDER =
             Pattern.compile("^\\$\\{([^:}]+)(?::[^}]*)?}$");
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final int DEFAULT_SERVER_PORT = 8080;
 
     private ResolvedConfiguration() {
     }
@@ -115,7 +119,80 @@ public final class ResolvedConfiguration {
         resolved.put("authMode", "auto".equals(mode) ? "open" : mode);
         resolved.put("trustedActorHeader",
                 StringUtils.trimToEmpty(properties.getTrustedActorHeader()));
+        resolved.put("harnessBaseUrl",
+                StringUtils.trimToEmpty(properties.getHarness().getBaseUrl()));
+        Binder binder = Binder.get(environment);
+        int port = binder.bind("server.port", Integer.class)
+                .orElse(DEFAULT_SERVER_PORT);
+        boolean ssl = Ssl.isEnabled(
+                binder.bind("server.ssl", Ssl.class).orElse(null));
+        String serverUrl = localUrl(ssl,
+                binder.bind("server.address", InetAddress.class).orElse(null),
+                port);
+        resolved.put("serverUrl", serverUrl);
+        resolved.put("healthUrl", healthUrl(binder, port, ssl, serverUrl));
         return resolved;
+    }
+
+    /**
+     * A URL that reaches a listener from this host, or empty when it has no
+     * fixed port: 0 picks one at start and a negative port starts none. A
+     * wildcard bind serves the loopback interface of its family, and any
+     * other address is dialled as bound.
+     */
+    private static String localUrl(boolean ssl, InetAddress address,
+            int port) {
+        if (port <= 0) {
+            return "";
+        }
+        String host;
+        if (address instanceof Inet6Address) {
+            // ::1 is the only IPv6 loopback address.
+            host = address.isAnyLocalAddress() || address.isLoopbackAddress()
+                    ? "[::1]" : "[" + address.getHostAddress() + "]";
+        } else {
+            host = address == null || address.isAnyLocalAddress()
+                    ? "127.0.0.1" : address.getHostAddress();
+        }
+        return (ssl ? "https" : "http") + "://" + host + ":" + port;
+    }
+
+    /**
+     * Where the health endpoint answers, by Spring Boot's rules for the
+     * management port (ManagementPortType): unset or equal to the server's,
+     * it shares the server's listener; negative, it turns the HTTP endpoints
+     * off; otherwise it opens a listener of its own, which binds
+     * management.server.address and keeps the server's TLS unless
+     * management.server.ssl replaces it. A blank path mapping keeps the
+     * endpoint's name, as MappingWebEndpointPathMapper ignores it. Empty when
+     * nothing answers at a fixed URL.
+     */
+    private static String healthUrl(Binder binder, int serverPort,
+            boolean serverSsl, String serverUrl) {
+        String endpoint = path(binder.bind("management.endpoints.web.base-path",
+                String.class).orElse("/actuator"))
+                + path(StringUtils.defaultIfBlank(binder.bind(
+                        "management.endpoints.web.path-mapping.health",
+                        String.class).orElse(null), "health"));
+        Integer port = binder.bind("management.server.port", Integer.class)
+                .orElse(null);
+        if (port == null || port != 0 && port == serverPort) {
+            return serverUrl.isEmpty() ? "" : serverUrl + endpoint;
+        }
+        Ssl ssl = binder.bind("management.server.ssl", Ssl.class).orElse(null);
+        String url = localUrl(ssl == null ? serverSsl : Ssl.isEnabled(ssl),
+                binder.bind("management.server.address", InetAddress.class)
+                        .orElse(null),
+                port);
+        return url.isEmpty() ? "" : url + path(binder.bind(
+                "management.server.base-path", String.class).orElse(""))
+                + endpoint;
+    }
+
+    /** A path segment as Spring Boot joins it: one leading slash, no trailing one. */
+    private static String path(String value) {
+        String path = StringUtils.strip(StringUtils.trimToEmpty(value), "/");
+        return path.isEmpty() ? "" : "/" + path;
     }
 
     /** Where the state directory came from, in the words of an operator. */

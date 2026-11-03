@@ -36,6 +36,8 @@ import {
   ChannelProactiveDeliveryError,
   isChannelProactiveDeliveryError,
 } from './ChannelProactiveDeliveryError.js';
+import { appendChannelEvent } from './channel-events.js';
+import type { ChannelEventInput } from './channel-events.js';
 import { GroupGate } from './GroupGate.js';
 import { DmGate } from './DmGate.js';
 import { GroupHistoryStore } from './group-history-store.js';
@@ -338,6 +340,7 @@ type CommandHandler = (envelope: Envelope, args: string) => Promise<boolean>;
 type PendingPermission = {
   requestId: string;
   sessionId: string;
+  runId?: string;
   target: SessionTarget;
   request: PermissionRequestEvent['request'];
   sourceLabel?: string;
@@ -959,6 +962,7 @@ export abstract class ChannelBase {
     const pending: PendingPermission = {
       requestId: event.requestId,
       sessionId: event.sessionId,
+      runId: this.activePrompts.get(event.sessionId)?.runId,
       target,
       request: event.request,
       ...(sourceLabel ? { sourceLabel } : {}),
@@ -1449,6 +1453,7 @@ export abstract class ChannelBase {
       config.groupPolicy,
       config.groups,
       pairingStore,
+      (groupId) => this.normalizeGroupId(groupId),
     );
     this.dmGate = new DmGate(
       this.privatePolicy === 'disabled' ? 'disabled' : 'open',
@@ -3341,6 +3346,7 @@ export abstract class ChannelBase {
   private pendingPermissionForEnvelope(
     envelope: Envelope,
     args: string,
+    requireOwner: boolean,
     selectedSessionId?: string | null,
   ): PendingPermissionLookup {
     const trimmed = args.trim();
@@ -3348,7 +3354,11 @@ export abstract class ChannelBase {
       const explicit = this.pendingPermissions.get(trimmed);
       if (
         explicit &&
-        this.canEnvelopeAnswerPendingPermission(envelope, explicit)
+        this.canEnvelopeAnswerPendingPermission(
+          envelope,
+          explicit,
+          requireOwner,
+        )
       ) {
         return { kind: 'found', pending: explicit };
       }
@@ -3367,7 +3377,11 @@ export abstract class ChannelBase {
           pending !== undefined &&
           (selectedSessionId === undefined ||
             pending.sessionId === selectedSessionId) &&
-          this.canEnvelopeAnswerPendingPermission(envelope, pending),
+          this.canEnvelopeAnswerPendingPermission(
+            envelope,
+            pending,
+            requireOwner,
+          ),
       );
     if (matching.length === 0) {
       return { kind: 'none', explicit: false };
@@ -3384,7 +3398,21 @@ export abstract class ChannelBase {
   private canEnvelopeAnswerPendingPermission(
     envelope: Envelope,
     pending: PendingPermission,
+    requireOwner: boolean,
   ): boolean {
+    if (requireOwner) {
+      const active = this.activePrompts.get(pending.sessionId);
+      if (
+        !active ||
+        pending.runId !== active.runId ||
+        active.owner?.id !== envelope.senderId ||
+        active.cancelled ||
+        active.loopPrompt ||
+        pending.target.senderId !== envelope.senderId
+      ) {
+        return false;
+      }
+    }
     return (
       pending.target.chatId === envelope.chatId &&
       pending.target.threadId === envelope.threadId &&
@@ -3620,7 +3648,8 @@ export abstract class ChannelBase {
     args: string,
     decision: 'approve' | 'approve-always' | 'deny',
   ): Promise<boolean> {
-    if (!this.isAuthorizedForSharedSession(envelope)) {
+    const requireOwner = !this.isAuthorizedForSharedSession(envelope);
+    if (requireOwner && decision === 'approve-always') {
       await this.sendThreadMessage(
         envelope.chatId,
         envelope.threadId,
@@ -3644,8 +3673,17 @@ export abstract class ChannelBase {
     const lookup = this.pendingPermissionForEnvelope(
       envelope,
       args,
+      requireOwner,
       bareNamedCommand ? (selectedTask?.sessionId ?? null) : undefined,
     );
+    if (lookup.kind === 'none' && requireOwner) {
+      await this.sendThreadMessage(
+        envelope.chatId,
+        envelope.threadId,
+        'Only authorized members can answer permission requests in this shared session.',
+      );
+      return true;
+    }
     if (lookup.kind === 'ambiguous') {
       const requestList = lookup.requestIds
         .slice(0, 6)
@@ -6134,7 +6172,7 @@ export abstract class ChannelBase {
     if (!envelope.isGroup) {
       return 0;
     }
-    const groupCfg = this.config.groups[envelope.chatId];
+    const groupCfg = this.groupConfigFor(envelope.chatId);
     const wildcardGroupCfg = this.config.groups['*'];
     const configured =
       groupCfg?.groupHistoryLimit ??
@@ -6310,14 +6348,32 @@ export abstract class ChannelBase {
 
   private groupConfigFor(key: string): GroupConfig | undefined {
     const groups = this.config.groups;
-    return Object.hasOwn(groups, key) ? groups[key] : undefined;
+    if (Object.hasOwn(groups, key)) return groups[key];
+    const normalized = this.normalizeGroupId(key);
+    for (const [groupId, group] of Object.entries(groups)) {
+      if (this.normalizeGroupId(groupId) === normalized) return group;
+    }
+    return undefined;
+  }
+
+  /**
+   * Group IDs are matched verbatim. A platform whose IDs are case-insensitive
+   * (GitHub repository full names) overrides this so the spelling an operator
+   * configured still matches the canonical ID the platform reports — for the
+   * allowlist, the sender policy and the per-group overrides alike.
+   */
+  protected normalizeGroupId(groupId: string): string {
+    return groupId;
   }
 
   protected preflightInbound(
     envelope: Envelope,
     options: PreflightInboundOptions = {},
   ): boolean | Promise<boolean> {
-    if (!this.applyMessageRoute(envelope)) return false;
+    if (!this.applyMessageRoute(envelope)) {
+      this.recordPreflightRejected('message_route', envelope);
+      return false;
+    }
     const groupResult = this.groupGate.check(envelope, {
       createPairingRequest: !options.deferPairingRequests,
     });
@@ -6327,7 +6383,7 @@ export abstract class ChannelBase {
       (envelope.isMentioned || envelope.isReplyToBot);
     if (!groupResult.allowed && !deferredGroupPairing) {
       if (groupResult.pairing !== undefined) {
-        this.logPreflightRejected('group_pairing_required');
+        this.logPreflightRejected('group_pairing_required', envelope);
         return this.onGroupPairingRequired(
           envelope.chatId,
           groupResult.pairing,
@@ -6347,17 +6403,23 @@ export abstract class ChannelBase {
       if (groupResult.reason === 'mention_required') {
         // This is the expected high-frequency drop path for group bots.
         this.recordPendingGroupHistory(envelope);
+        // Journaled but not logged: the operator needs the reason, the log
+        // must not gain a line per ambient comment.
+        this.recordPreflightRejected('group_mention_required', envelope);
       } else if (groupResult.reason === 'pairing_trigger_required') {
         return false;
       } else {
-        this.logPreflightRejected(`group_${groupResult.reason ?? 'denied'}`);
+        this.logPreflightRejected(
+          `group_${groupResult.reason ?? 'denied'}`,
+          envelope,
+        );
       }
       return false;
     }
 
     const dmResult = this.dmGate.check(envelope);
     if (!dmResult.allowed) {
-      this.logPreflightRejected(`dm_${dmResult.reason ?? 'denied'}`);
+      this.logPreflightRejected(`dm_${dmResult.reason ?? 'denied'}`, envelope);
       return false;
     }
 
@@ -6376,7 +6438,7 @@ export abstract class ChannelBase {
     const result = senderGate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
       if (result.pairing !== undefined) {
-        this.logPreflightRejected('sender_pairing_required');
+        this.logPreflightRejected('sender_pairing_required', envelope);
         return this.onPairingRequired(
           envelope.chatId,
           result.pairing,
@@ -6395,6 +6457,7 @@ export abstract class ChannelBase {
       }
       this.logPreflightRejected(
         senderGate === this.gate ? 'sender_denied' : 'group_sender_denied',
+        envelope,
       );
       return false;
     }
@@ -6403,13 +6466,46 @@ export abstract class ChannelBase {
     return true;
   }
 
-  protected logPreflightRejected(reason: string): void {
+  /**
+   * Logs a preflight rejection and journals it. `envelope` supplies the
+   * identifiers an operator needs to find the message the skip refers to; it
+   * is optional because some adapters reject before an envelope exists.
+   */
+  protected logPreflightRejected(reason: string, envelope?: Envelope): void {
     process.stderr.write(
       `[Channel:${this.name}] preflight rejected reason=${sanitizeLogText(
         reason,
         80,
       )}\n`,
     );
+    this.recordPreflightRejected(reason, envelope);
+  }
+
+  /**
+   * Journals a preflight rejection without a stderr line, for the drop paths
+   * that are expected to be frequent.
+   */
+  protected recordPreflightRejected(reason: string, envelope?: Envelope): void {
+    this.recordChannelEvent({
+      type: 'inbound',
+      outcome: 'skipped',
+      reason,
+      ...(envelope
+        ? {
+            repository: envelope.chatId,
+            thread: envelope.threadId,
+            messageId: envelope.messageId,
+            actor: envelope.senderId,
+            ...(envelope.messageRoute
+              ? { detail: { route: envelope.messageRoute } }
+              : {}),
+          }
+        : {}),
+    });
+  }
+
+  protected recordChannelEvent(event: ChannelEventInput): void {
+    appendChannelEvent(this.name, this.config.cwd, event);
   }
 
   protected logDebugPayload(platform: string, payload: unknown): void {
@@ -6485,6 +6581,17 @@ export abstract class ChannelBase {
     envelope: Envelope,
     process: () => Promise<void> = () => this.processInbound(envelope),
   ): Promise<void> {
+    this.recordChannelEvent({
+      type: 'inbound',
+      outcome: 'accepted',
+      repository: envelope.chatId,
+      thread: envelope.threadId,
+      messageId: envelope.messageId,
+      actor: envelope.senderId,
+      ...(envelope.messageRoute
+        ? { detail: { route: envelope.messageRoute } }
+        : {}),
+    });
     if (this.namedSessions && !(await this.prepareNamedTurnBinding(envelope))) {
       return;
     }
