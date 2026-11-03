@@ -35,8 +35,8 @@ status: 'implemented'
 
 - 打断进行中的模型请求（不在流中途取消）。
 - 发送方控制的紧迫性：`"now"` 只是请求；由接收方的设置、队列状态与 Goal
-  归属权决定是否投递。但在已经排队的 peer 之间，它确实决定先后顺序，
-  如下文的屏障规则所述。
+  归属权决定是否投递。但在回合中边界排队的 peer 之间，它确实决定先后顺序
+  ——边界抽取会跳过一个 `next` 去取更靠后的 `now`——而 idle 抽取保持到达顺序。
 - 区分"转向已获准"与"被延后"的回执：`delivered` 仍然只表示"已排队给模型"，
   线路不得向发送方泄露接收方策略。
 
@@ -44,8 +44,9 @@ status: 'implemented'
 
 新增两个设置，对 workspace 均只可收紧：`agents.crossSessionMidTurn`
 （boolean，默认 `false`）与 `agents.crossSessionMidTurnBudget`
-（integer ≥ 0，默认 `3`，经 `peerMidTurnBudgetOf` 读取：任何无法解析的值
-回退到默认值，`0` 表示关闭）。
+（integer ≥ 0，默认 `3`，经 `peerMidTurnBudgetOf` 读取：有限数向下取整，
+负数钳制为 `0`，其余非有限数回退到默认值；`0` 表示关闭——因此手写的
+`-1` 是 fail-closed，而不是 fail-open）。
 
 在 `use-llm-stream.ts` 的每个工具轮边界，先完成 steer 与 teammate 的 drain，
 随后边界不传批次大小地调用 peer drain，至多取走一个信封——每边界一个信封
@@ -92,10 +93,11 @@ pop → stale-pin → restore 的往返。每窗口一次的暂停提示在短�
   文档化的同意范围覆盖任何被接受的 `"now"` 帧：与本会话同审查类的其他会话
   （即 mode-parity 默认免审核投递的那一类）、受信 controller、用子令牌启动
   的本会话自有进程，以及声明本会话自身审查类的同用户进程——这一声明没有任何
-  认证背书。有一条接受路径凌驾于这四类之上：操作员设置
-  `agents.crossSessionInbound: 'accept'` 会整体短路发送者类别判断，此时任何
-  能触达本会话 socket 的同用户进程都会被投递——连同轮内转向资格——无论它
-  声称什么类别，甚至不声称任何类别。
+  认证背书。操作员设置的 `agents.crossSessionInbound`——`accept`、`hold`、
+  `refuse`，或按 hold 处理的不可解析值——凌驾于这四类之上：`accept` 整体短路
+  发送者类别判断，此时任何能触达本会话 socket 的同用户进程都会被投递——连同
+  轮内转向资格——无论它声称什么类别，甚至不声称任何类别；`hold` 与 `refuse`
+  则连自有进程与 controller 帧也一并暂存或拒绝。
 - **每个边界一个信封。** 话多的 peer 可以拖慢一个轮次，但绝不能霸占它：
   无论预算多少，每个工具轮至多一条 peer 消息。
 - **每五分钟窗口预算 3。** 刻意远低于 hold 上限（50 个信封）：被 hold 的
@@ -106,7 +108,8 @@ pop → stale-pin → restore 的往返。每窗口一次的暂停提示在短�
   导入曾让它们在收集阶段全部失败。
 - **不可解析的值 = 默认值，而不是"无限制"。** 上限存在的理由是 peer 消耗本
   会话的模型算力，因此任何解析失败都不可能是"没有上限"；`0` 是显式关闭，
-  且每个界面都如此说明。
+  且每个界面都如此说明。负数是可解析的，会钳制为 `0`——这正是 fail-closed
+  的方向；小数则向下取整。
 - **每窗口至多一次提示，且仅在有东西等待时。** 静默限流正是当初的症状；而
   无条件提示会让一个"已限流但空闲"的会话打印出限流了个寂寞的行文。
 - **结算失败时 refund。** 被恢复的批次稍后由 idle drain 投递，为本未到达
@@ -117,7 +120,11 @@ pop → stale-pin → restore 的往返。每窗口一次的暂停提示在短�
 ## 约束
 
 - `packages/cli/src/config/settingsSchema.ts` 与 `settingsUtils.ts` 不得在
-  运行时导入 `peerMessaging` 模块；轮内常量一律来自该叶子模块。
+  运行时导入 `peerMessaging` 模块；轮内常量一律来自该叶子模块。两个方向都由
+  `eslint.config.js` 强制：针对 `peerMessaging/mid-turn-constants.ts` 的
+  `@typescript-eslint/no-restricted-imports` override 禁止叶子的运行时导入
+  （仅类型导入放行）；针对 `packages/cli/src/config/**` 的 override 禁止
+  config 模块导入 peer 运行时，叶子常量为例外。
 - `boundaryEnvelopeTexts` 必须保持推送顺序：合并 strip 移除的是精确的尾部
   后缀，另一批次恰为尾部时按批 strip 会静默失效。
 - `drainQueue` 的 rest 计算基于对象身份——屏障会把本可 drain 的条目留在队列
@@ -132,12 +139,14 @@ pop → stale-pin → restore 的往返。每窗口一次的暂停提示在短�
 - **话多 peer 霸占轮次**——由每边界单信封加窗口预算共同封顶；提示让该上限
   对用户可见。
 - **提示注入式转向**——一旦选择开启，peer（以及自有进程、controller）帧可以
-  转向运行中的轮次；它们保留信封与权限声明文本，入站审核策略在此之前照常
-  把关，且 Goal 轮被排除。
+  转向运行中的轮次；它们保留信封与权限声明文本，且 Goal 轮被排除。peer 帧
+  保留入站审核门；mode-parity 下的自有进程帧与持已授予 token 的 controller
+  帧不经逐条审核即被投递（见下一条与 `commands.md` §6）。
 - **自有进程注入免审核，且现在可转向运行中的轮次**——有意为之（build hook
-  场景）：门控在 parity 之前就无条件接受本会话自有进程与受 controller 授权
-  的程序，parity 只管辖普通的 peer 会话。已在设置说明、`settings.md` 与
-  `commands.md` §6 中文档化。
+  场景）：门控不经任何发送者类别或 parity 检查就接受本会话自有进程与受
+  controller 授权的程序——但仍低于操作员设置的 `hold` 或 `refuse`（不可解析
+  的值按 hold 处理）；parity 只管辖普通的 peer 会话。已在设置说明、
+  `settings.md` 与 `commands.md` §6 中文档化。
 
 ## 验证计划
 
@@ -152,10 +161,14 @@ pop → stale-pin → restore 的往返。每窗口一次的暂停提示在短�
 
 ## 验收标准
 
-- `agents.crossSessionMidTurn` 关闭（默认）时，边界行为与本特性之前逐字节
-  一致：信封等待 Idle。另有一处不受该设置控制的 idle 路径变化随之生效：
-  `popNextSubmission` 对用户文本的成批提交会在第一个等待中的 peer 条目处
-  停止，而特性之前的过滤器会跳过 peer 条目、让它之后的用户文本继续成批。
+- `agents.crossSessionMidTurn` 关闭（默认）时，信封等待 Idle。三处不受该
+  设置控制的 idle 路径变化随之生效：成批屏障（`popNextSubmission` 对用户
+  文本的成批提交会在第一个等待中的 peer 条目处停止，而特性之前的过滤器会
+  跳过 peer 条目、让它之后的用户文本继续成批）；idle 路径的 peer 标记渲染
+  （`display: { peer: true }`，用 `PeerMessage` 图标替代特性前的
+  `InfoMessage`）及其 `/resume` 从记录 parts 的重新推导；以及基于身份的回执
+  结算（被消费或误址的帧不再额外收集关闭时刻的纠正回执，`settleUnconsumed`
+  按身份纠正整个集合，而不是位置尾段）。
 - 开启后，一条被接受的 `"now"` 信封可以在工具轮边界到达模型：每边界至多一
   条、每五分钟至多 3 条——预算为 `0` 时轮内投递整体关闭（drain 为 null）
   ——排在接收方已排队的用户输入之后、绝不在 Goal 轮中。

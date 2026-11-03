@@ -314,7 +314,10 @@ that look like the envelope are defanged inside `content`.
 - Constants that may change without notice: the burst and rate figures,
   the hold ceiling and expiry choices, the 1 MiB line cap, the 30-second
   line deadline, the 64-connection cap, the mid-turn budget default and
-  its five-minute window.
+  its 5-minute window. Wherever prose quotes these figures — setting
+  descriptions, `settings.md`, or this document — it is a snapshot of
+  the constant the code ships; when one moves, the code's value is
+  authoritative and the prose follows it.
 
 ## 8. Not settled yet
 

@@ -888,14 +888,17 @@ only because the modes differed is released on its own once they agree.
 
 A repository can make sessions opened in it more cautious, never less:
 a workspace `.qwen/settings.json` may set `agents.crossSessionInbound`
-to `hold` or `refuse`, or `agents.crossSessionMessaging` to `false`, and
-that value wins over a looser one in your user settings. A workspace
-value that would loosen an operator-set one (`accept`, or `true` for the
-switch when a user or system scope set it to `false`) is ignored with a
-warning; a workspace `true` where nothing else set the switch merely
-repeats the default and is dropped silently. A value the CLI does not
-recognize holds every message whenever it is the effective value.
-System settings override all of this, as they do for every setting.
+to `hold` or `refuse`, `agents.crossSessionMessaging` to `false`,
+`agents.crossSessionMidTurn` to `false`, or `agents.crossSessionMidTurnBudget`
+to a lower number, and that value wins over a looser one in your user
+settings. (These are the cross-session entries of
+`WORKSPACE_TIGHTEN_ONLY_SETTINGS`; a key added there is tighten-only too.)
+A workspace value that would loosen an operator-set one (`accept`, or
+`true` for the switch when a user or system scope set it to `false`) is
+ignored with a warning; a workspace `true` where nothing else set the
+switch merely repeats the default and is dropped silently. A value the
+CLI does not recognize holds every message whenever it is the effective
+value. System settings override all of this, as they do for every setting.
 
 A hold does not wait forever. A message nobody decides on expires after
 `agents.crossSessionHeldExpiry` — `1m`, `5m`, `10m`, or `never`, five
