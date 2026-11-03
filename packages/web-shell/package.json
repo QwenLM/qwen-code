@@ -32,7 +32,8 @@
     "NOTICES.txt",
     "dist/*.js",
     "dist/types",
-    "!dist/types/components/artifacts/pierre-*.d.ts"
+    "!dist/types/components/artifacts/pierre-*.d.ts",
+    "!dist/types/managed-host.d.ts"
   ],
   "scripts": {
     "dev": "vite",

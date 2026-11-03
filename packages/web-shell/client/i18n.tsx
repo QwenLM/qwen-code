@@ -28,6 +28,10 @@ import {
   TOKEN_USAGE_MESSAGES_ZH,
 } from './components/artifacts/token-usage-messages.js';
 import {
+  CHANNEL_EVENTS_MESSAGES_EN,
+  CHANNEL_EVENTS_MESSAGES_ZH,
+} from './components/channels/channel-events-messages.js';
+import {
   createContext,
   useContext,
   useMemo,
@@ -233,7 +237,10 @@ const EN: Messages = {
   'managed.retry': 'Retry the same request',
   'managed.cancel': 'Cancel turn',
   'managed.uncertain':
-    'The request outcome is unconfirmed. Retry to check or complete the same submission.',
+    'The previous message was not confirmed as submitted. Retrying reuses the same request and will not run twice.',
+  'managed.pendingElsewhere':
+    'Another conversation has an unconfirmed request. Return to it before sending a new message.',
+  'managed.openPendingOwner': 'Open the original conversation',
   'managed.discard': 'Discard this request',
   'managed.pendingRestoreFailed':
     'The pending request cannot be restored and may already have been submitted. Check the session before discarding this pending record.',
@@ -2144,6 +2151,7 @@ const EN: Messages = {
   'sidebar.moveWorkspaceDown': 'Move down',
   'sidebar.plugins': 'Plugins',
   'sidebar.channels': 'Channels',
+  'sidebar.channelEvents': 'Channel events',
   'sidebar.sessionSource': 'Session source',
   'sidebar.archiveSessionSource': 'Archived session source',
   'sidebar.sessionSource.tasks': 'Tasks',
@@ -3661,6 +3669,7 @@ const EN: Messages = {
   'contextUsage.unknown':
     'Context usage has not been observed for this session yet.',
   ...TOKEN_USAGE_MESSAGES_EN,
+  ...CHANNEL_EVENTS_MESSAGES_EN,
   'trajectory.title': 'Trajectory',
   'trajectory.description': 'View time and tokens',
   'trajectory.empty': 'No records in this session yet.',
@@ -4855,7 +4864,11 @@ const ZH: Messages = {
   'managed.runningHint': '本轮执行中，暂时不能发送新消息。',
   'managed.retry': '重试同一请求',
   'managed.cancel': '取消本轮',
-  'managed.uncertain': '请求结果尚未确认。重试会确认或完成同一次提交。',
+  'managed.uncertain':
+    '上一条消息未确认是否提交成功。重试使用同一请求标识，不会重复执行。',
+  'managed.pendingElsewhere':
+    '另一个对话有未确认请求，请返回原对话处理后再发送新消息。',
+  'managed.openPendingOwner': '返回原对话',
   'managed.discard': '丢弃本次请求',
   'managed.pendingRestoreFailed':
     '无法恢复待确认请求，此前的提交可能已成功。请先检查会话，再决定是否丢弃这条待确认记录。',
@@ -6708,6 +6721,7 @@ const ZH: Messages = {
   'sidebar.moveWorkspaceDown': '下移',
   'sidebar.plugins': '插件',
   'sidebar.channels': '频道',
+  'sidebar.channelEvents': '频道事件',
   'sidebar.sessionSource': '会话来源',
   'sidebar.archiveSessionSource': '归档会话来源',
   'sidebar.sessionSource.tasks': '任务',
@@ -8095,6 +8109,7 @@ const ZH: Messages = {
   'contextUsage.unavailable': '当前会话无法读取上下文使用情况。',
   'contextUsage.unknown': '当前会话尚无已观测的上下文占用数据。',
   ...TOKEN_USAGE_MESSAGES_ZH,
+  ...CHANNEL_EVENTS_MESSAGES_ZH,
   'trajectory.title': '轨迹',
   'trajectory.description': '查看时间和 token',
   'trajectory.empty': '这个会话还没有记录。',

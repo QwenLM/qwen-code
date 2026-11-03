@@ -201,6 +201,9 @@ com/alibaba/qwen/code/managedagent/persistence/ManagedRuntimeRetentionGuard.java
 com/alibaba/qwen/code/managedagent/persistence/ManagedRuntimeRetentionGuard.java|SELECT 1 FROM ma_session WHERE tenant_id = ? AND session_id = ? AND csi_guard = TRUE LIMIT 1 FOR UPDATE
 com/alibaba/qwen/code/managedagent/persistence/ManagedRuntimeRetentionGuard.java|SELECT 1 FROM ma_session_head h WHERE h.tenant_key = ? AND h.harness_key = ? AND h.tenant_id = ? AND h.session_id = ?
 com/alibaba/qwen/code/managedagent/persistence/ManagedRuntimeRetentionGuard.java|SELECT tenant_id, session_id, parent_session_id, parent_child_run_id FROM ma_session WHERE tenant_id = ? AND session_id = ?
+com/alibaba/qwen/code/managedagent/persistence/ManagedSessionModelConfigs.java|SELECT model_config_digest FROM ma_session WHERE tenant_id=? AND session_id=?
+com/alibaba/qwen/code/managedagent/persistence/ManagedSessionModelConfigs.java|SELECT model_config_digest, model_config_key_id, model_config_ciphertext FROM ma_session WHERE tenant_id=? AND session_id=?
+com/alibaba/qwen/code/managedagent/persistence/ManagedSessionModelConfigs.java|UPDATE ma_session SET model_config_digest=?, model_config_key_id=?, model_config_ciphertext=? WHERE tenant_id=? AND session_id=? AND model_config_digest IS NULL
 com/alibaba/qwen/code/managedagent/persistence/ManagedSessionRetirementStore.java|SELECT retired_at FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE
 com/alibaba/qwen/code/managedagent/persistence/ManagedSessionRetirementStore.java|SELECT retired_at, retirement_generation, recovery_protected FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE
 com/alibaba/qwen/code/managedagent/persistence/ManagedSessionRetirementStore.java|SELECT stream_kind, stream_id FROM ma_event_stream WHERE tenant_id = ? AND session_id = ? AND artifact_refs_resource_key IS NOT NULL LIMIT ? FOR UPDATE

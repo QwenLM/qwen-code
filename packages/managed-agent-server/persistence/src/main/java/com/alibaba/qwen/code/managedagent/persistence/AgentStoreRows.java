@@ -121,7 +121,8 @@ final class AgentStoreRows {
                 readBinding(result),
                 result.getString("approval_mode"),
                 result.getString("tool_profile"),
-                result.getString("agent_definition_digest"), result.getInt("public_child_agents_version"));
+                result.getString("agent_definition_digest"), result.getInt("public_child_agents_version"),
+                result.getString("model_config_digest"));
     }
 
     final RowMapper<TurnSummary> turnSummaryMapper;
