@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { DaemonChannelTypeDescriptor } from '@qwen-code/sdk/daemon';
 import {
@@ -140,5 +142,53 @@ describe('githubEventWebUrl', () => {
         githubConfig,
       ),
     ).toBeUndefined();
+  });
+});
+
+/**
+ * The client cannot import the Node-only GitHub adapter, so the origin
+ * mapping is a deliberate copy. This contract ties the two sources together:
+ * any change to either `.replace()` chain fails here until the other side is
+ * updated to match.
+ */
+describe('githubEventWebUrl origin mapping mirrors the GitHub adapter', () => {
+  function replaceChain(source: string, anchor: RegExp): string {
+    const block = anchor.exec(source)?.[1];
+    expect(block, `anchor ${anchor} not found`).toBeDefined();
+    const chain = (block ?? '')
+      .split('\n')
+      .map((line) => line.trim().replace(/;$/, ''))
+      .filter((line) => line.startsWith('.replace('))
+      .join('');
+    expect(chain).not.toBe('');
+    return chain;
+  }
+
+  it('keeps the client chain byte-identical to the adapter webOrigin chain', () => {
+    const clientSource = readFileSync(
+      fileURLToPath(new URL('./channel-platform.ts', import.meta.url)),
+      'utf8',
+    );
+    const adapterSource = readFileSync(
+      fileURLToPath(
+        new URL(
+          '../../../../channels/github/src/GithubAdapter.ts',
+          import.meta.url,
+        ),
+      ),
+      'utf8',
+    );
+
+    const clientChain = replaceChain(
+      clientSource,
+      /const origin = baseUrl([\s\S]*?);/,
+    );
+    const adapterChain = replaceChain(
+      adapterSource,
+      /this\.webOrigin = baseUrl([\s\S]*?);/,
+    );
+
+    expect(clientChain).toBe(adapterChain);
+    expect(clientChain.match(/\.replace\(/g)).toHaveLength(3);
   });
 });

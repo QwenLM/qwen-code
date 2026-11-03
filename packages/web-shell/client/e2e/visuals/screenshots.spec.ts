@@ -1407,11 +1407,14 @@ for (const theme of THEMES) {
       );
       // The shared mock daemon does not serve the journal route yet; fulfill
       // it with a fixed GitHub-heavy journal registered after the catch-all
-      // so this route wins.
+      // so this route wins. `user-gh` is deliberately absent from the channel
+      // listing: it mirrors a channel inherited from user settings, whose
+      // link metadata rides on the journal response instead.
       await page.route('**/channels/events*', async (route) => {
         await route.fulfill({
           json: {
             truncated: false,
+            channelLinkMeta: { 'user-gh': { type: 'github' } },
             events: [
               {
                 at: '2026-11-02T01:58:00.000Z',
@@ -1481,6 +1484,17 @@ for (const theme of THEMES) {
                 thread: 'group-42',
                 actor: 'ada',
               },
+              {
+                at: '2026-11-02T02:03:00.000Z',
+                channel: 'user-gh',
+                type: 'inbound',
+                outcome: 'accepted',
+                triggerKind: 'review_requested',
+                repository: 'QwenLM/qwen-code',
+                thread: 'pr:16226',
+                number: 16226,
+                actor: 'wenshao',
+              },
             ],
           },
         });
@@ -1515,7 +1529,18 @@ for (const theme of THEMES) {
         'href',
         'https://github.com/QwenLM/qwen-code/issues/16171',
       );
-      await expect(list.getByRole('link')).toHaveCount(5);
+      // The inherited user-scope channel links through journal metadata.
+      await expect(
+        list
+          .getByRole('link', {
+            name: 'Open QwenLM/qwen-code#16226 on GitHub',
+          })
+          .first(),
+      ).toHaveAttribute(
+        'href',
+        'https://github.com/QwenLM/qwen-code/pull/16226',
+      );
+      await expect(list.getByRole('link')).toHaveCount(6);
       await expect(list.getByText('group-42')).toBeVisible();
       await captureScreenshot(page, `channel-events-github-links-${theme}`);
     });

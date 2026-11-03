@@ -312,7 +312,11 @@ export function ChannelEventsPage({
                       : event.thread;
                     const targetUrl = githubEventWebUrl(
                       event,
-                      channels[event.channel]?.config,
+                      // The management listing is scope-local; channels
+                      // inherited from user/system settings resolve through
+                      // the journal response's merged-link metadata instead.
+                      channels[event.channel]?.config ??
+                        data?.channelLinkMeta?.[event.channel],
                     );
                     const safeTargetUrl =
                       targetUrl && isSafeHref(targetUrl)

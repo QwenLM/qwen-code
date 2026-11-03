@@ -31,7 +31,14 @@ const {
   eventsState: {
     current: {
       data: undefined as
-        | { events: Array<Record<string, unknown>>; truncated: boolean }
+        | {
+            events: Array<Record<string, unknown>>;
+            truncated: boolean;
+            channelLinkMeta?: Record<
+              string,
+              { type?: string; baseUrl?: string }
+            >;
+          }
         | undefined,
       loading: false,
       error: undefined as Error | undefined,
@@ -311,6 +318,93 @@ describe('ChannelEventsPage', () => {
     expect(container.querySelectorAll('li a')).toHaveLength(0);
     expect(container.textContent).toContain('owner/repo#42');
     expect(container.textContent).toContain('owner/repo#43');
+  });
+
+  it('links a user-scope channel missing from the listing via journal link metadata', async () => {
+    // The documented GitHub setup: the channel lives in user settings, so
+    // the scope-local management listing has no entry for it.
+    channelsState.current = {};
+    eventsState.current.data = {
+      truncated: false,
+      channelLinkMeta: {
+        'my-github': {
+          type: 'github',
+          baseUrl: 'https://ghe.example.com/api/v3',
+        },
+      },
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'my-github',
+          type: 'inbound',
+          outcome: 'accepted',
+          repository: 'owner/repo',
+          thread: 'pr:42',
+          number: 42,
+        },
+      ],
+    };
+
+    await renderPage();
+
+    const link = container.querySelector<HTMLAnchorElement>('li a');
+    expect(link?.getAttribute('href')).toBe(
+      'https://ghe.example.com/owner/repo/pull/42',
+    );
+    expect(link?.textContent).toBe('owner/repo#42');
+  });
+
+  it('prefers the workspace-local config over journal link metadata', async () => {
+    channelsState.current = {
+      'gh-bot': {
+        config: { type: 'github', baseUrl: 'https://ghe.local/api/v3' },
+      },
+    };
+    eventsState.current.data = {
+      truncated: false,
+      channelLinkMeta: { 'gh-bot': { type: 'github' } },
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'gh-bot',
+          type: 'inbound',
+          outcome: 'accepted',
+          repository: 'owner/repo',
+          thread: 'pr:42',
+          number: 42,
+        },
+      ],
+    };
+
+    await renderPage();
+
+    const link = container.querySelector<HTMLAnchorElement>('li a');
+    expect(link?.getAttribute('href')).toBe(
+      'https://ghe.local/owner/repo/pull/42',
+    );
+  });
+
+  it('does not linkify journal link metadata of a non-GitHub channel', async () => {
+    channelsState.current = {};
+    eventsState.current.data = {
+      truncated: false,
+      channelLinkMeta: { 'ding-bot': { type: 'dingtalk' } },
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'ding-bot',
+          type: 'inbound',
+          outcome: 'accepted',
+          repository: 'owner/repo',
+          number: 42,
+        },
+      ],
+    };
+
+    await renderPage();
+
+    expect(container.querySelectorAll('li a')).toHaveLength(0);
+    expect(container.textContent).toContain('owner/repo#42');
   });
 
   it('shows how many further notifications a collapsed skip stands for', async () => {

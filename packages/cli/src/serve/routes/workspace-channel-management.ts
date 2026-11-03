@@ -18,6 +18,7 @@ import type {
   ChannelEventType,
 } from '@qwen-code/channel-base';
 import { supportedChannelCatalog } from '../../commands/channel/channel-registry.js';
+import { channelLinkMetaForEvents } from '../channel-link-meta.js';
 import type {
   ChannelPairingApprovalSubject,
   ChannelManagementService,
@@ -524,12 +525,31 @@ export function registerWorkspaceChannelManagementRoutes(
         // A managed Channel's working directory must canonicalize to this
         // workspace, so its journal lives in the workspace's own scope.
         const scopeDir = channelEventScopeDir(runtime.workspaceCwd);
-        res.status(200).json(
-          await readChannelEvents({
-            scopeDirs: [scopeDir],
-            ...query,
-          }),
-        );
+        const result = await readChannelEvents({
+          scopeDirs: [scopeDir],
+          ...query,
+        });
+        // The management listing is scope-local, but workers run with the
+        // merged settings; attach non-secret link metadata so events of
+        // user/system-scope channels owned by this workspace stay linkable.
+        // Settings loading can fail (corruption, I/O); the journal itself
+        // must stay readable, so degrade to unlinked rows instead of a 500.
+        let channelLinkMeta: Record<string, unknown> = {};
+        try {
+          channelLinkMeta = channelLinkMetaForEvents(
+            result.events,
+            runtime.workspaceCwd,
+          );
+        } catch {
+          // Link metadata is best-effort decoration on a diagnostic view.
+        }
+        res
+          .status(200)
+          .json(
+            Object.keys(channelLinkMeta).length > 0
+              ? { ...result, channelLinkMeta }
+              : result,
+          );
       } catch (error) {
         sendManagementError(res, error);
       }

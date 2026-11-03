@@ -30,7 +30,20 @@ import {
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { ChannelControlWorkspaceLimitError } from '../channel-control-capacity.js';
+import { channelLinkMetaForEvents } from '../channel-link-meta.js';
 import { registerWorkspaceChannelManagementRoutes } from './workspace-channel-management.js';
+
+// Wrap the real helper so one test can force a settings-loading failure and
+// witness the journal route's degrade-to-plain-text path; every other test
+// keeps the real implementation.
+vi.mock('../channel-link-meta.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../channel-link-meta.js')>();
+  return {
+    ...actual,
+    channelLinkMetaForEvents: vi.fn(actual.channelLinkMetaForEvents),
+  };
+});
 
 function runtime(
   workspaceId: string,
@@ -889,5 +902,90 @@ describe('workspace Channel event journal', () => {
     } finally {
       chmodSync(dir, 0o700);
     }
+  });
+
+  it('attaches link metadata for a user-scope channel owned by the workspace', async () => {
+    // The documented GitHub setup: the channel lives in user settings with
+    // cwd pointing at the project, so the scope-local management listing
+    // has no entry for it even though its journal rows appear here.
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        channels: {
+          'my-github': {
+            type: 'github',
+            token: 'super-secret',
+            baseUrl: 'https://ghe.example.com/api/v3',
+            cwd: '/work/primary',
+          },
+        },
+      }),
+    );
+    const { app } = mount();
+    append('/work/primary', 1, 'my-github');
+
+    const response = await request(app).get('/workspace/channels/events');
+
+    expect(response.status).toBe(200);
+    expect(response.body.channelLinkMeta).toEqual({
+      'my-github': {
+        type: 'github',
+        baseUrl: 'https://ghe.example.com/api/v3',
+      },
+    });
+    expect(JSON.stringify(response.body)).not.toContain('super-secret');
+  });
+
+  it('keeps link metadata workspace-isolated by channel cwd', async () => {
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        channels: {
+          'primary-gh': { type: 'github', cwd: '/work/primary' },
+          'secondary-gh': { type: 'github', cwd: '/work/secondary' },
+        },
+      }),
+    );
+    const { app } = mount();
+    append('/work/primary', 1, 'primary-gh');
+    append('/work/primary', 2, 'secondary-gh');
+    append('/work/secondary', 3, 'secondary-gh');
+
+    const primary = await request(app).get('/workspace/channels/events');
+    const secondary = await request(app).get(
+      '/workspaces/secondary/channels/events',
+    );
+
+    expect(primary.body.channelLinkMeta).toEqual({
+      'primary-gh': { type: 'github' },
+    });
+    expect(secondary.body.channelLinkMeta).toEqual({
+      'secondary-gh': { type: 'github' },
+    });
+  });
+
+  it('omits link metadata when no journal channel resolves in the merged settings', async () => {
+    const { app } = mount();
+    append('/work/primary', 1, 'deleted-channel');
+
+    const response = await request(app).get('/workspace/channels/events');
+
+    expect(response.status).toBe(200);
+    expect(response.body.events).toHaveLength(1);
+    expect(response.body).not.toHaveProperty('channelLinkMeta');
+  });
+
+  it('still serves the journal when link metadata resolution fails', async () => {
+    vi.mocked(channelLinkMetaForEvents).mockImplementationOnce(() => {
+      throw new Error('settings unavailable');
+    });
+    const { app } = mount();
+    append('/work/primary', 1);
+
+    const response = await request(app).get('/workspace/channels/events');
+
+    expect(response.status).toBe(200);
+    expect(response.body.events).toHaveLength(1);
+    expect(response.body).not.toHaveProperty('channelLinkMeta');
   });
 });
