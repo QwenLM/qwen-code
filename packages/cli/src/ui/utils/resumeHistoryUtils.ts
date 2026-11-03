@@ -25,6 +25,7 @@ import { parseGoalStateRecordPayloadV2 } from '@qwen-code/qwen-code-core/goals/g
 import { projectUserTranscriptForDisplay } from '@qwen-code/qwen-code-core/utils/transcript-records.js';
 import { computeInitialTurnFromHistory } from '@qwen-code/qwen-code-core/services/session-turn-state.js';
 import { getRecordRewindId } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import { CROSS_SESSION_TAG } from '@qwen-code/qwen-code-core/ipc/peer-envelope.js';
 import type {
   HistoryItem,
   HistoryItemInfo,
@@ -390,7 +391,21 @@ function convertToHistoryItems(
             payload?.displayText ||
             extractTextFromParts(record.message?.parts as Part[]) ||
             fallback;
-          items.push({ type: 'notification', text });
+          // A peer envelope journals its projection as displayText and its
+          // raw envelope in the parts, so only the parts carry the marker
+          // here. Without it a resumed transcript renders the peer line with
+          // the plain info bullet, indistinguishable from system chatter —
+          // though, unlike that, it carries none of the user's authority.
+          const isPeerEnvelope = ((record.message?.parts ?? []) as Part[]).some(
+            (part) =>
+              typeof part?.text === 'string' &&
+              part.text.trimStart().startsWith(`<${CROSS_SESSION_TAG}`),
+          );
+          items.push({
+            type: 'notification',
+            text,
+            ...(isPeerEnvelope ? { display: { peer: true } } : {}),
+          });
           break;
         }
         // Session multi-agent records: `message` holds the model envelope,

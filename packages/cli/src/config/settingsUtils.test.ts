@@ -37,6 +37,8 @@ import {
   type SettingsSchemaType,
 } from './settingsSchema.js';
 import { SettingScope, type LoadedSettings } from './settings.js';
+import { PEER_MID_TURN_BUDGET_DEFAULT } from '../peerMessaging/mid-turn-constants.js';
+import { peerMidTurnBudgetOf } from '../peerMessaging/peer-messaging.js';
 
 vi.mock('./settingsSchema.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('./settingsSchema.js')>();
@@ -1239,6 +1241,8 @@ describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
       'tools.workflowNameOnly',
       'agents.crossSessionMessaging',
       'agents.crossSessionInbound',
+      'agents.crossSessionMidTurn',
+      'agents.crossSessionMidTurnBudget',
     ]);
     for (const key of keys) {
       expect(WORKSPACE_RESTRICTED_SETTING_KEYS).not.toContain(key);
@@ -1294,5 +1298,90 @@ describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
       messaging.strictness(false),
     );
     expect(messaging.strictness(undefined)).toBe(messaging.strictness(true));
+  });
+
+  // Mid-turn delivery widens what a peer may do, so `true` is the loosening
+  // direction and must never outrank the operator's `false`. Unlike the
+  // messaging switch above, this one defaults to off: an unset scope ranks
+  // with `false`, so a workspace cannot claim a tightening it did not earn.
+  it('ranks mid-turn delivery on as looser than off, unset or garbage', () => {
+    const midTurn = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+      ({ key }) => key === 'crossSessionMidTurn',
+    )!;
+    expect(midTurn.strictness(false)).toBeGreaterThan(midTurn.strictness(true));
+    expect(midTurn.strictness(undefined)).toBe(midTurn.strictness(false));
+    expect(midTurn.strictness('true')).toBe(midTurn.strictness(false));
+    expect(midTurn.strictness(1)).toBe(midTurn.strictness(false));
+    expect(midTurn.strictness(null)).toBe(midTurn.strictness(false));
+  });
+
+  // A larger allowance is looser, so the rank counts down from it. The
+  // direction is the whole contract: with the sign dropped a workspace
+  // `10` would outrank an operator's `3` and buy a peer more model runs.
+  it('ranks a smaller mid-turn budget as stricter than a larger one', () => {
+    const budget = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+      ({ key }) => key === 'crossSessionMidTurnBudget',
+    )!;
+    expect(budget.strictness(0)).toBeGreaterThan(budget.strictness(3));
+    expect(budget.strictness(3)).toBeGreaterThan(budget.strictness(10));
+    // Unset ranks with the schema default, so the tightening a workspace
+    // may earn is bounded by that default in both directions.
+    expect(budget.strictness(0)).toBeGreaterThan(budget.strictness(undefined));
+    expect(budget.strictness(10)).toBeLessThan(budget.strictness(undefined));
+    // Ranks by the value the reader actually applies, per
+    // `peerMidTurnBudgetOf`: fractions floor, negatives clamp to zero.
+    expect(budget.strictness(2.9)).toBe(budget.strictness(2));
+    expect(budget.strictness(-1)).toBe(budget.strictness(0));
+  });
+
+  it('ranks an unreadable mid-turn budget by the default, not by unlimited', () => {
+    const budget = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+      ({ key }) => key === 'crossSessionMidTurnBudget',
+    )!;
+    for (const unreadable of ['plenty', NaN, Infinity, {}, null, true]) {
+      expect(budget.strictness(unreadable)).toBe(-PEER_MID_TURN_BUDGET_DEFAULT);
+    }
+    // So an unreadable workspace value behaves exactly like the default:
+    // it can tighten a larger operator allowance but never loosen a
+    // smaller one.
+    expect(budget.strictness('plenty')).toBe(budget.strictness(3));
+    expect(budget.strictness('plenty')).toBeGreaterThan(budget.strictness(10));
+    expect(budget.strictness('plenty')).toBeLessThan(budget.strictness(0));
+  });
+
+  // The rank and the shipped reader are two mappings of one contract
+  // written in different files; they must classify every value the same
+  // way, or a workspace setting the reader applies one way ranks another.
+  // The comparison is `===`, not `toBe`: for `-0` the reader floors to -0
+  // while the negated rank yields +0, which Object.is (and therefore
+  // `toBe`) treats as different even though both mean a zero allowance.
+  it('ranks every budget value the way the shipped reader maps it', () => {
+    const budget = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+      ({ key }) => key === 'crossSessionMidTurnBudget',
+    )!;
+    for (const value of [
+      -1,
+      -0.5,
+      -0,
+      0,
+      0.5,
+      1,
+      2.9,
+      3,
+      10,
+      NaN,
+      Infinity,
+      -Infinity,
+      'plenty',
+      '',
+      null,
+      true,
+      {},
+      undefined,
+    ]) {
+      expect(-budget.strictness(value) === peerMidTurnBudgetOf(value)).toBe(
+        true,
+      );
+    }
   });
 });
