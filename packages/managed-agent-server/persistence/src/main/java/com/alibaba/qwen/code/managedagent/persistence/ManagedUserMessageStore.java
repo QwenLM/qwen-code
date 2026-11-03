@@ -45,8 +45,7 @@ public class ManagedUserMessageStore
 
     @Transactional
     public Snapshot queryMessages(String tenant, String actor, String session) {
-        return queryMessages(actor == null ? null
-                : SessionPrincipal.ofUser(tenant, actor), session);
+        return queryMessages(SessionPrincipal.ofUser(tenant, actor), session);
     }
 
     @Transactional
@@ -64,8 +63,7 @@ public class ManagedUserMessageStore
     @Transactional
     public Snapshot command(String tenant, String actor, String session,
             String key, Command command) {
-        return command(actor == null ? null
-                : SessionPrincipal.ofUser(tenant, actor), session, key, command);
+        return command(SessionPrincipal.ofUser(tenant, actor), session, key, command);
     }
 
     @Transactional

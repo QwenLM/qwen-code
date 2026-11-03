@@ -69,6 +69,14 @@ class ManagedUserMessageStoreTest {
     }
 
     @Test
+    void rejectsMissingActorBeforeQueueStateCanChange() {
+        assertCode("actor_required", () -> messages.queryMessages(TENANT, null, session));
+        assertCode("actor_required", () -> messages.command(TENANT, null, session,
+                "missing-actor", submit("must not be queued")));
+        assertThat(query().messages()).isEmpty();
+    }
+
+    @Test
     void refusesExternalAttachmentsBeforeSubmitOrEditCanPoisonTheQueue() {
         jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
                 WorkspaceToolProfiles.EXTERNAL_FILES, TENANT, session);
