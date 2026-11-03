@@ -732,9 +732,13 @@ export function useOpenTuiLiveTurn(
             },
           }),
           // Steering reaches the model mid-turn as no prompt of its own, so
-          // while the Mods hear prompts, queued ones wait to become turns.
+          // while the Mods hear prompts, may hear them once they load, or
+          // refuse them after a failed load, queued ones wait to become turns.
           drainSteering: () =>
-            seq === turnSeqRef.current && !mods?.hearsPrompts
+            seq === turnSeqRef.current &&
+            !mods?.hearsPrompts &&
+            !mods?.starting &&
+            !mods?.failed
               ? drainQueue()
               : [],
           restoreSteering: (submissions) => {

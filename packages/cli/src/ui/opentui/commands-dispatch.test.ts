@@ -612,6 +612,22 @@ describe('prompt.submit for ?-form input', () => {
     );
   });
 
+  it('refuses a rewrite that leaves ?-form, so it runs no other command', async () => {
+    const { outcome, action, logMessage, host } = await run(
+      '?btw what is prod',
+      () => ({ text: '/clear what is prod' }),
+    );
+    expect(outcome).toEqual({ kind: 'refused' });
+    expect(action).not.toHaveBeenCalled();
+    expect(logMessage).not.toHaveBeenCalled();
+    expect(host.items).toContainEqual(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringContaining('not ?-form'),
+      }),
+    );
+  });
+
   it('refuses ?-form input sent to Mods that failed to load', async () => {
     const { outcome, submitPrompt, action, host } = await run(
       '?btw question',

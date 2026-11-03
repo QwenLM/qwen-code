@@ -215,6 +215,9 @@ const STARTUP_REGISTRY_POLL_MS = 100;
 
 const replayedExtensionRefresh = new WeakSet<ExtensionRefreshState>();
 
+const REWRITE_LEFT_QUESTION_FORM =
+  'A prompt.submit hook rewrote this ?-form input into text that is not ?-form, so it did not run.';
+
 export class OpenTuiSlashDispatcher {
   private activeCommand: {
     controller: AbortController;
@@ -531,8 +534,12 @@ export class OpenTuiSlashDispatcher {
     const submitted = await mods.submitPrompt(text, signal);
     if ('drop' in submitted) return { refused: submitted.drop };
     // The text runs as typed or rewritten; it starts no turn of its own, so
-    // there is no first send for the hooks' context to ride.
-    return { text: submitted.text.trim() };
+    // there is no first send for the hooks' context to ride. A rewrite stays
+    // `?`-form, or it would run a command the person never typed.
+    const rewritten = submitted.text.trim();
+    if (!rewritten.startsWith('?'))
+      return { refused: REWRITE_LEFT_QUESTION_FORM };
+    return { text: rewritten };
   }
 
   private async run(

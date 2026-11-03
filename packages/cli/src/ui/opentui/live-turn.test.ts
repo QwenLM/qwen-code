@@ -3144,6 +3144,34 @@ describe('useOpenTuiLiveTurn prompt.submit', () => {
     );
   });
 
+  it.each([
+    ['still load', false],
+    ['failed to load', true],
+  ])(
+    'keeps queued prompts out of a slash-form turn as steering while the Mods %s',
+    async (_state, failed) => {
+      const { startup } = installStartingMods();
+      const { result } = renderHook(() =>
+        useOpenTuiLiveTurn({ config: {} as Config }),
+      );
+      if (failed) await act(async () => startup.reject!(new Error('bad mod')));
+      act(() => {
+        result.current.submit('/unknown thing');
+      });
+      await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+      act(() => {
+        result.current.submit('deploy AKIA1');
+      });
+      expect(result.current.messageQueue).toHaveLength(1);
+      let drained: unknown[] = [];
+      act(() => {
+        drained = (live.turns[0].options as LivePromptOptions).drainSteering!();
+      });
+      expect(drained).toEqual([]);
+      expect(result.current.messageQueue).toHaveLength(1);
+    },
+  );
+
   it('refuses every later prompt once the Mods failed to load, with those queued behind', async () => {
     const { startup, submitPrompt } = installStartingMods();
     const onPromptReturned = vi.fn();
