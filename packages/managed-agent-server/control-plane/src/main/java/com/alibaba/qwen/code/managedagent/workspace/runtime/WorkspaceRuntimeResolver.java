@@ -40,7 +40,7 @@ public final class WorkspaceRuntimeResolver {
         this(sessions, authority, properties, ssh, null);
     }
 
-    public WorkspaceRuntimeResolver(AgentStateStore sessions, WorkspaceExecutionStore authority,
+    public WorkspaceRuntimeResolver(SessionQueryStore sessions, WorkspaceExecutionStore authority,
             ManagedAgentSettings properties, SshWorkspaceService ssh,
             com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry externalRegistrations) {
         this.ssh = ssh;
