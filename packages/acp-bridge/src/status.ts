@@ -586,6 +586,13 @@ export interface ServeWorkspaceSkillsStatus {
   runtimeEpoch?: number;
   skills: ServeWorkspaceSkillStatus[];
   errors?: ServeStatusCell[];
+  /** Daemon observation metadata; omitted by direct runtime/config reads. */
+  snapshot?: {
+    observedAt: number;
+    ageMs: number;
+    stale: boolean;
+    refreshing: boolean;
+  };
 }
 
 /**
@@ -680,6 +687,8 @@ export interface ServeContextCategoryBreakdown {
   systemPrompt: number;
   builtinTools: number;
   mcpTools: number;
+  /** Instructions are separate when present; older producers combine them with memory. */
+  instructionFiles?: number;
   memoryFiles: number;
   skills: number;
   /** Startup prelude outside the skill listing. Absent from older servers. */
@@ -707,6 +716,13 @@ export interface ServeContextToolDetail {
 export interface ServeContextMemoryDetail {
   path: string;
   tokens: number;
+  /**
+   * Absolute on-disk path when the row maps to a file the context preview
+   * can open: inside the session workspace, or a global memory file. Absent
+   * for synthetic aggregates and instruction files outside that readable
+   * scope (parent-directory or extension files). Absent from older servers.
+   */
+  absolutePath?: string;
 }
 
 export interface ServeContextSkillDetail {
@@ -723,6 +739,7 @@ export interface ServeSessionContextUsage {
   breakdown: ServeContextCategoryBreakdown;
   builtinTools: ServeContextToolDetail[];
   mcpTools: ServeContextToolDetail[];
+  instructionFiles?: ServeContextMemoryDetail[];
   memoryFiles: ServeContextMemoryDetail[];
   skills: ServeContextSkillDetail[];
   isEstimated?: boolean;
@@ -733,6 +750,14 @@ export interface ServeSessionContextUsageStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
   workspaceCwd: string;
+  /**
+   * Stable workspace root the session was admitted under. Unlike
+   * `workspaceCwd` (the live target dir, which moves when a session enters a
+   * worktree or `cd`s into a subdirectory), this stays at the registered
+   * workspace root, so a client can resolve the owning workspace for file
+   * reads. Absent from older servers.
+   */
+  workspaceRoot?: string;
   usage: ServeSessionContextUsage;
   formattedText: string;
 }
@@ -1248,11 +1273,33 @@ export interface ServeSessionStatsModelMetrics {
     totalTtftMs: number;
     /**
      * Time from the first to the last visible output, summed over requests
-     * whose output arrived in more than one chunk.
+     * whose window is at least 100 ms; shorter bursts cannot measure a rate.
      */
     totalGenerationDurationMs: number;
     /** Output tokens of the requests in `totalGenerationDurationMs`. */
     totalThroughputOutputTokens: number;
+  };
+  /**
+   * Most recent timed, non-internal responses (oldest first, at most 200).
+   * Absent until a streamed response records its timing, and from older
+   * daemons.
+   */
+  timingSamples?: Array<{
+    /** Event time, epoch ms. */
+    at: number;
+    ttftMs: number;
+    /** Generation window; below 100 ms it measures no output rate. */
+    generationMs: number;
+    outputTokens: number;
+    /** Subagent that issued the request; absent for the main conversation. */
+    source?: string;
+  }>;
+  /** Failed API calls; absent until the first failure, and from older daemons. */
+  failures?: {
+    /** Count per HTTP status code, else error type, else `unknown`. */
+    byKind: Record<string, number>;
+    /** Most recent failures, oldest first, at most 50. */
+    recent: Array<{ at: number; kind: string; source?: string }>;
   };
 }
 

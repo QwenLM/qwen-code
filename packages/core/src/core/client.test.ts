@@ -38,7 +38,10 @@ import {
 import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
 import { detectTurnInterruption } from './turn-interruption.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
-import { ChatCompressionService } from '../services/chatCompressionService.js';
+import {
+  ChatCompressionService,
+  computeThresholds,
+} from '../services/chatCompressionService.js';
 import {
   AuthType,
   createContentGenerator,
@@ -50,6 +53,7 @@ import { MemoryManager } from '../memory/manager.js';
 import { getAutoMemorySnapshot } from '../memory/request-context.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { LlmChat, userContentPushSnapshotKey } from './llm-chat.js';
+import { WorkflowModeContext } from './workflow-mode.js';
 import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
@@ -81,6 +85,7 @@ import {
   type ServerLlmStreamEvent,
 } from './turn.js';
 import { LoopReason, LoopType } from '../telemetry/types.js';
+import * as loggers from '../telemetry/loggers.js';
 import { logMemoryRecallDelivery } from '../telemetry/index.js';
 import { formatOmniMemorySideQueryReminder } from '../omni/memory-side-query.js';
 import type { MediaMemoryRecallResult } from '../services/media-memory/index.js';
@@ -629,6 +634,7 @@ describe('Gemini Client (client.ts)', () => {
     scheduleSkillReview: ReturnType<typeof vi.fn>;
     resetMemoryBodyStateForSession: ReturnType<typeof vi.fn>;
     resetExhaustedBodyRefsForCurrentTurn: ReturnType<typeof vi.fn>;
+    invalidatePendingExtract: ReturnType<typeof vi.fn>;
     restoreMemoryBodiesPresentInHistory: ReturnType<typeof vi.fn>;
     reconcileMemoryBodiesPresentInHistory: ReturnType<typeof vi.fn>;
     markMemoryBodiesEvictedFromHistory: ReturnType<typeof vi.fn>;
@@ -812,6 +818,7 @@ describe('Gemini Client (client.ts)', () => {
       }),
       resetMemoryBodyStateForSession: vi.fn(),
       resetExhaustedBodyRefsForCurrentTurn: vi.fn(),
+      invalidatePendingExtract: vi.fn(),
       restoreMemoryBodiesPresentInHistory: vi.fn(),
       reconcileMemoryBodiesPresentInHistory: vi.fn(),
       markMemoryBodiesEvictedFromHistory: vi.fn(),
@@ -871,6 +878,9 @@ describe('Gemini Client (client.ts)', () => {
       authType: AuthType.USE_GEMINI,
     };
     mockConfig = {
+      refreshWorkflowMode: vi.fn(),
+      resetWorkflowModeContext: vi.fn(),
+      prepareWorkflowMode: vi.fn().mockReturnValue({}),
       getContentGeneratorConfig: vi
         .fn()
         .mockReturnValue(contentGeneratorConfig),
@@ -955,6 +965,10 @@ describe('Gemini Client (client.ts)', () => {
       getModelRouteIdentity: vi.fn().mockReturnValue('test-route'),
       getEffectiveInputModalities: vi.fn().mockReturnValue({}),
       getBaseLlmClient: vi.fn(),
+      // Undefined by default (no goal runtime); goal-runtime tests override.
+      getGoalRuntime: vi
+        .fn<() => GoalRuntime | undefined>()
+        .mockReturnValue(undefined),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
       getLoopProtection: vi.fn().mockReturnValue('stop'),
       // Mimics the resolved Config getter: always a number (Infinity keeps
@@ -1363,6 +1377,75 @@ describe('Gemini Client (client.ts)', () => {
       expect(hookSystem.fireSessionStartEvent).toHaveBeenCalledTimes(2);
       expectSessionStart(hookSystem, SessionStartSource.Startup, { nth: 1 });
       expectSessionStart(hookSystem, SessionStartSource.Resume, { nth: 2 });
+    });
+  });
+
+  describe('DW04: explicit workflow mode eligibility', () => {
+    beforeEach(() => {
+      mockTurnRunFn.mockImplementation(() => textTurn('ok'));
+      vi.mocked(mockConfig.prepareWorkflowMode).mockReturnValue({
+        reminder: '<system-reminder>Workflow mode fixture</system-reminder>',
+        onModelRequestDispatched: vi.fn(),
+      });
+    });
+
+    it('accepts an explicitly eligible fresh turn without human provenance', async () => {
+      await run([{ text: 'ordinary SDK input' }], 'mode-fresh', {
+        type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
+      });
+      expect(getLastTurnRequestText()).toContain('Workflow mode fixture');
+      expect(mockConfig.prepareWorkflowMode).toHaveBeenCalledOnce();
+      expect(mockConfig.prepareWorkflowMode).toHaveBeenCalledWith(null);
+    });
+
+    it.each([
+      SendMessageType.ToolResult,
+      SendMessageType.Steer,
+      SendMessageType.Retry,
+      SendMessageType.Hook,
+      SendMessageType.Cron,
+      SendMessageType.Notification,
+      SendMessageType.Teammate,
+    ])('rejects eligibility on %s', async (type) => {
+      await run([{ text: 'generated input' }], `mode-${type}`, {
+        type,
+        workflowModeEligible: true,
+      });
+      expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
+    });
+
+    it('defaults unknown producers and side queries to ineligible', async () => {
+      await run([{ text: 'plain' }], 'mode-unknown', {
+        type: SendMessageType.UserQuery,
+      });
+      await run([{ text: 'side' }], 'mode-side', {
+        type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
+        isConcurrentSideQuery: true,
+      });
+      expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
+    });
+
+    it('excludes a fresh UserQuery when Goal admission adds its permit', async () => {
+      const permit = { goalId: 'mode-goal', revision: 1, turnId: 'mode-turn' };
+      const beginTurn = vi.fn(() => permit);
+      mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue({
+        getSnapshot: () => ({
+          ...emptyGoalSnapshot(),
+          goal: { goalId: 'mode-goal', revision: 1, status: 'active' },
+        }),
+        permitForTurn: vi.fn(() => undefined),
+        beginTurn,
+        finishTurn: vi.fn().mockResolvedValue(undefined),
+        subscribe: vi.fn(() => vi.fn()),
+      } as unknown as GoalRuntime);
+      await run([{ text: 'ordinary goal input' }], 'mode-goal-admission', {
+        type: SendMessageType.UserQuery,
+        workflowModeEligible: true,
+      });
+      expect(beginTurn).toHaveBeenCalledExactlyOnceWith('mode-goal-admission');
+      expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
     });
   });
 
@@ -2864,6 +2947,29 @@ describe('Gemini Client (client.ts)', () => {
         'prompt-retry',
         'prompt-host',
       );
+      vi.mocked(mockConfig.startActiveTodoWorkChain).mockClear();
+
+      await runTurn(
+        SendMessageType.Retry,
+        [{ text: 'hello' }],
+        'prompt-host-retry',
+        { userTurnRecordedByHost: true },
+      );
+
+      // Unless the host started it for the retry.
+      expect(mockConfig.startActiveTodoWorkChain).not.toHaveBeenCalled();
+    });
+
+    it("marks a Retry's request with the identity the host gives it", async () => {
+      await runTurn(SendMessageType.Retry, [{ text: 'hello' }], 'prompt-new', {
+        historyPromptId: 'prompt-original',
+      });
+      await runTurn(SendMessageType.Retry, [{ text: 'hello' }], 'prompt-bare');
+
+      expect(mockTurnConstructorFn.mock.calls.map((args) => args[3])).toEqual([
+        'prompt-original',
+        undefined,
+      ]);
     });
 
     it.each(['agent', 'task'])(
@@ -4248,7 +4354,46 @@ describe('Gemini Client (client.ts)', () => {
       client.setHistory([userText('replaced')]);
 
       expect(cacheClear).toHaveBeenCalled();
+      expect(mockConfig.resetWorkflowModeContext).toHaveBeenCalledOnce();
       expect(client.getTrustedUserAnswers()).toEqual([]);
+    });
+
+    it('drops the parked cadence snapshot when a rewrite discards its timeline', async () => {
+      setChat({ setHistory: vi.fn() });
+      client.setHistory([userText('replaced')]);
+      expect(mockMemoryManager.invalidatePendingExtract).toHaveBeenCalled();
+
+      mockMemoryManager.invalidatePendingExtract.mockClear();
+      client['chat'] = mockChatWithLengths(3, 2);
+      client.truncateHistory(2);
+      expect(mockMemoryManager.invalidatePendingExtract).toHaveBeenCalled();
+
+      // A no-op truncate keeps the timeline the snapshot was cut from.
+      mockMemoryManager.invalidatePendingExtract.mockClear();
+      client['chat'] = mockChatWithLengths(2, 2);
+      client.truncateHistory(99);
+      expect(mockMemoryManager.invalidatePendingExtract).not.toHaveBeenCalled();
+
+      // The fast path rewrites history through LlmChat.setHistory, so neither
+      // this client's setHistory hook nor ChatCompressionService sees it.
+      mockMemoryManager.invalidatePendingExtract.mockClear();
+      setChat({
+        compressFast: vi.fn().mockReturnValue({
+          info: compressionInfo(CompressionStatus.COMPRESSED, 1000, 200),
+        }),
+      });
+      await client.tryCompressChatFast();
+      expect(mockMemoryManager.invalidatePendingExtract).toHaveBeenCalled();
+
+      // A NOOP fast compression shrinks nothing and rewrites no history.
+      mockMemoryManager.invalidatePendingExtract.mockClear();
+      setChat({
+        compressFast: vi.fn().mockReturnValue({
+          info: compressionInfo(CompressionStatus.NOOP, 100, 100),
+        }),
+      });
+      await client.tryCompressChatFast();
+      expect(mockMemoryManager.invalidatePendingExtract).not.toHaveBeenCalled();
     });
 
     /**
@@ -4287,6 +4432,8 @@ describe('Gemini Client (client.ts)', () => {
       client.truncateHistory(2);
 
       expect(client['lastDeliveredMemoryTreeRevision']).toBeUndefined();
+      expect(mockConfig.resetWorkflowModeContext).toHaveBeenCalledOnce();
+      vi.mocked(mockConfig.resetWorkflowModeContext).mockClear();
 
       // A no-op truncate keeps the router prompt in history, so the
       // delivered revision is still accurate and must survive.
@@ -4296,6 +4443,7 @@ describe('Gemini Client (client.ts)', () => {
       client.truncateHistory(99);
 
       expect(client['lastDeliveredMemoryTreeRevision']).toBe('still-valid');
+      expect(mockConfig.resetWorkflowModeContext).not.toHaveBeenCalled();
     });
 
     it('stripOrphanedUserEntriesFromHistory clears the delivered memory-tree revision only when entries were stripped', () => {
@@ -4321,6 +4469,89 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(client['lastDeliveredMemoryTreeRevision']).toBe('still-valid');
     });
+
+    describe.each([false, true])(
+      'Workflow notice removal with cancellation rearming %s',
+      (rearm) => {
+        it.each(['enabled', 'refresh', 'off', 'unavailable'] as const)(
+          'reannounces a discarded %s notice only for cancellation',
+          (kind) => {
+            const mode = new WorkflowModeContext();
+            const context = {
+              surface: 'pointer' as const,
+              bridgeWorkflowTool: false,
+              nameOnly: false,
+            };
+            const history = [userText('earlier prompt'), modelText('response')];
+            mode.setRequested(true);
+            if (kind !== 'enabled') {
+              const enabled = mode.prepare(context, null);
+              enabled.onModelRequestDispatched?.();
+              history[0].parts!.unshift({ text: enabled.reminder });
+            }
+            if (kind === 'refresh') {
+              for (let turn = 0; turn < 9; turn++) {
+                mode.prepare(context, null).onModelRequestDispatched?.();
+              }
+            }
+            if (kind === 'off') mode.setRequested(false);
+            const currentContext = kind === 'unavailable' ? null : context;
+            const cancelled = mode.prepare(currentContext, null);
+            expect(cancelled.reminder).toBeDefined();
+            cancelled.onModelRequestDispatched?.();
+            const snapshot = mode.snapshot();
+            const orphan = content(
+              'user',
+              { text: cancelled.reminder },
+              { text: 'cancelled prompt' },
+            );
+            client['chat'] = new LlmChat(mockConfig, {}, [...history, orphan]);
+            vi.mocked(mockConfig.resetWorkflowModeContext).mockImplementation(
+              () => mode.resetContext(),
+            );
+
+            const stripped = rearm
+              ? client.stripOrphanedUserEntriesFromHistory(true)
+              : client.stripOrphanedUserEntriesFromHistory();
+            expect(stripped).toEqual([orphan]);
+            expect(client.getHistory()).toEqual(history);
+            const next = mode.prepare(currentContext, null);
+            if (rearm) {
+              const expected =
+                kind === 'off'
+                  ? 'is off'
+                  : kind === 'unavailable'
+                    ? 'is temporarily unavailable'
+                    : 'is enabled';
+              expect(next.reminder).toContain(`Workflow mode ${expected}`);
+              next.onModelRequestDispatched?.();
+              expect(
+                mode.prepare(currentContext, null).reminder,
+              ).toBeUndefined();
+            } else {
+              expect(next.reminder).toBeUndefined();
+              expect(mode.snapshot()).toEqual(snapshot);
+              expect(
+                mockConfig.resetWorkflowModeContext,
+              ).not.toHaveBeenCalled();
+            }
+          },
+        );
+      },
+    );
+
+    it.each([false, true])(
+      'preserves Workflow cadence when cancellation removes no notice (orphan: %s)',
+      (hasOrphan) => {
+        const history = [userText('earlier prompt'), modelText('response')];
+        if (hasOrphan) history.push(userText('cancelled prompt'));
+        client['chat'] = new LlmChat(mockConfig, {}, history);
+
+        client.stripOrphanedUserEntriesFromHistory(true);
+
+        expect(mockConfig.resetWorkflowModeContext).not.toHaveBeenCalled();
+      },
+    );
 
     it('truncateHistory clears the cache when entries are actually removed', () => {
       const cacheClear = mockFileReadCacheClear();
@@ -9662,6 +9893,45 @@ Other open files:
       });
     });
 
+    it('passes the compaction-warning gate the cadence experiment arms on', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      mockConfig.getAutoCompactThreshold = vi.fn().mockReturnValue(undefined);
+      try {
+        const { warn } = computeThresholds(200_000);
+        mockTurnRunFn.mockReturnValue(textTurn('Done'));
+
+        const runTurn = async (
+          outputTokens: number,
+          belowCompactionWarn: boolean,
+          promptId: string,
+        ) => {
+          mockMemoryManager.scheduleExtract.mockClear();
+          installChat({
+            getHistory: vi
+              .fn()
+              .mockReturnValue([
+                userText('Please answer tersely'),
+                modelText('Done'),
+              ]),
+            getLastPromptTokenCount: vi.fn().mockReturnValue(warn - 1),
+            getLastOutputTokenCount: vi.fn().mockReturnValue(outputTokens),
+          });
+          await run([{ text: 'Please answer tersely' }], promptId);
+          expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledWith(
+            expect.objectContaining({ belowCompactionWarn }),
+          );
+        };
+
+        // warn - 1 on the prompt alone is below the tier; adding the two
+        // retained output tokens puts the sum at the tier.
+        await runTurn(0, true, 'prompt-id-warn-below');
+        await runTurn(2, false, 'prompt-id-warn-at-tier');
+      } finally {
+        vi.unstubAllEnvs();
+        delete (mockConfig as Partial<Config>).getAutoCompactThreshold;
+      }
+    });
+
     it('does not wait for metadata migration before completing the user turn', async () => {
       let finishMigration!: (value: {
         status: 'skipped';
@@ -11625,6 +11895,170 @@ Other open files:
       });
     });
 
+    /** `reminded` loop-protection decisions logged so far. */
+    const remindedDecisions = () =>
+      vi
+        .mocked(loggers.logLoopProtection)
+        .mock.calls.filter(([, event]) => event.decision === 'reminded');
+    /** First turn that queues the consecutive-identical reminder. */
+    const queueIdenticalReminder = async (promptId: string) => {
+      const shellCall = (i: number) =>
+        toolCallRequest(`repeat-${i}`, 'run_shell_command', {
+          command: 'echo repeated',
+        });
+      installChat();
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(shellCall(0), shellCall(1), shellCall(2), stopped()),
+      );
+      await run([{ text: 'repeat a tool' }], promptId);
+      expect(remindedDecisions()).toEqual([]);
+    };
+    const sendToolResult = (promptId: string, part: Part) => {
+      mockTurnRunFn.mockReturnValueOnce(textTurn('done'));
+      return run([part], promptId, { type: SendMessageType.ToolResult });
+    };
+    const fnShellResult = () =>
+      fnResponse('run_shell_command', { output: 'repeated' });
+
+    it('credits the reminder once the model accepts the send and never re-credits a clean continuation', async () => {
+      const promptId = 'prompt-id-loop-reminder-commit';
+      await queueIdenticalReminder(promptId);
+
+      await sendToolResult(promptId, fnShellResult());
+
+      const request = mockTurnRunFn.mock.lastCall?.[1] as Part[];
+      const warningParts = request.filter(
+        (part) =>
+          typeof part === 'object' &&
+          part !== null &&
+          'text' in part &&
+          String((part as { text?: unknown }).text).includes(
+            '3 times in a row',
+          ),
+      );
+      expect(warningParts).toHaveLength(1);
+      expect(remindedDecisions()).toHaveLength(1);
+      expect(remindedDecisions()[0][1]).toMatchObject({
+        decision: 'reminded',
+        prompt_id: promptId,
+        loop_type: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      });
+
+      // Clean continuation: no new reminder is taken, none credited.
+      await sendToolResult(promptId, fnShellResult());
+      expect(getLastTurnRequestText()).not.toContain('3 times in a row');
+      expect(remindedDecisions()).toHaveLength(1);
+    });
+
+    it('keeps the reminder eligible when the ToolResult send is cancelled at the goal-event yield', async () => {
+      const promptId = 'prompt-id-loop-reminder-cancel';
+      // A goal runtime makes every send carry a pending GoalState event, which
+      // the ToolResult continuation yields after the reminder take and before
+      // the model-bound request — the suspension point the consumer cancels.
+      const goalRuntime = {
+        subscribe: vi.fn(() => vi.fn()),
+        getSnapshot: vi.fn(() => emptyGoalSnapshot()),
+      } as unknown as GoalRuntime;
+      vi.mocked(mockConfig.getGoalRuntime).mockReturnValue(goalRuntime);
+      await queueIdenticalReminder(promptId);
+
+      const turnRunCallsBeforeSend = mockTurnRunFn.mock.calls.length;
+      const stream = client.sendMessageStream(
+        [fnShellResult()],
+        new AbortController().signal,
+        promptId,
+        { type: SendMessageType.ToolResult },
+      );
+      const iterator = stream[Symbol.asyncIterator]();
+      const first = await iterator.next();
+      expect(first.value).toMatchObject({ type: LlmEventType.GoalState });
+      // Suspended after the take, before any model-bound request: no turn.run
+      // call was issued for this send, so the count still matches the
+      // reminder-queueing turn above. Comparing the count is what pins the
+      // premise — clearing the mock first would make the assertion vacuous.
+      expect(mockTurnRunFn.mock.calls.length).toBe(turnRunCallsBeforeSend);
+      await iterator.return!(undefined as unknown as Turn);
+
+      expect(remindedDecisions()).toEqual([]);
+
+      // The same streak's warning is still delivered by the next send.
+      await sendToolResult(promptId, fnShellResult());
+      expect(getLastTurnRequestText()).toContain('3 times in a row');
+      expect(remindedDecisions()).toHaveLength(1);
+      expect(remindedDecisions()[0][1]).toMatchObject({ prompt_id: promptId });
+    });
+
+    it('keeps the reminder eligible when the send fails before the model accepts it', async () => {
+      const promptId = 'prompt-id-loop-reminder-failed-send';
+      await queueIdenticalReminder(promptId);
+
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('model send failed before any event');
+      });
+      await expect(
+        run([fnShellResult()], promptId, {
+          type: SendMessageType.ToolResult,
+        }),
+      ).rejects.toThrow('model send failed before any event');
+      expect(remindedDecisions()).toEqual([]);
+
+      // Retrying the same eligible streak delivers exactly once.
+      await sendToolResult(promptId, fnShellResult());
+      expect(getLastTurnRequestText()).toContain('3 times in a row');
+      expect(remindedDecisions()).toHaveLength(1);
+    });
+
+    it('does not leak an abandoned reminder into an unrelated new prompt', async () => {
+      const promptId = 'prompt-id-loop-reminder-leak';
+      const goalRuntime = {
+        subscribe: vi.fn(() => vi.fn()),
+        getSnapshot: vi.fn(() => emptyGoalSnapshot()),
+      } as unknown as GoalRuntime;
+      vi.mocked(mockConfig.getGoalRuntime).mockReturnValue(goalRuntime);
+      await queueIdenticalReminder(promptId);
+
+      const stream = client.sendMessageStream(
+        [fnShellResult()],
+        new AbortController().signal,
+        promptId,
+        { type: SendMessageType.ToolResult },
+      );
+      const iterator = stream[Symbol.asyncIterator]();
+      await iterator.next();
+      await iterator.return!(undefined as unknown as Turn);
+
+      // A new unrelated task resets the detector before any further send.
+      mockTurnRunFn.mockReturnValueOnce(textTurn('new task started'));
+      await run([{ text: 'completely different task' }], 'prompt-id-new-task');
+
+      await sendToolResult(
+        'prompt-id-new-task',
+        fnResponse('other_tool', { output: 'ok' }),
+      );
+      expect(getLastTurnRequestText()).not.toContain('3 times in a row');
+      expect(remindedDecisions()).toEqual([]);
+    });
+
+    it('credits the prepared reminder once when an attempt restarts before acceptance', async () => {
+      const promptId = 'prompt-id-loop-reminder-retry';
+      await queueIdenticalReminder(promptId);
+
+      // The request carrying the reminder goes out; the first attempt fails
+      // before any model-input event and the turn restarts into a second
+      // attempt whose acceptance settles the delivery exactly once.
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(
+          { type: LlmEventType.Retry },
+          { type: LlmEventType.Content, value: 'attempt two' },
+        ),
+      );
+      await run([fnShellResult()], promptId, {
+        type: SendMessageType.ToolResult,
+      });
+      expect(getLastTurnRequestText()).toContain('3 times in a row');
+      expect(remindedDecisions()).toHaveLength(1);
+    });
+
     describe('retry sendMessageType', () => {
       /** A retry-capable chat stub; `overrides` replace any default. */
       const retryChat = <T extends object>(overrides: T = {} as T) =>
@@ -11640,6 +12074,220 @@ Other open files:
       });
       const retryMe = (promptId: string) =>
         run([{ text: 'retry me' }], promptId, { type: SendMessageType.Retry });
+
+      it.each(['full', 'refresh', 'off', 'unavailable'] as const)(
+        'preserves the dispatched %s Workflow mode envelope on repeated Retry without counting another turn',
+        async (kind) => {
+          const mode = new WorkflowModeContext();
+          const context = {
+            surface: 'pointer' as const,
+            bridgeWorkflowTool: false,
+            nameOnly: false,
+          };
+          mode.setRequested(true);
+          if (kind !== 'full') {
+            mode.prepare(context, null).onModelRequestDispatched?.();
+          }
+          if (kind === 'refresh') {
+            for (let index = 0; index < 9; index++) {
+              mode.prepare(context, null).onModelRequestDispatched?.();
+            }
+          }
+          if (kind === 'off') mode.setRequested(false);
+          const currentContext = kind === 'unavailable' ? null : context;
+          const prepared = mode.prepare(currentContext, null);
+          expect(prepared.reminder).toBeDefined();
+          prepared.onModelRequestDispatched?.();
+          const snapshot = mode.snapshot();
+          const orphan = content(
+            'user',
+            { text: prepared.reminder },
+            { text: 'retry me' },
+          );
+          let pushes = 1;
+          const chat = retryChat({
+            ...strippingPrompt(orphan),
+            getUserContentPushCount: vi.fn(() => pushes),
+          });
+          mockTurnRunFn.mockImplementation((_model, request) => {
+            publishPushSnapshot(request, pushes++);
+            return textTurn('retry response');
+          });
+
+          for (let attempt = 0; attempt < 2; attempt++) {
+            await retryMe('mode-retry');
+            const request = mockTurnRunFn.mock.lastCall?.[1];
+            expect(Array.from(request!)).toEqual([
+              { text: prepared.reminder },
+              { text: 'retry me' },
+            ]);
+            expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
+            expect(mode.snapshot()).toEqual(snapshot);
+            expect(chat.addHistory).not.toHaveBeenCalled();
+          }
+          expect(mode.prepare(currentContext, null).reminder).toBeUndefined();
+        },
+      );
+
+      it.each([true, false])(
+        'preserves final mode %s when stripped Retry entries repeat an earlier envelope',
+        async (enabled) => {
+          const mode = new WorkflowModeContext();
+          const context = {
+            surface: 'pointer' as const,
+            bridgeWorkflowTool: false,
+            nameOnly: false,
+          };
+          mode.setRequested(true);
+          const on = mode.prepare(context, null).reminder!;
+          mode.setRequested(false);
+          const off = mode.prepare(context, null).reminder!;
+          const final = enabled ? on : off;
+          const previous = enabled ? off : on;
+          retryChat({
+            stripOrphanedUserEntriesFromHistory: vi
+              .fn()
+              .mockReturnValue([
+                content(
+                  'user',
+                  { text: final },
+                  { text: 'first failed prompt' },
+                ),
+                content(
+                  'user',
+                  { text: previous },
+                  { text: 'second failed prompt' },
+                ),
+                content('user', { text: final }, { text: 'retry me' }),
+              ]),
+          });
+          mockTurnRunFn.mockReturnValue(textTurn('retry response'));
+          await retryMe('mode-retry-transitions');
+          expect(mockTurnRunFn.mock.lastCall?.[1]).toEqual([
+            { text: previous },
+            { text: final },
+            { text: 'retry me' },
+          ]);
+          expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
+        },
+      );
+
+      it('does not duplicate a Workflow mode envelope already present in the Retry request', async () => {
+        const reminder =
+          '<system-reminder>\nWorkflow mode is off for this session. Do not apply the persistent workflow preference.\n</system-reminder>';
+        retryChat(
+          strippingPrompt(
+            content('user', { text: reminder }, { text: 'retry me' }),
+          ),
+        );
+        mockTurnRunFn.mockReturnValue(textTurn('retry response'));
+
+        await run(
+          [
+            fnResponse('read_file', { output: 'done' }),
+            { text: reminder },
+            { text: 'retry me' },
+          ],
+          'mode-retry-present',
+          {
+            type: SendMessageType.Retry,
+          },
+        );
+
+        expect(mockTurnRunFn.mock.lastCall?.[1]).toEqual([
+          fnResponse('read_file', { output: 'done' }),
+          { text: reminder },
+          { text: 'retry me' },
+        ]);
+        expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
+      });
+
+      it('does not replay a Workflow mode envelope when no history entry was stripped', async () => {
+        const reminder =
+          '<system-reminder>\nWorkflow mode is enabled for this session.\n</system-reminder>';
+        retryChat({
+          getHistory: vi
+            .fn()
+            .mockReturnValue([
+              content('user', { text: reminder }, { text: 'retry me' }),
+              modelText('partial'),
+            ]),
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockReturnValue(textTurn('retry response'));
+        await retryMe('mode-retry-retained');
+        expect(mockTurnRunFn.mock.lastCall?.[1]).toEqual([
+          { text: 'retry me' },
+        ]);
+        expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
+      });
+
+      it('restores the Workflow mode envelope after leading function responses without restoring the old prompt', async () => {
+        const reminder =
+          '<system-reminder>\nWorkflow mode is off for this session. Do not apply the persistent workflow preference.\n</system-reminder>';
+        const response = fnResponse('read_file', { output: 'done' });
+        retryChat(
+          strippingPrompt(
+            content('user', { text: reminder }, { text: 'old prompt' }),
+          ),
+        );
+        mockTurnRunFn.mockReturnValue(textTurn('retry response'));
+        await run([response, { text: 'retry me' }], 'mode-retry-tools', {
+          type: SendMessageType.Retry,
+        });
+        expect(mockTurnRunFn.mock.lastCall?.[1]).toEqual([
+          response,
+          { text: reminder },
+          { text: 'retry me' },
+        ]);
+      });
+
+      it.each([
+        '<system-reminder>\nWorkflow mode is off for this session. Do not apply the persistent workflow preference.\n</system-reminder>original user text',
+        '<system-reminder>\nWorkflow mode is off for this session. <system-reminder>nested</system-reminder>\n</system-reminder>',
+        '<system-reminder>\nWorkflow mode is off for this session. Do not apply the persistent workflow preference.\n</system-reminder><system-reminder>\noriginal user text\n</system-reminder>',
+      ])(
+        'does not restore user text attached to a Workflow mode envelope: %s',
+        async (text) => {
+          retryChat(
+            strippingPrompt(content('user', { text }, { text: 'old prompt' })),
+          );
+          mockTurnRunFn.mockReturnValue(textTurn('retry response'));
+          await retryMe('mode-retry-invalid-envelope');
+          expect(mockTurnRunFn.mock.lastCall?.[1]).toEqual([
+            { text: 'retry me' },
+          ]);
+        },
+      );
+
+      it('restores the unmodified stripped entry when a Workflow mode Retry fails before pushing', async () => {
+        const reminder =
+          '<system-reminder>\nWorkflow mode is off for this session. Do not apply the persistent workflow preference.\n</system-reminder>';
+        const orphan = content(
+          'user',
+          { text: reminder },
+          { text: 'retry me' },
+        );
+        const chat = retryChat({
+          ...strippingPrompt(orphan),
+          getUserContentPushCount: vi.fn().mockReturnValue(1),
+        });
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield* [] as ServerLlmStreamEvent[];
+            throw new Error('setup failed before push');
+          })(),
+        );
+        await expect(retryMe('mode-retry-setup-failure')).rejects.toThrow(
+          'setup failed before push',
+        );
+        expect(chat.addHistory).toHaveBeenCalledExactlyOnceWith(orphan);
+        expect(orphan.parts).toEqual([
+          { text: reminder },
+          { text: 'retry me' },
+        ]);
+        expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
+      });
 
       it('should call stripOrphanedUserEntriesFromHistory before executing', async () => {
         const mockChat = retryChat({
@@ -12202,31 +12850,161 @@ Other open files:
         );
       });
 
-      it('leaves the Stop hook and the memory tasks to a host that runs it after the round', async () => {
-        const request = blockStopOnce();
-        installMessageBus(request, 'Stop');
+      /** A stop policy that continues once with `text`, then lets it stop. */
+      const continueOnce = (text: string) => ({
+        continueAt: vi
+          .fn()
+          .mockResolvedValueOnce([{ text }])
+          .mockResolvedValue(undefined),
+        onStopHookCap: vi.fn(),
+      });
+
+      it("continues a stopped response with a host's stop policy, as a Hook send", async () => {
         notDoneChat();
-        mockTurnRunFn.mockImplementation(() =>
-          (async function* () {
-            yield { type: LlmEventType.Content, value: 'not done' };
-          })(),
-        );
-        const memoryTasks = vi.spyOn(
-          client,
-          'runManagedAutoMemoryBackgroundTasks',
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const policy = continueOnce('Finish the todos.');
+        const send = vi.spyOn(client, 'sendMessageStream');
+
+        await run([{ text: 'Hi' }], 'prompt-stop-policy', {
+          type: SendMessageType.UserQuery,
+          stopPolicies: [policy],
+        });
+
+        expect(policy.continueAt).toHaveBeenCalledTimes(2);
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        expect(mockTurnRunFn.mock.calls[1][1]).toContainEqual({
+          text: 'Finish the todos.',
+        });
+        expect(send.mock.calls[1][3]).toMatchObject({
+          type: SendMessageType.Hook,
+          stopPolicies: [policy],
+        });
+      });
+
+      it("gives a Retry's history identity to its first request only", async () => {
+        installMessageBus(blockStopOnce(), 'Stop');
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const send = vi.spyOn(client, 'sendMessageStream');
+        vi.spyOn(client, 'stripOrphanedUserEntriesFromHistory').mockReturnValue(
+          [],
         );
 
-        await run([{ text: 'Hi' }], 'prompt-stop-hook-by-host', {
+        await run([{ text: 'Hi' }], 'prompt-retry-identity', {
+          type: SendMessageType.Retry,
+          historyPromptId: 'prompt-original',
+        });
+
+        expect(mockTurnConstructorFn.mock.calls.map((args) => args[3])).toEqual(
+          ['prompt-original', undefined],
+        );
+        // The Stop hook's continuation carries the send's other options.
+        expect(send.mock.calls[1][3]).toMatchObject({
+          type: SendMessageType.Hook,
+        });
+        expect(send.mock.calls[1][3]?.historyPromptId).toBeUndefined();
+      });
+
+      it("keeps the host's steering on a stop policy's continuation", async () => {
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const policy = continueOnce('Finish the todos.');
+        const getSteerInput = vi.fn().mockResolvedValue(undefined);
+        const send = vi.spyOn(client, 'sendMessageStream');
+
+        await run([{ text: 'Hi' }], 'prompt-stop-policy-steer', {
           type: SendMessageType.UserQuery,
-          stopHookRunByHost: true,
+          stopPolicies: [policy],
+          getSteerInput,
+        });
+
+        expect(send.mock.calls[1][3]).toMatchObject({
+          type: SendMessageType.Hook,
+          getSteerInput,
+        });
+      });
+
+      it('lets the turn stop when a stop policy returns an empty request', async () => {
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const empty = { continueAt: vi.fn().mockResolvedValue([]) };
+        const next = continueOnce('Finish the todos.');
+
+        await run([{ text: 'Hi' }], 'prompt-stop-policy-empty', {
+          type: SendMessageType.UserQuery,
+          stopPolicies: [empty, next],
+        });
+
+        // The empty request sends nothing; the next policy is asked.
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        expect(mockTurnRunFn.mock.calls[1][1]).toContainEqual({
+          text: 'Finish the todos.',
+        });
+      });
+
+      it('asks the stop policies only once the Stop hook lets the response stop', async () => {
+        installMessageBus(blockStopOnce(), 'Stop');
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const policy = continueOnce('Finish the todos.');
+
+        await run([{ text: 'Hi' }], 'prompt-stop-policy-after-hook', {
+          type: SendMessageType.UserQuery,
+          stopPolicies: [policy],
+        });
+
+        // The hook's continuation, then the policy's, then the stop.
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(3);
+        expect(mockTurnRunFn.mock.calls[1][1]).toContainEqual({
+          text: 'Keep working',
+        });
+        expect(mockTurnRunFn.mock.calls[2][1]).toContainEqual({
+          text: 'Finish the todos.',
+        });
+        expect(policy.continueAt).toHaveBeenCalledTimes(2);
+      });
+
+      it('tells the stop policies when the Stop hook cap ends the turn', async () => {
+        installMessageBus(
+          vi.fn().mockResolvedValue({
+            output: { decision: 'block', reason: 'Keep working' },
+            stopHookCount: 1,
+          }),
+          'Stop',
+        );
+        vi.mocked(mockConfig.getStopHookBlockingCap).mockReturnValue(1);
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const policy = continueOnce('Finish the todos.');
+
+        await run([{ text: 'Hi' }], 'prompt-stop-policy-cap', {
+          type: SendMessageType.UserQuery,
+          stopPolicies: [policy],
         });
 
         expect(mockTurnRunFn).toHaveBeenCalledOnce();
-        expect(request).not.toHaveBeenCalledWith(
-          expect.objectContaining({ eventName: 'Stop' }),
-          expect.anything(),
-        );
-        expect(memoryTasks).not.toHaveBeenCalled();
+        expect(policy.onStopHookCap).toHaveBeenCalledOnce();
+        expect(policy.continueAt).not.toHaveBeenCalled();
+      });
+
+      it("keeps a host's span and guard options in a Stop hook continuation", async () => {
+        installMessageBus(blockStopOnce(), 'Stop');
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const send = vi.spyOn(client, 'sendMessageStream');
+
+        await run([{ text: 'Hi' }], 'prompt-stop-hook-host-options', {
+          type: SendMessageType.UserQuery,
+          interactionSpanByHost: true,
+          toolLoopGuardsByHost: true,
+        });
+
+        expect(send.mock.calls[1][3]).toMatchObject({
+          type: SendMessageType.Hook,
+          interactionSpanByHost: true,
+          toolLoopGuardsByHost: true,
+        });
+        expect(tel.startInteractionSpan).not.toHaveBeenCalled();
       });
 
       it('gives a blocking Stop hook continuation a fresh exploration phase', async () => {
@@ -12931,7 +13709,64 @@ Other open files:
           expect(mockTurnRunFn).toHaveBeenCalledOnce();
         });
 
-        it('rejects an admission on a send that is not a UserQuery', async () => {
+        it('applies an admission on a Retry instead of running the hook again', async () => {
+          const bus = promptSubmitBus({ output: undefined });
+          mockTurnRunFn.mockReturnValue(textTurn('ok'));
+          vi.spyOn(
+            client,
+            'stripOrphanedUserEntriesFromHistory',
+          ).mockReturnValue([]);
+          const admission = await client.admitUserPrompt(
+            'try again',
+            'prompt-retried',
+          );
+
+          await admittedSend(
+            admission,
+            'prompt-retried',
+            SendMessageType.Retry,
+          );
+
+          expect(submitCalls(bus)).toHaveLength(1);
+          expect(mockTurnRunFn).toHaveBeenCalledOnce();
+        });
+
+        it('puts back the attempt a Retry stripped when its admission is blocked', async () => {
+          promptSubmitBus({
+            output: { decision: 'block', reason: 'not this one' },
+          });
+          const attempt: Content = {
+            role: 'user',
+            parts: [{ text: 'try again' }],
+          };
+          vi.spyOn(
+            client,
+            'stripOrphanedUserEntriesFromHistory',
+          ).mockReturnValue([attempt]);
+          const addHistory = vi
+            .spyOn(client.getChat(), 'addHistory')
+            .mockImplementation(() => {});
+          const admission = await client.admitUserPrompt(
+            'try again',
+            'prompt-retry-blocked',
+          );
+
+          const events = await admittedSend(
+            admission,
+            'prompt-retry-blocked',
+            SendMessageType.Retry,
+          );
+
+          expect(events).toContainEqual(
+            expect.objectContaining({
+              type: LlmEventType.UserPromptSubmitBlocked,
+            }),
+          );
+          expect(addHistory).toHaveBeenCalledWith(attempt);
+          expect(mockTurnRunFn).not.toHaveBeenCalled();
+        });
+
+        it('rejects an admission on a send that is not a UserQuery or a Retry', async () => {
           promptSubmitBus({ output: undefined });
           const admission = await client.admitUserPrompt(
             '/deploy prod',
@@ -13046,6 +13881,42 @@ Other open files:
           hookContext: 'extra hook context',
         });
         expect(promptId).toBe('prompt-hook-context-tag');
+      });
+
+      it('puts the Mods prompt context ahead of the hook context, escaped', async () => {
+        const recordUserMessage = vi.fn();
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordUserMessage,
+          recordCronPrompt: vi.fn(),
+          recordAttributionSnapshot: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+        mockTurnRunFn.mockReturnValue(textTurn('ok'));
+        const tag = (context: string) =>
+          `<qwen:user-prompt-submit-context>\n${context}\n</qwen:user-prompt-submit-context>`;
+
+        // Without UserPromptSubmit hooks the Mods' context still enters.
+        await run([{ text: 'my prompt' }], 'prompt-mod-context', {
+          type: SendMessageType.UserQuery,
+          promptContext: ['<mod> note', ' '],
+        });
+        expect(
+          recordUserMessage.mock.calls[0]![0].map(
+            (part: { text: string }) => part.text,
+          ),
+        ).toEqual(['my prompt', tag('&lt;mod&gt; note')]);
+        expect(recordUserMessage.mock.calls[0]![2]).toEqual({
+          displayText: 'my prompt',
+          hookContext: '&lt;mod&gt; note',
+        });
+
+        promptSubmitBus(extraHookContext());
+        await run([{ text: 'next prompt' }], 'prompt-both-contexts', {
+          type: SendMessageType.UserQuery,
+          promptContext: ['first', 'second'],
+        });
+        expect(getLastTurnRequestText()).toContain(
+          tag('first\n\nsecond\n\nextra hook context'),
+        );
       });
 
       it.each([
@@ -13253,6 +14124,58 @@ Other open files:
           },
           'prompt-hook-context-dedup',
         );
+      });
+
+      it('counts the Mods context and the hook context as delivered each on its own', async () => {
+        installHistoryChat([
+          {
+            role: 'user',
+            parts: [
+              { text: 'earlier prompt' },
+              createUserPromptSubmitContextPart(
+                'mod one\n\nextra hook context',
+                ['mod one', 'extra hook context'],
+              ),
+            ],
+          },
+        ]);
+        promptSubmitBus(extraHookContext());
+        const recordUserMessage = vi.fn();
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordUserMessage,
+          recordCronPrompt: vi.fn(),
+          recordAttributionSnapshot: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+        mockTurnRunFn.mockReturnValue(textTurn('ok'));
+        const tag = (context: string) =>
+          `<qwen:user-prompt-submit-context>\n${context}\n</qwen:user-prompt-submit-context>`;
+
+        // A Mod context that changed is sent; the unchanged hook context is
+        // not sent again beside it.
+        await run([{ text: 'my prompt' }], 'prompt-mod-context-changed', {
+          type: SendMessageType.UserQuery,
+          promptContext: ['mod two'],
+        });
+        expect(
+          recordUserMessage.mock.calls[0]![0].map(
+            (part: { text: string }) => part.text,
+          ),
+        ).toEqual(['my prompt', tag('mod two')]);
+        expect(recordUserMessage.mock.calls[0]![2]).toEqual({
+          displayText: 'my prompt',
+          hookContext: 'mod two',
+        });
+
+        // Both already delivered: nothing is appended.
+        await run([{ text: 'again' }], 'prompt-mod-context-same', {
+          type: SendMessageType.UserQuery,
+          promptContext: ['mod one'],
+        });
+        expect(
+          recordUserMessage.mock.calls[1]![0].map(
+            (part: { text: string }) => part.text,
+          ),
+        ).toEqual(['again']);
       });
 
       it('still appends an unchanged block to a request with no parts of its own', async () => {

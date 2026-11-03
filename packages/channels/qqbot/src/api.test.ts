@@ -21,6 +21,7 @@ const {
   fetchAccessToken,
   fetchGatewayUrl,
   getApiBase,
+  requestQQApi,
   sendQQMessage,
   validateGatewayUrl,
 } = await import('./api.js');
@@ -85,6 +86,61 @@ describe('sendQQMessage', () => {
       '/v2/groups/g123/messages',
       'tok',
       { content: 'hi', msg_type: 0 },
+    );
+
+    expect(resp).toBe(fake);
+  });
+});
+
+describe('requestQQApi', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockFetch.mockResolvedValue(mockResponse(true, 200, ''));
+  });
+
+  it('sends GET without a body or Content-Type', async () => {
+    await requestQQApi(
+      'https://api.example.com',
+      'GET',
+      '/v2/groups/g123/info',
+      'tok',
+    );
+
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toBe('https://api.example.com/v2/groups/g123/info');
+    expect(init?.method).toBe('GET');
+    expect(init?.body).toBeUndefined();
+    expect(
+      (init?.headers as Record<string, string>)?.['Content-Type'],
+    ).toBeUndefined();
+    expect((init?.headers as Record<string, string>)?.['Authorization']).toBe(
+      'QQBot tok',
+    );
+  });
+
+  it('sends DELETE for message recall without a body', async () => {
+    await requestQQApi(
+      'https://api.example.com',
+      'DELETE',
+      '/v2/groups/g123/messages/m456',
+      'tok',
+    );
+
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toBe('https://api.example.com/v2/groups/g123/messages/m456');
+    expect(init?.method).toBe('DELETE');
+    expect(init?.body).toBeUndefined();
+  });
+
+  it('returns the fetch Response directly', async () => {
+    const fake = mockResponse(true, 200, '');
+    mockFetch.mockResolvedValue(fake);
+
+    const resp = await requestQQApi(
+      'https://api.example.com',
+      'GET',
+      '/v2/groups/g123/status',
+      'tok',
     );
 
     expect(resp).toBe(fake);

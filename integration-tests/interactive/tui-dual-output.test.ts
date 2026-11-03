@@ -387,9 +387,7 @@ it.each(cases)(
         'orderly PTY exit event',
         10_000,
       );
-      expect(active.exitResult()?.exitCode).toBe(
-        name === 'active-exit' && renderer === 'opentui' ? 130 : 0,
-      );
+      expect(active.exitResult()?.exitCode).toBe(0);
       expect(modelServer.requests).toHaveLength(
         ['tool', 'allow', 'cancel-followup'].includes(name) ? 2 : 1,
       );

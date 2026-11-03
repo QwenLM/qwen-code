@@ -31,9 +31,11 @@ describe('pairing bootstrap', () => {
       `${window.location.origin}/web-shell/pairing/exchange`,
       expect.objectContaining({
         method: 'POST',
-        headers: { Authorization: 'Bearer one-time' },
         redirect: 'error',
       }),
+    );
+    expect(new Headers(vi.mocked(fetch).mock.calls[0]?.[1]?.headers)).toEqual(
+      new Headers({ Authorization: 'Bearer one-time' }),
     );
     expect(persistDaemonToken).toHaveBeenCalledWith(
       'device-token',

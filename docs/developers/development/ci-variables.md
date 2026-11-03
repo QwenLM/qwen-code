@@ -78,10 +78,11 @@ to it. On GitHub-hosted runners
 the variable is ignored and Vitest uses its own defaults.
 
 Each Vitest run applies the cap on its own. The main CI workspace-test step
-runs two lanes at once (`.github/scripts/ci/run-unit-test-lanes.sh`): the cap
-bounds each Vitest run in the main lane, and web-shell's suite in the side lane
-runs at half the cap, at least 1, so at its peak the step runs the cap plus that
-half. On GitHub-hosted runners that side-lane suite runs at 2 workers.
+runs two lanes at once (`.github/scripts/ci/run-unit-test-lanes.sh`): the main
+lane runs the CLI and core suites at the cap, and the side lane runs the other
+workspaces' suites and `npm run test:scripts:unit` at half the cap, at least 1,
+so at its peak the step runs the cap plus that half. On GitHub-hosted runners
+the side lane's Vitest runs use 2 workers.
 
 ### Related variables outside test execution
 

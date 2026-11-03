@@ -14,6 +14,10 @@ import * as path from 'node:path';
 import { inspect } from 'node:util';
 import { z } from 'zod';
 import {
+  hashDaemonWorkspace,
+  withDaemonSpan,
+} from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
+import {
   APPROVAL_MODES,
   AGENT_WORKTREE_SLUG_PATTERN,
   BTW_MAX_INPUT_LENGTH,
@@ -126,6 +130,11 @@ import {
   type BridgeSessionCatalogVersion,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
+import {
+  BtwStreamError,
+  BtwStreamRequests,
+  streamBtwSnapshots,
+} from '../btw-stream.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import {
   WorktreeMarkerMissingError,
@@ -175,7 +184,7 @@ import {
 } from '../server/session-artifact-library.js';
 import { WorkspaceArtifactCache } from '../server/workspace-artifact-cache.js';
 import { ArtifactLibraryStream } from '../server/artifact-library-stream.js';
-import { bindSessionPrsFromReviewPrompt } from './session-pr-backfill.js';
+import { bindSessionPrsFromPromptCommand } from './session-pr-backfill.js';
 import { acquireWorktreeOwnershipOp } from '../server/worktree-ownership-op.js';
 import {
   exportSessionTranscript,
@@ -231,12 +240,21 @@ import {
   type VirtualSubagentSessions,
 } from '../virtual-subagent-sessions.js';
 import {
+  captureWorkspaceEntryCurrency,
+  failedBatchMember,
+  isGenerationClosedError,
+  MAX_BATCH_WORKSPACES,
+  MAX_MEMBER_BYTES,
+  MAX_SELECTOR_CHARS,
+  resolveWorkspaceEntryBySelector,
   resolveWorkspaceEntryFromParam,
   resolveWorkspaceRuntimeFromParam,
   sendUntrustedWorkspaceResponse,
   sendWorkspaceRuntimeUnavailable,
 } from '../workspace-route-runtime.js';
 import {
+  redactWorkflowModeFromConfigOptions,
+  redactWorkflowModeFromSessionState,
   redactWorkflowsFromAvailableCommandsEvent,
   redactWorkflowsFromReplayArrays,
   redactWorkflowsFromSupportedCommands,
@@ -856,6 +874,7 @@ export function registerSessionRoutes(
   app: Application,
   deps: RegisterSessionRoutesDeps,
 ): { resolveSubagentSessionRuntime: ResolveSubagentSessionRuntime } {
+  const btwStreams = new BtwStreamRequests();
   const {
     boundWorkspace,
     workspaceRegistry,
@@ -6986,9 +7005,14 @@ export function registerSessionRoutes(
     withOwnerReadSession(
       'GET /session/:id/context',
       async (_req, res, sessionId, runtime) => {
+        const status = await runtime.bridge.getSessionContextStatus(sessionId);
         res
           .status(200)
-          .json(await runtime.bridge.getSessionContextStatus(sessionId));
+          .json(
+            runtime.trusted
+              ? status
+              : redactWorkflowModeFromSessionState(status),
+          );
       },
     ),
   );
@@ -8608,9 +8632,10 @@ export function registerSessionRoutes(
         }
         res.off('close', onResClose);
 
-        // A `/review <N|url>` prompt binds the PR to this session as soon as
-        // the turn is admitted, instead of waiting for an on-demand backfill
-        // sweep. Off the prompt path: a failed bind never affects the turn.
+        // A `/review` or `/verify-pr` prompt binds the PR to this session as
+        // soon as the turn is admitted, instead of waiting for an on-demand
+        // backfill sweep. Off the prompt path: a failed bind never affects
+        // the turn.
         if (runtime.trusted && channelPrompt === undefined) {
           // Only the prompt the user typed is a source: take the first text
           // block. Later blocks can carry @-imported file content whose
@@ -8626,7 +8651,7 @@ export function registerSessionRoutes(
               ? (firstTextBlock['text'] as string)
               : undefined;
           if (promptText !== undefined) {
-            void bindSessionPrsFromReviewPrompt(
+            void bindSessionPrsFromPromptCommand(
               runtime,
               sessionId,
               promptText,
@@ -8636,10 +8661,19 @@ export function registerSessionRoutes(
             )
               .then((result) => {
                 if (!result) return;
-                if (result.writeErrors || result.unresolved) {
-                  daemonLog?.warn('review PR bind incomplete', {
+                // A `--repo` decline is a policy outcome, not a failure, but
+                // it still has to reach the log: a badge missing because the
+                // number named another repository is otherwise
+                // indistinguishable from one that never resolved.
+                if (
+                  result.writeErrors ||
+                  result.unresolved ||
+                  result.repoDeclined
+                ) {
+                  daemonLog?.warn('session PR bind incomplete', {
                     sessionId,
                     unresolved: result.unresolved,
+                    repoDeclined: result.repoDeclined,
                     writeErrors: result.writeErrors,
                     overLimit: result.overLimit,
                   });
@@ -8652,7 +8686,7 @@ export function registerSessionRoutes(
                 ) {
                   return;
                 }
-                daemonLog?.warn('review PR bind failed', {
+                daemonLog?.warn('session PR bind failed', {
                   sessionId,
                   error: describePromptTurnFailure(error),
                 });
@@ -10175,56 +10209,209 @@ export function registerSessionRoutes(
     BridgeSessionCatalogVersion
   >();
 
+  const readWorkspaceLiveState = (runtime: WorkspaceRuntime) => {
+    const assertRuntimeOpen = captureRuntimeGenerationAssertion(runtime);
+    const bridge = runtime.bridge;
+    assertRuntimeOpen?.();
+    const catalogVersion = bridge.getSessionCatalogVersion();
+    const lastExposed = lastExposedCatalogVersions.get(bridge);
+    if (
+      lastExposed === undefined ||
+      lastExposed.generation !== catalogVersion.generation ||
+      lastExposed.revision !== catalogVersion.revision
+    ) {
+      invalidateSessionLists(runtime, ['active', 'archived']);
+    }
+    const sessions = bridge
+      .listWorkspaceSessions(runtime.workspaceCwd)
+      .filter(
+        (session) => session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE,
+      )
+      .map((session) => ({
+        sessionId: session.sessionId,
+        clientCount: session.clientCount,
+        hasActivePrompt: session.hasActivePrompt,
+        ...(session.activeWorkState !== undefined
+          ? { activeWorkState: session.activeWorkState }
+          : {}),
+        hasRunningBackgroundTasks: session.hasRunningBackgroundTasks,
+        ...(session.backgroundTurn
+          ? { backgroundTurn: session.backgroundTurn }
+          : {}),
+        isWaitingForPermission: session.isWaitingForPermission ?? false,
+        isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
+        hasTurnError: session.hasTurnError ?? false,
+        // Bridge-local activity watermark, absent until a running prompt in
+        // this bridge publishes its first terminal. Reading it costs nothing
+        // extra: the summary is already in memory.
+        ...(session.updatedAt !== undefined
+          ? { updatedAt: session.updatedAt }
+          : {}),
+      }));
+    assertRuntimeOpen?.();
+    lastExposedCatalogVersions.set(bridge, catalogVersion);
+    return { v: 1 as const, catalogVersion, sessions };
+  };
+
   app.get('/workspaces/:workspace/sessions/live-state', async (req, res) => {
     const route = 'GET /workspaces/:workspace/sessions/live-state';
     // Strict trust gate: live state is never read from an untrusted
     // runtime, and an unknown selector never falls back to primary.
     const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
     if (runtime === null) return;
-    const assertRuntimeOpen = captureRuntimeGenerationAssertion(runtime);
-    const bridge = runtime.bridge;
     try {
-      assertRuntimeOpen?.();
-      const catalogVersion = bridge.getSessionCatalogVersion();
-      const lastExposed = lastExposedCatalogVersions.get(bridge);
-      if (
-        lastExposed === undefined ||
-        lastExposed.generation !== catalogVersion.generation ||
-        lastExposed.revision !== catalogVersion.revision
-      ) {
-        invalidateSessionLists(runtime, ['active', 'archived']);
-      }
-      const sessions = bridge
-        .listWorkspaceSessions(runtime.workspaceCwd)
-        .filter(
-          (session) => session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE,
-        )
-        .map((session) => ({
-          sessionId: session.sessionId,
-          clientCount: session.clientCount,
-          hasActivePrompt: session.hasActivePrompt,
-          ...(session.activeWorkState !== undefined
-            ? { activeWorkState: session.activeWorkState }
-            : {}),
-          hasRunningBackgroundTasks: session.hasRunningBackgroundTasks,
-          ...(session.backgroundTurn
-            ? { backgroundTurn: session.backgroundTurn }
-            : {}),
-          isWaitingForPermission: session.isWaitingForPermission ?? false,
-          isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
-          // Bridge-local activity watermark, absent until a running prompt in
-          // this bridge publishes its first terminal. Reading it costs nothing
-          // extra: the summary is already in memory.
-          ...(session.updatedAt !== undefined
-            ? { updatedAt: session.updatedAt }
-            : {}),
-        }));
-      assertRuntimeOpen?.();
-      lastExposedCatalogVersions.set(bridge, catalogVersion);
       res.setHeader('Cache-Control', 'no-store');
-      res.status(200).json({ v: 1, catalogVersion, sessions });
+      res.status(200).json(readWorkspaceLiveState(runtime));
     } catch (err) {
       sendBridgeError(res, err, { route });
+    }
+  });
+
+  const liveStateBatchRequest = z
+    .object({
+      workspaces: z
+        .array(z.string().min(1).max(MAX_SELECTOR_CHARS))
+        .min(1)
+        .max(MAX_BATCH_WORKSPACES),
+    })
+    .strict();
+
+  app.post('/sessions/live-state', async (req, res) => {
+    const parsed = liveStateBatchRequest.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        code: 'invalid_session_live_state_batch_request',
+        error: 'Invalid session live-state batch request.',
+      });
+      return;
+    }
+
+    const readMember = async (workspace: string) => {
+      const entry = resolveWorkspaceEntryBySelector(
+        workspaceRegistry,
+        workspace,
+      );
+      if (!entry) {
+        return failedBatchMember(
+          workspace,
+          undefined,
+          404,
+          'workspace_not_found',
+          'Workspace is not registered with this daemon.',
+        );
+      }
+      const unavailable = () =>
+        failedBatchMember(
+          workspace,
+          entry,
+          503,
+          'workspace_runtime_unavailable',
+          'Workspace runtime is not active.',
+        );
+      const { generation, isCurrent } = captureWorkspaceEntryCurrency(
+        workspaceRegistry,
+        entry,
+      );
+      if (!generation || !isCurrent()) return unavailable();
+      const runtime = generation.runtime;
+      if (!runtime.trusted) {
+        logSessionRoutingFailure(
+          'POST /sessions/live-state',
+          'untrusted_workspace',
+          {
+            workspaceId: runtime.workspaceId,
+            workspaceCwd: runtime.workspaceCwd,
+          },
+        );
+        return failedBatchMember(
+          workspace,
+          entry,
+          403,
+          'untrusted_workspace',
+          'Workspace is not trusted.',
+        );
+      }
+      try {
+        const snapshot = await withDaemonSpan(
+          'qwen-code.daemon.session_live_state_batch.member',
+          {
+            'qwen-code.workspace.hash': hashDaemonWorkspace(
+              runtime.workspaceCwd,
+            ),
+          },
+          async () => readWorkspaceLiveState(runtime),
+        );
+        if (!isCurrent()) return unavailable();
+        const member = {
+          workspace,
+          workspaceId: runtime.workspaceId,
+          cwd: runtime.workspaceCwd,
+          ...snapshot,
+        };
+        if (Buffer.byteLength(JSON.stringify(member)) > MAX_MEMBER_BYTES) {
+          return failedBatchMember(
+            workspace,
+            entry,
+            413,
+            'live_state_response_too_large',
+            `Live-state snapshot exceeds ${MAX_MEMBER_BYTES / 1024} KiB.`,
+          );
+        }
+        return member;
+      } catch (error) {
+        if (isGenerationClosedError(error) || !isCurrent()) {
+          return unavailable();
+        }
+        // The member body stays generic by contract; the raw error exists
+        // only here, so losing it would leave a polling client with no
+        // server-side trace of which workspace is failing.
+        daemonLog?.error(
+          error instanceof Error ? error.message : String(error),
+          error instanceof Error ? error : undefined,
+          {
+            route: 'POST /sessions/live-state',
+            workspaceId: entry.workspaceId,
+          },
+        );
+        return failedBatchMember(
+          workspace,
+          entry,
+          500,
+          'session_live_state_failed',
+          'Failed to read workspace session live state.',
+        );
+      }
+    };
+
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const onClose = () => {
+      if (!res.writableEnded) abort();
+    };
+    req.once('aborted', abort);
+    res.once('close', onClose);
+    if (req.aborted || res.destroyed) abort();
+
+    const workspaces = [];
+    try {
+      for (const workspace of parsed.data.workspaces) {
+        if (controller.signal.aborted) return;
+        workspaces.push(await readMember(workspace));
+        // Member reads are synchronous bridge-memory reads chained through
+        // microtasks, so without this yield the loop cannot observe a
+        // disconnect until every member has been read.
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      if (controller.signal.aborted) return;
+      addDaemonRequestAttribute(
+        'qwen-code.daemon.session_live_state_batch.members',
+        workspaces.length,
+      );
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(200).json({ workspaces });
+    } finally {
+      req.off('aborted', abort);
+      res.off('close', onClose);
     }
   });
 
@@ -10305,9 +10492,9 @@ export function registerSessionRoutes(
         const configId = body['configId'];
         const value = body['value'];
         const persist = body['persist'];
-        if (configId !== 'reasoning_effort') {
+        if (configId !== 'reasoning_effort' && configId !== 'workflow_mode') {
           res.status(400).json({
-            error: '`configId` must be reasoning_effort',
+            error: '`configId` must be reasoning_effort or workflow_mode',
           });
           return;
         }
@@ -10317,12 +10504,40 @@ export function registerSessionRoutes(
           });
           return;
         }
+        if (configId === 'workflow_mode') {
+          if ((value !== 'on' && value !== 'off') || persist !== undefined) {
+            res.status(400).json({
+              error:
+                'Workflow mode requires on/off and does not accept persist',
+            });
+            return;
+          }
+          if (!runtime.trusted) {
+            sendUntrustedSessionOwner(
+              res,
+              'POST /session/:id/config-option',
+              sessionId,
+              runtime,
+            );
+            return;
+          }
+          if (runtime.routeFileSystemFactory.sshWorkspace) {
+            res.status(501).json({
+              code: 'ssh_workspace_operation_unsupported',
+              error: 'Workflow mode is unsupported for SSH workspaces',
+            });
+            return;
+          }
+        }
         if (persist !== undefined && typeof persist !== 'boolean') {
           res.status(400).json({
             error: '`persist` must be a boolean when provided',
           });
           return;
         }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const assertOpen = captureRuntimeGenerationAssertion(runtime);
         const response = await runtime.bridge.setSessionConfigOption(
           sessionId,
           {
@@ -10337,10 +10552,16 @@ export function registerSessionRoutes(
                 }
               : {}),
           },
+          clientId !== undefined ? { clientId } : undefined,
+          assertOpen,
         );
+        assertOpen?.();
         res.status(200).json({
-          configOptions: response.configOptions,
+          configOptions: runtime.trusted
+            ? response.configOptions
+            : redactWorkflowModeFromConfigOptions(response).configOptions,
           persisted:
+            configId === 'workflow_mode' ||
             response._meta?.[REASONING_SELECTION_PERSISTED_META_KEY] === true,
         });
       },
@@ -10375,6 +10596,85 @@ export function registerSessionRoutes(
         res.status(200).json(response);
       },
     ),
+  );
+
+  const btwRequestId = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
+  const btwStreamInput = z.object({
+    question: z.string().max(BTW_MAX_INPUT_LENGTH).trim().min(1),
+    requestId: btwRequestId,
+    resume: z.boolean().optional(),
+  });
+  const btwStreamHandler = (method: 'post' | 'delete') =>
+    withOwnerMutableSession(
+      method === 'post'
+        ? 'POST /session/:id/btw/stream'
+        : 'DELETE /session/:id/btw/stream/:requestId',
+      (req, res, sessionId, runtime) => {
+        const parsed =
+          method === 'post'
+            ? btwStreamInput.safeParse(safeBody(req))
+            : btwRequestId.safeParse(req.params['requestId']);
+        if (!parsed.success) {
+          res.status(400).json({
+            code: 'invalid_btw_request',
+            error:
+              method === 'post'
+                ? 'A valid requestId and non-empty question are required'
+                : 'A valid requestId is required',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const bridge = runtime.bridge;
+        // Session detach can win the race with cancelling its own cached request.
+        if (
+          typeof parsed.data !== 'string' ||
+          !btwStreams.has(bridge, sessionId, clientId, parsed.data)
+        ) {
+          // Authorize this live-session client without starting model work.
+          bridge.getPendingPrompts(
+            sessionId,
+            clientId !== undefined ? { clientId } : undefined,
+          );
+        }
+        try {
+          if (typeof parsed.data === 'string') {
+            btwStreams.cancel(bridge, sessionId, clientId, parsed.data);
+            res.status(204).end();
+            return;
+          }
+          if (!bridge.generateSessionBtwStream) {
+            res.status(501).json({
+              code: 'btw_stream_not_supported',
+              error: 'Streaming side questions are not supported',
+            });
+            return;
+          }
+          const { requestId, question, resume } = parsed.data;
+          const request = btwStreams.open(
+            bridge,
+            sessionId,
+            clientId,
+            requestId,
+            question,
+            resume === true,
+          );
+          // The bridge's side request holds generation alive independently of HTTP.
+          void streamBtwSnapshots(res, request);
+        } catch (error) {
+          if (!(error instanceof BtwStreamError)) throw error;
+          res
+            .status(error.status)
+            .json({ code: error.code, error: error.message });
+        }
+      },
+    );
+  app.post('/session/:id/btw/stream', mutate(), btwStreamHandler('post'));
+  app.delete(
+    '/session/:id/btw/stream/:requestId',
+    mutate(),
+    btwStreamHandler('delete'),
   );
 
   app.post(

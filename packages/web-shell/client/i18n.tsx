@@ -8,6 +8,10 @@ import {
 } from './components/managed/managed-lifecycle-messages.js';
 import { plural } from './utils/plural.js';
 import {
+  ACTIVITY_MESSAGES_EN,
+  ACTIVITY_MESSAGES_ZH,
+} from './components/sidebar/activity-messages.js';
+import {
   MESSAGE_DELETION_MESSAGES_EN,
   MESSAGE_DELETION_MESSAGES_ZH,
 } from './components/message-deletion-messages.js';
@@ -70,7 +74,7 @@ import {
   MANAGED_MCP_MESSAGES_ZH,
 } from './components/managed/managed-mcp-messages.js';
 
-export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN'] as const;
+export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN', 'ru'] as const;
 
 export type WebShellLanguage = (typeof WEB_SHELL_LANGUAGES)[number];
 
@@ -79,6 +83,26 @@ type MessageValue =
   | ((vars?: Record<string, string | number>) => string);
 
 type Messages = Record<string, MessageValue>;
+
+/**
+ * Russian plural pick: 1 → `one`, 2–4 → `few`, otherwise → `many`, with the
+ * 11–14 exception per decade (ход/ходов, токен/токенов, цель/целей).
+ */
+function ruPlural(
+  count: string | number | undefined,
+  one: string,
+  few: string,
+  many: string,
+): string {
+  const value = typeof count === 'number' ? count : Number(count ?? 0);
+  const safe = Number.isFinite(value) ? value : 0;
+  const last = safe % 10;
+  const lastTwo = safe % 100;
+  if (lastTwo >= 11 && lastTwo <= 14) return many;
+  if (last === 1) return one;
+  if (last >= 2 && last <= 4) return few;
+  return many;
+}
 
 const EN: Messages = {
   'capacityChoice.persistenceUnconfirmed':
@@ -150,6 +174,14 @@ const EN: Messages = {
   'footnotes.next': 'Next reference',
   'footnotes.citations': (v) =>
     `${v?.count ?? 0} ${v?.count === 1 ? 'citation' : 'citations'}`,
+  'daemon.connection.paused':
+    'Cannot reach the service. Automatic refresh is paused while reconnecting.',
+  'daemon.connection.authRequired':
+    'Service authentication failed. Check your credentials; automatic refresh is paused.',
+  'daemon.connection.unavailable': 'Cannot reach the service.',
+  'localControl.connectionRetry':
+    'Connection interrupted. Retry to refresh the QR code.',
+  'daemon.connection.retry': 'Retry connection',
   'daemon.capacity.exhausted':
     'The service has reached its concurrent capacity limit and cannot start this session. Try again later or cancel this operation.',
   'managed.title': 'Managed Agents',
@@ -166,6 +198,10 @@ const EN: Messages = {
   'managed.refresh': 'Refresh',
   'managed.empty': 'No managed tasks yet.',
   'managed.loading': 'Loading…',
+  'managed.listLoadFailed': 'Managed sessions could not be loaded.',
+  'managed.listRetry': 'Retry loading sessions',
+  'managed.errorDetails': (v) =>
+    `HTTP ${v?.status ?? ''} · ${v?.code ?? ''}${v?.requestId ? ` · Request ID: ${v.requestId}` : ''}`,
   'managed.todo.loadedWindow': 'From the loaded session transcript.',
   'managed.more': 'Load more',
   'managed.titleSearch': 'Search session titles',
@@ -1034,6 +1070,8 @@ const EN: Messages = {
   'composer.dropChoice.moreFiles': (v) => `and ${v?.count ?? 0} more files`,
   'composerAdd.trigger': 'Add to message',
   'composerMobile.expand': 'Expand editor',
+  'composerMobile.advancedMode': 'Switch to advanced mode',
+  'composerMobile.simpleMode': 'Switch to simple mode',
   'composerMobile.hideKeyboard': 'Hide keyboard',
   'composerMobile.done': 'Done',
   'composerMobile.photos': 'Photos',
@@ -1111,6 +1149,8 @@ const EN: Messages = {
   'session.contextConflict':
     'A standalone or Live conversation link cannot include a workspace target.',
   'session.loadFailed': 'Failed to load conversation',
+  'session.splitAddFailed':
+    'Some sessions could not be added to Split View. Please try again.',
   'session.notFound': 'Conversation not found',
   'session.notFoundDescription':
     'This standalone conversation no longer exists.',
@@ -1336,6 +1376,8 @@ const EN: Messages = {
   'contextUsage.estimatedUntilProviderUsage':
     'Token usage is estimated until provider usage is received.',
   'contextUsage.free': 'Free',
+  'contextUsage.instructionFiles': 'Instruction files',
+  'contextUsage.autoMemory': 'Auto memory',
   'contextUsage.memoryFiles': 'Memory files',
   'contextUsage.messages': 'Messages',
   'contextUsage.startupContext': 'Startup context',
@@ -1893,6 +1935,42 @@ const EN: Messages = {
   'scheduledTasks.gate.hint':
     'Runs from the project directory before each scheduled fire, outside the model. Exit 0 with output wakes the session with that output attached as data; exit 0 with nothing on stdout skips the fire with no turn; a non-zero exit reports only its stderr, and only when the gate starts failing. It runs unattended only where the session would run the same command without asking — a saved Monitor(…) or Bash(…) rule, a read-only command, or an auto or yolo session; otherwise every fire is blocked.',
   'scheduledTasks.gate.cardPrefix': 'Gate:',
+  'autofixPrWatches.title': 'PR watches',
+  'autofixPrWatches.description':
+    'The /autofix-pr watches of your workspaces: what each round did, and what waits for you.',
+  'autofixPrWatches.empty':
+    'No /autofix-pr watch yet. Run /autofix-pr <PR> in a session to start one.',
+  'autofixPrWatches.loadFailed': 'Could not load the PR watches',
+  'autofixPrWatches.unreadable': (v) =>
+    `Could not read the watch of PR #${v?.pr ?? ''}: ${v?.error ?? ''}`,
+  'autofixPrWatches.phase.merged': 'PR merged — the watch can be stopped',
+  'autofixPrWatches.phase.closed': 'PR closed — the watch can be stopped',
+  'autofixPrWatches.phase.ended': (v) => `Stopped: ${v?.reason ?? ''}`,
+  'autofixPrWatches.phase.unscheduled': 'No scheduled check',
+  'autofixPrWatches.phase.fixing': (v) =>
+    `Fixing in the background (${v?.minutes ?? 0} min)`,
+  'autofixPrWatches.phase.fixingStarting': 'Fixing in the background',
+  'autofixPrWatches.phase.abandonedFix':
+    'A background fix was left behind — the next round redoes it',
+  'autofixPrWatches.phase.watching': 'Watching',
+  'autofixPrWatches.phase.idle': 'Not checked recently',
+  'autofixPrWatches.pushes': (v) => `Pushes ${v?.count ?? 0}/${v?.max ?? 0}`,
+  'autofixPrWatches.lastCheck': (v) => `Last check ${v?.when ?? ''}`,
+  'autofixPrWatches.neverChecked': 'Not checked yet',
+  'autofixPrWatches.lastRound': (v) => `Last round ${v?.when ?? ''}`,
+  'autofixPrWatches.needsHuman': (v) =>
+    `Needs your decision (${v?.count ?? 0})`,
+  'autofixPrWatches.staleTask':
+    'This task no longer drives the watch; it stops at its next fire.',
+  'autofixPrWatches.openSession': 'Open session',
+  'autofixPrWatches.stop': 'Stop watch',
+  'autofixPrWatches.stopHint': (v) =>
+    `Runs /autofix-pr stop ${v?.pr ?? ''} in the session that owns the watch`,
+  'autofixPrWatches.outsideDaemon':
+    'Owned by a session outside this Web Shell (a terminal, perhaps): stop it there.',
+  'autofixPrWatches.stopFailed': 'Could not stop the watch',
+  'autofixPrWatches.noOwner': (v) =>
+    `No session of this Web Shell runs it. In a session of its workspace, /autofix-pr stop ${v?.pr ?? ''} cleans it up, or /autofix-pr resume ${v?.pr ?? ''} starts it again.`,
   'scheduledTasks.gate.notRunYet': 'gate not run yet',
   'scheduledTasks.gate.neverDelivered': 'never',
   'scheduledTasks.gate.lastFailed': 'last run failed',
@@ -2019,6 +2097,7 @@ const EN: Messages = {
   'localFiles.blocker.unsupportedDaemon':
     'This daemon does not advertise the client filesystem bridge (client_mcp_over_ws). Start the daemon with QWEN_SERVE_CLIENT_MCP_OVER_WS=1 to enable local files.',
   ...FILES_MESSAGES_EN,
+  ...ACTIVITY_MESSAGES_EN,
   'rightPanel.add': 'Add panel',
   'attachment.showPreview': 'Preview',
   'attachment.showSource': 'Source',
@@ -2059,21 +2138,22 @@ const EN: Messages = {
   'sidebar.navigation': 'Main navigation',
   'sidebar.toggleMenu': 'Toggle menu',
   'sidebar.newChat': 'New chat',
-  'sidebar.newTask': 'New task',
-  'sidebar.newWorktreeTask': 'New worktree task',
+  'sidebar.newTask': 'New session',
+  'sidebar.newWorktreeTask': 'New worktree session',
   'sidebar.moveWorkspaceUp': 'Move up',
   'sidebar.moveWorkspaceDown': 'Move down',
   'sidebar.plugins': 'Plugins',
   'sidebar.channels': 'Channels',
   'sidebar.sessionSource': 'Session source',
+  'sidebar.archiveSessionSource': 'Archived session source',
   'sidebar.sessionSource.tasks': 'Tasks',
   'sidebar.sessionSource.channels': 'Channels',
   'sidebar.channelType.other': 'Other channels',
   'sidebar.live': 'Live',
   'sidebar.liveVoicePending': 'Voice chat',
-  'sidebar.project': 'Project',
+  'sidebar.project': 'Workspaces',
   'sidebar.pinnedSessions': 'Pinned',
-  'sidebar.recentSessions': 'Recent sessions',
+  'sidebar.recentSessions': 'Recent',
   'sidebar.standalonePinUnavailable':
     'Pinning no-workspace sessions is not supported yet.',
   'sidebar.workspaceSelectLabel': 'Workspace',
@@ -2095,15 +2175,16 @@ const EN: Messages = {
     'The daemon response was interrupted. Check the refreshed workspace list before creating another workspace.',
   'sidebar.scratchOutcomeRefresh': 'Refresh workspace list',
   'sidebar.scratchOutcomeAcknowledge': 'I checked the workspace list',
-  'sidebar.addWorkspaceTitle': 'Add Workspace',
+  'sidebar.addWorkspaceTitle': 'Add workspace',
   'sidebar.addWorkspacePath': 'Directory path',
   'sidebar.addWorkspaceBrowse': 'Browse…',
+  'sidebar.addWorkspaceBrowsing': 'Choosing directory…',
   'sidebar.addWorkspaceBrowseError':
-    'Unable to open the system folder picker. Enter an absolute path instead.',
+    'Unable to open the folder picker. Enter an absolute path instead.',
   'sidebar.addWorkspaceDisplayName': 'Display name (optional)',
   'sidebar.addWorkspaceDisplayNameHint':
     'Shown in Web Shell; the directory path remains the workspace identity.',
-  'sidebar.addWorkspaceRegister': 'Register',
+  'sidebar.addWorkspaceRegister': 'Add workspace',
   'sidebar.addWorkspaceCancel': 'Cancel',
   'sidebar.addWorkspaceError': 'Failed to add workspace',
   'sidebar.addWorkspaceBusyError': 'Another workspace operation is in progress',
@@ -2188,7 +2269,7 @@ const EN: Messages = {
   'sidebar.removeWorkspace': 'Remove workspace',
   'sidebar.workspaceActions': 'Workspace actions',
   'sidebar.renameWorkspace': 'Rename…',
-  'sidebar.renameWorkspaceTitle': 'Rename Workspace',
+  'sidebar.renameWorkspaceTitle': 'Rename workspace',
   'sidebar.workspaceNamePrompt': 'Display name',
   'sidebar.workspaceNameHint': 'Leave empty to show the folder name.',
   'sidebar.workspaceNameInvalid': 'Names cannot contain control characters.',
@@ -2237,7 +2318,7 @@ const EN: Messages = {
   'sidebar.overview.hooksDisabled': (v) =>
     `${v?.count ?? 0} hook${v?.count === 1 ? '' : 's'} (disabled)`,
   'sidebar.forceRemoveWorkspace': 'Force remove',
-  'sidebar.removeWorkspaceTitle': 'Remove Workspace',
+  'sidebar.removeWorkspaceTitle': 'Remove workspace',
   'sidebar.removeWorkspaceConfirm': (v) =>
     `Remove the runtime and persistent registration for “${v?.name ?? ''}”? Files, settings, and session history will not be deleted.`,
   'sidebar.removeWorkspaceBusy': (v) =>
@@ -2258,13 +2339,22 @@ const EN: Messages = {
   'sidebar.removeWorkspaceVoiceSessions': (v) =>
     `Voice sessions: ${v?.count ?? 0}`,
   'sidebar.noSessions': 'No sessions.',
-  'sidebar.projectFallback': 'Project',
+  'sidebar.projectFallback': 'Workspace',
   'sidebar.sessionsOverview': 'Session Overview',
   'sidebar.splitView': 'Split View',
+  'sidebar.addToSplitView': 'Add to Split View',
+  'sidebar.splitAtCapacity': (v) =>
+    `Split View already shows ${v?.max ?? 6} sessions — close a pane to add another`,
+  'sidebar.splitAlreadyOpen': 'This session is already open in Split View',
+  'sidebar.splitCurrentDisabled':
+    'The current session cannot be added while Split View is closed',
   'sidebar.settings': 'Settings',
   'update.button': 'Update',
   'update.restarting': 'Restarting…',
   'update.readyTitle': (v) => `Update to v${v?.version} and restart`,
+  'update.manualTitle': (v) => `Update to v${v?.version} (manual)`,
+  'update.manualHint':
+    'This installation cannot be updated from the Web Shell. Update guidance:',
   'update.failed':
     'Update could not finish. Check the service connection and retry.',
 
@@ -2272,13 +2362,15 @@ const EN: Messages = {
   'sidebar.scheduledTasks': 'Scheduled Tasks',
   'sidebar.workflows': 'Workflows',
   'sidebar.goals': 'Goals',
+  'sidebar.prWatches': 'PR watches',
   'sidebar.themeLight': 'Switch to light theme',
   'sidebar.themeDark': 'Switch to dark theme',
   'sidebar.collapse': 'Collapse',
   'sidebar.expand': 'Expand',
   'sidebar.showAllSessions': 'Show all',
-  'sidebar.collapseProject': 'Collapse project',
-  'sidebar.expandProject': 'Expand project',
+  'sidebar.subSessions': (v) => plural(v?.['count'], 'sub-session'),
+  'sidebar.collapseProject': 'Collapse workspace',
+  'sidebar.expandProject': 'Expand workspace',
   'sidebar.search': 'Search sessions',
   'sidebar.searchPlaceholder': 'Search sessions',
   'sidebar.rename': 'Rename',
@@ -2304,7 +2396,7 @@ const EN: Messages = {
   'sidebar.loadFailed': 'Failed to load sessions. Click to retry.',
   'sidebar.renameFailed': 'Failed to rename session',
   'sidebar.deleteFailed': 'Failed to delete session',
-  'sidebar.newSessionFailed': 'Failed to create a new chat',
+  'sidebar.newSessionFailed': 'Failed to create a new session',
   'sidebar.switchFailed': 'Failed to switch session',
   'sidebar.currentDeleteDisabled':
     'The current session is running and cannot be deleted',
@@ -2602,10 +2694,10 @@ const EN: Messages = {
   'slash.category.system': 'System commands',
   'language.changed': (v) => `UI language changed to ${v?.language ?? ''}`,
   'language.current': (v) => `Current UI language: ${v?.language ?? ''}`,
-  'language.invalid': 'Invalid language. Available: en, zh-CN',
+  'language.invalid': `Invalid language. Available: ${WEB_SHELL_LANGUAGES.join(', ')}`,
   'language.options': 'Available options:',
   'language.set': 'Set UI language',
-  'language.usage': 'Usage: /language ui [en|zh-CN] | output <language>',
+  'language.usage': `Usage: /language ui [${WEB_SHELL_LANGUAGES.join('|')}] | output <language>`,
   'localCommand.noSession':
     'No active session yet. Send your first message before using this command.',
   'localCommand.diffNoWorkspace':
@@ -2770,6 +2862,8 @@ const EN: Messages = {
   'rewind.confirm': 'Confirm rewind',
   'rewind.empty': 'No rewind snapshots are available for this session.',
   'rewind.failed': (v) => `Failed to rewind session: ${v?.reason ?? ''}`,
+  'rewind.identityUnavailable':
+    'This snapshot has no prompt identity to rewind to.',
   'rewind.loading': 'Loading rewind snapshots...',
   'rewind.promptFallback': (v) => `Prompt ${v?.id ?? ''}`,
   'rewind.rewinding': 'Rewinding...',
@@ -3222,7 +3316,7 @@ const EN: Messages = {
   'memory.openFolderUnsupported':
     'Opening the auto-memory folder is not available from web-shell yet.',
   'memory.placeholder': (v) => `Write ${v?.scope ?? 'memory'} content...`,
-  'memory.project': 'Project',
+  'memory.project': 'Workspace',
   'memory.project.desc': 'Saved to this workspace memory file',
   'memory.refresh': 'Refresh',
   'memory.refresh.desc': 'Reload memory file information',
@@ -3382,7 +3476,12 @@ const EN: Messages = {
     'Make the entered skill name match the name in SKILL.md, then upload the skill again.',
   'skills.install.error.unsafePath':
     'Use a regular skill directory and files instead of symbolic links, and check the reported installation path.',
-  'skills.install.error.zipTooLarge': 'The ZIP file must not exceed 6 MB.',
+  'skills.install.error.packageTooLarge':
+    'The skill exceeds the installer limit of 32 MiB per file or 64 MiB total.',
+  'skills.install.error.tooManyFiles':
+    'The skill package has too many files (max 2000).',
+  'skills.install.error.zipTooLarge':
+    'The ZIP file must not exceed 7,864,071 bytes.',
   'skills.install.error.invalidFolder': 'Enter a valid local skill folder.',
   'skills.install.error.githubFailed':
     'Could not download the skill from GitHub. Check the URL or authentication and try again.',
@@ -3468,6 +3567,7 @@ const EN: Messages = {
   'skills.toggleUnsupported':
     'The connected daemon does not support skill enable or disable actions.',
   'skills.title': 'Skills',
+  'plugins.backToChat': 'Back to conversation',
   'plugins.extensions': 'Extensions',
   'plugins.agents': 'Agents',
   'plugins.mcp': 'MCP',
@@ -3542,6 +3642,8 @@ const EN: Messages = {
   'contextUsage.compressInterrupted':
     'Connection changed during compression. Refresh to check current usage.',
   'contextUsage.compressFailed': 'Compression failed. You can try again.',
+  'contextUsage.previewTruncated':
+    'This file is large; the preview shows only its beginning.',
   'contextUsage.compressRefreshFailed':
     'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
   'contextUsage.compressUnavailable':
@@ -4194,7 +4296,7 @@ const EN: Messages = {
     'More sessions than one page; counts are a lower bound.',
   'workspacesOverview.dirty': (v) => `${v?.count ?? 0} changed`,
   'workspacesOverview.mcpFailed': (v) => `${v?.count ?? 0} failed`,
-  'workspacesOverview.newTask': 'New task',
+  'workspacesOverview.newTask': 'New session',
   'workspacesOverview.trust': 'Trust',
   'workspacesOverview.trusting': 'Trusting…',
   'workspacesOverview.trustFailed': 'Could not trust the workspace',
@@ -4215,6 +4317,7 @@ const EN: Messages = {
   'splitView.goToApproval': 'Go to it',
   'splitView.pendingCount': (v) => `${v?.count ?? 0} awaiting input`,
   'splitView.nextPending': 'Go to the next session awaiting input',
+  'splitView.noOtherSessions': 'No other sessions',
   'splitView.empty': 'No sessions in the split. Add one to get started.',
   'splitView.composerPlaceholder': 'Message this session…',
   'channels.title': 'Channels',
@@ -4290,6 +4393,8 @@ const EN: Messages = {
     'Update public settings or explicitly change stored credentials.',
   'channels.editor.section.identity': 'Identity',
   'channels.editor.section.credentials': 'Credentials',
+  'channels.editor.section.connection': 'Connection',
+  'channels.editor.section.routing': 'Notifications and routing',
   'channels.editor.section.session': 'Conversation management',
   'channels.editor.section.access': 'Access control',
   'channels.editor.section.access.description':
@@ -4321,6 +4426,12 @@ const EN: Messages = {
   'channels.editor.field.github.token': 'Personal Access Token',
   'channels.editor.field.github.token.description':
     'Optional classic PAT with "notifications" scope. Overrides local gh authentication',
+  'channels.editor.field.github.token.localGhHint':
+    'Local gh authentication is selected. The token cannot be edited here, and any stored token is removed on save.',
+  'channels.editor.field.github.allowedRepos': 'Allowed repositories',
+  'channels.editor.field.github.allowedRepos.description':
+    'Comma-separated repository full names, for example owner/repo.',
+  'channels.editor.field.github.allowedRepos.placeholder': 'owner/repo',
   'channels.editor.field.github.useLocalGh':
     'Use local GitHub CLI authentication',
   'channels.editor.field.github.useLocalGh.description':
@@ -4333,7 +4444,37 @@ const EN: Messages = {
     'Must be "Open", "Allowlist", or "Pairing" for notifications to flow',
   'channels.editor.field.github.reasonFilter': 'Reason Filter',
   'channels.editor.field.github.reasonFilter.description':
-    'Optional. Comma-separated notification reasons to process. Valid values: mention, review_requested, assign, author, comment, ci_activity, manual, state_change, subscribed, team_mention, security_alert, approval_requested, invitation, member_feature_requested, security_advisory_credit. Leave empty to process all.',
+    'Optional. Only notifications with a checked reason are processed. Leave every reason unchecked to process all of them.',
+  'channels.editor.field.github.reasonFilter.option.mention':
+    'mention — the bot is @mentioned',
+  'channels.editor.field.github.reasonFilter.option.review_requested':
+    'review_requested — the bot, or a team it belongs to, was asked to review a pull request',
+  'channels.editor.field.github.reasonFilter.option.assign':
+    'assign — the bot was assigned to the issue',
+  'channels.editor.field.github.reasonFilter.option.author':
+    'author — the bot created the thread',
+  'channels.editor.field.github.reasonFilter.option.comment':
+    'comment — the bot commented on the thread',
+  'channels.editor.field.github.reasonFilter.option.ci_activity':
+    'ci_activity — a workflow run the bot triggered completed',
+  'channels.editor.field.github.reasonFilter.option.manual':
+    'manual — the bot subscribed to the thread from an issue or pull request',
+  'channels.editor.field.github.reasonFilter.option.state_change':
+    'state_change — the bot changed the thread state, such as closing an issue',
+  'channels.editor.field.github.reasonFilter.option.subscribed':
+    'subscribed — the bot is watching the repository',
+  'channels.editor.field.github.reasonFilter.option.team_mention':
+    'team_mention — a team the bot belongs to is @mentioned',
+  'channels.editor.field.github.reasonFilter.option.security_alert':
+    'security_alert — GitHub found a security vulnerability in the repository',
+  'channels.editor.field.github.reasonFilter.option.approval_requested':
+    'approval_requested — the bot was asked to review and approve a deployment',
+  'channels.editor.field.github.reasonFilter.option.invitation':
+    'invitation — the bot accepted an invitation to contribute to the repository',
+  'channels.editor.field.github.reasonFilter.option.member_feature_requested':
+    'member_feature_requested — organization members asked to enable a feature such as Copilot',
+  'channels.editor.field.github.reasonFilter.option.security_advisory_credit':
+    'security_advisory_credit — the bot was credited for contributing to a security advisory',
   'channels.editor.field.gitlab.token': 'Personal Access Token',
   'channels.editor.field.gitlab.token.description':
     'PAT with "read_api" + "api" scopes',
@@ -4509,6 +4650,10 @@ const EN: Messages = {
   'channels.editor.validation.invalidName': 'Choose a different instance name.',
   'channels.editor.validation.invalidGroupId':
     'Enter a group ID other than __proto__, constructor, or prototype.',
+  'channels.editor.validation.invalidRepoId':
+    'Enter each repository as owner/repo.',
+  'channels.editor.validation.conflictingRepoAliases':
+    'This channel lists one repository twice with different settings, spelled differently (for example Owner/repo and owner/repo). Remove one of the entries from settings.json before saving.',
   'channels.editor.validation.invalidOption':
     "Remove values that aren't in the allowed list.",
   'channels.editor.validation.number': 'Enter a valid number.',
@@ -4657,6 +4802,12 @@ const ZH: Messages = {
   'footnotes.previous': '上一条引用',
   'footnotes.next': '下一条引用',
   'footnotes.citations': (v) => `${v?.count ?? 0} 个引用`,
+  'daemon.connection.paused': '无法连接服务，自动刷新已暂停，正在尝试恢复。',
+  'daemon.connection.authRequired':
+    '服务认证失败，请检查凭证；自动刷新已暂停。',
+  'daemon.connection.unavailable': '无法连接服务。',
+  'localControl.connectionRetry': '连接已中断，请点击重试刷新二维码。',
+  'daemon.connection.retry': '重试连接',
   'daemon.capacity.exhausted':
     '已达到当前服务的并发容量上限，暂时无法启动此会话。请稍后重试，或取消本次操作。',
   'managed.title': '托管 Agent',
@@ -4672,6 +4823,10 @@ const ZH: Messages = {
   'managed.refresh': '刷新',
   'managed.empty': '暂无托管任务。',
   'managed.loading': '加载中…',
+  'managed.listLoadFailed': '托管会话加载失败。',
+  'managed.listRetry': '重新加载会话',
+  'managed.errorDetails': (v) =>
+    `HTTP ${v?.status ?? ''} · ${v?.code ?? ''}${v?.requestId ? ` · 请求 ID：${v.requestId}` : ''}`,
   'managed.todo.loadedWindow': '来自当前已加载的会话记录。',
   'managed.more': '加载更多',
   'managed.titleSearch': '搜索会话标题',
@@ -5565,6 +5720,8 @@ const ZH: Messages = {
   'composer.dropChoice.moreFiles': (v) => `另有 ${v?.count ?? 0} 个文件`,
   'composerAdd.trigger': '添加到消息',
   'composerMobile.expand': '展开编辑',
+  'composerMobile.advancedMode': '切换至高级模式',
+  'composerMobile.simpleMode': '切换至简洁模式',
   'composerMobile.hideKeyboard': '收起键盘',
   'composerMobile.done': '完成',
   'composerMobile.photos': '照片',
@@ -5635,6 +5792,7 @@ const ZH: Messages = {
   'session.capabilitiesFailed': '无法加载 Daemon 能力。请重试后再打开该会话。',
   'session.contextConflict': 'Standalone 或 Live 会话链接不能同时指定工作区。',
   'session.loadFailed': '会话加载失败',
+  'session.splitAddFailed': '部分会话无法添加到分屏视图，请重试。',
   'session.notFound': '会话不存在',
   'session.notFoundDescription': '该 Standalone 会话已不存在。',
   'session.resolving': '正在打开会话...',
@@ -5835,6 +5993,8 @@ const ZH: Messages = {
   'contextUsage.estimatedUntilProviderUsage':
     'Token 使用量为估算值，直到收到服务商返回的使用量。',
   'contextUsage.free': '空闲',
+  'contextUsage.instructionFiles': '指令文件',
+  'contextUsage.autoMemory': '自动记忆',
   'contextUsage.memoryFiles': 'Memory 文件',
   'contextUsage.messages': '消息',
   'contextUsage.startupContext': '启动上下文',
@@ -6352,6 +6512,40 @@ const ZH: Messages = {
   'scheduledTasks.gate.hint':
     '每次定时触发前在模型之外、从项目目录运行。退出码 0 且有输出时唤醒会话，并把输出作为数据附上；退出码 0 且 stdout 为空则跳过本次触发、不产生回合；非零退出只报告其 stderr，且只在闸门开始失败时报告。只有在会话本身不经询问就会运行这条命令时(已保存的 Monitor(…) 或 Bash(…) 规则、只读命令，或 auto/yolo 模式)才会无人值守运行，否则每次触发都会被阻止。',
   'scheduledTasks.gate.cardPrefix': '闸门：',
+  'autofixPrWatches.title': 'PR 监视',
+  'autofixPrWatches.description':
+    '各工作区的 /autofix-pr 监视：每一轮做了什么，哪些事在等你决定。',
+  'autofixPrWatches.empty':
+    '还没有 /autofix-pr 监视。在会话里运行 /autofix-pr <PR> 即可开始。',
+  'autofixPrWatches.loadFailed': '加载 PR 监视失败',
+  'autofixPrWatches.unreadable': (v) =>
+    `读取 PR #${v?.pr ?? ''} 的监视失败：${v?.error ?? ''}`,
+  'autofixPrWatches.phase.merged': 'PR 已合入，可以停止监视',
+  'autofixPrWatches.phase.closed': 'PR 已关闭，可以停止监视',
+  'autofixPrWatches.phase.ended': (v) => `已停止：${v?.reason ?? ''}`,
+  'autofixPrWatches.phase.unscheduled': '没有定时检查',
+  'autofixPrWatches.phase.fixing': (v) =>
+    `后台修复进行中（${v?.minutes ?? 0} 分钟）`,
+  'autofixPrWatches.phase.fixingStarting': '后台修复进行中',
+  'autofixPrWatches.phase.abandonedFix': '后台修复被中断，下一轮会重做',
+  'autofixPrWatches.phase.watching': '监视中',
+  'autofixPrWatches.phase.idle': '最近没有检查',
+  'autofixPrWatches.pushes': (v) => `推送 ${v?.count ?? 0}/${v?.max ?? 0}`,
+  'autofixPrWatches.lastCheck': (v) => `上次检查 ${v?.when ?? ''}`,
+  'autofixPrWatches.neverChecked': '尚未检查',
+  'autofixPrWatches.lastRound': (v) => `上一轮 ${v?.when ?? ''}`,
+  'autofixPrWatches.needsHuman': (v) => `待你决定（${v?.count ?? 0}）`,
+  'autofixPrWatches.staleTask':
+    '这个任务已不再驱动该监视，下次触发时会自行停止。',
+  'autofixPrWatches.openSession': '打开会话',
+  'autofixPrWatches.stop': '停止监视',
+  'autofixPrWatches.stopHint': (v) =>
+    `在该监视所属的会话里运行 /autofix-pr stop ${v?.pr ?? ''}`,
+  'autofixPrWatches.outsideDaemon':
+    '属于本 Web Shell 之外的会话（例如终端），请在那里停止。',
+  'autofixPrWatches.stopFailed': '停止监视失败',
+  'autofixPrWatches.noOwner': (v) =>
+    `本 Web Shell 中没有会话在运行它。在该工作区的会话里，/autofix-pr stop ${v?.pr ?? ''} 可清理它，/autofix-pr resume ${v?.pr ?? ''} 可重新开始。`,
   'scheduledTasks.gate.notRunYet': '闸门尚未运行',
   'scheduledTasks.gate.neverDelivered': '从未',
   'scheduledTasks.gate.lastFailed': '上次运行失败',
@@ -6472,6 +6666,7 @@ const ZH: Messages = {
   'localFiles.blocker.unsupportedDaemon':
     '该 daemon 未启用客户端文件桥（client_mcp_over_ws）。以 QWEN_SERVE_CLIENT_MCP_OVER_WS=1 启动 daemon 即可启用本地文件。',
   ...FILES_MESSAGES_ZH,
+  ...ACTIVITY_MESSAGES_ZH,
   'rightPanel.add': '添加页签',
   'attachment.showPreview': '预览',
   'attachment.showSource': '源码',
@@ -6507,21 +6702,22 @@ const ZH: Messages = {
   'sidebar.navigation': '主导航',
   'sidebar.toggleMenu': '切换菜单',
   'sidebar.newChat': '新对话',
-  'sidebar.newTask': '新建任务',
-  'sidebar.newWorktreeTask': '新建 Worktree 任务',
+  'sidebar.newTask': '新建会话',
+  'sidebar.newWorktreeTask': '新建 Worktree 会话',
   'sidebar.moveWorkspaceUp': '上移',
   'sidebar.moveWorkspaceDown': '下移',
   'sidebar.plugins': '插件',
   'sidebar.channels': '频道',
   'sidebar.sessionSource': '会话来源',
+  'sidebar.archiveSessionSource': '归档会话来源',
   'sidebar.sessionSource.tasks': '任务',
   'sidebar.sessionSource.channels': '频道',
   'sidebar.channelType.other': '其他频道',
   'sidebar.live': 'Live',
   'sidebar.liveVoicePending': 'Voice chat',
-  'sidebar.project': '项目',
+  'sidebar.project': '工作区',
   'sidebar.pinnedSessions': '置顶',
-  'sidebar.recentSessions': '最近会话',
+  'sidebar.recentSessions': '最近',
   'sidebar.standalonePinUnavailable': '暂不支持置顶无工作区会话。',
   'sidebar.workspaceSelectLabel': '工作区',
   'sidebar.noWorkspace': '无工作区',
@@ -6545,12 +6741,13 @@ const ZH: Messages = {
   'sidebar.addWorkspaceTitle': '添加工作区',
   'sidebar.addWorkspacePath': '目录路径',
   'sidebar.addWorkspaceBrowse': '浏览…',
+  'sidebar.addWorkspaceBrowsing': '正在选择目录…',
   'sidebar.addWorkspaceBrowseError':
-    '无法打开系统文件夹选择器，请改为输入绝对路径。',
+    '无法打开文件夹选择器，请改为输入绝对路径。',
   'sidebar.addWorkspaceDisplayName': '展示名称（可选）',
   'sidebar.addWorkspaceDisplayNameHint':
     '用于 Web Shell 展示；目录路径仍是工作区身份。',
-  'sidebar.addWorkspaceRegister': '注册',
+  'sidebar.addWorkspaceRegister': '添加工作区',
   'sidebar.addWorkspaceCancel': '取消',
   'sidebar.addWorkspaceError': '添加工作区失败',
   'sidebar.addWorkspaceBusyError': '另一个工作区操作正在进行中',
@@ -6685,26 +6882,35 @@ const ZH: Messages = {
   'sidebar.removeWorkspaceWorkers': (v) => `Channel worker：${v?.count ?? 0}`,
   'sidebar.removeWorkspaceVoiceSessions': (v) => `语音会话：${v?.count ?? 0}`,
   'sidebar.noSessions': '暂无会话',
-  'sidebar.projectFallback': '项目',
+  'sidebar.projectFallback': '工作区',
   'sidebar.sessionsOverview': '会话总览',
   'sidebar.splitView': '分屏',
+  'sidebar.addToSplitView': '添加到分屏视图',
+  'sidebar.splitAtCapacity': (v) =>
+    `分屏视图已显示 ${v?.max ?? 6} 个会话 — 请先关闭一个面板再添加`,
+  'sidebar.splitAlreadyOpen': '该会话已在分屏视图中打开',
+  'sidebar.splitCurrentDisabled': '分屏视图关闭时，无法添加当前会话',
   'sidebar.settings': '设置',
   'update.button': '更新',
   'update.restarting': '重启中…',
   'update.readyTitle': (v) => `更新至 v${v?.version} 并重启`,
+  'update.manualTitle': (v) => `更新至 v${v?.version}（手动）`,
+  'update.manualHint': '当前安装方式无法在 Web Shell 中更新。更新指引：',
   'update.failed': '未能完成更新，请检查服务连接后重试。',
 
   'sidebar.daemonStatus': 'Daemon 状态',
   'sidebar.scheduledTasks': '定时任务',
   'sidebar.workflows': '工作流',
   'sidebar.goals': '目标',
+  'sidebar.prWatches': 'PR 监视',
   'sidebar.themeLight': '切换到浅色主题',
   'sidebar.themeDark': '切换到深色主题',
   'sidebar.collapse': '收起',
   'sidebar.expand': '展开',
   'sidebar.showAllSessions': '展开显示',
-  'sidebar.collapseProject': '收起项目',
-  'sidebar.expandProject': '展开项目',
+  'sidebar.subSessions': (v) => `${v?.['count'] ?? 0} 个子会话`,
+  'sidebar.collapseProject': '收起工作区',
+  'sidebar.expandProject': '展开工作区',
   'sidebar.search': '搜索会话',
   'sidebar.searchPlaceholder': '搜索会话',
   'sidebar.rename': '重命名',
@@ -6729,7 +6935,7 @@ const ZH: Messages = {
   'sidebar.loadFailed': '会话加载失败，点击重试。',
   'sidebar.renameFailed': '重命名会话失败',
   'sidebar.deleteFailed': '删除会话失败',
-  'sidebar.newSessionFailed': '创建新对话失败',
+  'sidebar.newSessionFailed': '创建新会话失败',
   'sidebar.switchFailed': '切换会话失败',
   'sidebar.currentDeleteDisabled': '当前会话正在运行，不能删除',
   'sidebar.currentStandaloneDeleteDisabled':
@@ -7003,10 +7209,10 @@ const ZH: Messages = {
   'slash.category.system': '系统',
   'language.changed': (v) => `UI 语言已切换为 ${v?.language ?? ''}`,
   'language.current': (v) => `当前 UI 语言：${v?.language ?? ''}`,
-  'language.invalid': '语言无效。可用值：en, zh-CN',
+  'language.invalid': `语言无效。可用值：${WEB_SHELL_LANGUAGES.join(', ')}`,
   'language.options': '可用选项：',
   'language.set': '设置 UI 语言',
-  'language.usage': '用法：/language ui [en|zh-CN] | output <language>',
+  'language.usage': `用法：/language ui [${WEB_SHELL_LANGUAGES.join('|')}] | output <language>`,
   'localCommand.noSession':
     '当前还没有会话。请先发送第一条消息，再使用这个命令。',
   'localCommand.diffNoWorkspace': '当前还没有可用于查看变更的工作区。',
@@ -7155,6 +7361,7 @@ const ZH: Messages = {
   'rewind.confirm': '确认回退',
   'rewind.empty': '当前会话没有可回退的快照。',
   'rewind.failed': (v) => `回退会话失败：${v?.reason ?? ''}`,
+  'rewind.identityUnavailable': '该快照没有可回退的 prompt 身份。',
   'rewind.loading': '正在加载可回退的 prompt...',
   'rewind.promptFallback': (v) => `Prompt ${v?.id ?? ''}`,
   'rewind.rewinding': '回退中...',
@@ -7569,8 +7776,8 @@ const ZH: Messages = {
   'memory.on': '开',
   'memory.openFolderUnsupported': 'web-shell 暂不支持打开自动记忆文件夹。',
   'memory.placeholder': (v) => `写入${v?.scope ?? 'memory'}内容...`,
-  'memory.project': '项目级',
-  'memory.project.desc': '保存到当前 workspace memory 文件',
+  'memory.project': '工作区级',
+  'memory.project.desc': '保存到当前工作区的记忆文件',
   'memory.refresh': '刷新',
   'memory.refresh.desc': '重新加载 memory 文件信息',
   'memory.refreshed': 'Memory 已刷新。',
@@ -7721,7 +7928,10 @@ const ZH: Messages = {
     '请将输入的技能名称与 SKILL.md 中的 name 保持一致，然后重新上传。',
   'skills.install.error.unsafePath':
     '请使用普通技能目录和文件，避免符号链接，并检查上述安装路径。',
-  'skills.install.error.zipTooLarge': 'ZIP 文件不能超过 6 MB。',
+  'skills.install.error.packageTooLarge':
+    '技能超过安装限制：单文件最大 32 MiB，合计最大 64 MiB。',
+  'skills.install.error.tooManyFiles': '技能包文件过多（最多 2000 个）。',
+  'skills.install.error.zipTooLarge': 'ZIP 文件不能超过 7,864,071 字节。',
   'skills.install.error.invalidFolder': '请输入有效的本地技能文件夹路径。',
   'skills.install.error.githubFailed':
     '无法从 GitHub 下载技能，请检查地址或认证信息后重试。',
@@ -7800,6 +8010,7 @@ const ZH: Messages = {
     '该技能所属扩展当前未启用，请先启用对应扩展。',
   'skills.toggleUnsupported': '当前连接的 daemon 不支持启用或禁用 Skill。',
   'skills.title': 'Skills',
+  'plugins.backToChat': '返回对话',
   'plugins.extensions': '扩展',
   'plugins.agents': '智能体',
   'plugins.mcp': 'MCP',
@@ -7868,6 +8079,7 @@ const ZH: Messages = {
   'contextUsage.compressInterrupted':
     '压缩期间连接发生变化，请刷新查看当前使用量。',
   'contextUsage.compressFailed': '压缩失败，可以重试。',
+  'contextUsage.previewTruncated': '文件较大，预览仅显示开头部分。',
   'contextUsage.compressRefreshFailed':
     '压缩已完成，但用量刷新失败。请点击刷新重试。',
   'contextUsage.compressUnavailable':
@@ -8468,7 +8680,7 @@ const ZH: Messages = {
   'workspacesOverview.truncated': '会话超过一页，计数为下限。',
   'workspacesOverview.dirty': (v) => `${v?.count ?? 0} 处改动`,
   'workspacesOverview.mcpFailed': (v) => `${v?.count ?? 0} 个失败`,
-  'workspacesOverview.newTask': '新建任务',
+  'workspacesOverview.newTask': '新建会话',
   'workspacesOverview.trust': '信任',
   'workspacesOverview.trusting': '正在信任…',
   'workspacesOverview.trustFailed': '无法信任该工作区',
@@ -8488,6 +8700,7 @@ const ZH: Messages = {
   'splitView.goToApproval': '前往处理',
   'splitView.pendingCount': (v) => `${v?.count ?? 0} 个会话待处理`,
   'splitView.nextPending': '前往下一个待处理会话',
+  'splitView.noOtherSessions': '没有其他会话',
   'splitView.empty': '分屏中还没有会话，添加一个开始。',
   'splitView.composerPlaceholder': '给这个会话发消息…',
   'channels.title': '频道',
@@ -8553,6 +8766,8 @@ const ZH: Messages = {
   'channels.editor.editDescription': '更新公开配置，或明确更改已保存的凭据。',
   'channels.editor.section.identity': '频道标识',
   'channels.editor.section.credentials': '应用凭据',
+  'channels.editor.section.connection': '连接',
+  'channels.editor.section.routing': '通知与路由',
   'channels.editor.section.session': '会话管理',
   'channels.editor.section.access': '访问控制',
   'channels.editor.section.access.description':
@@ -8584,6 +8799,12 @@ const ZH: Messages = {
   'channels.editor.field.github.token': '个人访问令牌',
   'channels.editor.field.github.token.description':
     '可选。填写具有 "notifications" 权限的经典 PAT；优先于本地 gh 认证',
+  'channels.editor.field.github.token.localGhHint':
+    '已选择本地 gh 认证：此处无法编辑令牌，保存时会移除已存的令牌。',
+  'channels.editor.field.github.allowedRepos': '允许的仓库',
+  'channels.editor.field.github.allowedRepos.description':
+    '逗号分隔的仓库全名，例如 owner/repo。',
+  'channels.editor.field.github.allowedRepos.placeholder': 'owner/repo',
   'channels.editor.field.github.useLocalGh': '使用本地 GitHub CLI 认证',
   'channels.editor.field.github.useLocalGh.description':
     '未配置令牌时，显式复用 daemon 主机上账户级的 gh 登录',
@@ -8595,7 +8816,37 @@ const ZH: Messages = {
     '必须设为 "Open"、"Allowlist" 或 "Pairing" 才能接收通知',
   'channels.editor.field.github.reasonFilter': '通知原因过滤',
   'channels.editor.field.github.reasonFilter.description':
-    '可选。逗号分隔的通知原因。有效值：mention、review_requested、assign、author、comment、ci_activity、manual、state_change、subscribed、team_mention、security_alert、approval_requested、invitation、member_feature_requested、security_advisory_credit。留空则处理全部。',
+    '可选。只处理勾选原因的通知；全部不勾选则处理所有通知。',
+  'channels.editor.field.github.reasonFilter.option.mention':
+    'mention — 有人在评论或正文中 @ 了机器人',
+  'channels.editor.field.github.reasonFilter.option.review_requested':
+    'review_requested — 机器人或其所在团队被请求评审 PR',
+  'channels.editor.field.github.reasonFilter.option.assign':
+    'assign — 机器人被指派到该 issue',
+  'channels.editor.field.github.reasonFilter.option.author':
+    'author — 该线程由机器人创建',
+  'channels.editor.field.github.reasonFilter.option.comment':
+    'comment — 机器人在该线程里评论过',
+  'channels.editor.field.github.reasonFilter.option.ci_activity':
+    'ci_activity — 机器人触发的工作流运行已完成',
+  'channels.editor.field.github.reasonFilter.option.manual':
+    'manual — 机器人在 issue 或 PR 上订阅了该线程',
+  'channels.editor.field.github.reasonFilter.option.state_change':
+    'state_change — 机器人改变了线程状态，例如关闭 issue',
+  'channels.editor.field.github.reasonFilter.option.subscribed':
+    'subscribed — 机器人正在关注该仓库',
+  'channels.editor.field.github.reasonFilter.option.team_mention':
+    'team_mention — 机器人所在团队被 @',
+  'channels.editor.field.github.reasonFilter.option.security_alert':
+    'security_alert — GitHub 在仓库中发现了安全漏洞',
+  'channels.editor.field.github.reasonFilter.option.approval_requested':
+    'approval_requested — 机器人被请求审核并批准部署',
+  'channels.editor.field.github.reasonFilter.option.invitation':
+    'invitation — 机器人接受了参与该仓库的邀请',
+  'channels.editor.field.github.reasonFilter.option.member_feature_requested':
+    'member_feature_requested — 组织成员请求启用 Copilot 等功能',
+  'channels.editor.field.github.reasonFilter.option.security_advisory_credit':
+    'security_advisory_credit — 机器人因参与安全公告而被致谢',
   'channels.editor.field.gitlab.token': '个人访问令牌',
   'channels.editor.field.gitlab.token.description':
     '需要 "read_api" + "api" 权限的 PAT',
@@ -8763,6 +9014,9 @@ const ZH: Messages = {
   'channels.editor.validation.invalidName': '请使用其他实例名称。',
   'channels.editor.validation.invalidGroupId':
     '群聊 ID 不能是 __proto__、constructor 或 prototype。',
+  'channels.editor.validation.invalidRepoId': '仓库需写成 owner/repo 形式。',
+  'channels.editor.validation.conflictingRepoAliases':
+    '该渠道把同一个仓库以不同大小写写了两次且设置不同（例如 Owner/repo 与 owner/repo）。请先在 settings.json 里删掉其中一条再保存。',
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
   'channels.editor.validation.number': '请输入有效数字。',
   'channels.editor.validation.outOfRange': (v) =>
@@ -8838,14 +9092,108 @@ const ZH: Messages = {
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,
 };
 
+/**
+ * Russian catalog — intentionally partial: it covers the Goal card and the
+ * Goals dialog (#13391). `getTranslator` falls back to EN for every other
+ * key (`messages[key] ?? EN[key] ?? key`), which is the behaviour this locale
+ * has been running with since it was first introduced as an installer patch.
+ */
+const RU: Messages = {
+  'goal.aborted': 'Цель прервана',
+  'goal.blocked': 'Цель заблокирована',
+  'goal.usageLimited': 'Лимит использования цели',
+  'goal.paused': 'Цель на паузе',
+  'goal.achieved': 'Цель достигнута',
+  'goal.check': 'Проверка цели',
+  'goal.cleared': 'Цель снята',
+  'goal.failed': 'Цель не достигнута',
+  'goal.judge': 'Оценка',
+  'goal.label': 'Цель',
+  'goal.lastCheck': 'Последняя проверка',
+  'goal.notYetMet': 'условие не выполнено',
+  'goal.set': 'Цель задана',
+  'goal.statusActive': '/goal активен',
+  'goal.status.active': 'В работе',
+  'goal.status.paused': 'Пауза',
+  'goal.status.blocked': 'Заблокирована',
+  'goal.status.usage_limited': 'Лимит исчерпан',
+  'goal.status.complete': 'Выполнена',
+  'goal.activity.idle': 'Ожидание',
+  'goal.activity.running': 'Работает',
+  'goal.activity.verifying': 'Проверка',
+  'goal.edit': 'Изменить цель',
+  'goal.pause': 'Поставить на паузу',
+  'goal.resume': 'Продолжить',
+  'goal.turn': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'ход', 'хода', 'ходов')}`,
+  'goal.turnLabel': (v) => `ход ${v?.count ?? 0}`,
+  'goal.turns': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'ход', 'хода', 'ходов')}`,
+  'goal.turnsOfBudget': (v) =>
+    `${v?.count ?? 0} / ${v?.budget ?? 0} ${ruPlural(v?.budget, 'ход', 'хода', 'ходов')}`,
+  'goal.activeOfBudget': (v) => `${v?.used ?? ''} / ${v?.budget ?? ''}`,
+  'goal.tokens': (v) =>
+    `${v?.used ?? 0} ${ruPlural(v?.used, 'токен', 'токена', 'токенов')}`,
+  'goal.tokensOfBudget': (v) =>
+    `${v?.used ?? 0} / ${v?.budget ?? 0} ${ruPlural(v?.budget, 'токен', 'токена', 'токенов')}`,
+  'goals.title': 'Цели',
+  'goals.subtitle':
+    'Цель удерживает сессию в работе, пока условие не выполнено. Здесь видны только загруженные сейчас сессии — цель двигается, пока её сессия работает.',
+  'goals.loading': 'Загрузка целей…',
+  'goals.count': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'активная цель', 'активные цели', 'активных целей')}`,
+  'goals.empty': 'Нет активных целей. Задайте: /goal <условие>.',
+  'goals.refresh': 'Обновить',
+  'goals.new': 'Новая цель',
+  'goals.newHint':
+    'Цель запускается в новой сессии и работает, пока условие не выполняется. Жёсткий лимит по числу ходов или времени задаётся в чате: /config model.goalMaxTurns=20 или /config model.goalMaxActiveMinutes=30 (применяется после перезапуска демона, к целям, созданным позже).',
+  'goals.condition': 'Условие',
+  'goals.conditionPlaceholder':
+    'напр. `npm test` завершается с кодом 0 и `npm run lint` без предупреждений (вставить вывод); не менять тестовые файлы; как указание модели — остановиться как blocked после 20 ходов',
+  'goals.cancel': 'Отмена',
+  'goals.create': 'Задать цель',
+  'goals.creating': 'Запуск…',
+  'goals.saving': 'Сохранение…',
+  'goals.save': 'Сохранить',
+  'goals.edit': 'Изменить цель',
+  'goals.objective': 'Целевое условие',
+  'goals.clear': 'Снять цель',
+  'goals.clearConfirm': (v) => `Снять цель "${v?.condition ?? ''}"?`,
+  'goals.running': 'Работает',
+  'goals.idle': 'Ожидание',
+  'goals.dropped': (v) =>
+    `не удалось связаться с ${v?.count ?? 0} ${ruPlural(v?.count, 'сессией', 'сессиями', 'сессиями')} — цели, которые они выполняли, отсутствуют в этом списке.`,
+  'goals.notYetEvaluated': 'ещё не оценено',
+  'goals.openSessionHint': 'Открыть сессию этой цели',
+  'goals.error.emptyCondition': 'Введите условие для цели.',
+  'goals.error.clearKeyword': (v) =>
+    `"${v?.word ?? ''}" снимает цель, а не задаёт её. Опишите условие, к которому нужно работать.`,
+  'goals.error.createFailed': 'Не удалось запустить цель',
+  'goals.error.saveFailed': 'Не удалось сохранить цель',
+  'goals.error.goalUnavailable': 'Цель больше недоступна.',
+  'goals.error.requiresObjective': (v) =>
+    `/goal ${v?.keyword ?? 'set'} требует целевого условия.`,
+  'goals.error.invalidCommand': 'Некорректная команда /goal',
+  'goals.error.goalsUnavailable': 'Панель целей недоступна в этом интерфейсе.',
+  'goals.error.attachmentsUnsupported': 'Уберите вложения перед /goal.',
+  'goals.error.editFailed': 'Не удалось изменить цель',
+  'goals.error.pauseFailed': 'Не удалось поставить цель на паузу',
+  'goals.error.resumeFailed': 'Не удалось продолжить цель',
+  'goals.error.clearFailed': 'Не удалось снять цель',
+  'goals.error.controlBusy':
+    'Другое управление целью ещё выполняется. Повторите, когда оно завершится.',
+};
+
 const MESSAGES: Record<WebShellLanguage, Messages> = {
   en: EN,
   'zh-CN': ZH,
+  ru: RU,
 };
 
 const LANGUAGE_LABELS: Record<WebShellLanguage, string> = {
   en: 'English [en]',
   'zh-CN': '中文 [zh-CN]',
+  ru: 'Русский [ru]',
 };
 
 const Context = createContext<{
@@ -8863,6 +9211,12 @@ export function normalizeLanguage(
   if (!normalized) return 'en';
   if (normalized === 'zh' || normalized === 'zh-cn' || normalized === 'zh_cn') {
     return 'zh-CN';
+  }
+  // Prefix match: ru, region-qualified ru (ru-RU, ru-UA, ru-KZ, …) and the
+  // underscore form all resolve to the partial ru catalog — region-qualified
+  // Russian speakers must not fall through to en.
+  if (normalized.startsWith('ru') || normalized === 'русский') {
+    return 'ru';
   }
   return 'en';
 }
@@ -8885,6 +9239,11 @@ export function languageSettingToWebShellLanguage(
     normalized === '中文'
   ) {
     return 'zh-CN';
+  }
+  // Same prefix match as normalizeLanguage: region-qualified settings
+  // (ru-UA, …) map to the partial ru catalog instead of an unknown setting.
+  if (normalized.startsWith('ru') || normalized === 'русский') {
+    return 'ru';
   }
   if (
     normalized === 'en' ||

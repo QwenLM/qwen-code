@@ -781,6 +781,9 @@ describe('useOpenTuiLiveTurn submit paths', () => {
       expect(stripOrphanedUserEntriesFromHistory).toHaveBeenCalledTimes(
         restored ? 1 : 0,
       );
+      if (restored) {
+        expect(stripOrphanedUserEntriesFromHistory).toHaveBeenCalledWith(true);
+      }
       expect(removeLastUserMessage).toHaveBeenCalledTimes(restored ? 1 : 0);
     },
   );
@@ -1191,6 +1194,7 @@ describe('useOpenTuiLiveTurn submit paths', () => {
       });
     });
     const options = live.turns[0].options as LivePromptOptions;
+    expect(options.workflowModeEligible).toBe(true);
     let held: OpenTuiSteeringSubmission[] = [];
     act(() => {
       result.current.submit('read @delayed.txt', [path]);

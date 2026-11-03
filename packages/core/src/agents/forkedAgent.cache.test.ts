@@ -391,6 +391,63 @@ describe('runForkedAgent (cache path)', () => {
     expect(result.model).toBe('test-model');
   });
 
+  it('streams only answer text while preserving the accumulated result', async () => {
+    saveCacheSafeParams({}, [], 'test-model');
+    mockForkStream([
+      modelChunk([{ text: 'private thought', thought: true }]),
+      modelChunk([fnCall('edit', { file: 'a.ts' })]),
+      modelChunk([{ text: ' first ' }]),
+      modelChunk([{ text: 'answer ' }], undefined, USAGE),
+    ]);
+    const onText = vi.fn();
+
+    const result = await runFork({ onText });
+
+    expect(onText.mock.calls).toEqual([[' first '], ['answer ']]);
+    expect(result.text).toBe('first answer');
+    expect(result.usage).toMatchObject({ inputTokens: 10, outputTokens: 5 });
+  });
+
+  it('awaits answer delivery before consuming the next chunk', async () => {
+    saveCacheSafeParams({}, [], 'test-model');
+    mockForkStream([
+      modelChunk([{ text: 'first' }]),
+      modelChunk([{ text: 'second' }]),
+    ]);
+    let release!: () => void;
+    const delivered = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const onText = vi.fn().mockImplementationOnce(() => delivered);
+    const result = runFork({ onText });
+    await vi.waitFor(() => expect(onText).toHaveBeenCalledOnce());
+    expect(onText).toHaveBeenCalledWith('first');
+
+    release();
+
+    await expect(result).resolves.toMatchObject({ text: 'firstsecond' });
+    expect(onText.mock.calls).toEqual([['first'], ['second']]);
+  });
+
+  it('propagates cancellation during answer delivery without later callbacks', async () => {
+    saveCacheSafeParams({}, [], 'test-model');
+    const send = mockForkStream([
+      modelChunk([{ text: 'first' }]),
+      modelChunk([{ text: 'second' }]),
+    ]);
+    const controller = new AbortController();
+    const onText = vi.fn(() => {
+      controller.abort();
+      controller.signal.throwIfAborted();
+    });
+
+    await expect(
+      runFork({ onText, abortSignal: controller.signal }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(sentConfig(send).abortSignal).toBe(controller.signal);
+    expect(onText.mock.calls).toEqual([['first']]);
+  });
+
   it('keeps the first structured response when the provider emits another schema call', async () => {
     saveCacheSafeParams(
       { tools: [{ functionDeclarations: [{ name: 'edit' }] }] },

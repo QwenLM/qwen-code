@@ -98,6 +98,13 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
     };
   });
 const refreshSessionCatalogQueries = vi.hoisted(() => vi.fn());
+const sessionCatalogController = vi.hoisted(() => ({
+  refreshQueries: refreshSessionCatalogQueries,
+  invalidateWorkspace: vi.fn(),
+  refreshWorkspace: vi.fn(),
+  renamed: vi.fn(),
+  toggleSessionPinned: vi.fn(),
+}));
 const useSessionCatalogQueries = vi.hoisted(() => vi.fn(() => []));
 const loadSession = vi.hoisted(() => vi.fn());
 
@@ -128,24 +135,24 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
         : options?.group === 'pinned'
           ? pinned
           : active;
-    const catalogQuery = {
-      routeKind: 'legacy',
-      workspaceCwd: connection.workspaceCwd,
-      options,
-    };
+    const { enabled: _enabled, ...catalogOptions } = options ?? {};
+    const optionsKey = JSON.stringify(catalogOptions);
+    const workspaceCwd = connection.workspaceCwd;
+    const catalogQuery = React.useMemo(
+      () => ({
+        routeKind: 'legacy',
+        workspaceCwd,
+        options: JSON.parse(optionsKey) as typeof catalogOptions,
+      }),
+      [optionsKey, workspaceCwd],
+    );
     return resolveWebShellSessions(
       state,
       options?.enabled !== false,
       catalogQuery,
     );
   },
-  useSessionCatalogController: () => ({
-    refreshQueries: refreshSessionCatalogQueries,
-    invalidateWorkspace: vi.fn(),
-    refreshWorkspace: vi.fn(),
-    renamed: vi.fn(),
-    toggleSessionPinned: vi.fn(),
-  }),
+  useSessionCatalogController: () => sessionCatalogController,
   useSessionCatalogPolling: () => undefined,
   useSessionCatalogQuery: (
     client: typeof workspace.client,
@@ -199,10 +206,12 @@ const namedGroup = {
 
 let root: Root;
 let container: HTMLDivElement;
+let archivedSessionsTarget: HTMLDivElement;
 
 function renderSidebar(
   collapsed = false,
   props: {
+    archivedSessionsTarget?: HTMLElement | null;
     onNewSession?: () => Promise<boolean> | boolean;
     onSelectCurrentSession?: () => void;
     currentSessionActive?: boolean;
@@ -224,6 +233,7 @@ function renderSidebar(
 ) {
   const sidebar = (
     <WebShellSidebar
+      archivedSessionsTarget={props.archivedSessionsTarget}
       collapsed={collapsed}
       currentSessionActive={props.currentSessionActive}
       layout={props.layout}
@@ -277,7 +287,8 @@ beforeEach(() => {
   window.localStorage.clear();
   container = document.createElement('div');
   document.body.appendChild(container);
-  root = createRoot(container);
+  root = createRoot(container.appendChild(document.createElement('div')));
+  archivedSessionsTarget = container.appendChild(document.createElement('div'));
   connection.status = 'connected';
   connection.loadingTranscript = false;
   connection.error = undefined;
@@ -455,8 +466,8 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       .map((call) => call[1])
       .filter((queries) =>
         queries.some(
-          (query: { options: { group?: string } }) =>
-            query.options.group === 'all',
+          (query: { options: { group?: string; pageSize?: number } }) =>
+            query.options.group === 'all' && query.options.pageSize !== 100,
         ),
       );
     expect(activeQueryCalls.length).toBeGreaterThan(0);
@@ -619,9 +630,16 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     const activeQueryCalls = useSessionCatalogQueries.mock.calls.filter(
       (call) =>
         call[1].some(
-          (query: { options: { group?: string; archiveState?: string } }) =>
+          (query: {
+            options: {
+              group?: string;
+              archiveState?: string;
+              pageSize?: number;
+            };
+          }) =>
             query.options.group === 'all' &&
-            query.options.archiveState === 'active',
+            query.options.archiveState === 'active' &&
+            query.options.pageSize !== 100,
         ),
     );
     expect(activeQueryCalls.length).toBeGreaterThan(0);
@@ -900,9 +918,16 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     const activeQueryCalls = useSessionCatalogQueries.mock.calls.filter(
       (call) =>
         call[1].some(
-          (query: { options: { group?: string; archiveState?: string } }) =>
+          (query: {
+            options: {
+              group?: string;
+              archiveState?: string;
+              pageSize?: number;
+            };
+          }) =>
             query.options.group === 'all' &&
-            query.options.archiveState === 'active',
+            query.options.archiveState === 'active' &&
+            query.options.pageSize !== 100,
         ),
     );
     expect(activeQueryCalls.length).toBeGreaterThan(0);
@@ -1072,18 +1097,10 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     );
     expect(switcher?.textContent).toContain('API review');
     expect(switcher?.textContent).toContain('Pinned task');
-    expect(switcher?.textContent).toContain('Archived');
+    expect(switcher?.textContent).not.toContain('Archived');
     expect(
       switcher?.querySelector('button[aria-label="Search sessions"]'),
     ).not.toBeNull();
-
-    const archivedHeader = Array.from(
-      switcher?.querySelectorAll<HTMLButtonElement>('button') ?? [],
-    ).find((button) => button.textContent?.includes('Archived'));
-    expect(archivedHeader).not.toBeNull();
-    act(() => click(archivedHeader!));
-    await flushSidebar();
-    expect(switcher?.textContent).toContain('Archived task');
 
     act(() => click(trigger!));
     await flushSidebar();
@@ -1275,14 +1292,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ];
     archived.data = archived.sessions;
 
-    renderSidebar();
-    await flushSidebar();
-
-    const archivedHeader = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
-    ).find((btn) => btn.textContent?.includes('Archived'));
-    expect(archivedHeader).not.toBeNull();
-    act(() => click(archivedHeader!));
+    renderSidebar(false, { archivedSessionsTarget });
     await flushSidebar();
 
     const sessionName = Array.from(container.querySelectorAll('span')).find(
@@ -1299,7 +1309,37 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(archivedRow!.tabIndex).toBe(-1);
   });
 
-  it('refreshes archived sessions each time the section expands', async () => {
+  it('renders archived settings while the sidebar is collapsed', async () => {
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization', 'session_archive'],
+    };
+    archived.sessions = [
+      makeSession('collapsed-archive', {
+        displayName: 'Collapsed archive',
+        isArchived: true,
+      }),
+    ];
+    archived.data = archived.sessions;
+    renderSidebar(true, { archivedSessionsTarget });
+    await flushSidebar();
+    expect(archivedSessionsTarget.textContent).toContain('Collapsed archive');
+    expect(container.querySelector('aside')?.textContent).not.toContain(
+      'Collapsed archive',
+    );
+  });
+
+  it('does not refresh workspace archives without the archive capability', async () => {
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    renderSidebar(false, { archivedSessionsTarget });
+    await flushSidebar();
+    expect(refreshSessionCatalogQueries).not.toHaveBeenCalled();
+  });
+
+  it('loads archived sessions only in settings and refreshes on re-entry', async () => {
     connection.capabilities = {
       qwenCodeVersion: '1.2.3',
       features: ['session_organization', 'session_archive'],
@@ -1307,13 +1347,13 @@ describe('WebShellSidebar collapsed session group persistence', () => {
 
     renderSidebar();
     await flushSidebar();
+    expect(refreshSessionCatalogQueries).not.toHaveBeenCalled();
+    expect(container.querySelector('aside')?.textContent).not.toContain(
+      'Archived',
+    );
 
-    const archivedHeader = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
-    ).find((btn) => btn.textContent?.includes('Archived'));
-    expect(archivedHeader).not.toBeNull();
-
-    act(() => click(archivedHeader!));
+    renderSidebar(false, { archivedSessionsTarget });
+    await flushSidebar();
     expect(refreshSessionCatalogQueries).toHaveBeenCalledTimes(1);
     expect(refreshSessionCatalogQueries).toHaveBeenLastCalledWith([
       expect.objectContaining({
@@ -1323,8 +1363,11 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       }),
     ]);
 
-    act(() => click(archivedHeader!));
-    act(() => click(archivedHeader!));
+    renderSidebar();
+    await flushSidebar();
+    expect(archivedSessionsTarget.textContent).toBe('');
+    renderSidebar(false, { archivedSessionsTarget });
+    await flushSidebar();
     expect(refreshSessionCatalogQueries).toHaveBeenCalledTimes(2);
   });
 
@@ -1382,7 +1425,10 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     container.remove();
     container = document.createElement('div');
     document.body.appendChild(container);
-    root = createRoot(container);
+    root = createRoot(container.appendChild(document.createElement('div')));
+    archivedSessionsTarget = container.appendChild(
+      document.createElement('div'),
+    );
     renderSidebar();
     await flushSidebar();
 
@@ -2093,7 +2139,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     const preview = document.querySelector('[data-web-shell-home-popover]');
     expect(preview).not.toBeNull();
     expect(preview!.textContent).toContain('Qwen Code');
-    expect(preview!.textContent).toContain('New task');
+    expect(preview!.textContent).toContain('New session');
     expect(preview!.textContent).toContain('Release notes');
     expect(
       document.querySelectorAll('[data-web-shell-home-column]'),
@@ -2152,7 +2198,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       ).not.toBeNull();
       expect(
         document.querySelector('[data-web-shell-home-popover]')!.textContent,
-      ).toContain('New task');
+      ).toContain('New session');
       expect(
         container
           .querySelector('button[aria-current="page"]')
@@ -2857,7 +2903,7 @@ describe('Recent sessions shared rows', () => {
         '[data-testid="recent-sessions"]',
       )!;
       const create = recent.querySelector<HTMLButtonElement>(
-        '[aria-label="New task"]',
+        '[aria-label="New session"]',
       )!;
       click(create);
       await flushSidebar();
@@ -2914,7 +2960,7 @@ describe('Recent sessions shared rows', () => {
         '[data-testid="recent-sessions"]',
       )!;
       click(
-        recent.querySelector<HTMLButtonElement>('[aria-label="New task"]')!,
+        recent.querySelector<HTMLButtonElement>('[aria-label="New session"]')!,
       );
       await flushSidebar();
       renderSidebar(false, { onNewSession });
@@ -3024,7 +3070,9 @@ describe('Recent sessions shared rows', () => {
     renderSidebar(false, { onNewSession });
     await flushSidebar();
     const recent = container.querySelector('[data-testid="recent-sessions"]')!;
-    click(recent.querySelector<HTMLButtonElement>('[aria-label="New task"]')!);
+    click(
+      recent.querySelector<HTMLButtonElement>('[aria-label="New session"]')!,
+    );
     await flushSidebar();
     connection.sessionId = 'session-b';
     workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
@@ -3066,9 +3114,8 @@ describe('Recent sessions shared rows', () => {
     ]);
     expect(recent.textContent).not.toContain('Independent chat');
     expect(
-      container.querySelector('[data-testid="standalone-active-group"]')
-        ?.textContent,
-    ).not.toContain('Independent chat');
+      container.querySelector('[data-testid="standalone-active-group"]'),
+    ).toBeNull();
     expect(active.archiveSession).not.toHaveBeenCalled();
   });
 

@@ -128,7 +128,7 @@ this recovery exception.
 
 | Surface    | Behavior                                                                                                                                                                                |
 | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Packaging  | One `.js`, `.mjs`, `.cjs`, `.ts`, `.mts` or `.cts` ESM entry; relative static imports and re-exports inside the installed plugin                                                        |
+| Packaging  | One `.ts`, `.tsx`, `.jsx`, `.js`, `.mjs`, `.cjs`, `.mts` or `.cts` ESM entry; relative static imports and re-exports inside the installed plugin; JSX in `.tsx` and `.jsx` files        |
 | Entry      | `register(on, options)`; async registration is awaited; typed non-secret options are copied and deeply frozen                                                                           |
 | Lifecycle  | All modules register before the initial `session.start` chain; `session.end` on exit and conversation replacement; clear/resume do not reload modules                                   |
 | Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                            |
@@ -137,13 +137,14 @@ this recovery exception.
 | API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                             |
 | Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                            |
 | Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits, described in [Turn events](#turn-events)                                                             |
+| Prompts    | `prompt.submit` in headless runs, described in [Submitted prompts](#submitted-prompts)                                                                                                  |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
 | Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                |
-| Drawing    | `ui.render` for the band above the prompt in the Ink terminal, described in [The band above the prompt](#the-band-above-the-prompt)                                                     |
+| Drawing    | `ui.render` for the band above the prompt in the Ink and OpenTUI terminals, described in [The band above the prompt](#the-band-above-the-prompt)                                        |
 | Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                 |
 
 This is a supported subset, not full compatibility with existing Claude Mods.
-JSX/TSX, runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
+Runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
 `$.session.messages` and `repo`, state/store, `$.clock.after` and `every`, `ui.render` sites other than the band above the prompt, streaming events and hot reload are not implemented.
 Commands cannot return `context`, `exitCode` or engine references yet. Hooks for
 other Claude Code events load without running, as described in
@@ -157,18 +158,18 @@ command names are matched against the resulting name.
 ## Middleware and recovery
 
 Patterns select among the engine events `session.start`, `session.end`,
-`command.run`, `tool.call`, `tool.check`, `turn.start`, `turn.complete` and, in the Ink terminal, `ui.render`, and the API event of each supported
+`command.run`, `tool.call`, `tool.check`, `turn.start`, `turn.complete`, in headless runs `prompt.submit`, in the Ink and OpenTUI terminals `ui.render`, and the API event of each supported
 `$` method, which `$.session.version()` lists. Use an exact name, a prefix such as `command.*`,
 `*`, or a single negation such as `!session.*`. The patterns `!*` and `!!...` are
 rejected.
 
-Claude Code 2.1.310 also defines events that Qwen Code does not run yet, such as
-`prompt.submit` or `classic.Stop`, and `ui.render` runs only where a host draws
-it. A registration for one of them,
+Claude Code 2.1.316 also defines events that Qwen Code does not run yet, such as
+`prompt.fill` or `classic.Stop`. `prompt.submit` runs only in headless runs, and
+`ui.render` only where a host draws it. A registration for one of them,
 or for a prefix such as `prompt.*` that matches none of the events above, loads
 but never runs, so the rest of the Mod keeps working. At startup each plugin
 reports its skipped patterns once, where transcript logs appear:
-`Hooks for unsupported events will not run: prompt.submit, ui.render`. A skipped
+`Hooks for unsupported events will not run: prompt.fill, ui.render`. A skipped
 hook never runs, including a guard and its `.catch`. Names that Claude Code does
 not define, such as `tool.calls`, still reject initialization.
 
@@ -200,8 +201,9 @@ registrations with matchers, including equal matchers. Each wildcard or negated
 pattern can be registered once. Within a plugin, registration order determines
 the chain; consumers run before their declared dependency providers. A handler
 can answer early, including at `session.start`, preventing later handlers from
-running. Only command `args` can be rewritten on `command.run`; lifecycle and
-command identity fields stay pinned.
+running. Only command `args` can be rewritten on `command.run`, and only a
+prompt's `text` and `context` on `prompt.submit`; lifecycle and command identity
+fields stay pinned.
 
 ## Tool interception
 
@@ -414,7 +416,7 @@ supports:
 {
   "version": "0.26.0",
   "qwen": {
-    "claudeCode": "2.1.310",
+    "claudeCode": "2.1.316",
     "events": [
       "clock.now",
       "clock.sleep",
@@ -461,7 +463,7 @@ supports:
 }
 ```
 
-This is a headless run. In the Ink terminal, `events` also lists `ui.render`.
+This is a headless run. In the Ink and OpenTUI terminals, `events` also lists `ui.render`.
 `claudeCode` is the Claude Code release whose event names are recognized,
 `events` lists the events hooks can receive and `methods` the `$` methods a Mod can
 call. A Mod can use it to choose a fallback, such as a command reply where a
@@ -511,7 +513,7 @@ Mod discovery. Mod manifests must be relative paths inside the extension.
 directory, the one that holds `qwen-extension.json` or
 `.claude-plugin/plugin.json`. They are plain properties.
 
-The other methods are API events that resolve to the shapes Claude Code 2.1.310
+The other methods are API events that resolve to the shapes Claude Code 2.1.316
 declares:
 
 | Method                                | Resolves to                                                                             |
@@ -625,6 +627,83 @@ ending. In a headless run the turn ends with the error result
 its next message. Qwen Code has no `$.prompt.submit` yet, so a Mod cannot send a
 prompt after it ends a turn.
 
+## Submitted prompts
+
+In headless runs, `prompt.submit` fires for each prompt a person submits, before
+UserPromptSubmit hooks and before `@` references are read. A hook can rewrite the
+prompt, attach context the model reads beside it, or drop it:
+
+```javascript
+export function register(on) {
+  on('prompt.submit', ($, e, next) => {
+    if (/AKIA[0-9A-Z]{16}/.test(e.text))
+      return { drop: 'the prompt holds an AWS access key' };
+    return next({
+      ...e,
+      text: e.text.replace(/\bprod\b/g, 'production'),
+      context: [...(e.context ?? []), 'Answer in British English.'],
+    });
+  });
+}
+```
+
+The hook receives:
+
+| Field     | Value                                                                                 |
+| --------- | ------------------------------------------------------------------------------------- |
+| `text`    | the prompt as submitted; for a stream-json message, its text blocks                   |
+| `context` | absent; each hook that attaches context passes the list on with its own entries added |
+| `wait`    | `false`                                                                               |
+| `origin`  | `{kind: 'sdk'}`                                                                       |
+
+`origin`, `wait` and `turnId` are pinned. The prompt that enters is the one that
+arrives beneath the hooks: `next(e)` resolves to `{text, context?, origin}`, and
+what a hook answers after its `next` resolved changes nothing. The rewritten text
+is what the model reads, what `turn.start` hears and what the transcript keeps.
+In a stream-json message with blocks other than text, the rewrite replaces its
+text blocks and the other blocks follow it.
+The context goes to the model after the prompt, in the block that holds
+UserPromptSubmit's context, ahead of it, and is never shown as part of the
+prompt.
+
+`{drop: reason}` stops the prompt before UserPromptSubmit and before any model
+request. The run ends with the error result `Prompt dropped by a hook: <reason>`
+and exit code 1; a stream-json session goes on to its next message. The reason
+is one line, kept to its first 4,096 characters. A hook that answers without
+calling `next` and without a drop also stops the prompt, with the result
+`Prompt not submitted: a hook answered without passing the prompt on`. A hook
+that calls `next` and then answers a drop fails, and its `next` stands.
+
+A hook that fails or times out is skipped, so a broken guard never blocks a
+prompt. Give a guard a `.catch` that drops instead:
+
+```javascript
+on('prompt.submit', guard).catch(($, e, next) =>
+  next.called ? next(e) : { drop: 'the guard failed' },
+);
+```
+
+A prompt longer than 128 KiB as JSON reaches no hook, and the line
+`prompt.submit hook skipped: the prompt is too long for a Mod payload` appears
+where transcript logs do.
+
+These differ from Claude Code:
+
+- `prompt.submit` runs only in headless runs; the Ink and OpenTUI terminals skip
+  its hooks at startup.
+- Slash commands, background notifications and the continuation of an
+  interrupted turn raise no `prompt.submit`, so `command` and `isMeta` never
+  appear.
+- `attachments` never appears, and `$.prompt.media` does not exist.
+- A UserPromptSubmit hook that blocks the prompt beneath does not turn `next(e)`
+  into `{drop}`: the Mod hooks have settled by the time it runs.
+- `next(e)` resolves once the hooks beneath have answered, not once the turn
+  starts.
+- A context the conversation already holds word for word is not sent again.
+  Each Mod context and UserPromptSubmit's context count on their own, so a
+  context that changes every turn does not make the others repeat.
+- `$.prompt.submit` does not exist yet.
+
 ## Elements
 
 `$.ui.resolve(e)` returns the element table of the terminal: a frozen object
@@ -640,8 +719,10 @@ numbers become strings. `key` is kept only on a `Box`. The `h(tag, props,
 ...children)` and `Fragment` globals build the same elements, as Claude Code's
 JSX factory does; `Fragment` is a column `Box`. `h` calls a function tag with
 its props and its children flattened into an array, and throws for a string tag other than `Box` or `Text`.
+JSX in a `.tsx` or `.jsx` file compiles to these calls, as described in
+[TypeScript, JSX and relative imports](#typescript-jsx-and-relative-imports).
 
-A tree a hook returns is judged with Claude Code 2.1.310's rules for `Box` and
+A tree a hook returns is judged with Claude Code 2.1.316's rules for `Box` and
 `Text`, and any other element refuses it with
 `<Element> is not drawn by Qwen Code yet`.
 
@@ -653,9 +734,9 @@ hook that asks for a redraw does not fail where nothing is drawn.
 
 ## The band above the prompt
 
-The Ink terminal raises `ui.render` for Claude Code's `AbovePrompt` site, a band
-between the session survey and the prompt input. OpenTUI and headless runs draw
-no site yet: there a `ui.render` hook is skipped and listed at startup, and
+The Ink and OpenTUI terminals raise `ui.render` for Claude Code's `AbovePrompt`
+site, a band between the session survey and the prompt input. Headless runs
+draw no site: there a `ui.render` hook is skipped and listed at startup, and
 `$.session.version()` leaves it out.
 
 A hook receives Claude Code's input:
@@ -733,24 +814,57 @@ These differ from Claude Code:
   running render waits for it, up to 10 seconds for each `ui.render` hook in
   the chain.
 - Refusal lines go only to the debug log, since Qwen Code has no hot reload.
-- JSX is not compiled yet, although `h` and `Fragment` exist.
+- OpenTUI has no session survey, so `hasSurvey` is always `false` there, and
+  `isWorking` stays `false` while a `!` shell command runs. OpenTUI takes
+  colors as hex values, so ANSI color names and `ansi256()` colors draw as
+  fixed values instead of the terminal's palette, and a `borderColor` border
+  draws undimmed under `borderDimColor`. Its text truncates only in the
+  middle, with `...` where Ink draws `…`: `wrap: "middle"` and
+  `"truncate-middle"` draw that way, and the other truncations cut the text
+  off at the right edge without a mark. Its borders have one stroke per axis,
+  so the `arrow` border draws its top arrow on the bottom edge and its left
+  arrow on the right edge.
 
-## TypeScript and relative imports
+## TypeScript, JSX and relative imports
 
-Change the hooks entry to `./register.ts` to use TypeScript. Imports and
-re-exports may use relative paths, extensionless paths, directory `index` files,
-or JavaScript spellings of TypeScript files (`./helper.js` can resolve to
-`helper.ts`). Exact files win. Next come `.js` → `.ts`, `.mjs` → `.mts`, and
-`.cjs` → `.cts` substitutions, followed by `.ts`, `.js`, `.mjs`, `.cjs`, `.mts`,
-`.cts` candidates, trying each file and then its directory index. All six
-suffixes use ESM, including `.cjs` and `.cts`. Module cycles and shared imported
-state within one plugin are supported.
+Change the hooks entry to `./register.ts` to use TypeScript, or to
+`./register.tsx` or `./register.jsx` to write JSX. Imports and re-exports may
+use relative paths, extensionless paths, directory `index` files, or JavaScript
+spellings of TypeScript files (`./helper.js` can resolve to `helper.ts`). Exact
+files win. Next come `.js` → `.ts` or `.tsx`, `.jsx` → `.tsx`, `.mjs` → `.mts`
+and `.cjs` → `.cts` substitutions, followed by `.ts`, `.tsx`, `.jsx`, `.js`,
+`.mjs`, `.cjs`, `.mts`, `.cts` candidates, trying each file and then its
+directory index. This is Claude Code's order. All eight suffixes use ESM,
+including `.cjs` and `.cts`. Module cycles and shared imported state within one
+plugin are supported.
+
+JSX compiles with the classic runtime to calls of the `h` and `Fragment`
+globals, as Claude Code compiles it, so `<>...</>` is a column `Box`. A tag is
+one of the constructors `$.ui.resolve(e)` returns, or a function component:
+
+```tsx
+on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+  const { Box, Text } = $.ui.resolve(e);
+  return (
+    <Box flexDirection="row" paddingX={1}>
+      <Text bold>☀ Clear</Text>
+      <Text dimColor> {e.props.bodyColumns} columns</Text>
+    </Box>
+  );
+});
+```
+
+Only `.tsx` and `.jsx` files take JSX. As in Claude Code, a module that declares
+its own `h` or `Fragment`, or carries a `@jsx` pragma, points its JSX away from
+the globals. A file that fails to compile reports the first error with its line
+and column, such as
+`Invalid Mod JSX: view.jsx: JSX element 'Text' has no corresponding closing tag. (line 4, column 12).`
 
 Compilation uses fixed options inside the cancellable worker; it does not
 type-check or load `tsconfig.json`, package resolvers or build plugins. Type-only
 imports, including types from `claude-code`, are erased. Runtime value imports
 from `claude-code` require APIs outside this subset and are rejected, as are
-package/Node/URL imports, dynamic imports, `require`, JSX and imported top-level
+package/Node/URL imports, dynamic imports, `require` and imported top-level
 `await`. Guest code continues to execute only in QuickJS.
 
 ## Plugin options
@@ -855,6 +969,6 @@ Own `__proto__` keys in tool inputs and results are ordinary data on both sides.
 A hook answer whose getter throws while Qwen Code reads it fails as a whole;
 Claude Code 2.1.299 drops only that key.
 
-The author API follows the Claude Code 2.1.310 declarations, event names
+The author API follows the Claude Code 2.1.316 declarations, event names
 included, and the
 [official Mod documentation](https://code.claude.com/docs/en/plugins/mods/create).

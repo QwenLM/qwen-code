@@ -48,6 +48,11 @@ import {
   type MicrocompactOptions,
 } from '../services/microcompaction/microcompact.js';
 import { buildLegacyRelevantAutoMemoryPrompt } from '../memory/recall.js';
+import {
+  EXTRACT_TAIL_ENTRIES,
+  getExtractNoopSkipTurns,
+} from '../memory/extract-cadence.js';
+import { isBelowCompactionWarn } from '../services/chatCompressionService.js';
 import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 import { appendAutoMemoryContext } from '../memory/request-context.js';
 import {
@@ -207,7 +212,7 @@ import { logApiRetry } from '../telemetry/loggers.js';
 import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
 import {
   createUserPromptSubmitContextPart,
-  hasUserPromptSubmitContext,
+  deliveredUserPromptSubmitContexts,
 } from '../hooks/user-prompt-submit-context.js';
 import {
   TrustedUserAnswers,
@@ -259,6 +264,29 @@ export enum SendMessageType {
   Goal = 'goal',
 }
 
+/** A host's reason to continue a turn whose response stopped. */
+export interface StopPolicy {
+  /** The request to continue with, or undefined or empty to let the turn stop. */
+  continueAt(stop: {
+    promptId: string;
+    signal: AbortSignal;
+  }): Promise<Part[] | undefined>;
+  /** The Stop hook's blocking cap ended the turn before the policy was asked. */
+  onStopHookCap?(): void;
+}
+
+/** The host-owned options a continuation the client sends on its own keeps. */
+function hostContinuationOptions(
+  options: SendMessageOptions | undefined,
+): Partial<SendMessageOptions> {
+  return {
+    ...(options?.toolCallPreparations && { toolCallPreparations: true }),
+    ...(options?.interactionSpanByHost && { interactionSpanByHost: true }),
+    ...(options?.toolLoopGuardsByHost && { toolLoopGuardsByHost: true }),
+    ...(options?.stopPolicies && { stopPolicies: options.stopPolicies }),
+  };
+}
+
 /** Upper bound on prompt ids tracked for an in-flight Stop-hook chain. */
 export const MAX_STOP_HOOK_CHAIN_PROMPT_IDS = 32;
 
@@ -278,6 +306,7 @@ export interface SendMessageOptions {
    */
   memoryRecallQuery?: string;
   humanInput?: HumanPromptInput;
+  workflowModeEligible?: boolean;
   onWorkflowIntentApplied?: (trigger: WorkflowIntentTrigger) => void;
   /**
    * Called once when UserPromptSubmit lets the prompt through, before any
@@ -286,26 +315,38 @@ export interface SendMessageOptions {
   onPromptAdmitted?: () => void;
   /**
    * {@link LlmClient.admitUserPrompt}'s verdict on this prompt, applied in
-   * place of running UserPromptSubmit again. It is spent by the UserQuery with
-   * the prompt id it was issued for; any other use throws.
+   * place of running UserPromptSubmit again. It is spent by the UserQuery or
+   * Retry with the prompt id it was issued for; any other use throws.
    */
   promptAdmission?: UserPromptAdmission;
+  /**
+   * What the Mods' `prompt.submit` hooks attached for the model to read
+   * beside this UserQuery's prompt. It joins UserPromptSubmit's context in
+   * the hidden block the person never sees, ahead of it.
+   */
+  promptContext?: readonly string[];
   /** A UserQuery running beside an active turn, without replacing its state. */
   isConcurrentSideQuery?: boolean;
   /**
    * The host already recorded this UserQuery's user message, started its todo
    * work chain and took its file-history snapshot, as ACP does when it admits
-   * a prompt, so the client does none of them.
+   * a prompt, so the client does none of them. On a Retry, the host started
+   * the todo work chain and keeps the attempt's recorded user message, so the
+   * client neither starts the chain nor records the message again.
    */
   userTurnRecordedByHost?: boolean;
+  /**
+   * The rewindable identity a Retry's request carries in history: that of the
+   * attempt it replaces. Spent by the first request.
+   */
+  historyPromptId?: string;
   /** Also yield `ToolCallPreparation` for calls the model starts streaming. */
   toolCallPreparations?: boolean;
   /**
-   * The host fires the Stop hook after the round, so this send does not. The
-   * host then decides when the turn ends, so it also runs the turn's memory
-   * tasks through `runManagedAutoMemoryBackgroundTasks`.
+   * The host's own reasons to continue at a stop point, asked in order once
+   * the Stop hook let the response stop.
    */
-  stopHookRunByHost?: boolean;
+  stopPolicies?: readonly StopPolicy[];
   /**
    * The host keeps the interaction span open around its turn, so this send
    * neither starts nor ends one.
@@ -909,6 +950,10 @@ export class LlmClient {
     return true;
   }
 
+  isTelemetrySwapInProgress(): boolean {
+    return this.telemetrySwap !== undefined;
+  }
+
   /**
    * The swap committed: drop the armed undo without restoring. The replayed
    * history legitimately belongs to the session the user is now on, and a
@@ -1074,6 +1119,16 @@ export class LlmClient {
    * Host-supported sessions settle after classifying their own protective
    * exits, so core must leave their single-take proposal latch untouched.
    */
+  /**
+   * Drops the turn's parked Goal proposal when the send ends abnormally. A
+   * host that settles proposals itself takes it when its turn ends, so it can
+   * still report that the Goal did not start.
+   */
+  private dropUnsettledGoalProposal(promptId: string): void {
+    if (this.config.getGoalProposalHostSupported?.()) return;
+    this.config.takePendingGoalProposal?.(promptId);
+  }
+
   private async settlePendingGoalProposal(
     turnEnded: boolean,
     signal: AbortSignal,
@@ -1220,7 +1275,7 @@ export class LlmClient {
    *     one and the new one — and the model would see context the user
    *     thought had been undone.
    */
-  stripOrphanedUserEntriesFromHistory(): Content[] {
+  stripOrphanedUserEntriesFromHistory(rearmWorkflowMode = false): Content[] {
     const chat = this.getChat();
     const before = chat.getHistoryLength();
     const strippedEntries = chat.stripOrphanedUserEntriesFromHistory();
@@ -1230,6 +1285,17 @@ export class LlmClient {
       return strippedEntries;
     }
     this.trustedUserAnswers.clear();
+    // Retry replays removed notices; cancellation discards them.
+    if (
+      rearmWorkflowMode &&
+      strippedEntries.some((entry) =>
+        entry.parts?.some((part) =>
+          part.text?.startsWith('<system-reminder>\nWorkflow mode '),
+        ),
+      )
+    ) {
+      this.config.resetWorkflowModeContext();
+    }
     // Stripped trailing user entries can include read_file
     // functionResponses from a failed-then-retried request. The
     // FileReadCache would still record those reads, so the retry's
@@ -1321,6 +1387,7 @@ export class LlmClient {
   setHistory(history: Content[]) {
     this.trustedUserAnswers.clear();
     this.getChat().setHistory(history);
+    this.config.resetWorkflowModeContext();
     // Replacing history wholesale drops any prior read_file tool
     // results the FileReadCache still believes the model has seen.
     // Without clearing, a follow-up Read of an unchanged file would
@@ -1342,6 +1409,12 @@ export class LlmClient {
     // its chain so the next turn cannot continue work the restore removed.
     this.activeTodoWorkChainPromptId = undefined;
     this.config.clearActiveTodoReminders();
+    // A restore/rewind rewrites the timeline the parked cadence snapshot was
+    // cut from; replaying it at close would fork turns this history no longer
+    // holds.
+    this.config
+      .getMemoryManager()
+      .invalidatePendingExtract(this.config.getSessionId());
     this.forceFullIdeContext = true;
   }
 
@@ -1358,6 +1431,7 @@ export class LlmClient {
     // the clear, reintroducing the file_unchanged placeholder bug).
     const newLen = this.getChat().getHistoryLength();
     if (newLen < prevLen) {
+      this.config.resetWorkflowModeContext();
       this.trustedUserAnswers.clear();
       debugLogger.debug(
         `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount}, prev=${prevLen}, new=${newLen})`,
@@ -1376,6 +1450,11 @@ export class LlmClient {
       // continuing work that was rewound away.
       this.activeTodoWorkChainPromptId = undefined;
       this.config.clearActiveTodoReminders();
+      // Same rewind hazard for the parked cadence snapshot: its history is the
+      // one this truncation just discarded.
+      this.config
+        .getMemoryManager()
+        .invalidatePendingExtract(this.config.getSessionId());
     }
     this.forceFullIdeContext = true;
   }
@@ -1405,6 +1484,7 @@ export class LlmClient {
       ? [{ functionDeclarations: toolDeclarations }]
       : [];
     this.getChat().setTools(tools);
+    this.config.refreshWorkflowMode();
     this.queueAddedMcpToolsReminder(deferredTools ?? []);
     this.queueMcpServerInstructionsReminder(
       toolRegistry.getMcpServerInstructions(),
@@ -1591,7 +1671,10 @@ export class LlmClient {
   captureCacheSafeParams(): void {
     try {
       const chat = this.getChat();
-      const historyForCache = this.getHistoryTailShallow(40, true);
+      const historyForCache = this.getHistoryTailShallow(
+        EXTRACT_TAIL_ENTRIES,
+        true,
+      );
       const cachedHistory = slimCompactionInput(
         historyForCache,
         this.config.getEffectiveInputModalities(),
@@ -3206,7 +3289,7 @@ export class LlmClient {
 
   /**
    * Schedules the memory work due when a response ends without tool calls.
-   * A host that runs the Stop hook itself calls this once its turn ends.
+   * A host calls this at turn completion if the client did not schedule it.
    */
   runManagedAutoMemoryBackgroundTasks(messageType: SendMessageType): void {
     // During shutdown, skip all background memory tasks so the process
@@ -3330,6 +3413,14 @@ export class LlmClient {
         sessionId,
         history,
         config: this.config,
+        ...(getExtractNoopSkipTurns() > 0 && {
+          // The next prompt's known base; see isBelowCompactionWarn.
+          belowCompactionWarn: isBelowCompactionWarn(
+            this.config,
+            this.getChat().getLastPromptTokenCount() +
+              this.getChat().getLastOutputTokenCount(),
+          ),
+        }),
       })
       .then((result) => result.touchedTopics.length)
       .catch((error: unknown) => {
@@ -3618,8 +3709,8 @@ export class LlmClient {
 
   /**
    * Runs UserPromptSubmit on a prompt before the caller expands it, so a block
-   * also stops the expansion. The prompt's first UserQuery send takes the
-   * result as `promptAdmission` and applies it instead of running the hook on
+   * also stops the expansion. The prompt's first UserQuery or Retry send takes
+   * the result as `promptAdmission` and applies it instead of running the hook on
    * the expanded text, so hooks registered during the expansion do not check
    * this prompt, even when none was configured here.
    */
@@ -3673,7 +3764,8 @@ export class LlmClient {
     const owner = captureHookExecutionOwner(this.config);
     if (
       !issued ||
-      messageType !== SendMessageType.UserQuery ||
+      (messageType !== SendMessageType.UserQuery &&
+        messageType !== SendMessageType.Retry) ||
       issued.promptId !== promptId ||
       issued.sessionId !== this.config.getSessionId() ||
       issued.owner?.runtimeId !== owner?.runtimeId ||
@@ -3737,16 +3829,28 @@ export class LlmClient {
         ? { text: options.humanInput.text }
         : undefined;
     const onWorkflowIntentApplied = options?.onWorkflowIntentApplied;
+    const workflowModeEligible =
+      options?.workflowModeEligible === true &&
+      messageType === SendMessageType.UserQuery &&
+      !options.isConcurrentSideQuery &&
+      isTopLevelSession();
     const onPromptAdmitted = options?.onPromptAdmitted;
+    const historyPromptId = options?.historyPromptId;
     if (
       options &&
-      (options.humanInput || onWorkflowIntentApplied || onPromptAdmitted)
+      (options.humanInput ||
+        onWorkflowIntentApplied ||
+        options.workflowModeEligible ||
+        onPromptAdmitted ||
+        historyPromptId !== undefined)
     ) {
       options = {
         ...options,
         humanInput: undefined,
         onWorkflowIntentApplied: undefined,
+        workflowModeEligible: undefined,
         onPromptAdmitted: undefined,
+        historyPromptId: undefined,
       };
     }
     const startsInteraction =
@@ -4131,6 +4235,8 @@ export class LlmClient {
     let userPromptRecordPayload: UserPromptRecordPayload | undefined;
     /** Hook context appended to this turn's request, if any. */
     let appendedHookContext: string | undefined;
+    /** The separate contexts `appendedHookContext` joins. */
+    let appendedHookContexts: readonly string[] | undefined;
     /** Hook context suppressed as already delivered; compression may need it back. */
     let suppressedHookContext: string | undefined;
     let hooksEnabled: boolean;
@@ -4146,6 +4252,14 @@ export class LlmClient {
           ? options.submittedPrompt
           : undefined;
       let verdict: (UserPromptSubmitDecision & { prompt: string }) | undefined;
+      const promptContext =
+        messageType === SendMessageType.UserQuery
+          ? options?.promptContext?.filter((text) => text.trim())
+          : undefined;
+      if (options?.promptContext) {
+        // Spent here, as the admission below is.
+        options = { ...options, promptContext: undefined };
+      }
       if (options?.promptAdmission) {
         const { promptAdmission } = options;
         // Spent here: the continuation sends below re-spread `options`.
@@ -4183,8 +4297,8 @@ export class LlmClient {
         };
       }
 
-      if (verdict) {
-        if (verdict.blockReason !== undefined) {
+      if (verdict || promptContext?.length) {
+        if (verdict?.blockReason !== undefined) {
           if (goalPermit) {
             userPromptSubmitFailureMessage = 'Goal turn finalization failed';
             const runtime = await loadGoalRuntime(true);
@@ -4231,7 +4345,9 @@ export class LlmClient {
           // A blocked send never reaches the history push: settle the
           // attached carrier by unconditional restore, never by the push
           // counter (a concurrent push inside the hook window above would
-          // otherwise masquerade as this send's acceptance).
+          // otherwise masquerade as this send's acceptance). A blocked Retry
+          // puts back the attempt it stripped above.
+          restoreStrippedRetryEntries();
           settleSteerInput(attachedSteerInput);
           return new Turn(this.getChat(), prompt_id);
         }
@@ -4241,39 +4357,66 @@ export class LlmClient {
         // distinguishable from user-authored text in model history, resume,
         // and offline transcript analysis. `getAdditionalContext()` escapes
         // `<`/`>`, so hook output cannot forge the closing tag.
-        // An unchanged payload is already in history from an earlier turn, so
-        // re-appending it would duplicate it once per turn for the rest of the
-        // session; the earlier copy still carries the same text. History is
-        // scanned newest-first over the raw entries, so the check stays off
-        // the deep-cloning accessor on this per-turn path.
+        // A context already in history from an earlier turn is not sent
+        // again, or it would repeat once per turn for the rest of the
+        // session; the earlier copy still carries the same text. Each context
+        // counts on its own, the Mods' contexts and UserPromptSubmit's, so a
+        // Mod whose context changes every turn does not make an unchanged
+        // UserPromptSubmit context repeat. History is scanned newest-first
+        // over the raw entries, so the check stays off the deep-cloning
+        // accessor on this per-turn path.
         // A request with no parts of its own keeps the block, which is then
         // all that keeps it non-empty (`toParts` rejects an empty array).
-        const additionalContext = verdict.additionalContext;
-        if (additionalContext) {
+        // The Mods' context comes first, as their hooks run above the
+        // settings hooks, and is escaped the same way.
+        const contexts = [
+          ...new Set([
+            ...(promptContext ?? []).map((text) =>
+              text.replace(/</g, '&lt;').replace(/>/g, '&gt;'),
+            ),
+            ...(verdict?.additionalContext ? [verdict.additionalContext] : []),
+          ]),
+        ];
+        if (contexts.length > 0) {
           const requestArray = Array.isArray(request) ? request : [request];
-          const alreadyDelivered =
-            requestArray.length > 0 &&
-            Boolean(
-              this.getChat().findLastHistoryEntry((entry) =>
-                hasUserPromptSubmitContext(entry, additionalContext),
-              ),
-            );
-          if (!alreadyDelivered) {
+          const undelivered = new Set(contexts);
+          if (requestArray.length > 0) {
+            this.getChat().findLastHistoryEntry((entry) => {
+              for (const context of deliveredUserPromptSubmitContexts(entry)) {
+                undelivered.delete(context);
+              }
+              return undelivered.size === 0;
+            });
+          }
+          const pending = contexts.filter((context) =>
+            undelivered.has(context),
+          );
+          const delivered = contexts.filter(
+            (context) => !undelivered.has(context),
+          );
+          const additionalContext = pending.join('\n\n');
+          if (pending.length > 0) {
             request = [
               ...requestArray,
-              createUserPromptSubmitContextPart(additionalContext),
+              createUserPromptSubmitContextPart(additionalContext, pending),
             ];
             appendedHookContext = additionalContext;
-          } else {
-            suppressedHookContext = additionalContext;
+            appendedHookContexts = pending;
+          }
+          if (delivered.length > 0) {
+            suppressedHookContext = delivered.join('\n\n');
           }
           if (messageType === SendMessageType.UserQuery) {
             // A suppressed turn appends nothing, so it records no
             // hookContext, but the user-authored projection still belongs in
             // the transcript.
             userPromptRecordPayload = {
-              displayText: submittedPrompt ?? verdict.prompt,
-              hookContext: alreadyDelivered ? '' : additionalContext,
+              displayText:
+                submittedPrompt ??
+                verdict?.prompt ??
+                preHookUserPromptText ??
+                '',
+              hookContext: additionalContext,
             };
           }
         }
@@ -4284,7 +4427,7 @@ export class LlmClient {
         signal.aborted ? undefined : userPromptSubmitFailureMessage,
         signal.aborted ? undefined : getErrorType(error),
       );
-      this.config.takePendingGoalProposal?.(prompt_id);
+      this.dropUnsettledGoalProposal(prompt_id);
       for (const goalEvent of await finalizeInterruptedGoalTurn(
         undefined,
         getErrorMessage(error),
@@ -4296,9 +4439,8 @@ export class LlmClient {
       // never pushed: settle the attached carrier here by unconditional
       // restore instead of leaving it to caller-side failure handling.
       // Symmetric with the Goal-admission catch below: re-add any Retry
-      // orphan entries popped above (a no-op today — hooks never fire for
-      // Retry, the only type that populates the entries — but keeps this
-      // exit safe under future hook-scope changes).
+      // orphan entries popped above (a Retry reaches this try when the host
+      // admitted its prompt).
       restoreStrippedRetryEntries();
       settleSteerInput(attachedSteerInput);
       throw error;
@@ -4364,7 +4506,7 @@ export class LlmClient {
         signal.aborted ? undefined : 'Goal turn admission failed',
         signal.aborted ? undefined : getErrorType(error),
       );
-      this.config.takePendingGoalProposal?.(prompt_id);
+      this.dropUnsettledGoalProposal(prompt_id);
       for (const goalEvent of await finalizeInterruptedGoalTurn(
         undefined,
         getErrorMessage(error),
@@ -4442,10 +4584,12 @@ export class LlmClient {
       }
       this.activeTodoWorkChainPromptId = prompt_id;
     } else if (messageType === SendMessageType.Retry) {
-      this.config.startActiveTodoWorkChain(
-        prompt_id,
-        this.activeTodoWorkChainPromptId,
-      );
+      if (!options?.userTurnRecordedByHost) {
+        this.config.startActiveTodoWorkChain(
+          prompt_id,
+          this.activeTodoWorkChainPromptId,
+        );
+      }
       this.activeTodoWorkChainPromptId = prompt_id;
     } else if (
       messageType === SendMessageType.Cron ||
@@ -4492,6 +4636,11 @@ export class LlmClient {
     let memoryDeliveryToCommit: MemoryDeliveryResult | null = null;
     let memoryDeliveryStateInvalidated = false;
     let modelRequestAccepted = false;
+    // Set when this send took a loop-protection reminder into requestToSend;
+    // cleared when the model accepts the request (commit) or on exit
+    // (abandon), so the `reminded` accounting and the pending state settle at
+    // the real delivery boundary instead of the draft request assembly.
+    let loopReminderPrepared = false;
     // A concurrent `/btw` side query runs through this same client and its
     // tool-result continuation is submitted without the flag, so ownership is
     // carried by the prompt id the interaction claimed at its start: a
@@ -4826,17 +4975,25 @@ export class LlmClient {
         }
       }
 
+      let onModelRequestDispatched: (() => void) | undefined;
       const turn = new Turn(
         this.getChat(),
         prompt_id,
         goalPermit,
-        // Only a first-party user prompt opens a rewindable identity. Re-entry
-        // stays unmarked, so a replaced identified turn fails closed.
-        messageType === SendMessageType.UserQuery ? prompt_id : undefined,
+        // Only a first-party user prompt opens a rewindable identity, or a
+        // retry the host gives the identity of the attempt it replaces.
+        // Other re-entry stays unmarked, so a replaced identified turn fails
+        // closed.
+        messageType === SendMessageType.UserQuery
+          ? prompt_id
+          : messageType === SendMessageType.Retry
+            ? historyPromptId
+            : undefined,
         options?.retractDeliveredOutputOnRetry,
         options?.onPreparedRequest,
         options?.toolCallPreparations,
         suppressedHookContext,
+        workflowModeEligible ? () => onModelRequestDispatched?.() : undefined,
       );
 
       // Assemble the outgoing request. IDE context is merged into the
@@ -4850,7 +5007,10 @@ export class LlmClient {
         // that history carries the same provenance resume restores from the
         // recorded payload.
         requestToSend[requestToSend.length - 1] =
-          createUserPromptSubmitContextPart(appendedHookContext);
+          createUserPromptSubmitContextPart(
+            appendedHookContext,
+            appendedHookContexts,
+          );
       }
       if (ideContextText) {
         const firstText = requestToSend.find(
@@ -4997,8 +5157,54 @@ export class LlmClient {
 
       if (!signal.aborted) {
         const workflowIntent = resolveWorkflowIntent(this.config, humanInput);
+        const preparedWorkflow =
+          workflowModeEligible && !goalPermit
+            ? this.config.prepareWorkflowMode(workflowIntent)
+            : undefined;
+        onModelRequestDispatched = preparedWorkflow?.onModelRequestDispatched;
+        const reminder = preparedWorkflow?.reminder ?? workflowIntent?.reminder;
+        const reminders = new Set(reminder ? [reminder] : []);
+        // Retry replaces the failed user entry after its dispatch token was
+        // consumed. Preserve its mode envelope without preparing another turn.
+        for (const entry of strippedRetryEntries) {
+          for (const { text } of entry.parts ?? []) {
+            if (
+              text &&
+              /^<system-reminder>\nWorkflow mode (?:is enabled for this session|remains enabled for this session|is off for this session|is temporarily unavailable)\. [\s\S]*\n<\/system-reminder>$/.test(
+                text,
+              ) &&
+              text.indexOf('</system-reminder>') ===
+                text.length - '</system-reminder>'.length &&
+              text.indexOf('<system-reminder>', 1) === -1
+            ) {
+              // Keep the last occurrence so mode transitions stay ordered.
+              reminders.delete(text);
+              reminders.add(text);
+            }
+          }
+        }
+        const missingReminders = [...reminders].filter(
+          (text) =>
+            !requestToSend.some(
+              (part) =>
+                part === text ||
+                (typeof part === 'object' && part?.text === text),
+            ),
+        );
+        if (missingReminders.length > 0) {
+          const insertAt = requestToSend.findIndex(
+            (part) =>
+              typeof part !== 'object' ||
+              part === null ||
+              !('functionResponse' in part),
+          );
+          requestToSend.splice(
+            insertAt < 0 ? requestToSend.length : insertAt,
+            0,
+            ...missingReminders.map((text) => ({ text })),
+          );
+        }
         if (workflowIntent) {
-          requestToSend.unshift({ text: workflowIntent.reminder });
           logWorkflowKeyword(this.config, new WorkflowKeywordEvent());
           onWorkflowIntentApplied?.(workflowIntent.trigger);
         }
@@ -5179,7 +5385,10 @@ export class LlmClient {
         const loopReminder = ownsExplorationBudget
           ? this.loopDetector.takeLoopReminder()
           : undefined;
-        if (loopReminder) requestToSend.push({ text: loopReminder });
+        if (loopReminder) {
+          requestToSend.push({ text: loopReminder });
+          loopReminderPrepared = true;
+        }
         if (activeTodoReminder) {
           const insertAt = requestToSend.findIndex(
             (part) =>
@@ -5284,6 +5493,15 @@ export class LlmClient {
                 .reconcileMemoryBodiesPresentInHistory(
                   collectResidentMemoryBodies(this.getHistoryShallow()),
                 );
+            }
+            if (loopReminderPrepared) {
+              // First model-accepted event: the request carrying the prepared
+              // loop-protection reminder is being consumed, so commit its
+              // delivery accounting here — not at take time, where a draft
+              // request cancelled at a yield or failed before acceptance
+              // would credit telemetry for a warning the model never saw.
+              this.loopDetector.commitLoopReminderDelivery();
+              loopReminderPrepared = false;
             }
           }
           if (!steerInputSettled) {
@@ -5464,6 +5682,11 @@ export class LlmClient {
           // the previous merged IDE context.
           if (event.type === LlmEventType.ChatCompressed) {
             this.forceFullIdeContext = true;
+            if (
+              event.value?.compressionStatus === CompressionStatus.COMPRESSED
+            ) {
+              this.config.resetWorkflowModeContext();
+            }
             this.resetManagedAutoMemoryAfterCompression();
             memoryDeliveryStateInvalidated = true;
             // Auto-compaction summarized away the startup prelude. Rebuild it
@@ -5609,7 +5832,6 @@ export class LlmClient {
       if (
         hooksEnabled &&
         messageBus &&
-        !options?.stopHookRunByHost &&
         !turn.pendingToolCalls.length &&
         signal &&
         !signal.aborted &&
@@ -5682,6 +5904,9 @@ export class LlmClient {
 
           if (capped) {
             this.clearStopHookChain(prompt_id);
+            for (const policy of options?.stopPolicies ?? []) {
+              policy.onStopHookCap?.();
+            }
             const warning = formatStopHookBlockingCapWarning('Stop', cap);
             yield {
               type: LlmEventType.HookSystemMessage,
@@ -5781,6 +6006,9 @@ export class LlmClient {
           // yield because a cap of 1 means no follow-up turn should run.
           if (capped) {
             this.clearStopHookChain(prompt_id);
+            for (const policy of options?.stopPolicies ?? []) {
+              policy.onStopHookCap?.();
+            }
             const warning = formatStopHookBlockingCapWarning('Stop', cap);
             yield {
               type: LlmEventType.HookSystemMessage,
@@ -5841,7 +6069,7 @@ export class LlmClient {
                 modelOverride: options?.modelOverride,
                 getSteerInput: options?.getSteerInput,
                 steerInput: pendingSteer,
-                toolCallPreparations: options?.toolCallPreparations,
+                ...hostContinuationOptions(options),
               },
               hookTurnBudget,
               managedMemoryType,
@@ -5878,6 +6106,59 @@ export class LlmClient {
       }
 
       if (
+        !turn.pendingToolCalls.length &&
+        !signal.aborted &&
+        options?.stopPolicies?.length
+      ) {
+        for (const policy of options.stopPolicies) {
+          const continueRequest = await policy.continueAt({
+            promptId: prompt_id,
+            signal,
+          });
+          if (signal.aborted) {
+            for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+              yield goalEvent;
+            }
+            endCurrentInteraction('cancelled');
+            return turn;
+          }
+          if (!continueRequest?.length) continue;
+          // Like a Stop hook's continuation, each gets its own tool budget.
+          this.loopDetector.reset(prompt_id);
+          if (ownsExplorationBudget) this.toolExplorationBudget.reset();
+          const policyTurn = yield* this.sendMessageStream(
+            continueRequest,
+            signal,
+            prompt_id,
+            {
+              type: SendMessageType.Hook,
+              modelOverride: options.modelOverride,
+              getSteerInput: options.getSteerInput,
+              ...hostContinuationOptions(options),
+            },
+            boundedTurns - 1,
+            managedMemoryType,
+          );
+          hasToolCalls = policyTurn.pendingToolCalls.length > 0;
+          if (!hasToolCalls) {
+            endCurrentInteraction(signal.aborted ? 'cancelled' : 'ok');
+          }
+          await this.settlePendingGoalProposal(
+            !hasToolCalls,
+            signal,
+            loadGoalRuntime,
+            prompt_id,
+            reportGoalSettlementFailure,
+          );
+          for (const goalEvent of takePendingGoalEvents()) {
+            yield goalEvent;
+          }
+          normalCompletion = true;
+          return policyTurn;
+        }
+      }
+
+      if (
         goalPermit &&
         goalRuntime &&
         !turn.pendingToolCalls.length &&
@@ -5905,7 +6186,7 @@ export class LlmClient {
         this.captureCacheSafeParams();
 
         if (this.config.getSkipNextSpeakerCheck()) {
-          if (!isGoalRuntimeTurn && !options?.stopHookRunByHost) {
+          if (!isGoalRuntimeTurn) {
             this.runManagedAutoMemoryBackgroundTasks(managedMemoryType);
           }
           if (arenaAgentClient) {
@@ -5988,7 +6269,7 @@ export class LlmClient {
           return continueTurn;
         }
 
-        if (!isGoalRuntimeTurn && !options?.stopHookRunByHost) {
+        if (!isGoalRuntimeTurn) {
           this.runManagedAutoMemoryBackgroundTasks(managedMemoryType);
         }
 
@@ -6052,6 +6333,15 @@ export class LlmClient {
       throw error;
     } finally {
       settleMemoryDelivery();
+      if (loopReminderPrepared) {
+        // The send exited before the model accepted the request that carried
+        // the prepared loop-protection reminder (cancelled at a yield, failed
+        // before any model event, ...): put it back so the streak's warning
+        // stays eligible for the next real send instead of being lost while
+        // the telemetry already counted it.
+        this.loopDetector.abandonLoopReminderDelivery();
+        loopReminderPrepared = false;
+      }
       if (messageType === SendMessageType.ToolResult && !modelRequestAccepted) {
         this.restoreMemoryBodyStateFromHistory();
       }
@@ -6095,7 +6385,7 @@ export class LlmClient {
         // Only a natural end can hand a hook-forced turn's tool calls back to
         // the caller for a ToolResult re-entry; any other exit ends it.
         this.clearStopHookChain(prompt_id);
-        this.config.takePendingGoalProposal?.(prompt_id);
+        this.dropUnsettledGoalProposal(prompt_id);
         this.cancelPendingMemoryPrefetch(
           signal?.aborted ? 'abort' : 'no_safe_delivery_point',
         );
@@ -6242,6 +6532,7 @@ export class LlmClient {
       const compressedHistory =
         previousChat.getHistoryShallow?.() ?? previousChat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
+      this.config.resetWorkflowModeContext();
       this.getChat().setCompletedToolCallIds(
         previousChat.getCompletedToolCallIds(),
       );
@@ -6374,6 +6665,12 @@ export class LlmClient {
     // the old history (legacy recall exclusions, prefetched-body refs) must
     // be dropped exactly as on the LLM compression path.
     this.resetManagedAutoMemoryDeliveryState();
+    this.config.resetWorkflowModeContext();
+    // compressFast() rewrites history via LlmChat.setHistory, bypassing both
+    // shrink hooks: the parked snapshot describes turns now gone.
+    this.config
+      .getMemoryManager()
+      .invalidatePendingExtract(this.config.getSessionId());
     this.forceFullIdeContext = true;
 
     return info;

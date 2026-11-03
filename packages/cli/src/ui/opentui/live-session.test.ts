@@ -14,6 +14,8 @@
  */
 
 import { makeFakeConfig } from '@qwen-code/qwen-code-core/test-utils/config.js';
+import { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { LlmClient } from '@qwen-code/qwen-code-core/core/client.js';
 import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { createRestoreToolResponseBinding } from '../utils/restore-tool-response.js';
@@ -37,7 +39,6 @@ import {
   SendMessageType,
 } from '@qwen-code/qwen-code-core';
 import type {
-  Config,
   ServerLlmStreamEvent,
   SendMessageOptions,
   ToolCallConfirmationDetails,
@@ -698,6 +699,7 @@ describe('livePromptEvents', () => {
         promptId: 'same-id',
         submittedPrompt: '@owned.txt',
         humanInput: { text: 'original' },
+        workflowModeEligible: true,
         retry: {
           content,
           modelOverride: 'skill-model',
@@ -920,7 +922,8 @@ describe('livePromptEvents', () => {
       'terminal tool.call',
     );
     expect(sendMessageStream).not.toHaveBeenCalled();
-    expect(initializeMods).toHaveBeenCalledOnce();
+    // OpenTUI offers the band above the prompt.
+    expect(initializeMods).toHaveBeenCalledExactlyOnceWith(['AbovePrompt']);
   });
 
   it('waits for the shared initialization before the first send', async () => {
@@ -1020,7 +1023,7 @@ describe('livePromptEvents', () => {
   });
 
   it.each(['already initialized', 'client ready'])(
-    'still initializes Mods after a recoverable host re-entry: %s',
+    'accepts only successful host re-entry: %s',
     async (state) => {
       const initializeMods = vi.fn().mockResolvedValue(undefined);
       const failStartup = vi.fn();
@@ -1040,9 +1043,85 @@ describe('livePromptEvents', () => {
         }),
       } as unknown as Config;
 
-      await expect(ensureConfigInitialized(config)).resolves.toBeUndefined();
-      expect(initializeMods).toHaveBeenCalledOnce();
-      expect(failStartup).not.toHaveBeenCalled();
+      if (state === 'already initialized') {
+        await expect(ensureConfigInitialized(config)).resolves.toBeUndefined();
+        expect(initializeMods).toHaveBeenCalledOnce();
+        expect(failStartup).not.toHaveBeenCalled();
+      } else {
+        await expect(ensureConfigInitialized(config)).rejects.toThrow(
+          'Background recovery failed',
+        );
+        expect(initializeMods).not.toHaveBeenCalled();
+        expect(failStartup).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
+  it.each(['helper', 'failed elsewhere', 'succeeded elsewhere'])(
+    'preserves the real staged Workflow mode startup outcome: %s',
+    async (owner) => {
+      const root = await mkdtemp(path.join(tmpdir(), 'opentui-startup-'));
+      vi.stubEnv('QWEN_CODE_MODELS_DEV', 'off');
+      vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', '1');
+      const initializeMods = vi.fn();
+      const failStartup = vi.fn();
+      modMocks.get.mockReturnValue({ initialize: initializeMods, failStartup });
+      try {
+        await Storage.runWithRuntimeBaseDir(root, undefined, async () => {
+          const config = new Config({
+            cwd: root,
+            targetDir: root,
+            debugMode: false,
+            model: 'test-model',
+            chatRecording: true,
+            workflowsEnabled: false,
+            workflowMode: owner !== 'succeeded elsewhere',
+            usageStatisticsEnabled: false,
+            overrideExtensions: [],
+            bareMode: true,
+            safeMode: true,
+            trustedFolder: true,
+            disableAllHooks: true,
+          });
+          const send = vi.spyOn(config.getGeminiClient(), 'sendMessageStream');
+          try {
+            let failure: unknown;
+            if (owner !== 'helper') {
+              failure = await config
+                .initialize()
+                .catch((error: unknown) => error);
+            }
+            const startup = ensureConfigInitialized(config);
+            expect(ensureConfigInitialized(config)).toBe(startup);
+            if (owner === 'succeeded elsewhere') {
+              await expect(startup).resolves.toBeUndefined();
+              expect(initializeMods).toHaveBeenCalledOnce();
+              expect(failStartup).not.toHaveBeenCalled();
+            } else {
+              failure ??= await startup.catch((error: unknown) => error);
+              expect(failure).toMatchObject({
+                message: 'Workflow mode is unavailable in this session',
+              });
+              await expect(startup).rejects.toBe(failure);
+              await expect(ensureConfigInitialized(config)).rejects.toBe(
+                failure,
+              );
+              await expect(
+                drain(livePromptEvents(config, 'hello')),
+              ).rejects.toBe(failure);
+              expect(initializeMods).not.toHaveBeenCalled();
+              expect(failStartup).toHaveBeenCalledExactlyOnceWith(failure);
+            }
+            expect(config.getGeminiClient().isInitialized()).toBe(true);
+            expect(send).not.toHaveBeenCalled();
+          } finally {
+            await config.shutdown({ shutdownTelemetry: false });
+          }
+        });
+      } finally {
+        vi.unstubAllEnvs();
+        await rm(root, { recursive: true, force: true });
+      }
     },
   );
 
@@ -1321,6 +1400,29 @@ describe('livePromptEvents', () => {
     expect((sendMessageStream.mock.calls[0] as unknown[])[2]).toBe(
       'session-9########7',
     );
+  });
+
+  it('forwards fresh-mode eligibility once without inventing human provenance', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 'mode-tool',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    await drain(
+      livePromptEvents(config, 'ordinary recalled input', undefined, {
+        workflowModeEligible: true,
+      }),
+    );
+    expect((sendMessageStream.mock.calls[0] as unknown[])[3]).toMatchObject({
+      workflowModeEligible: true,
+    });
+    expect(
+      (sendMessageStream.mock.calls[0] as unknown[])[3],
+    ).not.toHaveProperty('humanInput');
+    expect(
+      (sendMessageStream.mock.calls[1] as unknown[])[3],
+    ).not.toHaveProperty('workflowModeEligible');
   });
 
   it('forwards multimodal part lists unchanged', async () => {
