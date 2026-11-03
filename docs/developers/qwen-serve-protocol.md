@@ -250,7 +250,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'extension_local_path_install',
  'workspace_persisted_transcript',
  'workspace_session_export', 'workspace_archived_session_export',
- 'workspace_session_live_state',
+ 'workspace_session_live_state', 'workspace_session_live_state_batch',
  'client_mcp_over_ws', 'cdp_tunnel_over_ws', 'browser_automation_mcp']
 ```
 
@@ -316,6 +316,8 @@ When a workspace runtime has more than one execution engine, `runtimeLive` and `
 `workspace_archived_session_export` advertises `GET /workspaces/:workspace/session/:id/archive/export`, a trusted-only full export from the selected workspace's archived persisted storage. It is independent of `workspace_session_export` and `workspace_qualified_rest_core`; clients must pre-flight this tag directly. A distinct route prevents an older daemon from ignoring archive intent and returning an active transcript with the same id.
 
 `workspace_session_live_state` advertises `GET /workspaces/:workspace/sessions/live-state`, a trusted-only, memory-only snapshot of the selected workspace runtime's live sessions plus an in-memory catalog version that tells clients when a full persisted-catalog reload is warranted. It is independent of `workspace_qualified_rest_core`: released daemons can advertise the broader workspace REST capability without implementing this route, so clients must pre-flight this tag directly. The tag is unconditional because a trusted single-workspace primary can use the route by id or cwd; per-workspace trust checks still apply on every request, and the route does not extend the permissive untrusted-secondary persisted-catalog read policy to live bridge state. The tag means the endpoint exists; it does not promise that every live item carries the optional `updatedAt` activity watermark, which is lifecycle-dependent.
+
+`workspace_session_live_state_batch` advertises `POST /sessions/live-state`. Clients pre-flight it once before batching polls and retain the single-workspace route for older daemons. The batch uses the same trusted, memory-only snapshot and catalog-version semantics as the single-workspace route.
 
 The optional top-level `/capabilities` field `sessionLiveStatePollIntervalMs` advertises the daemon-wide live-state polling interval in milliseconds. It is resolved once from the startup environment variable `QWEN_SESSION_LIVE_STATE_POLL_INTERVAL_MS`, independently of workspace environment overlays. Integer values from `1000` to `2147483647` are accepted; missing or invalid values use `5000`. Web Shell consumes this hint for all workspace live-state polling and also falls back to `5000` for an absent or invalid field from an older or incompatible daemon. This field does not change the route's snapshot semantics, immediate local/visibility refreshes, or full-catalog polling. SDK clients remain responsible for their own timers.
 
@@ -1235,8 +1237,30 @@ Read-only discovery uses:
 
 - `GET /workspace/channel-types`
 - `GET /workspace/channels`
+- `GET /workspace/channels/events`
 - `GET /workspaces/:workspace/channel-types`
 - `GET /workspaces/:workspace/channels`
+- `GET /workspaces/:workspace/channels/events`
+
+`GET .../channels/events` returns the resolved workspace's Channel event
+journal as `{ "events": [...], "truncated": boolean }` with
+`Cache-Control: no-store`. Each event records what a Channel did — an inbound
+message it accepted or skipped (with the machine reason: `reason_filter`,
+`mention_required`, `duplicate`, a sender-gate rejection), a publication
+outcome, an inbound task transition, or a poll result — and never carries
+message text. A GitHub poll that filters more than 20 notifications journals
+the first 20 individually and one further `reason_filter` row whose
+`detail.filtered` counts the rest, so a pinned poll cursor cannot flood the
+journal with repeats of the same batch. Query parameters: `limit` (1-500, default 100), `type`
+(comma-separated `inbound`, `outbound`, `task`, `poll`), `channel`
+(repeat the parameter once per instance name), and `since` (ISO 8601). The route reads only
+the resolved workspace's Channel state directory and needs no operator authority. Reads are
+asynchronous and bounded: the current journal plus one rotated file per Channel, 256 KiB per
+file, 4 MiB per request, 32 files per request, freshest first. `truncated` is true when the
+record limit or any read bound clipped the result, including a journal taller than the
+per-file tail window. A workspace with no journal yet
+returns an empty list; a scope directory that cannot be read answers 5xx rather than an empty
+list.
 
 The catalog marks the types supported by this management API with
 `manageable: true`. Instance snapshots include a revision, redacted secret
@@ -1244,7 +1268,11 @@ presence metadata, startup state, and runtime state; literal secrets are never
 returned. Channel snapshots use `Cache-Control: no-store`.
 
 Field descriptors can expose nested object metadata through `properties`.
-Numeric descriptors can use `exclusiveMinimum` for open lower bounds. String
+Numeric descriptors can use `exclusiveMinimum` for an open lower bound and
+`maximum` for an inclusive upper bound. A stored number outside a newly declared
+bound is still accepted when the client re-sends it unchanged, so declaring a
+bound does not block unrelated edits to an existing channel; a value the client
+actually changed must satisfy both bounds. String
 and secret descriptors can use `multiline` to ask clients for a multi-line text
 area; the descriptor types allow it only on top-level fields. Clients that do
 not render an advertised field kind must preserve its existing config value
@@ -3017,9 +3045,9 @@ Request:
 }
 ```
 
-| Field | Required | Notes                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| ----- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `cwd` | no       | Same canonicalization + `workspace_mismatch` rules as `POST /session`. Omit to inherit `/capabilities.workspaceCwd`. When `features` contains `multi_workspace_sessions`, callers may pass any trusted registered `workspaces[].cwd`; untrusted non-primary workspaces return `403 untrusted_workspace`. `mcpServers` is intentionally NOT accepted here — daemon-wide MCP is settings-driven (matches `POST /session`). |
+| Field | Required | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ----- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cwd` | no       | Same canonicalization as `POST /session`, with a stricter absence contract for restore: an explicit `cwd` with NO registry entry (removed, or never registered) returns `404 workspace_not_found` — a permanent absence callers may classify as gone — while a workspace whose entry exists in a reversible state (draining, transitioning, blocked) still returns `400 workspace_mismatch`. Omit to inherit `/capabilities.workspaceCwd`. When `features` contains `multi_workspace_sessions`, callers may pass any trusted registered `workspaces[].cwd`; untrusted non-primary workspaces return `403 untrusted_workspace`. `mcpServers` is intentionally NOT accepted here — daemon-wide MCP is settings-driven (matches `POST /session`). |
 
 Response:
 
@@ -3049,7 +3077,8 @@ The replay-window byte caps apply after the child has reconstructed the persiste
 **Errors:**
 
 - `404` — persisted session id doesn't exist (`SessionNotFoundError`).
-- `400` — `workspace_mismatch` (same shape as `POST /session`).
+- `404` — `workspace_not_found` when an explicit `cwd` has no registry entry at all (removed, or never registered): a PERMANENT absence, distinct from the reversible states below. Body: `{ error, code: "workspace_not_found", boundWorkspace, requestedWorkspace }` — no `workspaceCount`. A client that read the old "404 means the session is gone" contract should treat this code as a routing failure it can route around (e.g. re-register the workspace), not as evidence the session was deleted.
+- `400` — `workspace_mismatch` (same shape as `POST /session`), including the reversible lifecycle states: a workspace whose registry entry exists but is draining, transitioning, or blocked. Retry once the workspace settles; do not classify it as gone.
 - `403` — `untrusted_workspace` when `cwd` targets an untrusted non-primary workspace.
 - `503` — `session_limit_exceeded` (counts against `--max-sessions`; in-flight restores are accounted for too).
 - `504` — `session_restore_timeout`; retryable, with a `Retry-After` derived from the restore budget (clamped to 5-120s) because the same session id stays fenced until late cleanup settles.
@@ -3460,6 +3489,12 @@ Unknown, internal, and removed workspaces produce `404 workspace_not_found`; una
 
 The daemon runs at most four workspace reads concurrently per batch, limits selectors to 4096 characters and cursors to 16384 characters, and caps each serialized successful entry at 512 KiB. An oversized entry returns `413 catalog_response_too_large`; reduce `size` or omit groups before retrying. This bounds a batch response to approximately 10 MiB plus envelope/error overhead. Client disconnect cancels pending reads and prevents additional workspace reads from starting. The existing daemon JSON body limit and persisted scan limits also apply. Catalog requests use the read rate-limit tier.
 
+### `POST /sessions/live-state`
+
+Read live-state snapshots for 1–20 explicitly selected registered workspaces in one request. The strict body is `{ "workspaces": ["workspace-id", "/absolute/workspace/path"] }`; selectors resolve as exact workspace ids before canonical absolute paths. The response is `{ "workspaces": [...] }` in request order. Each successful entry includes its original `workspace` selector, canonical `workspaceId` and `cwd`, plus the same `v: 1`, `catalogVersion`, and complete `sessions` snapshot as the single-workspace route below. The snapshots are independent; there is no cross-workspace atomicity or merged session feed. Both routes share catalog-version exposure and cache invalidation, so alternating between them preserves the single-workspace catalog reconciliation contract. A valid batch returns HTTP 200 and `Cache-Control: no-store` even if some entries fail.
+
+Each failed entry contains `workspace`, optional resolved `workspaceId` and `cwd`, and `error: { code, message, status }` without a successful empty `sessions` list. Unknown, internal, or removed selectors return `404 workspace_not_found`; unavailable or replaced runtime generations return `503 workspace_runtime_unavailable`; untrusted primary or secondary workspaces return `403 untrusted_workspace`; unexpected bridge failures return `500 session_live_state_failed`. A successful entry exceeding 512 KiB returns `413 live_state_response_too_large`. Invalid envelopes, extra keys, empty arrays, more than 20 selectors, and selectors longer than 4096 characters return HTTP 400 `invalid_session_live_state_batch_request` before any bridge reads. The route reads only each selected active runtime's in-memory bridge, never persisted catalogs or ACP children; member reads run sequentially, and the POST is charged to the daemon read rate-limit tier.
+
 ### `GET /workspaces/:workspace/sessions/live-state`
 
 Return the selected workspace runtime's memory-only live-session snapshot plus an in-memory catalog version, so clients can stop polling the persisted catalog at `GET /workspaces/:workspace/sessions` for volatile state such as `hasActivePrompt`, waiting flags, and `clientCount`. Pre-flight `workspace_session_live_state`; the tag is independent of `workspace_qualified_rest_core`, so older daemons advertising the broader workspace REST capability do not implement this route. The selector resolves as exact workspace id first, then as a URL-encoded absolute cwd after canonicalization, matching the other plural session routes. The route is trusted-only for primary and secondary runtimes alike: it never falls back to the primary runtime, and it does not use the permissive persisted-catalog policy that grants an untrusted secondary bounded catalog reads. The endpoint has no query parameters and performs no session storage, settings, external command, or ACP round trips, so its cost is independent of persisted session count and JSONL size; the default live-session cap keeps the response bounded, and with the cap disabled cost stays proportional only to the number of live sessions.
@@ -3754,6 +3789,39 @@ send or publish a delivery result.
 
 Validation: `prompt` must be a non-empty array of objects. Other failures return `400` before reaching the bridge.
 
+`idempotencyKey` is an optional non-empty string of at most 200 characters
+(invalid values return `400 invalid_idempotency_key`). It identifies the
+caller's EVENT, not the HTTP request: the first admission remembers the key
+per session, and a repeat POST with the same key returns the original
+admission — `202 { promptId, lastEventId, eventEpoch, deduplicated: true }`
+with the FIRST prompt's `promptId` and a fresh cursor/epoch — without
+enqueueing a second turn. This lets a relay that marks acceptance durably
+after the `202` (or loses the response) retry safely. Dedupe is best-effort
+within a daemon's lifetime: the ring is in-memory and bounded (128 keys per
+session, 1024 sessions, FIFO eviction at both levels). Either cap can evict
+a key while its event's queue entry is still live — the per-session cap in
+the ordinary case of one long-lived session admitting more than 128 distinct
+events, the session cap when more than 1024 sessions hold keys — and a retry
+after such an eviction re-injects. The ring also dies with the in-memory
+prompt queue it protects, so a daemon restart loses both together and
+re-injection becomes the correct recovery. Keys are scoped per session; the
+field is admission metadata and is never forwarded to the agent.
+
+Channel relays ride three `_meta` keys that the route strips before
+forwarding: `qwen.channel.prompt` (channel-turn classification),
+`qwen.daemon.channelBoundRelay: true` (cross-workspace bound-delivery
+intent), and `qwen.daemon.channelPromptAuthorization` (the channel-worker
+authorization token; the reference worker sends it only when it holds a
+credential). `qwen.channel.prompt` requires a registered channel-worker
+authorization token — the per-workspace registration for the target
+workspace, or, for a CROSS-workspace bound delivery, any registered worker
+token plus the explicit `qwen.daemon.channelBoundRelay: true` marker and a
+primary/trusted target. A relay that sends only the two markers without the
+credential gets no channel classification: it is admitted as an ordinary
+interactive prompt (loop-detected rejection, live PR-binding backfill on the
+relayed text). A plain prompt carrying a foreign worker token likewise gets
+no channel classification and no caller-supplied display projection.
+
 Response:
 
 ```json
@@ -3762,7 +3830,17 @@ Response:
 
 The `202` response acknowledges admission, not Agent completion. Observe the
 session SSE stream after `lastEventId` and correlate `turn_complete` or
-`turn_error` by `promptId`.
+`turn_error` by `promptId`. Every reachable pre-enqueue admission check —
+including the reserved standalone working-directory guard — throws
+synchronously, so the route answers a non-202 error BEFORE any acceptance:
+the guard answers `409 working_directory_missing` (`retryable: true`,
+`Retry-After: 5`) while the session's managed conversation binding has not
+released yet, and a channel relay defers the event instead of consuming a
+phantom acceptance. Should a bridge still reject deferred before admission,
+the route drops the request's `idempotencyKey` so a subsequent retry is
+admitted fresh instead of deduping into a phantom admission — a
+defense-in-depth for that case, whose CURRENT delivery is already consumed
+by the caller.
 
 `turn_complete.data.stopReason` carries the ACP `StopReason` the agent
 returned — `end_turn`, `max_tokens`, `max_turn_requests`, `refusal` or

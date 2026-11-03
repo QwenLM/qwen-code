@@ -68,6 +68,14 @@ import {
   resolveSessionRestoreTimeouts,
 } from './actions.js';
 import {
+  beginSessionConfigRead,
+  getSessionConfigSync,
+  observeSessionConfig,
+  queueSessionConfigRefresh,
+  resetSessionConfigSync,
+  type SessionConfigSync,
+} from './session-config-sync.js';
+import {
   eventPromptId,
   findLiveJournalRepairSuffix,
   findLiveJournalRepairTarget,
@@ -108,6 +116,10 @@ import {
 import { useOptionalDaemonWorkspace } from '../workspace/DaemonWorkspaceProvider.js';
 import { loadReadyWorkspaceSkills } from '../workspace/load-ready-skills.js';
 import {
+  applyConfigOptions,
+  applySessionConfigContext,
+  getConfigOptionsUpdate,
+  mapWorkflowMode,
   getCurrentMode,
   getPlanExecutionMode,
   getSessionDisplayName,
@@ -131,6 +143,7 @@ import {
   delay,
   getReconnectDelayMs,
   schedulePassiveAssistantDone,
+  withActionTimeout,
   type TimerRef,
 } from '../timing.js';
 import {
@@ -1014,7 +1027,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
   const sessionRef = useRef<DaemonSessionClient | undefined>(undefined);
   const sessionConfigGenerationRef = useRef(
-    new WeakMap<DaemonSessionClient, number>(),
+    new WeakMap<DaemonSessionClient, SessionConfigSync>(),
+  );
+  const workflowModeSessionRef = useRef<DaemonSessionClient | undefined>(
+    undefined,
   );
   const sessionRecoveryGenerationRef = useRef(
     new WeakMap<DaemonSessionClient, number>(),
@@ -2053,10 +2069,24 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
           | undefined;
         let removeProviderAbortListener: (() => void) | undefined;
+        let configStreamOwner: DaemonSessionClient | undefined;
         const clearEventStream = () => {
           removeProviderAbortListener?.();
           removeProviderAbortListener = undefined;
-          if (eventStreamRef.current === eventStream) {
+          if (eventStream && eventStreamRef.current === eventStream) {
+            const owner = configStreamOwner;
+            if (owner && sessionRef.current === owner) {
+              resetSessionConfigSync(sessionConfigGenerationRef.current, owner);
+              setConnection((current) =>
+                sessionRef.current === owner
+                  ? {
+                      ...current,
+                      workflowModeStatus: 'syncing',
+                      workflowModePending: false,
+                    }
+                  : current,
+              );
+            }
             eventStreamRef.current = undefined;
           }
         };
@@ -2447,6 +2477,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 error: undefined,
                 errorStatus: undefined,
                 missingSession: false,
+                sessionArchived: undefined,
                 loadingTranscript: true,
               }));
             }
@@ -3406,8 +3437,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               locallyBoundPromptIdsRef.current.delete(activeSession.sessionId);
             }
           }
+          const reuseWorkflowMode =
+            workflowModeSessionRef.current === activeSession;
+          workflowModeSessionRef.current = activeSession;
           setConnection((current) => ({
             ...current,
+            workflowMode: reuseWorkflowMode ? current.workflowMode : undefined,
+            workflowModeStatus: 'syncing',
+            workflowModePending: false,
             status: 'connected',
             sessionId: activeSession.sessionId,
             sessionContext: activeProductSessionContext,
@@ -3454,6 +3491,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 activeSession.lastEventId != null ||
                 undefined,
           }));
+          // The config-sync domain belongs to the attachment, so establish it
+          // here rather than at SSE setup below: resolving the pending load
+          // lets first-prompt config writes start immediately, while the
+          // metadata await can still be outstanding. Recreating the domain
+          // after that await invalidated their ownership tokens mid-write and
+          // silently dropped daemon-confirmed values (#16065).
+          resetSessionConfigSync(
+            sessionConfigGenerationRef.current,
+            activeSession,
+          );
           if (pendingLoadToResolve) {
             lastHandledSessionIdRef.current = activeSession.sessionId;
             lastHandledSessionContextRef.current = activeProductSessionContext;
@@ -3475,8 +3522,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               connectionRef.current.skills !== undefined &&
               connectionRef.current.supportedCommands !== undefined &&
               connectionRef.current.context !== undefined);
-          const configGeneration =
-            sessionConfigGenerationRef.current.get(activeSession) ?? 0;
+          const configCurrent = beginSessionConfigRead(
+            sessionConfigGenerationRef.current,
+            activeSession,
+          );
           const goalStateAtLoadStart =
             connectionRef.current.sessionId === activeSession.sessionId
               ? connectionRef.current.goalState
@@ -3617,6 +3666,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             providerContextWindow;
           const { commands, skills } = mapSupportedCommands(supportedCommands);
           const currentMode = getCurrentMode(context);
+          const configSnapshotCurrent = configCurrent();
 
           setConnection((current) => {
             if (
@@ -3627,10 +3677,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             ) {
               return current;
             }
-            const configSnapshotCurrent =
-              configGeneration % 2 === 0 &&
-              (sessionConfigGenerationRef.current.get(activeSession) ?? 0) ===
-                configGeneration;
             const recoverySnapshotCurrent =
               context?.sessionId === activeSession.sessionId &&
               recoveryGeneration !== undefined &&
@@ -3691,6 +3737,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 configSnapshotCurrent && currentMode !== undefined
                   ? getPlanExecutionMode(context)
                   : current.planExecutionMode,
+              ...(configSnapshotCurrent && context !== undefined
+                ? {
+                    ...mapWorkflowMode(context.state.configOptions ?? []),
+                    workflowModeStatus: 'syncing' as const,
+                  }
+                : {}),
               reasoning:
                 configSnapshotCurrent && context !== undefined
                   ? mapSessionContextReasoning(context)
@@ -3846,6 +3898,67 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             restartRequested: false,
           };
           eventStreamRef.current = eventStream;
+          configStreamOwner = activeSession;
+          const configState = getSessionConfigSync(
+            sessionConfigGenerationRef.current,
+            activeSession,
+          );
+          const isConfigOwner = () =>
+            !disposed &&
+            !abort.signal.aborted &&
+            !eventStreamController.signal.aborted &&
+            sessionRef.current === activeSession &&
+            eventStreamRef.current === eventStream &&
+            sessionConfigGenerationRef.current.get(activeSession) ===
+              configState;
+          let acceptingConfig = activeSession.lastEventId === undefined;
+          let initialConfigReadRequested = false;
+          const refreshConfig = () => {
+            if (!isConfigOwner()) return;
+            queueSessionConfigRefresh(
+              sessionConfigGenerationRef.current,
+              activeSession,
+              () => {
+                if (!isConfigOwner()) return;
+                const readCurrent = beginSessionConfigRead(
+                  sessionConfigGenerationRef.current,
+                  activeSession,
+                );
+                void withActionTimeout(
+                  activeSession.context(),
+                  'Refresh session configuration timed out',
+                ).then(
+                  (updated) => {
+                    setConnectionSynchronous((current) =>
+                      isConfigOwner() &&
+                      readCurrent() &&
+                      current.sessionId === activeSession.sessionId
+                        ? updated.sessionId === activeSession.sessionId
+                          ? applySessionConfigContext(current, updated)
+                          : { ...current, workflowModeStatus: 'unknown' }
+                        : current,
+                    );
+                  },
+                  () =>
+                    setConnectionSynchronous((current) =>
+                      isConfigOwner() && readCurrent()
+                        ? { ...current, workflowModeStatus: 'unknown' }
+                        : current,
+                    ),
+                );
+              },
+            );
+          };
+          const requestInitialConfigRead = () => {
+            if (
+              initialConfigReadRequested ||
+              !acceptingConfig ||
+              !isConfigOwner()
+            )
+              return;
+            initialConfigReadRequested = true;
+            refreshConfig();
+          };
           const abortEventStream = () =>
             eventStreamController.abort(abort.signal.reason);
           abort.signal.addEventListener('abort', abortEventStream, {
@@ -3863,6 +3976,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           for await (const event of activeSession.events({
             signal: eventStreamController.signal,
             maxQueued,
+            onEpoch: () => requestInitialConfigRead(),
             ...(sseConnectReason ? { sseConnectReason } : {}),
           })) {
             if (
@@ -3878,6 +3992,25 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               sessionRef.current !== activeSession
             ) {
               break;
+            }
+            if (event.type === 'replay_complete') acceptingConfig = true;
+            requestInitialConfigRead();
+            const configUpdate = getConfigOptionsUpdate(event);
+            if (configUpdate && acceptingConfig && isConfigOwner()) {
+              observeSessionConfig(
+                sessionConfigGenerationRef.current,
+                activeSession,
+              );
+              setConnectionSynchronous((current) =>
+                isConfigOwner() && current.sessionId === activeSession.sessionId
+                  ? applyConfigOptions(current, configUpdate.configOptions)
+                  : current,
+              );
+              if (
+                mapWorkflowMode(configUpdate.configOptions)
+                  .workflowModeStatus === 'unknown'
+              )
+                refreshConfig();
             }
             trajectoryLiveStore.ingest(
               activeSession,
@@ -4059,8 +4192,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   sessionRecoveryGenerationRef.current,
                   activeSession,
                 );
+                const policyConfigCurrent = generatedUiPolicyChanged
+                  ? beginSessionConfigRead(
+                      sessionConfigGenerationRef.current,
+                      activeSession,
+                    )
+                  : undefined;
                 const publishContext = (
                   updated?: DaemonSessionContextStatus,
+                  configReadSettled = false,
                 ) => {
                   // Publish receipt invalidation even when the read fails or
                   // the response owner is wrong.
@@ -4070,35 +4210,53 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     eventStreamController.signal.aborted
                   )
                     return;
-                  setConnection((current) =>
-                    current.sessionId === activeSession.sessionId &&
-                    eventStreamRef.current === eventStream &&
-                    sessionRef.current === activeSession &&
-                    generation ===
-                      sessionRecoveryGenerationRef.current.get(activeSession)
-                      ? {
-                          ...current,
-                          ...(current.context &&
-                          updated?.sessionId === activeSession.sessionId
+                  setConnection((current) => {
+                    if (
+                      current.sessionId !== activeSession.sessionId ||
+                      eventStreamRef.current !== eventStream ||
+                      sessionRef.current !== activeSession
+                    )
+                      return current;
+                    const next =
+                      policyConfigCurrent?.() && isConfigOwner()
+                        ? updated?.sessionId === activeSession.sessionId
+                          ? applyConfigOptions(
+                              current,
+                              updated.state.configOptions ?? [],
+                            )
+                          : configReadSettled
                             ? {
-                                context: {
-                                  ...current.context,
-                                  recovery: updated.recovery,
-                                },
+                                ...current,
+                                workflowModeStatus: 'unknown' as const,
                               }
-                            : {}),
+                            : current
+                        : current;
+                    return next.context &&
+                      updated?.sessionId === activeSession.sessionId &&
+                      generation ===
+                        sessionRecoveryGenerationRef.current.get(activeSession)
+                      ? {
+                          ...next,
+                          context: {
+                            ...next.context,
+                            recovery: updated.recovery,
+                          },
                         }
-                      : current,
-                  );
+                      : { ...next };
+                  });
                 };
                 if (generatedUiPolicyChanged) {
                   invalidateGeneratedUi(activeSession, 'policy', null);
                   activeSession.session.generatedUi = undefined;
                   publishContext();
                 }
-                void activeSession.context().then(publishContext, () => {
-                  publishContext();
-                });
+                void withActionTimeout(
+                  activeSession.context(),
+                  'Refresh session context timed out',
+                ).then(
+                  (updated) => publishContext(updated, true),
+                  () => publishContext(undefined, true),
+                );
               }
               const transcriptUiEvents =
                 subagentTranscriptModeRef.current === 'summary'
@@ -4532,6 +4690,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               status: 'disconnected',
               sessionId: undefined,
               context: undefined,
+              workflowMode: undefined,
+              workflowModeStatus: 'unknown',
+              workflowModePending: false,
               reasoning: undefined,
               models: getWorkspaceModelsAfterSessionClear(current),
               backgroundTurn: undefined,
@@ -4541,6 +4702,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               error: undefined,
               errorStatus: undefined,
               missingSession: false,
+              sessionArchived: undefined,
             }));
             return;
           }
@@ -4848,9 +5010,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 reason: isAuthFailure ? 'auth-failed' : 'deleted',
               });
             }
-            // Auth failures (401/403) and terminal session errors (404/410)
-            // must clear the session — the server-side state is gone or
-            // inaccessible, so delta resume is impossible.
+            // Auth failures (401/403) and terminal session errors (404/410, and
+            // 409 session_archived) must clear the session — the server-side
+            // state is gone or inaccessible, so delta resume is impossible.
             session = undefined;
             sessionRef.current = undefined;
             if (isAuthFailure) {
@@ -4859,6 +5021,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 status: 'error',
                 sessionId: undefined,
                 context: undefined,
+                workflowMode: undefined,
+                workflowModeStatus: 'unknown',
+                workflowModePending: false,
                 reasoning: undefined,
                 models: getWorkspaceModelsAfterSessionClear(current),
                 backgroundTurn: undefined,
@@ -4891,6 +5056,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               status: 'disconnected',
               sessionId: undefined,
               context: undefined,
+              workflowMode: undefined,
+              workflowModeStatus: 'unknown',
+              workflowModePending: false,
               reasoning: undefined,
               models: getWorkspaceModelsAfterSessionClear(current),
               backgroundTurn: undefined,
@@ -4906,6 +5074,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               // but they also must not clear one confirmed by load/heartbeat.
               missingSession:
                 missingLoadedSession || current.missingSession === true,
+              sessionArchived: isSessionArchivedHttpError(error) || undefined,
               capabilities: capabilities ?? current.capabilities,
               loadingTranscript: undefined,
               catchingUp: undefined,
@@ -4978,6 +5147,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               current.errorStatus,
             ),
             missingSession: false,
+            sessionArchived: undefined,
             loadingTranscript: undefined,
           }));
         }
@@ -5275,6 +5445,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     ? {
                         sessionId: undefined,
                         context: undefined,
+                        workflowMode: undefined,
+                        workflowModeStatus: 'unknown',
+                        workflowModePending: false,
                         reasoning: undefined,
                         models: getWorkspaceModelsAfterSessionClear(current),
                         backgroundTurn: undefined,
@@ -6869,8 +7042,23 @@ function bumpSessionEventSignals(
 }
 
 function isTerminalSessionHttpError(error: unknown): boolean {
+  if (isSessionArchivedHttpError(error)) return true;
   const status = extractHttpStatus(error);
   return status !== undefined && TERMINAL_SESSION_HTTP_STATUSES.has(status);
+}
+
+/**
+ * The daemon answers 409 `{ code: 'session_archived' }` for every active-route
+ * load/resume/attach of an archived session. A plain 409 (for example a
+ * session-writer conflict) stays retriable: that conflict can clear on its own.
+ * An archived session will not, so retrying loops forever on an empty
+ * transcript — treat the error as terminal and park with a visible error
+ * instead of reconnecting.
+ */
+export function isSessionArchivedHttpError(error: unknown): boolean {
+  if (!(error instanceof DaemonHttpError) || error.status !== 409) return false;
+  const body = isRecord(error.body) ? error.body : undefined;
+  return body?.['code'] === 'session_archived';
 }
 
 function isAuthFailureHttpError(error: unknown): boolean {

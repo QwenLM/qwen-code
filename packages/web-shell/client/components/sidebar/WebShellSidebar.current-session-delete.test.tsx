@@ -456,6 +456,25 @@ it('clears a previous standalone archive error before the next visit commits', a
 });
 
 describe('WebShellSidebar current-session delete (issue #12619)', () => {
+  it('keeps Managed navigation visible when local Workspaces are collapsed', async () => {
+    window.localStorage.setItem(
+      'qwen.web-shell.sidebar.workspace-expanded:projects',
+      'false',
+    );
+    renderSidebar({
+      managedWorkspaces: (
+        <nav data-testid="managed-navigation">Managed sessions</nav>
+      ),
+    });
+    await flushSidebar();
+
+    const managedNavigation = container.querySelector(
+      '[data-testid="managed-navigation"]',
+    );
+    expect(managedNavigation).not.toBeNull();
+    expect(managedNavigation?.closest('[hidden]')).toBeNull();
+  });
+
   it('renders Managed and Local archives only in the settings target', async () => {
     connection.capabilities = {
       qwenCodeVersion: '1.2.3',
