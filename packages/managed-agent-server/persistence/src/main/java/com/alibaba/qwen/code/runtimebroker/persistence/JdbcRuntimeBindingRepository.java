@@ -208,7 +208,10 @@ public final class JdbcRuntimeBindingRepository
             JdbcRepositorySupport.setIdentity(clear, 2, session.getBindingId());
             clear.setLong(3, session.getRuntimeGeneration());
             JdbcRepositorySupport.setIdentity(clear, 4, session.getRuntimeSessionId());
-            clear.executeUpdate();
+            com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore.releaseMembers(connection, key,
+                    clear.executeUpdate(), com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore
+                            .exclusiveMemberKey(session.getBindingId(), session.getRuntimeGeneration(),
+                                    session.getRuntimeSessionId()));
         }
     }
 
@@ -602,6 +605,9 @@ public final class JdbcRuntimeBindingRepository
                     connection -> {
                         lockPlacementDomain(
                                 connection, original.getRequest().getScope().getTenantId());
+                        if (!csi && HarnessOwnership.sharesRuntimeSessions(original.getRequest())) {
+                            requireStorageAdmission(connection, original.getRequest());
+                        }
                         var csiOriginal =
                                 JdbcCsiActivationAdmission.lockForExecution(
                                         connection, original, this);
