@@ -324,6 +324,14 @@
   margin-bottom: 12px;
 }
 
+.workspaceDropBefore {
+  box-shadow: 0 -2px var(--primary);
+}
+
+.workspaceDropAfter {
+  box-shadow: 0 2px var(--primary);
+}
+
 .liveWorkspaceHeader {
   display: inline-flex;
   min-width: 0;

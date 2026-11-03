@@ -49,6 +49,8 @@ import {
   GitPullRequestIcon,
   ChevronDownIcon,
   ChevronRightIcon,
+  ListChevronsDownUpIcon,
+  ListChevronsUpDownIcon,
   Columns2Icon,
   LayoutGridIcon,
   LoaderCircleIcon,
@@ -123,9 +125,9 @@ import { WorkspaceMenu, type WorkspaceMenuActions } from './WorkspaceMenu';
 import {
   moveWorkspace,
   orderWorkspaces,
-  readWorkspaceOrder,
-  writeWorkspaceOrder,
+  reorderWorkspace,
 } from './workspaceOrder';
+import { useWorkspaceOrder } from './useWorkspaceOrder';
 import { WorkspaceRenameDialog } from './WorkspaceRenameDialog';
 import {
   DEFAULT_WORKSPACE_OVERVIEW_ITEMS,
@@ -1412,20 +1414,33 @@ export function WebShellSidebar({
     () => (workspace.baseUrl || window.location.origin).replace(/\/+$/, ''),
     [workspace.baseUrl],
   );
-  const [workspaceOrder, setWorkspaceOrder] = useState<string[]>(() =>
-    readWorkspaceOrder(workspaceOrderScope),
-  );
-  useEffect(() => {
-    setWorkspaceOrder(readWorkspaceOrder(workspaceOrderScope));
-  }, [workspaceOrderScope]);
-  const workspaceCatalogAdvertised =
-    workspaces.length > 0 ||
-    workspace.capabilities?.workspaces !== undefined ||
-    connection.capabilities?.workspaces !== undefined;
+  const workspaceOrderFeatures =
+    workspace.capabilities?.features ?? connection.capabilities?.features;
   const primaryWorkspaceCwd =
     workspaces.find((entry) => entry.primary)?.cwd ??
     workspace.capabilities?.workspaceCwd ??
     connection.workspaceCwd;
+  const {
+    order: workspaceOrder,
+    canReorder,
+    saveOrder,
+  } = useWorkspaceOrder({
+    client: workspace.client,
+    scope: workspaceOrderScope,
+    primaryWorkspaceCwd,
+    serverEnabled: workspaceOrderFeatures?.includes('workspace_order') === true,
+    onError: (error) =>
+      onError(
+        new Error(t('sidebar.workspaceOrderError'), { cause: error }),
+        t('sidebar.workspaceOrderError'),
+      ),
+  });
+  const canReorderWorkspaces =
+    workspaceOrderFeatures !== undefined && canReorder;
+  const workspaceCatalogAdvertised =
+    workspaces.length > 0 ||
+    workspace.capabilities?.workspaces !== undefined ||
+    connection.capabilities?.workspaces !== undefined;
   const primaryWorkspaceExpansionId = `primary:${
     primaryWorkspaceCwd ?? 'default'
   }`;
@@ -1776,6 +1791,36 @@ export function WebShellSidebar({
     readWorkspaceExpanded(primaryWorkspaceExpansionId),
   );
   const [showAllProjectSessions, setShowAllProjectSessions] = useState(false);
+  const [workspaceExpansionRequest, setWorkspaceExpansionRequest] = useState<{
+    scope: string;
+    expanded: boolean;
+  }>();
+  const [secondaryWorkspaceExpanded, setSecondaryWorkspaceExpanded] = useState<
+    Record<string, boolean>
+  >({});
+  useEffect(() => {
+    if (workspaceExpansionRequest) setWorkspaceExpansionRequest(undefined);
+  }, [workspaceExpansionRequest]);
+  const [workspaceDrag, setWorkspaceDrag] = useState<{
+    cwd: string;
+    targetCwd: string;
+    after: boolean;
+  } | null>(null);
+  const workspaceDragStartRef = useRef<
+    | {
+        timer: number;
+        cwd: string;
+      }
+    | undefined
+  >(undefined);
+  useEffect(() => {
+    window.clearTimeout(workspaceDragStartRef.current?.timer);
+    workspaceDragStartRef.current = undefined;
+    setWorkspaceExpansionRequest(undefined);
+    setSecondaryWorkspaceExpanded({});
+    setWorkspaceDrag(null);
+    return () => window.clearTimeout(workspaceDragStartRef.current?.timer);
+  }, [workspaceOrderScope, primaryWorkspaceCwd]);
   const [projectsExpanded, setProjectsExpanded] = useState(
     () => hideProjectHeader || readWorkspaceExpanded('projects'),
   );
@@ -2245,6 +2290,47 @@ export function WebShellSidebar({
     () => orderWorkspaces(projectWorkspaces, workspaceOrder),
     [projectWorkspaces, workspaceOrder],
   );
+  useEffect(() => {
+    const sourceCwd = workspaceDrag?.cwd ?? workspaceDragStartRef.current?.cwd;
+    if (
+      sourceCwd &&
+      (!canReorderWorkspaces ||
+        lockedWorkspaceCwd ||
+        projectWorkspaces.length < 2 ||
+        !projectWorkspaces.some((entry) => entry.cwd === sourceCwd))
+    ) {
+      window.clearTimeout(workspaceDragStartRef.current?.timer);
+      workspaceDragStartRef.current = undefined;
+      setWorkspaceDrag(null);
+    }
+  }, [
+    workspaceDrag,
+    projectWorkspaces,
+    canReorderWorkspaces,
+    lockedWorkspaceCwd,
+  ]);
+  const anyWorkspaceExpanded = projectWorkspaces.some((entry) =>
+    entry.primary
+      ? projectExpanded
+      : (secondaryWorkspaceExpanded[entry.id] ??
+        readWorkspaceExpanded(entry.id)),
+  );
+  const toggleAllWorkspaces = () => {
+    const expanded = !anyWorkspaceExpanded;
+    setWorkspaceExpansionRequest({ scope: workspaceOrderScope, expanded });
+    setSecondaryWorkspaceExpanded(
+      Object.fromEntries(
+        projectWorkspaces.map((entry) => [entry.id, expanded]),
+      ),
+    );
+    setProjectExpanded(expanded);
+    setShowAllProjectSessions(false);
+    writeWorkspaceExpanded(primaryWorkspaceExpansionId, expanded);
+    if (expanded) {
+      setProjectsExpanded(true);
+      writeWorkspaceExpanded('projects', true);
+    }
+  };
   const moveWorkspaceInList = useCallback(
     (cwd: string, direction: -1 | 1) => {
       const next = moveWorkspace(
@@ -2253,10 +2339,9 @@ export function WebShellSidebar({
         direction,
       );
       if (!next) return;
-      writeWorkspaceOrder(workspaceOrderScope, next);
-      setWorkspaceOrder(next);
+      void saveOrder(next);
     },
-    [orderedProjectWorkspaces, workspaceOrderScope],
+    [orderedProjectWorkspaces, saveOrder],
   );
   const resolveSessionWorkspaceScope = useCallback(
     (session: DaemonSessionSummary): SessionWorkspaceScope => {
@@ -7584,6 +7669,30 @@ export function WebShellSidebar({
                     <IconChevron expanded={projectsExpanded} />
                   </button>
                   <div className={styles.projectsHeaderActions}>
+                    {managedWorkspaces === undefined &&
+                      projectWorkspaces.length > 0 && (
+                        <button
+                          className={styles.projectsHeaderAction}
+                          type="button"
+                          title={t(
+                            anyWorkspaceExpanded
+                              ? 'sidebar.collapseAllWorkspaces'
+                              : 'sidebar.expandAllWorkspaces',
+                          )}
+                          aria-label={t(
+                            anyWorkspaceExpanded
+                              ? 'sidebar.collapseAllWorkspaces'
+                              : 'sidebar.expandAllWorkspaces',
+                          )}
+                          onClick={toggleAllWorkspaces}
+                        >
+                          {anyWorkspaceExpanded ? (
+                            <ListChevronsDownUpIcon />
+                          ) : (
+                            <ListChevronsUpDownIcon />
+                          )}
+                        </button>
+                      )}
                     {!channelView &&
                       !lockedWorkspaceCwd &&
                       onOpenWorkspacesOverview && (
@@ -7670,9 +7779,100 @@ export function WebShellSidebar({
                     <div className={styles.workspaceList}>
                       {!channelView && managedWorkspaces}
                       {orderedProjectWorkspaces.map((ws) => (
-                        <Fragment key={ws.id}>
+                        <div
+                          key={ws.id}
+                          data-sidebar-workspace={ws.cwd}
+                          className={cx(
+                            workspaceDrag?.cwd !== ws.cwd &&
+                              workspaceDrag?.targetCwd === ws.cwd &&
+                              (workspaceDrag.after
+                                ? styles.workspaceDropAfter
+                                : styles.workspaceDropBefore),
+                          )}
+                          onDragOver={(event) => {
+                            if (!workspaceDrag || !canReorderWorkspaces) return;
+                            event.preventDefault();
+                            event.dataTransfer.dropEffect = 'move';
+                            const bounds =
+                              event.currentTarget.getBoundingClientRect();
+                            const after =
+                              event.clientY > bounds.top + bounds.height / 2;
+                            if (
+                              workspaceDrag.targetCwd !== ws.cwd ||
+                              workspaceDrag.after !== after
+                            ) {
+                              setWorkspaceDrag({
+                                ...workspaceDrag,
+                                targetCwd: ws.cwd,
+                                after,
+                              });
+                            }
+                          }}
+                          onDrop={(event) => {
+                            if (!workspaceDrag || !canReorderWorkspaces) return;
+                            event.preventDefault();
+                            const bounds =
+                              event.currentTarget.getBoundingClientRect();
+                            const next = reorderWorkspace(
+                              orderedProjectWorkspaces.map(
+                                (entry) => entry.cwd,
+                              ),
+                              workspaceDrag.cwd,
+                              ws.cwd,
+                              event.clientY > bounds.top + bounds.height / 2,
+                            );
+                            if (next) {
+                              void saveOrder(next);
+                            }
+                            setWorkspaceDrag(null);
+                          }}
+                        >
                           <WorkspaceSection
                             workspace={ws}
+                            expansionRequest={
+                              workspaceExpansionRequest?.scope ===
+                              workspaceOrderScope
+                                ? workspaceExpansionRequest
+                                : undefined
+                            }
+                            temporarilyCollapsed={workspaceDrag !== null}
+                            dragHandleProps={
+                              !lockedWorkspaceCwd &&
+                              canReorderWorkspaces &&
+                              orderedProjectWorkspaces.length > 1
+                                ? {
+                                    draggable: true,
+                                    onDragStart: (event) => {
+                                      event.dataTransfer.effectAllowed = 'move';
+                                      event.dataTransfer.setData(
+                                        'text/plain',
+                                        ws.cwd,
+                                      );
+                                      setOpenWorkspaceMenuId(null);
+                                      // Moving the source during dragstart cancels native dragging.
+                                      workspaceDragStartRef.current = {
+                                        cwd: ws.cwd,
+                                        timer: window.setTimeout(() => {
+                                          workspaceDragStartRef.current =
+                                            undefined;
+                                          setWorkspaceDrag({
+                                            cwd: ws.cwd,
+                                            targetCwd: ws.cwd,
+                                            after: false,
+                                          });
+                                        }, 0),
+                                      };
+                                    },
+                                    onDragEnd: () => {
+                                      window.clearTimeout(
+                                        workspaceDragStartRef.current?.timer,
+                                      );
+                                      workspaceDragStartRef.current = undefined;
+                                      setWorkspaceDrag(null);
+                                    },
+                                  }
+                                : undefined
+                            }
                             executionLabel={
                               managedWorkspaces !== undefined
                                 ? t('managed.localMode')
@@ -7751,7 +7951,14 @@ export function WebShellSidebar({
                                     );
                                     setProjectExpanded(expanded);
                                   }
-                                : undefined
+                                : (expanded) => {
+                                    setSecondaryWorkspaceExpanded(
+                                      (current) => ({
+                                        ...current,
+                                        [ws.id]: expanded,
+                                      }),
+                                    );
+                                  }
                             }
                             renderSessions={!ws.primary}
                             renderSession={(session, renderOptions) =>
@@ -7859,6 +8066,7 @@ export function WebShellSidebar({
                                       );
                                     const canMoveWorkspace =
                                       !lockedWorkspaceCwd &&
+                                      canReorderWorkspaces &&
                                       ws.trusted &&
                                       workspaceIndex >= 0 &&
                                       orderedProjectWorkspaces.length > 1;
@@ -8062,11 +8270,16 @@ export function WebShellSidebar({
                           />
                           {ws.primary &&
                           (projectExpanded || searchQuery.trim()) ? (
-                            <div className={styles.workspaceSessionBody}>
+                            <div
+                              className={styles.workspaceSessionBody}
+                              style={
+                                workspaceDrag ? { display: 'none' } : undefined
+                              }
+                            >
                               {body}
                             </div>
                           ) : null}
-                        </Fragment>
+                        </div>
                       ))}
                     </div>
                   </div>

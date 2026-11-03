@@ -33,8 +33,10 @@ import {
 } from '../workspace-route-runtime.js';
 import {
   normalizeWorkspaceDisplayName,
+  normalizeWorkspaceOrder,
   workspaceRegistrationId,
   WorkspaceDisplayNameValidationError,
+  WorkspaceOrderValidationError,
   WorkspaceRegistrationStoreCommittedError,
   WorkspaceRegistrationStoreLimitError,
   WorkspaceRegistrationStoreTooLargeError,
@@ -2264,6 +2266,82 @@ export function registerWorkspaceManagementRoutes(
       }
     },
   );
+
+  app.get('/workspace-order', async (_req, res) => {
+    if (!workspaceRegistrationStore) {
+      res.status(501).json({
+        error: 'Persistent workspace storage is not available',
+        code: 'persistence_not_available',
+      });
+      return;
+    }
+    try {
+      const snapshot = await workspaceRegistrationStore.read();
+      res.json({ cwds: snapshot.workspaceOrder ?? [] });
+    } catch {
+      res.status(500).json({
+        error: 'Failed to read workspace order',
+        code: 'workspace_registration_store_error',
+      });
+    }
+  });
+
+  app.post('/workspace-order', mutate({ strict: true }), async (req, res) => {
+    if (sealed) {
+      sendSealed(res);
+      return;
+    }
+    if (!workspaceRegistrationStore) {
+      res.status(501).json({
+        error: 'Persistent workspace storage is not available',
+        code: 'persistence_not_available',
+      });
+      return;
+    }
+    let cwds: string[];
+    try {
+      cwds = normalizeWorkspaceOrder(safeBody(req)['cwds']);
+    } catch (err) {
+      if (!(err instanceof WorkspaceOrderValidationError)) throw err;
+      res
+        .status(400)
+        .json({ error: err.message, code: 'invalid_workspace_order' });
+      return;
+    }
+    const known = new Set(
+      workspaceRegistry
+        .listManaged()
+        .filter((runtime) => !isInternalWorkspaceRuntime(runtime))
+        .map((runtime) => runtime.workspaceCwd),
+    );
+    if (cwds.some((cwd) => !known.has(cwd))) {
+      res.status(400).json({
+        error: 'Workspace order contains an unregistered workspace',
+        code: 'workspace_mismatch',
+      });
+      return;
+    }
+    operationStarted();
+    try {
+      try {
+        await workspaceRegistrationStore.setWorkspaceOrder(cwds);
+      } catch (err) {
+        if (!(err instanceof WorkspaceRegistrationStoreCommittedError))
+          throw err;
+        // The write committed; a lock-release failure must not roll back the UI.
+      }
+      res.json({ cwds });
+    } catch (err) {
+      if (!sendStoreCapacityError(res, err)) {
+        res.status(500).json({
+          error: 'Failed to persist workspace order',
+          code: 'workspace_registration_store_error',
+        });
+      }
+    } finally {
+      operationFinished();
+    }
+  });
 
   const registrationIsActive = (registrationId: string): boolean =>
     workspaceRegistry.listManaged().some((runtime) => {

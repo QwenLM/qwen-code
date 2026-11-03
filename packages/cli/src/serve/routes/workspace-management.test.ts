@@ -2825,6 +2825,111 @@ describe('DELETE /workspaces/:workspace', () => {
   });
 });
 
+describe('workspace order', () => {
+  function setup() {
+    const registry = createMockRegistry([
+      makeRuntime('/work/primary', { primary: true }),
+      makeRuntime('/work/second', { trusted: false }),
+    ]);
+    const store = {
+      read: vi.fn().mockResolvedValue({
+        workspaceOrder: ['/work/second', '/work/primary'],
+      }),
+      setWorkspaceOrder: vi.fn().mockResolvedValue(undefined),
+    };
+    const fixture = createApp({
+      workspaceRegistry: registry,
+      workspaceRegistrationStore:
+        store as unknown as WorkspaceRegistrationStore,
+    });
+    return { ...fixture, registry, store };
+  }
+
+  it('reads and writes process-global presentation order without changing runtimes', async () => {
+    const { app, registry, store } = setup();
+    expect((await request(app).get('/workspace-order')).body).toEqual({
+      cwds: ['/work/second', '/work/primary'],
+    });
+    const response = await request(app)
+      .post('/workspace-order')
+      .send({ cwds: ['/work/primary', '/work/second'] });
+    expect(response.status).toBe(200);
+    expect(response.body.cwds).toEqual(['/work/primary', '/work/second']);
+    expect(store.setWorkspaceOrder).toHaveBeenCalledWith(response.body.cwds);
+    expect(
+      registry.listManaged().map((runtime) => runtime.workspaceCwd),
+    ).toEqual(['/work/primary', '/work/second']);
+    expect(registry.add).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid and unknown paths without touching persistence', async () => {
+    const { app, store } = setup();
+    for (const cwds of [
+      null,
+      ['relative'],
+      ['/work/primary', '/work/primary'],
+      ['/work/unknown'],
+    ]) {
+      expect(
+        (await request(app).post('/workspace-order').send({ cwds })).status,
+      ).toBe(400);
+    }
+    expect(store.setWorkspaceOrder).not.toHaveBeenCalled();
+  });
+
+  it('reports unavailable persistence and storage errors', async () => {
+    const { app: unavailable } = createApp();
+    expect((await request(unavailable).get('/workspace-order')).status).toBe(
+      501,
+    );
+    expect(
+      (await request(unavailable).post('/workspace-order').send({ cwds: [] }))
+        .status,
+    ).toBe(501);
+    const { app, store } = setup();
+    store.read.mockRejectedValueOnce(new Error('disk unavailable'));
+    expect((await request(app).get('/workspace-order')).status).toBe(500);
+    store.setWorkspaceOrder.mockRejectedValueOnce(new Error('disk full'));
+    expect(
+      (await request(app).post('/workspace-order').send({ cwds: [] })).status,
+    ).toBe(500);
+    store.setWorkspaceOrder.mockRejectedValueOnce(
+      new WorkspaceRegistrationStoreCommittedError('lock release failed'),
+    );
+    expect(
+      (await request(app).post('/workspace-order').send({ cwds: [] })).status,
+    ).toBe(200);
+  });
+
+  it('waits for pending writes on shutdown and rejects later writes', async () => {
+    const { app, store, handle } = setup();
+    let complete!: () => void;
+    store.setWorkspaceOrder.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          complete = resolve;
+        }),
+    );
+    const pending = request(app)
+      .post('/workspace-order')
+      .send({ cwds: [] })
+      .then((response) => response);
+    await vi.waitFor(() => expect(store.setWorkspaceOrder).toHaveBeenCalled());
+    let sealed = false;
+    const seal = handle.sealAndWait().then(() => {
+      sealed = true;
+    });
+    await Promise.resolve();
+    expect(sealed).toBe(false);
+    expect(
+      (await request(app).post('/workspace-order').send({ cwds: [] })).status,
+    ).toBe(503);
+    complete();
+    expect((await pending).status).toBe(200);
+    await seal;
+  });
+});
+
 describe('persistent workspace registrations', () => {
   it('returns 501 for registration management without a store', async () => {
     const { app } = createApp();

@@ -485,6 +485,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   multi_workspace_session_shell: { since: 'v1' },
   dynamic_workspace_registration: { since: 'v1' },
   persistent_workspace_registration: { since: 'v1' },
+  workspace_order: { since: 'v1' },
   // Optional presentation-only names and updates to those names for workspace
   // runtimes. Workspace ids and canonical paths remain the routing identities.
   workspace_display_name: { since: 'v1' },
@@ -872,6 +873,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   [
     'persistent_workspace_registration',
+    (toggles) => toggles.persistentWorkspaceRegistrationAvailable === true,
+  ],
+  [
+    'workspace_order',
     (toggles) => toggles.persistentWorkspaceRegistrationAvailable === true,
   ],
   [
