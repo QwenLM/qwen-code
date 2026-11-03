@@ -298,7 +298,9 @@ SELECT DISTINCT CAST(encryption_key_id AS BINARY) AS key_id
 FROM ma_extension_settings WHERE encryption_key_id IS NOT NULL;
 ```
 
-查询结果列出持久化记录仍需要的 key ID：预期只剩 active ID（`reference-v2`）。只要结果中仍出现 `reference-v1`，就必须继续配置该密钥。
+查询结果列出持久化记录仍需要的密钥 ID。结果中出现的每把密钥都必须继续配置；只有 `reference-v1` 不再出现时，才能退场该密钥。
+
+Session 模型配置只在创建时写入，关闭或删除 Session 会保留相关行；扩展配置也会保留历史修订。切换 active key 不会重加密或移除这些记录，因此只要记录仍在，旧密钥 ID 就会继续出现在结果中。本流程不提供重加密或物理清除步骤；请保留所需密钥，不要仅为通过该检查而删除持久化记录。
 
 该 key ring 是映射结构，无法通过 `QWEN_MANAGED_AGENT_*` 环境变量提供：宽松绑定会把环境变量形式静默解析为空 ring 或键名错误的 ring，且启动时不报错。`previous-credential-keys` 配置在 `config/application.yml` 中。分发产物随包提供 `config/application.example.yml`，两个启动脚本都会在该文件存在时导出 `SPRING_CONFIG_ADDITIONAL_LOCATION=file:<分发产物根目录>/config/application.yml`，因此加载位置不再取决于进程工作目录，也不会向命令的位置参数注入选项。若该变量已设置，启动脚本保留原值。只依赖环境变量的部署会以空 ring 启动，因此在未配置旧密钥的情况下轮换 `credential-key-id` 会使旧密钥写入的记录不可读。显式的 `--spring.config.additional-location` 命令行参数优先于该环境变量默认值；两者同时存在时命令行值生效，随包的 `config/application.yml` 不会被加载。
 

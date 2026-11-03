@@ -299,7 +299,9 @@ SELECT DISTINCT CAST(encryption_key_id AS BINARY) AS key_id
 FROM ma_extension_settings WHERE encryption_key_id IS NOT NULL;
 ```
 
-The result lists the key IDs that persisted rows still require: expect the active ID (`reference-v2`) only. While `reference-v1` appears, that key must stay configured.
+The result lists the key IDs that persisted rows still require. Keep every returned key configured; `reference-v1` can be retired only when it is absent from the result.
+
+Session model configurations are written once; closing or deleting a Session retains their rows. Extension settings retain earlier revisions. Rotating the active key does not re-encrypt or remove these records, so their old key IDs stay in the result while the records remain. This procedure provides no re-encryption or physical-purge step; keep the required keys configured and do not delete rows just to clear the check.
 
 The key ring is a map and cannot be supplied through a `QWEN_MANAGED_AGENT_*` environment variable: relaxed binding silently resolves an env-var form to an empty or mis-keyed ring, with no startup error. Configure `previous-credential-keys` in `config/application.yml`. The distribution ships `config/application.example.yml`, and both launchers export `SPRING_CONFIG_ADDITIONAL_LOCATION=file:<distribution-root>/config/application.yml` when that file exists, so the location no longer depends on the process working directory and no option is added to the command's positional arguments. When the variable is already set, the launchers leave it in effect instead. A deployment that relies on environment variables alone starts with an empty ring, so rotating `credential-key-id` without configuration of the previous key makes rows written under it unreadable. An explicit `--spring.config.additional-location` command-line argument outranks this environment default; when both are present, the command-line value wins and the bundled `config/application.yml` is not loaded.
 

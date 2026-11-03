@@ -1167,8 +1167,12 @@ every tenant and workspace on the host. This does not isolate files: a worker
 runs as the service account and can read whatever that account can.
 
 After a credential-key rotation, keep each prior key in
-`previous-credential-keys` until no persisted Runtime binding references its
-key ID. The brackets are not decoration: Spring's relaxed binder strips `/`,
+`previous-credential-keys` while any persisted row references it: Runtime
+bindings, complete Session model configurations and extension settings all
+retain key IDs. Use the retirement query in the runbook linked below to check
+all three scopes.
+
+The brackets are not decoration: Spring's relaxed binder strips `/`,
 `:` and spaces from plain map keys, so an unbracketed ID binds as a key that
 matches no persisted row.
 
