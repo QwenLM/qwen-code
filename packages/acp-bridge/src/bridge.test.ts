@@ -2831,12 +2831,13 @@ describe('createAcpSessionBridge', () => {
       // would lose it: the close it raced is about to complete. `closing` alone
       // does not cover this span, which is the whole reason the in-flight flag
       // is checked alongside it.
-      await expect(
+      // Admission failures throw synchronously (B-F1 contract).
+      expect(() =>
         bridge.sendPrompt(session.sessionId, {
           sessionId: session.sessionId,
           prompt: [{ type: 'text', text: 'race the teardown' }],
         }),
-      ).rejects.toThrow(/closing/);
+      ).toThrow(/closing/);
       await expect(
         bridge.rewindSession(session.sessionId, { promptId: 'whatever' }),
       ).rejects.toThrow(/closing/);
@@ -19360,7 +19361,7 @@ describe('createAcpSessionBridge', () => {
       const bridge = makeBridge({ channelFactory: factory });
       const admitted = vi.fn();
 
-      await expect(
+      expect(() =>
         bridge.sendPrompt(
           'missing-session',
           {
@@ -19370,7 +19371,7 @@ describe('createAcpSessionBridge', () => {
           undefined,
           { onPromptAdmitted: admitted },
         ),
-      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      ).toThrow(SessionNotFoundError);
       expect(admitted).not.toHaveBeenCalled();
 
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
@@ -19474,6 +19475,53 @@ describe('createAcpSessionBridge', () => {
       await vi.waitFor(() => expect(releaseFirst).toBeDefined());
       releaseFirst!();
       await Promise.all(accepted);
+      await bridge.shutdown();
+    });
+
+    it('throws synchronously when sendPrompt targets an unknown or closing session (B-F1)', async () => {
+      // Admission-phase failures must throw SYNCHRONOUSLY: a rejected
+      // promise would let the HTTP prompt route return a phantom 202 for a
+      // prompt that was never enqueued, and a channel relay would mark the
+      // event delivered and lose it instead of waking the session.
+      const closeResult = deferred<Record<string, unknown>>();
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+            return closeResult.promise;
+          }
+          throw new Error(`unexpected extMethod ${method}`);
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(() =>
+        bridge.sendPrompt('no-such-session', {
+          sessionId: 'no-such-session',
+          prompt: [{ type: 'text', text: 'hi' }],
+        }),
+      ).toThrow(SessionNotFoundError);
+
+      const close = bridge.closeSession(session.sessionId, {
+        clientId: session.clientId,
+      });
+      void close.catch(() => {});
+      await vi.waitFor(() =>
+        expect(handle.agent.extMethodCalls.length).toBeGreaterThan(0),
+      );
+      let thrown: unknown;
+      try {
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'hi' }],
+        });
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeInstanceOf(SessionNotFoundError);
+      expect((thrown as SessionNotFoundError).code).toBe('session_closing');
+      closeResult.resolve({});
+      await close.catch(() => {});
       await bridge.shutdown();
     });
 
@@ -20573,12 +20621,12 @@ describe('createAcpSessionBridge', () => {
           throw new Error('factory should not be called');
         },
       });
-      await expect(
+      expect(() =>
         bridge.sendPrompt('unknown', {
           sessionId: 'unknown',
           prompt: [{ type: 'text', text: 'x' }],
         }),
-      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      ).toThrow(SessionNotFoundError);
     });
   });
 

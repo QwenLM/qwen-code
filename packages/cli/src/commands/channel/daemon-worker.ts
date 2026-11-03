@@ -307,6 +307,13 @@ export function createDaemonSessionFactory({
 }
 
 /**
+ * Upper bound on the accessor's session→cwd wake cache. Complete snapshots
+ * rebuild it and Gone verdicts evict entries, but a permanent partial never
+ * clears it; the cap bounds churn-driven growth during such a window.
+ */
+const MAX_WAKE_CWD_CACHE = 1024;
+
+/**
  * Daemon-backed delivery into PR-bound sessions the channel does not own.
  * Acceptance into the session's prompt queue counts as delivery; the turn
  * itself runs independently of the channel worker.
@@ -327,11 +334,12 @@ export function createDaemonSessionFactory({
  * that defers the event without consuming the failure budget; everything
  * else propagates as a transient delivery error for the adapter to retry.
  *
- * Every POST carries the caller's idempotency key (the adapter's durable
- * task id) and the bound-relay marker: the daemon deduplicates repeated
- * admissions of the same key (a lost acceptance mark or a lost 202 must not
- * re-inject the event), and cross-workspace channel classification requires
- * the marker in addition to the worker token.
+ * Every POST carries the caller's idempotency key (a stable event identity
+ * derived from the source chat and message id) and the bound-relay marker:
+ * the daemon deduplicates repeated admissions of the same key (a lost
+ * acceptance mark or a lost 202 must not re-inject the event), and
+ * cross-workspace channel classification requires the marker in addition to
+ * the worker token.
  */
 export function createBoundSessionsAccessor(
   client: DaemonClientLike,
@@ -449,6 +457,17 @@ export function createBoundSessionsAccessor(
       // keys retention on the listed session set, so "scanned, no bindings"
       // (an observed unbind) has to reach it even on a partial answer.
       const { sourceType, updatedAt } = record;
+      // Bounded: under a permanent partial the cache is never cleared, so
+      // session churn during the partial window must not grow it without
+      // limit. FIFO eviction only drops the oldest wake hints; a dropped
+      // entry is re-fetched from the bindings route on the next 404.
+      if (
+        cwdBySession.size >= MAX_WAKE_CWD_CACHE &&
+        !cwdBySession.has(sessionId)
+      ) {
+        const oldest = cwdBySession.keys().next().value;
+        if (oldest !== undefined) cwdBySession.delete(oldest);
+      }
       cwdBySession.set(sessionId, workspaceCwd);
       summaries.push({
         sessionId,

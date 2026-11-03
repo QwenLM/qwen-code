@@ -3771,10 +3771,13 @@ admission — `202 { promptId, lastEventId, eventEpoch, deduplicated: true }`
 with the FIRST prompt's `promptId` and a fresh cursor/epoch — without
 enqueueing a second turn. This lets a relay that marks acceptance durably
 after the `202` (or loses the response) retry safely. The dedupe ring is
-in-memory and bounded (128 keys per session, FIFO): it lives exactly as long
-as the prompt queue it protects, so a daemon restart loses both together and
-re-injection becomes the correct recovery. Keys are scoped per session; the
-field is admission metadata and is never forwarded to the agent.
+in-memory and bounded (128 keys per session, 1024 sessions, FIFO eviction at
+both levels); it normally lives exactly as long as the prompt queue it
+protects, so a daemon restart loses both together and re-injection becomes
+the correct recovery. The session cap is the one exception: a key can be
+evicted while its queue is still live if more than 1024 sessions hold keys,
+and a retry after such an eviction re-injects. Keys are scoped per session;
+the field is admission metadata and is never forwarded to the agent.
 
 Channel relays ride two `_meta` keys that the route strips before forwarding:
 `qwen.channel.prompt` (channel-turn classification) requires a registered

@@ -53,8 +53,8 @@ export const plugin: ChannelPlugin = {
         label: 'Reason Filter',
         kind: 'string-list',
         description:
-          'Optional. Comma-separated notification reasons to process. ' +
-          'Leave empty to process all.',
+          'Optional. Only notifications with a selected reason are processed. ' +
+          'Leave every reason unselected to process all of them.',
         options: [
           { value: 'mention', label: 'mention' },
           { value: 'review_requested', label: 'review_requested' },

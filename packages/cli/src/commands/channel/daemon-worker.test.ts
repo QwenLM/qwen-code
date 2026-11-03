@@ -4801,15 +4801,18 @@ describe('createBoundSessionsAccessor', () => {
       expect.objectContaining({
         method: 'POST',
         signal: expect.any(AbortSignal),
-        body: JSON.stringify({
-          prompt: [{ type: 'text', text: 'event text' }],
-          _meta: {
-            [CHANNEL_PROMPT_META_KEY]: true,
-            [CHANNEL_BOUND_RELAY_META_KEY]: true,
-          },
-        }),
       }),
     );
+    // Field assertions, not exact serialization: JSON key order is not
+    // semantic.
+    const body = JSON.parse(
+      String((requestRest.mock.calls[0]![1] as RequestInit).body),
+    ) as Record<string, unknown>;
+    expect(body['prompt']).toEqual([{ type: 'text', text: 'event text' }]);
+    expect(body['_meta']).toEqual({
+      [CHANNEL_PROMPT_META_KEY]: true,
+      [CHANNEL_BOUND_RELAY_META_KEY]: true,
+    });
   });
 
   it('rides the worker authorization alongside the prompt marker', async () => {
@@ -4826,17 +4829,17 @@ describe('createBoundSessionsAccessor', () => {
 
     expect(requestRest).toHaveBeenCalledWith(
       '/session/session-1/prompt',
-      expect.objectContaining({
-        body: JSON.stringify({
-          prompt: [{ type: 'text', text: 'event text' }],
-          _meta: {
-            [CHANNEL_PROMPT_META_KEY]: true,
-            [CHANNEL_BOUND_RELAY_META_KEY]: true,
-            [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]: 'worker-prompt-token',
-          },
-        }),
-      }),
+      expect.objectContaining({ method: 'POST' }),
     );
+    const body = JSON.parse(
+      String((requestRest.mock.calls[0]![1] as RequestInit).body),
+    ) as Record<string, unknown>;
+    expect(body['prompt']).toEqual([{ type: 'text', text: 'event text' }]);
+    expect(body['_meta']).toEqual({
+      [CHANNEL_PROMPT_META_KEY]: true,
+      [CHANNEL_BOUND_RELAY_META_KEY]: true,
+      [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]: 'worker-prompt-token',
+    });
   });
 
   it('bounds the prompt request with a 30s timeout signal', async () => {
@@ -5564,5 +5567,37 @@ describe('createBoundSessionsAccessor', () => {
     // an authoritative empty binding set for this session.
     expect(snapshot.partial).toBe(true);
     expect(snapshot.bindings).toHaveLength(0);
+  });
+
+  it('bounds the wake cwd cache under a permanent partial (B-F3)', async () => {
+    const many = Array.from({ length: 1030 }, (_, i) => ({
+      sessionId: `s-${i}`,
+      workspaceCwd: '/ws/a',
+      prs: [],
+    }));
+    // Fresh Response per call: a shared instance's body can only be read
+    // once.
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, { bindings: many, partial: true }),
+      )
+      .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+      .mockImplementation(async () =>
+        jsonResponse(200, { bindings: many, partial: true }),
+      );
+    const wake = vi.fn().mockResolvedValue(undefined);
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest), wake);
+    await accessor.listPrBindings();
+
+    // s-0 is the oldest entry: the 1024 FIFO cap evicted it, and the
+    // refresh evicts it again (1030 > 1024). The 404 must therefore trigger
+    // a bindings refresh (a cached entry would skip it) and then defer as
+    // backpressure instead of waking with a stale cwd.
+    await expect(accessor.deliverPrompt('s-0', 'x')).rejects.toBeInstanceOf(
+      BoundSessionUnavailableError,
+    );
+    expect(wake).not.toHaveBeenCalled();
+    expect(requestRest.mock.calls[2]![0]).toBe('/sessions/pr-bindings');
   });
 });

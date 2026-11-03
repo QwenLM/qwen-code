@@ -412,6 +412,13 @@ function rememberPromptIdempotencyKey(
   }
 }
 
+function forgetPromptIdempotencyKey(sessionId: string, key: string): void {
+  const keys = promptIdempotencyBySession.get(sessionId);
+  if (!keys) return;
+  keys.delete(key);
+  if (keys.size === 0) promptIdempotencyBySession.delete(sessionId);
+}
+
 // SVG is allowed as an ordinary file resource but never as an inline image.
 // Compare the normalized media type so spelling variants cannot bypass the
 // image-block check.
@@ -8832,6 +8839,18 @@ export function registerSessionRoutes(
               }
             },
             (err) => {
+              // Defense in depth: the admission contract throws session
+              // not-found/closing synchronously, but a bridge implementation
+              // that still rejects deferred must not leave a phantom key —
+              // the prompt was never enqueued, and a retry deduped into this
+              // non-admission would silently lose the event. Turn failures
+              // (the prompt WAS admitted) keep their key.
+              if (
+                idempotencyKey !== undefined &&
+                err instanceof SessionNotFoundError
+              ) {
+                forgetPromptIdempotencyKey(sessionId, idempotencyKey);
+              }
               if (daemonLog) {
                 daemonLog.warn(
                   `prompt turn failed: ${describePromptTurnFailure(err)}`,

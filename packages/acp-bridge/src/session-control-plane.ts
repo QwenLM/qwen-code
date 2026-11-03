@@ -11350,14 +11350,18 @@ export function createSessionControlPlane(
       const capturedContext = telemetry.captureContext();
       const queuedAt = Date.now();
       const entry = byId.get(sessionId);
-      if (!entry) return Promise.reject(new SessionNotFoundError(sessionId));
+      // Admission-phase failures throw SYNCHRONOUSLY (same contract as the
+      // worktree-reset barrier below and the continue path's closing check):
+      // a rejected promise would let the HTTP route return a phantom 202 for
+      // a prompt that was never enqueued, and a channel relay would mark the
+      // event delivered and lose it instead of waking the session and
+      // retrying.
+      if (!entry) throw new SessionNotFoundError(sessionId);
       if (isClosingOrAuthorizingClose(entry)) {
-        return Promise.reject(
-          new SessionNotFoundError(
-            sessionId,
-            'The session is closing; retry after close completes',
-            'session_closing',
-          ),
+        throw new SessionNotFoundError(
+          sessionId,
+          'The session is closing; retry after close completes',
+          'session_closing',
         );
       }
       // Worktree-reset barrier: the transfer owns this session's worktree

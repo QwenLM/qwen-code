@@ -6126,12 +6126,90 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
         const firstKey = boundSessions.deliverPrompt.mock.calls[0]![2];
         const secondKey = boundSessions.deliverPrompt.mock.calls[1]![2];
-        expect(firstKey).toBe(tasks[0]!['id']);
+        // The key is the EVENT identity (chat + source message), not the
+        // task id: it must survive task re-creation after a crash.
+        expect(firstKey).toBe('github:owner/repo:1001');
         expect(secondKey).toBe(firstKey);
         expect(existsSync(inboundTaskPath())).toBe(false);
       } finally {
         proto.transitionInboundTask = original;
       }
+    });
+
+    it('keeps the idempotency key stable across task re-creation after the cursor-save crash window (A-F2)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      // First attempt defers (queue full) so the task survives poll 1 and
+      // its id is observable.
+      boundSessions.deliverPrompt.mockRejectedValueOnce(
+        new BoundSessionQueueFullError('bound-session'),
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      const firstTaskId = readInboundTasks()[0]!['id'] as string;
+      expect(firstTaskId).toBeDefined();
+
+      // Simulate the crash window: the task was accepted and removed, but
+      // the process died before the end-of-poll cursor save. On restart the
+      // persisted cursor has neither the advanced lastProcessedAt nor the
+      // dispatchedComments key, so the same comment is re-listed and a NEW
+      // task is created.
+      writeInboundTasks([]);
+      const ch = channel as unknown as {
+        cursor: { dispatchedComments?: string[]; lastProcessedAt: string };
+      };
+      ch.cursor.dispatchedComments = [];
+      ch.cursor.lastProcessedAt = '2026-07-01T00:00:00.000Z';
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+      const firstKey = boundSessions.deliverPrompt.mock.calls[0]![2];
+      const secondKey = boundSessions.deliverPrompt.mock.calls[1]![2];
+      const secondTaskId = existsSync(inboundTaskPath())
+        ? (readInboundTasks()[0]?.['id'] as string)
+        : 'removed-after-success';
+      // A new task (different id) must carry the SAME event key so the
+      // daemon dedupes the re-injection into the original admission.
+      expect(secondKey).toBe(firstKey);
+      expect(firstKey).toBe('github:owner/repo:1001');
+      expect(secondTaskId).not.toBe(firstTaskId);
+    });
+
+    it('does not record aggregate dedupe keys when the task claim fails (A-F1)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      // An unwritable/corrupt task store: the claim throws, the per-
+      // notification catch swallows it, and the poll completes "normally".
+      writeInboundTasks([]);
+      writeFileSync(inboundTaskPath(), '{corrupt', 'utf-8');
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([
+          makeComment({ body: 'LOSS-CHECK-1 ambient remark' }),
+        ]);
+      await pollOnce();
+      const ch = channel as unknown as {
+        cursor: { dispatchedComments?: string[] };
+      };
+      // No key may be recorded: the end-of-poll cursor save would persist
+      // it while no task exists, and the comment would be filtered forever.
+      expect(ch.cursor.dispatchedComments ?? []).toHaveLength(0);
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+
+      // Heal the store: the SAME comment must still be deliverable.
+      writeInboundTasks([]);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([
+          makeComment({ body: 'LOSS-CHECK-1 ambient remark' }),
+        ]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+        'LOSS-CHECK-1',
+      );
     });
 
     it('delivers privately for a www.github.com binding URL (F9)', async () => {
@@ -9616,6 +9694,125 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         'CI failed on head sha-1',
       );
       expect(existsSync(inboundTaskPath())).toBe(false);
+    });
+
+    it('bounds CI re-fetches by the interval even when the endpoint persistently fails (A-F3)', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-07-02T09:00:00.000Z'));
+      await initChannel(watchConfig, { boundSessions });
+      // Classic PAT without Checks permission: every fetch 403s.
+      mockOctokit.rest.checks.listForRef.mockRejectedValue(
+        Object.assign(new Error('Resource not accessible by integration'), {
+          status: 403,
+        }),
+      );
+      mockPull({});
+      mockNotificationsOnce([]);
+      await pollOnce();
+      expect(mockOctokit.rest.checks.listForRef).toHaveBeenCalledTimes(1);
+
+      // One poll later: the failed attempt must still advance the interval
+      // clock — otherwise the undefined-ci condition re-fires every poll
+      // and burns one doomed request per PR per poll.
+      vi.setSystemTime(new Date('2026-07-02T09:01:00.000Z'));
+      mockPull({});
+      mockNotificationsOnce([]);
+      await pollOnce();
+      expect(mockOctokit.rest.checks.listForRef).toHaveBeenCalledTimes(1);
+
+      // Past the pending interval: retried (and still isolated from the
+      // other detections).
+      vi.setSystemTime(new Date('2026-07-02T09:06:00.000Z'));
+      mockPull({});
+      mockNotificationsOnce([]);
+      await pollOnce();
+      expect(mockOctokit.rest.checks.listForRef).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not prune a watch entry whose earlier transition still has a surviving task (A-F4)', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      // A deferred watch task whose pending event already moved to fired:
+      // the entry has no pending, and the PR is unbound in a complete
+      // snapshot — the old prune would delete it, resetting the episode
+      // counter while the old task still owns watch:merge_conflict:1.
+      seedWatchState({
+        'owner/repo#42': {
+          headSha: 'sha-1',
+          ci: 'success',
+          mergeableState: 'clean',
+          prState: 'open',
+          prUpdatedAt: '2026-07-02T09:00:00.000Z',
+          seq: 1,
+          fired: ['watch:merge_conflict:1'],
+          pending: [],
+        },
+      });
+      writeInboundTasks([
+        makeInboundTaskRecord({
+          id: 'old-watch-task',
+          state: 'failed',
+          attempts: 0,
+          deferCount: 1,
+          backpressure: true,
+          issueNumber: 42,
+          source: {
+            chatId: 'owner/repo',
+            threadId: 'pr:42',
+            messageId: 'watch:merge_conflict:1',
+          },
+          envelope: {
+            ...makeInboundTaskRecord().envelope,
+            threadId: 'pr:42',
+            messageId: 'watch:merge_conflict:1',
+            text: 'OLD conflict episode',
+          },
+          dedupe: {},
+          delivery: { kind: 'bound-session', sessionId: 'bound-session' },
+        }),
+      ]);
+      // Drive the watch pass directly (as the F22 prune test does) so
+      // generic recovery cannot retire the old task mid-scenario. Refresh
+      // the binding snapshot explicitly first (pollOnce normally does it).
+      const watch = channel as unknown as {
+        runPrStateWatch: () => Promise<void>;
+        refreshBoundSessions: () => Promise<void>;
+      };
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      await watch.refreshBoundSessions();
+      mockPull({});
+      await watch.runPrStateWatch();
+      // The entry must survive while the old task is recoverable.
+      expect(readWatchState().entries['owner/repo#42']).toBeDefined();
+
+      // Rebind and fire a NEW conflict episode: it must get seq 2, not
+      // collide with the surviving watch:merge_conflict:1 task.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [makeBinding()],
+        partial: false,
+      });
+      await watch.refreshBoundSessions();
+      boundSessions.deliverPrompt.mockRejectedValue(
+        new BoundSessionQueueFullError('bound-session'),
+      );
+      mockPull({ mergeable: false, mergeable_state: 'dirty' });
+      await watch.runPrStateWatch();
+      const entry = readWatchState().entries['owner/repo#42']!;
+      expect(entry['seq']).toBe(2);
+      expect(entry['fired']).toContain('watch:merge_conflict:2');
+      // The NEW episode owns a distinct task; the old one is not silently
+      // reused for the new event.
+      const tasks = readInboundTasks();
+      expect(tasks.some((t) => t['id'] === 'old-watch-task')).toBe(true);
+      expect(
+        tasks.some(
+          (t) =>
+            (t['source'] as Record<string, unknown>)['messageId'] ===
+            'watch:merge_conflict:2',
+        ),
+      ).toBe(true);
     });
   });
 });

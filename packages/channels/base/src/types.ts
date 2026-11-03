@@ -236,9 +236,10 @@ export interface ChannelBoundSessions {
    * the failure budget.
    *
    * `idempotencyKey` identifies the delivery attempt's EVENT (the adapter
-   * passes its durable task id): the daemon deduplicates repeated
-   * admissions of the same key, so a retry after a lost acceptance mark or
-   * a lost response re-injects nothing. The key's dedupe lifetime is the
+   * derives it from the source chat and message id, so it survives task
+   * re-creation after a crash): the daemon deduplicates repeated admissions
+   * of the same key, and a retry after a lost acceptance mark or a lost
+   * response re-injects nothing. The key's dedupe lifetime is the
    * daemon process — a daemon restart loses the queue with it, making
    * re-injection the correct recovery there.
    */

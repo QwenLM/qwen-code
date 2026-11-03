@@ -363,7 +363,11 @@ interface PrWatchEntry {
   prUpdatedAt?: string;
   /** When the current head was first observed; bounds the 'none' grace. */
   headObservedAt?: number;
-  /** When the CI aggregate was last fetched; drives the periodic re-check. */
+  /**
+   * When the CI aggregate was last fetch-ATTEMPTED (success or failure);
+   * drives the periodic re-check and bounds retries of a persistently
+   * failing Checks endpoint.
+   */
   lastCiFetchAt?: number;
   /**
    * Monotonic episode counter. merge_conflict / state_change / head_change
@@ -1968,20 +1972,23 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         senderGate.isAllowed(sender)
       );
     });
-    for (const comment of newComments) {
-      this.recordDispatchedComment(comment.node_id || String(comment.id));
-    }
+    // The dedupe keys are recorded by applyTaskDedupe AFTER the task write
+    // succeeds (the dispatch below carries the full newComments set). Never
+    // record them before the claim: if the task store is unwritable, a
+    // pre-recorded key would be persisted by the end-of-poll cursor save
+    // while no task exists, and the comment would be filtered out forever —
+    // silently consumed with no task, no dead-letter, no retry.
     const comments = newComments
       .map((comment) => ({ comment, body: (comment.body || '').trim() }))
       .slice(-MAX_AGGREGATE_COMMENTS);
     if (comments.length === 0) return;
 
     const first = comments[0]!.comment;
-    // Every new comment is recorded in dispatchedComments before dispatch,
-    // so comments dropped by the batch cap would vanish from every surface;
-    // the omission must be visible in the prompt itself. It rides at the
-    // FRONT: a tail notice would be the first thing the bound prompt's
-    // code-point cap truncates away.
+    // Comments dropped by the batch cap are recorded as dispatched once the
+    // task is claimed, so they would vanish from every surface; the omission
+    // must be visible in the prompt itself. It rides at the FRONT: a tail
+    // notice would be the first thing the bound prompt's code-point cap
+    // truncates away.
     const omitted = newComments.length - comments.length;
     const summary =
       (omitted > 0
@@ -3217,11 +3224,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       if (!admitted) return;
     }
     const prompt = this.buildBoundSessionPrompt(envelope);
+    // The idempotency identity is the EVENT (chat + source message), not the
+    // task: a crash after task removal but before the cursor save re-creates
+    // the task with a new id on recovery, and a task-scoped key would let the
+    // daemon admit the same event twice. The event key survives task
+    // re-creation, so the retry dedupes into the original admission.
+    const idempotencyKey = `github:${envelope.chatId}:${envelope.messageId ?? ''}`;
     try {
-      // The durable task id is the admission-side idempotency identity: if
-      // the acceptance mark below fails to persist (or the 202 is lost),
-      // recovery re-injects with the SAME key and the daemon deduplicates.
-      await boundSessions.deliverPrompt(delivery.sessionId, prompt, task.id);
+      await boundSessions.deliverPrompt(
+        delivery.sessionId,
+        prompt,
+        idempotencyKey,
+      );
     } catch (err) {
       if (!(err instanceof BoundSessionGoneError)) throw err;
       // The daemon's Gone verdict is authoritative deletion evidence. Evict
@@ -3237,7 +3251,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.transitionInboundTask(task.id, 'running', { delivery: next });
         task.delivery = next;
         try {
-          await boundSessions.deliverPrompt(next.sessionId, prompt, task.id);
+          // Same event key: a different session's ring has never seen it.
+          await boundSessions.deliverPrompt(
+            next.sessionId,
+            prompt,
+            idempotencyKey,
+          );
           return;
         } catch (retryErr) {
           if (!(retryErr instanceof BoundSessionGoneError)) throw retryErr;
@@ -3440,12 +3459,38 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // the edge-triggered memory of PRs it failed to list. Prune against the
     // full candidate set, not the capped watch set, so PRs rotating out of
     // the cap keep their baseline. Never delete an entry that still holds
-    // undelivered pending events (a failed claim keeps its queue).
+    // undelivered pending events (a failed claim keeps its queue) OR whose
+    // earlier transition still has a surviving inbound task: pruning resets
+    // the episode counter, and a rebind would re-issue watch:<type>:1,
+    // collide with the old task's source key, and silently consume the new
+    // transition into the old envelope.
     if (!this.lastBindingsPartial) {
-      for (const key of Object.keys(this.prWatchState.entries)) {
-        if (candidates.has(key)) continue;
-        if (this.prWatchState.entries[key]?.pending?.length) continue;
-        delete this.prWatchState.entries[key];
+      let survivingWatchPrs: Set<string> | undefined;
+      try {
+        survivingWatchPrs = new Set(
+          this.readInboundTasks()
+            .filter(
+              (task) =>
+                this.isRecoverableInboundTask(task) &&
+                task.envelope?.messageId?.startsWith('watch:') === true,
+            )
+            .map((task) =>
+              this.prBindingKey(task.source.chatId, task.issueNumber),
+            ),
+        );
+      } catch {
+        // Task state unknown: pruning watch memory now could collide with
+        // tasks we cannot see. Skip pruning entirely this poll (fail-closed,
+        // same convention as the persistence-blocked cursor).
+        survivingWatchPrs = undefined;
+      }
+      if (survivingWatchPrs !== undefined) {
+        for (const key of Object.keys(this.prWatchState.entries)) {
+          if (candidates.has(key)) continue;
+          if (this.prWatchState.entries[key]?.pending?.length) continue;
+          if (survivingWatchPrs.has(key)) continue;
+          delete this.prWatchState.entries[key];
+        }
       }
     }
     const watched = [...active.entries()]
@@ -3541,12 +3586,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const prUpdatedAt =
       typeof pr.updated_at === 'string' ? pr.updated_at : undefined;
     let ciResult: CiObservation | undefined;
+    let ciFetchAttempted = false;
     if (
       headSha &&
       this.prWatchEvents.has('ci_failure') &&
       (headChanged ||
-        entry.ci === undefined ||
-        (entry.ci === 'pending' &&
+        ((entry.ci === undefined || entry.ci === 'pending') &&
           (entry.lastCiFetchAt === undefined ||
             Date.now() - entry.lastCiFetchAt >=
               CI_PENDING_RECHECK_INTERVAL_MS)) ||
@@ -3557,6 +3602,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         (entry.lastCiFetchAt !== undefined &&
           Date.now() - entry.lastCiFetchAt >= CI_RECHECK_INTERVAL_MS))
     ) {
+      ciFetchAttempted = true;
       try {
         ciResult = await this.fetchCiAggregate(owner, repo, headSha);
       } catch (err) {
@@ -3566,6 +3612,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // suppress merge_conflict / state_change, whose data already arrived
         // in pulls.get. Leave ciResult undefined so entry.ci is preserved
         // (writing 'none' would re-fire ci_failure when the endpoint heals).
+        // The attempt still advances lastCiFetchAt below: without it, a
+        // persistent failure would leave the interval conditions true every
+        // poll and degrade to one doomed request per PR per poll.
         process.stderr.write(
           `[Channel:${this.name}] CI fetch failed for ${key}, continuing without CI state this poll: ${sanitizeLogText(
             err instanceof Error ? err.message : String(err),
@@ -3646,7 +3695,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         : entry.headObservedAt !== undefined
           ? { headObservedAt: entry.headObservedAt }
           : {}),
-      ...(ciResult !== undefined
+      ...(ciFetchAttempted
         ? { lastCiFetchAt: Date.now() }
         : entry.lastCiFetchAt !== undefined
           ? { lastCiFetchAt: entry.lastCiFetchAt }

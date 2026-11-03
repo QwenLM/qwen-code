@@ -2163,10 +2163,11 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * session FIFO-serialize through a per-session queue.
    *
    * Admission contract: implementations must not be `async`. Admission
-   * failures such as `InvalidClientIdError`, `PromptQueueFullError`, and
-   * pre-aborted signals throw synchronously so HTTP routes can reject
-   * before returning 202. Deferred failures such as `SessionNotFoundError`
-   * may be returned as rejected promises.
+   * failures — `InvalidClientIdError`, `PromptQueueFullError`, pre-aborted
+   * signals, and `SessionNotFoundError` (unknown or closing session) — throw
+   * synchronously so HTTP routes can reject before returning 202. A rejected
+   * promise represents a turn that WAS admitted and then failed; callers
+   * must not treat it as an admission failure.
    *
    * Reserved contract (not yet implemented): promptId admission dedup — a
    * `PromptIdConflictError` admission failure class, and a rule that a

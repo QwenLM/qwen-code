@@ -97,6 +97,35 @@ const DINGTALK_WITH_ACCESS: DaemonChannelTypeDescriptor = {
   ],
 };
 
+// Same field keys as the real GitHub descriptor; labels/descriptions
+// intentionally differ from the i18n values so a missing FIELD_LABEL_KEYS
+// entry or i18n key surfaces the untranslated descriptor fallback.
+const GITHUB_BOUND: DaemonChannelTypeDescriptor = {
+  type: 'github',
+  displayName: 'GitHub',
+  manageable: true,
+  fields: [
+    { key: 'token', label: 'Token (descriptor)', kind: 'secret' },
+    {
+      key: 'deliverToBoundSessions',
+      label: 'Bound sessions (descriptor)',
+      kind: 'boolean',
+      default: 'false',
+      description: 'Descriptor description for bound sessions',
+    },
+    {
+      key: 'prWatchEvents',
+      label: 'Watch events (descriptor)',
+      kind: 'string-list',
+      description: 'Descriptor description for watch events',
+      options: [
+        { value: 'ci_failure', label: 'ci_failure' },
+        { value: 'merge_conflict', label: 'merge_conflict' },
+      ],
+    },
+  ],
+};
+
 const OPTIONAL_SECRET: DaemonChannelTypeDescriptor = {
   ...DINGTALK,
   fields: DINGTALK.fields.map((field) =>
@@ -769,6 +798,29 @@ describe('ChannelEditorDialog', () => {
     const description = descriptionOf(document.querySelector('textarea'));
     expect(description).toContain('replace their own default guidance');
     expect(description).not.toContain('DESCRIPTOR FALLBACK COPY');
+  });
+
+  it('renders the bound-session fields with translated EN labels', async () => {
+    await renderDialog({ descriptor: GITHUB_BOUND });
+    const labels = Array.from(document.querySelectorAll('label')).map(
+      (l) => l.textContent ?? '',
+    );
+    expect(labels.some((t) => t.includes('Deliver To PR-Bound Sessions'))).toBe(
+      true,
+    );
+    expect(labels.some((t) => t.includes('PR Watch Events'))).toBe(true);
+    // No descriptor fallback may leak through for these keys.
+    expect(labels.some((t) => t.includes('(descriptor)'))).toBe(false);
+  });
+
+  it('renders the bound-session fields with translated zh-CN labels', async () => {
+    await renderDialog({ descriptor: GITHUB_BOUND, language: 'zh-CN' });
+    const labels = Array.from(document.querySelectorAll('label')).map(
+      (l) => l.textContent ?? '',
+    );
+    expect(labels.some((t) => t.includes('投递到 PR 绑定会话'))).toBe(true);
+    expect(labels.some((t) => t.includes('PR 状态监视事件'))).toBe(true);
+    expect(labels.some((t) => t.includes('(descriptor)'))).toBe(false);
   });
 
   it('localizes the instructions copy for zh-CN operators', async () => {

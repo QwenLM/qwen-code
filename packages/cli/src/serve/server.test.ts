@@ -20852,6 +20852,76 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls).toHaveLength(0);
     });
 
+    it('forgets the idempotency key when admission rejects deferred (B-F1)', async () => {
+      // A bridge that rejects AFTER returning (the legacy closing-session
+      // shape) never enqueued the prompt. The remembered key must be
+      // removed, or a retry would dedupe into a phantom admission and the
+      // event would be silently lost instead of waking the session.
+      const bridge = fakeBridge({
+        promptImpl: () =>
+          Promise.reject(
+            new SessionNotFoundError(
+              'session-A',
+              'The session is closing; retry after close completes',
+              'session_closing',
+            ),
+          ),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const first = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'phantom-key',
+        });
+      expect(first.status).toBe(202);
+      // Let the deferred rejection handler run.
+      await new Promise((r) => setTimeout(r, 20));
+      const retry = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'phantom-key',
+        });
+      // The retry must reach admission again, not dedupe into the phantom.
+      expect(retry.body.deduplicated).toBeUndefined();
+      expect(bridge.promptCalls).toHaveLength(2);
+    });
+
+    it('rejects a closing session synchronously without remembering the key (B-F1)', async () => {
+      const bridge = fakeBridge({
+        promptImpl: () => {
+          throw new SessionNotFoundError(
+            'session-A',
+            'The session is closing; retry after close completes',
+            'session_closing',
+          );
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const first = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'closing-key',
+        });
+      // Synchronous admission failure: 404 BEFORE any 202, so the relay
+      // wakes the session and retries instead of marking a phantom delivery.
+      expect(first.status).toBe(404);
+      const retry = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'closing-key',
+        });
+      expect(retry.status).toBe(404);
+      expect(retry.body.deduplicated).toBeUndefined();
+    });
+
     it('passes client identity and promptId context into bridge.sendPrompt', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(baseOpts, undefined, { bridge });
@@ -21155,11 +21225,13 @@ describe('createServeApp', () => {
       }
     });
 
-    it('does not classify a channel prompt for an untrusted non-primary workspace', async () => {
-      // G3 negative: the relay check is gated on runtime.primary ||
-      // runtime.trusted. An untrusted non-primary owner is rejected at the
-      // routing trust gate before classification, so a registered token
-      // never yields channelPrompt there.
+    it('rejects prompts to an untrusted non-primary workspace at the routing gate', async () => {
+      // Regression guard for the PRE-EXISTING routing trust gate (not the
+      // PR's classification gate): an untrusted non-primary owner is
+      // rejected before classification runs, so the classification's own
+      // trust conjunct is unreachable defense at this layer and cannot be
+      // pinned by a route-level test. The relay-marker negative is pinned
+      // by 'admits a foreign worker token only for an explicit bound relay'.
       const primaryBridge = fakeBridge();
       const secondaryBridge = fakeBridge({
         summaryImpl: (sessionId) => ({
