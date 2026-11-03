@@ -173,8 +173,6 @@ class WorkspaceCsiSqlWorkerMySqlIT {
         var binding = bindings.claimOperation(initial.getBindingId(), "owned-test", Duration.ofMinutes(5));
         var reserved = storage.reserve(registration, bindings, binding, UUID.randomUUID().toString());
         bindings.releaseOperation(binding.getBindingId(), "owned-test", binding.getOperationGeneration());
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
-        journal.setCsiBindings(bindings);
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision("construction-fixture/1");
         // Wired as in production, so the receipt commits below reach the capture guard.
@@ -182,7 +180,9 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                 com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON,
                         java.time.Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties,
                         new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
-        journal.setToolResults(toolResults);
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc,
+                new ManagedExtensionRecordStore(jdbc), null, null, null, null, toolResults, null,
+                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), bindings);
         var endpoint = new AtomicReference<URI>();
         var actualClient = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER).build();
         var mappedClient = mock(HttpClient.class);
@@ -434,9 +434,9 @@ class WorkspaceCsiSqlWorkerMySqlIT {
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE native_authorization_json IS NOT NULL"
                         + " AND execution_state = 'SETTLED'", Integer.class)).isEqualTo(4);
                 // The receipts of those executions were committed through the private CSI
-                // lane, which records none for projection. The journal still holds the
+                // lane, which records none for projection. The journal commit component still holds the
                 // result store, so the zero below is the capture guard's, not a missing store's.
-                assertThat(journal).extracting("toolResults").isSameAs(toolResults);
+                assertThat(journal).extracting("commits.toolResults").isSameAs(toolResults);
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation"
                         + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION'", Integer.class)).isZero();
                 assertThat(jdbc.queryForObject("SELECT writer_generation FROM ma_session_head", Long.class))

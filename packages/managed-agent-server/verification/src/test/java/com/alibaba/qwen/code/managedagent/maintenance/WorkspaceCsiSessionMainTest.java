@@ -12,7 +12,6 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationRetentionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
@@ -453,7 +452,7 @@ class WorkspaceCsiSessionMainTest {
         var original = create(request("agent-instructions"));
         var before = allTables();
         assertPrivateRefusal(() -> new TransactionTemplate(manager).executeWithoutResult(status ->
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).publishAgentInstructions("tenant", "workspace", original.sessionId(), "instructions")));
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).publishAgentInstructions("tenant", "workspace", original.sessionId(), "instructions")));
         assertThat(allTables()).isEqualTo(before);
     }
 
@@ -478,7 +477,7 @@ class WorkspaceCsiSessionMainTest {
         var original = create(request("direct-retained-pin"));
         jdbc.update("UPDATE ma_session SET tool_profile = 'workspace-files/1'");
         var before = allTables();
-        assertThatThrownBy(() -> com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).acquireWriter("tenant", original.sessionId(),
+        assertThatThrownBy(() -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).acquireWriter("tenant", original.sessionId(),
                 "a".repeat(32), new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 60000L)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("CSI mutation requires its original transaction connection");

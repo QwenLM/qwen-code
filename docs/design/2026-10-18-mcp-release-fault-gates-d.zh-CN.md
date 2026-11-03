@@ -132,3 +132,21 @@ v2 关闭被准入之后，store 会 fence 普通写者续租，而 Harness 要�
 变异见证：在打包 CLI 的副本中让 `drainConfigurations` 只遍历 `configurations.slice(0, 1)`。两个 server 的用例在 `settle must complete` 处变红，因为第二个配置保持 active；一个 server 的用例仍绿，因此是这个用例钉住了第二个配置。还原后的 bundle 复绿。
 
 预算：两个 server 的用例在 JDK 21、MySQL 8.4.6、Linux x86_64 上单独实测 16.16–16.24 秒（两次），十用例整类 81.6 秒。按 2× 记 32 秒加入共享健康总和（11504 → 11536 秒），`hosted-harness-mysql` fork 移到 11536 秒，Verify 步骤移到 203 分钟（含 wrap 共 12136 秒），job 上限移到 326（293 + 33）。`hosted-mcp-gates` profile 与产物根不变。
+
+## 后续格：工具结果未知时 detach 被拒
+
+#15750 的 FG12d 行还要求：工具结果未知时 detach 必须被拒。本类已有的 unknown 结果用例（`stdioKillDuringRequestSettlesOutcomeUnknownOnMySql` 与 `workerKillDuringOperationSettlesOutcomeUnknownOnMySql`）只停在 unknown；本后续格在记录处于 `recovery_blocked` / `outcome_unknown` 时调用 Harness 的 detach 路由。
+
+| 用例                            | 注入                                                                                                                            | 期望                                                                                                                                                                                 |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `detach-refused-unknown-result` | 通过私有路由发起 `ext://hold` 原始操作；杀掉 stdio fixture；等 `outcome_unknown` / `recovery_blocked`；POST Harness detach 路由 | detach 返回 409 `hosted_turn_active` 或 503 `managed_session_close_failed`（close 捕获 MCP recovery 错误）；没有 `mcp-release` 控制；操作保持 unknown；Session 保持 attached、可重开 |
+
+决策：
+
+1. **以 Harness detach 路由为门禁。** 控制面 lifecycle close 已由 R1-1 与两 server 用例覆盖；本格直接调 `POST /session/{id}/detach`，即生产 detach 到达 `HostedMcpSession.close()` 的路径。
+2. **unknown 是永久的，不是定时窗口。** 带 `ext://hold` 读在飞时杀掉 stdio fixture，操作只能由原 Runtime 代的确定性应答结算；detach 没有可赛跑的窗口。
+3. **拒绝码取自已记录的关闭应答。** 测试接受 409 `hosted_turn_active`（MCP busy/recovering）与 503 `managed_session_close_failed` / `hosted_mcp_recovery_required`；拒绝 200/204，并断言没有 release 控制、记录仍是 unknown。
+
+变异见证：在打包 CLI 副本的 close 路径中把 `session.mcp?.close()` 包进 `try { … } catch {}`；detach 返回 204，用例在状态断言处变红。还原后的 bundle 复绿。
+
+预算：该用例在 JDK 21、MySQL 8.4.6、Linux x86_64 上两次实测取最慢 27.4 秒（27.4/17.4），按 2× 记 55 秒。`hosted-harness-mysql` fork 移到 11591 秒，Verify 移到 204 分钟，job 上限移到 327（294 + 33）。

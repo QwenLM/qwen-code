@@ -229,7 +229,7 @@ class WorkspaceRecoveryStoreTest {
             request.put("mountRevision", revision);
         }
         long committedRevision = revision;
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String token = "a".repeat(64);
         String records = "{\"subtype\":\"session_execution_engine\"}\n{\"subtype\":\"managed_session_header_v1\"}\n";
         byte[] bytes = records.getBytes(StandardCharsets.UTF_8);
@@ -446,11 +446,11 @@ class WorkspaceRecoveryStoreTest {
         head(pinned);
         jdbc.update("UPDATE ma_session_head SET workspace_id = X'776f726b73706163652d62'"
                 + " WHERE session_id = ?", pinned);
-        var instructions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).publishAgentInstructions(
+        var instructions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).publishAgentInstructions(
                 "tenant", "workspace-b", pinned, "Keep the agent instructions. 保留指令。");
         var skillCatalog = List.<Map<String, Object>>of(Map.of(
                 "name", "review", "description", "Review", "body", "Check the diff. 检查差异。"));
-        var skills = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).publishAgentSkills(
+        var skills = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).publishAgentSkills(
                 "tenant", "workspace-b", pinned, skillCatalog);
         JsonNode sources = call(capture(), "sessions").path("sessions");
         assertThat(sources).hasSize(3);
