@@ -156,11 +156,21 @@ export function normalize(model: string): string {
   // the model, and a revision after it:
   // `us.anthropic.claude-sonnet-4-5-20250929-v1:0`. Left alone, the colon
   // split below keeps only the revision (`0`) and every Bedrock id falls
-  // through to the default limit.
+  // through to the default limit. The revision is dropped for any id, so a
+  // provider missing from the list below still keeps its model name.
+  s = s.replace(/-(?:v\d+|\d+):\d+$/, '');
   const bedrock = s.match(
-    /^(?:[a-z]+(?:-[a-z]+)?\.)?(?:anthropic|meta|amazon|mistral|cohere|ai21|deepseek|qwen|openai)\.(.+)$/,
+    /^(?:[a-z]+(?:-[a-z]+)?\.)?(anthropic|meta|amazon|mistral|cohere|ai21|deepseek|qwen|openai|moonshotai|google|minimax|nvidia|writer)\.(.+)$/,
   );
-  if (bedrock) s = bedrock[1]!.replace(/-(?:v\d+(?::\d+)?|\d+:\d+)$/, '');
+  if (bedrock) {
+    const model = bedrock[2]!.replace(/-v\d+$/, '');
+    // DeepSeek's Bedrock ids drop the family name (`deepseek.r1-v1:0`,
+    // `deepseek.v3.2`), which the limit tables key on.
+    s =
+      bedrock[1] === 'deepseek' && !model.startsWith('deepseek')
+        ? `deepseek-${model}`
+        : model;
+  }
 
   // A colon can sit on either side of the model name. `authType:model` and
   // `family:model` put it on the left, and the split below keeps the right

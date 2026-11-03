@@ -851,4 +851,21 @@ describe('Bedrock model ids', () => {
     // would not pass.
     expect(tokenLimit('global.anthropic.claude-opus-4-6-v1')).toBe(1_000_000);
   });
+
+  it('handles every region, revision and provider shape', () => {
+    // A hyphenated region and a revision without the `v`.
+    expect(normalize('us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0')).toBe(
+      'claude-sonnet-4-5',
+    );
+    expect(normalize('openai.gpt-oss-120b-1:0')).toBe('gpt-oss-120b');
+    expect(normalize('moonshotai.kimi-k2-thinking')).toBe('kimi-k2-thinking');
+    // A provider missing from the list keeps its model name, not `0`.
+    expect(normalize('twelvelabs.pegasus-1-2-v1:0')).not.toBe('0');
+  });
+
+  it("keeps the DeepSeek family name, which DeepSeek's Bedrock ids drop", () => {
+    expect(normalize('deepseek.r1-v1:0')).toBe('deepseek-r1');
+    expect(tokenLimit('deepseek.r1-v1:0')).toBe(tokenLimit('deepseek-r1'));
+    expect(tokenLimit('deepseek.v3.2')).toBe(131_072);
+  });
 });
