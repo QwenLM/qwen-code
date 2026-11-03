@@ -474,9 +474,9 @@ jobs:
           if [ '${{ matrix.epel }}' = 'true' ]; then
             dnf install -y dnf-plugins-core
             dnf config-manager --set-enabled crb
-            epel_rpm="$RUNNER_TEMP/epel-release-latest-10.noarch.rpm"
-            curl -fsSL --connect-timeout 15 --max-time 120 -o "$epel_rpm" 'https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm'
-            echo '8090214eb8b95617118478304aa5a8f796d4c19c625bc09e0c740cce0e682a34  '"$epel_rpm" | sha256sum -c -
+            epel_rpm="$RUNNER_TEMP/epel-release-10-9.el10_3.noarch.rpm"
+            curl -fsSL --connect-timeout 15 --max-time 120 -o "$epel_rpm" 'https://dl.fedoraproject.org/pub/epel/10/Everything/x86_64/Packages/e/epel-release-10-9.el10_3.noarch.rpm'
+            echo 'f567aa5c3cde55f579ba5c41c79df97da692a391efddd14b123a4eec0824fbc0  '"$epel_rpm" | sha256sum -c -
             dnf install -y "$epel_rpm"
           fi
           dnf install -y --setopt=install_weak_deps=False \

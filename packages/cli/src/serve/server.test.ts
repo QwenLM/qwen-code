@@ -4693,6 +4693,7 @@ describe('createServeApp', () => {
     it.each([
       '/plugins',
       '/channels',
+      '/channel-events',
       '/live',
       '/scheduled-tasks',
       '/goals',

@@ -17,6 +17,34 @@
     <dependencies>
         <dependency>
             <groupId>com.alibaba</groupId>
+            <artifactId>qwen-managed-agent-runtime-http</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>qwen-managed-agent-runtime-host</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>qwen-managed-agent-runtime-local</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>qwen-managed-agent-runtime-external</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>qwen-managed-agent-runtime-kubernetes</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>qwen-managed-agent-runtime-ssh</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>qwen-managed-agent-runtime-static</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba</groupId>
             <artifactId>qwen-managed-agent-contracts</artifactId>
         </dependency>
         <dependency>
