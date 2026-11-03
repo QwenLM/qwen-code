@@ -43,12 +43,14 @@ import {
 } from './config.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { Storage } from './storage.js';
+import { ideContextStore } from '../ide/ideContext.js';
 import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { setMemoryFilename as mockSetMemoryFilename } from '../utils/memory-constants.js';
+import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
 import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
@@ -494,6 +496,9 @@ function mockAutoMemoryIndexRead(content: string) {
 vi.mock('../core/baseLlmClient.js');
 vi.mock('../core/toolHookTriggers.js', () => ({
   fireNotificationHook: vi.fn().mockResolvedValue({}),
+}));
+vi.mock('../models/model-catalog-refresh.js', () => ({
+  refreshModelCatalog: vi.fn().mockResolvedValue(undefined),
 }));
 
 type MemoryLoad = Awaited<ReturnType<typeof loadServerHierarchicalMemory>>;
@@ -1234,7 +1239,7 @@ describe('Server Config (config.ts)', () => {
       ],
       [
         'replaces project hooks without leaking them into user hooks',
-        {},
+        { interactive: true, folderTrust: true, trustedFolder: true },
         { projectHooks },
         undefined,
         projectHooks,
@@ -1266,9 +1271,13 @@ describe('Server Config (config.ts)', () => {
     });
 
     it.each([false, undefined])(
-      'keeps the project hook gate when folder trust is %s',
+      'keeps the interactive project hook gate when folder trust is %s',
       (trustedFolder) => {
-        const config = makeConfig({ folderTrust: true, trustedFolder });
+        const config = makeConfig({
+          interactive: true,
+          folderTrust: true,
+          trustedFolder,
+        });
 
         config.setHooksFromSettings({ userHooks, projectHooks });
 
@@ -1289,23 +1298,24 @@ describe('Server Config (config.ts)', () => {
 
   describe('per-scope hooks and the legacy merged fallback', () => {
     const mergedHooks = { ...systemHooks, ...userHooks, ...projectHooks };
+    const explicitTrust = { folderTrust: true, trustedFolder: true };
 
     it.each([
       [
         'does not read the merged hooks as project hooks when only user hooks are supplied',
-        { userHooks },
+        { ...explicitTrust, userHooks },
         userHooks,
         undefined,
       ],
       [
         'does not read the merged hooks as user hooks when only project hooks are supplied',
-        { projectHooks },
+        { ...explicitTrust, projectHooks },
         undefined,
         projectHooks,
       ],
       [
         'still serves the merged hooks as user and project hooks when no scope is supplied',
-        {},
+        explicitTrust,
         mergedHooks,
         mergedHooks,
       ],
@@ -1387,7 +1397,11 @@ describe('Server Config (config.ts)', () => {
         // A Config built from merged settings alone still registers the hook
         // under both the user and project sources. The planner is what keeps
         // that from running it twice.
-        const registry = await registryFor({ hooks: lintHook });
+        const registry = await registryFor({
+          folderTrust: true,
+          trustedFolder: true,
+          hooks: lintHook,
+        });
         expect(registry.getAllHooks().map(({ source }) => source)).toEqual([
           'user',
           'project',
@@ -1404,6 +1418,7 @@ describe('Server Config (config.ts)', () => {
 
     it('loads system hooks in an untrusted folder, where project hooks are withheld', () => {
       const config = makeConfig({
+        interactive: true,
         trustedFolder: false,
         systemHooks,
         projectHooks,
@@ -1411,6 +1426,74 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.getSystemHooks()).toBe(systemHooks);
       expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it.each([
+      ['the trust feature is off', {}, false],
+      [
+        'the feature is on but the folder is undecided',
+        { folderTrust: true },
+        false,
+      ],
+      [
+        'the feature is on and the folder is explicitly trusted',
+        { folderTrust: true, trustedFolder: true },
+        true,
+      ],
+    ] as Array<[string, Partial<ConfigParameters>, boolean]>)(
+      'gates interactive settings-file project hooks when %s',
+      (_label, trust, explicit) => {
+        const config = makeConfig({
+          interactive: true,
+          ...trust,
+          projectHooks,
+        });
+
+        expect(config.getProjectHooks()).toEqual(
+          explicit ? projectHooks : undefined,
+        );
+        expect(config.getUserHooks()).toBeUndefined();
+      },
+    );
+
+    it.each([
+      ['the trust feature is off', {}],
+      ['the feature is on but the folder is undecided', { folderTrust: true }],
+      [
+        'the folder is explicitly untrusted',
+        { folderTrust: true, trustedFolder: false },
+      ],
+    ] as Array<[string, Partial<ConfigParameters>]>)(
+      'loads project hooks in non-interactive sessions when %s (implicit trust)',
+      (_label, trust) => {
+        const config = makeConfig({
+          interactive: false,
+          ...trust,
+          projectHooks,
+        });
+
+        expect(config.getProjectHooks()).toEqual(projectHooks);
+      },
+    );
+
+    it('still withholds project hooks in non-interactive safe and bare modes', () => {
+      expect(
+        makeConfig({ safeMode: true, projectHooks }).getProjectHooks(),
+      ).toBeUndefined();
+      expect(
+        makeConfig({ bareMode: true, projectHooks }).getProjectHooks(),
+      ).toBeUndefined();
+    });
+
+    it('loads project hooks with IDE-granted trust even while the feature is off', () => {
+      ideContextStore.clear();
+      ideContextStore.set({ workspaceState: { isTrusted: true } });
+      try {
+        const config = makeConfig({ interactive: true, projectHooks });
+        expect(config.getProjectHooks()).toEqual(projectHooks);
+      } finally {
+        ideContextStore.clear();
+      }
     });
   });
 
@@ -1754,6 +1837,35 @@ describe('Server Config (config.ts)', () => {
       const config = await initConfig({}, LEGACY_SKIP_ALL_INIT);
       expect(config.getGeminiClient()).toBe(config.getLlmClient());
       await config.shutdown();
+    });
+  });
+
+  describe('lsp client lifecycle', () => {
+    it('stops the session lsp client on shutdown (#14751)', async () => {
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const config = makeConfig({ lspClient: { stop } as never });
+      await config.initialize(SKIP_ALL_INIT);
+      await config.shutdown();
+      expect(stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops the client even when shutdown runs before initialize', async () => {
+      // loadCliConfig installs the client before initialization, so a session
+      // that dies during startup (e.g. daemon admission rejects it) still owns
+      // language servers; teardown must not skip them over `initialized`.
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const config = makeConfig({ lspClient: { stop } as never });
+      await config.shutdown();
+      expect(stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the remaining cleanup running when lsp stop rejects', async () => {
+      const stop = vi.fn().mockRejectedValue(new Error('stop failed'));
+      const config = makeConfig({ lspClient: { stop } as never });
+      await config.initialize({ ...SKIP_ALL_INIT, skipSkillManager: false });
+      await config.shutdown();
+      expect(stop).toHaveBeenCalledTimes(1);
+      expect(config.getSkillManager()?.stopWatching).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -5277,6 +5389,27 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('initialize', () => {
+    it.each([
+      ['the default', { usageStatisticsEnabled: true }, true],
+      [
+        'the operator refresh switch',
+        { usageStatisticsEnabled: true, modelCatalogRefreshEnabled: false },
+        false,
+      ],
+      [
+        'the usage-statistics opt-out',
+        { usageStatisticsEnabled: false },
+        false,
+      ],
+    ])(
+      'gates the model catalog refresh on %s',
+      async (_name, params, expected) => {
+        await initConfig(params, SKIP_ALL_INIT);
+
+        expect(refreshModelCatalog).toHaveBeenCalledTimes(expected ? 1 : 0);
+      },
+    );
+
     it('accepts managed handoff only after certified takeover is configured', async () => {
       const standalone = makeConfig();
       await standalone.closeSessionWriter({ handoff: true });
@@ -6847,6 +6980,8 @@ describe('Server Config (config.ts)', () => {
       afterEach(restoreEnv);
 
       const interactiveCli = { interactive: true, sdkMode: false };
+      // A host with no record_artifact tool and no artifact metadata route.
+      const workerHost = { artifactRecordingSupported: false };
       // `record` is the expected isRecordArtifactEnabled(), where asserted.
       it.each`
         title                                                                              | env                                                                    | params                                           | artifact | record
@@ -6858,6 +6993,8 @@ describe('Server Config (config.ts)', () => {
         ${'keeps the Artifact tool disabled for daemon CLI env enablement'}                | ${{ QWEN_CODE_ENABLE_ARTIFACT: '1' }}                                  | ${DAEMON}                                        | ${false} | ${true}
         ${'lets daemon sessions record metadata by default without publishing'}            | ${{}}                                                                  | ${DAEMON}                                        | ${false} | ${true}
         ${'lets QWEN_CODE_ENABLE_ARTIFACT force-enable interactive CLI use'}               | ${{ QWEN_CODE_ENABLE_ARTIFACT: '1' }}                                  | ${{ ...interactiveCli, artifactEnabled: false }} | ${true}  | ${undefined}
+        ${'keeps recording off for hosts that do not support it'}                          | ${{}}                                                                  | ${{ ...DAEMON, ...workerHost }}                  | ${false} | ${false}
+        ${'keeps recording off for those hosts even when force-enabled'}                   | ${{ QWEN_CODE_ENABLE_ARTIFACT: '1' }}                                  | ${{ ...interactiveCli, ...workerHost }}          | ${true}  | ${false}
       `('%s', ({ env, params, artifact, record }) => {
         Object.assign(process.env, env);
         const config = makeConfig(params);
@@ -10667,6 +10804,41 @@ describe('Server Config (config.ts)', () => {
         subagentRegistry.__mcpManagerMock.setOnBudgetEvent,
       ).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('explicit folder trust for repository execution', () => {
+  afterEach(() => ideContextStore.clear());
+
+  it.each([
+    [false, undefined, true, false],
+    [false, true, true, false],
+    [true, undefined, false, false],
+    [true, false, false, false],
+    [true, true, true, true],
+  ] as const)(
+    'distinguishes enabled=%s, trusted=%s from implicit trust',
+    (folderTrust, trustedFolder, legacy, explicit) => {
+      ideContextStore.clear();
+      const config = new Config({
+        ...MINIMAL_PARAMS,
+        folderTrust,
+        trustedFolder,
+      });
+      expect(config.isTrustedFolder()).toBe(legacy);
+      expect(config.isExplicitlyTrustedFolder()).toBe(explicit);
+    },
+  );
+
+  it('honors live IDE trust, including denial and disconnect', () => {
+    const config = new Config({ ...MINIMAL_PARAMS, folderTrust: false });
+    ideContextStore.set({ workspaceState: { isTrusted: true } });
+    expect(config.isExplicitlyTrustedFolder()).toBe(true);
+    ideContextStore.set({ workspaceState: { isTrusted: false } });
+    expect(config.isExplicitlyTrustedFolder()).toBe(false);
+    ideContextStore.clear();
+    expect(config.isTrustedFolder()).toBe(true);
+    expect(config.isExplicitlyTrustedFolder()).toBe(false);
   });
 });
 

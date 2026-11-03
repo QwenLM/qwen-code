@@ -3,6 +3,15 @@ export {
   getWorkspaceScopeDirName,
   resolvePath,
 } from './paths.js';
+export {
+  appendChannelEvent,
+  channelEventFilePath,
+  channelEventScopeDir,
+  CHANNEL_EVENT_MAX_READ,
+  CHANNEL_EVENT_TYPES,
+  readChannelEvents,
+} from './channel-events.js';
+export type { ChannelEventQuery, ChannelEventType } from './channel-events.js';
 export { PollingChannelBase } from './PollingChannelBase.js';
 export { ACP_EVENT_LOOP_STALL_RESTART_MS, AcpBridge } from './AcpBridge.js';
 export {
@@ -24,6 +33,8 @@ export type {
   ChannelLoopToolCreateInput,
   ChannelLoopToolHandler,
   ChannelLoopToolResult,
+  ChannelToolContext,
+  ChannelToolDefinition,
   PermissionRequestEvent,
   PermissionResolvedEvent,
   SessionDiedEvent,
