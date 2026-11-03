@@ -297,8 +297,14 @@ async function readTail(
   try {
     const { size } = await handle.stat();
     const start = Math.max(0, size - maxBytes);
+    // A window starting mid-file usually lands inside a line, but it can land
+    // exactly on a boundary. Read one leading byte to tell the two apart, so an
+    // aligned window keeps every complete record instead of dropping one for
+    // nothing. Folding that byte into the first chunk keeps the read to one
+    // awaited call per chunk — the daemon serves other requests between them.
+    const lead = start > 0 ? 1 : 0;
     const chunks: Buffer[] = [];
-    let position = start;
+    let position = start - lead;
     let bytes = 0;
     while (position < size) {
       const length = Math.min(CHANNEL_EVENT_READ_CHUNK_BYTES, size - position);
@@ -309,14 +315,14 @@ async function readTail(
       bytes += bytesRead;
       position += bytesRead;
     }
-    const lines = Buffer.concat(chunks).toString('utf-8').split('\n');
-    // Starting mid-file can land inside a line; drop that partial line. The
-    // skipped head is clipped data too: a journal grows to 1 MiB before it
+    const window = Buffer.concat(chunks);
+    const lines = window.subarray(lead).toString('utf-8').split('\n');
+    if (lead === 1 && window[0] !== 0x0a) lines.shift();
+    // The skipped head is clipped data too: a journal grows to 1 MiB before it
     // rotates, so a 256 KiB tail of a busy Channel omits its own older events.
-    if (start > 0) lines.shift();
     return {
       lines: lines.filter((line) => line.length > 0),
-      bytes,
+      bytes: Math.max(0, bytes - lead),
       clipped: start > 0,
     };
   } finally {
@@ -327,7 +333,7 @@ async function readTail(
 async function eventFiles(
   scopeDir: string,
   channels?: readonly string[],
-): Promise<{ files: string[]; clipped: boolean }> {
+): Promise<{ files: Array<{ path: string; size: number }>; clipped: boolean }> {
   let names: string[];
   try {
     names = await readdir(scopeDir);
@@ -355,7 +361,8 @@ async function eventFiles(
   const stated = await Promise.all(
     candidates.map(async (file) => {
       try {
-        return { file, at: (await stat(file)).mtimeMs };
+        const { mtimeMs, size } = await stat(file);
+        return { file, at: mtimeMs, size };
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
         throw err;
@@ -366,10 +373,11 @@ async function eventFiles(
   // allowance on the journals an operator is most likely looking at.
   const files = stated
     .filter(
-      (entry): entry is { file: string; at: number } => entry !== undefined,
+      (entry): entry is { file: string; at: number; size: number } =>
+        entry !== undefined,
     )
     .sort((left, right) => right.at - left.at)
-    .map((entry) => entry.file);
+    .map((entry) => ({ path: entry.file, size: entry.size }));
   return {
     files: files.slice(0, CHANNEL_EVENT_MAX_FILES),
     clipped: files.length > CHANNEL_EVENT_MAX_FILES,
@@ -412,14 +420,16 @@ export async function readChannelEvents(
     const candidates = await eventFiles(scopeDir, query.channels);
     clipped = clipped || candidates.clipped;
     for (const file of candidates.files) {
-      // Spend the budget in whole tail windows: a partial window would report
-      // a clipped file anyway, and stopping here keeps the flag's meaning
-      // ("whole journals were left out") exact.
-      if (budget < CHANNEL_EVENT_READ_TAIL_BYTES) {
+      // Reserve what this journal actually needs, not a full window: a small
+      // journal must still be read when the remainder is under one window but
+      // comfortably over its size. Stopping only when a whole journal cannot
+      // fit keeps the flag's meaning ("whole journals were left out") exact.
+      const window = Math.min(CHANNEL_EVENT_READ_TAIL_BYTES, file.size);
+      if (budget < window) {
         clipped = true;
         break;
       }
-      const tail = await readTail(file, CHANNEL_EVENT_READ_TAIL_BYTES);
+      const tail = await readTail(file.path, window);
       budget -= tail.bytes;
       clipped = clipped || tail.clipped;
       for (const line of tail.lines) {
@@ -434,6 +444,9 @@ export async function readChannelEvents(
         if (channels && !channels.has(record.channel)) continue;
         if (types && !types.has(record.type)) continue;
         if (query.since !== undefined) {
+          // A record whose instant cannot be parsed has no known time, so it
+          // cannot satisfy a time bound. An unfiltered read still returns it
+          // (the page renders the raw string) ahead of every dated record.
           const at = Date.parse(record.at);
           if (!Number.isFinite(at) || at < query.since) continue;
         }

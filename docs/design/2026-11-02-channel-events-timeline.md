@@ -155,8 +155,12 @@ Anything a bound clips sets `truncated`: dropped files, an exhausted byte
 budget, **and a journal taller than the tail window** — a file grows to 1 MiB
 before it rotates, so a 256 KiB window omits that Channel's own older events.
 The page's completeness banner therefore cannot claim a timeline is whole when
-any of those happened. The budget is spent in whole tail windows, so its flag
-always means "whole journals were left out".
+any of those happened. The budget is reserved per journal — a file is read only
+if its whole window fits in what remains — so a small journal is still read when
+the remainder is under one window, and the flag always means "whole journals
+were left out". A window starting mid-file reads one leading byte to tell a
+partial first line from a complete one, so a window that lands exactly on a line
+boundary keeps every record it read.
 
 Every line still has to be parsed to filter it, but the accumulator is trimmed
 to the newest `limit` once it passes four times that, so a busy workspace's

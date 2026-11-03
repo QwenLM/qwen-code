@@ -11,6 +11,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -306,6 +307,161 @@ describe('channel events journal', async () => {
     expect(truncated).toBe(true);
     expect(events.length).toBeGreaterThan(0);
     expect(events.length).toBeLessThan(480);
+  });
+
+  it('reads a small journal that fits the budget left over', async () => {
+    // 17 journals of exactly 240 KiB plus one tiny journal, together under the
+    // 4 MiB budget. The tiny one is the oldest, so it is read last, when less
+    // than one 256 KiB window remains — it must still be read, because the
+    // 16 KiB remainder covers its 200 bytes eighty times over.
+    const at = new Date(2026, 0, 1).toISOString();
+    const sized = (channel: string, sizeBytes: number): string => {
+      const shape = { at, channel, type: 'poll', outcome: 'ok' };
+      const base = JSON.stringify({ ...shape, detail: { pad: '' } });
+      const line = JSON.stringify({
+        ...shape,
+        detail: { pad: 'x'.repeat(sizeBytes - 1 - Buffer.byteLength(base)) },
+      });
+      expect(Buffer.byteLength(line) + 1).toBe(sizeBytes);
+      return line;
+    };
+    const epoch = new Date(Date.UTC(2026, 0, 1));
+    const write = (channel: string, body: string, mtime: Date): void => {
+      const path = channelEventFilePath(channel, cwd);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, body);
+      utimesSync(path, mtime, mtime);
+    };
+
+    write('win-last', `${sized('win-last', 200)}\n`, epoch);
+    let total = 200;
+    for (let index = 0; index < 17; index += 1) {
+      const channel = `bulk-${index}`;
+      const block = Array.from({ length: 10 }, () => sized(channel, 24576));
+      write(
+        channel,
+        `${block.join('\n')}\n`,
+        new Date(epoch.getTime() + (index + 1) * 1000),
+      );
+      total += 245760;
+    }
+    expect(total).toBeLessThan(4 * 1024 * 1024);
+
+    const { events, truncated } = await readChannelEvents({
+      scopeDirs: [channelEventScopeDir(cwd)],
+      limit: 500,
+    });
+
+    expect(truncated).toBe(false);
+    expect(events).toHaveLength(171);
+    expect(events.filter((event) => event.channel === 'win-last')).toHaveLength(
+      1,
+    );
+  });
+
+  it('yields to the event loop once per chunk, not once per file', async () => {
+    // The daemon must be able to serve sessions between chunks, so the turns a
+    // read takes have to grow with the bytes read, not just with the file
+    // count. Measure the same six journals short (one chunk each) and tall (a
+    // full 256 KiB window, chunked several times). Every awaited read costs at
+    // least one turn and a tall window takes four more reads per journal than a
+    // short one, so the tall read leads by 24 turns at minimum; the bound below
+    // leaves room for scheduling noise. Reading those windows synchronously
+    // would erase the difference.
+    const measure = async (repeat: number): Promise<number> => {
+      rmSync(channelEventScopeDir(cwd), { recursive: true, force: true });
+      for (let index = 0; index < 6; index += 1) {
+        const channel = `yield-${index}`;
+        const line = JSON.stringify({
+          at: new Date(2026, 0, 1).toISOString(),
+          channel,
+          type: 'poll',
+          outcome: 'ok',
+          detail: { pad: 'x'.repeat(900) },
+        });
+        const path = channelEventFilePath(channel, cwd);
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, `${line}\n`.repeat(repeat));
+      }
+      let turns = 0;
+      let reading = true;
+      const tick = (): void => {
+        turns += 1;
+        if (reading) setImmediate(tick);
+      };
+      setImmediate(tick);
+      const { events } = await readChannelEvents({
+        scopeDirs: [channelEventScopeDir(cwd)],
+        limit: 500,
+      });
+      reading = false;
+      expect(events.length).toBeGreaterThan(0);
+      return turns;
+    };
+
+    const short = await measure(4);
+    const tall = await measure(400);
+    expect(tall).toBeGreaterThan(short + 12);
+  });
+
+  it('keeps every complete record when the window starts on a line boundary', async () => {
+    // 300 records of exactly 1 KiB, so the 256 KiB window starts exactly at
+    // record 44: the first line it reads is complete and must not be dropped.
+    const at = new Date(2026, 0, 1).toISOString();
+    const lines = Array.from({ length: 300 }, (_, index) => {
+      const shape = {
+        at,
+        channel: 'aligned',
+        type: 'poll',
+        outcome: 'ok',
+        number: index,
+      };
+      const base = JSON.stringify({ ...shape, detail: { pad: '' } });
+      const line = JSON.stringify({
+        ...shape,
+        detail: { pad: 'x'.repeat(1024 - 1 - Buffer.byteLength(base)) },
+      });
+      expect(Buffer.byteLength(line) + 1).toBe(1024);
+      return line;
+    });
+    const path = channelEventFilePath('aligned', cwd);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, `${lines.join('\n')}\n`);
+
+    const { events, truncated } = await readChannelEvents({
+      scopeDirs: [channelEventScopeDir(cwd)],
+      limit: 500,
+    });
+
+    expect(truncated).toBe(true);
+    expect(events).toHaveLength(256);
+    expect(events[0]?.number).toBe(44);
+    expect(events.at(-1)?.number).toBe(299);
+  });
+
+  it('shows an undated record unfiltered but not under a since bound', async () => {
+    appendChannelEvent('bot', cwd, {
+      at: 'not-a-date',
+      type: 'poll',
+      outcome: 'ok',
+    });
+    appendChannelEvent('bot', cwd, {
+      at: new Date(2026, 0, 1, 0, 0, 5).toISOString(),
+      type: 'poll',
+      outcome: 'ok',
+    });
+    const scopeDirs = [channelEventScopeDir(cwd)];
+
+    const all = await readChannelEvents({ scopeDirs });
+    expect(all.events).toHaveLength(2);
+    expect(all.events[0]?.at).toBe('not-a-date');
+
+    const bounded = await readChannelEvents({
+      scopeDirs,
+      since: new Date(2026, 0, 1, 0, 0, 1).getTime(),
+    });
+    expect(bounded.events).toHaveLength(1);
+    expect(bounded.events[0]?.at).not.toBe('not-a-date');
   });
 
   it('fails loudly when a journal file cannot be read', async () => {
