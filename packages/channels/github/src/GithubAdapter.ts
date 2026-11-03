@@ -300,6 +300,17 @@ const CI_NONE_GRACE_MS = 10 * 60 * 1000;
 const CI_RECHECK_INTERVAL_MS = 10 * 60 * 1000;
 
 /**
+ * Pending aggregates re-check on this period, NOT every poll: a workflow
+ * queued for environment approval or an offline runner can stay pending for
+ * hours, and an unbounded per-poll re-fetch turns the settled-head cost
+ * model into ~3,600 CI calls/hour at the watch cap — over the 5,000/hour
+ * PAT budget once pulls.get is counted, starving the notification lane.
+ * Must stay above the poll interval (60s) to actually bound the fan-out;
+ * pending still settles within one period of the real transition.
+ */
+const CI_PENDING_RECHECK_INTERVAL_MS = 5 * 60 * 1000;
+
+/**
  * Backpressure horizon for bound-session delivery: queue-full and
  * temporarily-unavailable conditions defer without consuming the failure
  * budget, but not forever. After this many consecutive deferrals (~4 hours
@@ -307,6 +318,19 @@ const CI_RECHECK_INTERVAL_MS = 10 * 60 * 1000;
  * log with a stderr alert instead of silently wedging or silently dropping.
  */
 const MAX_BOUND_DEFERRALS = 240;
+
+/**
+ * Cold-start bound: consecutive EMPTY partial snapshots tolerated before the
+ * comment lane opens anyway. A draining/unreadable workspace can answer
+ * {bindings: [], partial: true} on the first poll after a restart while its
+ * bound sessions still exist; opening the lane on that answer would route
+ * every event publicly and commit the cursor — an irreversible
+ * misclassification. The cap keeps a PERMANENTLY empty partial (a workspace
+ * that is never active) from freezing the lane forever: once reached, the
+ * lane opens and unmatched events take the per-event bounded deferral
+ * (MAX_BOUND_DEFERRALS -> dead-letter) instead of the public path.
+ */
+const MAX_COLD_EMPTY_PARTIAL_POLLS = 30;
 
 type PrWatchEventType =
   | 'ci_failure'
@@ -401,13 +425,24 @@ function isPrWatchEntryShape(value: unknown): value is PrWatchEntry {
     v === undefined || typeof v === 'string';
   const numberOrUndef = (v: unknown) =>
     v === undefined || typeof v === 'number';
+  // The envelope and delivery must satisfy the SAME validators the task
+  // store applies at claim time: a shape-valid envelope missing chatId
+  // would throw in prBindingKey and abort the whole reconcile loop
+  // (starving the healthy entries queued behind it), and a partial
+  // envelope would be claimed verbatim, rejected by isInboundTaskRecord on
+  // the next read, and wedge the task file until an operator deletes it.
   const isPending = (item: unknown) =>
     item !== null &&
     typeof item === 'object' &&
     typeof (item as PendingWatchEvent).key === 'string' &&
     typeof (item as PendingWatchEvent).issueNumber === 'number' &&
-    (item as PendingWatchEvent).envelope !== null &&
-    typeof (item as PendingWatchEvent).envelope === 'object';
+    (item as PendingWatchEvent).envelope !== undefined &&
+    isInboundEnvelope((item as PendingWatchEvent).envelope) &&
+    ((item as PendingWatchEvent).delivery === undefined ||
+      ((item as PendingWatchEvent).delivery !== null &&
+        typeof (item as PendingWatchEvent).delivery === 'object' &&
+        (item as PendingWatchEvent).delivery?.kind === 'bound-session' &&
+        typeof (item as PendingWatchEvent).delivery?.sessionId === 'string'));
   return (
     stringOrUndef(entry.headSha) &&
     stringOrUndef(entry.ci) &&
@@ -713,23 +748,37 @@ function isDefiniteNoWriteGithubError(err: unknown): boolean {
  * Watch-pass fail-fast predicate. The watch is best-effort detection that runs
  * serially before the notification lane, so it must not sleep through
  * `githubApi`'s 1s+2s backoff on conditions a retry cannot fix:
+ * - credential failure (401 — an expired or revoked token is retried per PR
+ *   otherwise, because the daemon-route binding refresh keeps succeeding);
  * - any rate limit (403/429). GitHub does not always send `retry-after` on a
  *   secondary/abuse limit, so waiting for that header misses the common shape;
  * - permanent per-PR statuses (404/410/451 — the PR was deleted, transferred,
  *   or the repo became unavailable). A retry re-fetches the same answer.
- * The per-PR catch isolates one PR's failure, so this never blocks the rest of
- * the pass. Kept watch-local so the publication lane's retry semantics are
- * unchanged.
+ * Kept watch-local so the publication lane's retry semantics are unchanged.
  */
 function isWatchFailFastError(err: unknown): boolean {
   const e = err as { status?: number };
   return (
+    e.status === 401 ||
     e.status === 403 ||
     e.status === 429 ||
     e.status === 404 ||
     e.status === 410 ||
     e.status === 451
   );
+}
+
+/**
+ * Fail-fast statuses that condemn the WHOLE pass, not just one PR: a bad
+ * credential or an exhausted rate budget is shared by every watched PR, so
+ * walking the rest of the set would issue one doomed request per PR per
+ * poll (~1,800 rejected calls/hour at the cap) for the whole reset window.
+ * Per-PR permanent statuses (404/410/451) stay isolated: one deleted PR
+ * must not stop the others from being watched.
+ */
+function isWatchPassAbortError(err: unknown): boolean {
+  const e = err as { status?: number };
+  return e.status === 401 || e.status === 403 || e.status === 429;
 }
 
 function parseTriggerKind(metadata: string | undefined): string | undefined {
@@ -805,12 +854,30 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   /**
    * False until ANY binding snapshot succeeds (complete or partial). The
    * cold-start comment-lane gate uses this, not boundSnapshotTrusted: the
-   * map is populated from partial snapshots too, so once one succeeds the
-   * empty-map risk is gone. Gating on complete-only would stall the lane
-   * forever under a permanent partial (multi-page scan / non-active
-   * workspace).
+   * map is populated from partial snapshots too. Gating on complete-only
+   * would stall the lane forever under a permanent partial (multi-page
+   * scan / non-active workspace). An EMPTY partial answer is additionally
+   * bounded by coldEmptyPartialStreak: success of an incomplete scan does
+   * not establish absence, so the first such answers must not open the
+   * lane onto an empty map.
    */
   private boundSnapshotSeen = false;
+  /**
+   * Consecutive empty partial snapshots while no complete snapshot has ever
+   * succeeded and the map is empty. Drives the bounded cold-start deferral
+   * (MAX_COLD_EMPTY_PARTIAL_POLLS); reset by any complete or non-empty
+   * answer.
+   */
+  private coldEmptyPartialStreak = 0;
+  /**
+   * True while the most recent pending-watch reconciliation FAILED (e.g.
+   * the watch file is unreadable). Generic recovery must then leave watch
+   * tasks alone: delivering and removing an accepted watch task without
+   * reconciling its on-disk pending record would let a later drain claim
+   * and deliver the same transition a second time. Unrelated comment
+   * recovery keeps running.
+   */
+  private watchReconcileBlocked = false;
   /**
    * Consecutive binding-refresh failures since the last success. While no
    * snapshot has ever succeeded, the cold-start gate defers the comment lane,
@@ -1558,11 +1625,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     if (this.prWatchEvents.size > 0) {
       try {
         await this.reconcilePendingWatch();
+        this.watchReconcileBlocked = false;
       } catch (err) {
+        // Recovery must not deliver accepted watch tasks while their pending
+        // records are unreconciled (a later drain would deliver them again).
+        this.watchReconcileBlocked = true;
         process.stderr.write(
           `[Channel:${this.name}] pending watch reconciliation failed, will retry next poll: ${err}\n`,
         );
       }
+    } else {
+      this.watchReconcileBlocked = false;
     }
 
     // The watch pass runs before generic recovery so detection cannot race
@@ -1603,6 +1676,32 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // non-active workspace). Defer the comment lane (cursor does not advance)
     // instead; persisted tasks still recover above.
     if (this.deliverToBoundSessions && !this.boundSnapshotSeen) {
+      return;
+    }
+    // An EMPTY partial first answer is not an authoritative absence either:
+    // a draining/unreadable workspace returns {bindings: [], partial: true}
+    // while its bound sessions still exist, and opening the lane here would
+    // publicly route every event and commit the cursor before the real
+    // snapshot arrives. Keep deferring while the map is empty and no
+    // complete snapshot has ever succeeded — bounded, so a permanently
+    // empty partial opens the lane after MAX_COLD_EMPTY_PARTIAL_POLLS
+    // (unmatched events then take the per-event bounded deferral below,
+    // never the silent public path).
+    if (
+      this.deliverToBoundSessions &&
+      !this.boundSnapshotTrusted &&
+      this.boundSessionByPr.size === 0 &&
+      this.lastBindingsPartial &&
+      this.coldEmptyPartialStreak < MAX_COLD_EMPTY_PARTIAL_POLLS
+    ) {
+      if (
+        this.coldEmptyPartialStreak === 1 ||
+        this.coldEmptyPartialStreak % 10 === 0
+      ) {
+        process.stderr.write(
+          `[Channel:${this.name}] binding snapshot is an empty partial (${this.coldEmptyPartialStreak}/${MAX_COLD_EMPTY_PARTIAL_POLLS} cold polls): the comment lane stays deferred until a complete or non-empty snapshot arrives, so no event is misrouted publicly.\n`,
+        );
+      }
       return;
     }
 
@@ -1868,12 +1967,22 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     if (comments.length === 0) return;
 
     const first = comments[0]!.comment;
-    const summary = comments
-      .map(
-        ({ comment, body }) =>
-          `- @${comment.user?.login || 'unknown'}: ${sanitizeDisplayText(body, MAX_AGGREGATE_COMMENT_CHARS)}`,
-      )
-      .join('\n');
+    // Every new comment is recorded in dispatchedComments before dispatch,
+    // so comments dropped by the batch cap would vanish from every surface;
+    // the omission must be visible in the prompt itself. It rides at the
+    // FRONT: a tail notice would be the first thing the bound prompt's
+    // code-point cap truncates away.
+    const omitted = newComments.length - comments.length;
+    const summary =
+      (omitted > 0
+        ? `[${omitted} earlier comment(s) omitted from this batch; list the PR comments to see them]\n`
+        : '') +
+      comments
+        .map(
+          ({ comment, body }) =>
+            `- @${comment.user?.login || 'unknown'}: ${sanitizeDisplayText(body, MAX_AGGREGATE_COMMENT_CHARS)}`,
+        )
+        .join('\n');
     const envelope: Envelope = {
       channelName: this.name,
       senderId: (first.user?.login || 'unknown').toLowerCase(),
@@ -2144,6 +2253,35 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     if (!envelope) return true;
     const bound = task.delivery?.kind === 'bound-session';
     const isWatch = envelope.messageId?.startsWith('watch:') === true;
+    // While no COMPLETE snapshot has ever succeeded, absence from the map
+    // is not an authoritative unbind: routing this event publicly would be
+    // irreversible (the cursor commits in the same poll, and a later
+    // snapshot cannot undo the public reply). Defer it as backpressure —
+    // recoverable, bounded by MAX_BOUND_DEFERRALS, and re-resolved against
+    // the map by recovery once a complete snapshot lands. Known targets
+    // (bound tasks) are unaffected and proceed immediately.
+    if (
+      !bound &&
+      !isWatch &&
+      this.deliverToBoundSessions &&
+      !this.boundSnapshotTrusted
+    ) {
+      const deferCount = (task.deferCount ?? 0) + 1;
+      if (deferCount >= MAX_BOUND_DEFERRALS) {
+        this.retireBoundTask(
+          task,
+          `binding snapshot never completed after ${deferCount} deferrals; absence never established`,
+        );
+        return false;
+      }
+      this.transitionInboundTask(task.id, 'failed', {
+        error: 'binding snapshot incomplete; absence not established',
+        attempts: task.attempts ?? 0,
+        deferCount,
+        backpressure: true,
+      });
+      return false;
+    }
     const attempts = (task.attempts ?? 0) + 1;
     this.activeInboundTaskIdsByMessage.set(
       this.inboundMessageKey(envelope.chatId, envelope.messageId),
@@ -2268,7 +2406,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // published), and the acceptance mark must land BEFORE any cross-lane read
     // that can throw — otherwise a corrupt or unreadable pending-deliveries
     // file leaves the task running without deliveredAt, and recovery replays
-    // the injection (the POST carries no idempotency key).
+    // the injection. The replay is safe (the POST carries the task id as an
+    // idempotency key the daemon deduplicates), but the mark still retires
+    // the task without a needless round-trip.
     if (task.delivery?.kind === 'bound-session') {
       this.transitionInboundTask(task.id, 'running', {
         deliveredAt: Date.now(),
@@ -2300,11 +2440,40 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     for (const task of tasks) {
       if (!task.envelope) continue;
       this.applyTaskDedupe(task);
+      if (
+        this.watchReconcileBlocked &&
+        task.envelope.messageId?.startsWith('watch:') === true
+      ) {
+        // Reconciliation itself failed (e.g. the watch file is unreadable):
+        // delivering and removing this accepted task now would leave its
+        // on-disk pending record for a later drain to claim and deliver a
+        // second time. Keep it queued for the reconcile pass; unrelated
+        // comment recovery continues below.
+        continue;
+      }
       if (task.deliveredAt !== undefined) {
         // The daemon accepted this prompt before the crash; re-injecting
         // would deliver the same event twice. Retire without replay.
         this.removeInboundTask(task.id);
         continue;
+      }
+      if (
+        !task.delivery &&
+        task.backpressure === true &&
+        this.deliverToBoundSessions &&
+        task.envelope.messageId?.startsWith('watch:') !== true
+      ) {
+        // An unmatched event deferred while the snapshot was incomplete:
+        // re-resolve it against the current map, so a complete snapshot
+        // that has since landed routes it privately instead of publicly.
+        const delivery = this.resolveBoundDelivery(
+          task.envelope.chatId,
+          task.issueNumber,
+        );
+        if (delivery) {
+          this.transitionInboundTask(task.id, 'running', { delivery });
+          task.delivery = delivery;
+        }
       }
       if (
         pendingDeliveries.some(
@@ -2358,17 +2527,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   /**
    * Recoverable tasks that may hold the shared notification cursor. Pure
-   * bound-session backpressure is excluded: it has its own durable retry
-   * and a bounded deferral horizon, and must not freeze mark-as-read for
-   * every unrelated PR the channel follows.
+   * backpressure is excluded: it has its own durable retry and a bounded
+   * deferral horizon, and must not freeze mark-as-read for every unrelated
+   * PR the channel follows. This covers both bound deliveries and the
+   * targetless deferrals an incomplete binding snapshot produces (no
+   * delivery yet, same durable retry).
    */
   private hasCursorBlockingTasks(): boolean {
     return this.readInboundTasks().some(
       (task) =>
-        this.isRecoverableInboundTask(task) &&
-        !(
-          task.delivery?.kind === 'bound-session' && task.backpressure === true
-        ),
+        this.isRecoverableInboundTask(task) && task.backpressure !== true,
     );
   }
 
@@ -2376,7 +2544,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * Terminal outcome for a bound event that can no longer be delivered:
    * append it to the private dead-letter log (the private path's exhaustion
    * surface — it posts no public error comment) and remove the task. The
-   * event is surfaced for operator inspection, never silently consumed.
+   * event is surfaced for operator inspection, never silently consumed —
+   * including when the dead-letter write itself fails: the task is then
+   * kept, not removed.
    */
   private retireBoundTask(task: InboundTaskRecord, reason: string): void {
     const record = {
@@ -2388,7 +2558,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       reason,
       text: task.envelope?.text,
     };
-    let written = false;
     try {
       const path = this.channelFilePath('github-bound-deadletter.jsonl');
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -2396,20 +2565,22 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         encoding: 'utf-8',
         mode: 0o600,
       });
-      written = true;
     } catch (err) {
       // The dead-letter is the private path's only exhaustion surface. If the
-      // write fails (disk pressure), surface the full payload here so the
-      // event stays recoverable from the log, and do not claim it was retired.
+      // write fails (disk pressure, a per-file quota on the never-rotated
+      // log), surface the full payload here AND keep the durable task: a
+      // removal here would leave one stderr line as the event's only trace.
+      // A backpressure-horizon task stays recoverable, so the next poll
+      // retries the append; an exhausted task survives in the task file for
+      // operator recovery.
       process.stderr.write(
         `[Channel:${this.name}] failed to write bound dead-letter (${task.source.messageId}): ${err}; payload: ${JSON.stringify(record)}\n`,
       );
+      return;
     }
-    if (written) {
-      process.stderr.write(
-        `[Channel:${this.name}] bound event retired to dead-letter (${task.source.messageId}): ${reason}\n`,
-      );
-    }
+    process.stderr.write(
+      `[Channel:${this.name}] bound event retired to dead-letter (${task.source.messageId}): ${reason}\n`,
+    );
     this.removeInboundTask(task.id);
   }
 
@@ -2837,6 +3008,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.lastBindings = snapshot.bindings;
       }
       this.boundSessionByPr = map;
+      if (snapshot.partial && map.size === 0 && !this.boundSnapshotTrusted) {
+        this.coldEmptyPartialStreak += 1;
+        if (this.coldEmptyPartialStreak === MAX_COLD_EMPTY_PARTIAL_POLLS) {
+          process.stderr.write(
+            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: opening the comment lane. Unmatched events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence — verify the daemon's workspaces are active and readable.\n`,
+          );
+        }
+      } else {
+        this.coldEmptyPartialStreak = 0;
+      }
     } catch (err) {
       // Keep the previous map: a stale candidate fails with 404 at delivery
       // time and falls back to the channel path; an empty map would silently
@@ -2915,13 +3096,30 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const contextLines = metadataLines.filter((line) =>
       /^(Trigger|Event|Author): /.test(line),
     );
+    // The mention and first-contact lanes carry no Author metadata line;
+    // without it the session cannot tell a maintainer's instruction from a
+    // drive-by commenter's (the channel path attributes the same envelope
+    // as `[alice] …`). The sender is already on the envelope.
+    if (!contextLines.some((line) => line.startsWith('Author: '))) {
+      contextLines.push(`Author: ${envelope.senderName || 'unknown'}`);
+    }
     // The aggregate lane's channel-facing instruction ("output exactly
     // <no-reply/>") contradicts in-session delivery; keep only the comments.
     let text = envelope.text;
     if (text.startsWith(AGGREGATE_COMMENTS_PROMPT_PREFIX)) {
       text = `New comments on the PR:\n${text.slice(AGGREGATE_COMMENTS_PROMPT_PREFIX.length)}`;
     }
-    const body = truncateCodePoints(sanitizePromptText(text), 6_000);
+    // The cap must be VISIBLE: the aggregate lane can compose more than
+    // 6,000 code points (20 comments x 400 chars), every comment is already
+    // recorded in dispatchedComments, and the task is removed on acceptance
+    // — a silent cut would drop the tail (possibly the actionable last line
+    // of an instruction) from every surface while the prompt reads complete.
+    const cleaned = sanitizePromptText(text);
+    const totalCodePoints = Array.from(cleaned).length;
+    const body =
+      totalCodePoints > 6_000
+        ? `${truncateCodePoints(cleaned, 6_000)}\n[prompt truncated: ${totalCodePoints - 6_000} more characters omitted]`
+        : cleaned;
     return [
       '[GitHub event for a PR this session follows]',
       `Delivered by the "${this.name}" GitHub channel because this session is bound to the PR below.`,
@@ -3001,7 +3199,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
     const prompt = this.buildBoundSessionPrompt(envelope);
     try {
-      await boundSessions.deliverPrompt(delivery.sessionId, prompt);
+      // The durable task id is the admission-side idempotency identity: if
+      // the acceptance mark below fails to persist (or the 202 is lost),
+      // recovery re-injects with the SAME key and the daemon deduplicates.
+      await boundSessions.deliverPrompt(delivery.sessionId, prompt, task.id);
     } catch (err) {
       if (!(err instanceof BoundSessionGoneError)) throw err;
       // The daemon's Gone verdict is authoritative deletion evidence. Evict
@@ -3017,7 +3218,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.transitionInboundTask(task.id, 'running', { delivery: next });
         task.delivery = next;
         try {
-          await boundSessions.deliverPrompt(next.sessionId, prompt);
+          await boundSessions.deliverPrompt(next.sessionId, prompt, task.id);
           return;
         } catch (retryErr) {
           if (!(retryErr instanceof BoundSessionGoneError)) throw retryErr;
@@ -3247,6 +3448,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       try {
         await this.watchOnePr(key, candidate.chatId, candidate.number);
       } catch (err) {
+        if (isWatchPassAbortError(err)) {
+          // Shared credential/rate-limit failure: abort the rest of the
+          // pass instead of issuing one doomed request per watched PR.
+          // Later polls retry the full set once the condition clears.
+          process.stderr.write(
+            `[Channel:${this.name}] PR watch pass aborted at ${key} (credential/rate limit); the remaining watched PRs skip this poll: ${sanitizeLogText(
+              err instanceof Error ? err.message : String(err),
+              200,
+            )}\n`,
+          );
+          break;
+        }
         process.stderr.write(
           `[Channel:${this.name}] PR watch failed for ${key}, skipping this poll: ${sanitizeLogText(
             err instanceof Error ? err.message : String(err),
@@ -3299,12 +3512,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // Check fetches are conditional and gated on the ci_failure subscription
     // (the other three events come from pulls.get fields alone). A
     // steady-state green PR costs one pulls.get per poll. A new head always
-    // re-checks; a pending aggregate keeps checking until it settles; an
-    // advanced updated_at re-checks a settled head. updated_at is NOT a
-    // reliable re-run signal (GitHub does not bump it on check activity),
-    // so settled heads — including 'none' past the grace window — also
-    // re-check on the CI_RECHECK_INTERVAL_MS period to catch re-runs that
-    // turn red and CI that appears late (manual workflow_dispatch).
+    // re-checks; a pending aggregate re-checks on the
+    // CI_PENDING_RECHECK_INTERVAL_MS period until it settles; an advanced
+    // updated_at re-checks a settled head. updated_at is NOT a reliable
+    // re-run signal (GitHub does not bump it on check activity), so settled
+    // heads — including 'none' past the grace window — also re-check on the
+    // CI_RECHECK_INTERVAL_MS period to catch re-runs that turn red and CI
+    // that appears late (manual workflow_dispatch).
     const prUpdatedAt =
       typeof pr.updated_at === 'string' ? pr.updated_at : undefined;
     let ciResult: CiObservation | undefined;
@@ -3313,7 +3527,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.prWatchEvents.has('ci_failure') &&
       (headChanged ||
         entry.ci === undefined ||
-        entry.ci === 'pending' ||
+        (entry.ci === 'pending' &&
+          (entry.lastCiFetchAt === undefined ||
+            Date.now() - entry.lastCiFetchAt >=
+              CI_PENDING_RECHECK_INTERVAL_MS)) ||
         (prUpdatedAt !== undefined && prUpdatedAt !== entry.prUpdatedAt) ||
         (entry.ci === 'none' &&
           entry.headObservedAt !== undefined &&
@@ -3321,7 +3538,22 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         (entry.lastCiFetchAt !== undefined &&
           Date.now() - entry.lastCiFetchAt >= CI_RECHECK_INTERVAL_MS))
     ) {
-      ciResult = await this.fetchCiAggregate(owner, repo, headSha);
+      try {
+        ciResult = await this.fetchCiAggregate(owner, repo, headSha);
+      } catch (err) {
+        // CI is a conditional refinement of the pulls.get baseline, not a
+        // dependency of it: a persistent Checks-endpoint failure (a classic
+        // PAT without Checks permission, an enterprise policy) must not
+        // suppress merge_conflict / state_change, whose data already arrived
+        // in pulls.get. Leave ciResult undefined so entry.ci is preserved
+        // (writing 'none' would re-fire ci_failure when the endpoint heals).
+        process.stderr.write(
+          `[Channel:${this.name}] CI fetch failed for ${key}, continuing without CI state this poll: ${sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            200,
+          )}\n`,
+        );
+      }
     }
     const ci = ciResult?.aggregate;
     const prevCiForThisHead = headChanged ? undefined : entry.ci;

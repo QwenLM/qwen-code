@@ -119,8 +119,22 @@ export function registerSessionPrBindingsRoutes(
             // truncated scan: callers must not treat it as authoritative.
             if (result.truncated || result.liveMergeFailed) partial = true;
             for (const session of result.sessions) {
-              const prs = session.prs;
-              if (!prs || prs.length === 0) continue;
+              if (session.prsReadFailed) {
+                // The sidecar exists but could not be read: this session's
+                // bindings are UNKNOWN, not empty. Omitting it without
+                // flagging would advertise an authoritative absence over
+                // bindings that may still exist.
+                partial = true;
+                continue;
+              }
+              // Every successfully scanned session gets a row — including
+              // an EMPTY one (a tombstone). "Scanned, no bindings" (an
+              // observed unbind) must stay distinguishable from "this
+              // answer did not enumerate the session": callers key
+              // retention on the listed session set, and a dropped empty
+              // row would let any partial answer revive the stale binding
+              // and keep delivering privately after an explicit unbind.
+              const prs = session.prs ?? [];
               bindings.push({
                 sessionId: session.sessionId,
                 workspaceCwd: runtime.workspaceCwd,

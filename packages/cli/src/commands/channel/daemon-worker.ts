@@ -71,6 +71,7 @@ import {
   type ChannelDeliveryRequest,
 } from '../../runtime/channel-delivery-ipc.js';
 import { sanitizeWorkerDiagnostic } from '../../serve/channel-worker-diagnostics.js';
+import { CHANNEL_BOUND_RELAY_META_KEY } from '../../serve/channel-worker-prompt-authorization.js';
 import {
   isChannelStartupReportAckMessage,
   MAX_CHANNEL_STARTUP_FAILURES,
@@ -321,10 +322,16 @@ export function createDaemonSessionFactory({
  * `BoundSessionGoneError` so the adapter falls back to the channel path —
  * except a 404 on the retry AFTER a successful wake, which is reversible
  * backpressure (the owner may have begun draining) and defers one cycle;
- * queue-full and temporarily-unavailable conditions (503, restore conflicts,
- * session limits, draining workspaces) are backpressure that defers the
- * event without consuming the failure budget; everything else propagates
- * as a transient delivery error for the adapter to retry.
+ * queue-full and temporarily-unavailable conditions (503, 429, other 5xx,
+ * restore conflicts, session limits, draining workspaces) are backpressure
+ * that defers the event without consuming the failure budget; everything
+ * else propagates as a transient delivery error for the adapter to retry.
+ *
+ * Every POST carries the caller's idempotency key (the adapter's durable
+ * task id) and the bound-relay marker: the daemon deduplicates repeated
+ * admissions of the same key (a lost acceptance mark or a lost 202 must not
+ * re-inject the event), and cross-workspace channel classification requires
+ * the marker in addition to the worker token.
  */
 export function createBoundSessionsAccessor(
   client: DaemonClientLike,
@@ -341,7 +348,11 @@ export function createBoundSessionsAccessor(
   const requestSignal = (): AbortSignal => AbortSignal.timeout(30_000);
   const discardBody = (res: Response): Promise<void> =>
     res.body?.cancel().catch(() => {}) ?? Promise.resolve();
-  const postPrompt = (sessionId: string, prompt: string): Promise<Response> =>
+  const postPrompt = (
+    sessionId: string,
+    prompt: string,
+    idempotencyKey?: string,
+  ): Promise<Response> =>
     client.requestRest(`/session/${encodeURIComponent(sessionId)}/prompt`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -351,11 +362,18 @@ export function createBoundSessionsAccessor(
       // interactive user prompt (loop-detected rejection instead of the
       // graceful channel end-turn, and live PR-binding backfill on relayed
       // external text). Admission strips the marker for unauthorized
-      // callers, so both keys must ride together.
+      // callers, so both keys must ride together. The bound-relay marker
+      // additionally scopes the process-level worker credential to its
+      // reason: cross-workspace channel classification requires it.
       body: JSON.stringify({
         prompt: [{ type: 'text', text: prompt }],
+        // The durable task id: the daemon deduplicates repeated admissions
+        // of the same key, so a retry after a lost acceptance mark or a
+        // lost 202 response does not re-inject the event.
+        ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
         _meta: {
           [CHANNEL_PROMPT_META_KEY]: true,
+          [CHANNEL_BOUND_RELAY_META_KEY]: true,
           ...(promptAuthorization
             ? { [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]: promptAuthorization }
             : {}),
@@ -374,7 +392,7 @@ export function createBoundSessionsAccessor(
       bindings?: unknown;
       partial?: unknown;
     };
-    const partial = body.partial === true;
+    let partial = body.partial === true;
     // A malformed 200 is not an authoritative empty snapshot: throwing
     // routes it into the adapter's fail-closed refresh handling (keep the
     // previous map, skip the watch pass) instead of wiping watch state.
@@ -420,7 +438,16 @@ export function createBoundSessionsAccessor(
             : {}),
         });
       }
-      if (entries.length === 0) continue;
+      if (entries.length === 0 && prs.length > 0) {
+        // A listed session whose PR entries ALL failed shape validation is
+        // a degraded answer, not an unbind: flag it so the adapter retains
+        // known bindings instead of trusting an empty projection.
+        partial = true;
+        continue;
+      }
+      // An empty prs row is a TOMBSTONE and must pass through: the adapter
+      // keys retention on the listed session set, so "scanned, no bindings"
+      // (an observed unbind) has to reach it even on a partial answer.
       const { sourceType, updatedAt } = record;
       cwdBySession.set(sessionId, workspaceCwd);
       summaries.push({
@@ -435,8 +462,8 @@ export function createBoundSessionsAccessor(
   };
   return {
     listPrBindings,
-    deliverPrompt: async (sessionId, prompt) => {
-      let res = await postPrompt(sessionId, prompt);
+    deliverPrompt: async (sessionId, prompt, idempotencyKey) => {
+      let res = await postPrompt(sessionId, prompt, idempotencyKey);
       let releaseWake: (() => Promise<void>) | undefined;
       let wokeSession = false;
       try {
@@ -466,7 +493,9 @@ export function createBoundSessionsAccessor(
             releaseWake = await wake(sessionId, cwd);
             wokeSession = true;
             await discardBody(res);
-            res = await postPrompt(sessionId, prompt);
+            // Same idempotency key: the first POST was a 404 (never
+            // admitted), and a response-loss retry must dedupe too.
+            res = await postPrompt(sessionId, prompt, idempotencyKey);
           }
         }
         if (res.status === 404) {
@@ -529,6 +558,20 @@ export function createBoundSessionsAccessor(
           }
           throw new Error(
             `POST /session/:id/prompt failed: HTTP 409 (${String(body.code)})`,
+          );
+        }
+        if (res.status === 429 || res.status >= 500) {
+          // The daemon's own rate limiter answers 429 rate_limit_exceeded
+          // (prompt tier, keyed on the worker's client id — one bucket for
+          // every bound delivery of the channel), and other 5xx are daemon
+          // transient states. Both are daemon-signalled backpressure: like
+          // the sibling 503s they must defer, not consume the failure budget
+          // (three consecutive 429s would otherwise dead-letter a watch
+          // event irrecoverably). The retries themselves keep the bucket
+          // saturated, so the deferral horizon is the escape.
+          throw new BoundSessionUnavailableError(
+            sessionId,
+            `HTTP ${res.status} (daemon backpressure)`,
           );
         }
         if (!res.ok) {

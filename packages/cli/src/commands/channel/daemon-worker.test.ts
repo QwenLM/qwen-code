@@ -9,6 +9,7 @@ import {
   CHANNEL_PROMPT_META_KEY,
 } from '@qwen-code/channel-base';
 import type { ChannelBoundSessions } from '@qwen-code/channel-base';
+import { CHANNEL_BOUND_RELAY_META_KEY } from '../../serve/channel-worker-prompt-authorization.js';
 
 const mockCanonicalizeWorkspace = vi.hoisted(() => vi.fn((p: string) => p));
 const mockLoadChannelsConfig = vi.hoisted(() => vi.fn());
@@ -2938,6 +2939,7 @@ describe('runChannelDaemonWorker', () => {
         prompt: [{ type: 'text', text: 'event text' }],
         _meta: {
           [CHANNEL_PROMPT_META_KEY]: true,
+          [CHANNEL_BOUND_RELAY_META_KEY]: true,
           [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]: 'worker-prompt-token',
         },
       });
@@ -4801,7 +4803,10 @@ describe('createBoundSessionsAccessor', () => {
         signal: expect.any(AbortSignal),
         body: JSON.stringify({
           prompt: [{ type: 'text', text: 'event text' }],
-          _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+          _meta: {
+            [CHANNEL_PROMPT_META_KEY]: true,
+            [CHANNEL_BOUND_RELAY_META_KEY]: true,
+          },
         }),
       }),
     );
@@ -4826,6 +4831,7 @@ describe('createBoundSessionsAccessor', () => {
           prompt: [{ type: 'text', text: 'event text' }],
           _meta: {
             [CHANNEL_PROMPT_META_KEY]: true,
+            [CHANNEL_BOUND_RELAY_META_KEY]: true,
             [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]: 'worker-prompt-token',
           },
         }),
@@ -5087,7 +5093,7 @@ describe('createBoundSessionsAccessor', () => {
     expect(requestRest).toHaveBeenCalledTimes(2);
   });
 
-  it('wakes only on 404, not on a generic 500 prompt failure', async () => {
+  it('wakes only on 404, not on a 500 prompt failure (R1-9)', async () => {
     const requestRest = vi
       .fn()
       .mockResolvedValueOnce(bindingsResponse())
@@ -5099,8 +5105,10 @@ describe('createBoundSessionsAccessor', () => {
     const err = await accessor
       .deliverPrompt('session-1', 'x')
       .catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(Error);
-    expect((err as Error).message).toContain('failed: HTTP 500');
+    // A daemon 5xx is backpressure: defer without waking and without
+    // consuming the failure budget.
+    expect(err).toBeInstanceOf(BoundSessionUnavailableError);
+    expect((err as Error).message).toContain('HTTP 500');
     expect(wake).not.toHaveBeenCalled();
     expect(requestRest).toHaveBeenCalledTimes(2);
   });
@@ -5211,7 +5219,7 @@ describe('createBoundSessionsAccessor', () => {
     expect((err as Error).name).not.toBe('BoundSessionUnavailableError');
   });
 
-  it('keeps a 500 prompt failure transient', async () => {
+  it('classifies a 500 prompt failure as daemon backpressure (R1-9)', async () => {
     const requestRest = vi
       .fn()
       .mockResolvedValue(jsonResponse(500, { error: 'boom' }));
@@ -5220,11 +5228,12 @@ describe('createBoundSessionsAccessor', () => {
     const err = await accessor
       .deliverPrompt('session-1', 'x')
       .catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(Error);
-    expect((err as Error).message).toContain('failed: HTTP 500');
+    // Daemon-signalled transient states must not consume the failure
+    // budget: three consecutive 500s would otherwise dead-letter the event.
+    expect(err).toBeInstanceOf(BoundSessionUnavailableError);
+    expect((err as Error).message).toContain('HTTP 500');
     expect((err as Error).name).not.toBe('BoundSessionGoneError');
     expect((err as Error).name).not.toBe('BoundSessionQueueFullError');
-    expect((err as Error).name).not.toBe('BoundSessionUnavailableError');
   });
 
   it('defers a post-wake 404 as reversible', async () => {
@@ -5425,14 +5434,135 @@ describe('createBoundSessionsAccessor', () => {
   });
 
   it('discards the response body of a failed prompt', async () => {
-    const res = jsonResponse(500, { error: 'boom' });
+    const res = jsonResponse(400, { error: 'boom' });
     const cancel = vi.spyOn(res.body!, 'cancel');
     const requestRest = vi.fn().mockResolvedValue(res);
     const accessor = createBoundSessionsAccessor(makeClient(requestRest));
 
     await expect(accessor.deliverPrompt('session-1', 'x')).rejects.toThrow(
-      'failed: HTTP 500',
+      'failed: HTTP 400',
     );
     expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it('classifies a 429 rate limit as backpressure, not a failure (R1-9)', async () => {
+    // The daemon's prompt-tier limiter answers 429 rate_limit_exceeded with
+    // one bucket per worker client id: a delivery burst saturates it, and
+    // the retries keep it saturated. Burning the failure budget here would
+    // dead-letter a watch event irrecoverably after three polls.
+    const res = jsonResponse(429, { code: 'rate_limit_exceeded' });
+    const cancel = vi.spyOn(res.body!, 'cancel');
+    const requestRest = vi.fn().mockResolvedValue(res);
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    const err = await accessor
+      .deliverPrompt('session-1', 'x')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BoundSessionUnavailableError);
+    expect((err as Error).message).toContain('HTTP 429');
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it('classifies other daemon 5xx as backpressure (R1-9)', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(502, { error: 'bad gateway' }));
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    await expect(
+      accessor.deliverPrompt('session-1', 'x'),
+    ).rejects.toBeInstanceOf(BoundSessionUnavailableError);
+  });
+
+  it('carries the idempotency key on the initial and the post-wake POST (W4)', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(bindingsResponse())
+      .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+      .mockResolvedValueOnce(jsonResponse(202, { promptId: 'p-1' }));
+    const wake = vi.fn().mockResolvedValue(undefined);
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest), wake);
+    await accessor.listPrBindings();
+
+    await accessor.deliverPrompt('session-1', 'event text', 'task-42');
+
+    // The first POST was a 404 (never admitted); the retry must carry the
+    // SAME key so a lost acceptance mark or a lost 202 deduplicates.
+    for (const call of [
+      requestRest.mock.calls[1]!,
+      requestRest.mock.calls[2]!,
+    ]) {
+      const body = JSON.parse(String((call[1] as RequestInit).body)) as {
+        idempotencyKey?: string;
+      };
+      expect(body.idempotencyKey).toBe('task-42');
+    }
+  });
+
+  it('omits the idempotency key when the caller passes none', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(202, { promptId: 'p-1' }));
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    await accessor.deliverPrompt('session-1', 'x');
+
+    const body = JSON.parse(
+      String((requestRest.mock.calls[0]![1] as RequestInit).body),
+    ) as Record<string, unknown>;
+    expect(body['idempotencyKey']).toBeUndefined();
+  });
+
+  it('passes an empty-prs tombstone through to the adapter (W2, R1-8)', async () => {
+    // "Scanned, no bindings" (an observed unbind) must reach the adapter
+    // even on a partial answer: retention keys on the listed session set,
+    // and a dropped empty row would revive the stale binding forever.
+    const requestRest = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        bindings: [
+          {
+            sessionId: 'session-1',
+            workspaceCwd: '/ws/a',
+            prs: [{ number: 1, url: 'https://github.com/o/r/pull/1' }],
+          },
+          { sessionId: 'session-unbound', workspaceCwd: '/ws/a', prs: [] },
+        ],
+        partial: true,
+      }),
+    );
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    const snapshot = await accessor.listPrBindings();
+
+    expect(snapshot.partial).toBe(true);
+    expect(snapshot.bindings).toHaveLength(2);
+    expect(snapshot.bindings[1]).toEqual({
+      sessionId: 'session-unbound',
+      workspaceCwd: '/ws/a',
+      prs: [],
+    });
+  });
+
+  it('flags a session whose PR entries are all malformed as partial (W2)', async () => {
+    const requestRest = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        bindings: [
+          {
+            sessionId: 'session-1',
+            workspaceCwd: '/ws/a',
+            prs: [{ number: 'bad' }, { url: 42 }],
+          },
+        ],
+        partial: false,
+      }),
+    );
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    const snapshot = await accessor.listPrBindings();
+
+    // A degraded projection is not an unbind: the answer must not advertise
+    // an authoritative empty binding set for this session.
+    expect(snapshot.partial).toBe(true);
+    expect(snapshot.bindings).toHaveLength(0);
   });
 });

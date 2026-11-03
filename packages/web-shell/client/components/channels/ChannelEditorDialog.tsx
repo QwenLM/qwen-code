@@ -90,6 +90,9 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     baseUrl: 'channels.editor.field.github.baseUrl',
     groupPolicy: 'channels.editor.field.github.groupPolicy',
     reasonFilter: 'channels.editor.field.github.reasonFilter',
+    deliverToBoundSessions:
+      'channels.editor.field.github.deliverToBoundSessions',
+    prWatchEvents: 'channels.editor.field.github.prWatchEvents',
   },
   gitlab: {
     token: 'channels.editor.field.gitlab.token',

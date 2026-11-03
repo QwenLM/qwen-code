@@ -62,6 +62,7 @@ import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorizat
 import { tagListener } from './local-control/index.js';
 import {
   CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY,
+  CHANNEL_BOUND_RELAY_META_KEY,
   registerChannelWorkerPromptAuthorization,
   revokeChannelWorkerPromptAuthorization,
 } from './channel-worker-prompt-authorization.js';
@@ -20767,6 +20768,90 @@ describe('createServeApp', () => {
       expect(res.body.eventEpoch).toBe('epoch-abc');
     });
 
+    it('deduplicates a repeated idempotency key into the original admission (W4)', async () => {
+      // A channel relay marks acceptance durably AFTER the 202; a crash or
+      // write failure in that gap (or a lost response) makes it retry with
+      // the same key. The retry must return the original admission without
+      // enqueueing a second turn.
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const first = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'task-42',
+        });
+      expect(first.status).toBe(202);
+
+      const retry = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'task-42',
+        });
+      expect(retry.status).toBe(202);
+      expect(retry.body.promptId).toBe(first.body.promptId);
+      expect(retry.body.deduplicated).toBe(true);
+      expect(bridge.promptCalls).toHaveLength(1);
+
+      // A different event admits normally.
+      const other = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'another event' }],
+          idempotencyKey: 'task-43',
+        });
+      expect(other.status).toBe(202);
+      expect(other.body.promptId).not.toBe(first.body.promptId);
+      expect(other.body.deduplicated).toBeUndefined();
+      expect(bridge.promptCalls).toHaveLength(2);
+      // The key is route-level admission metadata, never prompt content.
+      expect(bridge.promptCalls[0]?.req).not.toHaveProperty('idempotencyKey');
+    });
+
+    it('scopes idempotency keys per session (W4)', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const a = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'same-key',
+        });
+      const b = await request(app)
+        .post('/session/session-B/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'event' }],
+          idempotencyKey: 'same-key',
+        });
+      expect(a.status).toBe(202);
+      expect(b.status).toBe(202);
+      expect(b.body.promptId).not.toBe(a.body.promptId);
+      expect(bridge.promptCalls).toHaveLength(2);
+    });
+
+    it('rejects a malformed idempotency key (W4)', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      for (const key of ['', 42, 'x'.repeat(201)]) {
+        const res = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'event' }],
+            idempotencyKey: key,
+          });
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_idempotency_key');
+      }
+      expect(bridge.promptCalls).toHaveLength(0);
+    });
+
     it('passes client identity and promptId context into bridge.sendPrompt', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(baseOpts, undefined, { bridge });
@@ -20943,12 +21028,14 @@ describe('createServeApp', () => {
       }
     });
 
-    it('admits a channel worker token registered for a different workspace', async () => {
+    it('admits a foreign worker token only for an explicit bound relay (G3, R1-14)', async () => {
       // G3: bound delivery is cross-workspace, so the prompt route uses the
       // process-level relay check (token registered for ANY workspace) gated
       // on the target runtime's trust — not the old home===target equality.
-      // A token whose home is a foreign workspace must still classify a
-      // prompt delivered into the primary workspace; a forged token must not.
+      // R1-14: the widening is scoped to its reason — cross-workspace
+      // classification additionally requires the bound-relay marker, so a
+      // PLAIN prompt carrying a foreign worker token stays an ordinary
+      // interactive prompt. A forged token must not classify either way.
       const bridge = fakeBridge();
       const app = createServeApp(baseOpts, undefined, { bridge });
       const token = 'channel-worker-cross-workspace-token';
@@ -20964,7 +21051,7 @@ describe('createServeApp', () => {
               [CHANNEL_PROMPT_META_KEY]: true,
             },
           });
-        const trusted = await request(app)
+        const plainForeign = await request(app)
           .post('/session/session-A/prompt')
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({
@@ -20972,13 +21059,37 @@ describe('createServeApp', () => {
             _meta: {
               [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: token,
               [CHANNEL_PROMPT_META_KEY]: true,
+              [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: 'benign transcript text',
+            },
+          });
+        const relay = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'hi' }],
+            _meta: {
+              [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: token,
+              [CHANNEL_PROMPT_META_KEY]: true,
+              [CHANNEL_BOUND_RELAY_META_KEY]: true,
             },
           });
 
         expect(forged.status).toBe(202);
-        expect(trusted.status).toBe(202);
+        expect(plainForeign.status).toBe(202);
+        expect(relay.status).toBe(202);
         expect(bridge.promptCalls[0]?.context?.channelPrompt).toBeUndefined();
-        expect(bridge.promptCalls[1]?.context?.channelPrompt).toBe(true);
+        // The plain foreign prompt gets no channel classification and no
+        // caller-supplied display projection.
+        expect(bridge.promptCalls[1]?.context?.channelPrompt).toBeUndefined();
+        expect(
+          bridge.promptCalls[1]?.context?.promptDisplayText,
+        ).toBeUndefined();
+        expect(bridge.promptCalls[2]?.context?.channelPrompt).toBe(true);
+        for (const call of bridge.promptCalls) {
+          expect(call.req._meta ?? {}).not.toHaveProperty(
+            CHANNEL_BOUND_RELAY_META_KEY,
+          );
+        }
       } finally {
         revokeChannelWorkerPromptAuthorization(token);
       }
@@ -21029,6 +21140,7 @@ describe('createServeApp', () => {
             _meta: {
               [CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY]: token,
               [CHANNEL_PROMPT_META_KEY]: true,
+              [CHANNEL_BOUND_RELAY_META_KEY]: true,
             },
           });
 

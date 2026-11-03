@@ -127,7 +127,7 @@ The adapter uses GitHub's Notifications API as a wake-up signal:
 
 The comment window is `(previousCursor, currentMaxUpdatedAt]`. Accepted, running, and failed tasks are stored under `~/.qwen/channels/<workspace-scope>/` with private file permissions. On restart, the channel recovers those tasks before polling GitHub again. Failed tasks are attempted up to three times, then become terminal; cancelled tasks are terminal and are not rerun. A task whose final reply was already posted, suppressed, or queued for definite no-write retry is not rerun.
 
-The notification cursor does not advance while recoverable tasks remain, or when inbound task state cannot be read or written. This prevents a crash or agent failure from losing an accepted comment and preserves the deduplication keys needed to avoid a second dispatch from the notification feed.
+The notification cursor does not advance while recoverable tasks remain, or when inbound task state cannot be read or written. This prevents a crash or agent failure from losing an accepted comment and preserves the deduplication keys needed to avoid a second dispatch from the notification feed. The one deliberate exception is **bound-session backpressure** (see below): a deferred bound delivery has its own durable retry and a bounded deferral horizon, so it does not hold the shared cursor — its notification is marked read while the event stays recoverable in the task store.
 
 Non-comment activity (push, label changes) bumps the notification's `updated_at` but produces zero new comments in the window, so re-fetched threads are skipped without triggering the agent.
 
@@ -167,13 +167,33 @@ so the session that follows the PR handles the event with its existing context.
   the delivery, so restarts do not divert events into public replies.
   **Watch events (below) are private-only**: with no bound target they are
   logged and retired, never published as PR comments.
-- A full prompt queue or a temporarily unavailable session defers the event
-  without consuming the retry budget; the deferral is bounded (240 consecutive
-  deferrals — ~4 hours at the default 60s poll, and proportionally longer with
-  a larger `pollInterval`), and events that exhaust it are retired to a private
-  dead-letter log
+- A full prompt queue, a rate-limited daemon (HTTP 429), or a temporarily
+  unavailable session defers the event without consuming the retry budget;
+  the deferral is bounded (240 consecutive deferrals — ~4 hours at the
+  default 60s poll, and proportionally longer with a larger `pollInterval`),
+  and events that exhaust it are retired to a private dead-letter log
   (`~/.qwen/channels/<workspace-scope>/<channel>-<name-hash>-github-bound-deadletter.jsonl`)
-  with a stderr alert rather than silently dropped.
+  with a stderr alert rather than silently dropped. If the dead-letter write
+  itself fails, the task is kept (not removed) so the event stays recoverable.
+  Deferred bound events do not hold the shared notification cursor: their
+  notifications are marked read while the durable task keeps retrying.
+- **Two operator-visible states stop bound delivery from processing events.**
+  (1) _Cold start_: with `deliverToBoundSessions` on, the comment lane waits
+  for the first successful binding lookup. While the lookup has never
+  succeeded — or keeps answering an **empty partial** snapshot (a draining or
+  unreadable workspace) — `pollOnce` returns before fetching notifications, so
+  no GitHub event for any PR is processed; a throttled stderr line names the
+  state. The empty-partial deferral is bounded (30 consecutive polls): after
+  that the lane opens, and events whose PR is still absent from the incomplete
+  snapshot defer per-event (backpressure above) instead of taking the public
+  path — an incomplete scan never establishes that a PR is unbound. Once a
+  complete snapshot lands, deferred events are re-resolved and delivered
+  privately. (2) _Backpressure_: a deferred bound event keeps its own durable
+  retry (previous bullet) while the rest of the channel continues normally.
+- The injected prompt names the comment author and marks truncation
+  explicitly: comment content is capped at 6,000 code points with an
+  `[prompt truncated: N more characters omitted]` notice, and an aggregate
+  batch that drops older comments says so — no tail is silently consumed.
 - This feature requires a daemon-managed channel; standalone
   `qwen channel start` ignores the setting with a warning.
 
@@ -186,13 +206,16 @@ pushed, including a force-push revisit of a recent SHA), and `state_change`
 (PR merged or closed; close → reopen → close fires again). Detection is
 API-level and spends no model tokens until a transition fires. A quiet PR with
 settled CI costs one API call per poll; a PR whose CI is still pending is
-re-checked every poll, and settled heads are re-checked every 10 minutes
-(GitHub does not advance a PR's `updated_at` on check re-runs, so the periodic
-re-check is what catches a re-run turning red). At most 30 bound PRs are
-actively polled; CI-active bursts add check-list pages and can exceed the
-5 000 calls/hour token budget on large-CI repos — the watch then fails fast on
-rate limiting and retries next poll. Transitions are persisted before
-delivery, so restarts do not re-fire them.
+re-checked every 5 minutes until it settles, and settled heads are re-checked
+every 10 minutes (GitHub does not advance a PR's `updated_at` on check
+re-runs, so the periodic re-check is what catches a re-run turning red). At
+most 30 bound PRs are actively polled. A credential failure or rate limit
+(401/403/429) aborts the whole watch pass for that poll — one shared failure
+must not issue one doomed request per watched PR — while a per-PR permanent
+status (404/410/451) only skips that PR. A failing Checks endpoint never
+suppresses the other three detections: their data comes from `pulls.get`,
+and the last known CI aggregate stands until a fetch succeeds again.
+Transitions are persisted before delivery, so restarts do not re-fire them.
 
 ## Known Limitations
 

@@ -150,6 +150,9 @@ describe('GET /sessions/pr-bindings', () => {
     const res = await request(h.app).get('/sessions/pr-bindings');
 
     expect(res.status).toBe(200);
+    // Every successfully scanned session gets a row — an empty one is a
+    // TOMBSTONE (W2/R1-8): callers must be able to tell "scanned, no
+    // bindings" (an observed unbind) from "not enumerated by this answer".
     expect(res.body).toEqual({
       bindings: [
         {
@@ -165,9 +168,35 @@ describe('GET /sessions/pr-bindings', () => {
             },
           ],
         },
+        { sessionId: 'session-2', workspaceCwd: '/ws/a', prs: [] },
+        { sessionId: 'session-no-prs', workspaceCwd: '/ws/a', prs: [] },
       ],
       partial: false,
     });
+  });
+
+  it('flags an unreadable PR sidecar as partial instead of an unbind (W2, R1-8)', async () => {
+    const h = appHarness({
+      entries: [makeEntry(makeRuntime())],
+      listSessions: async () =>
+        page([
+          { sessionId: 'session-unbound', prs: [] },
+          // The projection sets prsReadFailed when the sidecar EXISTS but
+          // could not be read (I/O error, corrupt JSON, invalid shape).
+          { sessionId: 'session-corrupt', prsReadFailed: true },
+        ]),
+    });
+
+    const res = await request(h.app).get('/sessions/pr-bindings');
+
+    expect(res.status).toBe(200);
+    // The unreadable session's bindings are UNKNOWN: omitting it without
+    // partial would advertise an authoritative absence over bindings that
+    // may still exist, degrading private delivery to the public path.
+    expect(res.body.partial).toBe(true);
+    expect(res.body.bindings).toEqual([
+      { sessionId: 'session-unbound', workspaceCwd: '/ws/a', prs: [] },
+    ]);
   });
 
   it('falls back to createdAt when a live summary lacks updatedAt', async () => {

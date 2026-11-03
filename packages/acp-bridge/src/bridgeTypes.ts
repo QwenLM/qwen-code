@@ -1268,6 +1268,15 @@ export interface BridgeSessionSummary {
    * session can produce several PRs (stacked or follow-up work).
    */
   prs?: SessionPrInfo[];
+  /**
+   * True when the session's PR sidecar EXISTS but could not be read (I/O
+   * error, invalid JSON, failed shape check): `prs` is then unknown, not
+   * empty. Absent sidecars (never bound / last binding removed) leave both
+   * fields unset — that is an authoritative "no bindings". Consumers that
+   * project bindings into authoritative snapshots must treat this flag as
+   * a degraded read, not an unbind.
+   */
+  prsReadFailed?: true;
 }
 
 /** Original event-bus cursor captured when a prompt id was first admitted. */

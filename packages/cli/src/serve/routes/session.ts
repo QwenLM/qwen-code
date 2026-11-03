@@ -282,7 +282,9 @@ import {
 } from '../branch-worktree-preparation.js';
 import type { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
 import {
+  CHANNEL_BOUND_RELAY_META_KEY,
   CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY,
+  isChannelWorkerPromptAuthorized,
   isChannelWorkerPromptToken,
 } from '../channel-worker-prompt-authorization.js';
 import {
@@ -375,6 +377,40 @@ const ARTIFACT_LIBRARY_CONCURRENCY = 4;
 // repeated reference resolves to the same 8 MiB image once per occurrence).
 // Keep a single request from expanding an unbounded number of content blocks.
 const MEDIA_CONTENT_MAX_BLOCKS = 256;
+
+// Admission-side idempotency for POST /session/:id/prompt. A channel relay
+// marks acceptance durably AFTER the 202; a crash or write failure in that
+// gap (or a lost response) makes it retry, and the retry must not enqueue
+// the event twice. The ring maps a caller-supplied key to the promptId of
+// its first admission; a repeat returns that admission without re-enqueueing.
+// In-memory on purpose: the prompt queue it protects is in-memory too, so a
+// daemon restart loses both together and re-injection becomes the correct
+// recovery. Bounded per session and across sessions (FIFO eviction).
+const PROMPT_IDEMPOTENCY_KEY_MAX_LENGTH = 200;
+const PROMPT_IDEMPOTENCY_KEYS_PER_SESSION = 128;
+const PROMPT_IDEMPOTENCY_MAX_SESSIONS = 1024;
+const promptIdempotencyBySession = new Map<string, Map<string, string>>();
+
+function rememberPromptIdempotencyKey(
+  sessionId: string,
+  key: string,
+  promptId: string,
+): void {
+  let keys = promptIdempotencyBySession.get(sessionId);
+  if (!keys) {
+    keys = new Map<string, string>();
+    promptIdempotencyBySession.set(sessionId, keys);
+    if (promptIdempotencyBySession.size > PROMPT_IDEMPOTENCY_MAX_SESSIONS) {
+      const oldest = promptIdempotencyBySession.keys().next().value;
+      if (oldest !== undefined) promptIdempotencyBySession.delete(oldest);
+    }
+  }
+  keys.set(key, promptId);
+  if (keys.size > PROMPT_IDEMPOTENCY_KEYS_PER_SESSION) {
+    const oldest = keys.keys().next().value;
+    if (oldest !== undefined) keys.delete(oldest);
+  }
+}
 
 // SVG is allowed as an ordinary file resource but never as an inline image.
 // Compare the normalized media type so spelling variants cannot bypass the
@@ -8499,6 +8535,22 @@ export function registerSessionRoutes(
           }
           requestDeadlineMs = rawRequestDeadline;
         }
+        const rawIdempotencyKey = body['idempotencyKey'];
+        let idempotencyKey: string | undefined;
+        if (rawIdempotencyKey !== undefined && rawIdempotencyKey !== null) {
+          if (
+            typeof rawIdempotencyKey !== 'string' ||
+            rawIdempotencyKey.length === 0 ||
+            rawIdempotencyKey.length > PROMPT_IDEMPOTENCY_KEY_MAX_LENGTH
+          ) {
+            res.status(400).json({
+              error: `\`idempotencyKey\` must be a non-empty string of at most ${PROMPT_IDEMPOTENCY_KEY_MAX_LENGTH} characters`,
+              code: 'invalid_idempotency_key',
+            });
+            return;
+          }
+          idempotencyKey = rawIdempotencyKey;
+        }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
 
@@ -8514,6 +8566,26 @@ export function registerSessionRoutes(
         }
 
         const promptId = crypto.randomUUID();
+        if (idempotencyKey !== undefined) {
+          const admittedPromptId = promptIdempotencyBySession
+            .get(sessionId)
+            ?.get(idempotencyKey);
+          if (admittedPromptId !== undefined) {
+            // A retry of an already-admitted event (lost acceptance mark or
+            // lost 202 on the caller side): return the original admission
+            // without enqueueing a second turn — and before any delivery
+            // authorization is minted for the unused new promptId. The
+            // cursor/epoch are fresh so the caller can still seed SSE
+            // resume from this response.
+            res.status(202).json({
+              promptId: admittedPromptId,
+              lastEventId: ownerBridge.getSessionLastEventId(sessionId),
+              eventEpoch: ownerBridge.getSessionEventEpoch(sessionId),
+              deduplicated: true,
+            });
+            return;
+          }
+        }
         if (delivery && deps.channelDeliveryAuthorizations) {
           deps.channelDeliveryAuthorizations.authorizePrompt(
             runtime.workspaceCwd,
@@ -8527,6 +8599,7 @@ export function registerSessionRoutes(
         const forwardedBody = { ...body };
         delete forwardedBody['deadlineMs'];
         delete forwardedBody['delivery'];
+        delete forwardedBody['idempotencyKey'];
         const forwardedMeta =
           typeof forwardedBody['_meta'] === 'object' &&
           forwardedBody['_meta'] !== null &&
@@ -8539,26 +8612,37 @@ export function registerSessionRoutes(
         const promptDisplayText =
           forwardedMeta?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
         const channelPrompt = forwardedMeta?.[CHANNEL_PROMPT_META_KEY];
+        const boundRelay = forwardedMeta?.[CHANNEL_BOUND_RELAY_META_KEY];
         if (forwardedMeta) {
           delete forwardedMeta[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY];
           delete forwardedMeta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
           delete forwardedMeta[SUBMITTED_PROMPT_META_KEY];
           delete forwardedMeta[DAEMON_SUBMITTED_PROMPT_META_KEY];
           delete forwardedMeta[CHANNEL_PROMPT_META_KEY];
+          delete forwardedMeta[CHANNEL_BOUND_RELAY_META_KEY];
           if (Object.keys(forwardedMeta).length > 0) {
             forwardedBody['_meta'] = forwardedMeta;
           } else {
             delete forwardedBody['_meta'];
           }
         }
-        // Bound delivery is cross-workspace: the worker token is a
-        // process-level relay credential, admitted for any workspace the
-        // daemon serves bindings for (primary or trusted — the same trust
-        // model the bindings route enumerates). A forged token is still
-        // dropped here and again at the bridge admission strip.
+        // Home-workspace channel turns ride the per-workspace worker
+        // registration (the pre-relay predicate). Cross-workspace bound
+        // delivery additionally requires the explicit bound-relay marker:
+        // the process-level credential exists for createBoundSessionsAccessor
+        // relays, so a PLAIN prompt carrying a foreign worker token gets no
+        // channel classification (and no caller-supplied display projection).
+        // The target must still be primary or trusted — the same trust model
+        // the bindings route enumerates. A forged token is dropped here and
+        // again at the bridge admission strip.
         const channelWorkerAuthorized =
-          isChannelWorkerPromptToken(promptAuthorization) &&
-          (runtime.primary || runtime.trusted);
+          isChannelWorkerPromptAuthorized(
+            promptAuthorization,
+            runtime.workspaceCwd,
+          ) ||
+          (boundRelay === true &&
+            isChannelWorkerPromptToken(promptAuthorization) &&
+            (runtime.primary || runtime.trusted));
         const trustedPromptDisplayText =
           typeof promptDisplayText === 'string' && channelWorkerAuthorized
             ? promptDisplayText
@@ -8667,6 +8751,12 @@ export function registerSessionRoutes(
           return;
         }
         res.off('close', onResClose);
+        if (idempotencyKey !== undefined) {
+          // Admission succeeded: remember the key BEFORE any await so a
+          // concurrent retry cannot slip past the check above (the whole
+          // check-admit-remember sequence is synchronous).
+          rememberPromptIdempotencyKey(sessionId, idempotencyKey, promptId);
+        }
 
         // A `/review` or `/verify-pr` prompt binds the PR to this session as
         // soon as the turn is admitted, instead of waiting for an on-demand

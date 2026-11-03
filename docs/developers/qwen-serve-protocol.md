@@ -3019,9 +3019,9 @@ Request:
 }
 ```
 
-| Field | Required | Notes                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| ----- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `cwd` | no       | Same canonicalization + `workspace_mismatch` rules as `POST /session`. Omit to inherit `/capabilities.workspaceCwd`. When `features` contains `multi_workspace_sessions`, callers may pass any trusted registered `workspaces[].cwd`; untrusted non-primary workspaces return `403 untrusted_workspace`. `mcpServers` is intentionally NOT accepted here — daemon-wide MCP is settings-driven (matches `POST /session`). |
+| Field | Required | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ----- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cwd` | no       | Same canonicalization as `POST /session`, with a stricter absence contract for restore: an explicit `cwd` with NO registry entry (removed, or never registered) returns `404 workspace_not_found` — a permanent absence callers may classify as gone — while a workspace whose entry exists in a reversible state (draining, transitioning, blocked) still returns `400 workspace_mismatch`. Omit to inherit `/capabilities.workspaceCwd`. When `features` contains `multi_workspace_sessions`, callers may pass any trusted registered `workspaces[].cwd`; untrusted non-primary workspaces return `403 untrusted_workspace`. `mcpServers` is intentionally NOT accepted here — daemon-wide MCP is settings-driven (matches `POST /session`). |
 
 Response:
 
@@ -3051,7 +3051,8 @@ The replay-window byte caps apply after the child has reconstructed the persiste
 **Errors:**
 
 - `404` — persisted session id doesn't exist (`SessionNotFoundError`).
-- `400` — `workspace_mismatch` (same shape as `POST /session`).
+- `404` — `workspace_not_found` when an explicit `cwd` has no registry entry at all (removed, or never registered): a PERMANENT absence, distinct from the reversible states below. Body: `{ error, code: "workspace_not_found", boundWorkspace, requestedWorkspace }` — no `workspaceCount`. A client that read the old "404 means the session is gone" contract should treat this code as a routing failure it can route around (e.g. re-register the workspace), not as evidence the session was deleted.
+- `400` — `workspace_mismatch` (same shape as `POST /session`), including the reversible lifecycle states: a workspace whose registry entry exists but is draining, transitioning, or blocked. Retry once the workspace settles; do not classify it as gone.
 - `403` — `untrusted_workspace` when `cwd` targets an untrusted non-primary workspace.
 - `503` — `session_limit_exceeded` (counts against `--max-sessions`; in-flight restores are accounted for too).
 - `504` — `session_restore_timeout`; retryable, with a `Retry-After` derived from the restore budget (clamped to 5-120s) because the same session id stays fenced until late cleanup settles.
@@ -3761,6 +3762,27 @@ later through the same replayable event and never changes `turn_complete` into
 send or publish a delivery result.
 
 Validation: `prompt` must be a non-empty array of objects. Other failures return `400` before reaching the bridge.
+
+`idempotencyKey` is an optional non-empty string of at most 200 characters
+(invalid values return `400 invalid_idempotency_key`). It identifies the
+caller's EVENT, not the HTTP request: the first admission remembers the key
+per session, and a repeat POST with the same key returns the original
+admission — `202 { promptId, lastEventId, eventEpoch, deduplicated: true }`
+with the FIRST prompt's `promptId` and a fresh cursor/epoch — without
+enqueueing a second turn. This lets a relay that marks acceptance durably
+after the `202` (or loses the response) retry safely. The dedupe ring is
+in-memory and bounded (128 keys per session, FIFO): it lives exactly as long
+as the prompt queue it protects, so a daemon restart loses both together and
+re-injection becomes the correct recovery. Keys are scoped per session; the
+field is admission metadata and is never forwarded to the agent.
+
+Channel relays ride two `_meta` keys that the route strips before forwarding:
+`qwen.channel.prompt` (channel-turn classification) requires a registered
+channel-worker authorization token — the per-workspace registration for the
+target workspace, or, for a CROSS-workspace bound delivery, any registered
+worker token plus the explicit `qwen.daemon.channelBoundRelay: true` marker
+and a primary/trusted target. A plain prompt carrying a foreign worker token
+gets no channel classification and no caller-supplied display projection.
 
 Response:
 

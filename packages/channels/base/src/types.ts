@@ -230,11 +230,22 @@ export interface ChannelBoundSessions {
    * Throws `BoundSessionGoneError` when the session no longer exists,
    * `BoundSessionQueueFullError` when the session's prompt queue is full,
    * and `BoundSessionUnavailableError` when the session or its workspace is
-   * temporarily unavailable (draining, session limit, restore in progress).
-   * The latter two are backpressure: defer without consuming the failure
-   * budget.
+   * temporarily unavailable (draining, session limit, restore in progress,
+   * rate limited). The latter two are backpressure: defer without consuming
+   * the failure budget.
+   *
+   * `idempotencyKey` identifies the delivery attempt's EVENT (the adapter
+   * passes its durable task id): the daemon deduplicates repeated
+   * admissions of the same key, so a retry after a lost acceptance mark or
+   * a lost response re-injects nothing. The key's dedupe lifetime is the
+   * daemon process — a daemon restart loses the queue with it, making
+   * re-injection the correct recovery there.
    */
-  deliverPrompt(sessionId: string, prompt: string): Promise<void>;
+  deliverPrompt(
+    sessionId: string,
+    prompt: string,
+    idempotencyKey?: string,
+  ): Promise<void>;
 }
 
 export interface ObservedChannelIdentity {
