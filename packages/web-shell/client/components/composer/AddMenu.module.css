@@ -1,16 +1,3 @@
-.content {
-  width: 320px;
-  max-width: calc(100vw - 1rem);
-  padding: 6px;
-}
-
-.actionRow {
-  min-height: 52px;
-  gap: 10px;
-  padding: 6px;
-  border-radius: 10px;
-}
-
 .iconTile {
   display: inline-flex;
   width: 32px;

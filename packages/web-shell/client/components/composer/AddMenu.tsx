@@ -9,10 +9,12 @@ import {
 import type { ChangeEvent, ReactNode } from 'react';
 import {
   ArrowLeftIcon,
+  AudioLinesIcon,
   BlocksIcon,
   CameraIcon,
   FileTextIcon,
   GitBranchIcon,
+  HistoryIcon,
   ImageIcon,
   MessageCircleQuestionIcon,
   PaperclipIcon,
@@ -20,6 +22,7 @@ import {
   PlusIcon,
   SlashIcon,
   SparklesIcon,
+  TerminalIcon,
   UploadIcon,
   XIcon,
 } from 'lucide-react';
@@ -50,7 +53,6 @@ import type {
   AtMentionWorkspaceActions,
   BuiltinProviderCache,
 } from '../../hooks/useAtMentionSources';
-import { LiveVoiceMenuItem } from '../../live/LiveVoiceMenuItem';
 import { ModeIcon } from '../ModeIcon';
 import {
   getWorkflowModeControlState,
@@ -128,15 +130,19 @@ type MobilePage =
   | 'commands';
 
 const ADD_MENU_SEARCH_DEBOUNCE_MS = 150;
+const ACTION_ROW_CLASS =
+  'min-h-[52px] gap-[10px] rounded-[10px] p-[6px] font-normal';
 
 function ActionContent({
   icon,
   label,
   description,
+  descriptionId,
 }: {
   icon: ReactNode;
   label: string;
   description?: string;
+  descriptionId?: string;
 }) {
   return (
     <>
@@ -146,7 +152,9 @@ function ActionContent({
       <span className={menuStyles.actionText}>
         <span className={menuStyles.actionLabel}>{label}</span>
         {description && (
-          <span className={menuStyles.description}>{description}</span>
+          <span id={descriptionId} className={menuStyles.description}>
+            {description}
+          </span>
         )}
       </span>
     </>
@@ -383,6 +391,7 @@ export function AddMenu({
 }: AddMenuProps) {
   const { t, language } = useI18n();
   const workflowDescriptionId = useId();
+  const actionDescriptionId = useId();
   const workflowControl = workflow
     ? getWorkflowModeControlState(workflow, language)
     : null;
@@ -683,7 +692,7 @@ export function AddMenu({
                     <>
                       <Button
                         variant="ghost"
-                        className={`${mobileRowClass} ${menuStyles.actionRow}`}
+                        className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
                         onClick={() => pickMobileFiles('photos')}
                       >
                         <ActionContent
@@ -693,7 +702,7 @@ export function AddMenu({
                       </Button>
                       <Button
                         variant="ghost"
-                        className={`${mobileRowClass} ${menuStyles.actionRow}`}
+                        className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
                         onClick={() => pickMobileFiles('camera')}
                       >
                         <ActionContent
@@ -703,7 +712,7 @@ export function AddMenu({
                       </Button>
                       <Button
                         variant="ghost"
-                        className={`${mobileRowClass} ${menuStyles.actionRow}`}
+                        className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
                         onClick={() => pickMobileFiles('attach')}
                       >
                         <ActionContent
@@ -716,7 +725,7 @@ export function AddMenu({
                   {!disabled && uploadAvailable && (
                     <Button
                       variant="ghost"
-                      className={`${mobileRowClass} ${menuStyles.actionRow}`}
+                      className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
                       onClick={() => pickMobileFiles('upload')}
                     >
                       <ActionContent
@@ -743,9 +752,9 @@ export function AddMenu({
                         key={id}
                         data-testid={`composer-add-menu-${id === 'files' ? 'reference-file' : id}`}
                         variant="ghost"
-                        className={`${mobileRowClass} ${menuStyles.actionRow}`}
+                        className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
                         aria-label={pageLabels[id]}
-                        aria-description={pageDescriptions[id]}
+                        aria-describedby={`${actionDescriptionId}-${id}`}
                         onClick={() => {
                           setPage(id);
                           if (id === 'skills') onSkillsOpenChange?.(true);
@@ -755,6 +764,7 @@ export function AddMenu({
                           icon={<Icon />}
                           label={pageLabels[id]}
                           description={pageDescriptions[id]}
+                          descriptionId={`${actionDescriptionId}-${id}`}
                         />
                       </Button>
                     ))}
@@ -767,44 +777,59 @@ export function AddMenu({
                         mobileActions.commands.length > 0 && (
                           <Button
                             variant="ghost"
-                            className={mobileRowClass}
+                            className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
                             onClick={() => setPage('commands')}
                           >
-                            {t('composerMobile.commands')}
+                            <ActionContent
+                              icon={<SlashIcon />}
+                              label={t('composerMobile.commands')}
+                            />
                           </Button>
                         )}
                       <Button
                         variant="ghost"
-                        className={mobileRowClass}
+                        className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
                         onClick={() => closeAndRun(mobileActions.onHistory)}
                       >
-                        {t('composerMobile.history')}
+                        <ActionContent
+                          icon={<HistoryIcon />}
+                          label={t('composerMobile.history')}
+                        />
                       </Button>
                       <Button
                         variant="ghost"
-                        className={mobileRowClass}
+                        className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
                         onClick={() => closeAndRun(mobileActions.onToggleShell)}
                       >
-                        {t(
-                          mobileActions.shellMode
-                            ? 'quickActions.exitShellMode'
-                            : 'quickActions.shellMode',
-                        )}
+                        <ActionContent
+                          icon={<TerminalIcon />}
+                          label={t(
+                            mobileActions.shellMode
+                              ? 'quickActions.exitShellMode'
+                              : 'quickActions.shellMode',
+                          )}
+                        />
                       </Button>
                       {mobileActions.onLiveVoice && (
-                        <LiveVoiceMenuItem
-                          className={mobileRowClass}
+                        <Button
+                          variant="ghost"
+                          className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
                           onClick={() =>
                             closeAndRun(mobileActions.onLiveVoice!)
                           }
-                        />
+                        >
+                          <ActionContent
+                            icon={<AudioLinesIcon />}
+                            label={t('live.open')}
+                          />
+                        </Button>
                       )}
                     </>
                   )}
                   {!disabled && btw && !simpleMode && (
                     <Button
                       variant="ghost"
-                      className={`${mobileRowClass} ${menuStyles.actionRow}`}
+                      className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
                       disabled={Boolean(btw.disabledReason)}
                       data-testid="composer-add-menu-btw"
                       onClick={() => closeAndRun(btw.onSelect)}
@@ -829,13 +854,9 @@ export function AddMenu({
                   {!disabled && plan && !simpleMode && (
                     <Button
                       variant="ghost"
-                      className={`${mobileRowClass} ${menuStyles.actionRow}`}
+                      className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
                       aria-label={t('composerAdd.plan.label')}
-                      aria-description={t(
-                        plan.disabled
-                          ? 'composerAdd.plan.busy'
-                          : 'composerAdd.plan.description',
-                      )}
+                      aria-describedby={`${actionDescriptionId}-plan${plan.disabled ? '-busy' : ''}`}
                       aria-pressed={plan.checked}
                       disabled={plan.disabled}
                       data-testid="composer-add-menu-plan"
@@ -845,9 +866,13 @@ export function AddMenu({
                         icon={<ModeIcon mode="plan" />}
                         label={t('composerAdd.plan.label')}
                         description={t('composerAdd.plan.description')}
+                        descriptionId={`${actionDescriptionId}-plan`}
                       />
                       {plan.disabled && (
-                        <span className="text-xs text-muted-foreground">
+                        <span
+                          id={`${actionDescriptionId}-plan-busy`}
+                          className="text-xs text-muted-foreground"
+                        >
                           {t('composerAdd.plan.busy')}
                         </span>
                       )}
@@ -857,7 +882,7 @@ export function AddMenu({
                   {workflowControl && (
                     <Button
                       variant="ghost"
-                      className={`${mobileRowClass} ${menuStyles.actionRow}`}
+                      className={`${mobileRowClass} ${ACTION_ROW_CLASS}`}
                       aria-label={workflowControl.messages.label}
                       aria-describedby={workflowDescriptionId}
                       title={workflowControl.description}
@@ -1020,7 +1045,7 @@ export function AddMenu({
             align="start"
             side="top"
             sideOffset={6}
-            className={menuStyles.content}
+            className="w-[320px] max-w-[calc(100vw-1rem)] p-[6px]"
             onClick={(event) => event.stopPropagation()}
             onCloseAutoFocus={(event) => {
               const pendingCloseAction = pendingCloseActionRef.current;
@@ -1043,15 +1068,16 @@ export function AddMenu({
                 {addFileAvailable || uploadAvailable ? (
                   <DropdownMenuSub>
                     <DropdownMenuSubTrigger
-                      className={menuStyles.actionRow}
+                      className={ACTION_ROW_CLASS}
                       data-testid="composer-add-menu-file"
                       aria-label={t('composerAdd.file.label')}
-                      aria-description={t('composerAdd.file.description')}
+                      aria-describedby={`${actionDescriptionId}-file`}
                     >
                       <ActionContent
                         icon={<PaperclipIcon />}
                         label={t('composerAdd.file.label')}
                         description={t('composerAdd.file.description')}
+                        descriptionId={`${actionDescriptionId}-file`}
                       />
                     </DropdownMenuSubTrigger>
                     <DropdownMenuSubContent
@@ -1081,9 +1107,9 @@ export function AddMenu({
                 ) : null}
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger
-                    className={menuStyles.actionRow}
+                    className={ACTION_ROW_CLASS}
                     aria-label={pageLabels.files}
-                    aria-description={pageDescriptions.files}
+                    aria-describedby={`${actionDescriptionId}-files`}
                     disabled={!availability.referenceFile}
                     data-testid="composer-add-menu-reference-file"
                     onPointerMove={() => setReferenceSearchAutoFocus(false)}
@@ -1093,6 +1119,7 @@ export function AddMenu({
                       icon={<FileTextIcon />}
                       label={pageLabels.files}
                       description={pageDescriptions.files}
+                      descriptionId={`${actionDescriptionId}-files`}
                     />
                     {!availability.referenceFile ? (
                       <span className="text-xs text-muted-foreground">
@@ -1118,9 +1145,9 @@ export function AddMenu({
                 </DropdownMenuSub>
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger
-                    className={menuStyles.actionRow}
+                    className={ACTION_ROW_CLASS}
                     aria-label={pageLabels.extensions}
-                    aria-description={pageDescriptions.extensions}
+                    aria-describedby={`${actionDescriptionId}-extensions`}
                     disabled={!availability.extensions}
                     data-testid="composer-add-menu-extensions"
                   >
@@ -1128,6 +1155,7 @@ export function AddMenu({
                       icon={<BlocksIcon />}
                       label={pageLabels.extensions}
                       description={pageDescriptions.extensions}
+                      descriptionId={`${actionDescriptionId}-extensions`}
                     />
                     {!availability.extensions ? (
                       <span className="text-xs text-muted-foreground">
@@ -1149,9 +1177,9 @@ export function AddMenu({
                 </DropdownMenuSub>
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger
-                    className={menuStyles.actionRow}
+                    className={ACTION_ROW_CLASS}
                     aria-label={pageLabels.mcp}
-                    aria-description={pageDescriptions.mcp}
+                    aria-describedby={`${actionDescriptionId}-mcp`}
                     disabled={!availability.mcp}
                     data-testid="composer-add-menu-mcp"
                   >
@@ -1159,6 +1187,7 @@ export function AddMenu({
                       icon={<PlugIcon />}
                       label={pageLabels.mcp}
                       description={pageDescriptions.mcp}
+                      descriptionId={`${actionDescriptionId}-mcp`}
                     />
                     {!availability.mcp ? (
                       <span className="text-xs text-muted-foreground">
@@ -1180,9 +1209,9 @@ export function AddMenu({
                 </DropdownMenuSub>
                 <DropdownMenuSub onOpenChange={onSkillsOpenChange}>
                   <DropdownMenuSubTrigger
-                    className={menuStyles.actionRow}
+                    className={ACTION_ROW_CLASS}
                     aria-label={pageLabels.skills}
-                    aria-description={pageDescriptions.skills}
+                    aria-describedby={`${actionDescriptionId}-skills`}
                     disabled={!availability.skills}
                     data-testid="composer-add-menu-skills"
                   >
@@ -1190,6 +1219,7 @@ export function AddMenu({
                       icon={<SparklesIcon />}
                       label={pageLabels.skills}
                       description={pageDescriptions.skills}
+                      descriptionId={`${actionDescriptionId}-skills`}
                     />
                     {!availability.skills ? (
                       <span className="text-xs text-muted-foreground">
@@ -1244,7 +1274,7 @@ export function AddMenu({
               <>
                 <DropdownMenuSeparator className={menuStyles.separator} />
                 <DropdownMenuItem
-                  className={menuStyles.actionRow}
+                  className={ACTION_ROW_CLASS}
                   disabled={Boolean(btw.disabledReason)}
                   data-testid="composer-add-menu-btw"
                   onSelect={() => closeAndRun(btw.onSelect)}
@@ -1268,7 +1298,7 @@ export function AddMenu({
               <>
                 <DropdownMenuSeparator className={menuStyles.separator} />
                 <DropdownMenuCheckboxItem
-                  className={`${menuStyles.actionRow} ${menuStyles.planRow}`}
+                  className={`${ACTION_ROW_CLASS} ${menuStyles.planRow}`}
                   checked={plan.checked}
                   disabled={plan.disabled}
                   data-testid="composer-add-menu-plan"
@@ -1294,7 +1324,7 @@ export function AddMenu({
                   <DropdownMenuSeparator className={menuStyles.separator} />
                 )}
                 <DropdownMenuCheckboxItem
-                  className={menuStyles.actionRow}
+                  className={ACTION_ROW_CLASS}
                   checked={Boolean(workflowControl.mode?.requested)}
                   disabled={workflowControl.disabled}
                   aria-label={workflowControl.messages.label}

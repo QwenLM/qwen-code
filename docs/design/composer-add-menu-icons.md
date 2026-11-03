@@ -19,19 +19,28 @@ Add file, FileText for Reference file, Blocks for Extensions, Plug for MCP, and
 Sparkles for Skills. The last three match the workspace menu's existing icons.
 Use the same icons for corresponding mobile drawer entries; its separate photo,
 camera, and upload actions use Image, Camera, and Upload respectively.
+The mobile Commands, Input history, Shell, and Live voice rows use Slash,
+History, Terminal, and AudioLines icons with the same tiles and minimum height.
 
 Add short English and Chinese descriptions to the five desktop entries and the
 corresponding mobile reference entries. Describe Extensions and MCP as reference
 actions, not management or connection actions. Keep accessible labels stable and
 provide the supplementary text as accessible descriptions.
+Link each description with `aria-describedby` to its rendered text, including the
+busy explanation for mobile Plan.
 Use regular font weight for both action labels and descriptions.
 
 In the Extensions and MCP submenus, keep each item's description to one line
 with an ellipsis when it overflows. Preserve the full text in the native title.
+This intentionally also applies to touch devices to keep the list compact, as
+requested. Touch browsers do not expose native hover titles, so the full
+description is not available through that tooltip on touch.
 
 Keep the existing dropdown, drawer, and button primitives. Add a small private
-CSS Module for icon tiles, text hierarchy, row spacing, and a responsive menu
-width. Keep the layout compact with 32px icon tiles, 52px minimum rows, and a
+CSS Module for icon tiles, text hierarchy, and the Plan indicator. Pass row
+metrics and responsive menu width as Tailwind utilities through the existing
+primitives so their class merging resolves conflicting utilities. Keep the
+layout compact with 32px icon tiles, 52px minimum rows, and a
 320px menu capped to the viewport. Remove the separator above Skills and inset
 the remaining separators to align with the icon tiles. The menu background,
 border, shadow, and portal integration remain owned by the existing primitive.
@@ -62,11 +71,13 @@ the VS Code host itself works; report that distinction in verification results.
   drawer using the existing mock daemon. Label evidence as simulated backend UI
   validation, not real daemon or Git operation validation.
 - Check leading icons and label alignment at desktop and narrow widths without
-  menu overflow. Run the repository build and typecheck.
+  menu overflow, including against the built package and its scoped CSS. Run the
+  repository build and typecheck.
 - Keep the component, private styles, both translations, affected tests, and both
   design documents synchronized. Store local evidence under `.qwen/e2e-tests/`.
 
 ## Open questions
 
-None for this version. This implements the reference's internal organization;
-the existing menu background and border stay intact, and Plan is not highlighted.
+This implements the user's requested internal organization; the existing menu
+background and border stay intact, and Plan is not highlighted. Acceptance of
+the visual direction upstream remains subject to maintainer review.

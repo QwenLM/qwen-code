@@ -124,6 +124,11 @@ test('simple mobile add drawer keeps advanced controls in advanced mode @smoke',
     'MCP',
     'Skills',
   ]);
+  await expect(
+    drawer
+      .getByTestId('composer-add-menu-reference-file')
+      .getByText('Reference file', { exact: true }),
+  ).toBeVisible();
   await drawer.getByRole('button', { name: /^close$/i }).tap();
   await composer.locator('[data-web-shell-composer-expand]').tap();
   await expect(composer).toHaveAttribute(
@@ -140,6 +145,21 @@ test('simple mobile add drawer keeps advanced controls in advanced mode @smoke',
     .getByRole('button', { name: 'Qwen Test Alt', exact: true })
     .tap();
   await expect.poll(() => daemon.modelRequests().length).toBe(1);
+  await composer.getByTestId('composer-add-menu-trigger').tap();
+  await expect(drawer).toBeVisible();
+  const rows = drawer.locator('[data-vaul-no-drag] button');
+  const layout = await rows.evaluateAll((buttons) =>
+    buttons.map((button) => ({
+      minHeight: getComputedStyle(button).minHeight,
+      hasIcon: Boolean(
+        button.querySelector(':scope > span[aria-hidden="true"]'),
+      ),
+    })),
+  );
+  expect(layout.length).toBeGreaterThan(8);
+  expect(layout.every((row) => row.minHeight === '52px' && row.hasIcon)).toBe(
+    true,
+  );
 });
 
 test('simple mobile composer switches directly to advanced mode without losing its draft or attachments @smoke', async ({
