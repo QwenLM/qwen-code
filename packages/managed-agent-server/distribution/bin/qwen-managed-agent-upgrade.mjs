@@ -2591,6 +2591,18 @@ async function waitFor(system, deadline, probe) {
 // waits for the whole budget.
 const PROBE_TIMEOUT_MS = 5000;
 
+// Endpoint-supplied text — a health body's status, a fetch error's message —
+// is interpolated into single-line terminal reports. Neutralize control bytes
+// so a queryable endpoint cannot drive the terminal that reports it: moving
+// the cursor to repaint a FAIL verdict as PASS, splitting a row with a newline,
+// or writing the clipboard through OSC-52. Replacing every C0 control, DEL and
+// C1 byte with U+FFFD breaks the escape introducer (ESC) and keeps the row on
+// one line, while leaving the readable text intact.
+function printable(text) {
+  // eslint-disable-next-line no-control-regex -- matching control bytes is the point
+  return String(text).replace(/[\u0000-\u001F\u007F-\u009F]/g, '\uFFFD');
+}
+
 /**
  * Whether the health endpoint reports UP, and what it answered when it does
  * not: its status, or why fetch failed, which fetch itself words only as
@@ -2607,7 +2619,9 @@ async function health(system, url, budgetMs, capMs = PROBE_TIMEOUT_MS) {
     // name, only its code.
     return {
       up: false,
-      answer: error.cause?.message || error.cause?.code || error.message,
+      answer: printable(
+        error.cause?.message || error.cause?.code || error.message,
+      ),
       // How fetch rejects once the timeout signal fires.
       timedOut: error.name === 'TimeoutError',
     };
@@ -2620,7 +2634,7 @@ async function health(system, url, budgetMs, capMs = PROBE_TIMEOUT_MS) {
     // A proxy's error page is no JSON, and its status says enough.
     return {
       up: false,
-      answer: response.ok ? `${status}, ${error.message}` : status,
+      answer: response.ok ? `${status}, ${printable(error.message)}` : status,
       // The signal ends a body that stalls after its headers as well.
       timedOut: error.name === 'TimeoutError',
     };
@@ -2629,7 +2643,9 @@ async function health(system, url, budgetMs, capMs = PROBE_TIMEOUT_MS) {
     ? { up: true }
     : {
         up: false,
-        answer: body?.status ? `${status}, status ${body.status}` : status,
+        answer: body?.status
+          ? `${status}, status ${printable(body.status)}`
+          : status,
       };
 }
 
@@ -2662,8 +2678,14 @@ async function phaseStart(system, deployment, options) {
   // preflight would fail after the Harness restarts; and an opaque value such
   // as proxy.test:8443 names no host to wait on at all.
   if (!['http:', 'https:'].includes(harnessUrl?.protocol)) {
+    // When the value does not parse at all, reuse fetchRefusal so an IPv6 zone
+    // is named here exactly as --server-url names it, rather than a bare
+    // "is not a URL" that leaves the operator nothing to act on.
+    const reason = harnessUrl
+      ? 'is not an http or https URL'
+      : fetchRefusal(urls.harness);
     throw new Refusal(
-      `The control plane reaches ${harness.name} at ${JSON.stringify(urls.harness)}, which is not ${harnessUrl ? 'an http or https URL' : 'a URL'}; correct qwen.managed-agent.harness.base-url.`,
+      `The control plane reaches ${harness.name} at ${JSON.stringify(urls.harness)}, which ${reason}; correct qwen.managed-agent.harness.base-url.`,
     );
   }
 
@@ -2749,7 +2771,7 @@ async function phaseStart(system, deployment, options) {
   if (!healthy) {
     // Left running: the journal may show a start that is merely slow.
     throw new Refusal(
-      `${server.name} did not report UP at ${urls.health} within ${options.timeout}s${answer ? ` (the last probe: ${answer})` : ''} and keeps running; see journalctl -u ${server.name}, then run verify, or run stop to start it again.`,
+      `${server.name} did not report UP at ${urls.health} within ${options.timeout}s${answer ? ` (the last answer: ${answer})` : ''} and keeps running; see journalctl -u ${server.name}, then run verify, or run stop to start it again.`,
     );
   }
   system.out(

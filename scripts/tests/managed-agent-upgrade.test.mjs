@@ -1802,7 +1802,7 @@ test('start gives up when the control plane never reports UP', async (t) => {
   assert.equal(await host.upgrade('start', '--timeout', '5'), 1);
   assert.match(
     host.output.join('\n'),
-    /did not report UP at http:\/\/127.0.0.1:18080\/actuator\/health within 5s \(the last probe: HTTP 200, status DOWN\) and keeps running; .* run stop to start it again/,
+    /did not report UP at http:\/\/127.0.0.1:18080\/actuator\/health within 5s \(the last answer: HTTP 200, status DOWN\) and keeps running; .* run stop to start it again/,
   );
   assert.equal(host.units[SERVER].ActiveState, 'active');
   assert.equal(await host.upgrade('start'), 1);
@@ -1933,7 +1933,7 @@ test('a health probe that never answers ends at the timeout', async (t) => {
   assert.ok(Date.now() - started < 4000, `${Date.now() - started}ms`);
   assert.match(
     host.output.join('\n'),
-    /within 1s \(the last probe: The operation was aborted due to timeout\) and keeps running/,
+    /within 1s \(the last answer: The operation was aborted due to timeout\) and keeps running/,
   );
   assert.ok(host.requests.every(({ init }) => init.signal));
 });
@@ -1963,7 +1963,7 @@ test('start names what the endpoint answered, not a probe the deadline cut short
   assert.deepEqual(timedOut, [4]);
   assert.match(
     host.output.at(-1),
-    /within 3s \(the last probe: HTTP 200, status DOWN\) and keeps running/,
+    /within 3s \(the last answer: HTTP 200, status DOWN\) and keeps running/,
   );
 
   // One that answered and then stopped: a probe that runs out of its own
@@ -1984,7 +1984,7 @@ test('start names what the endpoint answered, not a probe the deadline cut short
   assert.equal(host.requests.length, 2);
   assert.match(
     host.output.at(-1),
-    /within 6s \(the last probe: The operation was aborted due to timeout\) and keeps running/,
+    /within 6s \(the last answer: The operation was aborted due to timeout\) and keeps running/,
   );
 
   // On real sockets. A body that stalls after its headers is cut short as
@@ -2020,7 +2020,7 @@ test('start names what the endpoint answered, not a probe the deadline cut short
   assert.ok(served >= 2, `${served} requests`);
   assert.match(
     host.output.at(-1),
-    /within 2s \(the last probe: HTTP 503, status DOWN\) and keeps running/,
+    /within 2s \(the last answer: HTTP 503, status DOWN\) and keeps running/,
   );
 
   // A refused connection after an answer is what the endpoint says now,
@@ -2034,6 +2034,13 @@ test('start names what the endpoint answered, not a probe the deadline cut short
     response.end('{"status":"DOWN"}');
   });
   await new Promise((resolve) => closes.listen(0, '127.0.0.1', resolve));
+  // The handler closes the server itself once a request lands; tear it down
+  // here too so an assertion that fails before any request does not leave the
+  // listener open and hang node --test to the job's 45-minute ceiling.
+  t.after(() => {
+    closes.closeAllConnections();
+    if (closes.listening) closes.close();
+  });
   const { port } = closes.address();
   assert.equal(await host.upgrade('stop'), 0);
   assert.equal(
@@ -2049,7 +2056,7 @@ test('start names what the endpoint answered, not a probe the deadline cut short
   assert.match(
     host.output.at(-1),
     new RegExp(
-      `within 3s \\(the last probe: connect ECONNREFUSED 127\\.0\\.0\\.1:${port}\\) and keeps running`,
+      `within 3s \\(the last answer: connect ECONNREFUSED 127\\.0\\.0\\.1:${port}\\) and keeps running`,
     ),
   );
 });
@@ -2366,6 +2373,14 @@ test('start refuses listeners it cannot reach before it starts anything', async 
     host.output.join('\n'),
     /start refused: The control plane reaches qwen-hosted-harness at "proxy\.test:4170", which is not an http or https URL; correct qwen\.managed-agent\.harness\.base-url\./,
   );
+  // The Harness URL gets the same zone explanation --server-url gets: a
+  // link-local address that still looks well formed must say why it is refused.
+  host.resolved = { harnessBaseUrl: 'http://[fe80::1%eth0]:4170' };
+  assert.equal(await host.upgrade('start'), 1);
+  assert.match(
+    host.output.join('\n'),
+    /start refused: The control plane reaches qwen-hosted-harness at "http:\/\/\[fe80::1%eth0\]:4170", which is not a URL: a URL cannot carry an IPv6 zone; correct qwen\.managed-agent\.harness\.base-url\./,
+  );
   // A link-local listener keeps its zone, which no URL can carry.
   const zoned = 'http://[fe80:0:0:0:0:0:0:1%1]';
   host.resolved = {
@@ -2448,6 +2463,63 @@ test('start refuses listeners it cannot reach before it starts anything', async 
     host.output.join('\n'),
     /verify refused: The server's configuration gives the control plane no fixed port/,
   );
+});
+
+test('health reports neutralize terminal control bytes from the endpoint', async (t) => {
+  const { host, target } = await backedUp(t);
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  host.responses['GET /actuator/health'] = { status: 'UP' };
+  assert.equal(await host.upgrade('start'), 0);
+  // A queryable endpoint must not drive the terminal that reports it: cursor
+  // moves that repaint a FAIL verdict as PASS, a newline that splits the row,
+  // and an OSC-52 clipboard write all ride in the status field as control bytes.
+  const malicious =
+    'DOWN\u001b[1A\u001b[2K\u001b[32mPASS\u001b[0m\nsplit\u001b]52;c;SGVsbG8=\u0007';
+  host.responses['GET /actuator/health'] = { status: malicious };
+  assert.equal(await host.upgrade('verify'), 1);
+  const row = rowsOf(host.output).health;
+  assert.ok(
+    row.startsWith(
+      'FAIL http://127.0.0.1:18080/actuator/health is not UP: HTTP 200, status DOWN',
+    ),
+    row,
+  );
+  assert.ok(
+    // eslint-disable-next-line no-control-regex -- detecting surviving control bytes is the assertion
+    !/[\u0000-\u001F\u007F-\u009F]/.test(row),
+    `a control byte survived: ${JSON.stringify(row)}`,
+  );
+  assert.ok(row.includes('\uFFFD'), row);
+  assert.ok(
+    row.includes('PASS') && row.includes('split'),
+    `readable text stays: ${row}`,
+  );
+});
+
+test('verify refuses a URL fetch refuses before it probes', async (t) => {
+  const { host, target } = await backedUp(t);
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  host.responses['GET /actuator/health'] = { status: 'UP' };
+  assert.equal(await host.upgrade('start'), 0);
+  // verify reaches listeners() with reachesHarness:false; the URL refusal must
+  // still run before any probe. Gating that loop on reachesHarness would let
+  // verify wait out --timeout and report a health row instead of refusing.
+  const probes = host.requests.length;
+  assert.equal(
+    await host.upgrade(
+      'verify',
+      '--server-url',
+      'http://127.0.0.1:6000',
+      '--timeout',
+      '9',
+    ),
+    1,
+  );
+  assert.match(
+    host.output.join('\n'),
+    /verify refused: --server-url "http:\/\/127\.0\.0\.1:6000" is on port 6000, so fetch refuses to dial it\./,
+  );
+  assert.equal(host.requests.length, probes, 'verify refused before probing');
 });
 
 test('verify leaves signed APIs to the ingress', async (t) => {
