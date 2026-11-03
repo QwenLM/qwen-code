@@ -191,11 +191,13 @@ it('settles when the host re-renders with a fresh inline status callback', async
 it('delivers the settled status to a callback supplied after the list settled', async () => {
   listSessions.mockResolvedValue({ sessions: [summary('a')] });
   const late = vi.fn();
-  const tree = (onStatusChange?: (status: {
-    count: number;
-    loading: boolean;
-    error: boolean;
-  }) => void) => (
+  const tree = (
+    onStatusChange?: (status: {
+      count: number;
+      loading: boolean;
+      error: boolean;
+    }) => void,
+  ) => (
     <I18nProvider language="en">
       <ManagedArchivedSessions
         provider={provider}
