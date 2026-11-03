@@ -223,12 +223,12 @@ export async function setup() {
 export async function teardown() {
   // Cleanup the CLI test run directory unless KEEP_OUTPUT is set
   if (process.env['KEEP_OUTPUT'] !== 'true' && runDir) {
-    await rm(runDir, { recursive: true, force: true });
+    await removeScratchDir(runDir);
   }
 
   // Cleanup the SDK E2E test run directory unless KEEP_OUTPUT is set
   if (process.env['KEEP_OUTPUT'] !== 'true' && sdkE2eRunDir) {
-    await rm(sdkE2eRunDir, { recursive: true, force: true });
+    await removeScratchDir(sdkE2eRunDir);
   }
 
   // Only when the memory file is the host's. Under a hermetic home it sits in
