@@ -79,6 +79,26 @@ class SharedHarnessOwnershipTest {
     }
 
     @Test
+    void harnessChecksDoNotWaitForTheTenantPlacementGuard() throws Exception {
+        bindings.requestHarnessDrain("tenant", "harness-a");
+        try (var holder = source.getConnection()) {
+            holder.setAutoCommit(false);
+            JdbcRuntimeBindingRepository.lockPlacementDomain(holder, "tenant");
+            try {
+                bindings.requireHarnessAdmission(SHARED, SCOPE, "harness-b", null);
+                bindings.requireHarnessAdmission(SCOPE, "harness-b", null);
+                bindings.requireHookAdmission(SHARED, SCOPE, "harness-b", null);
+                assertEquals(false, bindings.requireHarnessRecovery(SHARED, SCOPE, "harness-a", null));
+                assertClosed(() -> bindings.requireHarnessAdmission(SHARED, SCOPE, "harness-a", null));
+                assertClosed(() -> bindings.requireHarnessCleanup(SHARED, SCOPE, "harness-a",
+                        new RuntimeLifecycleAuthority("close", 1)));
+            } finally {
+                holder.rollback();
+            }
+        }
+    }
+
+    @Test
     void cleanupAuthorityFollowsTheRuntimeSessionsHarnessClaim() throws Exception {
         var binding = ready(bindings, SHARED);
         var authority = new RuntimeLifecycleAuthority("close", 1);
