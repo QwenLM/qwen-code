@@ -157,3 +157,16 @@ it('handles preflight and exact custom origins without allowing unrelated pages'
   expect((await probe('null')).status).toBe(403);
   expect((await manage('origins', { origins: ['*'] })).status).toBe(409);
 });
+
+it('does not echo internal error detail to the client on an unexpected failure (R1-6)', async () => {
+  const secretPath = '/etc/qwen/tls/server-key.pem';
+  vi.spyOn(service, 'enable').mockRejectedValueOnce(
+    new Error(`ENOENT: no such file or directory, open '${secretPath}'`),
+  );
+  const response = await manage('enable', { port: 0 });
+  expect(response.status).toBe(500);
+  const body = await response.json();
+  expect(body.code).toBe('remote_access_failed');
+  expect(body.error).toBe('Remote access operation failed.');
+  expect(JSON.stringify(body)).not.toContain(secretPath);
+});
