@@ -14,9 +14,16 @@ Reference: the MySQL chapter, printed pages 32–35, in the
 
 ## Decisions
 
-- Give every table an unsigned auto-increment `id` primary key. Preserve each
-  previous business primary key as a unique constraint. Business
-  identities, tenant scoping, idempotency, and fencing continue to use those keys.
+- Give every table an unsigned auto-increment, unique `id`. Use it as the primary
+  key except on `ma_session` and `ma_tenant_guard`, which retain their original
+  business primary keys `(tenant_id, session_id)` and `(tenant_key, guard_domain)`.
+  These two tables coordinate existing records through upserts. With `id` as
+  their clustered primary key, native MySQL captured `PRIMARY` supremum locks
+  blocking unrelated Sessions, tenants and guard domains during acquisition.
+  Keep their business clustering and a separate unique `id` index to preserve
+  the existing creation and locking-read protocol. The other 36 tables keep `id`
+  primary keys and unique business keys. Business identities, tenant scoping,
+  idempotency, and fencing continue to use the original business keys.
 - Keep the existing `gmt_create` and `gmt_modified` names and all
   epoch-millisecond timestamp fields. Application clocks, lease deadlines, and
   ordered pagination depend on the current timestamp contracts.
@@ -64,6 +71,13 @@ later administrative or connection-mode changes, and does not change SQL modes.
 
 - Exercise Broker and Flyway initialization, repeated validation, row ID
   generation on fresh H2 and disposable MySQL 8.4 databases.
+- Independently verify all 38 generated IDs are unique, both coordination tables
+  retain their ordered business primary keys, and the other 36 retain `id`
+  primary keys. Native concurrency checks must preserve same-key exclusion,
+  independent guard domains/tenants/Sessions, concurrent first creation,
+  committed migration-fence visibility, SSH overlap arbitration, publication
+  ordering and bounded lifecycle completion. Existing failures remain unresolved
+  until the corrected revision passes the required native gates.
 - Verify that duplicate business identities still fail, flags retain their
   values and nullability, and representative Server/Broker stores still read and
   write the renamed columns.

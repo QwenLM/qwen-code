@@ -76,11 +76,17 @@ class ManagedSchemaTest {
                     assertTrue(columns.next(), table);
                     assertEquals("YES", columns.getString("IS_AUTOINCREMENT"), table);
                 }
+                Map<Integer, String> primaryKey = new TreeMap<>();
                 try (var keys = connection.getMetaData().getPrimaryKeys(null, null, table)) {
-                    assertTrue(keys.next(), table);
-                    assertEquals("id", keys.getString("COLUMN_NAME"), table);
-                    assertTrue(!keys.next(), table);
+                    while (keys.next()) {
+                        primaryKey.put(keys.getInt("KEY_SEQ"), keys.getString("COLUMN_NAME"));
+                    }
                 }
+                List<String> expectedPrimary = switch (table) {
+                    case "ma_session", "ma_tenant_guard" -> BUSINESS_KEYS.get(table);
+                    default -> List.of("id");
+                };
+                assertEquals(expectedPrimary, List.copyOf(primaryKey.values()), table + " primary key");
                 try (var keys = connection.getMetaData().getImportedKeys(null, null, table)) {
                     assertTrue(!keys.next(), table);
                 }
@@ -94,6 +100,9 @@ class ManagedSchemaTest {
                         }
                     }
                 }
+                assertTrue(uniqueKeys.values().stream()
+                        .anyMatch(columns -> List.copyOf(columns.values()).equals(List.of("id"))),
+                        table + " row identity");
                 assertTrue(uniqueKeys.values().stream()
                         .anyMatch(columns -> List.copyOf(columns.values()).equals(BUSINESS_KEYS.get(table))),
                         table + " business key " + BUSINESS_KEYS.get(table));

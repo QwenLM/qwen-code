@@ -17,7 +17,7 @@ CREATE TABLE ma_session (
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
     gmt_modified BIGINT UNSIGNED NOT NULL COMMENT 'Last record update time in Unix epoch milliseconds.',
     version BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Optimistic concurrency version of the record.',
-    CONSTRAINT uk_ma_session_business_key UNIQUE (tenant_id, session_id),
+    CONSTRAINT pk_ma_session PRIMARY KEY (tenant_id, session_id),
     public_session_id VARBINARY(512) GENERATED ALWAYS AS (CASE WHEN session_kind = 'PUBLIC' THEN session_id ELSE NULL END)
         COMMENT 'Generated public Session identity enforcing global uniqueness for PUBLIC rows.',
     CONSTRAINT uk_ma_session_public_session_id UNIQUE (public_session_id),
@@ -81,7 +81,7 @@ CREATE TABLE ma_session (
     harness_placement_state VARCHAR(16) NOT NULL DEFAULT 'UNASSIGNED' COMMENT 'Harness assignment state: UNASSIGNED, ACTIVE, QUIESCING, or RELEASED.',
     CONSTRAINT ck_ma_harness_placement CHECK ((harness_placement_state = 'UNASSIGNED' AND harness_instance_id IS NULL AND harness_owner_boot_id IS NULL AND harness_placement_epoch = 0) OR (harness_instance_id IS NOT NULL AND harness_owner_boot_id IS NOT NULL AND harness_placement_epoch > 0 AND (CASE harness_placement_state WHEN 'ACTIVE' THEN 6 WHEN 'QUIESCING' THEN 9 WHEN 'RELEASED' THEN 8 ELSE -1 END = CHAR_LENGTH(harness_placement_state)))),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
-    CONSTRAINT pk_ma_session_id PRIMARY KEY (id),
+    CONSTRAINT uk_ma_session_id UNIQUE (id),
     CONSTRAINT ck_ma_session_boolean_values CHECK ((is_recovery_protected >= 0 AND is_recovery_protected <= 1) AND (is_resource_gc_completed >= 0 AND is_resource_gc_completed <= 1) AND (is_csi_guard >= 0 AND is_csi_guard <= 1) AND (is_plan_enabled >= 0 AND is_plan_enabled <= 1))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Managed Session identity, lifecycle, Workspace binding, and execution preferences.';
 
@@ -1092,10 +1092,10 @@ CREATE TABLE ma_tenant_guard (
     tenant_key CHAR(64) NOT NULL COMMENT 'Hashed tenant identity used for indexed lookup.',
     tenant_id VARBINARY(2048) NOT NULL COMMENT 'Tenant identity used for isolation.',
     guard_domain VARCHAR(32) NOT NULL COMMENT 'Lock domain: runtime_placement or output_publication.',
-    CONSTRAINT uk_ma_tenant_guard_business_key UNIQUE (tenant_key, guard_domain),
+    CONSTRAINT pk_ma_tenant_guard PRIMARY KEY (tenant_key, guard_domain),
     CONSTRAINT ck_ma_guard_domain CHECK ((CASE guard_domain WHEN 'runtime_placement' THEN 17 WHEN 'output_publication' THEN 18 ELSE -1 END = CHAR_LENGTH(guard_domain))),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
-    CONSTRAINT pk_ma_tenant_guard_id PRIMARY KEY (id)
+    CONSTRAINT uk_ma_tenant_guard_id UNIQUE (id)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Tenant-scoped lock rows coordinating Runtime placement and output publication.';
 
 CREATE TABLE ma_read_lease (
