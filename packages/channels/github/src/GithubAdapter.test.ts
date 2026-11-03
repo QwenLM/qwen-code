@@ -6518,15 +6518,22 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       mkdirSync(auditPath, { recursive: true });
       const notification = makeNotification({
         reason: 'review_requested',
+        // A previously-read thread keeps the first-contact body feed off,
+        // so only the direct lane can dispatch here.
+        last_read_at: '2026-07-02T09:30:00.000Z',
         subject: {
           title: 'Test PR',
           url: 'https://api.github.com/repos/owner/repo/pulls/42',
           type: 'PullRequest',
         },
       });
+      // review_requested runs the comment lane after the direct lane; prime
+      // its empty comment list so it returns cleanly instead of throwing on
+      // an unmocked fetch (swallowed per-notification stderr noise).
       mockOctokit.paginate
         .mockResolvedValueOnce([notification])
-        .mockResolvedValueOnce([makeIssueEvent()]);
+        .mockResolvedValueOnce([makeIssueEvent()])
+        .mockResolvedValueOnce([]);
       await pollOnce();
       // The freeze refused the dispatch with NO task claimed: the direct
       // lane must not record the trigger key, or the unconditional
@@ -6544,7 +6551,8 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       rmSync(auditPath, { recursive: true, force: true });
       mockOctokit.paginate
         .mockResolvedValueOnce([notification])
-        .mockResolvedValueOnce([makeIssueEvent()]);
+        .mockResolvedValueOnce([makeIssueEvent()])
+        .mockResolvedValueOnce([]);
       await pollOnce();
       expect(channel.inboundEnvelopes).toHaveLength(1);
     });
