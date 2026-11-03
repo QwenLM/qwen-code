@@ -132,7 +132,7 @@ final class JournalResourceReads {
                             } else {
                                 original.requireAdmission();
                             }
-                            JournalStoreRows.HeadRow head = storeRows.requireHeadForUpdate(tenantId, sessionId);
+                            JournalStoreRows.HeadRow head = fencing.requireHeadAfterCsiCheck(tenantId, sessionId);
                             storeRows.requireHeadScope(head, tenantId, workspaceId, sessionId);
                             JournalFencing.requireCsiWriter(original, head);
                             fencing.requireReadGrant(head, writerToken);
@@ -333,7 +333,7 @@ final class JournalResourceReads {
                     }
                     original.requireAdmission();
                     JournalStoreRows.HeadRow head =
-                            storeRows.requireHeadForUpdate(admittedHead.tenantId(), admittedHead.sessionId());
+                            fencing.requireHeadAfterCsiCheck(admittedHead.tenantId(), admittedHead.sessionId());
                     var persisted = nativeReadReceipt(admission.id(), true);
                     if (!persisted.equals(admission.persisted())) {
                         throw JournalFencing.nativeReadConflict();
