@@ -5499,19 +5499,15 @@ describe('Session', () => {
       const result = await prompt();
 
       expect(result.stopReason).toBe('end_turn');
-      // The prompt ends with its response, as the client's stop point does.
-      expect(send).toHaveBeenCalledOnce();
-      await vi.waitFor(() =>
-        expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
-          expect.anything(),
-          expect.objectContaining({
-            message: expect.arrayContaining([{ text: 'WORKER_RESULT' }]),
-          }),
-          expect.stringContaining('notification'),
-          undefined,
-          undefined,
-        ),
-      );
+      // The prompt ends with its response, as the client's stop point does,
+      // and the result starts a notification turn of its own.
+      await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+      expect(send.mock.calls[1][0]).toContainEqual({ text: 'WORKER_RESULT' });
+      expect(send.mock.calls[1][2]).toContain('notification');
+      expect(send.mock.calls[1][3]).toMatchObject({
+        type: core.SendMessageType.Notification,
+      });
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
     });
 
     describe('the Todo Stop Guard as a stop policy', () => {
@@ -5975,6 +5971,214 @@ describe('Session', () => {
               /plan mode/i.test(part.text),
           ),
         ).toBe(true);
+      });
+    });
+
+    describe('cron and background-notification turns', () => {
+      /** Runs each round on the mocked client; a round pushes its request unless told not to. */
+      function automaticRounds(
+        events: (index: number) => RoundEvent[] = () => [],
+        pushes: (index: number) => boolean = () => true,
+      ) {
+        const sends: Array<
+          [Part[], AbortSignal, string, Record<string, unknown>]
+        > = [];
+        let pushCount = 0;
+        mockConfig.isUnifiedAgentLoopEnabled = vi.fn().mockReturnValue(true);
+        Object.assign(mockChat, {
+          getUserContentPushCount: vi.fn(() => pushCount),
+        });
+        Object.assign(mockLlmClient, {
+          admitUserPrompt: vi.fn().mockResolvedValue({ blocked: false }),
+          finishManagedAutoMemoryRecall: vi.fn(),
+          sendMessageStream: vi.fn(
+            (
+              parts: Part[],
+              signal: AbortSignal,
+              promptId: string,
+              options: Record<string, unknown>,
+            ) => {
+              sends.push([parts, signal, promptId, options]);
+              const index = sends.length - 1;
+              return (async function* () {
+                if (pushes(index)) pushCount++;
+                for (const event of events(index)) yield event;
+              })();
+            },
+          ),
+        });
+        mockChat.sendMessageStream = vi.fn();
+        return sends;
+      }
+
+      /** Fires one in-session cron job once the session starts its scheduler. */
+      function fireCron(prompt: string) {
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue({
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn((callback: (job: { prompt: string }) => void) =>
+            callback({ prompt }),
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        });
+      }
+
+      const notify = () =>
+        session.enqueueBackgroundNotification({
+          displayText: 'Agent completed.',
+          modelText: '<task-notification />',
+          taskId: 'task-1',
+          status: 'completed',
+          kind: 'agent',
+        });
+
+      const backgroundResponses = () =>
+        updates().filter(
+          (update) =>
+            update.sessionUpdate === 'agent_message_chunk' &&
+            (update._meta as { source?: string } | undefined)?.source ===
+              'background_notification_response',
+        );
+
+      it('runs a cron fire as a Cron round and records its prompt once sent', async () => {
+        fireCron('nightly report');
+        const sends = automaticRounds((index) =>
+          index === 1 ? [text('cron result'), finished()] : [finished()],
+        );
+
+        await prompt();
+        await vi.waitFor(() =>
+          expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalled(),
+        );
+
+        expect(sends[1][0]).toEqual([{ text: 'nightly report' }]);
+        expect(sends[1][3]).toMatchObject({
+          type: core.SendMessageType.Cron,
+          userTurnRecordedByHost: true,
+          interactionSpanByHost: true,
+          toolCallPreparations: true,
+        });
+        expect(sends[1][3]['stopPolicies']).toHaveLength(1);
+        expect(mockChatRecordingService.recordCronPrompt).toHaveBeenCalledWith(
+          [{ text: 'nightly report' }],
+          'nightly report',
+        );
+        await vi.waitFor(() => expect(agentText()).toContain('cron result'));
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      });
+
+      it('keeps a cron prompt whose request never went out out of the record', async () => {
+        fireCron('nightly report');
+        const sends = automaticRounds(
+          () => [finished()],
+          (index) => index !== 1,
+        );
+
+        await prompt();
+        await vi.waitFor(() => expect(sends).toHaveLength(2));
+        await vi.waitFor(() =>
+          expect(
+            mockLlmClient.finishManagedAutoMemoryRecall,
+          ).toHaveBeenCalled(),
+        );
+
+        expect(
+          mockChatRecordingService.recordCronPrompt,
+        ).not.toHaveBeenCalled();
+      });
+
+      it("sends a cron fire's tool results back as a ToolResult round", async () => {
+        fireCron('nightly report');
+        const execute = useTool(core.Kind.Read, 'read_file');
+        const sends = automaticRounds((index) =>
+          index === 1
+            ? [
+                toolCall({ id: 'call-1', name: 'read_file', args: {} }),
+                finished(),
+              ]
+            : [finished()],
+        );
+
+        await prompt();
+        await vi.waitFor(() => expect(sends).toHaveLength(3));
+
+        expect(execute).toHaveBeenCalledOnce();
+        expect(sends[2][3]).toMatchObject({
+          type: core.SendMessageType.ToolResult,
+          interactionSpanByHost: true,
+        });
+        expect(sends[2][3]).not.toHaveProperty('userTurnRecordedByHost');
+        expect(sends[2][0]).toContainEqual(
+          expect.objectContaining({
+            functionResponse: expect.objectContaining({ id: 'call-1' }),
+          }),
+        );
+      });
+
+      it('runs a background notification as a Notification round and shows its response once', async () => {
+        const sends = automaticRounds(() => [
+          text('agent '),
+          text('done'),
+          finished(),
+        ]);
+
+        await notify();
+        await vi.waitFor(() =>
+          expect(
+            backgroundResponses().some(
+              (update) =>
+                (
+                  update._meta as {
+                    backgroundTask?: { turnComplete?: boolean };
+                  }
+                ).backgroundTask?.turnComplete === true,
+            ),
+          ).toBe(true),
+        );
+
+        expect(sends).toHaveLength(1);
+        expect(sends[0][3]).toMatchObject({
+          type: core.SendMessageType.Notification,
+          userTurnRecordedByHost: true,
+        });
+        expect(sends[0][3]).not.toHaveProperty('interactionSpanByHost');
+        expect(sends[0][0]).toContainEqual({ text: '<task-notification />' });
+        expect(
+          backgroundResponses().map(
+            (update) => (update.content as { text: string }).text,
+          ),
+        ).toEqual(['agent done', '']);
+        // Not streamed piece by piece as a prompt's response is.
+        expect(agentText()).not.toContain('agent ');
+      });
+
+      it('ends a notification turn that loop protection stopped as partial', async () => {
+        automaticRounds(() => [
+          text('looping'),
+          {
+            type: core.LlmEventType.LoopDetected,
+            value: { loopType: core.LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS },
+          } as RoundEvent,
+        ]);
+
+        await notify();
+        await vi.waitFor(() =>
+          expect(mockClient.extNotification).toHaveBeenCalledWith(
+            '_qwencode/end_turn',
+            expect.objectContaining({ source: 'background_notification' }),
+          ),
+        );
+
+        const last = backgroundResponses().at(-1)!;
+        expect(
+          (
+            last._meta as {
+              backgroundTask: { turnComplete?: boolean; partial?: boolean };
+            }
+          ).backgroundTask,
+        ).toMatchObject({ turnComplete: true, partial: true });
       });
     });
   });
