@@ -321,6 +321,14 @@ type InboundTaskState =
   | 'cancelled';
 
 const MAX_INBOUND_TASK_ATTEMPTS = 3;
+/**
+ * The poll cursor does not advance while an inbound task is recoverable, so a
+ * slow or stuck turn makes GitHub return the same notifications on every poll.
+ * Filtered notifications are skipped before any dedupe, so journaling each one
+ * every time would rotate the useful rows out of the page's window. Journal the
+ * first few individually and collapse the rest into one counted row.
+ */
+const MAX_REASON_FILTER_EVENTS_PER_POLL = 20;
 
 interface InboundTaskDedupe {
   dispatchedBodies?: string[];
@@ -1246,6 +1254,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     );
 
     notifications.sort((a, b) => a.updated_at.localeCompare(b.updated_at));
+    this.setPollEventDetail({ notifications: notifications.length });
 
     const maxUpdatedAt =
       notifications.length > 0
@@ -1265,6 +1274,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           ? maxUpdatedAt
           : this.pendingCursorUpdatedAt;
     }
+    let reasonFilterJournaled = 0;
+    let reasonFilterCollapsed = 0;
     for (const notification of notifications) {
       if (!notification.subject.url) continue;
       const extracted = this.extractFromSubjectUrl(notification.subject.url);
@@ -1285,6 +1296,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           threadId,
           reason: notification.reason,
         });
+        if (reasonFilterJournaled < MAX_REASON_FILTER_EVENTS_PER_POLL) {
+          reasonFilterJournaled += 1;
+          this.recordChannelEvent({
+            type: 'inbound',
+            outcome: 'skipped',
+            reason: 'reason_filter',
+            triggerKind: reason,
+            repository: chatId,
+            thread: threadId,
+            number: issueNumber,
+          });
+        } else {
+          reasonFilterCollapsed += 1;
+        }
         continue;
       }
       const ctx: NotificationContext = {
@@ -1330,6 +1355,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         continue;
       }
     }
+    if (reasonFilterCollapsed > 0) {
+      // One counted row instead of a row per notification: the threads differ,
+      // so this carries no single repository/thread, and the page renders the
+      // count beside the reason.
+      this.recordChannelEvent({
+        type: 'inbound',
+        outcome: 'skipped',
+        reason: 'reason_filter',
+        detail: { filtered: reasonFilterCollapsed },
+      });
+    }
     if (this.hasRecoverableInboundTasks()) {
       this.inboundRecoveryPending = true;
     }
@@ -1357,15 +1393,41 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
     for (const comment of comments) {
       const key = comment.node_id || String(comment.id);
-      if (this.cursor.dispatchedComments?.includes(key)) continue;
+      const senderId = (comment.user?.login || 'unknown').toLowerCase();
+      if (this.cursor.dispatchedComments?.includes(key)) {
+        this.recordChannelEvent({
+          type: 'inbound',
+          outcome: 'skipped',
+          reason: 'duplicate',
+          triggerKind: 'comment',
+          repository: ctx.chatId,
+          thread: ctx.threadId,
+          number: ctx.issueNumber,
+          messageId: key,
+          actor: senderId,
+        });
+        continue;
+      }
 
       const body = comment.body || '';
       const hasMention = this.botUsername
         ? testBotMention(body, this.botUsername)
         : false;
-      if (onlyMentioned && !hasMention) continue;
+      if (onlyMentioned && !hasMention) {
+        this.recordChannelEvent({
+          type: 'inbound',
+          outcome: 'skipped',
+          reason: 'mention_required',
+          triggerKind: ctx.reason,
+          repository: ctx.chatId,
+          thread: ctx.threadId,
+          number: ctx.issueNumber,
+          messageId: key,
+          actor: senderId,
+        });
+        continue;
+      }
 
-      const senderId = (comment.user?.login || 'unknown').toLowerCase();
       // The same per-conversation gate preflight applies, so an approved
       // paired group admits its members here too.
       const allowed = this.senderGateFor({
@@ -1733,6 +1795,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     };
     this.updateInboundTasks((records) => [...records, task]);
     this.applyTaskDedupe(task);
+    this.recordChannelEvent({
+      type: 'task',
+      outcome: 'accepted',
+      triggerKind: parseTriggerKind(envelope.metadata),
+      repository: task.source.chatId,
+      thread: task.source.threadId,
+      number: task.issueNumber,
+      messageId: task.source.messageId,
+      actor: envelope.senderId,
+    });
     return task;
   }
 
@@ -1919,8 +1991,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       >
     > = {},
   ): void {
-    this.updateInboundTasks((records) =>
-      records.map((record) =>
+    const records = this.updateInboundTasks((existing) =>
+      existing.map((record) =>
         record.id === taskId
           ? {
               ...record,
@@ -1931,6 +2003,27 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           : record,
       ),
     );
+    const task = records.find((record) => record.id === taskId);
+    if (!task) return;
+    const envelope = task.envelope;
+    this.recordChannelEvent({
+      type: 'task',
+      outcome: state,
+      ...(envelope
+        ? {
+            triggerKind: parseTriggerKind(envelope.metadata),
+            actor: envelope.senderId,
+          }
+        : {}),
+      repository: task.source.chatId,
+      thread: task.source.threadId,
+      number: task.issueNumber,
+      messageId: task.source.messageId,
+      ...(updates.attempts !== undefined
+        ? { detail: { attempts: updates.attempts } }
+        : {}),
+      ...(updates.error ? { error: updates.error } : {}),
+    });
   }
 
   private removeInboundTask(taskId: string): void {
@@ -1941,13 +2034,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   private updateInboundTasks(
     update: (records: InboundTaskRecord[]) => InboundTaskRecord[],
-  ): void {
+  ): InboundTaskRecord[] {
     try {
       const records = update(this.readInboundTasks());
       this.writeInboundTasks(records);
       this.recoverableInboundTasks = records.filter((record) =>
         this.isRecoverableInboundTask(record),
       ).length;
+      return records;
     } catch (err) {
       this.inboundPersistenceBlocked = true;
       throw err;
@@ -2039,6 +2133,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         )}\n`,
       );
     }
+    this.recordChannelEvent({
+      type: 'outbound',
+      outcome: record.outcome,
+      ...(record.triggerKind ? { triggerKind: record.triggerKind } : {}),
+      repository: record.repository,
+      ...(record.threadId ? { thread: record.threadId } : {}),
+      ...(record.number !== undefined ? { number: record.number } : {}),
+      sessionId: record.sessionId,
+      ...(record.sourceMessageId ? { messageId: record.sourceMessageId } : {}),
+      ...(record.actor ? { actor: record.actor } : {}),
+      ...(record.failureError ? { error: record.failureError } : {}),
+    });
   }
 
   private migrateLegacyPublicationState(): void {
