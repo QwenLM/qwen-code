@@ -651,15 +651,31 @@ function assignGroupSenders(
 function removeGroupAllowlistMembership(
   config: Record<string, unknown>,
   instance: DaemonChannelInstanceSnapshot,
+  overrides?: Record<string, ChannelGroupOverrideDraft>,
 ): void {
   const previous = instance.config['groups'];
   const previousGroups = isRecord(previous) ? previous : {};
+  // The rows are hidden once the policy leaves Allowlist, but the draft still
+  // holds whatever the operator edited before switching, and the runtime keeps
+  // resolving these entries under open/pairing. Project the edits here too, or
+  // the save reports success while silently restoring the stored value.
   const groups = Object.fromEntries(
-    Object.entries(previousGroups).filter(
-      ([groupId, groupConfig]) =>
-        isRecord(groupConfig) &&
-        (groupId === '*' || Object.keys(groupConfig).length > 0),
-    ),
+    Object.entries(previousGroups)
+      .map(([groupId, groupConfig]): [string, unknown] => {
+        const override =
+          groupId === '*' ? undefined : overrides?.[groupId.toLowerCase()];
+        return [
+          groupId,
+          override && isRecord(groupConfig)
+            ? projectRepositoryGroup(groupConfig, override)
+            : groupConfig,
+        ];
+      })
+      .filter(
+        ([groupId, groupConfig]) =>
+          isRecord(groupConfig) &&
+          (groupId === '*' || Object.keys(groupConfig).length > 0),
+      ),
   );
   if (Object.keys(groups).length > 0) {
     config['groups'] = groups;
@@ -714,7 +730,11 @@ export function buildChannelUpsertRequest(
         repositoryOnly ? draft.groupOverrides : undefined,
       );
     } else if (instance?.config['groupPolicy'] === 'allowlist') {
-      removeGroupAllowlistMembership(config, instance);
+      removeGroupAllowlistMembership(
+        config,
+        instance,
+        repositoryOnly ? draft.groupOverrides : undefined,
+      );
     }
     assignGroupSenders(config, draft);
   }

@@ -3347,5 +3347,32 @@ describe('WorkspaceChannelSettingsStore', () => {
       });
       expect(next.channels['bounded']['boundedSeconds']).toBe(10);
     });
+
+    it('tolerates re-sending a stored number above a newly declared maximum', async () => {
+      // The minimum half alone would leave an operator storing 300000000
+      // stranded on every unrelated edit once a ceiling is declared, which is
+      // the regression the tolerance exists to prevent.
+      writeWorkspaceSettings(
+        JSON.stringify({
+          channels: {
+            bounded: {
+              ...baseConfig,
+              clientSecret: '$BOT_TOKEN',
+              boundedSeconds: 300,
+            },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      const next = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, boundedSeconds: 300, retries: 4 } as never,
+        secrets: {},
+      });
+
+      expect(next.channels['bounded']['boundedSeconds']).toBe(300);
+      expect(next.channels['bounded']['retries']).toBe(4);
+    });
   });
 });

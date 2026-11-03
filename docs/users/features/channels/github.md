@@ -100,16 +100,20 @@ Filtered notifications are marked read only after all accepted work in the poll 
 
 Settings → Channels → GitHub exposes the poll interval under **Connection**, from 1 to 86400000 ms (one day). Leave it empty for the 60000 ms default. When `groupPolicy` is `"allowlist"`, the **Access control** section also shows one row per allowlisted repository, each with a require-mention control and a speaker control.
 
-Every row starts at **Inherit**, and the option label names the value it inherits — for example `Inherit (require a mention)`. A row left at Inherit writes no key, so the repository keeps following `groups["*"]` and any later change to `"*"` still reaches it.
+A repository with no stored setting starts at **Inherit**, and the option label names the value it inherits — for example `Inherit (require a mention)`. A repository that already stores a value opens on that value instead, so a stored `requireMention: false` shows _Answer without a mention_. A row left at Inherit writes no key, so the repository keeps following `groups["*"]` and any later change to `"*"` still reaches it.
 
-Choosing an explicit value writes that repository's `groups` entry. Choosing Inherit again removes the **policy** key, but a speaker list you typed stays until you clear the box as well — the box still shows those names, so the repository keeps using them. Clear both to return the repository to the channel-wide list.
+Choosing an explicit value writes that repository's `groups` entry. Choosing Inherit again removes the **policy** key. What happens to a speaker list you typed depends on the policy the row ends up with:
 
-The speaker list appears whenever the row's effective policy is an allowlist, whether the row set it or inherited it. What an empty box means depends on what the row owns, and the hint under the box says which case you are in:
+- The row is set to **Allowlist only**, or inherits an allowlist from `groups["*"]`: the names stay in force. Clear the box as well to return the repository to the channel-wide list.
+- The row inherits **Anyone**: the names stay in the file but are not applied, because an open policy admits every group member. They apply again if the channel-wide policy later becomes an allowlist. The speaker box is not shown in this case, so there is nothing to clear.
 
-- The row owns a list — it is set to **Allowlist only**, or it already stores one. An empty list means _nobody_: the repository admits no one, and it does not fall back to the channel-wide list.
-- The row owns no list — a stored `"senders": "allowlist"` with no `allowedUsers` beside it. An empty box means _inherit_, so the channel-wide `groups["*"].allowedUsers` applies.
+The speaker box appears whenever the row's effective policy is an allowlist, whether the row set it or inherited it. What an **empty** box will do depends on the row's own policy, and the hint under the box says which case you are in:
 
-Switching the group policy away from `"allowlist"` hides the rows but does not delete these entries, and the runtime keeps enforcing them: per-repository senders and `requireMention` are resolved without consulting `groupPolicy`. The editor names the repositories that still carry settings and tells you to switch back to Allowlist to edit them.
+- The row is set to **Allowlist only**: saving an empty box writes `allowedUsers: []`, which means _nobody_. The repository admits no one and does not fall back to the channel-wide list.
+- The row inherits its policy: saving an empty box removes the per-repository list, so the channel-wide `groups["*"].allowedUsers` applies. This is also what happens when you clear a box that was showing stored names — the repository widens back to the channel-wide list rather than locking down.
+- A stored `"senders": "allowlist"` with no `allowedUsers` beside it inherits its members, so its empty box reads as _inherit_; a stored `allowedUsers: []` with no policy admits _nobody_. The hint distinguishes the two.
+
+Switching the group policy away from `"allowlist"` hides the rows but does not delete these entries. Under `"open"` and `"pairing"` the runtime keeps enforcing them, because per-repository senders and `requireMention` are resolved without consulting `groupPolicy`; under `"disabled"` the group gate drops every notification first, so the entries are kept but nothing is processed. The editor names the repositories that still carry settings, says which of those two cases applies, and tells you to switch back to Allowlist to edit them. Row edits you made before switching are still written, so the save cannot report success while restoring the old value.
 
 Per-repository settings the editor does not model, such as `dispatchMode` and `groupHistoryLimit`, are preserved when you save.
 

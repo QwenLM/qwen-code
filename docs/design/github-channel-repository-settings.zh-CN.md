@@ -31,14 +31,18 @@
   在缺失、非有限数值或非正数时回落到 `60_000`。
 - `GroupGate.check()` 解析 `requireMention` 的顺序是
   `groupConfigFor(chatId)?.requireMention ?? groups["*"]?.requireMention ?? true`，
-  发言人策略则是按仓库的 `senders` 回落到 `"*"` 再回落到 `open`。两处查表都走 #16096 加入的
-  大小写不敏感群组匹配。
+  并且在到达 mention 判断之前就对 `disabled` 策略返回 `{allowed: false, reason: 'disabled'}`。
+  它**完全不含发言人逻辑**。
+- 发言人策略与成员由 `ChannelBase.groupSendersFor` 与 `groupAllowedUsersFor` 解析：
+  按仓库的 `senders` 回落到 `"*"` 再回落到 `open`；按仓库的 `allowedUsers` 回落到 `"*"` 再回落到 `[]`。
+  `senderGateFor` 用这两者构造闸门。两个类的查表都走 #16096 加入的大小写不敏感群组匹配。
 - `channel-editor-state.ts` 由允许列表字符串构建 `groups`，逐字保留每个已列仓库的既存设置，
   并把渠道级发言人默认值写进 `groups["*"]`。按仓库的条目原样带过，没有对应的草稿状态。
 - daemon 已经接受本设计需要的全部编辑。`channel-settings-store.ts` 把
   `groups.<id>.requireMention` 校验为布尔、`senders` 校验为 `open` 或 `allowlist`、
   `allowedUsers` 校验为字符串数组，并按 `exclusiveMinimum` 校验描述符声明的 number 字段。
-  **不需要改 daemon、SDK 或描述符 schema。**
+  **按仓库的 `groups` 编辑不需要改 daemon、SDK 或描述符 schema。** 但轮询间隔的上界确实要给
+  number 描述符扩展 `maximum`，并在五处镜像——见决策 9 与受影响文件表。
 
 ## 目标
 
@@ -51,7 +55,8 @@
 
 - 不改任何默认值。群组策略默认值的分歧单独记录在 #16144，有意不在本次范围内。
 - 不编辑 `groups["*"].requireMention`、`dispatchMode`、`groupHistoryLimit`。这些键继续原样往返。
-- 不新增描述符字段类型、不改 SDK，也不为非仓库型平台提供按仓库 UI。聊天平台保持现有表单。
+- 不新增描述符字段*类型*，也不为非仓库型平台提供按仓库 UI。聊天平台保持现有表单。
+  number 描述符确实新增 `maximum` 界限（决策 9），那是镜像进 SDK 类型的词汇扩展，不是新类型。
 - 不做基于 GitHub API 的仓库选择器。仓库仍在允许列表字段里按 `owner/repo` 手填。
 
 ## 方案
@@ -66,6 +71,7 @@
   "label": "Poll Interval (ms)",
   "kind": "number",
   "exclusiveMinimum": 0,
+  "maximum": 86400000,
   "default": "60000"
 }
 ```
@@ -163,17 +169,23 @@ groupOverrides: Record<string, ChannelGroupOverrideDraft>;
 
 ## 受影响文件
 
-| 文件                                                                           | 改动                              |
-| :----------------------------------------------------------------------------- | :-------------------------------- |
-| `packages/channels/github/src/index.ts`                                        | 声明 `pollInterval`               |
-| `packages/web-shell/client/components/channels/channel-editor-state.ts`        | 覆盖草稿类型、读取、写入时合并    |
-| `packages/web-shell/client/components/channels/ChannelEditorDialog.tsx`        | 按仓库行、`pollInterval` 分区映射 |
-| `packages/web-shell/client/components/channels/ChannelEditorDialog.module.css` | 行布局                            |
-| `packages/web-shell/client/i18n.tsx`                                           | 中英文案                          |
-| `packages/web-shell/client/components/channels/channel-editor-state.test.ts`   | 状态往返、继承、保留性            |
-| `packages/web-shell/client/components/channels/ChannelEditorDialog.test.tsx`   | 渲染与交互                        |
-| `packages/web-shell/client/e2e/visuals/screenshots.spec.ts`                    | 截取新增的行                      |
-| `docs/users/features/channels/github.md`                                       | 说明编辑器现已暴露这些设置        |
+| 文件                                                                           | 改动                                 |
+| :----------------------------------------------------------------------------- | :----------------------------------- |
+| `packages/channels/github/src/index.ts`                                        | 声明带上下界的 `pollInterval`        |
+| `packages/channels/base/src/types.ts`                                          | number 描述符上的 `maximum`          |
+| `packages/channels/base/src/PollingChannelBase.ts`                             | 把间隔钳制到上界                     |
+| `packages/sdk-typescript/src/daemon/types.ts`                                  | 在 wire 描述符上镜像 `maximum`       |
+| `packages/cli/src/commands/channel/channel-registry.ts`                        | 校验 `maximum` 元数据                |
+| `packages/cli/src/serve/channel-settings-store.ts`                             | 强制 `maximum`；容忍未变更的已存数字 |
+| `docs/developers/qwen-serve-protocol.md`                                       | 在描述符词汇表里记录 `maximum`       |
+| `packages/web-shell/client/components/channels/channel-editor-state.ts`        | 覆盖草稿类型、读取、写入时合并       |
+| `packages/web-shell/client/components/channels/ChannelEditorDialog.tsx`        | 按仓库行、`pollInterval` 分区映射    |
+| `packages/web-shell/client/components/channels/ChannelEditorDialog.module.css` | 行布局                               |
+| `packages/web-shell/client/i18n.tsx`                                           | 中英文案                             |
+| `packages/web-shell/client/components/channels/channel-editor-state.test.ts`   | 状态往返、继承、保留性               |
+| `packages/web-shell/client/components/channels/ChannelEditorDialog.test.tsx`   | 渲染与交互                           |
+| `packages/web-shell/client/e2e/visuals/screenshots.spec.ts`                    | 截取新增的行                         |
+| `docs/users/features/channels/github.md`                                       | 说明编辑器现已暴露这些设置           |
 
 ## 设计决策与理由
 
@@ -212,8 +224,11 @@ groupOverrides: Record<string, ChannelGroupOverrideDraft>;
     这条容忍**有意不**推广到所有类型：既有契约测试钉住「未变更但类型错误的已存标量仍要重新校验并拒绝」，
     而那是对的规则——类型错误应当被修正，被容忍的区间不该把操作者困住。
 11. **比策略活得更久的设置被点名，而不是被删除。** 按仓库的 senders 与 `requireMention`
-    在解析时不读取 `groupPolicy`，所以把策略切离允许列表后它们仍被执行，而行却消失了。
-    删掉它们会毁掉手写配置；改为由编辑器列出仍带设置的仓库，并说明如何编辑它们。
+    在解析时不读取 `groupPolicy`，所以在 `open` 与 `pairing` 下，行消失后它们仍被执行。
+    在 `disabled` 下，群组闸门在两个查表之前就丢弃每个信封，所以这些条目被保留但不生效——
+    告警会说明当前属于哪一种，而不是一律声称仍然生效。删掉它们会毁掉手写配置；
+    改为由编辑器列出仍带设置的仓库，并说明如何编辑它们。切换之前做的行内修改在该分支同样会被投影，
+    所以保存不可能一边报告成功一边把已存值还原回去。
 
 ## 约束
 

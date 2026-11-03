@@ -60,13 +60,16 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
     if (
       typeof configured === 'number' &&
       Number.isFinite(configured) &&
-      configured > 0 &&
-      // Node clamps a timeout above its 32-bit range to 1ms, so an unbounded
-      // interval turns the poll loop into a hot loop that burns the platform's
-      // rate quota. One day matches the ceiling the Email channel enforces.
-      configured <= 86_400_000
+      configured > 0
     ) {
-      return configured;
+      // Node clamps a timeout above its 32-bit range to 1ms, which would turn
+      // the poll loop into a hot loop that burns the platform's rate quota.
+      // Clamp rather than fall back: an interval between one day and that limit
+      // was honoured before this ceiling existed and is not a hot loop, so
+      // replacing it with 60s would multiply the poll rate by orders of
+      // magnitude. One day matches the ceiling Email enforces and GitHub
+      // declares.
+      return Math.min(configured, 86_400_000);
     }
     return 60_000;
   }

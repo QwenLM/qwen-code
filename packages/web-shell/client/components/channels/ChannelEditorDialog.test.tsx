@@ -2164,4 +2164,119 @@ describe('GitHub per-repository settings', () => {
     };
     expect(request.config['pollInterval']).toBe(0);
   });
+
+  it('tells a stored list under an inherited policy that clearing it returns the channel-wide list', async () => {
+    // The hint promises what an EMPTY box will do. Asking the projection about
+    // the untouched draft would say "nobody" here, while clearing the box
+    // actually deletes the list and widens the repository back to the wildcard.
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { senders: 'allowlist', allowedUsers: ['op'] },
+        'qwenlm/qwen-code': { allowedUsers: ['alice'] },
+      }),
+    });
+
+    expect(
+      (rowControl('qwenlm/qwen-code', 'speakers') as HTMLInputElement).value,
+    ).toBe('alice');
+    expect(descriptionOf(rowControl('qwenlm/qwen-code', 'speakers'))).toContain(
+      'Leave empty to keep the channel-wide list',
+    );
+  });
+
+  it('says the retained settings are kept but inert while the policy is Disabled', async () => {
+    // The group gate drops every envelope before the mention or sender lookup,
+    // so "still apply" would be false under Disabled.
+    const instance = githubInstance({
+      '*': {},
+      'acme/widgets': { senders: 'allowlist', allowedUsers: ['alice'] },
+    });
+    instance.config['groupPolicy'] = 'disabled';
+    await renderDialog({ descriptor: GITHUB_CONFIGURED, instance });
+
+    expect(document.body.textContent).toContain(
+      'Repository settings are kept but not applied',
+    );
+    expect(document.body.textContent).not.toContain(
+      'Repository settings still apply',
+    );
+    expect(document.body.textContent).toContain('acme/widgets');
+  });
+
+  it('maps the Inherit option back to an absent key in both row selects', async () => {
+    // The widget's `inherit` sentinel only becomes the draft's '' here, and a
+    // cast hides a regression from the type checker: passing the raw value
+    // through would write requireMention = ('inherit' === 'true') = false.
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({
+      descriptor: GITHUB_CONFIGURED,
+      instance: githubInstance({
+        '*': { senders: 'allowlist', allowedUsers: ['op'] },
+        'qwenlm/qwen-code': {
+          requireMention: false,
+          senders: 'allowlist',
+          allowedUsers: ['alice'],
+        },
+      }),
+      onSave,
+    });
+
+    await chooseRowOption(
+      'qwenlm/qwen-code',
+      'mention',
+      'Inherit (require a mention)',
+    );
+    await chooseRowOption(
+      'qwenlm/qwen-code',
+      'senders',
+      'Inherit (allowlist only)',
+    );
+    await save();
+
+    const request = onSave.mock.calls[0][1] as {
+      config: Record<string, unknown>;
+    };
+    // A typed list survives a return to Inherit; only the two policy keys go.
+    expect(request.config['groups']).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['op'] },
+      'qwenlm/qwen-code': { allowedUsers: ['alice'] },
+    });
+  });
+
+  it('names only the bounds the descriptor declares in the range message', async () => {
+    const maxOnly: DaemonChannelTypeDescriptor = {
+      type: 'example',
+      displayName: 'Example',
+      manageable: true,
+      fields: [
+        {
+          key: 'concurrency',
+          label: 'Concurrency',
+          kind: 'number',
+          maximum: 4,
+        },
+      ],
+    };
+    await renderDialog({ descriptor: maxOnly });
+    await act(async () => {
+      setInputValue(inputByLabel('Concurrency')!, '9');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain('Enter a number at most 4.');
+    expect(document.body.textContent).not.toContain('greater than');
+  });
+
+  it('names both bounds when the descriptor declares both', async () => {
+    await renderDialog({ descriptor: GITHUB_POLLING });
+    await act(async () => {
+      setInputValue(inputByLabel('Poll Interval (ms)')!, '2592000000');
+    });
+    await save();
+
+    expect(document.body.textContent).toContain(
+      'Enter a number greater than 0 and at most 86400000.',
+    );
+  });
 });

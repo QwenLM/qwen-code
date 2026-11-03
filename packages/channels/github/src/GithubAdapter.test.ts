@@ -4966,7 +4966,7 @@ describe('GithubChannel', () => {
       );
     });
 
-    it.each([0, -1, NaN, Infinity, '60000', 2_592_000_000, 86_400_001])(
+    it.each([0, -1, NaN, Infinity, '60000'])(
       'falls back to 60000 for invalid pollInterval %s',
       (value) => {
         const ch = new TestableGithubChannel(
@@ -4981,8 +4981,6 @@ describe('GithubChannel', () => {
     );
 
     it('respects the one-day ceiling', () => {
-      // Node clamps a timeout above its 32-bit range to 1ms, so an interval
-      // past the ceiling has to fall back rather than become a hot loop.
       const ch = new TestableGithubChannel(
         'test',
         makeConfig({ pollInterval: 86_400_000 }),
@@ -4992,6 +4990,23 @@ describe('GithubChannel', () => {
         86_400_000,
       );
     });
+
+    it.each([86_400_001, 172_800_000, 2_592_000_000])(
+      'clamps pollInterval %s to the ceiling instead of falling back',
+      (value) => {
+        // These were honoured before the ceiling existed and are nowhere near
+        // Node's 32-bit timer limit, so replacing them with 60s would multiply
+        // the poll rate by orders of magnitude. Clamp, do not fall back.
+        const ch = new TestableGithubChannel(
+          'test',
+          makeConfig({ pollInterval: value }),
+          makeBridge(),
+        );
+        expect((ch as unknown as { pollInterval: number }).pollInterval).toBe(
+          86_400_000,
+        );
+      },
+    );
   });
 
   describe('plugin', () => {

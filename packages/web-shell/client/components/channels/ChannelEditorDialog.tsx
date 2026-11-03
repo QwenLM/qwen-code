@@ -373,8 +373,13 @@ export function ChannelEditorDialog({
     if (code === 'number') return t('channels.editor.validation.number');
     if (code === 'outOfRange') {
       const numberField = field && field.kind === 'number' ? field : undefined;
+      // Only name the bounds the descriptor actually declares: a field with a
+      // maximum and no exclusiveMinimum has no floor, and inventing "greater
+      // than 0" would state a constraint the validator does not enforce.
       return t('channels.editor.validation.outOfRange', {
-        min: numberField?.exclusiveMinimum ?? 0,
+        ...(numberField?.exclusiveMinimum !== undefined
+          ? { min: numberField.exclusiveMinimum }
+          : {}),
         ...(numberField?.maximum !== undefined
           ? { max: numberField.maximum }
           : {}),
@@ -880,12 +885,16 @@ export function ChannelEditorDialog({
           const storedGroup = isRecord(storedGroups[repositoryId])
             ? storedGroups[repositoryId]
             : {};
-          // Ask the save path what this row will own, rather than guessing from
-          // the draft policy: a stored allowlist with no list inherits its
-          // members, and a stored empty list admits nobody even with no policy
-          // beside it. The copy has to match what the runtime will resolve.
+          // The hint promises what an EMPTY box will do, so ask the projection
+          // about that hypothetical rather than about the current draft. A
+          // stored list under an inherited policy is deleted when the box is
+          // cleared, handing the repository back the channel-wide members —
+          // asking about the untouched draft would promise "nobody" instead.
           const ownsSpeakerList = Array.isArray(
-            projectRepositoryGroup(storedGroup, override)['allowedUsers'],
+            projectRepositoryGroup(storedGroup, {
+              ...override,
+              allowedUsers: '',
+            })['allowedUsers'],
           );
           const headingId = `${formId}-repo-${repositoryId}`;
           const mentionId = `${formId}-mention-${repositoryId}`;
@@ -1016,19 +1025,26 @@ export function ChannelEditorDialog({
       )
       .map(([groupId]) => groupId);
     if (retained.length === 0) return null;
-    // The runtime resolves per-repository senders and requireMention without
-    // consulting groupPolicy, so these entries keep deciding who may drive the
-    // agent after the policy moves off Allowlist. Say so rather than letting
-    // the form imply the channel-wide control is the whole story.
+    // Under open/pairing the runtime resolves per-repository senders and
+    // requireMention without consulting groupPolicy, so these entries keep
+    // deciding who may drive the agent. Under disabled the group gate drops
+    // every envelope before either lookup, so the entries are kept but inert —
+    // saying "still apply" there would be false.
+    const policy = hasDescriptorGroupPolicy(descriptor)
+      ? String(draft.values['groupPolicy'] ?? '')
+      : String(instance?.config['groupPolicy'] ?? '');
+    const variant = policy === 'disabled' ? '.disabled' : '';
     return (
       <Alert>
         <KeyRoundIcon />
         <AlertTitle>
-          {t('channels.editor.field.github.retainedRepositorySettings.title')}
+          {t(
+            `channels.editor.field.github.retainedRepositorySettings${variant}.title`,
+          )}
         </AlertTitle>
         <AlertDescription>
           {t(
-            'channels.editor.field.github.retainedRepositorySettings.description',
+            `channels.editor.field.github.retainedRepositorySettings${variant}.description`,
             { repositories: retained.join(', ') },
           )}
         </AlertDescription>

@@ -40,9 +40,13 @@ does not show.
   finite number, or not positive.
 - `GroupGate.check()` resolves `requireMention` as
   `groupConfigFor(chatId)?.requireMention ?? groups["*"]?.requireMention ?? true`,
-  and the speaker policy as the per-group `senders` falling back to `"*"` and
-  then to `open`. Both lookups go through the case-insensitive group matcher
-  added by #16096.
+  and returns `{allowed: false, reason: 'disabled'}` for a disabled policy before
+  it reaches the mention gate. It contains no speaker logic at all.
+- The speaker policy and members are resolved by `ChannelBase.groupSendersFor`
+  and `groupAllowedUsersFor`: the per-group `senders` falling back to `"*"` and
+  then to `open`, and the per-group `allowedUsers` falling back to `"*"` and then
+  to `[]`. `senderGateFor` builds the gate from those two. Both classes' lookups
+  go through the case-insensitive group matcher added by #16096.
 - `channel-editor-state.ts` builds `groups` from the allowlist string, preserving
   each listed repository's stored settings verbatim, and writes the channel-wide
   speaker default into `groups["*"]`. Per-repository entries are carried through
@@ -51,7 +55,10 @@ does not show.
   `channel-settings-store.ts` validates `groups.<id>.requireMention` as a
   boolean, `senders` as `open` or `allowlist`, and `allowedUsers` as a string
   array, and it validates descriptor-declared number fields against
-  `exclusiveMinimum`. **No daemon, SDK, or descriptor-schema change is required.**
+  `exclusiveMinimum`. **The per-repository `groups` edits need no daemon, SDK or
+  descriptor-schema change.** The poll-interval ceiling does extend the
+  number-field descriptor with `maximum`, mirrored at five sites — see decision
+  9 and the files table.
 
 ## Goals
 
@@ -70,8 +77,10 @@ does not show.
   separately in #16144 and is deliberately out of scope here.
 - No editing of `groups["*"].requireMention`, `dispatchMode`, or
   `groupHistoryLimit`. Those keys keep round-tripping untouched.
-- No new descriptor field kind, no SDK change, and no per-repository UI for
-  non-repository platforms. Chat platforms keep the current form.
+- No new descriptor field _kind_, and no per-repository UI for non-repository
+  platforms. Chat platforms keep the current form. The number descriptor does
+  gain a `maximum` bound (decision 9), which is a vocabulary extension mirrored
+  into the SDK types, not a new kind.
 - No repository picker backed by the GitHub API. Repositories are still typed as
   `owner/repo` in the allowlist field.
 
@@ -87,6 +96,7 @@ Add one field to the GitHub plugin's management descriptor, mirroring Email:
   "label": "Poll Interval (ms)",
   "kind": "number",
   "exclusiveMinimum": 0,
+  "maximum": 86400000,
   "default": "60000"
 }
 ```
@@ -225,17 +235,23 @@ the transcript build-artifact guard rejects that prefix.
 
 ## Files affected
 
-| File                                                                           | Change                                              |
-| :----------------------------------------------------------------------------- | :-------------------------------------------------- |
-| `packages/channels/github/src/index.ts`                                        | declare `pollInterval`                              |
-| `packages/web-shell/client/components/channels/channel-editor-state.ts`        | override draft type, read, merge-on-write           |
-| `packages/web-shell/client/components/channels/ChannelEditorDialog.tsx`        | per-repository rows, `pollInterval` section mapping |
-| `packages/web-shell/client/components/channels/ChannelEditorDialog.module.css` | row layout                                          |
-| `packages/web-shell/client/i18n.tsx`                                           | EN + ZH copy                                        |
-| `packages/web-shell/client/components/channels/channel-editor-state.test.ts`   | state round-trip, inheritance, preservation         |
-| `packages/web-shell/client/components/channels/ChannelEditorDialog.test.tsx`   | rendering and interaction                           |
-| `packages/web-shell/client/e2e/visuals/screenshots.spec.ts`                    | capture the new rows                                |
-| `docs/users/features/channels/github.md`                                       | document that the editor now exposes these settings |
+| File                                                                           | Change                                                 |
+| :----------------------------------------------------------------------------- | :----------------------------------------------------- |
+| `packages/channels/github/src/index.ts`                                        | declare `pollInterval` with both bounds                |
+| `packages/channels/base/src/types.ts`                                          | `maximum` on the number descriptor                     |
+| `packages/channels/base/src/PollingChannelBase.ts`                             | clamp the interval to the ceiling                      |
+| `packages/sdk-typescript/src/daemon/types.ts`                                  | mirror `maximum` on the wire descriptor                |
+| `packages/cli/src/commands/channel/channel-registry.ts`                        | validate `maximum` metadata                            |
+| `packages/cli/src/serve/channel-settings-store.ts`                             | enforce `maximum`; tolerate an unchanged stored number |
+| `docs/developers/qwen-serve-protocol.md`                                       | document `maximum` in the descriptor vocabulary        |
+| `packages/web-shell/client/components/channels/channel-editor-state.ts`        | override draft type, read, merge-on-write              |
+| `packages/web-shell/client/components/channels/ChannelEditorDialog.tsx`        | per-repository rows, `pollInterval` section mapping    |
+| `packages/web-shell/client/components/channels/ChannelEditorDialog.module.css` | row layout                                             |
+| `packages/web-shell/client/i18n.tsx`                                           | EN + ZH copy                                           |
+| `packages/web-shell/client/components/channels/channel-editor-state.test.ts`   | state round-trip, inheritance, preservation            |
+| `packages/web-shell/client/components/channels/ChannelEditorDialog.test.tsx`   | rendering and interaction                              |
+| `packages/web-shell/client/e2e/visuals/screenshots.spec.ts`                    | capture the new rows                                   |
+| `docs/users/features/channels/github.md`                                       | document that the editor now exposes these settings    |
 
 ## Design decisions and rationale
 
@@ -299,10 +315,14 @@ the transcript build-artifact guard rejects that prefix.
     tolerated range should not strand the operator.
 11. **Settings that outlive the policy are named, not deleted.** Per-repository
     senders and `requireMention` are resolved without consulting `groupPolicy`,
-    so switching the policy away from Allowlist leaves them enforced while the
-    rows disappear. Deleting them would destroy hand-written configuration;
-    instead the editor lists the repositories that still carry settings and says
-    how to edit them.
+    so under `open` and `pairing` they stay enforced after the rows disappear.
+    Under `disabled` the group gate drops every envelope before either lookup,
+    so the entries are retained but inert — the alert says which of the two
+    cases applies rather than claiming they all still apply. Deleting them would
+    destroy hand-written configuration; instead the editor lists the
+    repositories that still carry settings and says how to edit them. Row edits
+    made before the switch are projected in that branch too, so the save cannot
+    report success while restoring the stored value.
 
 ## Constraints
 

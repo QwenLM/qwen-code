@@ -1809,6 +1809,44 @@ describe('Per-repository overrides', () => {
     ).toEqual({ 'qwenlm/qwen-code': { requireMention: false } });
   });
 
+  it('keeps a row edit made before the policy was switched away from allowlist', () => {
+    // The rows hide once the policy leaves Allowlist, but the draft still holds
+    // the edit and the runtime keeps resolving these entries under open and
+    // pairing. Rebuilding groups from the stored config would report success
+    // while silently restoring the value the operator just changed.
+    const instance = githubInstance({
+      '*': {},
+      'acme/widgets': { requireMention: true },
+    });
+    const draft = draftFor(instance, 'acme/widgets');
+    draft.groupOverrides['acme/widgets'].requireMention = 'false';
+    draft.values.groupPolicy = 'pairing';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({ '*': {}, 'acme/widgets': { requireMention: false } });
+  });
+
+  it('still drops empty entries when the policy leaves allowlist', () => {
+    // Projecting the edits must not start retaining entries that carry nothing:
+    // acceptance criterion 9 keeps stored settings, not empty placeholders.
+    const instance = githubInstance({
+      '*': {},
+      'acme/widgets': {},
+      'qwenlm/qwen-code': { requireMention: true },
+    });
+    const draft = draftFor(instance, 'acme/widgets, qwenlm/qwen-code');
+    draft.values.groupPolicy = 'open';
+
+    expect(
+      buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+        'groups'
+      ],
+    ).toEqual({ '*': {}, 'qwenlm/qwen-code': { requireMention: true } });
+  });
+
   it('leaves chat platforms reading and writing groups exactly as before', () => {
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'chat-bot',
@@ -1944,10 +1982,11 @@ describe('GitHub poll interval', () => {
   });
 
   it('does not block an unrelated edit over a stored interval the runtime tolerates', () => {
-    // PollingChannelBase falls back to 60s for a non-positive stored value, so
-    // a channel carrying 0 or -5 works today. Declaring the field must not
-    // strand its operator on a setting they never touched.
-    for (const stored of [0, -5]) {
+    // PollingChannelBase falls back to 60s for a non-positive stored value and
+    // clamps one above the ceiling, so a channel carrying 0, -5 or 300000000
+    // works today. Declaring the field must not strand its operator on a
+    // setting they never touched — both halves of the range, not just the floor.
+    for (const stored of [0, -5, 300_000_000]) {
       const { draft, instance } = pollingDraft(stored);
       draft.values.useLocalGh = true;
 
