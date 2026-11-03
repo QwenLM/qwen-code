@@ -73,5 +73,5 @@ A non-interactive session cannot prompt. Unapproved project hooks stay unloaded 
 
 - ACP: a request to list and approve pending project hooks, mirroring the MCP one, and the withheld reason in the hooks status.
 - LSP: gate the workspace `.lsp.json` commands the same way.
-- Project skill and subagent frontmatter hooks: they still need only folder trust.
+- Project skill and subagent frontmatter hooks: they need explicit folder trust instead (see [Explicit trust for repository execution](2026-11-03-project-execution-trust.md)).
 - A non-interactive way to approve project hooks (for CI), mirroring `qwen mcp approve`.

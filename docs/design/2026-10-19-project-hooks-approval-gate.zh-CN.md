@@ -73,5 +73,5 @@
 
 - ACP：增加列出并审批待定项目 hooks 的请求，与 MCP 的对应，并在 hooks 状态中带上扣留原因。
 - LSP：以同样方式为工作区 `.lsp.json` 的命令设闸门。
-- 项目 skill 与 subagent frontmatter 中的 hooks：目前仍只需要目录信任。
+- 项目 skill 与 subagent frontmatter 中的 hooks：改为需要显式目录信任（见[仓库代码执行需要显式信任](2026-11-03-project-execution-trust.zh-CN.md)）。
 - 非交互式审批项目 hooks 的方式（用于 CI），与 `qwen mcp approve` 对应。

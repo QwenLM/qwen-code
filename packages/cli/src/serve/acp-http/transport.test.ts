@@ -13407,6 +13407,44 @@ describe('ACP WebSocket transport security', () => {
     ).toBe(403);
   });
 
+  it('uses remote listener origins and credentials without changing primary access', async () => {
+    await startServer({ token: 'operator', localControlToken: 'pairing' });
+    credentialStore!.setRemoteToken('remote-token');
+    const origin = `http://127.0.0.1:${lanPort}`;
+    tagListener(lanServer!, {
+      kind: 'remote-access',
+      authority: `127.0.0.1:${lanPort}`,
+      origin,
+      allowedOrigins: {
+        allows: (candidate) => candidate === 'http://localhost:5273',
+      },
+    });
+    const accepted = await wsConnectLocalControl('remote-token', {
+      Origin: 'http://localhost:5273',
+    });
+    expect(accepted.code).toBe(101);
+    const closed = new Promise<void>((resolve) =>
+      accepted.socket!.once('close', () => resolve()),
+    );
+    expect(
+      (
+        await wsConnectLocalControl('operator', {
+          Origin: 'http://localhost:5273',
+        })
+      ).code,
+    ).toBe(401);
+    expect(
+      (await wsConnectLocalControl('remote-token', { Origin: origin })).code,
+    ).toBe(403);
+    const primary = await wsConnect({
+      headers: { Authorization: 'Bearer operator' },
+    });
+    acpHandle!.detachServer(lanServer!);
+    await closed;
+    expect(primary.readyState).toBe(WebSocket.OPEN);
+    primary.terminate();
+  });
+
   it('terminates LAN WebSockets when their listener is detached', async () => {
     await startServer({ localControlToken: 'pairing-token' });
     const paired = await wsConnectLocalControl('pairing-token');

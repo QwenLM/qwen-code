@@ -41,6 +41,7 @@ function makeConfig(options: {
   safeMode?: boolean;
   bareMode?: boolean;
   trusted?: boolean;
+  explicitlyTrusted?: boolean;
   systemHooks?: Record<string, unknown>;
   userHooks?: Record<string, unknown>;
   projectHooks?: Record<string, unknown>;
@@ -62,6 +63,9 @@ function makeConfig(options: {
     getBareMode: vi.fn().mockReturnValue(options.bareMode ?? false),
     getSessionId: vi.fn().mockReturnValue(options.sessionId ?? SESSION_ID),
     isTrustedFolder: vi.fn().mockReturnValue(options.trusted ?? true),
+    isExplicitlyTrustedFolder: vi
+      .fn()
+      .mockReturnValue(options.explicitlyTrusted ?? options.trusted ?? true),
     getSystemHooks: vi.fn().mockReturnValue(options.systemHooks),
     getUserHooks: vi.fn().mockReturnValue(options.userHooks),
     getProjectHooks: vi.fn().mockReturnValue(options.projectHooks),
@@ -367,7 +371,11 @@ describe('buildHooksListing', () => {
     });
 
     /** The row for one session hook (`trustGated` or not) in a folder. */
-    function trustGatedRow(trustGated: boolean, trusted: boolean) {
+    function trustGatedRow(
+      trustGated: boolean,
+      trusted: boolean,
+      explicitlyTrusted = trusted,
+    ) {
       const session = new SessionHooksManager();
       session.addSessionHook(
         SESSION_ID,
@@ -376,7 +384,7 @@ describe('buildHooksListing', () => {
         { type: HookType.Command, command: './skill-check.sh' },
         { skillRoot: '/project/.qwen/skills/check', trustGated },
       );
-      return rows({ session, trusted })[0];
+      return rows({ session, trusted, explicitlyTrusted })[0];
     }
 
     it('disables a trust-gated session hook in an untrusted folder', () => {
@@ -395,6 +403,14 @@ describe('buildHooksListing', () => {
 
       expect(row).toMatchObject({ enabled: true, trustGated: true });
       expect(row).not.toHaveProperty('disabledReason');
+    });
+
+    it('lists a project skill hook as disabled when legacy trust is only implicit', () => {
+      expect(trustGatedRow(true, true, false)).toMatchObject({
+        enabled: false,
+        disabledReason: 'untrusted',
+      });
+      expect(trustGatedRow(false, true, false)?.enabled).toBe(true);
     });
 
     it('does not trust-gate a session hook that is not trust-gated', () => {

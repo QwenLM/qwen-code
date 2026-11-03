@@ -46,6 +46,12 @@ agents or run for parents and siblings. Global settings hooks and session-wide
 skill/function hooks retain their existing scope. Project-agent hooks recheck
 the trust of the workspace that supplied the agent before every event.
 
+Project skill and agent frontmatter hooks require **explicit folder trust**:
+enable `security.folderTrust.enabled` in user settings and trust the directory,
+or grant workspace trust through your IDE. Disabling folder trust does not
+authorize frontmatter hooks, including in YOLO mode. Their instructions still
+load. User and bundled frontmatter hooks keep their existing behavior.
+
 Use `SubagentStop` for agent completion; `Stop` is not automatically remapped.
 Move an agent hook to settings if it should observe the whole session.
 
@@ -1526,7 +1532,7 @@ Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` o
 
 ### Approving project hooks
 
-Hooks in a project's `.qwen/settings.json` are commands written by whoever controls the repository, and they run with your privileges. Like a project MCP server, they do not run until you approve them: the first time Qwen Code starts in a workspace that declares hooks, it lists them (with their environment settings, headers, prompt text and model) and asks whether to approve or reject them; Esc postpones the decision to the next start, and `/hooks` then lists them without asking. The decision is saved in `~/.qwen/hookApprovals.json` and is bound to the exact hooks configuration you reviewed and to the workspace's own `.env` files and `settings.env`, so an edit to the project hooks, or to any of those values, asks again. A rejected configuration stays unloaded and is not asked about again until it changes; to reconsider sooner, remove its entry from that file and open `/hooks` (or restart Qwen Code). A project `.env` cannot relocate the file. Hooks declared in a project skill's or subagent's frontmatter are not covered by this approval yet: they still need only folder trust.
+Hooks in a project's `.qwen/settings.json` are commands written by whoever controls the repository, and they run with your privileges. Like a project MCP server, they do not run until you approve them: the first time Qwen Code starts in a workspace that declares hooks, it lists them (with their environment settings, headers, prompt text and model) and asks whether to approve or reject them; Esc postpones the decision to the next start, and `/hooks` then lists them without asking. The decision is saved in `~/.qwen/hookApprovals.json` and is bound to the exact hooks configuration you reviewed and to the workspace's own `.env` files and `settings.env`, so an edit to the project hooks, or to any of those values, asks again. A rejected configuration stays unloaded and is not asked about again until it changes; to reconsider sooner, remove its entry from that file and open `/hooks` (or restart Qwen Code). A project `.env` cannot relocate the file. Hooks declared in a project skill's or subagent's frontmatter are not covered by this approval yet: they need explicit folder trust instead (see [Agent frontmatter scope](#agent-frontmatter-scope)).
 
 The approval applies whether or not [Trusted Folders](../configuration/trusted-folders.md) is enabled, because a trusted folder means its settings are read, not that every command in them was reviewed. Only `--yolo` or `--approval-mode yolo` on the command line skips the prompt and runs project hooks as approved, and only while the session stays in YOLO mode; a YOLO approval mode set in settings does not, because a repository's own settings could set it. No approval is asked for while `disableAllHooks`, `--safe-mode` or `--bare` turns hooks off. Non-interactive runs (`-p`, `--acp`) never prompt: unapproved project hooks stay unloaded and `qwen -p` prints a warning on stderr; run Qwen Code interactively in the folder once to approve them. While project hooks are withheld, the `/hooks` browser lists them as not approved, or as rejected.
 
@@ -1626,7 +1632,7 @@ fi
 ### Security Model
 
 - Hooks run in the user's environment with user privileges
-- Project-level hooks in `.qwen/settings.json` require trusted folder status and your approval of the exact hooks configuration (see [Approving project hooks](#approving-project-hooks)); hooks in project skill or subagent frontmatter need only folder trust
+- Project-level hooks in `.qwen/settings.json` require trusted folder status and your approval of the exact hooks configuration (see [Approving project hooks](#approving-project-hooks)); hooks in project skill or subagent frontmatter need explicit folder trust
 - Timeouts prevent hanging hooks (default: 60 seconds for command hooks)
 
 ## Best Practices
