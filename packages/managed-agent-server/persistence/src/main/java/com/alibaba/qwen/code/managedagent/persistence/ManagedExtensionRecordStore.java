@@ -719,18 +719,29 @@ public class ManagedExtensionRecordStore
                     + " WHERE session_scope_key=? AND record_key=? AND revision=?",
                     revision, resource.resourceId(), settledAt, scope, key, revision - 1);
         }
-        Set<String> retained = new HashSet<>(jdbc.queryForList(
-                "SELECT resource_id FROM ma_resource_ref WHERE session_scope_key=? AND owner_kind='SESSION_RECORD' AND owner_key=?",
-                String.class, scope, key));
-        if (retained.add(resource.resourceId())) {
-            referenceProjectionResource(scope, key, revision, tenantId, workspaceId,
-                    sessionId, resource.resourceId());
-        }
         if (ManagedConfigInstall.isPackageConfig(settings)) {
+            // Package config accumulates across revisions: the retained seed
+            // stops the closure walk from re-projecting resources an earlier
+            // revision already pinned.
+            Set<String> retained = new HashSet<>(jdbc.queryForList(
+                    "SELECT resource_id FROM ma_resource_ref WHERE session_scope_key=? AND owner_kind='SESSION_RECORD' AND owner_key=?",
+                    String.class, scope, key));
+            if (retained.add(resource.resourceId())) {
+                referenceProjectionResource(scope, key, revision, tenantId, workspaceId,
+                        sessionId, resource.resourceId());
+            }
             // A sealed writer cannot rely on its old journal to retain the
             // recovery resources named by the active package configuration.
             retainPackageConfiguration(scope, key, revision, tenantId, workspaceId,
                     sessionId, settings, resources, retained);
+        } else {
+            // Legacy MCP settings need no closure: replace the superseded
+            // projection row so the key keeps exactly one row instead of
+            // accumulating one per revision for the Session's whole life (R2-5).
+            jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key=? AND owner_kind='SESSION_RECORD' AND owner_key=?",
+                    scope, key);
+            referenceProjectionResource(scope, key, revision, tenantId, workspaceId,
+                    sessionId, resource.resourceId());
         }
     }
 

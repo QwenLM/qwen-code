@@ -76,19 +76,24 @@ describe('managed-agent-server e2e runner', () => {
     }
   });
 
-  it('names only real ma_public_event columns in its single-table SQL (R4-1)', () => {
-    const source = read('scripts/run-managed-agent-server-e2e.ts');
-    const baseline = read(
-      'packages/managed-agent-server/persistence/src/main/resources/db/managed-schema/V1__managed_schema.sql',
-    );
-    const tableBody =
-      baseline
-        .split('CREATE TABLE ma_public_event (')[1]
-        ?.split(') ENGINE=')[0] ?? '';
-    const columns = new Set(
-      [...tableBody.matchAll(/^\s+([a-z_]+)\s/gm)].map((match) => match[1]),
-    );
-    expect(columns.has('is_terminal')).toBe(true);
+  // Column identifiers named by the runner's single-table ma_public_event
+  // queries. Interpolated SQL fragments are expanded so a typo inside
+  // ${sessionFilter} stays visible, and quoted literals are stripped so a value
+  // like LIKE 'agent.%' cannot pose as a column (R5-1, both directions).
+  const maPublicEventColumns = (source) => {
+    const fragments = new Map();
+    for (const m of source.matchAll(/const (\w+) = `([^`]*)`/g)) {
+      fragments.set(m[1], m[2]);
+    }
+    const expand = (sql, depth) =>
+      depth > 4
+        ? sql
+        : sql.replace(/\$\{([^}]*)\}/g, (_whole, expr) => {
+            const name = expr.trim();
+            return fragments.has(name)
+              ? expand(fragments.get(name), depth + 1)
+              : ' ? ';
+          });
     const keywords = new Set([
       'select',
       'from',
@@ -114,6 +119,7 @@ describe('managed-agent-server e2e runner', () => {
       'on',
       'in',
       'is',
+      'like',
       'case',
       'when',
       'then',
@@ -124,18 +130,36 @@ describe('managed-agent-server e2e runner', () => {
     ]);
     const named = new Set();
     for (const match of source.matchAll(/`([^`]*ma_public_event[^`]*)`/g)) {
-      const sql = match[1];
+      let sql = match[1];
       const tables = [...sql.matchAll(/qwen_managed_agent\.(\w+)/g)].map(
         (m) => m[1],
       );
       // Multi-table dumps name other tables' columns too; only reconcile the
       // single-table ma_public_event queries.
       if (tables.some((table) => table !== 'ma_public_event')) continue;
-      const cleaned = sql.replace(/\$\{[^}]*\}/g, ' ? ');
-      for (const token of cleaned.matchAll(/[a-z][a-z_]+/g)) {
+      sql = expand(sql, 0);
+      sql = sql.replace(/'[^']*'/g, " '' ");
+      for (const token of sql.matchAll(/[a-z][a-z_]+/g)) {
         if (!keywords.has(token[0])) named.add(token[0]);
       }
     }
+    return named;
+  };
+
+  it('names only real ma_public_event columns in its single-table SQL (R4-1)', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    const baseline = read(
+      'packages/managed-agent-server/persistence/src/main/resources/db/managed-schema/V1__managed_schema.sql',
+    );
+    const tableBody =
+      baseline
+        .split('CREATE TABLE ma_public_event (')[1]
+        ?.split(') ENGINE=')[0] ?? '';
+    const columns = new Set(
+      [...tableBody.matchAll(/^\s+([a-z_]+)\s/gm)].map((match) => match[1]),
+    );
+    expect(columns.has('is_terminal')).toBe(true);
+    const named = maPublicEventColumns(source);
     expect(named.size).toBeGreaterThan(0);
     for (const column of named) {
       expect(
@@ -143,6 +167,26 @@ describe('managed-agent-server e2e runner', () => {
         `ma_public_event column ${column} is absent from canonical V1`,
       ).toBe(true);
     }
+  });
+
+  it('the ma_public_event column guard ignores literal values and sees interpolated typos (R5-1)', () => {
+    // (a) A quoted value must not be mistaken for a column: LIKE 'agent.%'
+    // contributes no `agent` token, so valid SQL does not red the guard.
+    const literal = maPublicEventColumns(
+      'const q = `SELECT event_type FROM qwen_managed_agent.ma_public_event ' +
+        "WHERE event_type LIKE 'agent.%'`;",
+    );
+    expect(literal.has('event_type')).toBe(true);
+    expect(literal.has('agent')).toBe(false);
+    // (b) A column misspelled inside an interpolated fragment must surface
+    // rather than being blanked away with the interpolation.
+    const typo = maPublicEventColumns(
+      'const sessionFilter = `sessoin_id=${sqlString(session.id)}`;\n' +
+        'const q = `SELECT sequence_id FROM qwen_managed_agent.ma_public_event ' +
+        'WHERE ${sessionFilter}`;',
+    );
+    expect(typo.has('sequence_id')).toBe(true);
+    expect(typo.has('sessoin_id')).toBe(true);
   });
 
   const extracted = (names) => {
