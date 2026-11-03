@@ -18373,6 +18373,11 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           prompt: [{ type: 'text', text: 'start' }],
         });
+        expect(
+          session
+            .collectActiveWorkHolds()
+            .some((hold) => hold.category === 'shell'),
+        ).toBe(false);
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
         expect(
           vi.mocked(mockChat.sendMessageStream).mock.calls[1][1].message,
@@ -18381,11 +18386,6 @@ describe('Session', () => {
           vi
             .mocked(mockClient.extMethod)
             .mock.calls.some(([method]) => method === '_qwencode/start_turn'),
-        ).toBe(false);
-        expect(
-          session
-            .collectActiveWorkHolds()
-            .some((hold) => hold.id === 'same-shell'),
         ).toBe(false);
       });
 
