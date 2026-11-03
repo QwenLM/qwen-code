@@ -1941,6 +1941,126 @@ describe('GithubChannel', () => {
       expect(channel.cursor.dispatchedComments).toEqual(['C_1001', 'C_1002']);
     });
 
+    it('does not re-dispatch a replied comment when a frozen cursor slides the ring (R11-A1)', async () => {
+      await initWithoutLoop();
+      const priv = channel as unknown as {
+        abortableSleep: (ms: number) => Promise<void>;
+      };
+      priv.abortableSleep = vi.fn().mockResolvedValue(undefined);
+      // A frozen cursor: mark-read keeps failing, so lastProcessedAt never
+      // advances and every unread thread re-lists each poll.
+      mockOctokit.rest.activity.markNotificationsAsRead.mockRejectedValue(
+        new Error('server error'),
+      );
+      // Seed a FULL ring with an already-replied comment C_first at the front
+      // and 499 expired dummies. C_first is re-listable (created_at newer than
+      // the frozen cursor); the dummies are expired.
+      const dummies = Array.from({ length: 499 }, (_, i) => `dummy${i}`);
+      channel.cursor.dispatchedComments = ['C_first', ...dummies];
+      const times: Record<string, string> = {
+        C_first: '2026-07-02T09:00:00.000Z',
+      };
+      for (const d of dummies) times[d] = '2026-06-30T00:00:00.000Z';
+      channel.cursor.dispatchedCommentTimes = times;
+
+      // Poll 1: a different thread dispatches one comment, sliding the ring.
+      // The old count-based eviction drops C_first (front); window-aware
+      // eviction must KEEP it (still re-listable) and drop the expired dummies.
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            subject: {
+              title: 'Issue 99',
+              url: 'https://api.github.com/repos/owner/repo/issues/99',
+              type: 'Issue',
+            },
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({
+            id: 2001,
+            node_id: 'C_2001',
+            body: 'other thread remark',
+            created_at: '2026-07-02T09:30:00.000Z',
+          }),
+        ]);
+      await pollOnce().catch(() => {});
+      expect(channel.cursor.dispatchedComments).toContain('C_first');
+
+      // Poll 2: thread 42 re-lists a SUPERSET batch — the replied C_first plus
+      // a brand-new C_new. C_first must stay filtered out so the batch covers
+      // only the new comment; otherwise the fresh batch hash misses the audit
+      // backstop and C_first is published a SECOND time (no crash involved).
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification({ reason: 'comment' })])
+        .mockResolvedValueOnce([
+          makeComment({
+            id: 1001,
+            node_id: 'C_first',
+            body: 'first remark already replied',
+            created_at: '2026-07-02T09:00:00.000Z',
+          }),
+          makeComment({
+            id: 1002,
+            node_id: 'C_new',
+            body: 'brand new remark',
+            created_at: '2026-07-02T10:00:00.000Z',
+          }),
+        ]);
+      await pollOnce().catch(() => {});
+
+      const last =
+        channel.inboundEnvelopes[channel.inboundEnvelopes.length - 1]!;
+      expect(last.text).toContain('brand new remark');
+      expect(last.text).not.toContain('first remark already replied');
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
+    });
+
+    it('refuses new comment dispatches at the hard ring cap with a frozen cursor (R11-A1)', async () => {
+      await initWithoutLoop();
+      const priv = channel as unknown as {
+        abortableSleep: (ms: number) => Promise<void>;
+      };
+      priv.abortableSleep = vi.fn().mockResolvedValue(undefined);
+      mockOctokit.rest.activity.markNotificationsAsRead.mockRejectedValue(
+        new Error('server error'),
+      );
+      // A full ring of PROTECTED keys (all newer than the frozen cursor):
+      // window-aware eviction cannot free any slot, so the hard cap must
+      // refuse new dispatches rather than evict a protected key.
+      const keys = Array.from({ length: 4096 }, (_, i) => `prot${i}`);
+      channel.cursor.dispatchedComments = [...keys];
+      const times: Record<string, string> = {};
+      for (const k of keys) times[k] = '2026-07-02T09:00:00.000Z';
+      channel.cursor.dispatchedCommentTimes = times;
+
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        mockOctokit.paginate
+          .mockResolvedValueOnce([makeNotification({ reason: 'comment' })])
+          .mockResolvedValueOnce([
+            makeComment({
+              id: 3001,
+              node_id: 'C_overflow',
+              body: 'should be deferred',
+              created_at: '2026-07-02T10:00:00.000Z',
+            }),
+          ]);
+        await pollOnce().catch(() => {});
+        // No dispatch, no key recorded, surfaced once.
+        expect(channel.inboundEnvelopes).toHaveLength(0);
+        expect(channel.cursor.dispatchedComments).not.toContain('C_overflow');
+        expect(
+          stderr.mock.calls.some((call) =>
+            String(call[0]).includes('ring at hard cap'),
+          ),
+        ).toBe(true);
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
     it('skips notifications whose reason is not in reasonFilter', async () => {
       await initWithoutLoop({
         reasonFilter: ['mention', 'review_requested', 'assign'],
@@ -3941,6 +4061,75 @@ describe('GithubChannel', () => {
           error: 'agent down',
         }),
       ]);
+    });
+
+    it('sanitizes the failure diagnostic against upstream log-line forgery (R11-B1)', async () => {
+      // octokit passes text/plain upstream error bodies through verbatim;
+      // a GHE/proxy error can carry raw separators and ANSI escapes. The
+      // diagnostic must stay ONE physical log line, like the persisted
+      // task error already does.
+      const crafted =
+        'upstream transient error\u2028[Channel:test-github] preflight rejected reason=sender_denied\u001b[31mFAKE-ALERT\u001b[0m\u0085tail';
+      channel.handleInboundError = new Error(crafted);
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      let dump = '';
+      try {
+        await pollOnce();
+        dump =
+          stderr.mock.calls
+            .map((call) => String(call[0]))
+            .find((line) => line.includes('handleInbound failed')) ?? '';
+      } finally {
+        stderr.mockRestore();
+      }
+      expect(dump).toContain('upstream transient error');
+      // eslint-disable-next-line no-control-regex
+      expect(dump).not.toMatch(/[\u2028\u2029\u0085\u001b]/);
+      expect(dump.endsWith('\n')).toBe(true);
+      expect(dump.slice(0, -1)).not.toContain('\n');
+      // The task stays recoverable with the sanitized error persisted.
+      const tasks = readInboundTasks();
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!['state']).toBe('failed');
+      const taskError = String(tasks[0]!['error']);
+      expect(taskError).not.toMatch(/[\u2028\u2029\u0085]/);
+      expect(taskError).not.toContain('\u001b');
+    });
+
+    it('sanitizes the API retry diagnostic (R11-B1)', async () => {
+      await initWithoutLoop();
+      const priv = channel as unknown as {
+        abortableSleep: (ms: number) => Promise<void>;
+      };
+      priv.abortableSleep = vi.fn().mockResolvedValue(undefined);
+      const crafted =
+        'rate limited\u2028[Channel:test-github] forged retry line\u001b[31mX';
+      mockOctokit.paginate
+        .mockRejectedValueOnce(
+          Object.assign(new Error(crafted), { status: 500 }),
+        )
+        .mockResolvedValueOnce([makeNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      let dump = '';
+      try {
+        await pollOnce();
+        dump =
+          stderr.mock.calls
+            .map((call) => String(call[0]))
+            .find((line) => line.includes('retrying in')) ?? '';
+      } finally {
+        stderr.mockRestore();
+      }
+      expect(dump).toContain('rate limited');
+      // eslint-disable-next-line no-control-regex
+      expect(dump).not.toMatch(/[\u2028\u2029\u0085\u001b]/);
+      expect(dump.endsWith('\n')).toBe(true);
+      expect(dump.slice(0, -1)).not.toContain('\n');
     });
 
     it('bounds failed task recovery and avoids duplicate error comments', async () => {
@@ -9027,14 +9216,39 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       );
       const path = watchStatePath();
       mkdirSync(dirname(path), { recursive: true });
+      // A NON-EMPTY array with a valid-shape entry: an empty array would
+      // make "remove the array-container guard" an equivalent mutation
+      // (Object.entries([]) is still {}), leaving the guard unpinned.
       writeFileSync(
         path,
-        `${JSON.stringify({ version: 1, entries: [] })}\n`,
+        `${JSON.stringify({
+          version: 1,
+          entries: [
+            {
+              headSha: 'sha-1',
+              mergeableState: 'clean',
+              prState: 'open',
+              fired: [],
+              pending: [],
+            },
+          ],
+        })}\n`,
         'utf-8',
       );
       mockPull({});
       mockNotificationsOnce([]);
-      await pollOnce();
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await pollOnce();
+        // The unusable container must be SURFACED, not silently wiped.
+        expect(
+          stderr.mock.calls.some((call) =>
+            String(call[0]).includes('container unusable'),
+          ),
+        ).toBe(true);
+      } finally {
+        stderr.mockRestore();
+      }
 
       mockPull({ mergeable: false, mergeable_state: 'dirty' });
       mockNotificationsOnce([]);
@@ -9042,10 +9256,14 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
 
       expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
       const state = JSON.parse(readFileSync(watchStatePath(), 'utf-8')) as {
-        entries: unknown;
+        entries: Record<string, unknown>;
       };
       expect(Array.isArray(state.entries)).toBe(false);
       expect(typeof state.entries).toBe('object');
+      // Fresh start under the PR key — without the array guard the entry
+      // would survive under the numeric index "0" instead.
+      expect(state.entries['owner/repo#42']).toBeDefined();
+      expect(state.entries['0']).toBeUndefined();
     });
 
     it('drains pending events for PRs outside the watch cap (F11)', async () => {

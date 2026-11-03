@@ -20890,6 +20890,7 @@ describe('createServeApp', () => {
         retry = await post();
       }
       // The retry must reach admission again, not dedupe into the phantom.
+      expect(retry.status).toBe(202);
       expect(retry.body.deduplicated).toBeUndefined();
       expect(bridge.promptCalls).toHaveLength(2);
     });
@@ -20994,6 +20995,7 @@ describe('createServeApp', () => {
         await new Promise((r) => setTimeout(r, 10));
         retry = await post();
       }
+      expect(retry.status).toBe(202);
       expect(retry.body.deduplicated).toBeUndefined();
       expect(bridge.promptCalls).toHaveLength(2);
     });

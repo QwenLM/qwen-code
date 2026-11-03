@@ -184,11 +184,30 @@ interface GithubCursor {
   dispatchedBodies?: string[];
   /** Comment node IDs already accepted by the channel. */
   dispatchedComments?: string[];
+  /**
+   * created_at per dispatched comment key, so eviction can respect the
+   * re-list window: a comment whose created_at is newer than the committed
+   * cursor can still be re-fetched (mark-read may have failed), so its key
+   * must NOT be evicted — otherwise a re-listed aggregate SUPERSET batch
+   * re-dispatches already-replied comments under a fresh batch hash that
+   * misses the publication-audit backstop. Keys without a recorded time are
+   * treated as protected (conservative). Pruned to the live ring.
+   */
+  dispatchedCommentTimes?: Record<string, string>;
   /** Direct-action event node IDs already accepted by the channel. */
   dispatchedEvents?: string[];
 }
 
 const MAX_DISPATCHED = 500;
+/**
+ * Hard ceiling on the dispatched-comment ring. Window-aware eviction keeps
+ * every re-listable (protected) key, so a permanently frozen cursor under
+ * sustained traffic would otherwise grow the ring without bound. At the
+ * ceiling, new comment dispatches are refused (fail-closed, surfaced) and
+ * retry once the cursor advances and prunes the ring — never evicting a
+ * protected key to make room, which would reintroduce duplicate publication.
+ */
+const MAX_DISPATCHED_HARD = 4096;
 const MAX_AGGREGATE_COMMENTS = 20;
 const MAX_AGGREGATE_COMMENT_CHARS = 400;
 
@@ -981,6 +1000,22 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         base[field] = [];
       }
     }
+    // Migrate/coerce the comment-time map. A legacy cursor has ring keys but
+    // no times: leave them time-less, which eviction treats as PROTECTED
+    // (conservative — a key dispatched during a still-frozen cursor may be
+    // re-listable, and its true created_at is unknown). The legacy set is
+    // fixed (<= the old cap) so it cannot grow; new dispatches capture real
+    // times at fetch and evict normally once the cursor passes them.
+    const times = base.dispatchedCommentTimes;
+    if (times === undefined || times === null || typeof times !== 'object') {
+      base.dispatchedCommentTimes = {};
+    } else {
+      const clean: Record<string, string> = {};
+      for (const [key, value] of Object.entries(times)) {
+        if (typeof value === 'string') clean[key] = value;
+      }
+      base.dispatchedCommentTimes = clean;
+    }
     return base;
   }
 
@@ -1043,7 +1078,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       );
     } catch (err) {
       throw new Error(
-        `[Channel:${this.name}] failed to resolve bot identity: ${err}`,
+        `[Channel:${this.name}] failed to resolve bot identity: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}`,
       );
     }
     // GitHub logins are case-insensitive; normalize both sides so the
@@ -1615,7 +1650,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.activeReactions.delete(key);
         this.reactionsPendingRemoval.delete(key);
         process.stderr.write(
-          `[Channel:${this.name}] failed to acknowledge comment ${messageId}: ${err}\n`,
+          `[Channel:${this.name}] failed to acknowledge comment ${messageId}: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
         );
       });
   }
@@ -1655,7 +1690,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       `removeAcknowledgement(${reaction.commentId})`,
     ).catch((err) => {
       process.stderr.write(
-        `[Channel:${this.name}] failed to remove acknowledgement from comment ${reaction.commentId}: ${err}\n`,
+        `[Channel:${this.name}] failed to remove acknowledgement from comment ${reaction.commentId}: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
       );
     });
   }
@@ -1663,6 +1698,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   protected async pollOnce(): Promise<void> {
     this.inboundPersistenceBlocked = false;
     this.publicationAuditBlocked = false;
+    this.commentRingOverflow = false;
     this.publicationAuditKeysCache = undefined;
 
     if (this.deliverToBoundSessions) {
@@ -1686,7 +1722,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // records are unreconciled (a later drain would deliver them again).
         this.watchReconcileBlocked = true;
         process.stderr.write(
-          `[Channel:${this.name}] pending watch reconciliation failed, will retry next poll: ${err}\n`,
+          `[Channel:${this.name}] pending watch reconciliation failed, will retry next poll: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
         );
       }
     } else {
@@ -1732,7 +1768,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         await this.runPrStateWatch();
       } catch (err) {
         process.stderr.write(
-          `[Channel:${this.name}] PR state watch failed, will retry next poll: ${err}\n`,
+          `[Channel:${this.name}] PR state watch failed, will retry next poll: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
         );
       }
     }
@@ -1742,7 +1778,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         await this.recoverInboundTasks();
       } catch (err) {
         process.stderr.write(
-          `[Channel:${this.name}] inbound task recovery failed, will retry next poll: ${err}\n`,
+          `[Channel:${this.name}] inbound task recovery failed, will retry next poll: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
         );
       } finally {
         this.inboundRecoveryPending = false;
@@ -1903,7 +1939,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }
       } catch (err) {
         process.stderr.write(
-          `[Channel:${this.name}] API error processing ${threadId}, skipping: ${err}\n`,
+          `[Channel:${this.name}] API error processing ${threadId}, skipping: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
         );
         continue;
       }
@@ -2250,6 +2286,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     comments.sort((a, b) =>
       (a.created_at || '').localeCompare(b.created_at || ''),
     );
+    // Capture created_at for every re-listable comment at the single fetch
+    // choke point, so ring eviction can protect keys the frozen cursor can
+    // still re-fetch (see dispatchedCommentTimes). Pruned to the live ring.
+    const times = (this.cursor.dispatchedCommentTimes ??= {});
+    for (const comment of comments) {
+      if (comment.created_at) {
+        times[comment.node_id || String(comment.id)] = comment.created_at;
+      }
+    }
     return comments.filter(
       (comment) =>
         comment.user?.login !== this.botUsername &&
@@ -2337,7 +2382,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       }
     } catch (err) {
       process.stderr.write(
-        `[Channel:${this.name}] failed to fetch issue for first contact: ${err}\n`,
+        `[Channel:${this.name}] failed to fetch issue for first contact: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
       );
     }
   }
@@ -2356,7 +2401,102 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   ): void {
     const list = this.cursor[field] ?? [];
     if (!list.includes(key)) list.push(key);
-    this.cursor[field] = list.slice(-MAX_DISPATCHED);
+    if (field === 'dispatchedComments') {
+      this.cursor[field] = this.evictDispatchedComments(list);
+      this.pruneCommentTimes();
+    } else {
+      this.cursor[field] = list.slice(-MAX_DISPATCHED);
+    }
+  }
+
+  /**
+   * Window-aware eviction. Once over the soft cap, drop EVERY key whose
+   * comment can no longer be re-listed (created_at <= the committed cursor),
+   * keeping protected keys regardless of position. A key newer than the
+   * cursor — or with no recorded time (legacy migration) — is protected:
+   * evicting it would let a re-listed aggregate SUPERSET re-dispatch
+   * already-replied comments under a fresh batch hash that misses the
+   * publication-audit backstop (duplicate public reply / private injection
+   * without any crash). If every remaining key is protected the ring stays
+   * over the soft cap; the HARD cap is enforced by refusing new dispatches
+   * (dispatchEnvelope), never by evicting a protected key.
+   */
+  private evictDispatchedComments(list: string[]): string[] {
+    if (list.length <= MAX_DISPATCHED) return list;
+    const times = this.cursor.dispatchedCommentTimes ?? {};
+    const cursor = this.cursor.lastProcessedAt;
+    return list.filter((key) => {
+      const time = times[key];
+      return time === undefined || time > cursor;
+    });
+  }
+
+  /**
+   * Bound the time map: drop entries that are neither in the ring nor still
+   * re-listable. Times for fetched-but-not-yet-dispatched comments survive
+   * while their created_at is newer than the cursor (they may be dispatched
+   * later this poll), so eviction never loses a key's protection mid-poll.
+   */
+  private pruneCommentTimes(): void {
+    const times = this.cursor.dispatchedCommentTimes;
+    if (!times) return;
+    const live = new Set(this.cursor.dispatchedComments ?? []);
+    const cursor = this.cursor.lastProcessedAt;
+    for (const [key, time] of Object.entries(times)) {
+      if (!live.has(key) && time <= cursor) delete times[key];
+    }
+    // Bound the map even under a permanently frozen cursor (nothing expires):
+    // fetch captures a time for every re-listable comment, including ones the
+    // sender gate never dispatches, so without a ceiling the map would grow
+    // with traffic during a hard-cap stall. Ring keys are always kept (their
+    // protection is load-bearing); excess NON-ring entries are dropped oldest
+    // first — a dropped key is re-captured on its next fetch, and if dispatched
+    // before then it is treated as protected (unknown time), the safe direction.
+    const cap = MAX_DISPATCHED_HARD * 2;
+    const keys = Object.keys(times);
+    if (keys.length > cap) {
+      const droppable = keys
+        .filter((key) => !live.has(key))
+        .sort((a, b) => (times[a]! < times[b]! ? -1 : 1));
+      let excess = keys.length - cap;
+      for (const key of droppable) {
+        if (excess <= 0) break;
+        delete times[key];
+        excess -= 1;
+      }
+    }
+  }
+
+  /** Ring keys that must not be evicted (re-listable, or unknown time). */
+  private protectedCommentCount(): number {
+    const times = this.cursor.dispatchedCommentTimes ?? {};
+    const cursor = this.cursor.lastProcessedAt;
+    let count = 0;
+    for (const key of this.cursor.dispatchedComments ?? []) {
+      const time = times[key];
+      if (time === undefined || time > cursor) count += 1;
+    }
+    return count;
+  }
+
+  /**
+   * True when recording these new comment keys would push the protected ring
+   * past the hard cap. Window-aware eviction can only remove expired keys, so
+   * the protected count is the ring's irreducible floor; adding protected
+   * keys beyond the cap must be refused (fail-closed) rather than evicting a
+   * protected key to make room.
+   */
+  private wouldOverflowCommentRing(newKeys: string[]): boolean {
+    const ring = new Set(this.cursor.dispatchedComments ?? []);
+    const times = this.cursor.dispatchedCommentTimes ?? {};
+    const cursor = this.cursor.lastProcessedAt;
+    let protectedCount = this.protectedCommentCount();
+    for (const key of newKeys) {
+      if (ring.has(key)) continue;
+      const time = times[key];
+      if (time === undefined || time > cursor) protectedCount += 1;
+    }
+    return protectedCount > MAX_DISPATCHED_HARD;
   }
 
   private async dispatchEnvelope(
@@ -2396,6 +2536,23 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     if (auditKeys.has(sourceKey)) {
       this.applyTaskDedupe(dedupe);
       return true;
+    }
+    // Hard-cap backpressure: a frozen cursor (mark-read failing) under
+    // sustained traffic fills the ring with protected keys that must not be
+    // evicted. Rather than evict one and risk a duplicate superset dispatch,
+    // refuse new comment dispatches; the unread events retry once the cursor
+    // advances and prunes the ring. No key is recorded and no task claimed.
+    if (
+      dedupe.dispatchedComments?.length &&
+      this.wouldOverflowCommentRing(dedupe.dispatchedComments)
+    ) {
+      if (!this.commentRingOverflow) {
+        this.commentRingOverflow = true;
+        process.stderr.write(
+          `[Channel:${this.name}] dispatched-comment ring at hard cap (${MAX_DISPATCHED_HARD}) with a frozen cursor; deferring new comment dispatches until mark-read recovers (no protected key is evicted)\n`,
+        );
+      }
+      return false;
     }
     const delivery = this.resolveBoundDelivery(envelope.chatId, issueNumber);
     const task = this.claimInboundTask(envelope, issueNumber, dedupe, delivery);
@@ -2549,7 +2706,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         200,
       );
       process.stderr.write(
-        `[Channel:${this.name}] handleInbound failed for ${envelope.messageId}: ${err}\n`,
+        `[Channel:${this.name}] handleInbound failed for ${envelope.messageId}: ${error}\n`,
       );
       if (err instanceof FinalPublicationError) {
         if (this.cancelledInboundTaskIds.has(task.id)) {
@@ -2844,7 +3001,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // — enough to forge extra log lines from untrusted event text.
       const payload = JSON.stringify(record);
       process.stderr.write(
-        `[Channel:${this.name}] failed to write bound dead-letter (${task.source.messageId}): ${err}; payload: ${sanitizeLogText(payload, payload.length)}\n`,
+        `[Channel:${this.name}] failed to write bound dead-letter (${task.source.messageId}): ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}; payload: ${sanitizeLogText(payload, payload.length)}\n`,
       );
       return;
     }
@@ -2869,6 +3026,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   private publicationAuditKeysCache: Set<string> | undefined;
   private publicationAuditBlocked = false;
+  private commentRingOverflow = false;
 
   /**
    * Publication audit keys cached for the current poll (reset at pollOnce
@@ -3221,7 +3379,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }
 
         process.stderr.write(
-          `[Channel:${this.name}] ${label} failed (attempt ${attempt}/${retries}, status=${e.status}), retrying in ${cooldown}ms: ${e.message}\n`,
+          `[Channel:${this.name}] ${label} failed (attempt ${attempt}/${retries}, status=${e.status}), retrying in ${cooldown}ms: ${sanitizeLogText(e.message ?? String(err), 200)}\n`,
         );
         await this.sleepForRetry(cooldown, signal);
       }
@@ -4260,7 +4418,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           // Sanitized without truncation, like the retireBoundTask dump.
           const payload = JSON.stringify(record);
           process.stderr.write(
-            `[Channel:${this.name}] failed to write watch pending overflow dead-letter (${oldest.key}): ${err}; payload: ${sanitizeLogText(payload, payload.length)}\n`,
+            `[Channel:${this.name}] failed to write watch pending overflow dead-letter (${oldest.key}): ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}; payload: ${sanitizeLogText(payload, payload.length)}\n`,
           );
         }
       }
@@ -4517,7 +4675,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       return true;
     } catch (err) {
       process.stderr.write(
-        `[Channel:${this.name}] postErrorComment also failed for ${chatId}#${issueNumber}, user must re-mention manually: ${err}\n`,
+        `[Channel:${this.name}] postErrorComment also failed for ${chatId}#${issueNumber}, user must re-mention manually: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
       );
       return false;
     }
