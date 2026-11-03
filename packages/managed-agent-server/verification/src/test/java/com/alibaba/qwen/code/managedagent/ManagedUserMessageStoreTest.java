@@ -70,10 +70,24 @@ class ManagedUserMessageStoreTest {
 
     @Test
     void rejectsMissingActorBeforeQueueStateCanChange() {
-        assertCode("actor_required", () -> messages.queryMessages(TENANT, null, session));
-        assertCode("actor_required", () -> messages.command(TENANT, null, session,
-                "missing-actor", submit("must not be queued")));
-        assertThat(query().messages()).isEmpty();
+        for (String actor : new String[] {null, "", " "}) {
+            assertThatThrownBy(() -> messages.queryMessages(TENANT, actor, session))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, failure -> {
+                        assertThat(failure.getStatus()).isEqualTo(401);
+                        assertThat(failure.getCode()).isEqualTo("actor_required");
+                    });
+            assertThatThrownBy(() -> messages.command(TENANT, actor, session,
+                    "missing-actor", submit("must not be queued")))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, failure -> {
+                        assertThat(failure.getStatus()).isEqualTo(401);
+                        assertThat(failure.getCode()).isEqualTo("actor_required");
+                    });
+        }
+        for (String table : List.of("ma_user_message_queue", "ma_user_message", "ma_user_message_command")) {
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM " + table
+                    + " WHERE tenant_id = ? AND session_id = ?", Integer.class, TENANT, session))
+                    .isZero();
+        }
     }
 
     @Test
