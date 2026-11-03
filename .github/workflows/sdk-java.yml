@@ -1431,9 +1431,9 @@ jobs:
     # only the bundled CLI, the server jar and a runner-private mysqld, not
     # its MySQL service. The rewritten-command arm delegates its own cgroup
     # root below. Each arm also runs when an earlier one failed. Ceilings:
-    # 28 arms × 10 = 280 plus ~13 minutes for the uncapped setup steps
-    # (Checkout.. Install MySQL binaries): 293 + 2.
-    timeout-minutes: 295
+    # 28 arms × 10 + the capped cgroup delegation × 10 = 290 plus ~13 minutes
+    # for the uncapped setup steps (Checkout.. Install MySQL binaries): 303 + 2.
+    timeout-minutes: 305
     env:
       QWEN_E2E_REGISTER_STORAGE: '1'
     steps:
@@ -1587,6 +1587,10 @@ jobs:
       # gates do; the arm's own shell enters it before starting Spring.
       - name: 'Delegate a cgroup v2 root for rewritten-command recovery'
         if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        # The smoke child sleeps up to 600 s; cgroup.kill reaps it at once on
+        # the happy path. Cap the step like its sibling arms so a wedged
+        # delegation cannot spend the whole job ceiling uncapped.
+        timeout-minutes: 10
         run: |-
           sudo mkdir -p /sys/fs/cgroup/a3-command-rewrite
           sudo chown -R "$(id -u):$(id -g)" /sys/fs/cgroup/a3-command-rewrite

@@ -711,9 +711,9 @@ describe('Hosted real-process gates', () => {
     // and now that path too can fill all four ceilings, so a slow setup
     // must still leave the O4 gates time to run.
     ['hosted-harness-mysql', 294, 327, 33],
-    // Twenty-eight failover arms at 10 each; the allowance is ~13 minutes of
-    // setup plus 2.
-    ['hosted-failover-e2e', 280, 295, 15],
+    // Twenty-eight failover arms at 10 each plus the capped rewritten-command
+    // cgroup delegation at 10; the allowance is ~13 minutes of setup plus 2.
+    ['hosted-failover-e2e', 290, 305, 15],
   ])(
     'keeps the %s job ceiling above its summed step ceilings',
     (name, steps, ceiling, allowance) => {
