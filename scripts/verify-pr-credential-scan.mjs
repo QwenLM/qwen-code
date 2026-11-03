@@ -34,11 +34,12 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { basename } from 'node:path';
+import { existsSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
 
 const CREDENTIAL_BASENAME =
-  /^(?:\.env.*|.*\.env|.*\.env~|.*\.pem|.*\.key|.*\.p12|.*\.pfx|id_rsa.*|id_ed25519.*|.*credentials.*|\.git-credentials|\.npmrc|\.netrc|gha-creds-.*\.json)$/;
+  /^(?:\.env.*|.*\.env|.*\.env~|.*\.pem|.*\.key|.*\.p12|.*\.pfx|id_(?:rsa|ed25519|ecdsa|dsa).*|.*credentials.*|\.git-credentials|\.npmrc|\.netrc|gha-creds-.*\.json)$/;
 
 // Git applies these pathspecs while enumerating, before any output is
 // buffered: a full ignored listing of an installed checkout is several MB and
@@ -54,6 +55,8 @@ const CREDENTIAL_PATHSPECS = [
   ':(glob)**/*.pfx',
   ':(glob)**/id_rsa*',
   ':(glob)**/id_ed25519*',
+  ':(glob)**/id_ecdsa*',
+  ':(glob)**/id_dsa*',
   ':(glob)**/*credentials*',
   ':(glob)**/.git-credentials',
   ':(glob)**/.npmrc',
@@ -97,54 +100,83 @@ export function gitScanArgs(root) {
   ];
 }
 
-/** Returns the nested repositories found under `root`, sorted. */
+/**
+ * Returns the nested repositories found under `root`, sorted. Three surfaces
+ * are enumerated, because git collapses a nested working tree to a directory
+ * entry on each of them: an ignored clone, an untracked NON-ignored clone
+ * (the shape a round's own `git clone` leaves behind), and a populated
+ * submodule (a mode-160000 gitlink whose directory carries a `.git`).
+ * Dependencies and build output keep their exclusion on every surface: a
+ * vendored `.git` is no more a project credential than a vendored `.env`.
+ */
 export function nestedGitRepos(root, { maxBuffer = 8 * 1024 * 1024 } = {}) {
-  const result = spawnSync(
-    'git',
-    [
-      '-C',
-      root,
-      'ls-files',
-      '--others',
-      '--ignored',
-      '--exclude-standard',
-      '-z',
-      '--',
-      ...NESTED_REPO_PATHSPECS,
-    ],
-    { encoding: 'utf8', maxBuffer },
-  );
-  if (result.status !== 0) {
-    throw new Error(
-      `could not list nested repositories: ${(result.stderr || '').trim() || 'git failed'}`,
-    );
+  const git = (args) => {
+    const result = spawnSync('git', ['-C', root, ...args], {
+      encoding: 'utf8',
+      maxBuffer,
+    });
+    if (result.status !== 0) {
+      throw new Error(
+        `could not list nested repositories: ${(result.stderr || '').trim() || 'git failed'}`,
+      );
+    }
+    return result.stdout;
+  };
+  const excluded = (path) =>
+    path.split('/').some((segment) => EXCLUDED_SEGMENTS.has(segment));
+  const found = new Set();
+  const ignored = git([
+    'ls-files',
+    '--others',
+    '--ignored',
+    '--exclude-standard',
+    '-z',
+    '--',
+    ...NESTED_REPO_PATHSPECS,
+  ]);
+  for (const path of ignored.split('\0')) {
+    if (!path || excluded(path)) continue;
+    found.add(path.replace(/\/$/, ''));
   }
-  // Git reports a real nested repository as its directory entry, which the
-  // exclude pathspecs cannot match; drop installed/build segments here so a
-  // vendored git dependency does not refuse the whole tree.
-  return result.stdout
-    .split('\0')
-    .filter(Boolean)
-    .filter((path) => !path.split('/').some((s) => EXCLUDED_SEGMENTS.has(s)))
-    .sort();
+  const untracked = git(['ls-files', '--others', '--exclude-standard', '-z']);
+  for (const entry of untracked.split('\0')) {
+    if (!entry.endsWith('/') || excluded(entry)) continue;
+    if (existsSync(join(root, entry, '.git'))) {
+      found.add(entry.replace(/\/$/, ''));
+    }
+  }
+  const staged = git(['ls-files', '--stage', '-z']);
+  for (const record of staged.split('\0')) {
+    if (!record.startsWith('160000 ')) continue;
+    const tab = record.indexOf('\t');
+    const path = tab === -1 ? '' : record.slice(tab + 1);
+    if (!path || excluded(path)) continue;
+    // An unpopulated gitlink has no working tree to read; its URL is covered
+    // by the config value scan instead.
+    if (existsSync(join(root, path, '.git'))) found.add(path);
+  }
+  return [...found].sort();
 }
 
 /**
  * Returns local config entries that carry a credential PR code could read
- * with plain `git config`: fetch and push URLs (`remote.*.url`,
- * `remote.*.pushurl`), submodule URLs, `url.*.insteadOf` rewrites, and
- * `http.*.extraheader` values — the shape GitHub Actions itself writes an
- * `Authorization` header into. The credential-bearing headers are the
- * RFC 7235 pair, `Authorization` and `Proxy-Authorization`; other header
- * names stay clean. On an http(s) URL any userinfo counts: a token
- * used as the username (`https://<pat>@…`) is as readable as `user:pass@`.
- * The bare conventional username `git@` carries no secret and stays benign
- * in any spelling, matching `ssh://git@…` (SSH keys are not in the URL
- * either). `--includes` is load-bearing for the same reason as in prepare's
- * filter enumeration: `--local` alone names one file and skips
- * `include.path`, while the `git config --get` PR code uses follows it — a
- * credential defined in an included worktree file would otherwise be
- * readable in the tree but invisible to the scan.
+ * with plain `git config`. The scan inspects VALUES, not a list of keys: any
+ * config value can hold a URL with a token (`http.proxy`, a novel mirror
+ * key, tomorrow's sibling of `pushurl`), so a key allowlist never converges.
+ * A value hits when it embeds http(s) userinfo or when it is an
+ * `Authorization` / `Proxy-Authorization` header (the RFC 7235 pair GitHub
+ * Actions writes into `http.*.extraheader`); other header names stay clean.
+ * The two URL-bearing KEY families are judged too: `url.*.insteadOf` /
+ * `url.*.pushInsteadOf` rewrites and `http.<url>.*` sections carry their URL
+ * in the key, not the value. On an http(s) URL any userinfo counts — a token
+ * used as the username (`https://<pat>@…`) is as readable as `user:pass@` —
+ * except the bare conventional account name `git@` in any spelling, which
+ * carries no secret, matching `ssh://git@…`. `--includes` follows
+ * `include.path` the way the `git config --get` PR code uses does, and
+ * `--list --null` frames each `key\nvalue` record so a multi-line value
+ * cannot forge entries. A `credential.helper` COMMAND is out of this
+ * URL/header contract by design (see the design record); prepare disables
+ * helpers for its own reads.
  */
 export function credentialBearingConfig(
   root,
@@ -152,19 +184,9 @@ export function credentialBearingConfig(
 ) {
   const result = spawnSync(
     'git',
-    [
-      '-C',
-      root,
-      'config',
-      '--local',
-      '--includes',
-      '--get-regexp',
-      '^(remote\\..*\\.(url|pushurl)|url\\..*\\.insteadof|submodule\\..*\\.url|http\\..*\\.extraheader)$',
-    ],
+    ['-C', root, 'config', '--local', '--includes', '--list', '--null'],
     { encoding: 'utf8', maxBuffer },
   );
-  // Exit 1 means the pattern matched nothing; anything else is a real failure.
-  if (result.status === 1) return [];
   if (result.status !== 0) {
     throw new Error(
       `could not read local git config: ${(result.stderr || '').trim() || 'git failed'}`,
@@ -180,17 +202,18 @@ export function credentialBearingConfig(
   const isAuthHeader = (value) =>
     /^\s*(?:proxy-)?authorization\s*:/i.test(value);
   const hits = [];
-  for (const line of result.stdout.split('\n')) {
-    if (!line) continue;
-    const space = line.indexOf(' ');
-    const key = space === -1 ? line : line.slice(0, space);
-    const value = space === -1 ? '' : line.slice(space + 1);
-    const instead = /^url\.(.*)\.insteadof$/.exec(key);
-    const extraheader = /^http\..*\.extraheader$/.test(key);
+  for (const record of result.stdout.split('\0')) {
+    if (!record) continue;
+    const newline = record.indexOf('\n');
+    const key = newline === -1 ? record : record.slice(0, newline);
+    const value = newline === -1 ? '' : record.slice(newline + 1);
+    const rewrite = /^url\.(.*)\.(insteadof|pushinsteadof)$/.exec(key);
+    const httpSection = /^http\.(.+)\.[^.]+$/.exec(key);
     if (
-      extraheader
-        ? isAuthHeader(value)
-        : hasUserinfo(value) || (instead && hasUserinfo(instead[1]))
+      hasUserinfo(value) ||
+      isAuthHeader(value) ||
+      (rewrite && hasUserinfo(rewrite[1])) ||
+      (httpSection && hasUserinfo(httpSection[1]))
     ) {
       hits.push(key);
     }

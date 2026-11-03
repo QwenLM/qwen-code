@@ -94,7 +94,9 @@ export function parseArgs(argv) {
     const arg = argv[i];
     if (arg === '--listen') {
       const value = argv[++i];
-      if (value === undefined) {
+      // An empty value would reach server.listen(port, ''), which binds
+      // every interface — past the bridge this proxy is meant to stay on.
+      if (value === undefined || value === '' || value.startsWith('--')) {
         throw new Error('--listen requires a value');
       }
       options.listen = value;
@@ -227,6 +229,12 @@ export function createModelProxy({
         controller.abort();
       });
       res.on('drain', arm);
+      // A slow request UPLOAD is activity too: fetch resolves only on the
+      // upstream headers, so without this a large prompt on a slow link
+      // would be torn down mid-upload by a window meant for stream silence.
+      // 'readable', not 'data': a data listener switches the request to
+      // flowing mode and steals the body chunks from the relayed stream.
+      req.on('readable', arm);
       arm();
       let upstream;
       try {

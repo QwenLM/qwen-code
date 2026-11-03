@@ -237,11 +237,15 @@ authority to certify the round.
 
    ```bash
    cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>
+   rm -rf ~/.cache/qwen-verify/pr<n>/qwen-base
    mkdir -p ~/.cache/qwen-verify/pr<n>/qwen-base
    cp <pr-clone>/tmp/verify-context/pr<n>.json ~/.cache/qwen-verify/pr<n>/pr.json
-   gh api "repos/<owner>/<repo>/issues/<n>/comments" --paginate --slurp \
-     --jq 'flatten | map(select(.body | test("Verdict:"))) | last | .body // empty' \
-     > ~/.cache/qwen-verify/pr<n>/previous-report.md
+   ME="$(gh api user --jq .login)" || { echo "could not read the gh user" >&2; exit 1; }
+   PREV="$(gh api "repos/<owner>/<repo>/issues/<n>/comments" --paginate --slurp \
+     | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const all=JSON.parse(d).flat();const hit=all.filter(c=>(/bot$/.test(c.user.login)||c.user.login===process.argv[1])&&c.body.split("\n\n")[0].includes("Verdict:")).pop();process.stdout.write(hit?hit.body+"\n":"")})' "$ME")" ||
+     { echo "could not read PR comments" >&2; exit 1; }
+   if [ -n "$PREV" ]; then printf '%s\n' "$PREV" > ~/.cache/qwen-verify/pr<n>/previous-report.md
+   else rm -f ~/.cache/qwen-verify/pr<n>/previous-report.md; fi
    BASE_OID="$(node -e 'const fs=require("node:fs"); console.log(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).baseRefOid)' ~/.cache/qwen-verify/pr<n>/pr.json)"
    git -C <pr-clone> archive "$BASE_OID" -- .qwen \
      | tar -x -C ~/.cache/qwen-verify/pr<n>/qwen-base
@@ -253,14 +257,24 @@ authority to certify the round.
    round reads the full gh snapshot (title, body, author, commits) from
    `$QWEN_VERIFY_CONTEXT`, and the newest substantive verify comment lands
    beside it as `previous-report.md` so a follow-up round keeps its
-   carried-forward findings. The host copy is also what pins the expected
-   head after the round, because PR code can rewrite anything inside
-   `<pr-clone>` — including `.git/config`. After a round the clone is
-   PR-controlled: re-clone before another round instead of trusting it
-   again, and note that prepare's host-side git commands disable
-   `core.fsmonitor`, hooks and credential helpers, and empty every locally
-   defined clean/smudge/process filter — including one arriving through
-   `include.path`, which the enumeration follows.
+   carried-forward findings. That file exists only when a report was actually
+   found — its presence is the follow-up trigger, so an empty file would
+   misclassify every first round — and the selector matches the first
+   paragraph of a bot's or your own report, not a reply quoting `Verdict:`.
+   The `.qwen` extraction starts from an empty directory, so a file the base
+   deleted or renamed cannot survive from an earlier round. The host copy is
+   also what pins the expected head after the round, because PR code can
+   rewrite anything inside `<pr-clone>` — including `.git/config`. After a
+   round the clone is PR-controlled: re-clone before another round instead of
+   trusting it again, and note that prepare's host-side git commands disable
+   `core.fsmonitor`, hooks, credential helpers and `core.excludesFile`, and
+   empty every locally defined clean/smudge/process filter — the enumeration
+   follows `include.path`, reads key names NUL-framed and re-validated (a
+   filter value with a newline must not forge overrides), covers
+   `.git/config.worktree` when `extensions.worktreeConfig` is set, and the
+   fixed hardening is applied last so nothing outranks it. Prepare also
+   refuses a `.git/info/exclude` with active patterns: no `-c` can neutralize
+   that file, and a fresh clone has only the commented default.
    Mounting the base commit's `.qwen` over the tree (step 3) keeps the
    round's instructions and project settings out of PR control, as the CI
    lane's base-pin does; the root `AGENTS.md`/`QWEN.md` are not covered and
@@ -276,14 +290,19 @@ authority to certify the round.
    if [ -t 0 ]; then
      read -rsp 'REVIEW_OPENAI_API_KEY: ' REVIEW_OPENAI_API_KEY; echo
    else
+     # `read` returns 1 at EOF even when it assigned the variable, and key
+     # files written by `security find-generic-password -w` / `op read` /
+     # `printf '%s'` carry no trailing newline — judge the variable, not the
+     # exit status.
      IFS= read -r REVIEW_OPENAI_API_KEY \
-       < "${REVIEW_OPENAI_KEY_FILE:-$HOME/.config/qwen-verify/review-openai-key}" ||
+       < "${REVIEW_OPENAI_KEY_FILE:-$HOME/.config/qwen-verify/review-openai-key}" || true
+     [ -n "$REVIEW_OPENAI_API_KEY" ] ||
        { echo "REVIEW_OPENAI_API_KEY is unset and no key file was readable; set the file named by REVIEW_OPENAI_KEY_FILE" >&2; exit 1; }
    fi
    export REVIEW_OPENAI_API_KEY
    REVIEW_OPENAI_BASE_URL=<upstream-url> \
      node <trusted-clone>/scripts/verify-pr-model-proxy.mjs \
-       --listen <bridge-ip> > ~/.cache/qwen-verify/pr<n>/proxy.json 2>&1 &
+       --listen <bridge-ip> > ~/.cache/qwen-verify/pr<n>/proxy.json 2> ~/.cache/qwen-verify/pr<n>/proxy.err &
    echo $! > ~/.cache/qwen-verify/pr<n>/proxy.pid
    unset REVIEW_OPENAI_API_KEY
    for _ in {1..100}; do
@@ -296,14 +315,19 @@ authority to certify the round.
    ```
 
    Bind the Docker bridge address, not `127.0.0.1` — a container cannot reach
-   the host's loopback. The bearer check stays mandatory: the port is visible
-   to every container on the bridge. Keep the proxy running for the whole
-   round and stop it at the end — it holds the real key. The background
-   process truncates `proxy.json` before it prints, so the loop waits for a
-   complete line with a token; the nonce is checked at the origin because the
-   printed `baseUrl` carries the upstream path prefix. The key is unset as
-   soon as the proxy owns its copy, so later diagnostics cannot leak it, and
-   the token stays in the file rather than this shell.
+   the host's loopback. On Docker Desktop (macOS/Windows) the bridge lives
+   inside the VM and has no host-bindable address: this recipe is tested on a
+   Linux host, and on Desktop you must bind an address the VM can reach and
+   dial that same address from the container. The bearer check stays
+   mandatory: the port is visible to every container on the bridge. Keep the
+   proxy running for the whole round and stop it at the end — it holds the
+   real key. The background process truncates `proxy.json` before it prints,
+   so the loop waits for a complete line with a token; stderr goes to a
+   separate `proxy.err`, because one diagnostic line folded into the JSON
+   file would break every parse of it. The nonce is checked at the origin
+   because the printed `baseUrl` carries the upstream path prefix. The key is
+   unset as soon as the proxy owns its copy, so later diagnostics cannot leak
+   it, and the token stays in the file rather than this shell.
 
 3. **Start the boundary as a named, detached container** so every later step
    can be issued without a TTY. Each step is its own shell: the token is
@@ -366,20 +390,23 @@ authority to certify the round.
    ```
 
    The scan names credential-shaped ignored files (nested ones included, but
-   not public keys) and credential-bearing git config: URLs in
-   `remote.*.url`, `remote.*.pushurl`, `submodule.*.url` or
-   `url.*.insteadOf` (any userinfo on http(s), including a token used as the
-   username — the bare `git@` account name, in any spelling, carries no
-   secret and stays benign, like `ssh://git@`), plus `http.*.extraheader`
-   values carrying an `Authorization` or `Proxy-Authorization` header. The
-   config enumeration follows `include.path`, so a credential defined in an
-   included worktree file is refused too. It leaves installed dependencies
-   and build output alone — a vendored git dependency under
-   `node_modules`/`dist` is excluded, not refused — and refuses a nested
-   git repository outright: git does not descend into it, so a credential
-   file inside one would otherwise pass silently. The abort is structural
-   (`|| exit 1`), not a side effect of `set -e`. Exit 4 means this is not a
-   boundary: stop and run nothing else.
+   not public keys; the private-key families cover RSA, Ed25519, ECDSA and
+   DSA) and credential-bearing git config. It inspects every local config
+   value rather than a list of keys — any value can hide a token URL,
+   `http.proxy` included — and refuses http(s) userinfo (a token used as the
+   username counts; the bare `git@` account name, in any spelling, carries
+   no secret and stays benign, like `ssh://git@`) plus `Authorization` /
+   `Proxy-Authorization` header values. The URL-bearing key families are
+   judged too: `url.*.insteadOf` / `url.*.pushInsteadOf` rewrites and
+   `http.<url>.*` sections. The config enumeration follows `include.path`,
+   so a credential defined in an included worktree file is refused too. It
+   leaves installed dependencies and build output alone — a vendored git
+   dependency under `node_modules`/`dist` is excluded, not refused — and
+   refuses a nested git repository outright on every surface (ignored
+   clone, untracked clone, populated submodule): git does not descend into
+   it, so a credential file inside one would otherwise pass silently. The
+   abort is structural (`|| exit 1`), not a side effect of `set -e`. Exit 4
+   means this is not a boundary: stop and run nothing else.
 
 6. **Run the round inside**, installing the CLI into the fresh home because
    the container is not root. Each `docker exec` is a new shell, so the
@@ -417,12 +444,15 @@ authority to certify the round.
      --context ~/.cache/qwen-verify/pr<n>/pr.json <round-dir>
    docker rm -f qwen-verify-<n>
    kill "$(cat ~/.cache/qwen-verify/pr<n>/proxy.pid)"
-   rm -f ~/.cache/qwen-verify/pr<n>/proxy.json ~/.cache/qwen-verify/pr<n>/proxy.pid
+   rm -f ~/.cache/qwen-verify/pr<n>/proxy.json ~/.cache/qwen-verify/pr<n>/proxy.err ~/.cache/qwen-verify/pr<n>/proxy.pid
    unset QWEN_VERIFY_PROXY_TOKEN
    ```
 
-   `<round-dir>` is `<pr-clone>/tmp/pr<n>-verify-<ts>`. Publishing still
-   needs `gh`, so it stays on the host.
+   `<round-dir>` is the artifact directory prepare printed —
+   `<pr-clone>/tmp/pr<n>-verify-<ts>`, never `tmp/verify-context`, which also
+   matches a loose `*verify*` glob. `<host snapshot>` throughout this recipe
+   is `~/.cache/qwen-verify/pr<n>/pr.json`, the host copy step 1 made.
+   Publishing still needs `gh`, so it stays on the host.
 
 ## Watch mode (local only)
 
@@ -628,10 +658,16 @@ _— <model> via Qwen Code /verify-pr (v<cli-version>; skill <skill-hash>)_
 Resolve the three values from the round's own runtime, never from memory:
 the model is `$QWEN_CODE_MODEL_IDENTITY` when non-empty, else
 `$QWEN_CODE_MODEL`; the CLI version is `qwen --version`; the skill hash is
-the first 12 characters of
-`git hash-object --no-filters .qwen/skills/verify-pr/SKILL.md` — the content
-hash of the instructions this round actually loaded, which needs no git
-history. When the model cannot be resolved, omit the footer rather than
+the first 12 characters of the blob hash of the instructions this round
+actually loaded. In the container recipe that is the base-pinned copy, so
+hash `git -C <pr-clone> rev-parse "<baseRefOid>:.qwen/skills/verify-pr/SKILL.md"`
+(equivalently, `git hash-object --no-filters` of the mounted
+`/work/.qwen/skills/verify-pr/SKILL.md`) — never the PR head's copy: the two
+blobs differ whenever the PR touches the skill, and hashing the head would
+certify instructions the round never ran. A non-container round that loads
+its own checkout hashes that file with
+`git hash-object --no-filters .qwen/skills/verify-pr/SKILL.md`, which needs
+no git history. When the model cannot be resolved, omit the footer rather than
 post an empty identity — and never claim the CI lane's `sandboxed
 verification` signature for a workstation round. Assemble the exact comment
 body — report content plus the resolved footer — into `comment.md` in the

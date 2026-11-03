@@ -46,7 +46,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
@@ -276,7 +276,9 @@ function run(command, args) {
 // config in .git/config: fsmonitor, hooks and clean/smudge/process filters all
 // execute on an ordinary `git status`. On the host these run as the maintainer,
 // outside the boundary, so every git command disables the fixed vectors and
-// empties every locally defined filter before reading the tree.
+// empties every locally defined filter before reading the tree. The fixed
+// vectors come LAST in every argument list: git applies the last `-c` for a
+// key, so an enumerated entry must never be able to outrank them.
 export const GIT_HARDENING = [
   '-c',
   'core.fsmonitor=false',
@@ -284,42 +286,66 @@ export const GIT_HARDENING = [
   'core.hooksPath=/dev/null',
   '-c',
   'credential.helper=',
+  '-c',
+  'core.excludesFile=/dev/null',
 ];
+
+const FILTER_NAME = /^filter\..+\.(clean|smudge|process)$/;
 
 /**
  * Empty `-c` overrides for every locally defined filter command. The filter
  * name is attacker-chosen, so the override set has to be enumerated from the
- * tree's own config instead of hardcoded. `--includes` is load-bearing:
- * `--local` alone names one file and skips `include.path`, while the config
- * parsing `git status` uses follows it — a filter defined in an included
- * worktree file would otherwise execute on the host unenumerated.
+ * tree's own config instead of hardcoded. Three properties are load-bearing:
+ * `--includes` follows `include.path` the way the config parsing `git status`
+ * uses does; `--null --name-only` frames KEY NAMES only, because a filter
+ * VALUE may contain newlines that would forge extra entries if the rendered
+ * `key value` output were parsed; and each name is re-validated before it
+ * becomes a `-c` argument. When `extensions.worktreeConfig` is set,
+ * `git status` also reads `.git/config.worktree`, so that scope is enumerated
+ * too.
  */
 export function localFilterOverrides(root) {
-  const result = run('git', [
-    ...(root ? ['-C', root] : []),
+  const prefix = root ? ['-C', root] : [];
+  const scopes = ['--local'];
+  const worktreeConfig = run('git', [
+    ...prefix,
     'config',
     '--local',
     '--includes',
-    '--get-regexp',
-    '^filter\\..*\\.(clean|smudge|process)$',
+    '--bool',
+    'extensions.worktreeConfig',
   ]);
-  if (result.status === 1) return [];
-  if (result.status !== 0) {
-    throw new Error('could not enumerate local git filters');
+  if (worktreeConfig.status === 0 && worktreeConfig.stdout.trim() === 'true') {
+    scopes.push('--worktree');
   }
   const overrides = [];
-  for (const line of result.stdout.split('\n')) {
-    if (!line) continue;
-    const key = line.split(' ')[0];
-    overrides.push('-c', `${key}=`);
+  for (const scope of scopes) {
+    const result = run('git', [
+      ...prefix,
+      'config',
+      scope,
+      '--includes',
+      '--null',
+      '--name-only',
+      '--get-regexp',
+      '^filter\\..*\\.(clean|smudge|process)$',
+    ]);
+    if (result.status === 1) continue;
+    if (result.status !== 0) {
+      throw new Error('could not enumerate local git filters');
+    }
+    for (const name of result.stdout.split('\0')) {
+      if (!name || !FILTER_NAME.test(name)) continue;
+      overrides.push('-c', `${name}=`);
+    }
   }
   return overrides;
 }
 
 export function gitStatusArgs(root) {
   return [
-    ...GIT_HARDENING,
     ...localFilterOverrides(root),
+    ...GIT_HARDENING,
     '-C',
     root,
     'status',
@@ -329,7 +355,24 @@ export function gitStatusArgs(root) {
 }
 
 function runGit(args) {
-  return run('git', [...GIT_HARDENING, ...localFilterOverrides(), ...args]);
+  return run('git', [...localFilterOverrides(), ...GIT_HARDENING, ...args]);
+}
+
+/**
+ * True when `.git/info/exclude` carries active patterns. A fresh clone has
+ * only git's commented default there; patterns hide untracked files from the
+ * clean-tree check, and unlike core.excludesFile no `-c` can neutralize this
+ * file, so the gate refuses it instead of reading a steered status.
+ */
+export function hasHostileInfoExclude(root) {
+  const path = join(root, '.git', 'info', 'exclude');
+  if (!existsSync(path)) return false;
+  return readFileSync(path, 'utf8')
+    .split('\n')
+    .some((line) => {
+      const trimmed = line.trim();
+      return trimmed !== '' && !trimmed.startsWith('#');
+    });
 }
 
 function report(lines) {
@@ -424,6 +467,16 @@ function main(argv) {
     return fail(
       3,
       `current tree is at ${treeHead.stdout.trim()}, not PR head ${context.head} — run: git checkout ${context.head}, then re-run prepare`,
+    );
+  }
+  // The ignore channel is steerable from the same PR-controlled .git:
+  // core.excludesFile is neutralized by GIT_HARDENING, but .git/info/exclude
+  // has no `-c` override, so active patterns there are refused outright
+  // rather than read through.
+  if (hasHostileInfoExclude(root)) {
+    return fail(
+      3,
+      '.git/info/exclude carries local exclude patterns, which can hide untracked files from the clean-tree check — re-clone (a fresh clone has only the commented default), or clear the file, then re-run prepare',
     );
   }
   // Explicit mode: a maintainer's status.showUntrackedFiles=no would otherwise

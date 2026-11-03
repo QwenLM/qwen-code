@@ -53,10 +53,16 @@ A host-side relay plus a recipe that names its trust boundaries.
   is a standalone clone at the PR head that the container mounts and that
   prepare is given as its cwd. The clone's `.git` is PR-controlled after a
   round, so it is not reused, and host-side git commands disable fsmonitor,
-  hooks and credential helpers and empty every locally defined
-  clean/smudge/process filter, following `include.path` so a filter defined
-  in an included worktree file is enumerated too. A linked worktree is
-  rejected by construction because its gitfile points outside the mount.
+  hooks, credential helpers and `core.excludesFile`, and empty every locally
+  defined clean/smudge/process filter. The enumeration follows
+  `include.path`, reads key names NUL-framed and re-validated (a filter
+  value carrying a newline must not forge extra `-c` entries), covers
+  `.git/config.worktree` when `extensions.worktreeConfig` is set, and the
+  fixed hardening is applied last so no enumerated entry can outrank it.
+  `.git/info/exclude` has no `-c` override, so active patterns there are
+  refused outright — a fresh clone ships only the commented default. A
+  linked worktree is rejected by construction because its gitfile points
+  outside the mount.
 - The container is named and detached (`sleep infinity` plus `docker exec`)
   and runs with `--user "$(id -u):$(id -g)"` and `HOME=/tmp/qwen-home`, so
   files written into the mounted tree stay maintainer-owned; the CLI installs
@@ -69,12 +75,15 @@ A host-side relay plus a recipe that names its trust boundaries.
   it stays out of shell history. The credential-free attestation is passed to
   the shell that starts the round, after `verify-pr-credential-scan.mjs`
   (trusted copy) rejects credential-shaped ignored files and
-  credential-bearing git config — fetch, push and submodule URLs,
-  `url.*.insteadOf` rewrites, and `Authorization`/`Proxy-Authorization`
-  extraheaders — following `include.path` like prepare's filter
-  enumeration, so a credential defined in an included worktree file is
-  refused too; that scan lists ignored files one by one and leaves
-  `node_modules`/`dist` alone, so a built tree is not refused. The round's
+  credential-bearing git config. The config guard inspects VALUES, not a
+  list of keys — any value can hide a token URL (`http.proxy` included), so
+  a key allowlist never converges — plus the URL-bearing key families
+  (`url.*.insteadOf` / `url.*.pushInsteadOf` rewrites, `http.<url>.*`
+  sections), following `include.path` like prepare's filter enumeration.
+  The file scan lists ignored files one by one and leaves
+  `node_modules`/`dist` alone, so a built tree is not refused; a nested git
+  repository is refused on every surface git collapses to a directory
+  entry — ignored clone, untracked clone, populated submodule. The round's
   engine is the released CLI unless the tree's own build is installed over
   it.
 - The round reads `$QWEN_VERIFY_CONTEXT` from the full snapshot. After the
@@ -113,45 +122,73 @@ the real key.
 ## Acceptance
 
 - Proxies: bearer rejection, exact path allowlist, base-path prefixing,
-  real-key injection, hop-by-hop stripping with a chunked body (fixed set and
-  `Connection`-nominated names), a gzip upstream body with the header
-  stripped, pre-header disconnect abort, paused-downstream survival,
-  slow-but-healthy streams, upstream reset survival, IPv6 listen formatting,
+  real-key injection, hop-by-hop stripping with a chunked body (fixed set
+  and `Connection`-nominated names, with a non-nominated custom header as
+  the passthrough control), a gzip upstream body with the header stripped,
+  pre-header disconnect abort, paused-downstream survival, slow-but-healthy
+  streams, a slow request upload kept alive by the per-chunk re-arm,
+  upstream reset survival, a genuinely refused dial (bound-then-closed
+  port, asserted `ECONNREFUSED` — a blocked port would never dial), an
+  empty or flag-looking `--listen` rejected, IPv6 listen formatting, the
+  idle default read from the core constant's source rather than restated,
   and the CLI's JSON coordinates.
 - Credential scan: a nested ignored `.env`, `.env~`, `backup.env~`, `*.pem`,
-  `*.key`, `*.p12`, `id_rsa*`, `credentials*`, `.git-credentials`, `.npmrc`,
-  `.netrc` or `gha-creds-*.json` is refused (a `.pub` public key is not), as
-  is any http(s) userinfo in `remote.*.url`, `remote.*.pushurl`,
-  `submodule.*.url` or `url.*.insteadOf`, including a token used as the
-  username (the bare `git@` account name carries no secret and stays benign
-  in any spelling, like `ssh://git@`), and any `http.*.extraheader` value
-  carrying an `Authorization` or `Proxy-Authorization` header (other header
-  names stay clean); a credential arriving through `include.path` is
-  refused on every enumerated key, and a credential-free include stays
-  clean; installed `node_modules`/`dist` are ignored at any depth,
-  including inside a workspace package, and a vendored git repository under
-  them is excluded rather than refused; enumeration is path-limited so a
-  large ignored dependency tree is never buffered; a nested project git
-  repository is refused because git does not descend into it; a missing
-  `--ignored` mode or a dropped pattern turns its test red.
-- Host git hardening: prepare disables fsmonitor, hooks and credential
-  helpers and empties every locally defined clean/smudge/process filter —
-  following `include.path` — before reading the PR-controlled tree;
-  planted-filter fixtures prove the override for a directly defined filter
-  and for one arriving through an included worktree file, each with a
-  positive control that fires without it; a non-git cwd is refused with the
-  worktree message (exit 3), not an uncaught enumeration error.
+  `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `id_dsa*`,
+  `credentials*`, `.git-credentials`, `.npmrc` (at depth too), `.netrc` or
+  `gha-creds-*.json` is refused (a `.pub` public key is not). The config
+  guard inspects every local value: any http(s) userinfo is refused,
+  including a token used as the username (the bare `git@` account name
+  carries no secret and stays benign in any spelling, like `ssh://git@`),
+  and so is any `Authorization` / `Proxy-Authorization` header value (other
+  header names stay clean); the URL-bearing key families (`insteadOf` /
+  `pushInsteadOf` rewrites, `http.<url>.*` sections) are judged on the
+  embedded URL. A novel key outside any historical list (`custom.mirror`,
+  `http.proxy`) is the witness that value inspection, not a key allowlist,
+  is the contract; the refusal names the key, never the value. Credentials
+  arriving through `include.path` are refused, and a credential-free
+  include stays clean. Installed `node_modules`/`dist` are ignored at any
+  depth, including inside a workspace package, and a vendored git
+  repository under them is excluded rather than refused; file enumeration
+  is path-limited so a large ignored dependency tree is never buffered
+  (the buffer fixture's files match a credential pathspec, so dropping the
+  restriction really overflows it). A nested git repository is refused on
+  every surface — ignored clone, untracked non-ignored clone, populated
+  submodule — while an unpopulated gitlink stays clean (its URL is covered
+  by the value scan); a missing `--ignored` mode or a dropped pattern turns
+  its test red.
+- Host git hardening: prepare disables fsmonitor, hooks, credential helpers
+  and `core.excludesFile`, and empties every locally defined
+  clean/smudge/process filter — following `include.path`, NUL-framed key
+  names re-validated against forgery, `.git/config.worktree` covered when
+  `extensions.worktreeConfig` is set, fixed hardening applied last — before
+  reading the PR-controlled tree. Planted-filter fixtures prove the
+  override for a directly defined filter, one arriving through an included
+  worktree file, one in the worktree config, and a newline-bearing value
+  that must not forge a `-c` outranking the hardening, each with a positive
+  control where the vector fires without the guard. A hostile
+  `core.excludesFile` cannot hide untracked files from the hardened status;
+  active patterns in `.git/info/exclude` are refused with a re-clone
+  remedy, while the commented default passes. A non-git cwd is refused with
+  the worktree message (exit 3), not an uncaught enumeration error.
 - Checker: `--context` overrides the writable artifact copy, refuses an
   unusable snapshot instead of falling back (with a usable writable copy
   seeded), and keeps its existing exit codes.
 - Recipe: every script names the trusted checkout (including prepare, the
   scan, the gate, the guard and the checker), the base commit's `.qwen` is
-  mounted read-only, both credentials come from files rather than command
-  lines (the key falls back to `REVIEW_OPENAI_KEY_FILE` when stdin is not a
-  TTY, and is unset once the proxy owns it), the proxy's coordinates and
-  nonce are awaited before the container starts, the token is re-derived in
-  the `docker run` step, and the attestation is on the round's shell but not
-  the `docker run` line; reverting any of those turns a recipe pin red.
+  mounted read-only and extracted into a freshly emptied directory, both
+  credentials come from files rather than command lines (the key falls back
+  to `REVIEW_OPENAI_KEY_FILE` when stdin is not a TTY, is judged by the
+  variable rather than `read`'s EOF status so a newline-less key file works,
+  and is unset once the proxy owns it), the proxy's coordinates and nonce
+  are awaited before the container starts with stderr in a separate file so
+  the JSON stays parseable, the token is re-derived in the `docker run`
+  step, and the attestation is on the round's shell but not the `docker run`
+  line. `previous-report.md` is written only when a report was found — its
+  presence is the follow-up trigger — and selected by first-paragraph marker
+  from a bot or the maintainer, not by a substring any reply could quote.
+  The publish footer hashes the base-pinned skill copy the round actually
+  loaded, never the PR head's; reverting any of those turns a recipe pin
+  red.
 - Mutation evidence: removing each of those guards turns its pin red.
 - A real Docker smoke covers the gate passing with `QWEN_VERIFY_PROXY_TOKEN`,
   the gate refusing `OPENAI_API_KEY`, and a container request reaching a mock

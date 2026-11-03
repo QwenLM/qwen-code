@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_IDLE_TIMEOUT_MS,
   createModelProxy,
@@ -286,6 +286,7 @@ describe('verify-pr-model-proxy', () => {
             authorization: `Bearer ${TOKEN}`,
             connection: ' x-client-hop , keep-alive ',
             'x-client-hop': 'client-secret',
+            'x-keep-me': 'kept',
             'proxy-authorization': 'Basic client-proxy-secret',
             'transfer-encoding': 'chunked',
             expect: '100-continue',
@@ -307,10 +308,14 @@ describe('verify-pr-model-proxy', () => {
     expect(seen.authorization).toBe(`Bearer ${REAL_KEY}`);
     expect(seen.headers['proxy-authorization']).toBeUndefined();
     expect(seen.headers.expect).toBeUndefined();
+    // The Connection-nominated name must not survive under its own spelling;
+    // this is the assertion that goes red when the nominated-strip loop is
+    // removed (the fixed-set strip alone would still drop `connection`).
     expect(seen.headers['x-client-hop']).toBeUndefined();
-    expect(seen.headers.connection).not.toBe('x-client-hop');
-    // Passthrough in the positive direction: the relay must keep the
-    // request's content type, not only drop the hop-by-hop names.
+    // Passthrough in the positive direction: a custom header NOT nominated
+    // by Connection, and the content type, must survive — the stripping is
+    // selective, not a wholesale header drop.
+    expect(seen.headers['x-keep-me']).toBe('kept');
     expect(seen.headers['content-type']).toBe('application/json');
   });
 
@@ -336,13 +341,67 @@ describe('verify-pr-model-proxy', () => {
   });
 
   it('answers 502 and stays alive when the upstream is unreachable', async () => {
-    const proxy = await startProxy({ port: 9 }, {}, '');
-    // Point at a closed port: port 9 is the discard service and is not
-    // listening in this environment, so fetch rejects with ECONNREFUSED.
-    const res = await fetch(`${proxy}/chat/completions`, chatRequest());
-    expect(res.status).toBe(502);
-    const health = await fetch(`${proxy}/__health`);
-    expect(health.status).toBe(200);
+    // Bind an ephemeral port and close it: the dial must really be refused.
+    // Port 9 would never dial at all — it is on undici's blocked-port list,
+    // so fetch rejects with `bad port` before a socket opens and the
+    // connect-refused path this test names would go unexercised.
+    const dead = http.createServer(() => {});
+    const deadPort = await listen(dead);
+    await new Promise((resolve) => {
+      dead.closeAllConnections();
+      dead.close(resolve);
+    });
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const proxy = await startProxy({ port: deadPort }, {}, '');
+      const res = await fetch(`${proxy}/chat/completions`, chatRequest());
+      expect(res.status).toBe(502);
+      const failure = logged.mock.calls
+        .map((call) => call.find((arg) => arg instanceof Error))
+        .find(Boolean);
+      expect(failure?.cause?.code).toBe('ECONNREFUSED');
+      const health = await fetch(`${proxy}/__health`);
+      expect(health.status).toBe(200);
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  // A slow request UPLOAD is activity: fetch resolves only on the upstream
+  // headers, so a window meant for stream silence must not tear a large
+  // prompt down mid-upload.
+  it('keeps a slow request upload alive past the idle window', async () => {
+    const upstream = await startUpstream();
+    const proxy = await startProxy(upstream, { idleTimeoutMs: 300 });
+    const { port } = new URL(proxy);
+    const status = await new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          host: '127.0.0.1',
+          port,
+          path: '/chat/completions',
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${TOKEN}`,
+            'content-type': 'application/json',
+          },
+        },
+        (res) => {
+          res.resume();
+          res.on('end', () => resolve(res.statusCode));
+        },
+      );
+      req.on('error', reject);
+      // Three chunks 150 ms apart: total 450 ms outlives the 300 ms window,
+      // and no single gap exceeds it — only the per-chunk re-arm survives.
+      req.write('{"model"');
+      setTimeout(() => req.write(':"m"'), 150);
+      setTimeout(() => req.write(',"stream":false}'), 300);
+      setTimeout(() => req.end(), 450);
+    });
+    expect(status).toBe(200);
+    expect(upstream.requests).toHaveLength(1);
+    expect(upstream.requests[0].body).toBe('{"model":"m","stream":false}');
   });
 
   it('aborts when headers arrive but no body follows', async () => {
@@ -434,7 +493,9 @@ describe('verify-pr-model-proxy', () => {
       chunks,
       respectBackpressure: true,
     });
-    const proxy = await startProxy(upstream, { idleTimeoutMs: 100 });
+    // The pause (800 ms) must exceed the window (300 ms) or the pause guard
+    // is never exercised; the margin keeps a loaded runner from flipping it.
+    const proxy = await startProxy(upstream, { idleTimeoutMs: 300 });
     const { port } = new URL(proxy);
     const body = await new Promise((resolve, reject) => {
       const req = http.request(
@@ -453,7 +514,7 @@ describe('verify-pr-model-proxy', () => {
           // Pause past the idle window while the upstream keeps producing:
           // a slow but live client must not be read as upstream idleness.
           res.pause();
-          setTimeout(() => res.resume(), 400);
+          setTimeout(() => res.resume(), 800);
         },
       );
       req.on('error', reject);
@@ -464,16 +525,23 @@ describe('verify-pr-model-proxy', () => {
 
   it('keeps a slow-but-healthy stream alive past the window', async () => {
     const upstream = await startUpstream({
-      chunks: ['data: 1\n\n', 'data: 2\n\n', 'data: 3\n\n', 'data: 4\n\n'],
-      chunkDelayMs: 40,
+      chunks: [
+        'data: 1\n\n',
+        'data: 2\n\n',
+        'data: 3\n\n',
+        'data: 4\n\n',
+        'data: 5\n\n',
+      ],
+      chunkDelayMs: 80,
     });
-    const proxy = await startProxy(upstream, { idleTimeoutMs: 100 });
+    const proxy = await startProxy(upstream, { idleTimeoutMs: 300 });
     const res = await fetch(`${proxy}/chat/completions`, chatRequest());
     expect(res.status).toBe(200);
-    // Total delivery (160 ms) outlives the 100 ms window; only the per-chunk
-    // re-arm keeps this from being cut.
+    // Total delivery (400 ms) outlives the 300 ms window while every gap
+    // (80 ms) stays well inside it: only the per-chunk re-arm keeps this
+    // from being cut, and the 220 ms margin survives a loaded runner.
     expect(await res.text()).toBe(
-      'data: 1\n\ndata: 2\n\ndata: 3\n\ndata: 4\n\n',
+      'data: 1\n\ndata: 2\n\ndata: 3\n\ndata: 4\n\ndata: 5\n\n',
     );
   });
 
@@ -527,9 +595,21 @@ describe('verify-pr-model-proxy', () => {
 
 describe('proxy defaults and base url formatting', () => {
   it('keeps the idle window at the client default', () => {
-    // packages/core openaiContentGenerator DEFAULT_STREAM_IDLE_TIMEOUT_MS.
-    // A tighter proxy would cut streams its own client still tolerates.
-    expect(DEFAULT_IDLE_TIMEOUT_MS).toBe(240_000);
+    // Read the core constant from its source instead of restating it: two
+    // hardcoded copies can drift with the suite green. A tighter proxy would
+    // cut streams its own client still tolerates.
+    const constants = readFileSync(
+      fileURLToPath(
+        new URL(
+          '../../packages/core/src/core/openaiContentGenerator/constants.ts',
+          import.meta.url,
+        ),
+      ),
+      'utf8',
+    );
+    const match = /DEFAULT_STREAM_IDLE_TIMEOUT_MS\s*=\s*(\d+)/.exec(constants);
+    expect(match).not.toBeNull();
+    expect(DEFAULT_IDLE_TIMEOUT_MS).toBe(Number(match[1]));
   });
 
   it('brackets an IPv6 listen host', () => {
@@ -571,6 +651,16 @@ describe('parseArgs', () => {
   it('rejects unknown arguments and missing values', () => {
     expect(() => parseArgs(['--docker'])).toThrow('unknown argument');
     expect(() => parseArgs(['--listen'])).toThrow('requires a value');
+  });
+
+  // server.listen(port, '') binds EVERY interface — past the bridge a
+  // key-holding proxy is meant to stay on — and a flag-looking value is a
+  // missing value, not a host.
+  it('rejects an empty or flag-looking --listen value', () => {
+    expect(() => parseArgs(['--listen', ''])).toThrow('requires a value');
+    expect(() => parseArgs(['--listen', '--other'])).toThrow(
+      'requires a value',
+    );
   });
 });
 
@@ -680,6 +770,9 @@ describe('local container recipe pins', () => {
   it('mounts the round tree writable and the metadata snapshot read-only', () => {
     expect(skill).toContain('--user "$(id -u):$(id -g)"');
     expect(skill).toContain('-v <pr-clone>:/work');
+    // toContain alone is satisfied by `:/work:ro` — the exact mutation this
+    // pin exists to catch — so the read-only spelling is excluded outright.
+    expect(skill).not.toContain('-v <pr-clone>:/work:ro');
     expect(skill).toContain('-v <trusted-clone>/scripts:/trusted-scripts:ro');
     expect(skill).toContain('-v ~/.cache/qwen-verify/pr<n>:/verify-context:ro');
     expect(skill).toContain('QWEN_VERIFY_CONTEXT=/verify-context/pr.json');
@@ -688,6 +781,11 @@ describe('local container recipe pins', () => {
   it('reads both credentials from files, including without a TTY', () => {
     expect(skill).toContain('if [ -t 0 ]; then');
     expect(skill).toContain('REVIEW_OPENAI_KEY_FILE');
+    // `read` returns 1 at EOF even when it assigned the variable: a key file
+    // without a trailing newline must be judged by the variable, not the
+    // exit status, or the documented agent path aborts with the opposite
+    // diagnosis.
+    expect(skill).toContain('[ -n "$REVIEW_OPENAI_API_KEY" ]');
     expect(skill).not.toContain('REVIEW_OPENAI_API_KEY=<real-key>');
     // The proxy owns its copy: later diagnostics must not see the key.
     expect(skill).toContain('unset REVIEW_OPENAI_API_KEY');
@@ -737,18 +835,19 @@ describe('local container recipe pins', () => {
 
   it('refuses a nested repository in the scan description', () => {
     expect(skill).toMatch(/nested\s+git repository outright/);
-    expect(skill).toContain('vendored git dependency');
+    expect(skill).toMatch(/vendored\s+git\s+dependency/);
     expect(skill).toContain('not public keys');
+    expect(skill).toContain('untracked clone, populated submodule');
   });
 
-  it('names the full config-credential coverage and the include-following enumeration', () => {
-    expect(skill).toContain('`remote.*.pushurl`');
-    expect(skill).toContain('`submodule.*.url`');
-    expect(skill).toContain('`http.*.extraheader`');
-    expect(skill).toContain('`Authorization` or `Proxy-Authorization` header');
+  it('names the value-inspection contract and the include-following enumeration', () => {
+    expect(skill).toContain('inspects every local config');
+    expect(skill).toContain('`http.proxy` included');
+    expect(skill).toContain('`url.*.pushInsteadOf`');
+    expect(skill).toContain('`Authorization` /');
+    expect(skill).toContain('`Proxy-Authorization` header values');
     expect(skill).toContain('bare `git@` account name');
-    expect(skill).toMatch(/including one arriving through\s+`include\.path`/);
-    expect(skill).toContain('config enumeration follows `include.path`');
+    expect(skill).toMatch(/enumeration\s+follows\s+`include\.path`/);
   });
 
   it('snapshots the previous report and pins both checker call sites', () => {
@@ -758,5 +857,47 @@ describe('local container recipe pins', () => {
       ...skill.matchAll(/verify-pr-check\.mjs --context <host snapshot>/g),
     ];
     expect(contextCalls.length).toBeGreaterThanOrEqual(2);
+    // The prose occurrences alone cannot catch step 7 dropping the flag on
+    // its continuation line — pin the executable call too.
+    expect(skill).toContain(
+      '--context ~/.cache/qwen-verify/pr<n>/pr.json <round-dir>',
+    );
+  });
+
+  it('writes previous-report.md only when a report exists', () => {
+    // The file's PRESENCE is the follow-up trigger: an empty file from a
+    // first round (or gh error text) misclassifies every round.
+    expect(skill).toContain('if [ -n "$PREV" ]; then');
+    expect(skill).toContain(
+      'else rm -f ~/.cache/qwen-verify/pr<n>/previous-report.md; fi',
+    );
+    expect(skill).toContain(
+      '{ echo "could not read PR comments" >&2; exit 1; }',
+    );
+    // First-paragraph marker + bot-or-self author, not a bare substring any
+    // reply quoting `Verdict:` would satisfy. gh's --slurp cannot combine
+    // with --jq, so the selection runs in node over the piped pages.
+    expect(skill).toContain('c.body.split("\\n\\n")[0].includes("Verdict:")');
+    expect(skill).toContain(
+      '/bot$/.test(c.user.login)||c.user.login===process.argv[1]',
+    );
+  });
+
+  it('keeps the proxy JSON parseable and the base extraction fresh', () => {
+    // One stderr line folded into proxy.json breaks every parse of it.
+    expect(skill).toContain(
+      '> ~/.cache/qwen-verify/pr<n>/proxy.json 2> ~/.cache/qwen-verify/pr<n>/proxy.err',
+    );
+    // Add-only extraction would keep a .qwen file the base deleted.
+    expect(skill).toContain('rm -rf ~/.cache/qwen-verify/pr<n>/qwen-base');
+  });
+
+  it('hashes the base-pinned skill copy in the publish footer', () => {
+    // The round loads the base commit's .qwen, not the PR head's: hashing
+    // the head would certify instructions the round never ran.
+    expect(skill).toContain(
+      'git -C <pr-clone> rev-parse "<baseRefOid>:.qwen/skills/verify-pr/SKILL.md"',
+    );
+    expect(skill).toContain("never the PR head's copy");
   });
 });
