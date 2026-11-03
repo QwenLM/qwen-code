@@ -62,7 +62,16 @@ function HostNavigationSlot({
   children: ReactNode;
 }) {
   return createPortal(
-    <div ref={slotRef} data-web-shell-portal-root data-web-shell-shadcn>
+    // display:contents keeps the portal-scope/theme wrapper in the DOM (so the
+    // scope attributes and synced variables still apply) without generating a
+    // box: otherwise this wrapper becomes the host sidebar's flex item and its
+    // default min-height:auto blocks the nav's overflow-y-auto from scrolling.
+    <div
+      ref={slotRef}
+      data-web-shell-portal-root
+      data-web-shell-shadcn
+      style={{ display: 'contents' }}
+    >
       {children}
     </div>,
     target,

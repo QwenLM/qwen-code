@@ -171,6 +171,9 @@ describe('ManagedAgentWebShell', () => {
       const slot = navigationTarget.firstElementChild as HTMLElement;
       expect(slot.hasAttribute('data-web-shell-portal-root')).toBe(true);
       expect(slot.hasAttribute('data-web-shell-shadcn')).toBe(true);
+      // The wrapper must not generate a box, or it becomes the host sidebar's
+      // flex item and its min-height:auto blocks the nav from scrolling (R1-4).
+      expect(slot.style.display).toBe('contents');
       expect(slot.classList.contains('dark')).toBe(true);
       expect(slot.lang).toBe('zh-CN');
       expect(slot.textContent).toBe('host list');
