@@ -196,7 +196,7 @@ export class MonitorRegistry {
     entry.outputOffset = 0;
     entry.notified = false;
     entry.todoWorkChainId ??= todoWorkChainContext.getStore();
-    entry.sourceTurnId =
+    entry.sourceTurnId ??=
       getInvocationContext()?.promptId ?? promptIdContext.getStore();
     this.monitors.set(entry.monitorId, entry);
     debugLogger.info(`Registered monitor: ${entry.monitorId}`);

@@ -34,7 +34,7 @@ Focused tests cover start/terminal ordering, stale end events, same-turn result 
 
 ## Decisions
 
-User messages and model execution IDs are distinct: mid-turn guidance is a real user message in the current execution. Background task activity is distinct from parent model execution; queued or still-running tasks do not alone set hasActivePrompt. Shell, monitor, and workflow notifications share the automatic lifecycle; same-execution injection is limited to subagents with origin metadata. Missing legacy origin metadata falls back to queued automatic delivery, not guessed same-turn injection. Reliable bridge restart recovery of a surviving child must use the existing load/runtime snapshot path; never infer running state solely from historical start rows.
+User messages and model execution IDs are distinct: mid-turn guidance is a real user message in the current execution. Background task activity is distinct from parent model execution; queued or still-running tasks do not alone set hasActivePrompt. Shell, monitor, and workflow notifications share the automatic lifecycle; same-execution injection applies to any notification whose origin turn equals the live turn (agent, shell, monitor and workflow alike), and a result without that origin metadata still falls back to queued automatic delivery, not guessed same-turn injection. Reliable bridge restart recovery of a surviving child must use the existing load/runtime snapshot path; never infer running state solely from historical start rows.
 
 ## Conversation presentation
 

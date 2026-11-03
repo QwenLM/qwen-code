@@ -915,7 +915,7 @@ export class WorkflowRunRegistry {
     entry.notified = false;
     entry.isBackgrounded = registration.isBackgrounded ?? false;
     entry.todoWorkChainId ??= todoWorkChainContext.getStore();
-    entry.sourceTurnId =
+    entry.sourceTurnId ??=
       getInvocationContext()?.promptId ?? promptIdContext.getStore();
     entry.currentPhase = null;
     entry.phases = [];
