@@ -316,11 +316,11 @@ describe('linter directories', () => {
 
   // curl resolves `--continue-at -` against a missing file to offset 0 and
   // sends no Range header, so the resume flag cannot corrupt attempt 1 on its
-  // own. What does need pinning is the 33/36 branch: a mirror that answers a
-  // ranged request with 200 leaves a complete body behind the old partial, so
-  // without the rm -f the next attempt appends a second full body and the
-  // SHA-256 pin fails. Deleting that rm -f left the suite green before this
-  // test existed.
+  // own. What needs pinning is the 33/36 branch: a mirror that answers a
+  // ranged request with 200 makes curl exit 33 and leave the partial
+  // byte-identical, so without the rm -f every attempt re-sends the same
+  // offset and the budget is spent without ever recovering. Deleting that
+  // rm -f left the suite green before this test existed.
   it.skipIf(process.platform === 'win32')(
     'drops the partial archive when a mirror answers a ranged request with 200',
     async () => {
@@ -337,11 +337,14 @@ describe('linter directories', () => {
         mkdirSync(binDir, { recursive: true });
         mkdirSync(path.dirname(localArchive), { recursive: true });
         writeFileSync(fixture, 'official archive');
-        // Attempt 1 leaves a partial behind and reports a range refusal (33);
-        // every later attempt answers with 200 and appends the whole body.
+        // Attempt 1 dies mid-transfer (28) leaving a partial behind. Later
+        // attempts hit a mirror that answers the ranged request with 200, so
+        // curl exits 33 and leaves those bytes untouched; only the 33/36
+        // branch's rm -f gets back to a full-body download. Measured against
+        // real curl: exit 33, output file byte-identical.
         writeFileSync(
           path.join(binDir, 'curl'),
-          `#!/bin/sh\nattempt=$(cat "${attemptFile}" 2>/dev/null || echo 0)\nattempt=$((attempt + 1))\necho "$attempt" > "${attemptFile}"\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = "-o" ]; then out="$2"; shift 2; continue; fi\n  shift\ndone\nif [ "$attempt" -eq 1 ]; then\n  printf "offic" > "$out"\n  exit 33\nfi\nprintf "official archive" >> "$out"\n`,
+          `#!/bin/sh\nattempt=$(cat "${attemptFile}" 2>/dev/null || echo 0)\nattempt=$((attempt + 1))\necho "$attempt" > "${attemptFile}"\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = "-o" ]; then out="$2"; shift 2; continue; fi\n  shift\ndone\nif [ "$attempt" -eq 1 ]; then\n  printf "offic" > "$out"\n  exit 28\nfi\nif [ -e "$out" ]; then\n  exit 33\nfi\nprintf "official archive" > "$out"\n`,
         );
         writeFileSync(path.join(binDir, 'sleep'), '#!/bin/sh\nexit 0\n');
         chmodSync(path.join(binDir, 'curl'), 0o755);
@@ -367,7 +370,7 @@ describe('linter directories', () => {
         });
 
         expect(readFileSync(executable, 'utf8')).toBe('official archive');
-        expect(readFileSync(attemptFile, 'utf8').trim()).toBe('2');
+        expect(readFileSync(attemptFile, 'utf8').trim()).toBe('3');
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
@@ -411,6 +414,7 @@ describe('linter directories', () => {
         });
 
         let status;
+        let stderr = '';
         try {
           execSync(installer, {
             env: {
@@ -418,16 +422,23 @@ describe('linter directories', () => {
               PATH: `${binDir}:${process.env.PATH}`,
               CURL_LOG: curlLog,
             },
-            stdio: 'ignore',
+            stdio: ['ignore', 'ignore', 'pipe'],
           });
         } catch (error) {
           status = error.status;
+          stderr = String(error.stderr);
         }
 
         expect(status).toBe(7);
         expect(readFileSync(curlLog, 'utf8').trim().split('\n')).toHaveLength(
           3,
         );
+        // The cap exits before the retry line, so without this terminal line a
+        // degraded (continue-on-error) run ends on "retrying in 10s..." naming
+        // neither the archive nor the exhausted budget.
+        const terminal = stderr.trim().split('\n').pop();
+        expect(terminal).toContain('failed after 3 attempts (curl exit 7)');
+        expect(terminal).toContain('https://example.invalid/tool.tar');
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
