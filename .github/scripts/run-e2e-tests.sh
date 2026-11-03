@@ -31,6 +31,59 @@ if [ "$sandbox" = 'sandbox:docker' ]; then
     npm run build:sandbox -- -s --no-prune -i "$sandbox_image" 7>&- 8>&- 9>&-
   }
 
+  # The Dockerfile's built-in apt source is deb.debian.org. On the pool's
+  # mainland-China hosts that CDN path has been measured at 11-20 kB/s, which
+  # turns its two apt layers into a 2-3 hour build against this job's 60-minute
+  # cap, so the leg is cancelled before any test runs (#16214). The same path
+  # runs at MB/s from the Hong Kong hosts, and it recovers on the mainland hosts
+  # at off-peak hours — so pinning either a mirror or a host list is wrong.
+  # Probe every build instead: the fastest endpoint wins, a healthy default is
+  # left alone, and no fleet map needs upkeep.
+  apt_mirror_probe_rate() {
+    # A 512 KiB range read of a file every Debian mirror carries. Any large
+    # immutable index would do. The window matters more than the target: a
+    # shorter read cannot tell a warm CDN edge from a throttled one, while this
+    # one still finishes in well under a second wherever the path is healthy,
+    # so a slow candidate costs at most the 4-second cap.
+    local reply code rate
+    reply="$(curl -s -o /dev/null --max-time 4 --range 0-524287 \
+      -w '%{http_code} %{speed_download}' \
+      "http://$1/debian/dists/bookworm/main/binary-arm64/Packages.gz" 2>/dev/null)" || true
+    code="${reply%% *}"
+    rate="${reply##* }"
+    case "${code}" in
+      200 | 206) printf '%s' "${rate%%.*}" ;;
+      *) printf '0' ;;
+    esac
+  }
+
+  select_apt_mirror() {
+    command -v curl > /dev/null 2>&1 || return 0
+    # Below this rate the two apt layers (~200 MB) would eat more than ~15 of
+    # this job's 60 minutes, so a faster mirror is worth the extra cache key.
+    # Above it the built-in source is healthy and is left untouched — which is
+    # what keeps a fixed mirror from slowing the Hong Kong hosts down.
+    local slow_default=250000
+    local default_rate best_rate=0 best='' mirror rate
+    default_rate="$(apt_mirror_probe_rate deb.debian.org)"
+    default_rate="${default_rate:-0}"
+    for mirror in mirrors.aliyun.com mirrors.tuna.tsinghua.edu.cn; do
+      rate="$(apt_mirror_probe_rate "${mirror}")"
+      rate="${rate:-0}"
+      if [ "${rate}" -gt "${best_rate}" ]; then
+        best="${mirror}"
+        best_rate="${rate}"
+      fi
+    done
+    # Print the measurements: the next person debugging a slow image build
+    # should not have to re-run this probe by hand (#16214).
+    echo "apt probe: deb.debian.org=${default_rate} B/s best=${best_rate} B/s (${best:-none})" >&2
+    if [ -n "${best}" ] && [ "${default_rate}" -lt "${slow_default}" ] &&
+      [ "${best_rate}" -gt $((default_rate * 4)) ]; then
+      printf '%s' "${best}"
+    fi
+  }
+
   if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
     mkdir -p "${HOME}/.cache/qwen-code-ci"
     # Host daemon lock, shared for the whole step and never
@@ -71,6 +124,13 @@ if [ "$sandbox" = 'sandbox:docker' ]; then
     # Label- and age-filtered, so it cannot touch the image a
     # concurrent shard is testing.
     timeout 20m docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
+    apt_mirror="$(select_apt_mirror)"
+    if [ -n "${apt_mirror}" ]; then
+      export BUILD_SANDBOX_FLAGS="${BUILD_SANDBOX_FLAGS:-} --build-arg APT_MIRROR=${apt_mirror}"
+      echo "apt mirror: ${apt_mirror} (probe measured deb.debian.org as slower)"
+    else
+      echo "apt mirror: deb.debian.org (probe found no faster mirror)"
+    fi
     if ! build_image; then
       echo "::warning::sandbox image build failed; retrying once"
       build_image
