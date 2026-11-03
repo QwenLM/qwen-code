@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.MySqlLockProbe;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
@@ -198,6 +199,9 @@ class WorkspaceMigrationMySqlIT {
                                 assertThat(refusal.isRetryable()).isFalse();
                             });
                 }
+            } catch (TimeoutException error) {
+                error.addSuppressed(new IllegalStateException(MySqlLockProbe.describeLockWaits(jdbc, schema)));
+                throw error;
             } finally {
                 migration.rollback();
             }

@@ -5,8 +5,8 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityRea
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.host.WorkspaceFileProcess;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.provisioning.WorkspaceFileProcess;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.BeforeEach;
@@ -66,6 +66,7 @@ class WorkspaceFileUploadStoreTest {
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().setEnabled(true);
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getRuntimeBroker().setWorkspaceCreationRoot(Files.createDirectory(temp.resolve("created")).toRealPath().toString());
         properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
@@ -207,6 +208,51 @@ class WorkspaceFileUploadStoreTest {
             var result = uploads.query("tenant", "actor", id);
             assertThat(result.state()).isEqualTo("completed");
             assertThat(result.scopeRevision()).isEqualTo(revision);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE holder_key IS NOT NULL", Integer.class)).isZero();
+        }
+    }
+
+    @Test
+    void sshOnlyRestartDefersOriginalLocalUploadsWithoutLosingTheirHold() {
+        String id = UUID.randomUUID().toString();
+        String revision = revision();
+        String creationRoot = properties.getRuntimeBroker().getWorkspaceCreationRoot();
+        AtomicInteger calls = new AtomicInteger();
+        try (var process = mockStatic(WorkspaceFileProcess.class)) {
+            process.when(() -> WorkspaceFileProcess.upload(anyString(), anyString(), any())).thenAnswer(call -> {
+                if (calls.getAndIncrement() == 0) {
+                    throw new RuntimeBrokerException(503, "ssh_runtime_unavailable", "unknown", true);
+                }
+                assertThat(call.<String>getArgument(1)).isEqualTo("/original/cli.js");
+                return response(call.getArgument(2), "completed", null);
+            });
+            assertThatThrownBy(() -> upload(id, "file.bin", revision, new byte[] {1}))
+                    .isInstanceOf(ManagedAgentException.class);
+            var broker = properties.getRuntimeBroker();
+            broker.setProvisioner("ssh-process");
+            broker.setWorkspaceCreationRoot("");
+            broker.setVerifiedWorkspaceRecoveryEnabled(false);
+            broker.setTrustedLocalRebootRecovery(false);
+            broker.setWorkerEntry("");
+            broker.setNodeExecutable("");
+            broker.getSsh().setNodes(List.of(new com.alibaba.qwen.code.managedagent.config.SshRuntimeSettings.Node(
+                    "remote", "Remote", "ssh-host", "/node", "/cli.js", "/state", List.of("/work"), 41270,
+                    "0.25.1", List.of(new com.alibaba.qwen.code.managedagent.config.SshRuntimeSettings.Access("tenant", "actor")))));
+            uploads = store();
+            assertThat(uploads.query("tenant", "actor", id).state()).isEqualTo("pending");
+            jdbc.update("UPDATE ma_operation SET available_at = 0 WHERE operation_kind = 'WORKSPACE_UPLOAD'");
+            uploads.reconcile();
+            assertThat(calls).hasValue(1);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE holder_key IS NOT NULL", Integer.class)).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind = 'WORKSPACE_UPLOAD'", String.class)).isEqualTo("RUNNING");
+            broker.setProvisioner("local-process");
+            broker.getSsh().setNodes(List.of());
+            broker.setWorkspaceCreationRoot(creationRoot);
+            broker.setVerifiedWorkspaceRecoveryEnabled(true);
+            broker.setWorkerEntry("/original/cli.js");
+            broker.setNodeExecutable("node");
+            assertThat(uploads.query("tenant", "actor", id).state()).isEqualTo("completed");
+            assertThat(calls).hasValue(2);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner WHERE holder_key IS NOT NULL", Integer.class)).isZero();
         }
     }

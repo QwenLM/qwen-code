@@ -4508,6 +4508,26 @@ describe('Settings Loading and Merging', () => {
         'tools.workflowsEnabled',
       );
     });
+
+    // Named key, not list iteration: dropping the entry must red here.
+    it('strips a workspace-only catalog refresh opt-out', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({ model: { catalogRefresh: false } });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.model?.catalogRefresh).toBeUndefined();
+      expect(
+        getSettingsWarnings(settings).some((warning) =>
+          warning.includes('model.catalogRefresh'),
+        ),
+      ).toBe(true);
+    });
   });
 
   describe('goals.modelProposed scope handling', () => {

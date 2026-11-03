@@ -47,7 +47,7 @@ final class AgentEventJournal {
                         result.getString("turn_id"),
                         result.getString("event_type"),
                         storeRows.readMap(result.getString("data_json")),
-                        result.getBoolean("terminal"),
+                        result.getBoolean("is_terminal"),
                         result.getString("source_key"),
                         result.getLong("gmt_create"),
                         result.getInt("schema_version"),
@@ -58,7 +58,7 @@ final class AgentEventJournal {
 
     static final String INSERT_EVENT = "INSERT INTO ma_public_event"
             + " (tenant_id, session_id, sequence_id, event_id, turn_id,"
-            + " event_type, data_json, terminal, source_key, gmt_create,"
+            + " event_type, data_json, is_terminal, source_key, gmt_create,"
             + " schema_version, projection_version, item_id, content_part_id)"
             + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 

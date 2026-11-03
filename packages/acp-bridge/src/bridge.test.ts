@@ -13157,12 +13157,12 @@ describe('createAcpSessionBridge', () => {
   });
 
   it('does not surface an unhandledRejection when the channel exits after a successful restore', async () => {
-    // Regression for the dangling-rejection bug: `transportClosed`
-    // is a fresh `.then(throw)` promise per restore. If `withTimeout`
-    // wins the race, `transportClosed` stays pending and a later
-    // channel exit fires the inner `throw` with no observer attached
-    // — Node 22 logs `unhandledRejection`, and
-    // `--unhandled-rejections=throw` deployments crash the daemon.
+    // Regression for the dangling-rejection bug: a closed-channel signal
+    // that rejects with no observer once the restore has already won makes
+    // Node 22 log `unhandledRejection`, and `--unhandled-rejections=throw`
+    // deployments crash the daemon. The restore now races through
+    // `raceChannelUnavailable`, whose per-channel signal fulfils with a
+    // sentinel and never rejects, so no such promise is left behind.
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {
       const h = makeChannel({ loadSessionImpl: () => ({}) });
@@ -13183,10 +13183,8 @@ describe('createAcpSessionBridge', () => {
       });
       expect(restored.attached).toBe(false);
       // Now resolve `channel.exited` AFTER the restore promise has
-      // already settled. `transportClosed` was the race-loser, so
-      // its `.then(throw)` fires now. With the `.catch(() => {})`
-      // suppression in place, no `unhandledRejection` is emitted;
-      // without it, the test would observe one.
+      // already settled. The channel's unavailability signal fires now;
+      // nothing derived from it may surface as an `unhandledRejection`.
       handles[0]!.crash({ exitCode: null, signalCode: null });
       // Give the rejection a tick to surface if it were unhandled.
       await new Promise((r) => setTimeout(r, 50));
