@@ -411,11 +411,7 @@ export function createBoundSessionsAccessor(
       );
     }
     const summaries: PrBindingSummary[] = [];
-    // Rebuild (not accumulate) on complete answers so sessions that left
-    // the bindings drop out of the wake cache. On a partial answer keep
-    // the known cwds: an incomplete enumeration must not turn a queued
-    // dormant delivery into a gone-session public fallback.
-    if (!partial) cwdBySession.clear();
+    const validatedCwds = new Map<string, string>();
     for (const entry of body.bindings) {
       if (entry === null || typeof entry !== 'object') {
         // A dropped session row is a degraded answer too: its bindings
@@ -469,6 +465,23 @@ export function createBoundSessionsAccessor(
       // keys retention on the listed session set, so "scanned, no bindings"
       // (an observed unbind) has to reach it even on a partial answer.
       const { sourceType, updatedAt } = record;
+      validatedCwds.set(sessionId, workspaceCwd);
+      summaries.push({
+        sessionId,
+        workspaceCwd,
+        ...(typeof sourceType === 'string' ? { sourceType } : {}),
+        ...(typeof updatedAt === 'string' ? { updatedAt } : {}),
+        prs: entries,
+      });
+    }
+    // Rebuild (not accumulate) on complete answers so sessions that left
+    // the bindings drop out of the wake cache. On a partial answer keep
+    // the known cwds: an incomplete enumeration must not turn a queued
+    // dormant delivery into a gone-session public fallback. The decision
+    // uses the FINAL partial verdict: row-level degradation upgrades a
+    // nominally complete answer, and must not have cleared the cache first.
+    if (!partial) cwdBySession.clear();
+    for (const [sessionId, workspaceCwd] of validatedCwds) {
       // Bounded: under a permanent partial the cache is never cleared, so
       // session churn during the partial window must not grow it without
       // limit. FIFO eviction only drops the oldest wake hints; a dropped
@@ -481,13 +494,6 @@ export function createBoundSessionsAccessor(
         if (oldest !== undefined) cwdBySession.delete(oldest);
       }
       cwdBySession.set(sessionId, workspaceCwd);
-      summaries.push({
-        sessionId,
-        workspaceCwd,
-        ...(typeof sourceType === 'string' ? { sourceType } : {}),
-        ...(typeof updatedAt === 'string' ? { updatedAt } : {}),
-        prs: entries,
-      });
     }
     return { bindings: summaries, partial };
   };

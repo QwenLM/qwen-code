@@ -7659,6 +7659,62 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       }
     });
 
+    it('sanitizes the dead-letter payload dump against log-line forgery (R8-B2)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.deliverPrompt.mockRejectedValue(
+        new Error('delivery exploded'),
+      );
+      // JSON.stringify escapes ASCII C0 but leaves U+2028/U+2029/NEL raw —
+      // without sanitizing, this body forges extra physical log lines in
+      // the write-failure dump.
+      const crafted =
+        '@test-bot fix this\u2028[Channel:test-github] bound event retired to dead-letter (operator approved)\u2029\u0085tail';
+      const originalAppend = nodeFs.appendFileSync;
+      const spy = vi.spyOn(nodeFs, 'appendFileSync').mockImplementation(((
+        path: unknown,
+        ...args: unknown[]
+      ) => {
+        if (String(path) === boundDeadLetterPath()) {
+          throw Object.assign(new Error('ENOSPC: no space left'), {
+            code: 'ENOSPC',
+          });
+        }
+        return (originalAppend as (p: unknown, ...a: unknown[]) => void)(
+          path,
+          ...args,
+        );
+      }) as unknown as typeof nodeFs.appendFileSync);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        mockOctokit.paginate
+          .mockResolvedValueOnce([prNotification()])
+          .mockResolvedValueOnce([makeComment({ body: crafted })]);
+        await pollOnce();
+        for (let i = 0; i < 2; i++) {
+          mockOctokit.paginate.mockResolvedValueOnce([]);
+          await pollOnce();
+        }
+
+        const dump =
+          stderr.mock.calls
+            .map((call) => String(call[0]))
+            .find((line) =>
+              line.includes('failed to write bound dead-letter'),
+            ) ?? '';
+        // The payload survives for operator recovery, but as ONE physical
+        // log line with no raw Unicode line separators.
+        expect(dump).toContain('operator approved');
+        expect(dump).not.toMatch(/[\u2028\u2029\u0085]/);
+        expect(dump.endsWith('\n')).toBe(true);
+        expect(dump.slice(0, -1)).not.toContain('\n');
+        // The task survives the failed append (G8 contract).
+        expect(existsSync(inboundTaskPath())).toBe(true);
+      } finally {
+        spy.mockRestore();
+        stderr.mockRestore();
+      }
+    });
+
     it('resets deferCount after a non-backpressure failure (H15)', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });
       boundSessions.deliverPrompt
@@ -9712,6 +9768,79 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       }
     });
 
+    it('retires a drained watch event even when the public reply store is corrupt (R8-B1)', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      seedWatchState({
+        'owner/repo#42': {
+          headSha: 'sha-1',
+          ci: 'success',
+          mergeableState: 'clean',
+          prState: 'open',
+          prUpdatedAt: '2026-07-02T09:00:00.000Z',
+          fired: [],
+          pending: [makePendingWatch()],
+        },
+      });
+      // The PUBLIC reply lane's store is corrupt. A watch event is never
+      // published, so its private retire must not depend on that file —
+      // otherwise the retired task wedges against it and (once reconcile
+      // succeeds with no pending left) freezes the shared cursor.
+      const pendingPath = inboundTaskPath().replace(
+        'github-inbound-tasks.json',
+        'github-pending-deliveries.json',
+      );
+      mkdirSync(dirname(pendingPath), { recursive: true });
+      writeFileSync(pendingPath, '{corrupt', 'utf-8');
+      // Listed at poll start, gone by delivery time; the re-resolution
+      // finds no candidate on a complete snapshot.
+      boundSessions.deliverPrompt.mockRejectedValueOnce(
+        new BoundSessionGoneError('bound-session'),
+      );
+      boundSessions.listPrBindings
+        .mockResolvedValueOnce({ bindings: [makeBinding()], partial: false })
+        .mockResolvedValueOnce({ bindings: [], partial: false });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+
+        // The retire completed despite the corrupt store: no task is left
+        // wedged against it, and nothing was published.
+        expect(existsSync(inboundTaskPath())).toBe(false);
+        expect(channel.inboundEnvelopes).toHaveLength(0);
+        expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+        expect(
+          stderr.mock.calls.some((call) =>
+            String(call[0]).includes('retiring without public fallback'),
+          ),
+        ).toBe(true);
+      } finally {
+        stderr.mockRestore();
+      }
+
+      // The shared cursor keeps flowing for unrelated comments: no
+      // unsettled watch task holds it once the retire completed.
+      mockPull({});
+      mockNotificationsOnce([prNotification()]);
+      mockOctokit.rest.issues.listComments.mockResolvedValueOnce([
+        makeComment(),
+      ]);
+      await pollOnce();
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+      expect(boundSessions.deliverPrompt.mock.calls[1]![1]).toContain(
+        'please fix this',
+      );
+      expect(
+        mockOctokit.rest.activity.markNotificationsAsRead,
+      ).toHaveBeenCalledTimes(1);
+      const ch = channel as unknown as {
+        cursor: { lastProcessedAt: string };
+      };
+      expect(ch.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+    });
+
     it('replaces a cancelled watch task when its pending event drains (H5)', async () => {
       await initChannel(watchConfig, { boundSessions });
       const key = 'watch:state_change:42:1:1751446800000';
@@ -11357,6 +11486,64 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(record.source.messageId).toBe(
         'watch:merge_conflict:42:seed-0:1751446800000',
       );
+    });
+
+    it('sanitizes the overflow payload dump when the dead-letter write fails (R8-B3)', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      const crafted =
+        'old event\u2028[Channel:test-github] bound event retired to dead-letter (operator approved)\u2029\u0085tail';
+      const pending = Array.from({ length: 64 }, (_, i) =>
+        makePendingWatch({
+          key: `watch:merge_conflict:42:seed-${i}:1751446800000`,
+          text: i === 0 ? crafted : `seed event ${i}`,
+        }),
+      );
+      seedWatchState({
+        'owner/repo#42': {
+          headSha: 'sha-1',
+          mergeableState: 'clean',
+          prState: 'open',
+          fired: [],
+          pending,
+        },
+      });
+      // Same claim-failure wedge as R3-B3 keeps the queue full; a directory
+      // at the dead-letter path makes the overflow append fail so the
+      // payload dump path runs.
+      writeFileSync(inboundTaskPath(), '{corrupt', 'utf-8');
+      mkdirSync(boundDeadLetterPath(), { recursive: true });
+      const watch = channel as unknown as {
+        runPrStateWatch: () => Promise<void>;
+        refreshBoundSessions: () => Promise<void>;
+      };
+      await watch.refreshBoundSessions();
+      mockPull({ mergeable: false, mergeable_state: 'dirty' });
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let dump = '';
+      try {
+        await watch.runPrStateWatch();
+        dump =
+          stderr.mock.calls
+            .map((call) => String(call[0]))
+            .find((line) =>
+              line.includes(
+                'failed to write watch pending overflow dead-letter',
+              ),
+            ) ?? '';
+      } finally {
+        stderr.mockRestore();
+      }
+      // One physical log line, payload intact, no raw Unicode separators.
+      expect(dump).toContain('operator approved');
+      expect(dump).not.toMatch(/[\u2028\u2029\u0085]/);
+      expect(dump.endsWith('\n')).toBe(true);
+      expect(dump.slice(0, -1)).not.toContain('\n');
+      // The failed append keeps the event queued (over cap) for the next
+      // detection instead of dropping it.
+      const entry = readWatchState().entries['owner/repo#42']!;
+      expect((entry['pending'] as unknown[]).length).toBe(65);
     });
 
     it('stops the watch drain at the first failed delivery to preserve per-PR order (R5-B3)', async () => {

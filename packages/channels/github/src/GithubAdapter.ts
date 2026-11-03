@@ -2648,6 +2648,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.removeInboundTask(task.id);
       return true;
     }
+    if (isWatch) {
+      // A watch task reaches here only after a private retire cleared its
+      // delivery (gone session, no target left). Watch events are never
+      // published, so they can have no pending final delivery: reading the
+      // public reply lane's store here would wedge the retired task — and
+      // with it the shared cursor — on an unrelated file's readability.
+      this.removeInboundTask(task.id);
+      return true;
+    }
     if (this.hasPendingFinalDeliveryForTask(task)) {
       this.transitionInboundTask(task.id, 'reply_pending', {
         envelope: undefined,
@@ -2815,9 +2824,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // removal here would leave one stderr line as the event's only trace.
       // A backpressure-horizon task stays recoverable, so the next poll
       // retries the append; an exhausted task survives in the task file for
-      // operator recovery.
+      // operator recovery. The dump is sanitized but NOT truncated (the cap
+      // equals the payload's own length): it is the operator's only copy,
+      // and JSON.stringify alone leaves U+2028/U+2029/NEL/bidi controls raw
+      // — enough to forge extra log lines from untrusted event text.
+      const payload = JSON.stringify(record);
       process.stderr.write(
-        `[Channel:${this.name}] failed to write bound dead-letter (${task.source.messageId}): ${err}; payload: ${JSON.stringify(record)}\n`,
+        `[Channel:${this.name}] failed to write bound dead-letter (${task.source.messageId}): ${err}; payload: ${sanitizeLogText(payload, payload.length)}\n`,
       );
       return;
     }
@@ -4230,8 +4243,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           // Same fail-safe as retireBoundTask: if the exhaustion surface
           // cannot be written, keep the event queued (over cap) and retry
           // the overflow on the next detection instead of dropping it.
+          // Sanitized without truncation, like the retireBoundTask dump.
+          const payload = JSON.stringify(record);
           process.stderr.write(
-            `[Channel:${this.name}] failed to write watch pending overflow dead-letter (${oldest.key}): ${err}; payload: ${JSON.stringify(record)}\n`,
+            `[Channel:${this.name}] failed to write watch pending overflow dead-letter (${oldest.key}): ${err}; payload: ${sanitizeLogText(payload, payload.length)}\n`,
           );
         }
       }

@@ -4787,6 +4787,48 @@ describe('createBoundSessionsAccessor', () => {
     expect(wake).toHaveBeenCalledWith('session-1', '/ws/a');
   });
 
+  it('keeps known cwds when row validation upgrades a complete answer to partial (R8-B4)', async () => {
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          bindings: [
+            {
+              sessionId: 'session-1',
+              workspaceCwd: '/ws/a',
+              prs: [{ number: 1, url: 'https://github.com/o/r/pull/1' }],
+            },
+          ],
+          partial: false,
+        }),
+      )
+      // Nominally complete, but the ONLY row is malformed: row validation
+      // degrades the answer to partial after the cache-clear decision would
+      // have run if it keyed on the body flag alone. The cached session is
+      // not listed, so an early clear would erase its wake hint.
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          bindings: [{ sessionId: 'bad-row', workspaceCwd: 42, prs: [] }],
+          partial: false,
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+      .mockResolvedValueOnce(jsonResponse(202, { promptId: 'p-1' }));
+    const wake = vi.fn().mockResolvedValue(undefined);
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest), wake);
+    await accessor.listPrBindings();
+    const second = await accessor.listPrBindings();
+    expect(second.partial).toBe(true);
+
+    // The degraded answer must not have cleared the wake cache before its
+    // row-level partial upgrade: the dormant delivery still wakes from the
+    // known cwd without another bindings refresh.
+    await accessor.deliverPrompt('session-1', 'x');
+
+    expect(wake).toHaveBeenCalledWith('session-1', '/ws/a');
+    expect(requestRest).toHaveBeenCalledTimes(4);
+  });
+
   it('adds new cwds to the wake cache from a partial answer', async () => {
     const requestRest = vi
       .fn()
