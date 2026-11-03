@@ -1103,7 +1103,13 @@ describe('e2e workflow', () => {
       expect(e2eRunScript).toContain('mirrors.aliyun.com');
       expect(e2eRunScript).toContain('mirrors.tuna.tsinghua.edu.cn');
       expect(e2eRunScript).toContain('--build-arg APT_MIRROR=');
-      expect(readFileSync('Dockerfile', 'utf8')).toMatch(/^ARG APT_MIRROR=$/m);
+      // Both stages need the ARG: a stage cannot inherit an ARG declared
+      // before its own FROM, so one declaration per stage is the contract.
+      // Counting (not toMatch) catches deleting either one — R1-1 witnessed
+      // the runtime-stage removal surviving a single-match assertion.
+      expect(
+        readFileSync('Dockerfile', 'utf8').match(/^ARG APT_MIRROR=$/gm),
+      ).toHaveLength(2);
 
       const selectIndex = e2eRunScript.indexOf('select_apt_mirror()');
       expect(selectIndex).toBeGreaterThan(-1);
