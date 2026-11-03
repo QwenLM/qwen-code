@@ -272,7 +272,9 @@ authority to certify the round.
    follows `include.path`, reads key names NUL-framed and re-validated (a
    filter value with a newline must not forge overrides), covers
    `.git/config.worktree` when `extensions.worktreeConfig` is set, and the
-   fixed hardening is applied last so nothing outranks it. Prepare also
+   fixed hardening is applied last so nothing outranks it. A filter name
+   containing `=` is refused outright: git splits `-c` at the first `=`, so
+   such a name cannot be safely disabled by an override. Prepare also
    refuses a `.git/info/exclude` with active patterns: no `-c` can neutralize
    that file, and a fresh clone has only the commented default.
    Mounting the base commit's `.qwen` over the tree (step 3) keeps the
@@ -398,8 +400,9 @@ authority to certify the round.
    no secret and stays benign, like `ssh://git@`) plus `Authorization` /
    `Proxy-Authorization` header values. The URL-bearing key families are
    judged too: `url.*.insteadOf` / `url.*.pushInsteadOf` rewrites and
-   `http.<url>.*` sections. The config enumeration follows `include.path`,
-   so a credential defined in an included worktree file is refused too. It
+   `http.<url>.*` sections. The config enumeration follows `include.path`
+   and covers the enabled `.git/config.worktree` scope, so a credential in
+   an included worktree file or the worktree config is refused too. It
    leaves installed dependencies and build output alone — a vendored git
    dependency under `node_modules`/`dist` is excluded, not refused — and
    refuses a nested git repository outright on every surface (ignored

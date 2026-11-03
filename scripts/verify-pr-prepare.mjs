@@ -293,6 +293,21 @@ export const GIT_HARDENING = [
 const FILTER_NAME = /^filter\..+\.(clean|smudge|process)$/;
 
 /**
+ * A filter name git allows (e.g. `filter.a=b.clean`) but `-c key=value`
+ * cannot represent: git splits the argument at the FIRST `=`, so emitting an
+ * override would set a different key and leave the real filter armed. The
+ * gate refuses such names instead, with their own remedy.
+ */
+export class UnsafeFilterNameError extends Error {
+  constructor(name) {
+    super(
+      `filter name ${name} contains '=' and cannot be safely disabled with -c — remove the filter from the tree's git config, or re-clone, then re-run prepare`,
+    );
+    this.name = 'UnsafeFilterNameError';
+  }
+}
+
+/**
  * Empty `-c` overrides for every locally defined filter command. The filter
  * name is attacker-chosen, so the override set has to be enumerated from the
  * tree's own config instead of hardcoded. Three properties are load-bearing:
@@ -302,7 +317,8 @@ const FILTER_NAME = /^filter\..+\.(clean|smudge|process)$/;
  * `key value` output were parsed; and each name is re-validated before it
  * becomes a `-c` argument. When `extensions.worktreeConfig` is set,
  * `git status` also reads `.git/config.worktree`, so that scope is enumerated
- * too.
+ * too. Names containing `=` throw UnsafeFilterNameError — no override can
+ * represent them.
  */
 export function localFilterOverrides(root) {
   const prefix = root ? ['-C', root] : [];
@@ -336,6 +352,7 @@ export function localFilterOverrides(root) {
     }
     for (const name of result.stdout.split('\0')) {
       if (!name || !FILTER_NAME.test(name)) continue;
+      if (name.includes('=')) throw new UnsafeFilterNameError(name);
       overrides.push('-c', `${name}=`);
     }
   }
@@ -402,7 +419,12 @@ function main(argv) {
   let toplevel;
   try {
     toplevel = runGit(['rev-parse', '--show-toplevel']);
-  } catch {
+  } catch (error) {
+    // A hostile filter name is a refusal with its own remedy, not a missing
+    // worktree; it must surface before any guarded status could run it.
+    if (error instanceof UnsafeFilterNameError) {
+      return fail(3, error.message);
+    }
     return fail(3, 'not inside a git worktree — run this from the clone');
   }
   if (toplevel.status !== 0) {

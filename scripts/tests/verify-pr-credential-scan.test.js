@@ -365,6 +365,87 @@ describe('scanIgnoredCredentials', () => {
     expect(scanIgnoredCredentials(dir)).toEqual([]);
   });
 
+  // Ordinary `git config --get` reads .git/config.worktree when the
+  // extension is enabled; --local alone would report a credential there as
+  // clean while PR code reads it. The scan must enumerate the enabled scope.
+  it('refuses credentials in the enabled worktree config scope', () => {
+    const dir = makeRepo(['src/app.ts'], []);
+    execFileSync(
+      'git',
+      ['config', '--local', 'extensions.worktreeConfig', 'true'],
+      { cwd: dir, env: gitEnv },
+    );
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--worktree',
+        'http.https://github.com/.extraheader',
+        'Authorization: Bearer FAKE_WORKTREE',
+      ],
+      { cwd: dir, env: gitEnv },
+    );
+    expect(() => scanIgnoredCredentials(dir)).toThrow(
+      /credential-bearing git config/,
+    );
+    expect(run(dir).status).toBe(1);
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--worktree',
+        '--unset',
+        'http.https://github.com/.extraheader',
+      ],
+      { cwd: dir, env: gitEnv },
+    );
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--worktree',
+        'remote.origin.url',
+        'https://FAKE_WORKTREE@example.invalid/repo.git',
+      ],
+      { cwd: dir, env: gitEnv },
+    );
+    expect(() => scanIgnoredCredentials(dir)).toThrow(
+      /credential-bearing git config/,
+    );
+    expect(run(dir).status).toBe(1);
+    execFileSync(
+      'git',
+      ['config', '--worktree', '--unset', 'remote.origin.url'],
+      { cwd: dir, env: gitEnv },
+    );
+    // Benign worktree config stays clean.
+    execFileSync(
+      'git',
+      ['config', '--worktree', 'core.logAllRefUpdates', 'true'],
+      { cwd: dir, env: gitEnv },
+    );
+    expect(scanIgnoredCredentials(dir)).toEqual([]);
+    // With the extension disabled git itself ignores the worktree file, and
+    // so does the scan: the same planted credential reads as clean.
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--worktree',
+        'remote.origin.url',
+        'https://FAKE_WORKTREE@example.invalid/repo.git',
+      ],
+      { cwd: dir, env: gitEnv },
+    );
+    execFileSync(
+      'git',
+      ['config', '--local', '--unset', 'extensions.worktreeConfig'],
+      { cwd: dir, env: gitEnv },
+    );
+    expect(scanIgnoredCredentials(dir)).toEqual([]);
+    expect(run(dir).status).toBe(0);
+  });
+
   it('keeps ssh URLs, the bare git username and public keys out of the refusal', () => {
     const dir = makeRepo(['id_rsa.pub'], ['id_rsa*']);
     execFileSync(

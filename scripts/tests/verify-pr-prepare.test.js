@@ -289,6 +289,40 @@ describe('git hardening', () => {
     expect(existsSync(marker)).toBe(false);
   });
 
+  // git allows '=' inside a filter subsection (filter.a=b.clean), but -c
+  // splits its argument at the FIRST '=': the override would set a different
+  // key and leave the real filter armed. Such a name must be refused before
+  // any guarded status could run it, not emitted as a broken override.
+  it('refuses a filter name containing = instead of emitting a broken override', () => {
+    const { dir } = makeRepo();
+    const marker = join(dir, 'filter-fired');
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--local',
+        'filter.a=b.clean',
+        `sh -c 'echo fired > ${marker} && cat'`,
+      ],
+      { cwd: dir, env: gitEnv },
+    );
+    mkdirSync(join(dir, '.git', 'info'), { recursive: true });
+    writeFileSync(join(dir, '.git', 'info', 'attributes'), '* filter=a=b\n');
+    // Same-byte-length change: a size change would let git skip the clean
+    // conversion and the positive control would prove nothing.
+    writeFileSync(join(dir, 'base.txt'), 'BaSe\n');
+    spawnSync('git', [...GIT_HARDENING, '-C', dir, 'status', '--porcelain'], {
+      encoding: 'utf8',
+    });
+    expect(existsSync(marker)).toBe(true);
+    rmSync(marker);
+    expect(() => localFilterOverrides(dir)).toThrow(
+      /cannot be safely disabled/,
+    );
+    expect(() => gitStatusArgs(dir)).toThrow(/cannot be safely disabled/);
+    expect(existsSync(marker)).toBe(false);
+  });
+
   // extensions.worktreeConfig makes git status read .git/config.worktree,
   // which --local never reads; a filter planted there must be emptied too.
   it('empties a filter planted in .git/config.worktree', () => {
@@ -743,6 +777,23 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     const result = runPrepare(dir, ['42', '--repo', REPO], env);
     expect(result.status).toBe(3);
     expect(result.stderr).toContain('uncommitted changes');
+    expect(existsSync(join(realpathSync(dir), 'tmp'))).toBe(false);
+  });
+
+  // The refusal must reach the CLI as a clean exit 3 with its own remedy,
+  // before any guarded status runs — not as an uncaught enumeration stack.
+  it('refuses a tree whose filter name cannot be safely disabled', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    execFileSync('git', ['config', '--local', 'filter.a=b.clean', 'true'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+
+    const result = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(result.status).toBe(3);
+    expect(result.stderr).toContain("contains '='");
+    expect(result.stderr).toContain('cannot be safely disabled');
     expect(existsSync(join(realpathSync(dir), 'tmp'))).toBe(false);
   });
 

@@ -848,6 +848,8 @@ describe('local container recipe pins', () => {
     expect(skill).toContain('`Proxy-Authorization` header values');
     expect(skill).toContain('bare `git@` account name');
     expect(skill).toMatch(/enumeration\s+follows\s+`include\.path`/);
+    expect(skill).toContain('covers the enabled `.git/config.worktree` scope');
+    expect(skill).toMatch(/filter name\s+containing `=` is refused outright/);
   });
 
   it('snapshots the previous report and pins both checker call sites', () => {

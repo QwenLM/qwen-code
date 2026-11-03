@@ -174,7 +174,10 @@ export function nestedGitRepos(root, { maxBuffer = 8 * 1024 * 1024 } = {}) {
  * carries no secret, matching `ssh://git@…`. `--includes` follows
  * `include.path` the way the `git config --get` PR code uses does, and
  * `--list --null` frames each `key\nvalue` record so a multi-line value
- * cannot forge entries. A `credential.helper` COMMAND is out of this
+ * cannot forge entries. When `extensions.worktreeConfig` is set, ordinary
+ * `git config --get` also reads `.git/config.worktree`, so that scope (with
+ * its includes) is enumerated too — `--local` alone would report a
+ * credential there as clean. A `credential.helper` COMMAND is out of this
  * URL/header contract by design (see the design record); prepare disables
  * helpers for its own reads.
  */
@@ -182,15 +185,35 @@ export function credentialBearingConfig(
   root,
   { maxBuffer = 8 * 1024 * 1024 } = {},
 ) {
-  const result = spawnSync(
+  const readScope = (scope) => {
+    const result = spawnSync(
+      'git',
+      ['-C', root, 'config', scope, '--includes', '--list', '--null'],
+      { encoding: 'utf8', maxBuffer },
+    );
+    if (result.status !== 0) {
+      throw new Error(
+        `could not read local git config: ${(result.stderr || '').trim() || 'git failed'}`,
+      );
+    }
+    return result.stdout;
+  };
+  const worktreeConfig = spawnSync(
     'git',
-    ['-C', root, 'config', '--local', '--includes', '--list', '--null'],
+    [
+      '-C',
+      root,
+      'config',
+      '--local',
+      '--includes',
+      '--bool',
+      'extensions.worktreeConfig',
+    ],
     { encoding: 'utf8', maxBuffer },
   );
-  if (result.status !== 0) {
-    throw new Error(
-      `could not read local git config: ${(result.stderr || '').trim() || 'git failed'}`,
-    );
+  const scopes = ['--local'];
+  if (worktreeConfig.status === 0 && worktreeConfig.stdout.trim() === 'true') {
+    scopes.push('--worktree');
   }
   const hasUserinfo = (value) => {
     const match = /^https?:\/\/([^/@\s]+)@/i.exec(value);
@@ -202,20 +225,22 @@ export function credentialBearingConfig(
   const isAuthHeader = (value) =>
     /^\s*(?:proxy-)?authorization\s*:/i.test(value);
   const hits = [];
-  for (const record of result.stdout.split('\0')) {
-    if (!record) continue;
-    const newline = record.indexOf('\n');
-    const key = newline === -1 ? record : record.slice(0, newline);
-    const value = newline === -1 ? '' : record.slice(newline + 1);
-    const rewrite = /^url\.(.*)\.(insteadof|pushinsteadof)$/.exec(key);
-    const httpSection = /^http\.(.+)\.[^.]+$/.exec(key);
-    if (
-      hasUserinfo(value) ||
-      isAuthHeader(value) ||
-      (rewrite && hasUserinfo(rewrite[1])) ||
-      (httpSection && hasUserinfo(httpSection[1]))
-    ) {
-      hits.push(key);
+  for (const scope of scopes) {
+    for (const record of readScope(scope).split('\0')) {
+      if (!record) continue;
+      const newline = record.indexOf('\n');
+      const key = newline === -1 ? record : record.slice(0, newline);
+      const value = newline === -1 ? '' : record.slice(newline + 1);
+      const rewrite = /^url\.(.*)\.(insteadof|pushinsteadof)$/.exec(key);
+      const httpSection = /^http\.(.+)\.[^.]+$/.exec(key);
+      if (
+        hasUserinfo(value) ||
+        isAuthHeader(value) ||
+        (rewrite && hasUserinfo(rewrite[1])) ||
+        (httpSection && hasUserinfo(httpSection[1]))
+      ) {
+        if (!hits.includes(key)) hits.push(key);
+      }
     }
   }
   return hits;

@@ -58,11 +58,13 @@ A host-side relay plus a recipe that names its trust boundaries.
   `include.path`, reads key names NUL-framed and re-validated (a filter
   value carrying a newline must not forge extra `-c` entries), covers
   `.git/config.worktree` when `extensions.worktreeConfig` is set, and the
-  fixed hardening is applied last so no enumerated entry can outrank it.
-  `.git/info/exclude` has no `-c` override, so active patterns there are
-  refused outright — a fresh clone ships only the commented default. A
-  linked worktree is rejected by construction because its gitfile points
-  outside the mount.
+  fixed hardening is applied last so no enumerated entry can outrank it. A
+  filter name containing `=` cannot be represented by `-c key=value` at all
+  (git splits the argument at the first `=`), so it is refused with its own
+  remedy rather than emitted as a broken override. `.git/info/exclude` has
+  no `-c` override, so active patterns there are refused outright — a fresh
+  clone ships only the commented default. A linked worktree is rejected by
+  construction because its gitfile points outside the mount.
 - The container is named and detached (`sleep infinity` plus `docker exec`)
   and runs with `--user "$(id -u):$(id -g)"` and `HOME=/tmp/qwen-home`, so
   files written into the mounted tree stay maintainer-owned; the CLI installs
@@ -79,7 +81,8 @@ A host-side relay plus a recipe that names its trust boundaries.
   list of keys — any value can hide a token URL (`http.proxy` included), so
   a key allowlist never converges — plus the URL-bearing key families
   (`url.*.insteadOf` / `url.*.pushInsteadOf` rewrites, `http.<url>.*`
-  sections), following `include.path` like prepare's filter enumeration.
+  sections), following `include.path` and covering the enabled
+  `.git/config.worktree` scope like prepare's filter enumeration.
   The file scan lists ignored files one by one and leaves
   `node_modules`/`dist` alone, so a built tree is not refused; a nested git
   repository is refused on every surface git collapses to a directory
@@ -145,8 +148,10 @@ the real key.
   embedded URL. A novel key outside any historical list (`custom.mirror`,
   `http.proxy`) is the witness that value inspection, not a key allowlist,
   is the contract; the refusal names the key, never the value. Credentials
-  arriving through `include.path` are refused, and a credential-free
-  include stays clean. Installed `node_modules`/`dist` are ignored at any
+  arriving through `include.path` or in the enabled `.git/config.worktree`
+  scope are refused; a credential-free include and benign worktree config
+  stay clean, and with the extension disabled the worktree file is ignored
+  exactly as git ignores it. Installed `node_modules`/`dist` are ignored at any
   depth, including inside a workspace package, and a vendored git
   repository under them is excluded rather than refused; file enumeration
   is path-limited so a large ignored dependency tree is never buffered
@@ -165,7 +170,10 @@ the real key.
   override for a directly defined filter, one arriving through an included
   worktree file, one in the worktree config, and a newline-bearing value
   that must not forge a `-c` outranking the hardening, each with a positive
-  control where the vector fires without the guard. A hostile
+  control where the vector fires without the guard. A filter name containing
+  `=` is refused with its own remedy on the module and the CLI path — no
+  override can represent it, and the refusal precedes any guarded status.
+  A hostile
   `core.excludesFile` cannot hide untracked files from the hardened status;
   active patterns in `.git/info/exclude` are refused with a re-clone
   remedy, while the commented default passes. A non-git cwd is refused with
