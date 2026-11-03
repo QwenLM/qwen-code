@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -9,6 +10,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import * as nodeFs from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PollingChannelBase } from './PollingChannelBase.js';
@@ -18,6 +20,13 @@ import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import type { ChannelConfig } from './types.js';
 
 const testHome = mkdtempSync(join(tmpdir(), 'poll-test-'));
+
+// The mock namespace (unlike the raw ESM builtin) is configurable, so a test
+// can spyOn chmodSync to inject a permission fault and restore it afterwards.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return { ...actual };
+});
 
 vi.mock('./paths.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./paths.js')>();
@@ -208,6 +217,17 @@ describe('PollingChannelBase', () => {
     expect(poller.cursor.count).toBe(2);
   });
 
+  it('does not fall back to a legacy cursor when the scoped file is empty', () => {
+    writeFileSync(
+      legacyCursorFile('empty-scoped'),
+      JSON.stringify({ ts: '2026-06-01T00:00:00.000Z', count: 9 }),
+      'utf-8',
+    );
+    writeFileSync(cursorFile('empty-scoped'), '', 'utf-8');
+    const poller = new TestPoller('empty-scoped', makeConfig(), makeBridge());
+    expect(poller.cursor).toEqual({ ts: '2026-01-01T00:00:00.000Z', count: 0 });
+  });
+
   it('does not fall back to a legacy cursor when the scoped file is corrupt', () => {
     writeFileSync(
       legacyCursorFile('corrupt-scoped'),
@@ -227,10 +247,49 @@ describe('PollingChannelBase', () => {
         { ...makeConfig(), cwd: '/tmp/ws-modes' },
         makeBridge(),
       );
-      poller.save();
       const file = cursorFile('modes', '/tmp/ws-modes');
+      // A scope directory left at 0o755 by an older build must be tightened.
+      mkdirSync(dirname(file), { recursive: true });
+      chmodSync(dirname(file), 0o755);
+      poller.save();
       expect(statSync(dirname(file)).mode & 0o777).toBe(0o700);
       expect(statSync(file).mode & 0o777).toBe(0o600);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'still publishes the cursor when the temp file mode cannot be tightened',
+    () => {
+      const poller = new TestPoller(
+        'chmod-denied',
+        { ...makeConfig(), cwd: '/tmp/ws-chmod-denied' },
+        makeBridge(),
+      );
+      poller.cursor = { ts: '2026-07-03T00:00:00.000Z', count: 3 };
+      const realChmod = nodeFs.chmodSync;
+      const spy = vi
+        .spyOn(nodeFs, 'chmodSync')
+        .mockImplementation((p, mode) => {
+          if (String(p).endsWith('.tmp')) {
+            const err = new Error('EPERM: operation not permitted');
+            (err as NodeJS.ErrnoException).code = 'EPERM';
+            throw err;
+          }
+          realChmod(p, mode);
+        });
+      try {
+        poller.save();
+      } finally {
+        spy.mockRestore();
+      }
+      expect(
+        JSON.parse(
+          readFileSync(
+            cursorFile('chmod-denied', '/tmp/ws-chmod-denied'),
+            'utf-8',
+          ),
+        ),
+      ).toEqual({ ts: '2026-07-03T00:00:00.000Z', count: 3 });
     },
   );
 
