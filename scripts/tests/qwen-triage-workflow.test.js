@@ -4700,8 +4700,14 @@ describe('qwen-triage verify hardening round 2', () => {
       // A flaky demotion is a finding, not noise: on a merged PR it names
       // tests now on main. Each body that carries one without the
       // substantive marker posts, unless this run's own report already
-      // carries the demotion.
+      // carries the demotion. Without a live status of its own, a later
+      // attempt finds an earlier attempt's report, which can predate the
+      // verdict; the marker counts only in that report's header.
       const flaky = { ...closed, FLAKE_VERDICT: 'flaky' };
+      const ownFlakyReport = {
+        ...ownReport,
+        body: `${M}\n<!-- qwen-triage:verify-run=1 -->\n<!-- qwen-triage:verify-flaky -->\n<!-- qwen-triage:verify-substantive -->\n\nreport`,
+      };
       for (const [env, headline] of [
         [{ DOWNLOAD_OUTCOME: 'failure' }, 'result artifact unavailable'],
         [{ VERIFY_RESULT: 'cancelled' }, 'job cancelled before the report'],
@@ -4712,7 +4718,23 @@ describe('qwen-triage verify hardening round 2', () => {
         expect(readFileSync(bodyOut, 'utf8')).toContain(
           `❌ not passed — non-deterministic tests (flakiness gate); ${headline}**`,
         );
-        expect(run([ownReport], { ...flaky, ...env })).toBe('');
+        expect(run([ownFlakyReport], { ...flaky, ...env })).toBe('');
+        for (const earlier of [
+          ownReport,
+          {
+            ...ownReport,
+            body: `${ownReport.body}\n<!-- qwen-triage:verify-flaky -->`,
+          },
+        ]) {
+          const beside = run([earlier], { ...flaky, ...env });
+          expect(beside).toContain('POST');
+          expect(beside).not.toContain('/issues/comments/555');
+        }
+        // A full re-run posts its own live status first, and that status
+        // is what this attempt finalizes.
+        const rerun = run([ownReport, status(600, 1)], { ...flaky, ...env });
+        expect(rerun).toContain('/issues/comments/600');
+        expect(rerun).not.toContain('POST');
       }
       // The exemption keys on the gate verdict, not on the rendered body.
       // The skipped, n/a and prepare-failure bodies stay ⚠️ under `flaky`;
@@ -6409,8 +6431,9 @@ describe('qwen-triage verify publish fidelity', () => {
   // A re-run of the publisher finds what it already published by the run
   // marker, and a notice must not replace findings, so every terminal body
   // opens with a header: the verify marker both lookups select on, this
-  // run's marker, and the substantive marker when it carries findings. The
-  // lookups read markers only from the lines before the first blank line.
+  // run's marker, the flaky marker when the gate demoted the run, and the
+  // substantive marker when it carries findings. The lookups read markers
+  // only from the lines before the first blank line.
   it('opens every terminal body with its header', () => {
     const dir = fixture();
     try {
@@ -6419,6 +6442,14 @@ describe('qwen-triage verify publish fidelity', () => {
         '<!-- qwen-triage:verify-run=41 -->',
       ];
       const strong = [...weak, '<!-- qwen-triage:verify-substantive -->'];
+      // Every body a flaky verdict can reach is demoted, and its header says
+      // so ahead of the substantive marker.
+      const flakyMark = '<!-- qwen-triage:verify-flaky -->';
+      const flakyWeak = [...weak, flakyMark];
+      const flakyStrong = [
+        ...flakyWeak,
+        '<!-- qwen-triage:verify-substantive -->',
+      ];
       const variants = [
         ['real report', strong, { AGENT_VERDICT: 'merge-ready' }],
         ['incomplete — cancelled', weak, { VERIFY_RESULT: 'cancelled' }],
@@ -6444,6 +6475,31 @@ describe('qwen-triage verify publish fidelity', () => {
           weak,
           { VERDICT: 'infra-error', PREPARE_FAILURE_PHASE: 'install' },
         ],
+        [
+          'non-deterministic tests (flakiness gate)**',
+          flakyStrong,
+          { AGENT_VERDICT: 'merge-ready', FLAKE_VERDICT: 'flaky' },
+        ],
+        [
+          'job cancelled before the report',
+          flakyWeak,
+          { VERIFY_RESULT: 'cancelled', FLAKE_VERDICT: 'flaky' },
+        ],
+        [
+          'the job then failed before the report',
+          flakyWeak,
+          { VERIFY_RESULT: 'failure', VERDICT: '', FLAKE_VERDICT: 'flaky' },
+        ],
+        [
+          'result artifact unavailable',
+          flakyWeak,
+          { DOWNLOAD_OUTCOME: 'failure', FLAKE_VERDICT: 'flaky' },
+        ],
+        [
+          'real report',
+          strong,
+          { AGENT_VERDICT: 'merge-ready', FLAKE_VERDICT: 'pass' },
+        ],
       ];
       variants.forEach(([shown, header, env], i) => {
         const body = render(dir, {
@@ -6462,6 +6518,12 @@ describe('qwen-triage verify publish fidelity', () => {
       });
       expect(reportless).toContain('No report.md was found');
       expect(reportless.split('\n\n')[0].split('\n')).toEqual(weak);
+      const flakyReportless = render(dir, {
+        NAME: 'hdr-noreport-flaky',
+        GITHUB_RUN_ID: '41',
+        FLAKE_VERDICT: 'flaky',
+      });
+      expect(flakyReportless.split('\n\n')[0].split('\n')).toEqual(flakyWeak);
 
       // Written once, before the branches, which only append: a new branch
       // cannot open its body without it.
