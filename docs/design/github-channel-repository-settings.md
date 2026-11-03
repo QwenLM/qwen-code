@@ -2,7 +2,7 @@
 
 [English](github-channel-repository-settings.md) | [简体中文](github-channel-repository-settings.zh-CN.md)
 
-Status: proposed. Follows the merged editor usability work (#16096) and closes the
+Status: implemented in this change. Follows the merged editor usability work (#16096) and closes the
 "per-repository settings remain editable only through `settings.json`" gap that
 PR listed under Risk & Scope.
 
@@ -204,7 +204,7 @@ built-in default resolves to `true`. The resolution shown is the same
 per-repository → `"*"` → built-in order the runtime uses. The speaker input is
 gated on the effective policy rather than the row's own, because a repository
 that inherits an allowlist still has a member list worth editing; its helper
-text says that leaving it empty keeps the channel-wide list.
+text says that leaving it empty uses the channel-wide list.
 
 The row's option labels and placeholder are repository-specific (`Anyone`,
 `Allowlist only`, `alice, bob`). Reusing the shared group-speaker strings would
@@ -248,10 +248,17 @@ the transcript build-artifact guard rejects that prefix.
 | `packages/web-shell/client/components/channels/ChannelEditorDialog.tsx`        | per-repository rows, `pollInterval` section mapping    |
 | `packages/web-shell/client/components/channels/ChannelEditorDialog.module.css` | row layout                                             |
 | `packages/web-shell/client/i18n.tsx`                                           | EN + ZH copy                                           |
-| `packages/web-shell/client/components/channels/channel-editor-state.test.ts`   | state round-trip, inheritance, preservation            |
+| `packages/web-shell/client/components/channels/channel-editor-state.test.ts`   | state round-trip, inheritance, preservation, sweep     |
 | `packages/web-shell/client/components/channels/ChannelEditorDialog.test.tsx`   | rendering and interaction                              |
 | `packages/web-shell/client/e2e/visuals/screenshots.spec.ts`                    | capture the new rows                                   |
 | `docs/users/features/channels/github.md`                                       | document that the editor now exposes these settings    |
+| `docs/users/features/channels/gitlab.md`                                       | document the ceiling for the other polling channel     |
+| `docs/users/features/channels/overview.md`                                     | point the group-settings section at the new rows       |
+| `docs/design/channels/channel-code-hosting.md`                                 | state the clamp in the shared polling contract         |
+| `packages/channels/github/src/GithubAdapter.test.ts`                           | ceiling, clamp and declared bounds                     |
+| `packages/cli/src/commands/channel/channel-registry.test.ts`                   | `maximum` metadata validation                          |
+| `packages/cli/src/commands/channel/channel-descriptor-sdk-mirror.test.ts`      | `maximum` in the mirrored key set                      |
+| `packages/cli/src/serve/channel-settings-store.test.ts`                        | ceiling enforcement and the unchanged-value tolerance  |
 
 ## Design decisions and rationale
 
@@ -289,20 +296,27 @@ the transcript build-artifact guard rejects that prefix.
    everyone while the row reads as inheriting. Only the field the operator
    actually changed is written, which is the same rule that makes an untouched
    save a no-op.
-8. **The hint is derived from the save projection, not the draft.** The row calls
-   the same `projectRepositoryGroup(stored, override)` the save path calls and
-   asks whether the result owns an `allowedUsers` array. Reading the hint off
-   `override.senders` alone tells two deliberately preserved shapes the opposite
-   of the truth, and no amount of care keeps two independent derivations in sync
-   across later edits.
+8. **The hint is derived from the save projection of an empty box, not the
+   draft.** The sentence under the box describes what _leaving it empty_ does,
+   so the row calls the same `projectRepositoryGroup` the save path calls with
+   `{ ...override, allowedUsers: '' }` and asks whether the result owns an
+   `allowedUsers` array. Projecting the current draft instead told a repository
+   storing a list with no policy beside it "nobody", while clearing that box
+   deletes the list and widens the repository back to the channel-wide members.
+   Reading the hint off `override.senders` alone is wrong for the same reason,
+   and no amount of care keeps two independent derivations in sync across later
+   edits.
 9. **The poll interval gets a real upper bound in the descriptor vocabulary.**
    `maximum` joins `exclusiveMinimum` on number fields, mirrored in the SDK, the
    registry's metadata validation, the store, and the editor. Node clamps a
    timeout above its 32-bit range to 1 ms, so an unbounded interval field lets
    the form persist a hot loop that burns the API quota. The ceiling is
    86 400 000 ms, the same one Email already enforces at runtime, and
-   `PollingChannelBase` also falls back past it so a hand-written configuration
-   cannot hot-loop either.
+   `PollingChannelBase` clamps to it — rather than falling back to 60 s — so a
+   hand-written configuration cannot hot-loop either, and an interval between
+   one day and Node's limit keeps most of its intent instead of being replaced.
+   DWS overrides the getter with a constant and Email does not extend the base,
+   so GitHub and GitLab are the only channels the clamp reaches.
 10. **A newly declared bound forgives an unchanged stored number, and only its
     range.** The editor re-sends stored values verbatim, so declaring
     `pollInterval` would otherwise block every unrelated edit to a channel
@@ -361,13 +375,18 @@ the transcript build-artifact guard rejects that prefix.
   explicit override writes, inherit deletes the key, unknown keys preserved,
   removed repository drops its entry, case-retyped repository keeps its
   settings, empty allowlist, invalid repository entry.
+- Invariant sweep: twelve stored shapes crossed with every single-field edit,
+  driven through the real save path rather than the projection alone — an
+  untouched row reproduces its stored object byte-for-byte, the empty-box hint
+  agrees with what that save admits, and no edit widens the admitted set unless
+  the row's own controls asked for it.
 - Component: rows appear per allowlisted repository, typing a repository adds a
   row, the speaker input appears when the row's **effective** policy is an
   allowlist — its own or the inherited one — and is hidden when it is `open`,
   the inherited hint reflects `"*"`, each row shows and edits only its own
-  speakers, the hint's wording follows what the save will own rather than the
-  draft policy, repositories whose settings outlive the policy are named, and
-  the poll interval renders in Connection in both locales.
+  speakers, the hint's wording follows what an empty box will save rather than
+  the draft policy, repositories whose settings outlive the policy are named,
+  and the poll interval renders in Connection in both locales.
 - Mutation: each behavioural claim above is pinned by introducing the
   corresponding mutation and confirming exactly the describing cases fail.
 - Build guards: the three vite builds plus `client/build-artifact.test.ts`,
@@ -395,8 +414,8 @@ the transcript build-artifact guard rejects that prefix.
 6. No chat platform's form changes. Email's poll interval moves to Connection
    alongside GitHub's, because the section map is keyed by field name.
 7. Both locales render the new copy, and the build-artifact guard passes.
-8. The speaker hint describes what the save will own, so a stored allowlist with
-   no list reads as inheriting and a stored empty list reads as nobody.
+8. The speaker hint describes what an empty box will save, so a stored allowlist
+   with no list reads as inheriting and a stored empty list reads as nobody.
 9. Repositories whose settings outlive a switch away from the allowlist policy
    are named in the editor rather than becoming invisible while still enforced.
 

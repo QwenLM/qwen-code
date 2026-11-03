@@ -15,6 +15,7 @@ import {
   repositoryAllowlistIds,
   validateChannelEditorDraft,
 } from './channel-editor-state';
+import type { ChannelGroupOverrideDraft } from './channel-editor-state';
 
 const DINGTALK: DaemonChannelTypeDescriptor = {
   type: 'dingtalk',
@@ -1880,6 +1881,164 @@ describe('Per-repository overrides', () => {
         'QwenLM/qwen-code, qwen-code, acme/widgets, QwenLM/Qwen-Code',
       ),
     ).toEqual(['qwenlm/qwen-code', 'acme/widgets']);
+  });
+
+  // Invariant sweep over stored shapes x single-field edits, run through the
+  // real save path. The cases above pin individual decisions; these assert the
+  // rules those decisions have to keep holding for shapes nobody enumerated.
+  const SWEEP_SHAPES: Array<[string, Record<string, unknown>]> = [
+    ['empty', {}],
+    ['open', { senders: 'open' }],
+    ['allowlist', { senders: 'allowlist' }],
+    ['allowlist+empty', { senders: 'allowlist', allowedUsers: [] }],
+    ['allowlist+names', { senders: 'allowlist', allowedUsers: ['alice'] }],
+    ['list-only-empty', { allowedUsers: [] }],
+    ['list-only-names', { allowedUsers: ['alice'] }],
+    ['mention-true', { requireMention: true }],
+    ['mention-false', { requireMention: false }],
+    ['unmodelled', { dispatchMode: 'collect', groupHistoryLimit: 25 }],
+    ['dup-names', { senders: 'allowlist', allowedUsers: ['alice', 'alice'] }],
+    ['mixed-types', { senders: 'allowlist', allowedUsers: ['alice', 42] }],
+  ];
+  const SWEEP_WILDCARD = {
+    senders: 'allowlist',
+    allowedUsers: ['op', 'release-bot'],
+  };
+  const SWEEP_SENDERS = ['', 'open', 'allowlist'] as const;
+  const SWEEP_USERS = ['', 'alice', 'alice, bob'] as const;
+  const SWEEP_MENTION = ['', 'true', 'false'] as const;
+
+  function sweepDraft(stored: Record<string, unknown>) {
+    const instance = githubInstance({
+      '*': structuredClone(SWEEP_WILDCARD),
+      'qwenlm/qwen-code': structuredClone(stored),
+    });
+    return { instance, draft: draftFor(instance) };
+  }
+
+  function sweepGroups(
+    stored: Record<string, unknown>,
+    override?: ChannelGroupOverrideDraft,
+  ): Record<string, Record<string, unknown>> {
+    const { instance, draft } = sweepDraft(stored);
+    if (override) {
+      draft.groupOverrides['qwenlm/qwen-code'] = override;
+    }
+    return buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance).config[
+      'groups'
+    ] as Record<string, Record<string, unknown>>;
+  }
+
+  // The runtime resolves each key per-repository -> "*" -> built-in, so an
+  // absent list is the wildcard's members, not an empty set.
+  function sweepAdmits(entry: Record<string, unknown>, who: string): boolean {
+    const policy =
+      (entry['senders'] as string | undefined) ?? SWEEP_WILDCARD.senders;
+    if (policy !== 'allowlist') {
+      return true;
+    }
+    const members =
+      (entry['allowedUsers'] as string[] | undefined) ??
+      SWEEP_WILDCARD.allowedUsers;
+    return members.includes(who);
+  }
+
+  it('reproduces every stored shape byte-for-byte when the row is untouched', () => {
+    const violations: string[] = [];
+    for (const [name, stored] of SWEEP_SHAPES) {
+      const saved = sweepGroups(stored)['qwenlm/qwen-code'];
+      if (JSON.stringify(saved) !== JSON.stringify(stored)) {
+        violations.push(
+          `${name}: ${JSON.stringify(stored)} -> ${JSON.stringify(saved)}`,
+        );
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  it('keeps the empty-box hint honest about what the save admits', () => {
+    const violations: string[] = [];
+    for (const [name, stored] of SWEEP_SHAPES) {
+      for (const senders of SWEEP_SENDERS) {
+        for (const users of SWEEP_USERS) {
+          for (const mention of SWEEP_MENTION) {
+            // The dialog derives the hint from an EMPTY box, so sweep that
+            // hypothetical rather than the draft the operator is typing in.
+            const saved = sweepGroups(stored, {
+              requireMention: mention,
+              senders,
+              allowedUsers: '',
+            })['qwenlm/qwen-code'];
+            const policy =
+              (saved['senders'] as string | undefined) ??
+              SWEEP_WILDCARD.senders;
+            if (policy !== 'allowlist') {
+              continue;
+            }
+            const members =
+              (saved['allowedUsers'] as string[] | undefined) ??
+              SWEEP_WILDCARD.allowedUsers;
+            // Owning a list is what makes the hint say "nobody", so an owned
+            // list has to be empty and an absent one has to inherit members.
+            if (
+              Array.isArray(saved['allowedUsers']) !==
+              (members.length === 0)
+            ) {
+              violations.push(
+                `${name} senders=${senders} users=${users} mention=${mention} ` +
+                  `saved=${JSON.stringify(saved)}`,
+              );
+            }
+          }
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  it('never widens the admitted set without the row asking for it', () => {
+    const violations: string[] = [];
+    for (const [name, stored] of SWEEP_SHAPES) {
+      const initialSenders =
+        stored['senders'] === 'open' || stored['senders'] === 'allowlist'
+          ? stored['senders']
+          : '';
+      for (const senders of SWEEP_SENDERS) {
+        for (const users of SWEEP_USERS) {
+          const saved = sweepGroups(stored, {
+            requireMention: '',
+            senders,
+            allowedUsers: users,
+          });
+          const after = saved['qwenlm/qwen-code'];
+          // Every identity any fixture names: the stored one, the typed ones,
+          // and both channel-wide members a silent inheritance would admit.
+          for (const who of ['alice', 'bob', 'op', 'release-bot']) {
+            if (sweepAdmits(stored, who) || !sweepAdmits(after, who)) {
+              continue;
+            }
+            const askedWider =
+              senders === 'open' ||
+              (senders === '' && initialSenders === 'allowlist') ||
+              users.split(',').some((user) => user.trim() === who) ||
+              // Clearing the box under an INHERITED policy hands the repository
+              // the channel-wide list, and the row's hint says exactly that. An
+              // explicit allowlist is the opposite promise — empty means nobody
+              // — so it must never be excused by the list it ended up without.
+              (users === '' &&
+                after['senders'] !== 'allowlist' &&
+                !Array.isArray(after['allowedUsers']));
+            if (!askedWider) {
+              violations.push(
+                `${name} senders=${senders} users=${users} who=${who}: ` +
+                  `${JSON.stringify(stored)} -> ${JSON.stringify(after)}`,
+              );
+            }
+          }
+        }
+      }
+    }
+    expect(violations).toEqual([]);
   });
 });
 

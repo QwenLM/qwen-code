@@ -4464,7 +4464,7 @@ const EN: Messages = {
   'channels.editor.field.github.repositorySpeakers.description':
     'GitHub logins allowed to start tasks in this repository. Empty means nobody.',
   'channels.editor.field.github.repositorySpeakers.inherited':
-    'GitHub logins allowed in this repository. Leave empty to keep the channel-wide list.',
+    'GitHub logins allowed in this repository. Leave empty to use the channel-wide list.',
   'channels.editor.field.github.retainedRepositorySettings.title':
     'Repository settings still apply',
   'channels.editor.field.github.retainedRepositorySettings.description': (v) =>
@@ -8874,7 +8874,7 @@ const ZH: Messages = {
   'channels.editor.field.github.repositorySpeakers.description':
     '可以在该仓库发起任务的 GitHub 登录名。留空表示没有人。',
   'channels.editor.field.github.repositorySpeakers.inherited':
-    '可以在该仓库发言的 GitHub 登录名。留空则沿用渠道级列表。',
+    '可以在该仓库发言的 GitHub 登录名。留空则使用渠道级列表。',
   'channels.editor.field.github.retainedRepositorySettings.title':
     '按仓库设置仍然生效',
   'channels.editor.field.github.retainedRepositorySettings.description': (v) =>

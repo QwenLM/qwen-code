@@ -1015,7 +1015,7 @@ export function ChannelEditorDialog({
     );
   };
 
-  const renderRetainedRepositoryOverrides = () => {
+  const renderRetainedRepositoryOverrides = (policy: string) => {
     const groups = instance?.config['groups'];
     if (!isRecord(groups)) return null;
     const retained = Object.entries(groups)
@@ -1029,10 +1029,8 @@ export function ChannelEditorDialog({
     // requireMention without consulting groupPolicy, so these entries keep
     // deciding who may drive the agent. Under disabled the group gate drops
     // every envelope before either lookup, so the entries are kept but inert —
-    // saying "still apply" there would be false.
-    const policy = hasDescriptorGroupPolicy(descriptor)
-      ? String(draft.values['groupPolicy'] ?? '')
-      : String(instance?.config['groupPolicy'] ?? '');
+    // saying "still apply" there would be false. The policy is the caller's, so
+    // the copy cannot disagree with the gate that decided to show this alert.
     const variant = policy === 'disabled' ? '.disabled' : '';
     return (
       <Alert>
@@ -1402,7 +1400,7 @@ export function ChannelEditorDialog({
                     ? renderRepositoryOverrides()
                     : null}
                   {repositoryOnly && effectiveGroupPolicy !== 'allowlist'
-                    ? renderRetainedRepositoryOverrides()
+                    ? renderRetainedRepositoryOverrides(effectiveGroupPolicy)
                     : null}
                   {showGroupSenders ? (
                     <FieldShell

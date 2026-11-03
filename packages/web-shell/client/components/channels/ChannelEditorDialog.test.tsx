@@ -2042,7 +2042,7 @@ describe('GitHub per-repository settings', () => {
     });
 
     expect(descriptionOf(rowControl('qwenlm/qwen-code', 'speakers'))).toContain(
-      'Leave empty to keep the channel-wide list',
+      'Leave empty to use the channel-wide list',
     );
     expect(descriptionOf(rowControl('acme/widgets', 'speakers'))).toContain(
       'Empty means nobody',
@@ -2169,20 +2169,39 @@ describe('GitHub per-repository settings', () => {
     // The hint promises what an EMPTY box will do. Asking the projection about
     // the untouched draft would say "nobody" here, while clearing the box
     // actually deletes the list and widens the repository back to the wildcard.
+    // The repository's own list is the admitted set until then, so the hint has
+    // to say the channel-wide list will be *used*, not that it is already kept.
+    const onSave = vi.fn().mockResolvedValue(undefined);
     await renderDialog({
       descriptor: GITHUB_CONFIGURED,
       instance: githubInstance({
-        '*': { senders: 'allowlist', allowedUsers: ['op'] },
+        '*': { senders: 'allowlist', allowedUsers: ['op', 'release-bot'] },
         'qwenlm/qwen-code': { allowedUsers: ['alice'] },
       }),
+      onSave,
     });
 
-    expect(
-      (rowControl('qwenlm/qwen-code', 'speakers') as HTMLInputElement).value,
-    ).toBe('alice');
-    expect(descriptionOf(rowControl('qwenlm/qwen-code', 'speakers'))).toContain(
-      'Leave empty to keep the channel-wide list',
+    const speakers = rowControl(
+      'qwenlm/qwen-code',
+      'speakers',
+    ) as HTMLInputElement;
+    expect(speakers.value).toBe('alice');
+    expect(descriptionOf(speakers)).toContain(
+      'Leave empty to use the channel-wide list',
     );
+
+    await act(async () => setInputValue(speakers, ''));
+    await save();
+
+    // What the hint promised: the repository no longer owns a list, so the
+    // runtime's `??` hands it the two channel-wide members instead of alice.
+    const request = onSave.mock.calls[0][1] as {
+      config: Record<string, unknown>;
+    };
+    expect(request.config['groups']).toEqual({
+      '*': { senders: 'allowlist', allowedUsers: ['op', 'release-bot'] },
+      'qwenlm/qwen-code': {},
+    });
   });
 
   it('says the retained settings are kept but inert while the policy is Disabled', async () => {

@@ -2,7 +2,7 @@
 
 [English](github-channel-repository-settings.md) | [简体中文](github-channel-repository-settings.zh-CN.md)
 
-状态：提案。承接已合入的编辑器可用性工作（#16096），补上该 PR 在 Risk & Scope 里列出的
+状态：已在本次变更中实现。承接已合入的编辑器可用性工作（#16096），补上该 PR 在 Risk & Scope 里列出的
 「按仓库设置仍只能改 `settings.json`」这一缺口。
 
 ## 问题陈述
@@ -146,7 +146,7 @@ groupOverrides: Record<string, ChannelGroupOverrideDraft>;
 
 继承值写在选项标签里，让操作者看见自己继承的是什么——例如当 `"*"` 或内置默认解析为 `true` 时显示
 `继承（需要 @）`。展示的解析顺序与运行时一致：按仓库 → `"*"` → 内置。发言人输入按生效策略而不是
-该行自己的策略把门，因为继承允许列表的仓库仍然有一份值得编辑的成员列表；它的辅助文案说明留空即沿用渠道级列表。
+该行自己的策略把门，因为继承允许列表的仓库仍然有一份值得编辑的成员列表；它的辅助文案说明留空即使用渠道级列表。
 
 行内的选项标签与占位符是仓库专属的（`任何人`、`仅允许列表`、`alice, bob`）。复用共享的群组成员字符串
 会把 `Any group member`、`Listed members only`、`user-a, user-b` 带回 GitHub 表单——
@@ -182,10 +182,17 @@ groupOverrides: Record<string, ChannelGroupOverrideDraft>;
 | `packages/web-shell/client/components/channels/ChannelEditorDialog.tsx`        | 按仓库行、`pollInterval` 分区映射    |
 | `packages/web-shell/client/components/channels/ChannelEditorDialog.module.css` | 行布局                               |
 | `packages/web-shell/client/i18n.tsx`                                           | 中英文案                             |
-| `packages/web-shell/client/components/channels/channel-editor-state.test.ts`   | 状态往返、继承、保留性               |
+| `packages/web-shell/client/components/channels/channel-editor-state.test.ts`   | 状态往返、继承、保留性、不变式扫描   |
 | `packages/web-shell/client/components/channels/ChannelEditorDialog.test.tsx`   | 渲染与交互                           |
 | `packages/web-shell/client/e2e/visuals/screenshots.spec.ts`                    | 截取新增的行                         |
 | `docs/users/features/channels/github.md`                                       | 说明编辑器现已暴露这些设置           |
+| `docs/users/features/channels/gitlab.md`                                       | 为另一个轮询渠道写明上限             |
+| `docs/users/features/channels/overview.md`                                     | 让群组设置一节指向新增的行           |
+| `docs/design/channels/channel-code-hosting.md`                                 | 在共享轮询契约里写明钳制             |
+| `packages/channels/github/src/GithubAdapter.test.ts`                           | 上限、钳制与声明的边界               |
+| `packages/cli/src/commands/channel/channel-registry.test.ts`                   | `maximum` 元数据校验                 |
+| `packages/cli/src/commands/channel/channel-descriptor-sdk-mirror.test.ts`      | 镜像键集合里的 `maximum`             |
+| `packages/cli/src/serve/channel-settings-store.test.ts`                        | 上限强制与未变更值容忍               |
 
 ## 设计决策与理由
 
@@ -209,15 +216,18 @@ groupOverrides: Record<string, ChannelGroupOverrideDraft>;
    而删掉它会毁掉操作者改回允许列表时可能还想用的内容。**空**列表是例外：它会被释放，
    因为留着它会在该行读作「继承」的同时继续拒绝所有人。只写入操作者真正改动的那个字段，
    这与「未触碰的保存是 no-op」是同一条规则。
-8. **提示文案由保存投影推导，而不是由草稿推导。** 该行调用与保存路径同一个
-   `projectRepositoryGroup(stored, override)`，并询问结果是否拥有 `allowedUsers` 数组。
-   只读 `override.senders` 会把两种有意保留的形态说成相反的意思，而再小心也无法让两条独立推导
-   在后续改动中保持同步。
+8. **提示文案由「空输入框」的保存投影推导，而不是由草稿推导。** 输入框下面那句话说的是
+   _留空_ 会怎样，所以该行用 `{ ...override, allowedUsers: '' }` 调用与保存路径同一个
+   `projectRepositoryGroup`，并询问结果是否拥有 `allowedUsers` 数组。改成投影当前草稿，
+   会对「存了列表但旁边没有策略」的仓库说「没有人」，而清空那个输入框其实会删除列表、
+   把仓库放宽回渠道级成员。只读 `override.senders` 出于同样的原因也是错的，
+   而再小心也无法让两条独立推导在后续改动中保持同步。
 9. **轮询间隔在描述符词汇表里获得真正的上界。** `maximum` 与 `exclusiveMinimum` 并列加入 number 字段，
    并在 SDK、注册表的元数据校验、store 与编辑器里镜像。Node 会把超过其 32 位范围的 timeout 钳制为 1 毫秒，
    所以一个无上界的间隔字段能让表单落盘一个烧尽 API 配额的热循环。上界取 86 400 000 毫秒，
-   与 Email 已在运行时强制的上限相同；`PollingChannelBase` 也在超过它时回落，
-   这样手写配置同样无法热循环。
+   与 Email 已在运行时强制的上限相同；`PollingChannelBase` 会**钳制**到该上限（而不是回落 60 秒），
+   这样手写配置同样无法热循环，且介于一天与 Node 上限之间的间隔保留了大部分原意而不是被替换。
+   DWS 用常量覆盖了该 getter，Email 不继承该基类，所以钳制实际只作用于 GitHub 与 GitLab。
 10. **新声明的界限宽恕未变更的已存数字，且只宽恕它的区间。** 编辑器会原样重发已存值，
     所以声明 `pollInterval` 否则会挡住一个存着 `0` 的渠道的所有无关编辑——而 `PollingChannelBase`
     正是有意容忍这个值并回落到 60 秒。编辑器与 store 都在「值是与已存深相等的有限数字」时跳过区间检查。
@@ -256,9 +266,12 @@ groupOverrides: Record<string, ChannelGroupOverrideDraft>;
 
 - 单测：状态往返（未触碰的渠道读取→保存是 no-op）、显式覆盖写入、继承删除键、未知键保留、
   被删仓库丢弃条目、重打大小写的仓库保留设置、空允许列表、非法仓库条目。
+- 不变式扫描：十二种存量形态叉乘每一种单字段编辑，走真实保存路径而不是只走投影——
+  未触碰的行逐字节还原它存的对象、空框提示与该次保存实际准入的人一致、
+  且除非行内控件自己要求，任何编辑都不放宽准入集。
 - 组件：每个已列仓库出现行、输入仓库即新增行、发言人输入在该行**生效**策略为允许列表时出现
   （自身的或继承来的）、策略为 `open` 时隐藏、继承提示反映 `"*"`、每行只显示并编辑自己的发言人、
-  提示文案跟随「保存后将拥有什么」而不是草稿策略、设置比策略活得更久的仓库被点名、
+  提示文案跟随「空输入框保存后将拥有什么」而不是草稿策略、设置比策略活得更久的仓库被点名、
   轮询间隔在两种语言下都渲染在「连接」区。
 - 变异：上面每条行为主张都用「引入对应变异并确认恰好描述它的用例变红」钉住。
 - 构建守卫：三个 vite 构建加 `client/build-artifact.test.ts`，因为新文案会进入 transcript 产物。
@@ -277,7 +290,7 @@ groupOverrides: Record<string, ChannelGroupOverrideDraft>;
 5. 编辑器不建模的键在一次保存后原样存活。
 6. 任何聊天平台的表单都不变。Email 的轮询间隔与 GitHub 的一起移到「连接」，因为分区映射按字段名生效。
 7. 两种语言都渲染新文案，且构建产物守卫通过。
-8. 发言人提示描述的是「保存后将拥有什么」，所以已存的「有策略无列表」读作继承，
+8. 发言人提示描述的是「空输入框保存后将拥有什么」，所以已存的「有策略无列表」读作继承，
    已存的空列表读作没有人。
 9. 策略切离允许列表后仍然生效的按仓库设置会在编辑器里被点名，
    而不是一边不可见一边继续被执行。
