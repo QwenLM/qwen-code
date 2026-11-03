@@ -213,7 +213,7 @@ describe('bundled autofix-pr skill', () => {
     );
     // A round of a watch whose fix is still running says so and ends.
     expect(body).toContain(
-      "a fix agent is working in the PR's worktree → nothing was read or written",
+      "For `fix_in_flight` (a fix agent is working in the PR's worktree) nothing was read or written",
     );
     // Work in the user's own copy of the head branch keeps a start from
     // racing the user's push to that branch.
@@ -311,6 +311,43 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain('A task whose watch another session still runs');
     expect(body).toContain('delete no task of that PR');
     expect(body).toContain("whose gate names the watch's session");
+  });
+
+  it('answers every step a refusal can name, and every code a step reads apart', () => {
+    const { body } = loadSkill();
+    const section = body.slice(
+      body.indexOf('## Refusals'),
+      body.indexOf('## Arguments'),
+    );
+    for (const next of [
+      'retry',
+      'stop',
+      'end_task',
+      'take_over',
+      'discard',
+      'foreground',
+      'rerun',
+      'needs_human',
+      'fix_plan',
+      'report',
+    ]) {
+      expect(section).toContain(`- \`${next}\` → `);
+    }
+    for (const code of [
+      'busy',
+      'partial',
+      'not_prepared',
+      'task_replaced',
+      'watch_stopped',
+      'watched_elsewhere',
+      'fix_in_flight',
+    ]) {
+      expect(section).toContain(`\`${code}\``);
+    }
+    // Nothing matches a refusal by its wording any more.
+    expect(body).not.toContain('another autofix-pr helper is working');
+    expect(body).not.toContain('fails saying');
+    expect(body).not.toContain('refusal saying');
   });
 
   it("forbids the fix agent's brief every write to GitHub, which only the main session makes", () => {

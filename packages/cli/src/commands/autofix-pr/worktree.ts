@@ -12,6 +12,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { GIT_TIMEOUT_MS, gitOpt, gitProbe, gitRaw } from '../review/lib/git.js';
 import { redirectedAncestor, sanitizedGitEnv } from '../review/lib/worktree.js';
 import type { AutofixPrPaths } from './state.js';
+import { AutofixPrRefusal } from './refusal.js';
 
 /**
  * Why the worktree's `.git` is not to be trusted, or null. It is a file a
@@ -331,7 +332,8 @@ export function requireWorktree(
     return;
   }
   if (branch !== `refs/heads/${paths.branch}`) {
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'worktree_dirty',
       `${worktreePath} has ${branch ? branch.replace(/^refs\/heads\//, 'branch ') : 'a detached HEAD'} checked out, not ${paths.branch}; switch it back before pushing or syncing.`,
     );
   }

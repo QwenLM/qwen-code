@@ -18,6 +18,7 @@ import {
   AutofixPrTool,
   autofixPrArgs,
   resetAutofixPrLaunchForTests,
+  codedRefusal,
   resolveAutofixPrLaunch,
   runAutofixPrHelper,
   validateAutofixPrParams,
@@ -54,6 +55,7 @@ if (sub !== 'autofix-pr') { process.stderr.write('not autofix-pr'); process.exit
 if (mode === 'hang') setInterval(() => {}, 1000);
 else if (mode === 'refuse') { process.stderr.write('another session watches PR #12\\n'); process.exit(1); }
 else if (mode === 'lost' && command === 'fix-end') { process.stdout.write(JSON.stringify({ attempt: 'x', lostSnapshot: true }) + '\\n'); }
+else if (mode === 'refuse-coded') { process.stderr.write('Error: gh said something first\\n' + JSON.stringify({ refused: 'busy', next: 'retry', message: 'another autofix-pr helper is working on PR #12' }) + '\\n'); process.exit(1); }
 else if (mode === 'refuse-stack') { process.stderr.write('Error: gh said something first\\nAn unexpected critical error occurred:\\nError: no round of PR #12 has a fix to start\\n    at runFixStart (fix.js:1:1)\\n    at handler (fix.js:2:2)\\n'); process.exit(1); }
 else if (command === 'prepare') process.stdout.write(JSON.stringify({ worktreePath: process.env.FAKE_WORKTREE, preparedAt: process.env.FAKE_PREPARED_AT, host: process.env.FAKE_HOST || undefined, authorCanPush: process.env.FAKE_CAN_PUSH === '1', tookOver: process.env.FAKE_TOOK_OVER === '1', inPlace: process.env.FAKE_IN_PLACE === '1' }) + '\\n');
 else if (command === 'status') process.stdout.write(process.env.FAKE_STATUS + '\\n');
@@ -838,6 +840,47 @@ describe('running a helper', () => {
     expect(moved.stdout.trim()).toBe('other');
   });
 
+  it('reads a coded refusal only from a last line that carries a code and a step', () => {
+    const line = JSON.stringify({
+      refused: 'busy',
+      next: 'retry',
+      message: 'm',
+    });
+    expect(codedRefusal(`git said this\n${line}\n`)).toEqual({
+      line,
+      before: 'git said this',
+    });
+    expect(codedRefusal(line)).toEqual({ line, before: '' });
+    // A code with no step, a step with no code, other JSON, a stack, or
+    // the line not last: the old form, reported.
+    for (const stderr of [
+      JSON.stringify({ refused: 'busy' }),
+      JSON.stringify({ next: 'retry' }),
+      JSON.stringify({ refused: 1, next: 'retry' }),
+      'null',
+      '[1]',
+      'Error: no round of PR #12 has a fix to start\n    at runFixStart (fix.js:1:1)',
+      `${line}\nsomething after`,
+      '',
+    ]) {
+      expect(codedRefusal(stderr)).toBeNull();
+    }
+  });
+
+  it('puts a coded refusal first, verbatim, with what the helper printed before it', async () => {
+    vi.stubEnv('FAKE_AUTOFIX_MODE', 'refuse-coded');
+    const result = await invocation({ command: 'sync', pr: 12 }).execute(
+      signal(),
+    );
+    expect(result.error?.message).toBe(
+      [
+        `autofix-pr sync refused: ${JSON.stringify({ refused: 'busy', next: 'retry', message: 'another autofix-pr helper is working on PR #12' })}`,
+        'Error: gh said something first',
+      ].join('\n'),
+    );
+    expect(result.llmContent).toBe(result.error?.message);
+  });
+
   it("returns a refusal with the helper's message", async () => {
     vi.stubEnv('FAKE_AUTOFIX_MODE', 'refuse');
     const result = await invocation({ command: 'sync', pr: 12 }).execute(
@@ -1259,6 +1302,16 @@ describe('background fixes', () => {
     ).rejects.toThrow(
       // The last line naming an error: what `gh` printed first is not it.
       /^autofix-pr fix-start refused: no round of PR #12 has a fix to start$/,
+    );
+  });
+
+  it("names a helper's coded refusal when the background launch is refused", async () => {
+    await granted();
+    vi.stubEnv('FAKE_AUTOFIX_MODE', 'refuse-coded');
+    await expect(
+      openBackgroundFix('session-a', worktree, signal()),
+    ).rejects.toThrow(
+      `autofix-pr fix-start refused: ${JSON.stringify({ refused: 'busy', next: 'retry', message: 'another autofix-pr helper is working on PR #12' })}`,
     );
   });
 

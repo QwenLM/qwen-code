@@ -1163,7 +1163,7 @@ the PR.
   lock, waits for none, and a call cancelled while it waits returns at once;
   the helpers' lock covers other processes.
 - The result is the helper's JSON line. A non-zero exit is the helper's
-  refusal, returned with its message.
+  refusal, returned with its coded line first (Section 6.16).
 - `snapshot --gate` and `cleanup --force` are not offered: the gate runs
   outside the model, and only the user discards a worktree's work.
 - Only the main session has it: subagents, forks, teammates and workspace
@@ -1588,6 +1588,48 @@ or `resume <n>` in a session of its workspace, which the page names.
 **Refresh.** The page and the cards read the watches again every 15
 seconds while shown. The cards read them only while a watch's task is
 listed, and only from a daemon advertising the tag.
+
+### 6.16 Refusals
+
+A helper that refuses exits 1 and prints, as its last line on stderr, one
+JSON object: `{"refused": "<code>", "next": "<step>", "message": "<why>"}`.
+No stack follows it: the CLI's handler of an unexpected error, which prints
+one, never sees a helper's refusal. Whatever else fails in a helper — git or
+`gh` failing, a file that cannot be read — is a refusal too, with the code
+`failed`. The skill acts on `next`, never on the wording of `message`, which
+says why, for the report.
+
+| Code                                             | Raised by                                                                                                  | `next`                                                                                                                                                                   |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `busy`                                           | every helper that takes the watch's lock, when another holds it                                            | `retry`                                                                                                                                                                  |
+| `partial`                                        | `snapshot`: more bot threads to ask about than one call asks, the answers kept                             | `retry`                                                                                                                                                                  |
+| `pr_closed`                                      | `prepare`, `sync`, `reply`, `rerun`: the PR was merged or closed                                           | `stop`; `report` from `prepare`                                                                                                                                          |
+| `not_prepared`, `watch_stopped`, `task_replaced` | the watch checks every helper runs                                                                         | `end_task` from a round's helper (`sync`, `snapshot`, `ci-log`, `push`, `reply`, `rerun`), `report` from the others                                                      |
+| `watched_elsewhere`                              | the same                                                                                                   | as above, but `take_over` from `prepare`                                                                                                                                 |
+| `fix_in_flight`                                  | a fix agent works in the worktree, or `fix-start` finds an attempt in flight                               | `report`                                                                                                                                                                 |
+| `worktree_dirty`                                 | `sync`, `push`, and every helper that checks the worktree's branch: uncommitted changes, or another branch | `discard` from `sync`, `needs_human` from `push`, `report` from the others                                                                                               |
+| `no_failed_job`                                  | `ci-log`: no finished job of the run failed or timed out                                                   | `rerun`                                                                                                                                                                  |
+| `no_background_fix`                              | `fix-start`: no round's snapshot to fix from, an in-place watch, or no task                                | `foreground`                                                                                                                                                             |
+| `rerun_failed`                                   | `rerun`: GitHub refused the re-run, or its answer was lost                                                 | `needs_human`                                                                                                                                                            |
+| `push_failed`                                    | `push`: git refused the push (a pre-push hook, the remote)                                                 | `needs_human`                                                                                                                                                            |
+| `plan_invalid`                                   | `reply`: the plan names what the round may not answer, or posts under `--no-reply`                         | `fix_plan`                                                                                                                                                               |
+| `failed`                                         | anything else                                                                                              | `needs_human` from `push` and `rerun`, `retry` from `reply` (a post that failed is still owed, and the second run skips what the first posted), `report` from the others |
+
+The steps are the skill's (Section "Refusals" there): `retry` runs the call
+again, once — `busy` after the other helper, `partial` up to three times a
+round; `stop` stops the watch; `end_task` deletes the task that woke the
+round and ends it; `take_over` asks whether this session takes the watch
+over; `discard` runs `sync --discard` in its place; `foreground` runs the
+fix in the foreground; `rerun` answers the run's checks with a re-run;
+`needs_human` answers the call's items as needing a person; `fix_plan`
+corrects the reply plan; `report` reports the message and ends the start or
+the round. The step depends on the helper as well as the code, so that one
+code can mean what the step that called the helper needs. The `autofix_pr`
+tool returns a coded refusal with that line first, verbatim —
+`autofix-pr <command> refused: {…}` — followed by what the helper printed
+before it (git's or `gh`'s output). A refusal without the line, from a CLI
+older than the codes or for arguments yargs refused, keeps the old form and
+is reported.
 
 ## 7. One check (`tick`)
 

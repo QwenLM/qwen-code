@@ -40,6 +40,11 @@ import {
   writeState,
   type AutofixPrState,
 } from './state.js';
+import type { RefusalCode } from './refusal.js';
+
+/** A refusal with its code: what the skill acts on. */
+const refused = (code: RefusalCode, message: RegExp) =>
+  expect.objectContaining({ code, message: expect.stringMatching(message) });
 
 const HEAD = 'a'.repeat(40);
 
@@ -247,7 +252,12 @@ describe('runReply', () => {
           { replyTo: 201, body: 'Fixed.', handled: ['PRRC_201'] },
         ],
       }),
-    ).toThrow(/thread 201 has no new comment from a trusted author/);
+    ).toThrow(
+      refused(
+        'plan_invalid',
+        /thread 201 has no new comment from a trusted author/,
+      ),
+    );
     // A thread that does not exist.
     expect(() =>
       reply({ replies: [{ replyTo: 999, body: 'Fixed.', handled: ['X'] }] }),
@@ -255,15 +265,17 @@ describe('runReply', () => {
     // A comment that is not in the thread named.
     expect(() =>
       reply({ replies: [{ replyTo: 101, body: 'Fixed.', handled: ['IC_1'] }] }),
-    ).toThrow(/outside it or not actionable: IC_1/);
+    ).toThrow(refused('plan_invalid', /outside it or not actionable: IC_1/));
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
     expect(state().handledCommentIds).toEqual([]);
   });
 
   it('refuses to mark an untrusted comment, or an unknown failure of the head, as handled', () => {
-    expect(() => reply({ handled: ['IC_2'] })).toThrow(/does not act on/);
+    expect(() => reply({ handled: ['IC_2'] })).toThrow(
+      refused('plan_invalid', /does not act on/),
+    );
     expect(() => reply({ summary: { body: 'x', handled: ['IC_9'] } })).toThrow(
-      /not a new comment from a trusted author/,
+      refused('plan_invalid', /not a new comment from a trusted author/),
     );
     // No failure snapshot reported, earlier or later than the one it does.
     for (const key of [
@@ -272,13 +284,13 @@ describe('runReply', () => {
       `Lint@${HEAD}@#on:1:pull_request_review`,
     ]) {
       expect(() => reply({ handledChecks: [key] })).toThrow(
-        /not a failure snapshot reports/,
+        refused('plan_invalid', /not a failure snapshot reports/),
       );
     }
     // Not a key at all, rather than one of another head.
     for (const key of ['Test@#5', `Test@${HEAD}@#5@ended`]) {
       expect(() => reply({ handledChecks: [key] })).toThrow(
-        /is not the `key` of a ci_failed event/,
+        refused('plan_invalid', /is not the `key` of a ci_failed event/),
       );
     }
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
@@ -645,7 +657,12 @@ describe('runReply', () => {
     );
     expect(() =>
       runReply({ pr: 7, planPath, post: true, task: 'aaaaaaaaaaaa' }),
-    ).toThrow(/started with --no-reply: run reply with --no-post/);
+    ).toThrow(
+      refused(
+        'plan_invalid',
+        /started with --no-reply: run reply with --no-post/,
+      ),
+    );
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
     expect(() =>
       runReply({ pr: 7, planPath, post: false, task: 'aaaaaaaaaaaa' }),
@@ -1240,7 +1257,7 @@ describe('runReply', () => {
       reply({
         replies: [{ replyTo: 101, body: 'Fixed.', handled: ['PRRC_101'] }],
       }),
-    ).toThrow(/is merged/);
+    ).toThrow(refused('pr_closed', /is merged/));
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
   });
 });

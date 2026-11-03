@@ -107,6 +107,11 @@ import {
   writeState,
 } from './state.js';
 import { requireWorktree } from './worktree.js';
+import type { RefusalCode } from './refusal.js';
+
+/** A refusal with its code: what the skill acts on. */
+const refused = (code: RefusalCode, message: RegExp) =>
+  expect.objectContaining({ code, message: expect.stringMatching(message) });
 
 function prView(overrides: Partial<PrView> = {}): PrView {
   return {
@@ -1527,7 +1532,7 @@ describe('runPrepare (real git)', () => {
     runPrepare({ pr: 7, repo: 'o/r' });
     process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
     expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
-      /watched by another session \(session-a\)/,
+      refused('watched_elsewhere', /watched by another session \(session-a\)/),
     );
   });
 
@@ -1683,7 +1688,9 @@ describe('runPrepare (real git)', () => {
       if (args[0] === 'pr') return JSON.stringify(prView({ state: 'MERGED' }));
       return JSON.stringify(writable);
     });
-    expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(/is merged/);
+    expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
+      refused('pr_closed', /is merged/),
+    );
     expect(existsSync(autofixPrPaths(clone, 7).worktreePath)).toBe(false);
   });
 

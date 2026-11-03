@@ -766,11 +766,38 @@ interface PreparedLike {
 /** How long `cleanup` waits for a stopped fix agent to end. */
 const FIX_STOP_WAIT_MS = 15_000;
 
-/** A helper's refusal in one line: its last line on stderr, or why it did
- * not finish. */
+/**
+ * A helper's coded refusal: the JSON line it prints last on stderr —
+ * `{"refused":"<code>","next":"<step>","message":"…"}` — verbatim, and what
+ * it printed before (what git or `gh` said). Null for a helper that did not
+ * get as far: an older CLI, or arguments yargs refused.
+ */
+export function codedRefusal(
+  stderr: string,
+): { line: string; before: string } | null {
+  const lines = stderr.trimEnd().split('\n');
+  const line = lines.at(-1)?.trim() ?? '';
+  try {
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    if (
+      typeof parsed?.['refused'] === 'string' &&
+      typeof parsed['next'] === 'string'
+    ) {
+      return { line, before: lines.slice(0, -1).join('\n').trim() };
+    }
+  } catch {
+    // Not a coded refusal.
+  }
+  return null;
+}
+
+/** A helper's refusal in one line: its coded refusal, else its last line on
+ * stderr, or why it did not finish. */
 function helperRefusal(command: string, run: AutofixPrRun): string {
-  // The CLI prints a helper's error with its stack: the reason is the line
-  // that names the error — the last such, as what `gh` or git printed
+  const coded = codedRefusal(run.stderr);
+  if (coded) return `autofix-pr ${command} refused: ${coded.line}`;
+  // An older CLI prints a helper's error with its stack: the reason is the
+  // line that names the error — the last such, as what `gh` or git printed
   // before the helper threw comes first.
   const lines = run.stderr.split('\n').map((line) => line.trim());
   const named = lines
@@ -1136,9 +1163,13 @@ class AutofixPrInvocation extends BaseToolInvocation<
       const why =
         run.failure ??
         (run.exitCode === null ? 'killed' : `exit ${run.exitCode}`);
+      // The skill acts on the coded line's `next`: it comes first.
+      const coded = run.failure ? null : codedRefusal(run.stderr);
       const message = [
-        `autofix-pr ${this.params.command} refused (${why}).`,
-        run.stderr.trim(),
+        coded
+          ? `autofix-pr ${this.params.command} refused: ${coded.line}`
+          : `autofix-pr ${this.params.command} refused (${why}).`,
+        coded ? coded.before : run.stderr.trim(),
         out,
       ]
         .filter(Boolean)

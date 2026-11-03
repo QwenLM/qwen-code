@@ -356,7 +356,7 @@ GitHub 只在 run 结束后才能重跑它，而 `snapshot` 在 job 一失败就
 
 - 它运行本会话所用的 CLI：`QWEN_CODE_CLI` 指向可用入口时用它——脚本经 JavaScript 解释器运行，可执行文件直接运行，Windows 的 `.cmd` 或 `.bat` 包装脚本跳过（只有 shell 能启动它们）——否则用解释器加上本进程启动时的入口。环境变量与 shell 给子进程的相同，带调用方会话的 id；工作目录是会话自己的目录，所以第 6.1 节第 7 步的 daemon 检查看到的和 shell 调用时一样。
 - 一次调用最长十分钟，这是辅助命令最长需要的时间（`push` 给 pre-push hook 九分钟），回合被取消时随之停止。同一工作目录下的调用逐个执行——但不取锁的 `status` 不等任何调用，等待中被取消的调用会立即返回；其他进程由辅助命令自己的锁来管。
-- 结果是辅助命令输出的那一行 JSON。非零退出就是辅助命令的拒绝，连同它的消息一起返回。
+- 结果是辅助命令输出的那一行 JSON。非零退出就是辅助命令的拒绝，返回时把带码的那一行放在最前面（第 6.16 节）。
 - 不提供 `snapshot --gate` 和 `cleanup --force`：闸门在模型之外运行，丢弃 worktree 里的工作只能由用户来做。
 - 只有主会话有这个工具：子 agent、fork、teammate 和 workspace agent 都没有，code mode 的 `exec` 也调用不了它。
 - 在 worktree 里运行任何 git 命令之前，`push`、`sync`、`status` 和 `cleanup` 都会直接读文件检查它的 `.git`：它必须指向本 clone 自己为某个 worktree 建的 admin 条目，而该条目也必须指回它。这个文件按 git 的方式读取（`gitdir: ` 加其余部分），路径按内核的方式解析，没有这个文件的 worktree 也会被拒绝。一轮运行的代码可以改写这个文件；它自己搭出来的 git 目录会把它的 config 交给那里的每一条 git 命令——`core.fsmonitor` 里的命令会在下一次 `git status` 时运行。
@@ -439,6 +439,28 @@ Web Shell 在监视的主人本来就会看的地方显示它——它的定时�
 没有本 Web Shell 会话在运行、但闸门两个间隔内检查过的监视，运行在其他进程里（终端会话），要在那里停止，页面会说明。其余的——已结束、没有任务，或最近没有任何检查——在其工作区的会话里用 `/autofix-pr stop <n>` 或 `resume <n>` 清理或重新开始，页面会写明命令。
 
 **刷新。** 页面和卡片显示期间每 15 秒重读一次监视；卡片只在列表里有监视的任务、且 daemon 声明了该能力时才读取。
+
+### 6.16 拒绝
+
+辅助命令拒绝时以 1 退出，并在 stderr 的最后一行输出一个 JSON 对象：`{"refused": "<code>", "next": "<step>", "message": "<原因>"}`。后面不跟堆栈：CLI 处理意外错误的入口会打印堆栈，但辅助命令的拒绝不会走到那里。辅助命令里其他任何失败——git 或 `gh` 出错、文件读不了——也算拒绝，码是 `failed`。skill 按 `next` 行事，从不按 `message` 的措辞判断；`message` 说明原因，用于报告。
+
+| 码                                               | 由谁给出                                                                               | `next`                                                                                                                                                      |
+| ------------------------------------------------ | -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `busy`                                           | 每个要取监视锁的辅助命令，锁被别的命令持有时                                           | `retry`                                                                                                                                                     |
+| `partial`                                        | `snapshot`：要问的 bot 线程超过一次调用能问的数量，已问到的答案保留                    | `retry`                                                                                                                                                     |
+| `pr_closed`                                      | `prepare`、`sync`、`reply`、`rerun`：PR 已合入或关闭                                   | `stop`；来自 `prepare` 时为 `report`                                                                                                                        |
+| `not_prepared`、`watch_stopped`、`task_replaced` | 每个辅助命令都做的监视检查                                                             | 来自一轮的辅助命令（`sync`、`snapshot`、`ci-log`、`push`、`reply`、`rerun`）时为 `end_task`，来自其他命令时为 `report`                                      |
+| `watched_elsewhere`                              | 同上                                                                                   | 同上，但来自 `prepare` 时为 `take_over`                                                                                                                     |
+| `fix_in_flight`                                  | 有修复 agent 在 worktree 里工作，或 `fix-start` 发现有进行中的 attempt                 | `report`                                                                                                                                                    |
+| `worktree_dirty`                                 | `sync`、`push`，以及每个检查 worktree 分支的辅助命令：有未提交的改动，或检出了别的分支 | 来自 `sync` 时为 `discard`，来自 `push` 时为 `needs_human`，来自其他命令时为 `report`                                                                       |
+| `no_failed_job`                                  | `ci-log`：这个 run 没有已结束且失败或超时的 job                                        | `rerun`                                                                                                                                                     |
+| `no_background_fix`                              | `fix-start`：没有可据以修复的一轮快照、是 in-place 监视，或没有任务                    | `foreground`                                                                                                                                                |
+| `rerun_failed`                                   | `rerun`：GitHub 拒绝了重跑，或者应答丢失                                               | `needs_human`                                                                                                                                               |
+| `push_failed`                                    | `push`：git 拒绝了推送（pre-push hook、远端）                                          | `needs_human`                                                                                                                                               |
+| `plan_invalid`                                   | `reply`：回复计划点名了这一轮不能回答的内容，或在 `--no-reply` 下要发帖                | `fix_plan`                                                                                                                                                  |
+| `failed`                                         | 其他任何情况                                                                           | 来自 `push` 和 `rerun` 时为 `needs_human`，来自 `reply` 时为 `retry`（没发出去的帖子仍然欠着，第二次运行会跳过第一次已经发出的），来自其他命令时为 `report` |
+
+这些步骤由 skill 定义（skill 里的 "Refusals" 一节）：`retry` 再运行一次同样的调用——`busy` 等另一个辅助命令结束后再跑，`partial` 一轮最多三次；`stop` 停止监视；`end_task` 删除唤醒这一轮的任务并结束这一轮；`take_over` 询问是否由本会话接管监视；`discard` 改为运行 `sync --discard`；`foreground` 在前台运行修复；`rerun` 把这个 run 的检查按重跑处理；`needs_human` 把这次调用涉及的事项交给人；`fix_plan` 修正回复计划；`report` 报告消息，并结束启动或这一轮。步骤既取决于码，也取决于是哪个辅助命令，这样同一个码可以对应调用它的那一步所需要的做法。`autofix_pr` 工具返回带码的拒绝时，把那一行原样放在最前面——`autofix-pr <command> refused: {…}`——后面跟着辅助命令在它之前输出的内容（git 或 `gh` 的输出）。没有这一行的拒绝（来自早于拒绝码的 CLI，或者 yargs 拒绝了参数）保持原来的格式，按 `report` 处理。
 
 ## 7. 一轮检查（`tick`）
 

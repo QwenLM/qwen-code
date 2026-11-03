@@ -92,6 +92,11 @@ import {
   writeState,
   type AutofixPrState,
 } from './state.js';
+import type { RefusalCode } from './refusal.js';
+
+/** A refusal with its code: what the skill acts on. */
+const refused = (code: RefusalCode, message: RegExp) =>
+  expect.objectContaining({ code, message: expect.stringMatching(message) });
 
 describe('runSync (real git, bare remote)', () => {
   let base: string;
@@ -256,7 +261,7 @@ describe('runSync (real git, bare remote)', () => {
     const old = new Date(Date.now() - 5 * 60_000);
     utimesSync(paths.fixPath, old, old);
     mocks.live = { ...mocks.live!, state: 'CLOSED' };
-    expect(() => runSync(7)).toThrow(/closed/);
+    expect(() => runSync(7)).toThrow(refused('pr_closed', /closed/));
     expect(existsSync(paths.fixPath)).toBe(true);
   });
 
@@ -265,7 +270,9 @@ describe('runSync (real git, bare remote)', () => {
     const old = new Date(Date.now() - 5 * 60_000);
     utimesSync(paths.fixPath, old, old);
     process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
-    expect(() => runSync(7)).toThrow(/watched by another session/);
+    expect(() => runSync(7)).toThrow(
+      refused('watched_elsewhere', /watched by another session/),
+    );
     expect(existsSync(paths.fixPath)).toBe(true);
   });
 
@@ -426,6 +433,15 @@ describe('runSync (real git, bare remote)', () => {
       dropped: 1,
     });
     expect(worktreeHead()).toBe(again);
+  });
+
+  it('keeps uncommitted changes from a head the author rewrote, for --discard to clear', () => {
+    writeFileSync(join(paths.worktreePath, 'stray.txt'), 'x');
+    forcePushFromElsewhere('rewritten.txt');
+    expect(() => runSync(7)).toThrow(
+      refused('worktree_dirty', /uncommitted changes/),
+    );
+    expect(existsSync(join(paths.worktreePath, 'stray.txt'))).toBe(true);
   });
 
   it('follows the author rolling back a push the watch made, so the next push cannot restore it', () => {
@@ -1021,7 +1037,9 @@ describe('runSync (real git, bare remote)', () => {
   it('refuses to move or reset a worktree with uncommitted changes', () => {
     pushFromElsewhere('theirs.txt');
     writeFileSync(join(paths.worktreePath, 'stray.txt'), 'x');
-    expect(() => runSync(7)).toThrow(/uncommitted changes/);
+    expect(() => runSync(7)).toThrow(
+      refused('worktree_dirty', /uncommitted changes/),
+    );
     forcePushFromElsewhere('rewritten.txt');
     expect(() => runSync(7)).toThrow(/uncommitted changes/);
     expect(worktreeHead()).toBe(featSha);
@@ -1427,7 +1445,9 @@ describe('runSync (real git, bare remote)', () => {
       mocks.afterFetch = () => {
         run(repo, 'switch', '-q', 'main');
       };
-      expect(() => runSync(7)).toThrow(/branch main checked out/);
+      expect(() => runSync(7)).toThrow(
+        refused('worktree_dirty', /branch main checked out/),
+      );
       // Neither branch advanced.
       expect(run(repo, 'rev-parse', 'feat')).toBe(featSha);
       expect(run(repo, 'rev-parse', 'main')).toBe(mainBefore);
