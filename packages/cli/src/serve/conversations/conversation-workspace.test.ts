@@ -148,7 +148,9 @@ describe('Live conversation workspace root', () => {
       process.platform === 'win32' ? 'junction' : 'dir',
     );
     const workspace = new ConversationWorkspace({ homeDir: home, rootPath });
-    await expect(workspace.getRoot()).rejects.toThrow(/non-symlink/);
+    await expect(workspace.getRoot()).rejects.toThrow(
+      `Live conversation root ${JSON.stringify(rootPath)} must be a non-symlink directory; check --conversations-dir / QWEN_CONVERSATIONS_DIR.`,
+    );
     await expect(lstat(getConversationRootPath(home))).rejects.toMatchObject({
       code: 'ENOENT',
     });
@@ -261,6 +263,28 @@ describe('Live conversation workspace root', () => {
     await mkdir(identity.configuredRoot, { mode: 0o700 });
 
     await expect(workspace.revalidate()).rejects.toThrow(/identity changed/);
+  });
+
+  it('identifies an invalid root during revalidation without changing standalone errors', async () => {
+    const home = await tempHome();
+    const rootPath = join(home, 'configured');
+    const workspace = new ConversationWorkspace({ rootPath });
+    const root = await workspace.getRoot();
+    await rename(rootPath, `${rootPath}-old`);
+    await writeFile(rootPath, 'not a directory');
+    const message = `Live conversation root ${JSON.stringify(rootPath)} must be a non-symlink directory; check --conversations-dir / QWEN_CONVERSATIONS_DIR.`;
+
+    await expect(revalidateConversationRoot(root)).rejects.toThrow(message);
+    await expect(assertExactConversationRoot(root, rootPath)).rejects.toThrow(
+      message,
+    );
+    await expect(
+      workspace.inspectStandaloneDirectory('standalone'),
+    ).rejects.toMatchObject({
+      name: 'ConversationDirectoryIdentityError',
+      scope: 'root',
+      reason: 'not_directory',
+    });
   });
 
   it('preserves Live filesystem errors while standalone keeps root scope', async (ctx) => {

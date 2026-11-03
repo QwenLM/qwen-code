@@ -827,6 +827,7 @@ describe('Conversations root environment', () => {
         'QWEN_CONVERSATIONS_DIR=/project/root\nRUNTIME_DOTENV=loaded\n',
       );
       preResolveHomeEnvOverrides();
+      expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe(root);
       loadEnvironment(testSettings({}), workspace);
       expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe(root);
       expect(process.env['RUNTIME_DOTENV']).toBe('loaded');

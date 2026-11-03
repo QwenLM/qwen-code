@@ -383,6 +383,12 @@ export const HOME_ENV_BOOTSTRAP_KEYS = [
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
 ] as const;
 
+// An empty Conversations root is an explicit invalid selection. Preserve it
+// through environment loading so serve rejects it instead of using a fallback.
+export function keepsEmptyHomeEnvValue(key: string): boolean {
+  return key.toUpperCase() === 'QWEN_CONVERSATIONS_DIR';
+}
+
 // Loader-affecting variables inherited from the launching shell. A daemon or
 // ACP child needs them only for its own boot (e.g. the dev harness tsx
 // loader); left in process.env they propagate into session subprocesses whose

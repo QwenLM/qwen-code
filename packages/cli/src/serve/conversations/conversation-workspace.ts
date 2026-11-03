@@ -60,6 +60,7 @@ export type StandaloneDeletionPathsInspection =
 
 function liveIdentityError(
   error: unknown,
+  rootPath: string,
   exactRoot = false,
   creatingRoot = false,
 ): never {
@@ -71,7 +72,7 @@ function liveIdentityError(
     switch (error.reason) {
       case 'not_directory':
         throw new Error(
-          'Live conversation root must be a non-symlink directory',
+          `Live conversation root ${JSON.stringify(rootPath)} must be a non-symlink directory; check --conversations-dir / QWEN_CONVERSATIONS_DIR.`,
         );
       case 'wrong_owner':
         throw new Error(
@@ -130,7 +131,7 @@ export async function revalidateConversationRoot(
   try {
     return await revalidateConversationRootIdentity(root);
   } catch (error) {
-    liveIdentityError(error);
+    liveIdentityError(error, root.configuredRoot);
   }
 }
 
@@ -141,7 +142,7 @@ export async function assertExactConversationRoot(
   try {
     return await assertExactConversationRootIdentity(root, candidate);
   } catch (error) {
-    liveIdentityError(error, true);
+    liveIdentityError(error, root.configuredRoot, true);
   }
 }
 
@@ -181,7 +182,7 @@ export class ConversationWorkspace {
     try {
       return await this.getRootIdentity();
     } catch (error) {
-      liveIdentityError(error, false, true);
+      liveIdentityError(error, this.rootPath, false, true);
     }
   }
 
@@ -220,7 +221,7 @@ export class ConversationWorkspace {
         )
       ).identity.canonicalPath;
     } catch (error) {
-      liveIdentityError(error);
+      liveIdentityError(error, this.rootPath);
     }
   }
 
@@ -243,7 +244,7 @@ export class ConversationWorkspace {
       ) {
         return false;
       }
-      liveIdentityError(error);
+      liveIdentityError(error, this.rootPath);
     }
     if (!identity) return false;
     try {

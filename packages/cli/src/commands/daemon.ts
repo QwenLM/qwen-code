@@ -89,7 +89,7 @@ interface StartArgs {
   port?: number;
   hostname: string;
   workspace?: string | string[];
-  'conversations-dir'?: string;
+  'conversations-dir'?: string | string[];
   web: boolean;
   'require-auth': boolean;
   token?: string;
@@ -722,6 +722,12 @@ async function printStartLogTail(file: string): Promise<void> {
 
 async function handleStart(argv: StartArgs): Promise<void> {
   ignoreBrokenPipe();
+  const conversationsDir = argv['conversations-dir'];
+  if (Array.isArray(conversationsDir)) {
+    writeStderrLine('qwen daemon: pass --conversations-dir once.');
+    process.exitCode = 1;
+    return;
+  }
   const entry = resolveCliEntry();
   if (!entry) {
     writeStderrLine(
@@ -807,7 +813,7 @@ async function handleStart(argv: StartArgs): Promise<void> {
     port,
     hostname,
     workspaces,
-    conversationsDir: argv['conversations-dir'],
+    conversationsDir,
     web: argv.web,
     requireAuth: argv['require-auth'],
   });

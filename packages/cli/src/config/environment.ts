@@ -16,6 +16,7 @@ import {
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
   isPrivateProvenanceEnvKey,
+  keepsEmptyHomeEnvValue,
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
   reportRejectedLoaderKeys,
@@ -249,7 +250,7 @@ function readHomeEnvInto(file: string): void {
     for (const key of HOME_ENV_BOOTSTRAP_KEYS) {
       if (
         (parsed[key] ||
-          (key === 'QWEN_CONVERSATIONS_DIR' && parsed[key] !== undefined)) &&
+          (keepsEmptyHomeEnvValue(key) && parsed[key] !== undefined)) &&
         !Object.hasOwn(process.env, key)
       ) {
         process.env[key] = parsed[key];
@@ -771,8 +772,7 @@ export function loadEnvironment(
       const existingValue = process.env[key];
       const isEffectivelyUnset =
         !Object.hasOwn(process.env, key) ||
-        (existingValue === '' &&
-          key.toUpperCase() !== 'QWEN_CONVERSATIONS_DIR');
+        (existingValue === '' && !keepsEmptyHomeEnvValue(key));
       if (isEffectivelyUnset) {
         process.env[key] = envFile.parsedEnv[key];
         dotEnvSourcedKeys.add(key);

@@ -1175,6 +1175,8 @@ describe('serve fast path environment bootstrap', () => {
         'QWEN_CONVERSATIONS_DIR=/project/root\nFAST_PATH_REFERENCED_TOKEN=loaded\n',
       );
       delete process.env['FAST_PATH_REFERENCED_TOKEN'];
+      preResolveServeFastPathHomeEnvOverrides();
+      expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe(root);
       await bootstrapServeFastPathEnvironment(tempWorkspace);
       expect(process.env['QWEN_CONVERSATIONS_DIR']).toBe(root);
       expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe('loaded');

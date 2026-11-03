@@ -20,6 +20,7 @@ import {
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
   isPrivateProvenanceEnvKey,
+  keepsEmptyHomeEnvValue,
   reportRejectedLoaderKeys,
 } from '../config/shared-env-keys.js';
 import {
@@ -117,7 +118,7 @@ function readHomeEnvIntoFastPath(file: string): void {
     for (const key of HOME_ENV_BOOTSTRAP_KEYS) {
       if (
         (parsed[key] ||
-          (key === 'QWEN_CONVERSATIONS_DIR' && parsed[key] !== undefined)) &&
+          (keepsEmptyHomeEnvValue(key) && parsed[key] !== undefined)) &&
         !Object.hasOwn(process.env, key)
       ) {
         process.env[key] = parsed[key];

@@ -4,17 +4,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawn } from 'node:child_process';
 import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import type { Argv } from 'yargs';
+import yargs, { type Argv } from 'yargs';
 
 const sanitizeTerminalText = vi.hoisted(() =>
   vi.fn((value: string) => value.replace(/\p{Cc}/gu, '')),
 );
 
 vi.mock('../ui/utils/textUtils.js', () => ({ sanitizeTerminalText }));
+
+vi.mock('node:child_process', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:child_process')>()),
+  spawn: vi.fn(() => {
+    throw new Error('unexpected daemon spawn');
+  }),
+}));
 
 // A record only names a process inside the namespace it was written in, so
 // the decision table is pinned against a fixed local namespace here.
@@ -105,6 +113,44 @@ describe('qwen daemon command', () => {
     expect(mockYargs.command.mock.calls.map((call) => call[0].command)).toEqual(
       ['start', 'status', 'logs', 'stop', 'restart', 'token'],
     );
+  });
+
+  it('rejects repeated Conversations roots before spawning a daemon', async () => {
+    const tempDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-start-root-'),
+    );
+    const exitCode = process.exitCode;
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    vi.stubEnv('QWEN_HOME', tempDir);
+    vi.stubEnv('QWEN_RUNTIME_DIR', tempDir);
+    vi.mocked(spawn).mockClear();
+    try {
+      await yargs([])
+        .exitProcess(false)
+        .fail(false)
+        .command(daemonCommand)
+        .parseAsync([
+          'daemon',
+          'start',
+          '--workspace',
+          tempDir,
+          '--conversations-dir',
+          path.join(tempDir, 'root-a'),
+          '--conversations-dir',
+          path.join(tempDir, 'root-b'),
+        ]);
+
+      expect(process.exitCode).toBe(1);
+      expect(stderr.mock.calls.map(([text]) => String(text)).join('')).toBe(
+        'qwen daemon: pass --conversations-dir once.\n',
+      );
+      expect(spawn).not.toHaveBeenCalled();
+    } finally {
+      process.exitCode = exitCode;
+      stderr.mockRestore();
+      vi.unstubAllEnvs();
+      await fsp.rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   describe('restart', () => {
