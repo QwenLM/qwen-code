@@ -324,7 +324,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         boolean supported = session.workspace() != null && store.workspaceFilesEnabled()
                 && !store.modelOptions().isEmpty() && harness.supportsModelSelection();
         return new WebShellSessionModels(store.modelOptions(),
-                store.findModelSelections(principal.tenantId(),
+                store.findModelSelections(session.tenantId(),
                         List.of(sessionId)).getOrDefault(sessionId,
                             new WebShellModelSelection(null, 0)), supported);
     }
@@ -339,12 +339,12 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     public WebShellModelChangeResult changeWebShellSessionModel(
             SessionPrincipal principal, String sessionId, String key,
             String modelId, long expectedRevision) {
-        requireModelActor(principal == null ? null : principal.userId());
-        requireReadableSession(principal, sessionId);
+        String actorId = requireModelActor(principal == null ? null : principal.userId());
+        SessionRecord session = requireReadableSession(principal, sessionId);
         validateIdempotencyKey(key);
         String digest = digests.digest(Map.of("sessionId", sessionId, "modelId", modelId,
                 "expectedRevision", expectedRevision));
-        return store.changeSessionModel(principal.tenantId(), principal.userId(),
+        return store.changeSessionModel(session.tenantId(), actorId,
                 sessionId, key, digest, modelId, expectedRevision,
                 harness.supportsModelSelection());
     }
@@ -439,10 +439,11 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 harness.supportsPermissionRules(), harness.supportsAutoApproval());
     }
 
-    private static void requireModelActor(String actorId) {
+    private static String requireModelActor(String actorId) {
         if (actorId == null || actorId.isEmpty()) {
             throw new ManagedAgentException(401, "actor_required", "A trusted actor is required");
         }
+        return actorId;
     }
 
     public CommandAdmission createWorkspaceSession(String tenantId,

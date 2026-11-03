@@ -18,9 +18,11 @@ Keep the preview's verified-payload concurrent dispatch and terminal failed/canc
 
 The existing preview incorrectly restricted persisted result acknowledgements to SSH. Admit fully formed external Workspace requests to the same acknowledgement path, preserving settled results, native-reference checks, durable Session membership and binding generation. Only shared external Workspace isolation may omit the single-Harness isolation key. Project the current transient lifecycle authority into the transport Session without persisting it. Regression evidence must cover both shared members receiving their own acknowledgement, releasing one while retaining the other, and the existing lost-ACK, expired-claim and original-stop ordering cases.
 
+Keep missing-principal rejection and authorization order unchanged. Model operations use the validated actor and authorized Session tenant; task views carry that authorized tenant through their existing page projections instead of dereferencing a nullable principal after authorization.
+
 ## Artifact and schema contract
 
-Build a new unique private Server version on the designated devbox, preserving third-party dependencies in its real consumer POM. Aggregate production modules only; union and deduplicate `META-INF/services` entries rather than overwriting providers. Freeze source, source revision, licenses, checksums and validation evidence. Never mutate old artifact bytes or publish the verification module.
+Build a new unique private Server version, preserving third-party dependencies in its real consumer POM. The user authorized isolated macOS JDK 21 compilation for this run; after the shared local budget was exhausted, remaining checks and packaging moved to CI. Aggregate production modules only; union and deduplicate `META-INF/services` entries rather than overwriting providers. Freeze source, source revision, licenses, checksums and validation evidence. Never mutate old artifact bytes or publish the verification module.
 
 The shared V1 baseline retains `ma_session_principal`, external registration receipts and shared dispatch classification. Development/preproduction catalogs must match the final artifact exactly. Legacy, partial and foreign catalogs remain refused; no Flyway repair, schema-version increment, automatic migration or mixed business catalog is allowed.
 

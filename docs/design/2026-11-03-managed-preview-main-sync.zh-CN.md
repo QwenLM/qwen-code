@@ -18,9 +18,11 @@
 
 既有预览错误地只允许 SSH 确认已持久化的工具结果。将结构完整的外部 Workspace 请求接入同一确认路径，保留终态结果、原生 reference、持久 Session 成员关系和 binding generation 检查。只有共享隔离的外部 Workspace 可以省去单 Harness isolation key 条件。当前瞬态 lifecycle authority 仅投影到传输用 Session，不写入持久状态。回归证据须覆盖两个共享成员各自收到确认、释放一个时保留另一个，以及既有丢失 ACK、claim 到期与原 worker 停止顺序场景。
 
+保持缺失身份的拒绝方式和授权顺序。模型操作使用已校验的 actor 与已授权 Session 的租户；任务视图通过既有分页投影传递该租户，不在授权后解引用可空 principal。
+
 ## 制品与结构契约
 
-在指定 devbox 构建新的唯一私有 Server 版本，在真实消费 POM 中保留第三方依赖。仅聚合生产模块；`META-INF/services` 条目须合并去重，不能覆盖其他 provider。冻结源码、源码提交、许可证、校验和与验证证据。不修改旧制品字节，不发布 verification 模块。
+构建新的唯一私有 Server 版本，在真实消费 POM 中保留第三方依赖。用户已授权本轮使用 macOS JDK 21 隔离编译；共享本地预算耗尽后，剩余检查与打包转到 CI。仅聚合生产模块；`META-INF/services` 条目须合并去重，不能覆盖其他 provider。冻结源码、源码提交、许可证、校验和与验证证据。不修改旧制品字节，不发布 verification 模块。
 
 共享 V1 基线保留 `ma_session_principal`、外部注册回执和 shared dispatch 分类。开发/预发库必须与最终制品精确匹配。继续拒绝旧库、残缺库和混用业务库；不进行 Flyway repair、结构版本递增、自动迁移或业务混库。
 

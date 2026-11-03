@@ -210,6 +210,54 @@ class SessionPrincipalOwnershipTest {
     }
 
     @Test
+    void modelEntryPointsRequireIdentityBeforeValidatingTheChange() {
+        var f = new Fixture();
+        f.tx.executeWithoutResult(status -> {
+            String id = f.create(OWNER, "create");
+            for (Runnable request : List.<Runnable>of(
+                    () -> f.service.queryWebShellSessionModels((SessionPrincipal) null, id),
+                    () -> f.service.changeWebShellSessionModel(
+                            (SessionPrincipal) null, id, null, null, -1),
+                    () -> f.service.queryWebShellSessionModels("tenant", null, id),
+                    () -> f.service.changeWebShellSessionModel(
+                            "tenant", null, id, null, null, -1))) {
+                assertThatThrownBy(request::run).isInstanceOfSatisfying(
+                        ManagedAgentException.class, error -> {
+                            assertThat(error.getStatus()).isEqualTo(401);
+                            assertThat(error.getCode()).isEqualTo("actor_required");
+                        });
+            }
+            assertThat(f.service.queryWebShellSessionModels(OWNER, id)).isNotNull();
+            var foreign = SessionPrincipal.of("tenant", "user", "actor-B");
+            denied(() -> f.service.queryWebShellSessionModels(foreign, id));
+            denied(() -> f.service.changeWebShellSessionModel(
+                    foreign, id, null, null, -1));
+        });
+    }
+
+    @Test
+    void legacyTaskEntryPointsHideTheSessionBeforeValidatingRequestsWithoutIdentity() {
+        var f = new Fixture();
+        var records = new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(f.jdbc);
+        var events = new com.alibaba.qwen.code.managedagent.persistence.ManagedTaskEventStore(f.jdbc);
+        var tasks = new ManagedTaskService(f.service, records, events);
+        f.tx.executeWithoutResult(status -> {
+            String id = f.create(OWNER, "create");
+            for (Runnable request : List.<Runnable>of(
+                    () -> tasks.listPublicTasks("tenant", null, id, "invalid", 0),
+                    () -> tasks.getPublicTask("tenant", null, id, "task_missing"),
+                    () -> tasks.queryWebShellTasks("tenant", null, id, "invalid", 0),
+                    () -> tasks.getWebShellTask("tenant", null, id, "task_missing"),
+                    () -> tasks.listPublicTaskEvents(
+                            "tenant", null, id, "task_missing", "invalid", 0),
+                    () -> tasks.queryWebShellTaskEvents(
+                            "tenant", null, id, "task_missing", "invalid", 0))) {
+                denied(request);
+            }
+        });
+    }
+
+    @Test
     void taskAndRecoveryEntryPointsKeepTheActorWhileRecheckingExistingWork() {
         var f = new Fixture();
         var records = new com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore(f.jdbc);
@@ -226,6 +274,9 @@ class SessionPrincipalOwnershipTest {
             denied(() -> tasks.listPublicTasks(foreign, id, null, 10));
             denied(() -> tasks.getPublicTask(foreign, id, "task_missing"));
             denied(() -> tasks.listPublicTaskEvents(foreign, id, "task_missing", null, 10));
+            denied(() -> tasks.queryWebShellTasks(foreign, id, "invalid", 0));
+            denied(() -> tasks.getWebShellTask(foreign, id, "task_missing"));
+            denied(() -> tasks.queryWebShellTaskEvents(foreign, id, "task_missing", "invalid", 0));
             denied(() -> recovery.query(foreign, id));
             assertThat(recovery.query(OWNER, id).state()).isEqualTo("ready");
             var turn = f.service.submitTurn(OWNER, "turn", id,
@@ -441,7 +492,10 @@ class SessionPrincipalOwnershipTest {
 
     private static void denied(Runnable action) {
         assertThatThrownBy(action::run).isInstanceOfSatisfying(ManagedAgentException.class,
-                error -> assertThat(error.getCode()).isEqualTo("session_not_found"));
+                error -> {
+                    assertThat(error.getStatus()).isEqualTo(404);
+                    assertThat(error.getCode()).isEqualTo("session_not_found");
+                });
     }
 
     private static final class Fixture {
