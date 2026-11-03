@@ -345,7 +345,9 @@ describe('git hardening', () => {
     );
     mkdirSync(join(dir, '.git', 'info'), { recursive: true });
     writeFileSync(join(dir, '.git', 'info', 'attributes'), '* filter=wt\n');
-    writeFileSync(join(dir, 'base.txt'), 'changed\n');
+    // Same byte length as 'base\n': a size change lets git skip the clean
+    // conversion, which makes the positive control depend on racy timing.
+    writeFileSync(join(dir, 'base.txt'), 'BaSe\n');
     // Positive control: without the worktree-scope override the filter runs.
     spawnSync(
       'git',
@@ -366,6 +368,26 @@ describe('git hardening', () => {
     expect(localFilterOverrides(dir)).toEqual(['-c', 'filter.wt.clean=']);
     spawnSync('git', gitStatusArgs(dir), { encoding: 'utf8' });
     expect(existsSync(marker)).toBe(false);
+  });
+
+  // The extension does not require config.worktree to exist. prepare's
+  // --get-regexp enumeration already treats the absent file as no matches
+  // (exit 1); pin that so a future switch to --list (exit 128 on absence)
+  // cannot silently false-refuse a clean repo the way the scan once did.
+  it('tolerates an enabled worktree extension with no config.worktree file', () => {
+    const { dir, base, head } = makeRepo();
+    execFileSync(
+      'git',
+      ['config', '--local', 'extensions.worktreeConfig', 'true'],
+      { cwd: dir, env: gitEnv },
+    );
+    expect(localFilterOverrides(dir)).toEqual([]);
+    const status = spawnSync('git', gitStatusArgs(dir), { encoding: 'utf8' });
+    expect(status.status).toBe(0);
+
+    const env = installFakeGh(snapshotFor({ base, head }));
+    const result = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(result.status).toBe(0);
   });
 
   // core.excludesFile is steerable from the same PR-controlled config; the
@@ -408,7 +430,9 @@ describe('git hardening', () => {
     );
     mkdirSync(join(dir, '.git', 'info'), { recursive: true });
     writeFileSync(join(dir, '.git', 'info', 'attributes'), '* filter=pwn\n');
-    writeFileSync(join(dir, 'base.txt'), 'changed\n');
+    // Same byte length as 'base\n': a size change lets git skip the clean
+    // conversion, which makes the positive control depend on racy timing.
+    writeFileSync(join(dir, 'base.txt'), 'BaSe\n');
     // Positive control: without the filter overrides the planted filter runs
     // on the host during an ordinary status.
     spawnSync('git', [...GIT_HARDENING, '-C', dir, 'status', '--porcelain'], {
@@ -437,7 +461,9 @@ describe('git hardening', () => {
     });
     mkdirSync(join(dir, '.git', 'info'), { recursive: true });
     writeFileSync(join(dir, '.git', 'info', 'attributes'), '* filter=pwn\n');
-    writeFileSync(join(dir, 'base.txt'), 'changed\n');
+    // Same byte length as 'base\n': a size change lets git skip the clean
+    // conversion, which makes the positive control depend on racy timing.
+    writeFileSync(join(dir, 'base.txt'), 'BaSe\n');
     // Positive control: an ordinary hardened status follows the include and
     // executes the planted filter on the host.
     spawnSync('git', [...GIT_HARDENING, '-C', dir, 'status', '--porcelain'], {

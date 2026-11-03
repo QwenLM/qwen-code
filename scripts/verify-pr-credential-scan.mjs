@@ -177,7 +177,9 @@ export function nestedGitRepos(root, { maxBuffer = 8 * 1024 * 1024 } = {}) {
  * cannot forge entries. When `extensions.worktreeConfig` is set, ordinary
  * `git config --get` also reads `.git/config.worktree`, so that scope (with
  * its includes) is enumerated too — `--local` alone would report a
- * credential there as clean. A `credential.helper` COMMAND is out of this
+ * credential there as clean. The file is optional: absent means an empty
+ * scope, while an existing but unreadable or malformed one refuses. A
+ * `credential.helper` COMMAND is out of this
  * URL/header contract by design (see the design record); prepare disables
  * helpers for its own reads.
  */
@@ -213,7 +215,24 @@ export function credentialBearingConfig(
   );
   const scopes = ['--local'];
   if (worktreeConfig.status === 0 && worktreeConfig.stdout.trim() === 'true') {
-    scopes.push('--worktree');
+    // Enabling the extension does not require the file to exist: an absent
+    // optional config.worktree is an EMPTY scope (explicit `--worktree
+    // --list` would exit 128 on it and false-refuse a clean repo). An
+    // existing but unreadable or malformed file still refuses, because
+    // readScope throws on any git error.
+    const gitDir = spawnSync(
+      'git',
+      ['-C', root, 'rev-parse', '--absolute-git-dir'],
+      { encoding: 'utf8', maxBuffer },
+    );
+    if (gitDir.status !== 0) {
+      throw new Error(
+        `could not read local git config: ${(gitDir.stderr || '').trim() || 'git failed'}`,
+      );
+    }
+    if (existsSync(join(gitDir.stdout.trim(), 'config.worktree'))) {
+      scopes.push('--worktree');
+    }
   }
   const hasUserinfo = (value) => {
     const match = /^https?:\/\/([^/@\s]+)@/i.exec(value);

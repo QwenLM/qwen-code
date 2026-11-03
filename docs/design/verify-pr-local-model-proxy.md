@@ -82,7 +82,10 @@ A host-side relay plus a recipe that names its trust boundaries.
   a key allowlist never converges — plus the URL-bearing key families
   (`url.*.insteadOf` / `url.*.pushInsteadOf` rewrites, `http.<url>.*`
   sections), following `include.path` and covering the enabled
-  `.git/config.worktree` scope like prepare's filter enumeration.
+  `.git/config.worktree` scope like prepare's filter enumeration. That file
+  is optional: absent means an empty scope (an explicit `--worktree --list`
+  would exit 128 and false-refuse a clean repo), while an existing but
+  unreadable or malformed one still refuses.
   The file scan lists ignored files one by one and leaves
   `node_modules`/`dist` alone, so a built tree is not refused; a nested git
   repository is refused on every surface git collapses to a directory
@@ -151,7 +154,10 @@ the real key.
   arriving through `include.path` or in the enabled `.git/config.worktree`
   scope are refused; a credential-free include and benign worktree config
   stay clean, and with the extension disabled the worktree file is ignored
-  exactly as git ignores it. Installed `node_modules`/`dist` are ignored at any
+  exactly as git ignores it. The worktree file is optional: an enabled
+  extension with no file (or an empty file) is an empty scope on both the
+  scan and prepare paths, while an unreadable or malformed file refuses.
+  Installed `node_modules`/`dist` are ignored at any
   depth, including inside a workspace package, and a vendored git
   repository under them is excluded rather than refused; file enumeration
   is path-limited so a large ignored dependency tree is never buffered

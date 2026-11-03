@@ -402,14 +402,16 @@ authority to certify the round.
    judged too: `url.*.insteadOf` / `url.*.pushInsteadOf` rewrites and
    `http.<url>.*` sections. The config enumeration follows `include.path`
    and covers the enabled `.git/config.worktree` scope, so a credential in
-   an included worktree file or the worktree config is refused too. It
-   leaves installed dependencies and build output alone — a vendored git
-   dependency under `node_modules`/`dist` is excluded, not refused — and
-   refuses a nested git repository outright on every surface (ignored
-   clone, untracked clone, populated submodule): git does not descend into
-   it, so a credential file inside one would otherwise pass silently. The
-   abort is structural (`|| exit 1`), not a side effect of `set -e`. Exit 4
-   means this is not a boundary: stop and run nothing else.
+   an included worktree file or the worktree config is refused too. The
+   file is optional: absent means an empty scope, while an unreadable or
+   malformed one still refuses. It leaves installed dependencies and build
+   output alone — a vendored git dependency under `node_modules`/`dist` is
+   excluded, not refused — and refuses a nested git repository outright on
+   every surface (ignored clone, untracked clone, populated submodule): git
+   does not descend into it, so a credential file inside one would
+   otherwise pass silently. The abort is structural (`|| exit 1`), not a
+   side effect of `set -e`. Exit 4 means this is not a boundary: stop and
+   run nothing else.
 
 6. **Run the round inside**, installing the CLI into the fresh home because
    the container is not root. Each `docker exec` is a new shell, so the

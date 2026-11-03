@@ -5,7 +5,13 @@
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -445,6 +451,54 @@ describe('scanIgnoredCredentials', () => {
     expect(scanIgnoredCredentials(dir)).toEqual([]);
     expect(run(dir).status).toBe(0);
   });
+
+  // Enabling the extension does not require config.worktree to exist: an
+  // absent optional file is an empty scope, not a refusal (explicit
+  // `--worktree --list` exits 128 on it). Unreadable or malformed files
+  // must still refuse — the tolerance is for absence only.
+  it('treats an absent optional worktree config as an empty scope', () => {
+    const dir = makeRepo(['src/app.ts'], []);
+    execFileSync(
+      'git',
+      ['config', '--local', 'extensions.worktreeConfig', 'true'],
+      { cwd: dir, env: gitEnv },
+    );
+    expect(scanIgnoredCredentials(dir)).toEqual([]);
+    expect(run(dir).status).toBe(0);
+    // An existing empty file is the same empty scope.
+    writeFileSync(join(dir, '.git', 'config.worktree'), '');
+    expect(scanIgnoredCredentials(dir)).toEqual([]);
+    expect(run(dir).status).toBe(0);
+    // A malformed file refuses on both paths.
+    writeFileSync(join(dir, '.git', 'config.worktree'), '[broken\n');
+    expect(() => scanIgnoredCredentials(dir)).toThrow(
+      /could not (read local git config|list nested repositories)/,
+    );
+    expect(run(dir).status).toBe(1);
+  });
+
+  // POSIX permissions only: on Windows chmod 000 does not block reads.
+  it.skipIf(process.platform === 'win32')(
+    'refuses an unreadable worktree config instead of treating it as absent',
+    () => {
+      const dir = makeRepo(['src/app.ts'], []);
+      execFileSync(
+        'git',
+        ['config', '--local', 'extensions.worktreeConfig', 'true'],
+        { cwd: dir, env: gitEnv },
+      );
+      writeFileSync(join(dir, '.git', 'config.worktree'), '');
+      chmodSync(join(dir, '.git', 'config.worktree'), 0o000);
+      try {
+        expect(() => scanIgnoredCredentials(dir)).toThrow(
+          /could not (read local git config|list nested repositories)/,
+        );
+        expect(run(dir).status).toBe(1);
+      } finally {
+        chmodSync(join(dir, '.git', 'config.worktree'), 0o644);
+      }
+    },
+  );
 
   it('keeps ssh URLs, the bare git username and public keys out of the refusal', () => {
     const dir = makeRepo(['id_rsa.pub'], ['id_rsa*']);
