@@ -21,38 +21,45 @@ if (!Element.prototype.hasPointerCapture) {
   Element.prototype.hasPointerCapture = () => false;
 }
 
-const { eventsState, eventsMock, useChannelsMock, workspaceState } = vi.hoisted(
-  () => ({
-    eventsState: {
-      current: {
-        data: undefined as
-          | { events: Array<Record<string, unknown>>; truncated: boolean }
+const {
+  eventsState,
+  eventsMock,
+  useChannelsMock,
+  channelsState,
+  workspaceState,
+} = vi.hoisted(() => ({
+  eventsState: {
+    current: {
+      data: undefined as
+        | { events: Array<Record<string, unknown>>; truncated: boolean }
+        | undefined,
+      loading: false,
+      error: undefined as Error | undefined,
+      reload: vi.fn(),
+    },
+  },
+  eventsMock: vi.fn(),
+  useChannelsMock: vi.fn(),
+  channelsState: {
+    current: {} as Record<string, { config?: Record<string, unknown> }>,
+  },
+  workspaceState: {
+    current: {
+      workspaceCwd: '/workspace/demo',
+      capabilities: {
+        features: ['channel_management'] as string[],
+        workspaces: undefined as
+          | Array<{
+              id: string;
+              cwd: string;
+              primary: boolean;
+              trusted: boolean;
+            }>
           | undefined,
-        loading: false,
-        error: undefined as Error | undefined,
-        reload: vi.fn(),
       },
     },
-    eventsMock: vi.fn(),
-    useChannelsMock: vi.fn(),
-    workspaceState: {
-      current: {
-        workspaceCwd: '/workspace/demo',
-        capabilities: {
-          features: ['channel_management'] as string[],
-          workspaces: undefined as
-            | Array<{
-                id: string;
-                cwd: string;
-                primary: boolean;
-                trusted: boolean;
-              }>
-            | undefined,
-        },
-      },
-    },
-  }),
-);
+  },
+}));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useChannelEvents: (options: unknown) => {
@@ -61,7 +68,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   },
   useChannels: (options: unknown) => {
     useChannelsMock(options);
-    return { channels: { bot: {}, 'ci-reporter': {} } };
+    return { channels: channelsState.current };
   },
   useWorkspace: () => workspaceState.current,
 }));
@@ -81,6 +88,7 @@ beforeEach(() => {
   };
   eventsMock.mockClear();
   useChannelsMock.mockClear();
+  channelsState.current = { bot: {}, 'ci-reporter': {} };
   workspaceState.current.capabilities.features = ['channel_management'];
   workspaceState.current.capabilities.workspaces = undefined;
   container = document.createElement('div');
@@ -165,6 +173,144 @@ describe('ChannelEventsPage', () => {
     expect(rows[1]?.textContent).toContain('owner/repo#42');
     expect(rows[1]?.textContent).toContain('@alice');
     expect(rows[1]?.textContent).toContain('reason_filter');
+  });
+
+  it('links GitHub PR and Issue targets to their web URL', async () => {
+    channelsState.current = {
+      'gh-bot': { config: { type: 'github' } },
+    };
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'gh-bot',
+          type: 'inbound',
+          outcome: 'accepted',
+          repository: 'owner/repo',
+          thread: 'pr:42',
+          number: 42,
+        },
+        {
+          at: '2026-11-02T02:01:00.000Z',
+          channel: 'gh-bot',
+          type: 'outbound',
+          outcome: 'posted',
+          repository: 'owner/repo',
+          thread: 'issue:7',
+          number: 7,
+        },
+      ],
+    };
+
+    await renderPage();
+
+    // Rows render newest first.
+    const links = container.querySelectorAll<HTMLAnchorElement>(
+      'a[href^="https://github.com/"]',
+    );
+    expect(links).toHaveLength(2);
+    expect(links[0]?.getAttribute('href')).toBe(
+      'https://github.com/owner/repo/issues/7',
+    );
+    expect(links[1]?.getAttribute('href')).toBe(
+      'https://github.com/owner/repo/pull/42',
+    );
+    expect(links[1]?.textContent).toBe('owner/repo#42');
+    expect(links[1]?.getAttribute('target')).toBe('_blank');
+    expect(links[1]?.getAttribute('rel')).toBe('noopener noreferrer');
+    expect(links[1]?.getAttribute('aria-label')).toBe(
+      'Open owner/repo#42 on GitHub',
+    );
+  });
+
+  it('links GitHub Enterprise targets using the configured API root', async () => {
+    channelsState.current = {
+      'gh-bot': {
+        config: { type: 'github', baseUrl: 'https://ghe.example.com/api/v3' },
+      },
+    };
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'gh-bot',
+          type: 'inbound',
+          outcome: 'accepted',
+          repository: 'owner/repo',
+          thread: 'pr:42',
+          number: 42,
+        },
+      ],
+    };
+
+    await renderPage();
+
+    const link = container.querySelector<HTMLAnchorElement>('li a');
+    expect(link?.getAttribute('href')).toBe(
+      'https://ghe.example.com/owner/repo/pull/42',
+    );
+  });
+
+  it('does not linkify a target whose configured base URL is not http(s)', async () => {
+    channelsState.current = {
+      'gh-bot': {
+        config: { type: 'github', baseUrl: 'javascript:alert(1)' },
+      },
+    };
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'gh-bot',
+          type: 'inbound',
+          outcome: 'accepted',
+          repository: 'owner/repo',
+          thread: 'pr:42',
+          number: 42,
+        },
+      ],
+    };
+
+    await renderPage();
+
+    expect(container.querySelectorAll('li a')).toHaveLength(0);
+    expect(container.textContent).toContain('owner/repo#42');
+  });
+
+  it('keeps targets of non-GitHub or unknown channels as plain text', async () => {
+    channelsState.current = {
+      'ding-bot': { config: { type: 'dingtalk' } },
+    };
+    eventsState.current.data = {
+      truncated: false,
+      events: [
+        {
+          at: '2026-11-02T02:00:00.000Z',
+          channel: 'ding-bot',
+          type: 'inbound',
+          outcome: 'accepted',
+          repository: 'owner/repo',
+          number: 42,
+        },
+        {
+          at: '2026-11-02T02:01:00.000Z',
+          channel: 'removed-channel',
+          type: 'inbound',
+          outcome: 'accepted',
+          repository: 'owner/repo',
+          number: 43,
+        },
+      ],
+    };
+
+    await renderPage();
+
+    expect(container.querySelectorAll('li a')).toHaveLength(0);
+    expect(container.textContent).toContain('owner/repo#42');
+    expect(container.textContent).toContain('owner/repo#43');
   });
 
   it('shows how many further notifications a collapsed skip stands for', async () => {

@@ -17,9 +17,11 @@ import {
   useChannels,
   useWorkspace,
 } from '@qwen-code/web-shell/daemon-react-sdk';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
 import { workspaceLabel } from '../../utils/workspace';
+import { isSafeHref } from '../messages/Markdown';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -38,6 +40,7 @@ import {
   SelectValue,
 } from '../ui/select';
 import { Spinner } from '../ui/spinner';
+import { githubEventWebUrl } from './channel-platform';
 import styles from './ChannelEventsPage.module.css';
 
 interface ChannelEventsPageProps {
@@ -67,6 +70,7 @@ export function ChannelEventsPage({
   initialFocusRef,
 }: ChannelEventsPageProps) {
   const { t, language } = useI18n();
+  const openExternalLink = useExternalLinkOpener();
   const workspace = useWorkspace();
   const supportsChannelEvents =
     workspace.capabilities?.features.includes('channel_management') === true;
@@ -306,6 +310,14 @@ export function ChannelEventsPage({
                           event.number !== undefined ? `#${event.number}` : ''
                         }`
                       : event.thread;
+                    const targetUrl = githubEventWebUrl(
+                      event,
+                      channels[event.channel]?.config,
+                    );
+                    const safeTargetUrl =
+                      targetUrl && isSafeHref(targetUrl)
+                        ? targetUrl
+                        : undefined;
                     return (
                       <li
                         key={`${event.at}-${event.channel}-${index}`}
@@ -329,7 +341,24 @@ export function ChannelEventsPage({
                           {outcomeLabel(event.outcome)}
                         </span>
                         <span className={styles.target}>
-                          {target ?? ''}
+                          {safeTargetUrl ? (
+                            <a
+                              href={safeTargetUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className={styles.targetLink}
+                              aria-label={t('channelEvents.openTarget', {
+                                target: target ?? '',
+                              })}
+                              onClick={(click) =>
+                                openExternalLink(click, safeTargetUrl)
+                              }
+                            >
+                              {target ?? ''}
+                            </a>
+                          ) : (
+                            (target ?? '')
+                          )}
                           {event.actor ? (
                             <span className={styles.actor}>@{event.actor}</span>
                           ) : null}

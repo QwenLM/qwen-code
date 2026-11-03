@@ -1363,6 +1363,163 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `channel-editor-existing-${theme}`);
     });
 
+    test(`Channel events`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'workspace_settings',
+            'workspace_voice',
+            'channel_management',
+          ],
+        },
+        channels: {
+          revision: '1',
+          instances: {
+            'github-bot': {
+              name: 'github-bot',
+              config: { type: 'github' },
+              secrets: { token: { present: true, source: 'environment' } },
+              startsWithServe: true,
+              runtime: { state: 'connected' },
+            },
+            dingtalk: {
+              name: 'dingtalk',
+              config: { type: 'dingtalk' },
+              secrets: {},
+              startsWithServe: false,
+              runtime: { state: 'stopped' },
+            },
+          },
+        },
+      });
+      await page.addInitScript(() => {
+        window.sessionStorage.setItem('qwen-daemon-token', 'visual-token');
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      // The shared mock daemon does not serve the journal route yet; fulfill
+      // it with a fixed GitHub-heavy journal registered after the catch-all
+      // so this route wins.
+      await page.route('**/channels/events*', async (route) => {
+        await route.fulfill({
+          json: {
+            truncated: false,
+            events: [
+              {
+                at: '2026-11-02T01:58:00.000Z',
+                channel: 'github-bot',
+                type: 'poll',
+                outcome: 'ok',
+                durationMs: 840,
+                detail: { notifications: 4 },
+              },
+              {
+                at: '2026-11-02T01:58:05.000Z',
+                channel: 'github-bot',
+                type: 'inbound',
+                outcome: 'accepted',
+                triggerKind: 'comment',
+                repository: 'QwenLM/qwen-code',
+                thread: 'pr:16117',
+                number: 16117,
+                actor: 'wenshao',
+              },
+              {
+                at: '2026-11-02T01:58:30.000Z',
+                channel: 'github-bot',
+                type: 'task',
+                outcome: 'running',
+                repository: 'QwenLM/qwen-code',
+                thread: 'pr:16117',
+                number: 16117,
+              },
+              {
+                at: '2026-11-02T01:59:10.000Z',
+                channel: 'github-bot',
+                type: 'outbound',
+                outcome: 'posted',
+                triggerKind: 'comment',
+                repository: 'QwenLM/qwen-code',
+                thread: 'pr:16117',
+                number: 16117,
+              },
+              {
+                at: '2026-11-02T02:00:00.000Z',
+                channel: 'github-bot',
+                type: 'inbound',
+                outcome: 'skipped',
+                reason: 'reason_filter',
+                triggerKind: 'ci_activity',
+                repository: 'QwenLM/qwen-code',
+                thread: 'issue:16171',
+                number: 16171,
+              },
+              {
+                at: '2026-11-02T02:01:00.000Z',
+                channel: 'github-bot',
+                type: 'inbound',
+                outcome: 'accepted',
+                triggerKind: 'mention',
+                repository: 'QwenLM/qwen-code',
+                thread: 'issue:16171',
+                number: 16171,
+                actor: 'contributor',
+              },
+              {
+                at: '2026-11-02T02:02:00.000Z',
+                channel: 'dingtalk',
+                type: 'inbound',
+                outcome: 'accepted',
+                thread: 'group-42',
+                actor: 'ada',
+              },
+            ],
+          },
+        });
+      });
+      await gotoSession(page, scenario, daemon, theme);
+
+      await page.getByRole('button', { name: 'Channel events' }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Channel events', level: 1 }),
+      ).toBeVisible();
+      const list = page.getByTestId('channel-events-list');
+      await expect(list).toBeVisible();
+      // Anchored assertions: the GitHub targets must render as links with the
+      // right web URLs, and the non-GitHub row must stay plain text.
+      await expect(
+        list
+          .getByRole('link', {
+            name: 'Open QwenLM/qwen-code#16117 on GitHub',
+          })
+          .first(),
+      ).toHaveAttribute(
+        'href',
+        'https://github.com/QwenLM/qwen-code/pull/16117',
+      );
+      await expect(
+        list
+          .getByRole('link', {
+            name: 'Open QwenLM/qwen-code#16171 on GitHub',
+          })
+          .first(),
+      ).toHaveAttribute(
+        'href',
+        'https://github.com/QwenLM/qwen-code/issues/16171',
+      );
+      await expect(list.getByRole('link')).toHaveCount(5);
+      await expect(list.getByText('group-42')).toBeVisible();
+      await captureScreenshot(page, `channel-events-github-links-${theme}`);
+    });
+
     test(`GitHub channel editor`, async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         capabilities: {
