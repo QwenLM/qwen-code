@@ -125,6 +125,7 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
       encoding: 'utf-8',
       mode: 0o600,
     });
+    chmodSync(tmp, 0o600);
     renameSync(tmp, path);
   }
 

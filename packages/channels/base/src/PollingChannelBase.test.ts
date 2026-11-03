@@ -234,6 +234,22 @@ describe('PollingChannelBase', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'tightens a pre-existing temp file before it becomes the cursor',
+    () => {
+      const poller = new TestPoller(
+        'stale-tmp',
+        { ...makeConfig(), cwd: '/tmp/ws-stale-tmp' },
+        makeBridge(),
+      );
+      const file = cursorFile('stale-tmp', '/tmp/ws-stale-tmp');
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(`${file}.tmp`, 'stale', { encoding: 'utf-8', mode: 0o644 });
+      poller.save();
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+    },
+  );
+
   it('saveCursor persists JSON to disk', () => {
     const poller = new TestPoller('persist', makeConfig(), makeBridge());
     poller.cursor = { ts: '2026-07-01T00:00:00.000Z', count: 42 };
