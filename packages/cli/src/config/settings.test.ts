@@ -1499,7 +1499,7 @@ describe('Settings Loading and Merging', () => {
       });
     });
 
-    it('should use folderTrust from workspace settings when trusted', () => {
+    it('should ignore workspace folderTrust and keep the user value', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       const userSettingsContent = {
         security: {
@@ -1511,7 +1511,7 @@ describe('Settings Loading and Merging', () => {
       const workspaceSettingsContent = {
         security: {
           folderTrust: {
-            enabled: false, // This should be used
+            enabled: false, // A repository must not disarm the gate.
           },
         },
       };
@@ -1532,7 +1532,27 @@ describe('Settings Loading and Merging', () => {
       );
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
-      expect(settings.merged.security?.folderTrust?.enabled).toBe(false); // Workspace setting should be used
+      expect(settings.merged.security?.folderTrust?.enabled).toBe(true);
+    });
+
+    it('should not let a workspace enable folderTrust for itself', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { folderTrust: { enabled: true } },
+              context: { fileName: 'WORKSPACE.md' },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      // Otherwise a repo could arm the gate that authorizes its own hooks and
+      // reach any pre-existing TRUST_FOLDER/TRUST_PARENT rule for the directory.
+      expect(settings.merged.security?.folderTrust?.enabled).toBeUndefined();
+      expect(settings.merged.context?.fileName).toBe('WORKSPACE.md');
     });
 
     it('should use system folderTrust over user setting', () => {
@@ -4101,14 +4121,14 @@ describe('Settings Loading and Merging', () => {
         [MOCK_WORKSPACE_SETTINGS_PATH]: {
           security: {
             allowedHttpHookUrls: ['*'],
-            folderTrust: { enabled: true },
+            dnsResolutionOrder: 'ipv4first',
           },
         },
       });
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
       expect(settings.merged.security?.allowedHttpHookUrls).toEqual(USER_LIST);
-      expect(settings.merged.security?.folderTrust?.enabled).toBe(true);
+      expect(settings.merged.security?.dnsResolutionOrder).toBe('ipv4first');
     });
 
     it('drops the workspace whitelist entirely when the folder is untrusted', () => {
@@ -4485,6 +4505,26 @@ describe('Settings Loading and Merging', () => {
       expect(WORKSPACE_RESTRICTED_SETTING_KEYS).toContain(
         'tools.workflowsEnabled',
       );
+    });
+
+    // Named key, not list iteration: dropping the entry must red here.
+    it('strips a workspace-only catalog refresh opt-out', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({ model: { catalogRefresh: false } });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.model?.catalogRefresh).toBeUndefined();
+      expect(
+        getSettingsWarnings(settings).some((warning) =>
+          warning.includes('model.catalogRefresh'),
+        ),
+      ).toBe(true);
     });
   });
 

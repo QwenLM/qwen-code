@@ -11,14 +11,16 @@ import {
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PollingChannelBase } from './PollingChannelBase.js';
+import { channelEventFilePath } from './channel-events.js';
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import type { ChannelConfig } from './types.js';
 
 const testHome = mkdtempSync(join(tmpdir(), 'poll-test-'));
 
-vi.mock('./paths.js', () => ({
-  getGlobalQwenDir: () => testHome,
-}));
+vi.mock('./paths.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./paths.js')>();
+  return { ...actual, getGlobalQwenDir: () => testHome };
+});
 
 afterAll(() => {
   rmSync(testHome, { recursive: true, force: true });
@@ -58,6 +60,7 @@ function makeBridge(): ChannelAgentBridge {
 class TestPoller extends PollingChannelBase<TestCursor> {
   pollCount = 0;
   shouldThrow = false;
+  errorMessage = 'poll failed';
 
   protected createInitialCursor(): TestCursor {
     return { ts: '2026-01-01T00:00:00.000Z', count: 0 };
@@ -69,7 +72,7 @@ class TestPoller extends PollingChannelBase<TestCursor> {
 
   protected async pollOnce(): Promise<void> {
     this.pollCount++;
-    if (this.shouldThrow) throw new Error('poll failed');
+    if (this.shouldThrow) throw new Error(this.errorMessage);
     this.cursor.count++;
     this.cursor.ts = new Date().toISOString();
   }
@@ -166,6 +169,35 @@ describe('PollingChannelBase', () => {
     stderrSpy.mockRestore();
   });
 
+  it('sanitizes the poll-error diagnostic against log-line forgery (R12-F3)', async () => {
+    const poller = new TestPoller('sanitize', makeConfig(), makeBridge());
+    poller.shouldThrow = true;
+    // A terminal poll error reaches the runLoop catch raw; an upstream/proxy
+    // error body can carry separators/ANSI that forge extra log lines.
+    poller.errorMessage =
+      'upstream boom\u2028[Channel:sanitize] preflight rejected reason=sender_denied\u001b[31mX';
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    poller.connect();
+    await vi.waitFor(() => {
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('backing off'),
+      );
+    });
+    poller.disconnect();
+    const line =
+      stderrSpy.mock.calls
+        .map((call) => String(call[0]))
+        .find((s) => s.includes('poll error')) ?? '';
+    stderrSpy.mockRestore();
+    expect(line).toContain('upstream boom');
+    // eslint-disable-next-line no-control-regex
+    expect(line).not.toMatch(/[\u2028\u2029\u0085\u001b]/);
+    expect(line.endsWith('\n')).toBe(true);
+    expect(line.slice(0, -1)).not.toContain('\n');
+  });
+
   it('uses configured pollInterval from config', () => {
     const poller = new TestPoller(
       'interval',
@@ -225,5 +257,71 @@ describe('PollingChannelBase', () => {
       .slice(0, 16);
     expect(files.some((f: string) => f.includes(h1))).toBe(true);
     expect(files.some((f: string) => f.includes(h2))).toBe(true);
+  });
+
+  it('records the detail produced by the same poll, not the previous one', async () => {
+    class DetailPoller extends PollingChannelBase<TestCursor> {
+      private readonly counts = [7, 2, 11];
+      private index = 0;
+
+      protected createInitialCursor(): TestCursor {
+        return { ts: '2026-01-01T00:00:00.000Z', count: 0 };
+      }
+
+      protected get pollInterval(): number {
+        return 1;
+      }
+
+      protected async pollOnce(): Promise<void> {
+        this.setPollEventDetail({
+          notifications: this.counts[this.index++]!,
+        });
+      }
+
+      async connect(): Promise<void> {
+        this.startPollLoop();
+      }
+
+      disconnect(): void {
+        this.stopPollLoop();
+      }
+
+      async sendMessage(): Promise<void> {}
+    }
+
+    vi.useFakeTimers();
+    const poller = new DetailPoller(
+      'detail-poller',
+      makeConfig(),
+      makeBridge(),
+    );
+    try {
+      poller.connect();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(1);
+      poller.disconnect();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const journal = readFileSync(
+      channelEventFilePath('detail-poller', '/tmp'),
+      'utf-8',
+    )
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            type: string;
+            detail?: { notifications?: number };
+          },
+      )
+      .filter((event) => event.type === 'poll');
+
+    expect(journal.map((event) => event.detail?.notifications)).toEqual([
+      7, 2, 11,
+    ]);
   });
 });

@@ -220,38 +220,31 @@ final class JournalStoreRows {
         // row stays with explicit publication paths so ordinary writes never
         // queue on it (#13800).
         ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId);
-        List<HeadRow> rows =
-                jdbc.query(
-                        "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
-                        headMapper,
-                        JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                        JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
-                        tenantId,
-                        sessionId);
+        return findHeadWithRootLocked(tenantId, sessionId);
+    }
+
+    private HeadRow findHeadWithRootLocked(String tenantId, String sessionId) {
+        var heads = jdbc.query(
+                "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
+                        + " tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
+                headMapper,
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId);
         ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
-        return rows.isEmpty() ? null : rows.get(0);
+        return heads.isEmpty() ? null : heads.getFirst();
+    }
+
+    HeadRow requireHeadWithRootLocked(String tenantId, String sessionId) {
+        HeadRow head = findHeadWithRootLocked(tenantId, sessionId);
+        if (head == null) {
+            throw sessionNotFound();
+        }
+        return head;
     }
 
     HeadRow requireHeartbeatHead(String tenantId, String sessionId) {
-        // An ordinary heartbeat holds no tenant fence (#13800): retirement
-        // serializes with it on the Session root, which the CSI check locked
-        // before its first consistent read, and on the head row, locked here
-        // before requireLive reads.
-        var heads =
-                jdbc.query(
-                        "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
-                            + " tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'"
-                            + " FOR UPDATE",
-                        headMapper,
-                        JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                        JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
-                        tenantId,
-                        sessionId);
-        ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
-        if (heads.isEmpty()) {
-            throw sessionNotFound();
-        }
-        return heads.getFirst();
+        // Preserve the standalone ordinary heartbeat's head-only locking contract.
+        return requireHeadWithRootLocked(tenantId, sessionId);
     }
 
     HeadRow requireHeadForUpdate(String tenantId, String sessionId) {
@@ -456,7 +449,7 @@ final class JournalStoreRows {
                                 + " p.publication_id WHERE p.tenant_id = ? AND p.workspace_id = ?"
                                 + " AND p.session_id = ? AND p.admission_resource_id = ? AND"
                                 + " p.producer_phase IN ('FINISHED', 'REFERENCED') AND"
-                                + " p.quarantined = FALSE AND o.slot_key = X'61646d697373696f6e'"
+                                + " p.is_quarantined = FALSE AND o.slot_key = X'61646d697373696f6e'"
                                 + " AND o.capture_state = 'VERIFIED' AND o.resource_id = ? AND"
                                 + " o.capture_object_key = ? AND o.sha256 = ? AND o.byte_length ="
                                 + " ?",
@@ -495,7 +488,7 @@ final class JournalStoreRows {
         if ("managed-tool-outcome".equals(resource.kind())) {
             Long quarantined = jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture"
                             + " WHERE tenant_id = ? AND workspace_id = ? AND session_id = ?"
-                            + " AND admission_resource_id = ? AND quarantined = TRUE",
+                            + " AND admission_resource_id = ? AND is_quarantined = TRUE",
                     Long.class, resource.tenantId(), resource.workspaceId(),
                     resource.sessionId(), resource.resourceId());
             if (quarantined != null && quarantined > 0) {
