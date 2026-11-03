@@ -33,6 +33,7 @@ export class SseObserver {
       readonly storeUrl: string;
       readonly tenantId: string;
       readonly timeoutMs: number;
+      readonly headers?: Readonly<Record<string, string>>;
     },
   ) {}
 
@@ -48,6 +49,7 @@ export class SseObserver {
       {
         method: surface === 'public' ? 'GET' : 'POST',
         headers: {
+          ...this.opts.headers,
           'X-Qwen-Tenant-Id': tenantId,
           Accept: 'text/event-stream',
           ...(surface === 'web' ? { 'Content-Type': 'application/json' } : {}),
@@ -191,7 +193,7 @@ export function projectEvents(
           ? Math.floor(Number(row['gmt_create']) / 1000)
           : row['gmt_create'],
       data: JSON.parse(String(row['data_json'])),
-      terminal: Boolean(row['terminal']),
+      terminal: Boolean(row['is_terminal']),
     };
     return Object.fromEntries(
       Object.entries(fields)

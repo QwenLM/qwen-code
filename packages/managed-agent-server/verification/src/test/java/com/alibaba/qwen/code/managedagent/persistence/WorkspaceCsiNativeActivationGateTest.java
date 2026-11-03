@@ -153,7 +153,7 @@ class WorkspaceCsiNativeActivationGateTest {
                 .startsWith("select latest_checkpoint_resource_id, harness_session_id from ma_session_head ");
         assertThat(replayHeads.get(2).sql()).contains("and harness_session_id = ? for update");
         assertThat(trace.successful("tenant", sessionId).stream().filter(event -> event.sql()
-                .startsWith("select tenant_id, session_id, csi_guard from ma_session "))).hasSize(1);
+                .startsWith("select tenant_id, session_id, is_csi_guard from ma_session "))).hasSize(1);
     }
 
     @Test
@@ -946,6 +946,9 @@ class WorkspaceCsiNativeActivationGateTest {
             env.put("QWEN_CODE_SYSTEM_DEFAULTS_PATH", directory.resolve("defaults.json").toString());
             env.put("OPENAI_API_KEY", "owned-dummy-key");
             env.put("OPENAI_MODEL", "owned-model");
+            // The owned model fixture must not send background usage analytics.
+            // Native managed-model usage and projection assertions remain enabled.
+            env.put("QWEN_USAGE_STATISTICS_ENABLED", "false");
             env.remove("OPENAI_BASE_URL");
         }
         Process process = builder.start();

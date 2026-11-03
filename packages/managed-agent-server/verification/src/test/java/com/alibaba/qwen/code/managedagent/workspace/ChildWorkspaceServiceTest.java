@@ -1172,24 +1172,27 @@ class ChildWorkspaceServiceTest {
 
     @Test
     void aStepWhoseClaimMovesOnStopsItsGit() throws Exception {
-        Path gate = Files.createFile(temp.resolve("gate"));
+        Path childPid = temp.resolve("gated-child");
         Path pid = temp.resolve("gated-pid");
         Path gated = temp.resolve("gated-git");
-        Files.writeString(gated, "#!/bin/sh\necho $$ > '" + pid + "'\nwhile [ -f '" + gate
-                + "' ]; do sleep 0.05; done\nexec git \"$@\"\n");
+        Files.writeString(gated, "#!/bin/sh\necho $$ > '" + pid + "'\nsleep 30 &\necho $! > '" + childPid
+                + "'\nwait\nexec git \"$@\"\n");
         assumeTrue(gated.toFile().setExecutable(true));
         ChildWorktreeGit gatedGit = new ChildWorktreeGit(gated.toString(), Duration.ofSeconds(60));
         warmer.provider = provider(root, Integer.MAX_VALUE, gatedGit);
         var parent = createSession("project");
         Row row = store.admit(parent.tenantId(), parent.sessionId(), "run-1", parent.workspace(), clock.get());
+        var worker = java.util.concurrent.Executors.newSingleThreadExecutor();
         try {
-            CompletableFuture<Row> step = CompletableFuture.supplyAsync(() -> service.drive(row));
+            var step = worker.submit(() -> service.drive(row));
             String key = storageKey(parent.workspace());
             // The step holds the storage and its first Git command waits at
             // the gate.
-            for (int wait = 0; wait < 500 && !Files.exists(pid); wait++) {
+            for (int wait = 0; wait < 500 && (!Files.exists(childPid) || Files.readString(childPid).isBlank()); wait++) {
                 sleep(10);
             }
+            assertThat(Files.readString(pid).strip()).matches("[0-9]+");
+            assertThat(Files.readString(childPid).strip()).matches("[0-9]+");
             assertThat(jdbc.queryForList("SELECT maintenance_id FROM ma_storage_owner"
                     + " WHERE storage_key = ? AND maintenance_id IS NOT NULL", String.class, key)).hasSize(1);
             // Another worker takes the row over. Done in SQL, not by waiting
@@ -1213,19 +1216,45 @@ class ChildWorkspaceServiceTest {
                 sleep(20);
             }
             assertThat(ProcessHandle.of(blocked).map(ProcessHandle::isAlive).orElse(false)).isFalse();
+            long blockedChild = Long.parseLong(Files.readString(childPid).strip());
+            assertThat(ProcessHandle.of(blockedChild).map(ProcessHandle::isAlive).orElse(false)).isFalse();
         } finally {
-            Files.deleteIfExists(gate);
-            gatedGit.close();
+            worker.shutdownNow();
+            try {
+                assertThat(worker.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            } finally {
+                gatedGit.close();
+            }
         }
+    }
+
+    @Test
+    void anUnverifiedGitStopRetainsItsStorageHolder() throws Exception {
+        var unverifiedGit = org.mockito.Mockito.mock(ChildWorktreeGit.class);
+        org.mockito.Mockito.doThrow(new ChildWorkspaceException(ChildWorkspaceException.STOP_UNVERIFIED, false,
+                "The original Git process tree has no confirmed stop proof"))
+                .when(unverifiedGit).runWhileLive(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+        warmer.provider = provider(root, Integer.MAX_VALUE, unverifiedGit);
+        var parent = createSession("project");
+        Row row = store.admit(parent.tenantId(), parent.sessionId(), "run-unverified", parent.workspace(), clock.get());
+
+        service.drive(row);
+
+        String key = storageKey(parent.workspace());
+        assertThat(jdbc.queryForList("SELECT holder_key FROM ma_storage_owner WHERE storage_key = ?",
+                String.class, key)).singleElement().isNotNull();
+        assertThat(jdbc.queryForList("SELECT maintenance_id FROM ma_storage_owner WHERE storage_key = ?"
+                + " AND maintenance_id IS NOT NULL", String.class, key)).hasSize(1);
+        assertThat(root.resolve(ChildWorktreeGit.CONTAINER)).doesNotExist();
     }
 
     @Test
     void theScanTheMigrationGateAndTheHoldSweepReadThroughIndexes() {
         // None of the three tables is pruned: each read must key on what it
         // filters, not scan the accumulated history.
-        assertThat(indexColumns("ma_operation", "ix_ma_operation_due"))
+        assertThat(indexColumns("ma_operation", "idx_ma_operation_due"))
                 .containsExactly("operation_kind", "delivery_state", "available_at");
-        assertThat(indexColumns("ma_operation", "ix_ma_operation_storage"))
+        assertThat(indexColumns("ma_operation", "idx_ma_operation_storage"))
                 .containsExactly("storage_key", "operation_kind", "state");
         assertThat(indexColumns("ma_storage_owner", "idx_execution_lease_maintenance"))
                 .containsExactly("maintenance_id");

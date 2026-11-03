@@ -49,7 +49,7 @@ public final class VerificationFixtures {
     public static void ownUnboundSession(org.springframework.jdbc.core.JdbcTemplate jdbc, String session,
             com.alibaba.qwen.code.managedagent.model.SessionPrincipal principal) {
         org.assertj.core.api.Assertions.assertThat(jdbc.update("INSERT INTO ma_session_principal"
-                + " (tenant_id,session_id,version,user_id,actor_present,actor_subject_id,gmt_create)"
+                + " (tenant_id,session_id,version,user_id,is_actor_present,actor_subject_id,gmt_create)"
                 + " SELECT tenant_id,session_id,1,?,?,?,gmt_create FROM ma_session"
                 + " WHERE tenant_id=? AND session_id=? AND workspace_id IS NULL",
                 principal.userId(), principal.actorPresent(), principal.actorSubjectId(),

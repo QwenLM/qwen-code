@@ -124,7 +124,7 @@ class ManagedSessionNativeReadTest {
         trace.assertOneTransaction("tenant", session);
         assertThat(trace.successful("tenant", session).stream().filter(StoreLockTrace.Event::mappedHead)).hasSize(headCount);
         assertThat(trace.successful("tenant", session).stream().filter(event -> event.sql()
-                .startsWith("select tenant_id, session_id, csi_guard from ma_session "))).hasSize(rootCount);
+                .startsWith("select tenant_id, session_id, is_csi_guard from ma_session "))).hasSize(rootCount);
     }
 
     @Test
@@ -137,7 +137,7 @@ class ManagedSessionNativeReadTest {
         assertThat(heads).hasSize(4);
         assertThat(heads.stream().map(event -> event.connection() + ":" + event.transaction()).distinct()).hasSize(4);
         assertThat(trace.successful("tenant", session).stream().filter(event -> event.sql()
-                .startsWith("select tenant_id, session_id, csi_guard from ma_session "))).hasSize(4);
+                .startsWith("select tenant_id, session_id, is_csi_guard from ma_session "))).hasSize(4);
         var history = readReceipts();
         assertThat(history).hasSize(2);
         assertThat(history).allSatisfy(row -> {

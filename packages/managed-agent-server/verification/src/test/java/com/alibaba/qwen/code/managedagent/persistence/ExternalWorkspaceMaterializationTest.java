@@ -282,7 +282,7 @@ class ExternalWorkspaceMaterializationTest {
                             .isEqualTo(new com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelection("yolo", 0));
                     assertThat(jdbc.queryForObject("SELECT approval_mode FROM ma_turn WHERE session_id=?", String.class, admitted.sessionId()))
                             .isEqualTo("yolo");
-                    assertThat(jdbc.queryForObject("SELECT plan_enabled FROM ma_turn WHERE session_id=?", Boolean.class, admitted.sessionId())).isFalse();
+                    assertThat(jdbc.queryForObject("SELECT is_plan_enabled FROM ma_turn WHERE session_id=?", Boolean.class, admitted.sessionId())).isFalse();
                 }
             }
             when(harness.supportsLifecycle(profile)).thenReturn(false);

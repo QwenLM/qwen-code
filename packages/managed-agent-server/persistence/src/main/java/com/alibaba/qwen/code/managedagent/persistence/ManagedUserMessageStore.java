@@ -119,7 +119,7 @@ public class ManagedUserMessageStore
                 String input = "edit".equals(command.action()) ? encode(input(tenant, session, command.input())) : null;
                 if (input == null && snapshot(tenant, session).messages().stream()
                         .anyMatch(message -> message.id().equals(command.messageId()) && "recovery_blocked".equals(message.state()))) {
-                    jdbc.update("UPDATE ma_user_message_queue SET paused = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
+                    jdbc.update("UPDATE ma_user_message_queue SET is_paused = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
                 }
                 // Keep a blocked claim's identity so a late durable receipt can still settle it.
                 int changed = input == null
@@ -143,7 +143,7 @@ public class ManagedUserMessageStore
                     throw conflict("user_message_recovery_blocked");
                 }
                 String turn = latestTurn(tenant, session).get("turnId");
-                jdbc.update("UPDATE ma_user_message_queue SET paused = FALSE, resumed_turn_id = ? WHERE tenant_id = ? AND session_id = ?",
+                jdbc.update("UPDATE ma_user_message_queue SET is_paused = FALSE, resumed_turn_id = ? WHERE tenant_id = ? AND session_id = ?",
                         turn, tenant, session);
             }
             default -> throw refusal("invalid_request", "Unknown user message action.");
@@ -177,7 +177,7 @@ public class ManagedUserMessageStore
         if (mismatches != null && mismatches > 0) {
             jdbc.update("UPDATE ma_user_message SET state = 'recovery_blocked' WHERE tenant_id = ? AND session_id = ? AND state = 'queued'",
                     tenant, session);
-            jdbc.update("UPDATE ma_user_message_queue SET paused = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
+            jdbc.update("UPDATE ma_user_message_queue SET is_paused = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
             return List.of();
         }
         jdbc.update("UPDATE ma_user_message SET state = 'claimed', turn_id = ?, prompt_id = ? WHERE tenant_id = ?"
@@ -190,7 +190,7 @@ public class ManagedUserMessageStore
         return jdbc.query("SELECT DISTINCT m.tenant_id, m.session_id, q.last_dispatch_at FROM ma_user_message m JOIN ma_session s"
                 + " ON s.tenant_id = m.tenant_id AND s.session_id = m.session_id JOIN ma_user_message_queue q"
                 + " ON q.tenant_id = m.tenant_id AND q.session_id = m.session_id WHERE s.status = 'ACTIVE'"
-                + " AND q.paused = FALSE AND m.state = 'queued' AND NOT EXISTS (SELECT 1 FROM ma_turn t"
+                + " AND q.is_paused = FALSE AND m.state = 'queued' AND NOT EXISTS (SELECT 1 FROM ma_turn t"
                 + " WHERE t.tenant_id = m.tenant_id AND t.session_id = m.session_id AND t.status IN ('ACCEPTED', 'RUNNING', 'CANCELLING', 'RECOVERY_BLOCKED'))"
                 + " AND NOT EXISTS (SELECT 1 FROM ma_user_message blocked WHERE blocked.tenant_id = m.tenant_id"
                 + " AND blocked.session_id = m.session_id AND blocked.state IN ('claimed', 'recovery_blocked'))"
@@ -226,7 +226,7 @@ public class ManagedUserMessageStore
                 + " AND state = 'queued' AND COALESCE(context_revision, -1) <> COALESCE(?, -1)", Integer.class, tenant, session, context);
         if (mismatches != null && mismatches > 0) {
             jdbc.update("UPDATE ma_user_message SET state = 'recovery_blocked' WHERE tenant_id = ? AND session_id = ? AND state = 'queued'", tenant, session);
-            jdbc.update("UPDATE ma_user_message_queue SET paused = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
+            jdbc.update("UPDATE ma_user_message_queue SET is_paused = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
             return;
         }
         Message first = snapshot.messages().getFirst();
@@ -341,7 +341,7 @@ public class ManagedUserMessageStore
             String resumed = jdbc.queryForObject("SELECT resumed_turn_id FROM ma_user_message_queue WHERE tenant_id = ? AND session_id = ?",
                     String.class, tenant, session);
             if (!Objects.equals(resumed, turn.get("turnId"))) {
-                jdbc.update("UPDATE ma_user_message_queue SET paused = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
+                jdbc.update("UPDATE ma_user_message_queue SET is_paused = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
             }
         }
         jdbc.update("UPDATE ma_user_message SET state = 'recovery_blocked' WHERE tenant_id = ? AND session_id = ? AND state = 'claimed'"
@@ -350,7 +350,7 @@ public class ManagedUserMessageStore
     }
 
     private Snapshot snapshot(String tenant, String session) {
-        boolean paused = Boolean.TRUE.equals(jdbc.queryForObject("SELECT paused FROM ma_user_message_queue"
+        boolean paused = Boolean.TRUE.equals(jdbc.queryForObject("SELECT is_paused FROM ma_user_message_queue"
                 + " WHERE tenant_id = ? AND session_id = ?", Boolean.class, tenant, session));
         List<Message> messages = read(tenant, session, "state IN ('queued', 'claimed', 'recovery_blocked')");
         return new Snapshot(paused || messages.stream().anyMatch(message -> "recovery_blocked".equals(message.state())), messages);

@@ -678,14 +678,14 @@ final class AgentExecutionOperations {
                                     + " <= ? AND EXISTS (SELECT 1 FROM ma_session private_scope"
                                     + " WHERE private_scope.tenant_id = ma_operation.tenant_id AND"
                                     + " private_scope.session_id = ma_operation.session_id AND"
-                                    + " private_scope.csi_guard = FALSE) ORDER BY available_at"
+                                    + " private_scope.is_csi_guard = FALSE) ORDER BY available_at"
                                     + " LIMIT ?",
                                 lifecycleOperations.operationTargetMapper,
                                 now,
                                 limit));
         if (targets.size() < limit) {
             targets.addAll(jdbc.query(
-                            "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE operation_kind = 'TASK_CANCEL' AND delivery_state = 'LEASED' AND claim_until < " + ManagedSchemaTime.SQL_NOW + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.csi_guard = FALSE) ORDER BY claim_until LIMIT ?",
+                            "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE operation_kind = 'TASK_CANCEL' AND delivery_state = 'LEASED' AND claim_until < " + ManagedSchemaTime.SQL_NOW + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.is_csi_guard = FALSE) ORDER BY claim_until LIMIT ?",
                     lifecycleOperations.operationTargetMapper, limit - targets.size()));
         }
         return List.copyOf(targets);
@@ -700,7 +700,7 @@ final class AgentExecutionOperations {
                     + " 'RECOVERY_BLOCKED' AND available_at <= ? AND delivery_state = 'BLOCKED'"
                     + " AND EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id ="
                     + " ma_operation.tenant_id AND s.session_id = ma_operation.session_id AND"
-                    + " s.csi_guard = FALSE) ORDER BY available_at LIMIT ?",
+                    + " s.is_csi_guard = FALSE) ORDER BY available_at LIMIT ?",
                 (result, row) -> new ParkedOperation(result.getString("tenant_id"),
                         result.getString("session_id"), result.getString("operation_id"),
                         result.getString("operation_kind")),

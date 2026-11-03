@@ -47,3 +47,11 @@ Workspace 的 rename key 保持租户范围：operator 对自己可操作的绑�
 CI85959174 确认先杀 Git 父进程会使原子进程在 PID1 下成为僵尸。先停止已观测叶子，保留其父进程回收机会，持续补查根与已知存活父进程，并将原 ProcessHandle 全部纳入最终停止证明。子进程回收与根进程停止共用一个两秒截止时间，run 的 finally 不再开启第二轮停止预算。清理尽力发送全部已知停止信号，即使失败仍恢复线程中断位；无法证明停止继续返回 STOP_UNVERIFIED 并保留维护 holder。新增多层子进程中断回归，要求原 PID 全部消失、中断位保留；中断 checkout fixture 保留部分文件及拒绝收养断言。
 
 两例原生 CSI fixture 已完成生成，却未在30s内退出。collector 先停止接收新连接，再关闭现有连接，之后等待关闭回调；清理阶段及资源类型日志区分 collector 等待与导入资源残留。保留幂等 store 清理、30s/exit0 门禁及全部字节和投影断言。本增量已实现、等待 CI，不引入数据库、鉴权、归属或超时例外。
+
+## 最新上游同步（2026-11-04）
+
+用户要求再次更新 Managed Agent Server。固定 canonical main da42e5714ad0238c4d49bc31e3ede99314397083，包含结构规范化、Workspace 执行脱离租户锁和并发上传。Java SDK 源码树仍为 e8e54635e6f70bcc85d71ff52ad05341b138350d。保留私有 principal 归属、外部 Workspace 回执及 shared dispatch，不替换为另一份旧 preview。
+
+合并后的基线严格等于上游38表 DDL 加 ma_session_principal、EXTERNAL_WORKSPACE 回执准入及 shared_dispatch_class 三项扩展。共39个自增行标识、76条 CHECK，无物理外键。按上游要求，ma_session 和 ma_tenant_guard 保留业务主键；其余表（含私有 principal 表）以 id 为主键，单独保留业务唯一键。id 均为最后一个物理列。Inventory 暴露818个业务列，排除39个 id，共857个物理列；二进制业务身份及大小写语义保持。独立预发库必须再次核对结构后才能部署此修订，先前21ed基线不代表当前验收。DDL 前检查行数、严格 SQL mode 及负数、布尔和转换条件，保留 Flyway 历史与全部既有数据。
+
+失去 claim 的稳定子进程 fixture 保留原有存储释放断言，并核对父子均停止；显式注入停止未证实错误时保留 holder。CSI 模型 fixture 仅关闭既有后台使用统计，原生 usage 资源及投影检查保留。Hosted 公共 SSE observer 转发与 JSON 请求相同的可信 actor，帧、崩溃、重放及单终态断言不变。本增量须由 CI 验证，不重新开启本地原生验证预算。

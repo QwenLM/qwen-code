@@ -164,7 +164,7 @@ final class AgentSessionQueries {
                                             row.getString("session_id"),
                                             row.getString("parent_session_id"),
                                             row.getString("workspace_id"),
-                                            (Long) row.getObject("workspace_generation"),
+                                            row.getObject("workspace_generation", Long.class),
                                             row.getString("workspace_storage_id"),
                                             row.getBoolean("creator_can_execute")),
                             arguments.toArray());
@@ -266,7 +266,7 @@ final class AgentSessionQueries {
                     + " ma_session.tenant_id AND sp.session_id ="
                     + " ma_session.session_id AND sp.version = "
                     + ManagedSessionPrincipal.VERSION
-                    + " AND sp.user_id = ? AND sp.actor_present = ? AND"
+                    + " AND sp.user_id = ? AND sp.is_actor_present = ? AND"
                     + " (sp.actor_subject_id = ? OR"
                     + " (sp.actor_subject_id IS NULL AND ? IS NULL)))";
             arguments.add(principal.userId());
@@ -491,10 +491,10 @@ final class AgentSessionQueries {
         args.addAll(sessionIds);
         Map<String, WebShellApprovalSelection> result = new HashMap<>();
         jdbc.query("SELECT session_id, COALESCE(selected_approval_mode, approval_mode) AS mode,"
-                        + " approval_revision, plan_enabled, permission_rules_json FROM ma_session WHERE tenant_id=? AND session_id IN ("
+                        + " approval_revision, is_plan_enabled, permission_rules_json FROM ma_session WHERE tenant_id=? AND session_id IN ("
                         + AgentStoreRows.placeholders(sessionIds.size()) + ") AND session_kind='PUBLIC'",
                 row -> { result.put(row.getString("session_id"), new WebShellApprovalSelection(
-                        row.getString("mode"), row.getLong("approval_revision"), row.getBoolean("plan_enabled"),
+                        row.getString("mode"), row.getLong("approval_revision"), row.getBoolean("is_plan_enabled"),
                         storeRows.readPermissionRules(row.getString("permission_rules_json")))); }, args.toArray());
         return result;
     }
@@ -514,7 +514,7 @@ final class AgentSessionQueries {
 
     WebShellApprovalSelection findTurnApprovalSelection(String tenantId, String sessionId,
             String promptId) {
-        var rows = jdbc.query("SELECT t.approval_mode, t.approval_revision, t.plan_enabled, t.permission_rules_json,"
+        var rows = jdbc.query("SELECT t.approval_mode, t.approval_revision, t.is_plan_enabled, t.permission_rules_json,"
                         + " s.approval_revision AS selected_revision, s.agent_id, s.agent_definition_digest,"
                         + " s.workspace_id, s.tool_profile, s.parent_session_id, s.public_child_agents_version FROM ma_turn t JOIN ma_session s"
                         + " ON s.tenant_id=t.tenant_id AND s.session_id=t.session_id"
@@ -536,7 +536,7 @@ final class AgentSessionQueries {
                     }
                     // Legacy prompt replays must preserve the original absence of a selection.
                     return mode == null ? null : new WebShellApprovalSelection(mode, row.getLong("approval_revision"),
-                            row.getBoolean("plan_enabled"), storeRows.readPermissionRules(row.getString("permission_rules_json")));
+                            row.getBoolean("is_plan_enabled"), storeRows.readPermissionRules(row.getString("permission_rules_json")));
                 }, tenantId, sessionId, promptId);
         if (rows.size() != 1) {
             throw new ManagedAgentException(409, "turn_not_found", "The Turn was not found");

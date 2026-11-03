@@ -53,7 +53,7 @@ public final class StoreLockTrace extends DelegatingDataSource {
             return table(sql, "ma_session")
                     && (sql.startsWith("insert into ma_session ")
                             || sql.startsWith("update ma_session ")
-                            || sql.contains("for update") && !sql.contains("csi_guard = true"));
+                            || sql.contains("for update") && !sql.contains("is_csi_guard = true"));
         }
 
         boolean turn() {

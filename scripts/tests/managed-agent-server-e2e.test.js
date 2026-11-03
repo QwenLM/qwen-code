@@ -1266,12 +1266,16 @@ describe('managed-agent-server e2e runner', () => {
     }
     const capture = await loadSse(DrainingObserver)('http://spring', 'sess', {
       tenantId: 't',
+      headers: { 'X-Qwen-Test-Actor': 'actor' },
       after: 0,
       until: (events) => events.some((event) => event.terminal),
       timeoutMs: 5_000,
       drainMs: 100,
     });
     expect(DrainingObserver.last.startedWith).toBe(0);
+    expect(DrainingObserver.last.opts.headers).toEqual({
+      'X-Qwen-Test-Actor': 'actor',
+    });
     expect(capture.events.filter((event) => event.terminal)).toHaveLength(2);
     expect(capture.lastId).toBe('2');
     // Last-Event-ID is converted to the observer's numeric after.
@@ -1395,14 +1399,22 @@ describe('managed-agent-server e2e runner', () => {
       storeUrl: 'http://spring',
       tenantId: 't',
       timeoutMs: 5_000,
+      headers: { 'X-Qwen-Test-Actor': 'actor' },
     };
     const stream =
       'id: 1\nevent: item.output_text.delta\ndata: {"sequence":1,"type":"item.output_text.delta","data":{"text":"A"}}\n\n' +
       'id: 2\nevent: turn.completed\ndata: {"sequence":2,"type":"turn.completed","terminal":true}\n\n';
-    vi.stubGlobal('fetch', async () => sseResponse(chunksOf(stream, 1)));
+    const fetch = vi.fn(async () => sseResponse(chunksOf(stream, 1)));
+    vi.stubGlobal('fetch', fetch);
     const observer = new SseObserver(opts);
     await observer.start(0);
     await observer.task;
+    expect(fetch.mock.calls[0][1].headers).toMatchObject({
+      'X-Qwen-Tenant-Id': 't',
+      'X-Qwen-Test-Actor': 'actor',
+      Accept: 'text/event-stream',
+      'Last-Event-ID': '0',
+    });
     expect(observer.failure).toBeUndefined();
     expect(observer.frames.map((frame) => frame.id)).toEqual([1, 2]);
     expect(observer.frames[0].data.data.text).toBe('A');
