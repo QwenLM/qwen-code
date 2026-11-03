@@ -173,10 +173,27 @@ test('the sidebar New session keeps the primary workspace route on a capable dae
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario({
     capabilities: { features: standaloneFeatures },
+    standaloneSessions: [
+      standaloneSummary(
+        '11111111-1111-4111-8111-111111111111',
+        'Existing standalone conversation',
+      ),
+    ],
   });
   const daemon = await installScenario(page, scenario, testInfo);
 
   await gotoNewTask(page);
+  await expect(
+    page
+      .getByTestId('standalone-active-group')
+      .getByText('Existing standalone conversation', {
+        exact: true,
+      }),
+  ).toBeVisible();
+  const standaloneReadsBeforeCreate = daemon.requests.filter(
+    (request) =>
+      request.method === 'GET' && request.path === '/standalone/sessions',
+  ).length;
   await fillComposer(page, 'Start a workspace conversation');
   await page.locator('[data-web-shell-composer-submit]').click();
 
@@ -186,6 +203,23 @@ test('the sidebar New session keeps the primary workspace route on a capable dae
   );
   expect(requestBody(create)['cwd']).toBe(scenario.workspaceCwd);
   expect(standaloneCreates(daemon)).toEqual([]);
+
+  const sessionId = scenario.sessionId;
+  await daemon.sse.waitForConnection(sessionId);
+  await daemon.sendEvent(replayCompleteEvent({ sessionId }));
+  await waitForRequest(
+    daemon,
+    (request) => request.path === `/session/${sessionId}/prompt`,
+  );
+  await expect(
+    page.getByRole('button', { name: 'esc to cancel' }),
+  ).toBeVisible();
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === 'GET' && request.path === '/standalone/sessions',
+    ),
+  ).toHaveLength(standaloneReadsBeforeCreate);
 });
 
 test('keeps workspace navigation reachable inside a standalone chat @smoke', async ({

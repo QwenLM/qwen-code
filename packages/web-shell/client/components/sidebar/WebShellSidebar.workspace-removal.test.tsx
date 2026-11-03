@@ -7136,6 +7136,46 @@ describe('WebShellSidebar standalone grouping', () => {
     expect(listStandaloneSessionsPage).not.toHaveBeenCalled();
   });
 
+  it('starts one standalone draft without refreshing the list from the group header', async () => {
+    const standaloneCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'standalone_sessions_v1'],
+    };
+    connection.capabilities = standaloneCapabilities;
+    workspace.capabilities = standaloneCapabilities;
+    listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'standalone-existing',
+          displayName: 'Existing standalone conversation',
+          context: { kind: 'standalone' },
+        },
+      ],
+    });
+    const onNewStandaloneSession = vi.fn(() => true);
+    const onNewSession = vi.fn(() => false);
+    renderSidebar({
+      onNewStandaloneSession,
+      onNewSession,
+      onLoadStandaloneSession: vi.fn(),
+      onStandaloneNotice: vi.fn(),
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const newSession = container.querySelector<HTMLButtonElement>(
+      '[data-testid="standalone-active-group"] button[aria-label="New session"]',
+    );
+    expect(newSession).not.toBeNull();
+    const readsBeforeDraft = listStandaloneSessionsPage.mock.calls.length;
+
+    await act(async () => click(newSession!));
+
+    expect(onNewStandaloneSession).toHaveBeenCalledOnce();
+    expect(onNewSession).not.toHaveBeenCalled();
+    expect(listStandaloneSessionsPage).toHaveBeenCalledTimes(readsBeforeDraft);
+  });
+
   it('keeps project lists mounted while Projects is collapsed', async () => {
     window.localStorage.setItem(
       'qwen.web-shell.sidebar.workspace-expanded:recent-sessions',
