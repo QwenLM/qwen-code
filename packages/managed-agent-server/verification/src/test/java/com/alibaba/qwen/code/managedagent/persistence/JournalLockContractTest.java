@@ -1,0 +1,143 @@
+package com.alibaba.qwen.code.managedagent.persistence;
+
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.*;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import org.apache.commons.codec.digest.DigestUtils;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import javax.sql.DataSource;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+import java.util.List;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+class JournalLockContractTest {
+    private static final String TENANT = "journal-tenant";
+    private static final String SESSION = "journal-session";
+    private static final String TOKEN = "a".repeat(32);
+    protected StoreLockTrace trace;
+    private ManagedSessionStore raw;
+    private ManagedSessionStore proxy;
+    private TransactionTemplate transactions;
+    private int notifications;
+
+    protected DataSource dataSource() {
+        return new DriverManagerDataSource("jdbc:h2:mem:journal-lock-" + UUID.randomUUID()
+                + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1", "sa", "");
+    }
+
+    @BeforeEach
+    void setUp() {
+        trace = new StoreLockTrace(dataSource());
+        ManagedSchema.initialize(trace);
+        var jdbc = new ManagedSchemaJdbcTemplate(trace);
+        raw = VerificationFixtures.managedSessionStore(jdbc, new ManagedExtensionRecordStore(jdbc),
+                null, null, null, null, null, bytes -> {
+                    assertThat(trace.events()).anyMatch(event -> event.phase() == StoreLockTrace.Phase.COMMIT);
+                    notifications++;
+                }, com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
+        proxy = AgentLockContractTest.transactional(raw, trace);
+        transactions = new TransactionTemplate(new DataSourceTransactionManager(trace));
+        proxy.acquireWriter(TENANT, SESSION, TOKEN, new AcquireWriterRequest("workspace", "writer", 60_000L));
+        trace.clear();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"commit", "seal", "block", "publication", "tool-result", "renew"})
+    void journalEntriesUseOneRootAndHeadInTheSameTransaction(String route) {
+        switch (route) {
+            case "commit" -> proxy.commit(TENANT, SESSION, TOKEN, genesis());
+            case "seal" -> proxy.sealWriter(TENANT, SESSION, TOKEN, new SealWriterRequest("workspace", "writer", 1));
+            case "block" -> proxy.blockRecovery(TENANT, SESSION, TOKEN,
+                    new BlockRecoveryRequest("workspace", "writer", 1, "BLOCKED_EXECUTION", "failure"));
+            case "publication" -> transactions.execute(status -> raw.lockPublicationWriter(TENANT, "workspace", SESSION, "writer", 1, TOKEN));
+            case "tool-result" -> proxy.publishToolResult(TENANT, SESSION, TOKEN,
+                    new PublishToolResultRequest("workspace", "writer", 1, "result", "managed-tool-result-content", 1,
+                            1, DigestUtils.sha256Hex(new byte[] {1}), "AQ=="));
+            case "renew" -> proxy.renewWriter(TENANT, SESSION, TOKEN, new RenewWriterRequest("workspace", "writer", 1, 60_000L));
+            default -> throw new IllegalArgumentException(route);
+        }
+        trace.assertRootBeforeHead(TENANT, SESSION);
+        trace.assertOneTransaction(TENANT, SESSION);
+        assertThat(heads()).isEqualTo(1);
+        assertThat(roots()).isEqualTo(1);
+    }
+
+    @Test
+    void ordinaryReplayReturnsBeforeLockingTheHead() {
+        proxy.commit(TENANT, SESSION, TOKEN, genesis());
+        trace.clear();
+        assertThat(proxy.commit(TENANT, SESSION, TOKEN, genesis()).replayed()).isTrue();
+        assertThat(heads()).isZero();
+        assertThat(notifications).isEqualTo(1);
+        assertThat(roots()).isEqualTo(1);
+    }
+
+    @Test
+    void standaloneStillPerformsItsRootRead() {
+        raw.sealWriter(TENANT, SESSION, TOKEN, new SealWriterRequest("workspace", "writer", 1));
+        assertThat(roots()).isEqualTo(1);
+        assertThat(heads()).isEqualTo(1);
+        assertThat(trace.successful(TENANT, SESSION)).allMatch(StoreLockTrace.Event::autoCommit);
+    }
+
+    @Test
+    void anUnrelatedTransactionDoesNotProveTheAutocommitConnectionHoldsRoot() {
+        var business = new DriverManagerDataSource("jdbc:h2:mem:business-" + UUID.randomUUID(), "sa", "");
+        var external = new TransactionTemplate(new DataSourceTransactionManager(business));
+        external.executeWithoutResult(status -> raw.sealWriter(TENANT, SESSION, TOKEN,
+                new SealWriterRequest("workspace", "writer", 1)));
+        assertThat(roots()).isEqualTo(2);
+        assertThat(heads()).isEqualTo(1);
+        assertThat(trace.successful(TENANT, SESSION)).allMatch(StoreLockTrace.Event::autoCommit);
+    }
+
+    @Test
+    void rollbackReacquiresTheRootAndOldWritersAreRefused() {
+        transactions.executeWithoutResult(status -> {
+            proxy.commit(TENANT, SESSION, TOKEN, genesis());
+            assertThat(notifications).isZero();
+            status.setRollbackOnly();
+        });
+        assertThat(trace.events()).anyMatch(event -> event.phase() == StoreLockTrace.Phase.ROLLBACK);
+        assertThat(notifications).isZero();
+        trace.clear();
+        assertThat(proxy.commit(TENANT, SESSION, TOKEN, genesis()).replayed()).isFalse();
+        assertThat(notifications).isEqualTo(1);
+        trace.assertRootBeforeHead(TENANT, SESSION);
+        trace.clear();
+        assertThatThrownBy(() -> proxy.renewWriter(TENANT, SESSION, "b".repeat(32),
+                new RenewWriterRequest("workspace", "writer", 1, 60_000L))).isInstanceOf(RuntimeException.class);
+        trace.assertRootBeforeHead(TENANT, SESSION);
+    }
+
+    private long roots() {
+        return trace.successful(TENANT, SESSION).stream().filter(event -> event.sql().startsWith("select tenant_id, session_id, csi_guard from ma_session ")).count();
+    }
+
+    private long heads() {
+        return trace.successful(TENANT, SESSION).stream().filter(StoreLockTrace.Event::mappedHead).count();
+    }
+
+    static CommitTransactionRequest genesis() {
+        String records = "{\"subtype\":\"session_execution_engine\"}\n{\"subtype\":\"managed_session_header_v1\"}\n";
+        byte[] bytes = records.getBytes(StandardCharsets.UTF_8);
+        String digest = DigestUtils.sha256Hex(bytes);
+        byte[] resource = "context".getBytes(StandardCharsets.UTF_8);
+        return new CommitTransactionRequest("workspace", "writer", 1, 0, 0, "transaction", "session.create", "command", digest,
+                0, 0, 0, null, null, null, 0, null, 2, Base64.getEncoder().encodeToString(bytes), digest,
+                List.of(new CommitResource("context", "managed-context", 1, resource.length,
+                        DigestUtils.sha256Hex(resource), Base64.getEncoder().encodeToString(resource))));
+    }
+}

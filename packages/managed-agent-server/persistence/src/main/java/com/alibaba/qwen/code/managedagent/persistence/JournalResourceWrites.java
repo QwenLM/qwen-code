@@ -148,7 +148,7 @@ final class JournalResourceWrites {
         if (csiOriginal != null) {
             csiOriginal.requireContinuation();
         }
-        JournalStoreRows.HeadRow head = storeRows.requireHeadForUpdate(tenantId, sessionId);
+        JournalStoreRows.HeadRow head = fencing.requireHeadAfterCsiCheck(tenantId, sessionId);
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         // Unlike the other writer paths, a v2 claim fences this lane even
         // for the claiming lifecycle authority: tool results are never

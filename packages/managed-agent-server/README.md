@@ -1,6 +1,6 @@
 # Qwen Managed Agent Server
 
-The application lives in `packages/managed-agent-server`, alongside the Java SDK. It builds as one Maven reactor with six production modules and a verification module. The executable remains one Spring Boot service. Install the Java SDK before building the reactor; see [Runtime Broker internals](docs/runtime-broker.md).
+The application lives in `packages/managed-agent-server`, alongside the Java SDK. It builds as one Maven reactor with thirteen production modules and a verification module. The executable remains one Spring Boot service. Install the Java SDK before building the reactor; see [Runtime Broker internals](docs/runtime-broker.md).
 
 Every configuration property, with its environment variable and default, is listed in the [configuration reference](../../docs/users/managed-agent-configuration-reference.md). It is generated from this module's configuration metadata and the descriptions in `configuration-descriptions.json`; a new property needs a description there, and a settings class declared outside `ManagedAgentProperties` needs `@NestedConfigurationProperty` on its field, or the metadata leaves it out.
 
@@ -95,17 +95,24 @@ remain closed to execution; startup does not re-register or repair them.
 
 ## Maven modules and Java packages
 
-| Module           | Responsibility                                                                          | Internal dependencies      |
-| ---------------- | --------------------------------------------------------------------------------------- | -------------------------- |
-| `contracts`      | Service and repository interfaces, shared values, settings views and protocol rules     | None                       |
-| `control-plane`  | Session, Workspace, catalog, lifecycle, Channel, automation and extension orchestration | `contracts`                |
-| `runtime-broker` | Runtime execution, binding, leases, cancellation and recovery coordination              | `contracts`                |
-| `persistence`    | JDBC/memory repositories, schema and atomic database operations                         | `contracts`                |
-| `adapters`       | Harness SDK, Runtime providers, HTTP clients, OSS, MQ, Git and filesystem operations    | `contracts`                |
-| `server`         | HTTP endpoints, Spring assembly, startup and maintenance entry points                   | All five modules           |
-| `verification`   | Unit, integration, architecture and packaging tests; not published                      | All six production modules |
+| Module               | Responsibility                                                                          | Internal dependencies                          |
+| -------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `contracts`          | Service and repository interfaces, shared values, settings views and protocol rules     | None                                           |
+| `control-plane`      | Session, Workspace, catalog, lifecycle, Channel, automation and extension orchestration | `contracts`                                    |
+| `runtime-broker`     | Runtime execution, routing, binding, leases, cancellation and recovery coordination     | `contracts`                                    |
+| `persistence`        | JDBC/memory repositories, schema and atomic database operations                         | `contracts`                                    |
+| `runtime-http`       | Shared Runtime HTTP transport                                                           | `contracts`                                    |
+| `runtime-host`       | Native identity, bounded host processes and private state files                         | `contracts`                                    |
+| `runtime-local`      | Local process provider and factory                                                      | `contracts`, `runtime-http`, `runtime-host`    |
+| `runtime-external`   | External scratch/workspace providers and factory                                        | `contracts`, `runtime-http`                    |
+| `runtime-kubernetes` | Kubernetes resident/CSI provider and maintenance capability                             | `contracts`, `runtime-http`                    |
+| `runtime-ssh`        | SSH provider, connection manager and factory                                            | `contracts`, `runtime-http`, `runtime-host`    |
+| `runtime-static`     | Pre-attested static Runtime provider and factory                                        | `contracts`                                    |
+| `adapters`           | Harness SDK, OSS, MQ, Git and filesystem operations                                     | `contracts`, `runtime-http`, `runtime-host`    |
+| `server`             | HTTP endpoints, Spring assembly, startup and maintenance entry points                   | Shared modules; optional runtime provider JARs |
+| `verification`       | Unit, integration, architecture and packaging tests; not published                      | All thirteen production modules                |
 
-The parent coordinate is `com.alibaba:qwen-managed-agent-parent`. All modules share its version; the server keeps `com.alibaba:qwen-managed-agent-server`. Each production Java package belongs to one module. Keep implementation modules independent of one another: their collaboration uses contracts injected by server configuration. SQL helpers sharing a connection remain in `managedagent.persistence` or `runtimebroker.persistence`. The Broker service lives in `runtimebroker.service`; physical clients and providers live in the adapter module. Maintenance applications retain their separate component scan.
+The parent coordinate is `com.alibaba:qwen-managed-agent-parent`. All modules share its version; the server keeps `com.alibaba:qwen-managed-agent-server`. Each production Java package belongs to one module. Orchestration and persistence collaborate through contracts; provider implementations share the narrow HTTP and host-I/O modules. The server compiles without any backend implementation classes. Backend modules do not depend on each other; routing stays in `runtime-broker`. SQL helpers sharing a connection remain in `managedagent.persistence` or `runtimebroker.persistence`. The Broker service lives in `runtimebroker.service`; physical clients and providers live in their owning adapter or provider modules. Maintenance applications retain their separate component scan.
 
 Only `server` creates executable JARs. Its ordinary library JAR and the existing `exec` and maintenance classifiers are under `server/target/`. Dependencies are ordinary JARs nested under `BOOT-INF/lib` in executable artifacts. Install the reactor before using the server POM directly or embedding the library in another Maven project:
 
@@ -114,7 +121,15 @@ mvn -pl server -am -DskipTests install
 mvn -f server/pom.xml spring-boot:run
 ```
 
-Embedding imports `ManagedAgentConfiguration`; internal callbacks additionally import `ManagedAgentInternalConfiguration`. The standalone application also enables the public web configuration. Add the ordinary server artifact as the dependency; Maven resolves the other five modules transitively. The verification module is never installed or deployed. The standalone application YAML is excluded from the ordinary library JAR.
+Embedding imports `ManagedAgentConfiguration`; internal callbacks additionally import `ManagedAgentInternalConfiguration`. The standalone application also enables the public web configuration. Add the ordinary server artifact as the dependency; Maven resolves the shared modules transitively. All five backend providers are optional runtime dependencies: an embedding host must explicitly add its chosen `com.alibaba:qwen-managed-agent-runtime-{local,ssh,kubernetes,external,static}` coordinates at the same version. Maven still resolves all five when building the standalone server, but does not propagate them to library consumers. The verification module is never installed or deployed. The standalone application YAML is excluded from the ordinary library JAR.
+
+Runtime factories are discovered through `META-INF/services/com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory`. The default executable and operator artifacts include all five backend JARs. A library host can omit all backends when its Broker is disabled, or select a single provider. `runtime-broker.provisioner` supports `local-process`, `ssh-process`, `kubernetes-workspace`, `external-scratch`, `external-workspace` and `static`; existing built-in settings and persisted identities are unchanged. Only the selected factory validates its configuration and creates resources. Missing providers and duplicate kinds fail explicitly.
+
+Backend selection for embedding is ordinary Maven dependency selection. For example, a host using Kubernetes adds `qwen-managed-agent-server` and `qwen-managed-agent-runtime-kubernetes` at the same version; no exclusions for Local, SSH, External or Static are needed. A host using Local+SSH adds both corresponding backend artifacts. Packaged availability and enabled configuration are separate: only the configured backend is initialized, with Local+SSH as the supported routing combination. The default standalone and operator artifacts continue to contain every backend. Selective standalone builds and archives are outside this change.
+
+To add a compatible provider, compile its factory against `qwen-managed-agent-contracts`, implement `RuntimeProviderFactory`, register its fully qualified class name in that service file, and add the JAR to the host application's runtime classpath. Select its exact kind with `qwen.managed-agent.runtime-broker.provisioner`; bind additional string settings under `qwen.managed-agent.runtime-broker.provider-options`. For example, a provider that reads `getProviderOptions().get("endpoint")` can receive `qwen.managed-agent.runtime-broker.provider-options.endpoint=https://provider.example`. Factories must have inert constructors; validation is configuration-only, preflight may perform read-only diagnostics, and creation transfers the provider's close ownership to the Broker. A remote provider leaves `usesLocalWorkspace()` false. Plugins execute as trusted application code and must honor the existing identity, fencing and Runtime HTTP contracts. This supports classpath selection at startup; existing warmup behavior remains, with no live JAR reload or automatic download.
+
+The provider boundaries and acceptance criteria are in the [backend module design](../../docs/design/2026-10-31-managed-runtime-backend-modules.md).
 
 Server configuration accessors use Lombok through the server POM's annotation processor; enable annotation processing when compiling through an IDE. Keep accessors with normalization, copying or fallback logic explicit. Lombok is excluded from executable and maintenance JARs and is not a runtime dependency of embedding applications.
 

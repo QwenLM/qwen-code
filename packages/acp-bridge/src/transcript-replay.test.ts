@@ -3815,3 +3815,160 @@ it('marks goal runtime text as injected within the existing turn', () => {
     ),
   ).toMatchObject([{ _meta: { source: 'goal_runtime' } }]);
 });
+
+describe('createTranscriptToolCallResultUpdate display compaction (#16171)', () => {
+  interface ToolResultUpdateView {
+    sessionUpdate: string;
+    toolCallId: string;
+    status: string;
+    content: Array<{
+      type: string;
+      content?: { type?: string; text?: string };
+      oldText?: string;
+      newText?: string;
+      path?: string;
+    }>;
+    rawOutput?: unknown;
+  }
+
+  function resultUpdate(options: {
+    toolName: string;
+    callId: string;
+    success: boolean;
+    resultDisplay?: unknown;
+  }): ToolResultUpdateView {
+    return createTranscriptToolCallResultUpdate(
+      options,
+    ) as unknown as ToolResultUpdateView;
+  }
+
+  function largeFileDiffDisplay() {
+    const line = 'const value = computeSomething(input);\n';
+    const originalContent = line.repeat(5_000);
+    return {
+      fileDiff:
+        '-const value = computeSomething(input);\n' +
+        '+const value = computeSomethingElse(input);\n',
+      fileName: 'big.ts',
+      filePath: '/repo/big.ts',
+      originalContent,
+      newContent: originalContent.replace(
+        'computeSomething',
+        'computeSomethingElse',
+      ),
+    };
+  }
+
+  it('bounds a large-file edit result instead of carrying whole file contents', () => {
+    const display = largeFileDiffDisplay();
+    const update = resultUpdate({
+      toolName: 'edit',
+      callId: 'edit-1',
+      success: true,
+      resultDisplay: display,
+    });
+
+    expect(update).toMatchObject({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'edit-1',
+      status: 'completed',
+    });
+    const serialized = JSON.stringify(update);
+    expect(serialized.length).toBeLessThan(10_000);
+    // A slice from the omitted middle of the file must not survive anywhere
+    // in the update (diff content or rawOutput).
+    expect(serialized).not.toContain(
+      display.originalContent.slice(20_000, 20_200),
+    );
+    expect(update.content[0]?.type).toBe('content');
+    expect(update.content[0]?.content?.text).toContain(
+      'Saved session preview only for big.ts',
+    );
+    expect(update.rawOutput).toEqual({
+      fileName: 'big.ts',
+      fileDiff: display.fileDiff,
+    });
+  });
+
+  it('keeps a small diff byte-for-byte intact', () => {
+    const display = {
+      fileDiff: '-a\n+b\n',
+      fileName: 'small.ts',
+      originalContent: 'a\n',
+      newContent: 'b\n',
+    };
+    const update = resultUpdate({
+      toolName: 'edit',
+      callId: 'edit-2',
+      success: true,
+      resultDisplay: display,
+    });
+
+    expect(update.content).toEqual([
+      { type: 'diff', path: 'small.ts', oldText: 'a\n', newText: 'b\n' },
+    ]);
+    expect(update.rawOutput).toEqual(display);
+  });
+
+  it('matches cold replay: an already-sanitized display yields the same update', () => {
+    const display = largeFileDiffDisplay();
+    const live = resultUpdate({
+      toolName: 'edit',
+      callId: 'edit-3',
+      success: true,
+      resultDisplay: display,
+    });
+    // The shape the recorder persists for the same edit: fields brought
+    // under the limits and marked truncatedForSession. Cold replay feeds
+    // exactly this back through the same builder after a restart.
+    const sanitized = {
+      ...display,
+      originalContent: 'x'.repeat(16_000),
+      newContent: 'y'.repeat(16_000),
+      truncatedForSession: true,
+      fileDiffLength: display.fileDiff.length,
+      originalContentLength: display.originalContent.length,
+      newContentLength: display.newContent.length,
+      fileDiffTruncated: false,
+      originalContentTruncated: true,
+      newContentTruncated: true,
+    };
+    const cold = resultUpdate({
+      toolName: 'edit',
+      callId: 'edit-3',
+      success: true,
+      resultDisplay: sanitized,
+    });
+
+    expect(cold.content).toEqual(live.content);
+    expect(cold.rawOutput).toEqual(live.rawOutput);
+  });
+
+  it('drops rawOutput entirely when the diff itself is oversized', () => {
+    const display = { ...largeFileDiffDisplay(), fileDiff: 'x'.repeat(60_000) };
+    const update = resultUpdate({
+      toolName: 'edit',
+      callId: 'edit-4',
+      success: true,
+      resultDisplay: display,
+    });
+
+    expect(update.rawOutput).toBeUndefined();
+    expect(update.content[0]?.content?.text).toContain(
+      'Full diff omitted from saved session history for big.ts',
+    );
+    expect(JSON.stringify(update).length).toBeLessThan(10_000);
+  });
+
+  it('bounds oversized non-diff displays too', () => {
+    const update = resultUpdate({
+      toolName: 'shell',
+      callId: 'shell-1',
+      success: true,
+      resultDisplay: 'out\n'.repeat(50_000),
+    });
+
+    expect(typeof update.rawOutput).toBe('string');
+    expect((update.rawOutput as string).length).toBeLessThan(40_000);
+  });
+});
