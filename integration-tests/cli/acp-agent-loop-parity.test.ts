@@ -32,6 +32,10 @@ import {
 } from '../fake-openai-server.js';
 import { ACP_HOME_PREFIX, removeScratchDir } from '../scratch-dir.js';
 
+// The agent trusts a client that presents the capability it was started with.
+const PRIVATE_ACP_CAPABILITY_ENV = 'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
+const PARENT_CAPABILITY = 'acp-agent-loop-parity-parent';
+
 type JsonObject = Record<string, unknown>;
 
 interface Scenario {
@@ -41,6 +45,20 @@ interface Scenario {
   settings?: JsonObject;
   /** Answers each `session/request_permission`; allows once by default. */
   permission?: (request: JsonObject) => JsonObject;
+  /** The `_meta` each prompt is sent with, by index. */
+  promptMeta?: Array<JsonObject | undefined>;
+  /**
+   * The client holds the private parent capability, as the channel bridges
+   * do, so the agent keeps trusted prompt metadata such as a channel mark.
+   */
+  trustedParent?: boolean;
+  /**
+   * Records the session, which a Goal needs, and waits after the prompts for
+   * this many Goal turns to end.
+   */
+  goalTurns?: number;
+  /** The model's reply to a request that does not stream, such as a verifier's. */
+  sideReply?: (body: JsonObject) => FakeOpenAIResponse;
   /** Sends `session/cancel` once this file exists in the test directory. */
   cancelOnFile?: string;
   /**
@@ -74,9 +92,15 @@ interface Run {
   permissions: unknown[];
   /** How many updates had arrived when each permission request did. */
   permissionsAt: number[];
+  /** The stop reason of each Goal turn, in order. */
+  goalTurnEnds: unknown[];
 }
 
 const PROMPT_TIMEOUT_MS = 60_000;
+
+// A Goal's id and the record ids it cites are random in each run.
+const RANDOM_ID =
+  /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
 
 // Fields that differ between two runs of the same scenario.
 const VOLATILE_KEYS = new Set([
@@ -89,6 +113,10 @@ const VOLATILE_KEYS = new Set([
   'executionId',
   'executionDurationMs',
   'apiTimeMs',
+  'createdAt',
+  'updatedAt',
+  'activeTimeMs',
+  'setAt',
   // Holds only the plan's random id.
   'qwenTodoPlan',
 ]);
@@ -127,7 +155,7 @@ function normalize(value: unknown, dir: string, sessionId = ''): unknown {
     .join('<DIR>')
     .replace(CONTINUATION_PROMPT_ID, '$1');
   if (sessionId) text = text.split(sessionId).join('<SESSION>');
-  const replaced = JSON.parse(text);
+  const replaced = JSON.parse(text.replace(RANDOM_ID, '<ID>'));
   const strip = (node: unknown): unknown => {
     if (Array.isArray(node)) return node.map(strip);
     if (node && typeof node === 'object') {
@@ -241,7 +269,9 @@ const allowOnce = () => ({
                 dir,
                 streamingIndex++,
               )
-            : { content: '{"selected_memories":[]}' },
+            : (scenario.sideReply?.(body) ?? {
+                content: '{"selected_memories":[]}',
+              }),
         fakeServerHostOptions(),
       );
       const noProxy = IS_CONTAINER_SANDBOX
@@ -260,9 +290,17 @@ const allowOnce = () => ({
       };
       delete env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'];
       if (shared) env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = '1';
+      delete env[PRIVATE_ACP_CAPABILITY_ENV];
+      if (scenario.trustedParent) {
+        env[PRIVATE_ACP_CAPABILITY_ENV] = PARENT_CAPABILITY;
+      }
       const agent = spawn(
         'node',
-        [rig.bundlePath, '--acp', '--no-chat-recording'],
+        [
+          rig.bundlePath,
+          '--acp',
+          ...(scenario.goalTurns ? [] : ['--no-chat-recording']),
+        ],
         {
           cwd: dir,
           stdio: ['pipe', 'pipe', 'pipe'],
@@ -273,6 +311,7 @@ const allowOnce = () => ({
       agent.stderr.on('data', (chunk: Buffer) => (stderr += chunk));
 
       const updates: unknown[] = [];
+      const goalTurnEnds: unknown[] = [];
       const permissions: unknown[] = [];
       const permissionsAt: number[] = [];
       const pending = new Map<
@@ -335,6 +374,10 @@ const allowOnce = () => ({
           updates.push(params?.['update']);
           return;
         }
+        if (method === '_qwencode/end_turn' && params?.['source'] === 'goal') {
+          goalTurnEnds.push(params['reason']);
+          return;
+        }
         if (typeof id !== 'number' || typeof method !== 'string') return;
         if (method === 'session/request_permission') {
           permissions.push(params?.['toolCall']);
@@ -378,13 +421,18 @@ const allowOnce = () => ({
           clientCapabilities: {
             fs: { readTextFile: true, writeTextFile: true },
           },
+          ...(scenario.trustedParent && {
+            _meta: {
+              'qwen-code/private-parent-capability': PARENT_CAPABILITY,
+            },
+          }),
         });
         await request('authenticate', { methodId: 'openai' });
         ({ sessionId } = (await request('session/new', {
           cwd: dir,
           mcpServers: [],
         })) as { sessionId: string });
-        for (const text of scenario.prompts) {
+        for (const [promptIndex, text] of scenario.prompts.entries()) {
           let settled = false;
           const cancelFile = scenario.cancelOnFile;
           if (cancelFile) {
@@ -400,6 +448,9 @@ const allowOnce = () => ({
             const result = (await request('session/prompt', {
               sessionId,
               prompt: [{ type: 'text', text }],
+              ...(scenario.promptMeta?.[promptIndex] && {
+                _meta: scenario.promptMeta[promptIndex],
+              }),
             })) as JsonObject;
             stopReasons.push(result['stopReason']);
           } catch (error) {
@@ -407,6 +458,13 @@ const allowOnce = () => ({
           } finally {
             settled = true;
           }
+        }
+        const goalDeadline = Date.now() + PROMPT_TIMEOUT_MS;
+        while (
+          goalTurnEnds.length < (scenario.goalTurns ?? 0) &&
+          Date.now() < goalDeadline
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
         }
       } finally {
         agent.kill();
@@ -433,6 +491,7 @@ const allowOnce = () => ({
         ),
         permissions: permissions.map((call) => normalize(call, dir, sessionId)),
         permissionsAt,
+        goalTurnEnds,
       };
     }
 
@@ -593,6 +652,63 @@ const allowOnce = () => ({
         reply: (messages) => ({ content: `Answer ${userTurns(messages)}.` }),
       },
       {
+        name: 'a retry after a model error',
+        prompts: ['Answer, please.', 'Answer, please.'],
+        // The client retries the prompt the error ended.
+        promptMeta: [undefined, { 'qwen.daemon.retry': true }],
+        reply: (_messages, _dir, index) =>
+          index === 0
+            ? { errorContent: 'upstream exploded' }
+            : { content: 'Here is the answer.' },
+      },
+      {
+        name: 'a retry that fails again',
+        prompts: ['Answer, please.', 'Answer, please.', 'Answer, please.'],
+        // The second error comes after the retry's request reached history.
+        promptMeta: [
+          undefined,
+          { 'qwen.daemon.retry': true },
+          { 'qwen.daemon.retry': true },
+        ],
+        reply: (_messages, _dir, index) =>
+          index < 2
+            ? { errorContent: 'upstream exploded' }
+            : { content: 'Here is the answer.' },
+      },
+      {
+        name: 'a channel prompt that reads a file',
+        prompts: ['Read the readme.'],
+        promptMeta: [{ 'qwen.channel.prompt': true }],
+        trustedParent: true,
+        prepare: (r) => r.createFile('readme.txt', 'readme body\n'),
+        reply: (messages, dir) =>
+          toolResults(messages) === 0
+            ? { toolCalls: [read(join(dir, 'readme.txt'), 'call_read')] }
+            : { content: 'It says readme body.' },
+      },
+      {
+        name: 'a Goal its second continuation completes',
+        prompts: ['/goal Report the weather.'],
+        goalTurns: 2,
+        // The first continuation stops on its own; the second proposes that
+        // the Goal is complete, which ends its turn for the verifier.
+        reply: (_messages, _dir, index) =>
+          index === 0
+            ? { content: 'Checking the forecast.' }
+            : {
+                toolCalls: [
+                  fakeToolCall(
+                    'update_goal',
+                    { status: 'complete', reason: 'The forecast is sunny.' },
+                    'call_goal',
+                  ),
+                ],
+              },
+        sideReply: () => ({
+          content: '{"decision":"accept","reason":"The forecast was given."}',
+        }),
+      },
+      {
         name: 'a model error',
         prompts: ['Fail please.'],
         reply: () => ({ errorContent: 'upstream exploded' }),
@@ -679,6 +795,10 @@ const allowOnce = () => ({
 
         expect(shared.stopReasons).toEqual(current.stopReasons);
         expect(shared.requests).toEqual(current.requests);
+        expect(shared.goalTurnEnds).toEqual(current.goalTurnEnds);
+        if (scenario.goalTurns) {
+          expect(current.goalTurnEnds).toHaveLength(scenario.goalTurns);
+        }
         const updates = (run: Run) =>
           scenario.cutByLoopGuard
             ? run.updates.filter((update) => !isResponseEnd(update))

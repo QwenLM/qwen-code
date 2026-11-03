@@ -704,9 +704,29 @@ describe('extractShellOperationsAcrossCommand', () => {
       [write('/repo/-some-dir/settings.local.json')],
     ],
     [
-      'ignores redirects attached to cd when resolving static cwd',
+      'resolves the static cwd even when the cd segment carries a >/dev/null redirect',
       "cd .qwen >/dev/null && echo '{}' > settings.json",
       [write(REPO_SETTINGS)],
+    ],
+    [
+      'reports a redirect on a static cd segment from the starting cwd',
+      "cd .qwen > settings.json && echo '{}' > settings.local.json",
+      [write('/repo/settings.json'), write('/repo/.qwen/settings.local.json')],
+    ],
+    [
+      'reports a redirect on a dynamic cd segment from the current cwd',
+      'cd $TARGET > settings.json',
+      [write('/repo/settings.json')],
+    ],
+    [
+      'marks a later cd redirect as cwd-unknown after a dynamic cd',
+      'cd $TARGET && cd .qwen > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      'reports a redirect on a backgrounded cd segment without moving cwd',
+      "cd .qwen > settings.json & echo '{}' > settings.local.json",
+      [write('/repo/settings.json'), write('/repo/settings.local.json')],
     ],
     [
       'tracks static pushd targets like cd targets',

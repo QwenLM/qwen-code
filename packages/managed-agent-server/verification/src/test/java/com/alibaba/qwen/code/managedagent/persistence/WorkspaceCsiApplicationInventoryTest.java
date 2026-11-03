@@ -788,7 +788,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
         assertThat(snapshot.tables()).hasSize(com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.TABLES.size());
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(805);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(808);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -869,6 +869,34 @@ class WorkspaceCsiApplicationInventoryTest {
         jdbc.update("UPDATE ma_session SET model_id = ?", new byte[] {(byte) 0xff});
         assertThatThrownBy(this::inspect).isInstanceOf(IllegalStateException.class)
                 .hasMessage("Identity is not valid UTF-8");
+    }
+
+    @Test
+    void modelConfigurationColumnsRetainTypedValuesAndBlockPrivateModelActivity() throws Exception {
+        var before = inspect();
+        var owner = before.table("ma_session").rows().getFirst();
+        for (String field : List.of("model_config_digest", "model_config_key_id", "model_config_ciphertext")) {
+            assertThat(owner.cell(field).isNull()).isTrue();
+        }
+        assertThat(before.blockers()).noneMatch(blocker -> blocker.table().equals("ma_session"));
+
+        String digest = "sha256:" + "a".repeat(64);
+        jdbc.update("UPDATE ma_session SET model_config_digest = ?, model_config_key_id = ?, model_config_ciphertext = ?",
+                digest, "encryption-key", "encrypted-connection");
+        var after = inspect();
+        var configured = after.table("ma_session").rows().getFirst();
+        assertThat(configured.text("model_config_digest")).isEqualTo(digest);
+        assertThat(configured.text("model_config_key_id")).isEqualTo("encryption-key");
+        assertThat(configured.text("model_config_ciphertext")).isEqualTo("encrypted-connection");
+        assertThat(configured.bytes()).isNotEqualTo(owner.bytes());
+        assertThat(after.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift"));
+        assertThat(after.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session")
+                && blocker.code().equals("invalid_original_association"));
+
+        jdbc.update("UPDATE ma_session SET model_config_digest = NULL, model_config_key_id = NULL, model_config_ciphertext = NULL");
+        var restored = inspect();
+        assertThat(restored.table("ma_session").rows().getFirst().bytes()).isEqualTo(owner.bytes());
+        assertThat(restored.blockers()).noneMatch(blocker -> blocker.table().equals("ma_session"));
     }
 
     @Test
@@ -1540,7 +1568,7 @@ class WorkspaceCsiApplicationInventoryTest {
             catalog.add(Map.of("name", "imported-" + i, "description", "Imported Skill",
                     "body", i == 0 ? "x".repeat(404465) : "Instruction", "model_invocable", false));
         }
-        var resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         resources.publishAgentSkills("foreign", "foreign-workspace", "foreign-session", catalog);
         assertThat(readHistory(expected, new java.util.ArrayList<>(), true).blockers()).isEmpty();
         resources.publishAgentSkills("foreign", "foreign-workspace", "foreign-session", List.of(
