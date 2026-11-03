@@ -1,11 +1,13 @@
-import { spawn, type ChildProcess } from 'node:child_process';
-import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, test } from '@playwright/test';
 import type { DaemonWorkspaceSettingsStatus } from '@qwen-code/sdk/daemon';
+import {
+  spawnDaemon,
+  type SpawnedDaemon,
+} from '../../../../integration-tests/cli/_daemon-harness.js';
 import { WEB_SHELL_SETTING_ITEM_IDS } from '../settings';
 import { createWebShellDaemonScenario } from './utils/mockDaemon';
 import {
@@ -16,7 +18,7 @@ import {
 } from './visuals/harness';
 
 const token = 'settings-exclusions-test';
-let daemon: ChildProcess | undefined;
+let daemon: SpawnedDaemon | undefined;
 let directory: string | undefined;
 let settings: DaemonWorkspaceSettingsStatus;
 
@@ -76,53 +78,19 @@ const cases: Array<{
 test.beforeAll(async () => {
   test.skip(process.platform === 'win32', 'Daemon harness requires POSIX');
   directory = await mkdtemp(join(tmpdir(), 'qwen-settings-exclusions-'));
-  const child = spawn(
-    process.execPath,
-    [
-      fileURLToPath(new URL('../../../cli/dist/index.js', import.meta.url)),
-      'serve',
-      '--port',
-      '0',
-      '--hostname',
-      '127.0.0.1',
-      '--token',
-      token,
-      '--workspace',
-      directory,
-    ],
-    {
-      env: {
-        ...process.env,
-        QWEN_HOME: join(directory, 'config'),
-        QWEN_RUNTIME_DIR: join(directory, 'runtime'),
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
+  daemon = await spawnDaemon({
+    workspaceCwd: directory,
+    token,
+    cliBin: fileURLToPath(
+      new URL('../../../cli/dist/index.js', import.meta.url),
+    ),
+    bootTimeoutMs: 30_000,
+    env: {
+      QWEN_HOME: join(directory, 'config'),
+      QWEN_RUNTIME_DIR: join(directory, 'runtime'),
     },
-  );
-  daemon = child;
-  let output = '';
-  child.stdout.on('data', (chunk: Buffer) => {
-    output += chunk.toString();
   });
-  child.stderr.on('data', (chunk: Buffer) => {
-    output += chunk.toString();
-  });
-  let spawnError: Error | undefined;
-  child.on('error', (error) => {
-    spawnError = error;
-  });
-  await expect
-    .poll(
-      () => {
-        if (spawnError) throw spawnError;
-        if (child.exitCode !== null) throw new Error(output);
-        return output.match(/listening on http:\/\/127\.0\.0\.1:(\d+)/)?.[1];
-      },
-      { timeout: 30_000 },
-    )
-    .toBeTruthy();
-  const port = output.match(/listening on http:\/\/127\.0\.0\.1:(\d+)/)![1];
-  const response = await fetch(`http://127.0.0.1:${port}/workspace/settings`, {
+  const response = await fetch(`${daemon.base}/workspace/settings`, {
     headers: { Authorization: `Bearer ${token}` },
     signal: AbortSignal.timeout(10_000),
   });
@@ -134,18 +102,9 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
-  const child = daemon;
+  const spawned = daemon;
   daemon = undefined;
-  if (child?.pid && child.exitCode === null && child.signalCode === null) {
-    const exited = once(child, 'exit');
-    child.kill('SIGTERM');
-    const timeout = setTimeout(() => child.kill('SIGKILL'), 5_000);
-    try {
-      await exited;
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
+  await spawned?.dispose();
   if (directory) {
     await rm(directory, { recursive: true, force: true });
     directory = undefined;

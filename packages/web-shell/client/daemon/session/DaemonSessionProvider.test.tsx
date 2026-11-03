@@ -4172,16 +4172,25 @@ describe('DaemonSessionProvider', () => {
     const lateMetadata = createDeferred<unknown>();
     sdkMocks.workspaceProviders.mockReturnValue(lateMetadata.promise);
     // A daemon that confirmed the write reports it on every later context
-    // read, so the reconciliation cannot republish the pre-write value.
+    // read. Every read issued from the write onwards is held open, so the
+    // assertion below can only be satisfied by the write's own apply — a
+    // reconciliation that merely republishes the value cannot rescue it.
     let sessionReasoning = 'none';
+    let holdContextReads = false;
+    const contextAnswer = () => ({
+      v: 1 as const,
+      sessionId,
+      workspaceCwd: '/mock-workspace',
+      state: { configOptions: reasoningConfigOptions(sessionReasoning) },
+    });
+    const postWriteRead = createDeferred<ReturnType<typeof contextAnswer>>();
     const session = createMockSession({
       sessionId,
-      context: vi.fn(async () => ({
-        v: 1 as const,
-        sessionId,
-        workspaceCwd: '/mock-workspace',
-        state: { configOptions: reasoningConfigOptions(sessionReasoning) },
-      })),
+      context: vi.fn(() =>
+        holdContextReads
+          ? postWriteRead.promise
+          : Promise.resolve(contextAnswer()),
+      ),
     });
     session.setConfigOption = vi.fn(async () => {
       sessionReasoning = 'medium';
@@ -4214,6 +4223,7 @@ describe('DaemonSessionProvider', () => {
 
     let writing!: Promise<void>;
     act(() => {
+      holdContextReads = true;
       writing = requireActions(actions).setReasoningEffort('medium', {
         persist: true,
       });
@@ -4224,13 +4234,24 @@ describe('DaemonSessionProvider', () => {
       await flushPromises();
     });
 
+    // The reconciliation was scheduled but has not answered, so this value
+    // came from the confirmed write itself.
+    expect(vi.mocked(session.context).mock.calls.length).toBeGreaterThan(
+      readsBeforeWrite,
+    );
     expect(connection?.reasoning).toMatchObject({
       enabled: true,
       effort: 'medium',
     });
-    expect(vi.mocked(session.context).mock.calls.length).toBeGreaterThan(
-      readsBeforeWrite,
-    );
+
+    await act(async () => {
+      postWriteRead.resolve(contextAnswer());
+      await flushPromises();
+    });
+    expect(connection?.reasoning).toMatchObject({
+      enabled: true,
+      effort: 'medium',
+    });
   });
 
   it('can create a session after connecting from the empty state', async () => {

@@ -196,6 +196,17 @@ immediate 'turn_error' history=false approvalPending=true」在
 - 真实 daemon 测试仍然只支持 POSIX；win32 skip 已移入 `beforeAll`，因此共享
   fixture 绝不会在 Windows 上 spawn。
 
+- bind 处的 reset 是**有意冗余**的，当前 harness 里没有任何测试能单独钉住它。
+  已有两个机制会作废重连之前捕获的一切：每次 load 迭代都无条件调用
+  `beginSessionConfigRead(...)`，而读谓词与 `mutation.isCurrent()` 都要求捕获时的
+  `readSequence`，因此新附件自己的那次捕获就会取代先前的读**与写**；并且重连会
+  结束上一轮 SSE 循环，其退出路径调用 `clearEventStream()`，对同一 owner 的域
+  执行重置。删掉 bind 处那四行后，provider 套件仍停在其既有基线上。保留该调用
+  是因为它把「新附件以 `pendingWrites` 为零开始」变成 bind 处的局部保证，而不是
+  一个仅在远处拆除路径总会先触发时才成立的性质——尤其是绑定后在 await 之后的
+  处置检查处提前返回、从未建立过流的那种迭代。本次改动承重的一半是**移除**
+  SSE 处的 reset，而那一半由回归测试与重做后的 approval-mode 用例钉住。
+
 ## 验证计划
 
 1. 单测：在 `packages/web-shell` 里于改动前后各跑一遍 `daemon/session` 套件。

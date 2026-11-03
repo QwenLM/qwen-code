@@ -233,6 +233,22 @@ Out of scope:
 - The live-daemon test remains POSIX-only; the win32 skip moved into
   `beforeAll` so the shared fixture never spawns on Windows.
 
+- The bind-site reset is deliberately redundant, and no test in the current
+  harness can pin it in isolation. Two mechanisms already invalidate anything
+  captured before a re-attach: every load iteration calls
+  `beginSessionConfigRead(...)` unconditionally, and both the read predicate and
+  `mutation.isCurrent()` require the captured `readSequence`, so the new
+  attachment's own capture supersedes prior reads _and_ writes; and a re-attach
+  ends the outgoing SSE loop, whose exit paths call `clearEventStream()`, which
+  resets the same owner's domain. Deleting the four bind-site lines leaves the
+  provider suite at its pre-existing baseline. The call is kept because it makes
+  "a new attachment starts with `pendingWrites` at zero" a local guarantee at the
+  bind, rather than a property that holds only while a distant teardown path
+  fires first — notably for an iteration that binds and then returns early on the
+  post-await disposal check, where no stream was ever established. The
+  load-bearing half of this change is the _removal_ of the SSE-site reset, and
+  that is pinned by the regression test and the reworked approval-mode case.
+
 ## Validation plan
 
 1. Unit: the `daemon/session` suites in `packages/web-shell`, before and after.
