@@ -1040,7 +1040,12 @@ describe('SessionService', () => {
       expect(result.items[0].sessionId).toBe(sessionIdC); // newest
       expect(result.items[1].sessionId).toBe(sessionIdB);
       expect(result.hasMore).toBe(true);
-      expect(result.nextCursor).toBeDefined();
+      // The boundary mtime is unique here, so this pins the published format:
+      // a bare numeric mtime satisfies every shape-agnostic cursor assertion
+      // in this suite while breaking the documented cursor.
+      expect(result.nextCursor).toMatch(
+        /^\d+(\.\d+)?\|[0-9a-f-]{32,36}\.jsonl$/,
+      );
     });
 
     it('should paginate with cursor parameter', async () => {
