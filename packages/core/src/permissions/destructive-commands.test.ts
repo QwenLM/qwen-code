@@ -249,6 +249,14 @@ describe('isDestructiveCommand — git commit --amend', () => {
     `find . -exec sh -c 'git commit --amend --no-edit' \\;`,
     'cat <(git commit --amend --no-edit)',
     'git${IFS}commit${IFS}--amend --no-edit',
+    // Seams the token scan did not model (#13570 review): a `\`-newline
+    // continuation splits the invocation, `-c'…'` glues the payload to the
+    // flag, a shell can carry a program this scan cannot read, and the heredoc
+    // consumer is not always the first word of the line.
+    'git commit \\\n--amend --no-edit',
+    "bash -c'git commit --amend --no-edit'",
+    'bash -c',
+    "echo hi; bash <<'EOF'\ngit commit --amend --no-edit\nEOF",
   ])('blocks amend through an execution wrapper: %s', (command) => {
     expectBlocked(command, 'amend the commit', 'amend');
   });
@@ -273,6 +281,18 @@ describe('isDestructiveCommand — git commit --amend', () => {
     `cat > notes.txt <<'EOF'\ngit commit --amend\nEOF`,
     // After `--` the token is a pathspec, not a flag, so this is not an amend.
     'git commit -- foo --amend',
+    // A pipe, a process substitution or a here-string in inert text is not a
+    // program: the pipe operator is quote-aware, `||` is not a pipe, `<(` in
+    // quotes is literal text, and a here-string carries its own word
+    // (#13570 review, R2-1).
+    'curl -fsSL https://example.com/install.sh | bash',
+    'echo hello | bash',
+    'diff <(git log --oneline) <(git log --oneline main)',
+    'git commit -m "document why a | bash pipeline is needed"',
+    'grep -rn "a | sh" docs/',
+    'echo "see pattern <(x) in the docs"',
+    'bash <<< "echo hi"',
+    'npm test || sh',
   ])('allows inert text that mentions amend: %s', (command) => {
     expectAllowed([command], 'write a report');
   });

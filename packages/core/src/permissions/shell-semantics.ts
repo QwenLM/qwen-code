@@ -120,6 +120,13 @@ function tokenize(
       continue;
     }
     if (ch === '\\' && !inSingle) {
+      // Bash removes a backslash-newline continuation outright, joining the
+      // word it interrupts — so `git commit \<newline>--amend` is the plain
+      // two-word invocation, not a token containing a newline.
+      if (command[i + 1] === '\n') {
+        i++;
+        continue;
+      }
       escaped = true;
       continue;
     }
@@ -2530,15 +2537,23 @@ const AMEND_SHELL_PROGRAMS = new Set([
   'su',
 ]);
 
-/** A pipeline whose consumer is a shell, which reads its program from stdin. */
-const PIPES_INTO_SHELL = /\|\s*(?:[^\s|;&]*\/)?(?:ba|z|da|fi|k|a)?sh\b/;
-
-/** The `-c` payload of a shell token, if it carries one (`-c`, `-lc`, `-ec`). */
+/**
+ * The `-c` payload of a shell token, if it carries one (`-c`, `-lc`, `-c'…'`).
+ *
+ * Returns `null` when the token list has no `-c`, and an empty string when `-c`
+ * carries no locatable payload — the caller fails closed on that, because a
+ * shell whose program this scan cannot read must not answer "not an amend".
+ */
 function shellDashCPayload(tokens: string[], index: number): string | null {
   for (let inner = index + 1; inner < tokens.length; inner++) {
     const token = tokens[inner]!;
     if (token === '-' || !token.startsWith('-')) break;
-    if (/^-[A-Za-z]*c/.test(token)) return tokens[inner + 1] ?? null;
+    const flag = /^-[A-Za-z]*c/.exec(token);
+    if (!flag) continue;
+    // Tokenization drops the quote but keeps the word, so `-c'…'` arrives as
+    // one token and its payload is the flag's own tail.
+    const attached = token.slice(flag[0].length);
+    return attached.length > 0 ? attached : (tokens[inner + 1] ?? '');
   }
   return null;
 }
@@ -2599,7 +2614,11 @@ function nestedAmendPayloads(tokens: string[]): {
 
     if (!AMEND_SHELL_PROGRAMS.has(program)) continue;
     const payload = shellDashCPayload(tokens, index);
-    if (payload !== null) payloads.push(payload);
+    if (payload === null) continue;
+    // `-c` with nothing after it: the shell has a program this scan cannot
+    // read, so it is unclassifiable rather than amend-free.
+    if (payload === '') unclassifiable = true;
+    else payloads.push(payload);
   }
 
   // `${IFS}` splits a word into argv entries the tokenizer keeps glued together.
@@ -2651,18 +2670,15 @@ function tokensContainGitAmend(segment: string, depth: number): boolean {
     if (isGitAmendInvocationAt(tokens, offset)) return true;
   }
 
-  // Constructs whose payload this scan does not turn into a token sequence.
-  // The extracted ones are analysed above; the rest fail closed, because in
-  // AUTO mode this function is the gate that decides whether a real amend runs.
-
-  // A process substitution always runs its body, and a here-string is only
-  // handed to a shell — neither appears in the token stream.
-  if (/[<>]\(/.test(segment)) return true;
+  // A here-string is one word handed to the program on its left; when that
+  // program is a shell, that word is the program it runs.
+  const hereString = hereStringProgram(segment);
   if (
-    segment.includes('<<<') &&
+    hereString !== null &&
     tokens.some((token) =>
       AMEND_SHELL_PROGRAMS.has(amendExecutableBasename(token)),
-    )
+    ) &&
+    commandContainsGitAmendAtDepth(hereString, depth + 1)
   ) {
     return true;
   }
@@ -2671,11 +2687,26 @@ function tokensContainGitAmend(segment: string, depth: number): boolean {
 }
 
 /**
- * Bodies of `$(…)` and backtick substitutions, which are code rather than data.
+ * The word a `<<<` here-string feeds to a shell, quote-removed.
+ *
+ * Returns null when the segment has no here-string.
+ */
+function hereStringProgram(segment: string): string | null {
+  const operator = segment.indexOf('<<<');
+  if (operator === -1) return null;
+  const [word] = tokenize(segment.slice(operator + 3));
+  return word ?? null;
+}
+
+/**
+ * Bodies of `$(…)`, `<(…)`, `>(…)` and backtick substitutions, which are code
+ * rather than data.
  *
  * Quoted and escaped occurrences are skipped so `echo '$(date)'` does not read
- * as a substitution; nesting inside `$( … $( … ) … )` is preserved by counting
- * depth, and the body is returned verbatim so the caller can analyse it.
+ * as a substitution, and a process substitution inside double quotes stays
+ * literal text, which is why `<(`/`>(` are only taken unquoted; nesting inside
+ * `$( … $( … ) … )` is preserved by counting depth, and the body is returned
+ * verbatim so the caller can analyse it.
  */
 function extractCommandSubstitutionBodies(command: string): string[] {
   const bodies: string[] = [];
@@ -2710,7 +2741,10 @@ function extractCommandSubstitutionBodies(command: string): string[] {
       index++;
       continue;
     }
-    if (char === '$' && command[index + 1] === '(') {
+    if (
+      command[index + 1] === '(' &&
+      (char === '$' || (!quote && (char === '<' || char === '>')))
+    ) {
       let depth = 1;
       let cursor = index + 2;
       let inner: "'" | '"' | null = null;
@@ -2757,45 +2791,13 @@ const SHELLS_READING_STDIN = new Set([
   'ash',
 ]);
 
-function openerLinePipesToShell(line: string): boolean {
-  const heredocIdx = line.indexOf('<<');
-  if (heredocIdx === -1) return false;
-
-  let pos = heredocIdx + 2;
-  if (line[pos] === '-') pos++;
-
-  const quote = line[pos];
-  const quoted = quote === "'" || quote === '"';
-  if (quoted) pos++;
-
-  while (pos < line.length && /[A-Za-z0-9_./-]/.test(line[pos]!)) pos++;
-  if (quoted && pos < line.length && line[pos] === quote) pos++;
-
-  const rest = line.slice(pos);
-  const tokens = rest.split(/\s+/).filter((t) => t.length > 0);
-
-  for (let i = 0; i < tokens.length; i++) {
-    if (tokens[i] !== '|') continue;
-    const afterPipe = tokens.slice(i + 1);
-    if (afterPipe.length === 0) continue;
-    const meaningful = skipAmendPrefixes(afterPipe);
-    if (
-      meaningful.length > 0 &&
-      SHELLS_READING_STDIN.has(amendExecutableBasename(meaningful[0]!))
-    ) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
 /**
  * Heredoc bodies whose consumer runs them as code.
  *
  * `cat > notes.txt <<'EOF'` carries inert data, but `bash <<'EOF'` carries the
  * program itself — stripping every body unconditionally hides the second case.
- * The consumer is the first word of the line that opened the heredoc.
+ * The body is shell-fed when any command on the opener line is a stdin-reading
+ * shell: the one that owns the redirection, or a pipe consumer after it.
  */
 function extractShellFedHeredocBodies(command: string): string[] {
   const lines = command.split('\n');
@@ -2818,15 +2820,17 @@ function extractShellFedHeredocBodies(command: string): string[] {
     const delimiters = getHeredocDelimiters(line);
     if (delimiters.length === 0) continue;
 
-    const opener = line.slice(0, line.indexOf('<<'));
-    const openerTokens = opener
-      .trim()
-      .split(/\s+/)
-      .filter((t) => t.length > 0);
-    const meaningful = skipAmendPrefixes(openerTokens);
-    const consumer = amendExecutableBasename(meaningful[0] ?? '');
-    const shellFed =
-      SHELLS_READING_STDIN.has(consumer) || openerLinePipesToShell(line);
+    // Derived from the whole line, not its first word: `echo hi; bash <<'EOF'`
+    // hands the body to the shell that is not first.
+    const shellFed = splitCompoundCommandSegments(line).some(
+      ({ command: seg }) => {
+        const [program] = skipAmendPrefixes(tokenize(seg));
+        return (
+          program !== undefined &&
+          SHELLS_READING_STDIN.has(amendExecutableBasename(program))
+        );
+      },
+    );
     active = {
       delimiter: delimiters[0]!,
       shellFed,
@@ -2855,18 +2859,44 @@ function commandContainsGitAmendAtDepth(
     }
   }
 
-  // A pipe into a shell hands that shell a program through stdin. The segment
-  // split drops the producer's text and keeps only the bare shell, so neither
-  // side can be classified from tokens — fail closed rather than answer "not an
-  // amend" for `echo "git commit --amend" | bash`.
-  if (PIPES_INTO_SHELL.test(command)) return true;
-
-  for (const { command: segment } of splitCompoundCommandSegments(
-    stripHeredocBodies(command),
-  )) {
+  const code = stripHeredocBodies(command);
+  const segments = splitCompoundCommandSegments(code);
+  for (let index = 0; index < segments.length; index++) {
+    const { command: segment, terminator } = segments[index]!;
+    // A pipe into a shell hands that shell a program through stdin, and the
+    // segment split keeps only the bare shell on the consumer side. The
+    // producer's words are what that shell runs, so analyse them as a command;
+    // `terminator` is quote-aware, so a `|` inside a commit message is not a
+    // pipe and `||` is a different operator.
+    const consumer = segments[index + 1];
+    if ((terminator === '|' || terminator === '|&') && consumer !== undefined) {
+      const fed = pipedProgramText(segment, consumer.command);
+      if (fed !== null && commandContainsGitAmendAtDepth(fed, depth + 1)) {
+        return true;
+      }
+    }
     if (tokensContainGitAmend(segment, depth)) return true;
   }
   return false;
+}
+
+/**
+ * The program a shell consumer runs from its producer's output.
+ *
+ * `echo`/`printf` write their arguments, so the producer's words are the
+ * candidate program text. Returns null when the consumer is not a shell that
+ * reads stdin, and an empty string when nothing the scan can read reaches it
+ * (a file, a download) — there is nothing to classify in that case.
+ */
+function pipedProgramText(producer: string, consumer: string): string | null {
+  const [program] = skipAmendPrefixes(tokenize(consumer));
+  if (
+    program === undefined ||
+    !SHELLS_READING_STDIN.has(amendExecutableBasename(program))
+  ) {
+    return null;
+  }
+  return tokenize(producer).slice(1).join(' ');
 }
 
 /**
