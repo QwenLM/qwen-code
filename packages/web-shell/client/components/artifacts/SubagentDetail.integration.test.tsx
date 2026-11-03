@@ -430,6 +430,7 @@ it('opens subagent and fork transcript outputs in source-scoped panel tabs', asy
     title: 'Review',
     turnId: 'turn-1',
     changes: [],
+    unfilteredChanges: [],
     sourceSessionId: 'subagent-session',
     workspaceCwd: '/work/project',
     workspaceId: 'project-id',

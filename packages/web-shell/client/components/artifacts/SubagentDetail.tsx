@@ -1,7 +1,7 @@
 import { useWorkspaceFileChanges } from './useWorkspaceFileChanges';
 import { useDaemonAvailabilityController } from '../../daemon/availability-context.js';
 import { isDaemonUnavailableError } from '../../daemon/availability.js';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DaemonSessionProvider,
   useConnection,
@@ -22,7 +22,10 @@ import { MessageList } from '../MessageList';
 import { getAgentDescription } from '../messages/toolFormatting';
 import { Badge } from '../ui/badge';
 import type { TurnOutputOpenRequest } from './TurnOutputs';
-import { getArtifactsByTurn } from './turnOutputSelectors';
+import {
+  getArtifactsByTurn,
+  getFileChangesByTurn,
+} from './turnOutputSelectors';
 import { fileChangeOwnerSessionId } from './workspace-file-changes';
 import styles from './SubagentDetail.module.css';
 
@@ -178,14 +181,34 @@ function SubagentDetailContent({
     };
   }, [artifacts, connection.sessionId, onArtifactsChange]);
 
+  const reviewSourceRef = useRef({ messages, artifactsByTurn });
+  reviewSourceRef.current = { messages, artifactsByTurn };
   const handleRightPanelOpen = useCallback(
     (request: TurnOutputOpenRequest) => {
+      const source = reviewSourceRef.current;
       onRightPanelOpen?.({
         ...request,
+        ...(request.kind === 'review'
+          ? {
+              unfilteredChanges:
+                getFileChangesByTurn(
+                  source.messages,
+                  source.artifactsByTurn,
+                  connection.workspaceCwd ||
+                    connection.standaloneSession?.projectlessOutputDirectory ||
+                    '',
+                ).get(request.turnId) ?? request.changes,
+            }
+          : {}),
         sourceSessionId: connection.sessionId,
       });
     },
-    [connection.sessionId, onRightPanelOpen],
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      connection.standaloneSession?.projectlessOutputDirectory,
+      onRightPanelOpen,
+    ],
   );
 
   useEffect(() => {

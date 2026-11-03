@@ -50,6 +50,11 @@ export function useWorkspaceFileChanges(
   const supported = workspace.capabilities?.features?.includes(
     'workspace_git_check_ignore',
   );
+  const sourceChanges = useMemo(
+    () => getFileChangesByTurn(messages, artifactsByTurn, workspaceCwd),
+    [messages, artifactsByTurn, workspaceCwd],
+  );
+  const hasChanges = sourceChanges.size > 0;
   const directoryKey = JSON.stringify([workspaceCwd, sessionId]);
   const [directory, setDirectory] = useState<{
     key: string;
@@ -59,9 +64,10 @@ export function useWorkspaceFileChanges(
   useEffect(() => {
     if (
       gitCwd !== undefined ||
-      !supported ||
+      !hasChanges ||
       !available ||
       connection.status !== 'connected' ||
+      connection.loadingTranscript ||
       !sessionId
     )
       return;
@@ -81,9 +87,10 @@ export function useWorkspaceFileChanges(
     };
   }, [
     gitCwd,
-    supported,
+    hasChanges,
     available,
     connection.status,
+    connection.loadingTranscript,
     sessionId,
     ownerSessionId,
     client,
@@ -103,11 +110,8 @@ export function useWorkspaceFileChanges(
   const scope = JSON.stringify([workspaceCwd, cwd, sessionId]);
   const contained = useMemo(
     () =>
-      filterWorkspaceFileChanges(
-        getFileChangesByTurn(messages, artifactsByTurn, cwd),
-        cwd,
-      ),
-    [messages, artifactsByTurn, cwd],
+      cwd ? filterWorkspaceFileChanges(sourceChanges, cwd) : sourceChanges,
+    [sourceChanges, cwd],
   );
   const key = JSON.stringify({
     workspaceCwd,
@@ -118,7 +122,10 @@ export function useWorkspaceFileChanges(
       new Set(
         Array.from(contained.values())
           .flat()
-          .map((change) => workspaceRelativeChangePath(change.path, cwd)!),
+          .flatMap((change) => {
+            const path = workspaceRelativeChangePath(change.path, cwd);
+            return path === undefined ? [] : [path];
+          }),
       ),
     ),
   });

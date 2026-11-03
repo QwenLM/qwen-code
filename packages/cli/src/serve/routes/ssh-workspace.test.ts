@@ -640,6 +640,13 @@ describe.skipIf(process.platform === 'win32')(
       const mutable = runtime as { trusted: boolean };
       mutable.trusted = false;
       expect((await supertest(app).get(url('/git'))).status).toBe(403);
+      expect(
+        (
+          await supertest(app)
+            .post(url('/git/check-ignore'))
+            .send({ paths: ['file.ts'] })
+        ).status,
+      ).toBe(403);
       mutable.trusted = true;
       registry.beginDrain(runtime);
       expect((await supertest(app).get(url('/git'))).body.code).toBe(

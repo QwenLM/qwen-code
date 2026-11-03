@@ -9,7 +9,10 @@ const mock = vi.hoisted(() => ({
   ignored: vi.fn(),
   workspaceByCwd: vi.fn(),
   features: ['workspace_git_check_ignore'],
-  connection: { status: 'connected' },
+  connection: {
+    status: 'connected',
+    loadingTranscript: false,
+  },
   capabilitiesReady: true,
   sessionStatus: vi.fn(),
 }));
@@ -64,11 +67,13 @@ function Host({
 }
 
 beforeEach(() => {
+  artifacts.clear();
   const container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   mock.features = ['workspace_git_check_ignore'];
   mock.connection.status = 'connected';
+  mock.connection.loadingTranscript = false;
   mock.capabilitiesReady = true;
   mock.sessionStatus.mockReset().mockResolvedValue({});
   mock.workspaceByCwd.mockReturnValue({
@@ -83,6 +88,73 @@ afterEach(async () => {
 });
 
 describe('useWorkspaceFileChanges', () => {
+  it('only resolves metadata when file edits are loaded', async () => {
+    await act(async () => root.render(<Host input={[]} />));
+    expect(mock.sessionStatus).not.toHaveBeenCalled();
+    mock.connection.loadingTranscript = true;
+    const input = messages('/project/source.ts');
+    await act(async () => root.render(<Host input={input} />));
+    expect(mock.sessionStatus).not.toHaveBeenCalled();
+    mock.connection.loadingTranscript = false;
+    await act(async () => root.render(<Host input={input} />));
+    expect(mock.sessionStatus).toHaveBeenCalledTimes(1);
+    expect(output.get('turn')).toHaveLength(1);
+  });
+
+  it('resolves worktree containment without the ignore capability', async () => {
+    mock.features = [];
+    const cwd = '/repo/.qwen/worktrees/one';
+    mock.sessionStatus.mockResolvedValue({ worktree: { path: cwd } });
+    await act(async () =>
+      root.render(
+        <Host
+          cwd="/repo/packages/web"
+          input={messages(`${cwd}/source.ts`, '/repo/packages/web/base.ts')}
+        />,
+      ),
+    );
+    expect(mock.sessionStatus).toHaveBeenCalledWith('session-1');
+    expect(output.get('turn')?.map((change) => change.path)).toEqual([
+      `${cwd}/source.ts`,
+    ]);
+    expect(mock.ignored).not.toHaveBeenCalled();
+  });
+
+  it('retains Live edits when the session does not expose its working directory', async () => {
+    await act(async () =>
+      root.render(
+        <Host
+          cwd=""
+          gitCwd={null}
+          input={messages('/conversations/notes/report.md')}
+        />,
+      ),
+    );
+    expect(output.get('turn')?.map((change) => change.path)).toEqual([
+      '/conversations/notes/report.md',
+    ]);
+    expect(mock.ignored).not.toHaveBeenCalled();
+  });
+
+  it('matches worktree artifacts against the base workspace', async () => {
+    const cwd = '/project/.qwen/worktrees/one';
+    artifacts.set('turn', [
+      { workspacePath: '.qwen/worktrees/one/reports/data.csv' },
+    ]);
+    await act(async () =>
+      root.render(
+        <Host gitCwd={cwd} input={messages(`${cwd}/reports/data.csv`)} />,
+      ),
+    );
+    expect(output.get('turn')?.[0].isArtifact).toBe(true);
+    expect(mock.ignored).toHaveBeenCalledWith(
+      ['reports/data.csv'],
+      cwd,
+      'session-1',
+    );
+    expect(mock.sessionStatus).not.toHaveBeenCalled();
+  });
+
   it('uses the real parent for both metadata and Git when given a virtual session', async () => {
     const parent = '11111111-1111-4111-8111-111111111111';
     const virtual = `subagent.${btoa(parent).replace(/=+$/, '')}.YWdlbnQ`;

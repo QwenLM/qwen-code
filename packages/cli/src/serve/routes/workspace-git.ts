@@ -72,6 +72,7 @@ export function registerWorkspaceQualifiedGitRoutes(
     workspaceRegistry: WorkspaceRegistry;
     gitState: WorkspaceGitState;
     sendBridgeError: SendBridgeError;
+    daemonEnv: Readonly<NodeJS.ProcessEnv>;
   },
 ): void {
   app.post('/workspaces/:workspace/git/check-ignore', async (req, res) => {
@@ -91,7 +92,7 @@ export function registerWorkspaceQualifiedGitRoutes(
       route,
       deps.sendBridgeError,
     );
-    if (cwd === undefined) return;
+    if (cwd === undefined || res.destroyed) return;
     const abort = new AbortController();
     const onClose = () => {
       if (!res.writableEnded) abort.abort();
@@ -102,7 +103,8 @@ export function registerWorkspaceQualifiedGitRoutes(
       const ignoredPaths = await getGitIgnoredPaths(
         cwd,
         paths,
-        runtime.env.effectiveEnv ?? {},
+        runtime.env.effectiveEnv ??
+          (runtime.env.mode === 'parent-process' ? deps.daemonEnv : {}),
         abort.signal,
       );
       runtime.generationGuard?.assertOpen();

@@ -142,6 +142,7 @@ import { TURN_OUTPUT_KINDS } from './artifacts/TurnOutputs';
 import { useArtifactWorkspaceTarget } from './artifacts/useArtifactWorkspaceTarget';
 import {
   getArtifactsByTurn,
+  getFileChangesByTurn,
   getScheduledTasksByTurn,
 } from './artifacts/turnOutputSelectors';
 import { PaneHeaderActions } from './PaneHeaderActions';
@@ -1342,15 +1343,35 @@ export function ChatPane({
       );
   }, [actions, reportError]);
 
+  const reviewSourceRef = useRef({ messages, artifactsByTurn });
+  reviewSourceRef.current = { messages, artifactsByTurn };
   const handleRightPanelOpen = useCallback(
     (request: TurnOutputOpenRequest) => {
       if (!onRightPanelOpen) return;
+      const source = reviewSourceRef.current;
       onRightPanelOpen({
         ...request,
+        ...(request.kind === 'review'
+          ? {
+              unfilteredChanges:
+                getFileChangesByTurn(
+                  source.messages,
+                  source.artifactsByTurn,
+                  connection.workspaceCwd ||
+                    connection.standaloneSession?.projectlessOutputDirectory ||
+                    '',
+                ).get(request.turnId) ?? request.changes,
+            }
+          : {}),
         sourceSessionId: connection.sessionId,
       });
     },
-    [connection.sessionId, onRightPanelOpen],
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      connection.standaloneSession?.projectlessOutputDirectory,
+      onRightPanelOpen,
+    ],
   );
   const paneWorkspaceCwd = workspaceCwd ?? connection.workspaceCwd;
   const previewSessionIdRef = useRef(connection.sessionId);

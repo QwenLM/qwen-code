@@ -12,6 +12,7 @@ import express from 'express';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as gitIgnored from '../server/git-ignored.js';
+import * as routeRuntime from '../workspace-route-runtime.js';
 import {
   collectGitIgnoredPaths,
   getGitIgnoredPaths,
@@ -53,6 +54,7 @@ function mount(
     overlayKeys: [],
     effectiveEnv: process.env,
   },
+  daemonEnv: NodeJS.ProcessEnv = process.env,
 ) {
   const generationGuard = createWorkspaceGenerationGuard();
   const runtime = {
@@ -80,11 +82,140 @@ function mount(
     workspaceRegistry: createWorkspaceRegistry([primary, runtime]),
     gitState: {} as WorkspaceGitState,
     sendBridgeError,
+    daemonEnv,
   });
   return { app, generationGuard };
 }
 
 describe('workspace Git ignore query', () => {
+  it('aborts an active Git probe when the client disconnects', async () => {
+    let started!: () => void;
+    let cancelled!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const stopped = new Promise<void>((resolve) => {
+      cancelled = resolve;
+    });
+    const query = vi
+      .spyOn(gitIgnored, 'getGitIgnoredPaths')
+      .mockImplementationOnce(
+        async (_cwd, _paths, _env, signal) =>
+          new Promise((_resolve, reject) => {
+            signal!.addEventListener(
+              'abort',
+              () => {
+                cancelled();
+                reject(signal!.reason);
+              },
+              { once: true },
+            );
+            started();
+          }),
+      );
+    const { app } = mount();
+    const server = app.listen(0, '127.0.0.1');
+    const abort = new AbortController();
+    try {
+      await new Promise<void>((resolve) => server.once('listening', resolve));
+      const address = server.address();
+      if (!address || typeof address === 'string')
+        throw new Error('No HTTP address');
+      const response = fetch(
+        `http://127.0.0.1:${address.port}/workspaces/selected/git/check-ignore`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paths: ['file.ts'] }),
+          signal: abort.signal,
+        },
+      ).catch((error: unknown) => error);
+      await ready;
+      abort.abort();
+      await response;
+      await stopped;
+      expect(query).toHaveBeenCalledOnce();
+    } finally {
+      abort.abort();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('inherits daemon global excludes only for a parent-process runtime without a snapshot', async () => {
+    const home = path.join(directory, 'daemon-home');
+    await fs.mkdir(home);
+    const excludes = path.join(home, 'excludes');
+    await fs.writeFile(excludes, '*.daemon-global\n');
+    await fs.writeFile(
+      path.join(home, '.gitconfig'),
+      `[core]\nexcludesFile = ${excludes}\n`,
+    );
+    const { app } = mount(
+      true,
+      { mode: 'parent-process', overlayKeys: [] },
+      { ...process.env, HOME: home },
+    );
+    const response = await request(app)
+      .post('/workspaces/selected/git/check-ignore')
+      .send({ paths: ['ignored.daemon-global', 'source.ts'] });
+    expect(response.status).toBe(200);
+    expect(response.body.ignoredPaths).toEqual(['ignored.daemon-global']);
+  });
+
+  it('skips Git probes when the client disconnects during cwd resolution', async () => {
+    let started!: () => void;
+    let closed!: () => void;
+    let finish: (cwd: string) => void = () => {};
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const disconnected = new Promise<void>((resolve) => {
+      closed = resolve;
+    });
+    vi.spyOn(
+      routeRuntime,
+      'resolveSessionManagedGitCwdForRoute',
+    ).mockImplementationOnce(async (_req, res) => {
+      res.once('close', closed);
+      started();
+      return new Promise<string>((resolve) => {
+        finish = resolve;
+      });
+    });
+    const query = vi
+      .spyOn(gitIgnored, 'getGitIgnoredPaths')
+      .mockResolvedValueOnce([]);
+    const { app } = mount();
+    const server = app.listen(0, '127.0.0.1');
+    const abort = new AbortController();
+    try {
+      await new Promise<void>((resolve) => server.once('listening', resolve));
+      const address = server.address();
+      if (!address || typeof address === 'string')
+        throw new Error('No HTTP address');
+      const response = fetch(
+        `http://127.0.0.1:${address.port}/workspaces/selected/git/check-ignore`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paths: ['file.ts'] }),
+          signal: abort.signal,
+        },
+      ).catch((error: unknown) => error);
+      await ready;
+      abort.abort();
+      await response;
+      await disconnected;
+      finish(repo);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(query).not.toHaveBeenCalled();
+    } finally {
+      finish(repo);
+      abort.abort();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it.each([{ HOME: '/selected-workspace-home' }, undefined])(
     'uses only the selected runtime environment snapshot (%j)',
     async (env) => {
@@ -231,7 +362,10 @@ describe('workspace Git ignore query', () => {
     await ready;
     generationGuard.close();
     finish([]);
-    expect((await response).status).toBe(503);
+    const result = await response;
+    expect(result.status).toBe(503);
+    expect(result.body.code).toBe('workspace_runtime_unavailable');
+    expect(result.headers['retry-after']).toBe('1');
   });
   it('uses real Git rules and preserves tracked and explicitly included paths', async () => {
     await fs.writeFile(path.join(repo, '.gitignore'), '*.log\ncache/\n');
@@ -381,13 +515,12 @@ describe('workspace Git ignore query', () => {
     ).toBe(400);
     const closed = mount();
     closed.generationGuard.close();
-    expect(
-      (
-        await request(closed.app)
-          .post('/workspaces/selected/git/check-ignore')
-          .send({ paths: [] })
-      ).status,
-    ).toBe(503);
+    const response = await request(closed.app)
+      .post('/workspaces/selected/git/check-ignore')
+      .send({ paths: [] });
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('workspace_runtime_unavailable');
+    expect(response.headers['retry-after']).toBe('1');
   });
 
   it('validates the requested cwd instead of falling back to the primary', async () => {

@@ -47,7 +47,7 @@ export function workspaceRelativeChangePath(
       ? file.slice(prefix.length)
       : undefined;
   }
-  return file === '..' || file.startsWith('../') || /^[a-zA-Z]+:/.test(file)
+  return file === '..' || file.startsWith('../') || /^[a-zA-Z]:/.test(file)
     ? undefined
     : file;
 }
@@ -58,8 +58,12 @@ export async function loadGitIgnoredChangePaths(
 ): Promise<ReadonlySet<string>> {
   const ignored = new Set<string>();
   for (let index = 0; index < paths.length; index += 256) {
-    const result = await load(paths.slice(index, index + 256));
-    for (const file of result.ignoredPaths) ignored.add(file);
+    try {
+      const result = await load(paths.slice(index, index + 256));
+      for (const file of result.ignoredPaths) ignored.add(file);
+    } catch {
+      break;
+    }
   }
   return ignored;
 }

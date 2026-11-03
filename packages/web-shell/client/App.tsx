@@ -6220,18 +6220,41 @@ export function App({
       tabId = 'review',
       sourceTurnId?: string,
       sourceSessionId?: string,
+      unfilteredChanges?: readonly TurnOutputFileChange[],
     ) => {
+      const sourceMessages =
+        artifactPanelRestoreInputsRef.current.displayMessages;
+      const sourceCwd =
+        connection.workspaceCwd ||
+        connection.standaloneSession?.projectlessOutputDirectory ||
+        '';
+      const sourceChanges =
+        unfilteredChanges ??
+        ((!sourceSessionId || sourceSessionId === connection.sessionId) &&
+        sourceTurnId
+          ? getFileChangesByTurn(
+              sourceMessages,
+              getArtifactsByTurn(
+                sourceMessages,
+                artifactsRef.current,
+                sourceCwd,
+              ),
+              sourceCwd,
+            ).get(sourceTurnId)
+          : undefined) ??
+        changes;
       const reviewTab: ArtifactPanelTab = {
         id: tabId,
         kind: 'review',
         title: t('turnOutputs.review'),
         changes,
+        unfilteredChanges: sourceChanges,
         ...(selectedPath ? { selectedPath } : {}),
         ...(reviewWorkspaceCwd ? { workspaceCwd: reviewWorkspaceCwd } : {}),
         ...(reviewWorkspaceId ? { workspaceId: reviewWorkspaceId } : {}),
         ...(sourceTurnId ? { sourceTurnId } : {}),
         ...(sourceSessionId ? { sourceSessionId } : {}),
-        sourceToolCallIds: changes.map((change) => change.toolCallId),
+        sourceToolCallIds: sourceChanges.map((change) => change.toolCallId),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === reviewTab.id)
@@ -6246,7 +6269,13 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [getDefaultReviewPanelWidth, t],
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      connection.standaloneSession?.projectlessOutputDirectory,
+      getDefaultReviewPanelWidth,
+      t,
+    ],
   );
   const openLatestReviewPanel = useCallback(() => {
     if (latestReviewChanges.length === 0) return;
@@ -6979,13 +7008,17 @@ export function App({
                 changesByTurn,
                 tab.sourceToolCallIds,
               ) ?? changesByTurn.get(tab.sourceTurnId ?? '');
-            const changes = sourceChanges
-              ? await filterReviewChanges(
-                  sourceChanges,
-                  tab.sourceSessionId,
-                  tab.workspaceCwd,
-                )
-              : undefined;
+            const complete = (tab.sourceToolCallIds ?? []).every((id) =>
+              sourceChanges?.some((change) => change.toolCallId === id),
+            );
+            const changes =
+              sourceChanges && complete
+                ? await filterReviewChanges(
+                    sourceChanges,
+                    tab.sourceSessionId,
+                    tab.workspaceCwd,
+                  )
+                : undefined;
             if (!owner.isCurrent()) return;
             if (changes) {
               restored = {
@@ -7459,10 +7492,8 @@ export function App({
                   if (!reviewSessionId) return undefined;
                   if (reviewSessionId === connection.sessionId) {
                     const cwd =
-                      connection.standaloneSession
-                        ?.projectlessOutputDirectory ??
-                      sessionWorktree?.path ??
-                      connection.workspaceCwd;
+                      connection.workspaceCwd ||
+                      connection.standaloneSession?.projectlessOutputDirectory;
                     const memoryChanges = getFileChangesByTurn(
                       restoreInputs.displayMessages,
                       getArtifactsByTurn(
@@ -8076,6 +8107,7 @@ export function App({
             : undefined,
           request.turnId,
           request.sourceSessionId,
+          request.unfilteredChanges,
         );
         return;
       }

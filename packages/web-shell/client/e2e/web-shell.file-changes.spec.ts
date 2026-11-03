@@ -10,7 +10,7 @@ import {
 
 // A simulated daemon verifies UI behavior; real Git is covered by route tests.
 for (const onlyNoise of [false, true]) {
-  test(`file change cards exclude external and Git-ignored files${onlyNoise ? ' when all edits are noise' : ''}`, async ({
+  test(`file change cards exclude external and Git-ignored files${onlyNoise ? ' when a turn only contains noise' : ''}`, async ({
     page,
     baseURL,
   }, testInfo) => {
@@ -23,10 +23,30 @@ for (const onlyNoise of [false, true]) {
       `${cwd}-other/outside.ts`,
       '/Users/example/.qwen/memory/feedback.md',
     ];
+    const controlEvents = onlyNoise
+      ? [
+          userTextEvent('Create a visible control file.', {
+            id: paths.length + 4,
+          }),
+          toolCallEvent(
+            'control-write',
+            'write_file',
+            { file_path: `${cwd}/control.ts`, content: 'control\n' },
+            {
+              id: paths.length + 5,
+              rawOutput: { originalContent: '', newContent: 'control\n' },
+            },
+          ),
+          assistantTextEvent('Control ready.', { id: paths.length + 6 }),
+          turnCompleteEvent('control', { id: paths.length + 7 }),
+        ]
+      : [];
     const scenario = createWebShellDaemonScenario({
       workspaceCwd: cwd,
       events: [
-        userTextEvent('Update the project and auxiliary files.', { id: 1 }),
+        userTextEvent('Update the project and auxiliary files.', {
+          id: 1,
+        }),
         ...paths.map((file_path, index) =>
           toolCallEvent(
             `write-${index}`,
@@ -38,8 +58,11 @@ for (const onlyNoise of [false, true]) {
             },
           ),
         ),
-        assistantTextEvent('Project updated.', { id: paths.length + 2 }),
+        assistantTextEvent('Project updated.', {
+          id: paths.length + 2,
+        }),
         turnCompleteEvent('file-changes', { id: paths.length + 3 }),
+        ...controlEvents,
       ],
     });
     scenario.capabilities.features.push(
@@ -69,8 +92,17 @@ for (const onlyNoise of [false, true]) {
     ).toBeVisible();
     await expect.poll(() => batches.length).toBeGreaterThan(0);
     const rows = page.locator('[class*="fileRow"]');
-    await expect(rows).toHaveCount(visible.length);
-    expect(batches.flat()).not.toContain('../outside.ts');
+    await expect(rows).toHaveCount(onlyNoise ? 1 : visible.length);
+    await expect
+      .poll(() => [...new Set(batches.flat())].sort())
+      .toEqual(
+        [
+          ...visible,
+          'ignored.log',
+          '.qwen/tmp/helper.py',
+          ...(onlyNoise ? ['control.ts'] : []),
+        ].sort(),
+      );
     expect(batches.flat().every((path) => !path.startsWith('/'))).toBe(true);
     if (!onlyNoise) {
       await expect(
@@ -103,7 +135,8 @@ for (const onlyNoise of [false, true]) {
       ).toBeVisible();
       await expect(page.locator('[class*="reviewRowToggle"]')).toHaveCount(2);
     } else {
-      await expect(page.getByText(/^Edited \d+ files$/)).toHaveCount(0);
+      await expect(rows).toHaveText(['control.ts+1-0']);
+      await expect(page.getByText(/^Edited \d+ files$/)).toHaveCount(1);
     }
   });
 }

@@ -4,9 +4,24 @@ import {
   filterWorkspaceFileChanges,
   fileChangeOwnerSessionId,
   workspaceRelativeChangePath,
+  loadGitIgnoredChangePaths,
 } from './workspace-file-changes';
 
 describe('workspace file changes', () => {
+  it('keeps earlier ignored verdicts when a later batch fails', async () => {
+    const paths = [
+      'known.log',
+      ...Array.from({ length: 256 }, (_, index) => `file-${index}.ts`),
+    ];
+    let calls = 0;
+    const ignored = await loadGitIgnoredChangePaths(paths, async () => {
+      if (++calls > 1) throw new Error('offline');
+      return { ignoredPaths: ['known.log'] };
+    });
+    expect(calls).toBe(2);
+    expect([...ignored]).toEqual(['known.log']);
+  });
+
   it('resolves a virtual child to the real parent and rejects malformed encodings', () => {
     expect(fileChangeOwnerSessionId('parent-session')).toBe('parent-session');
     expect(
@@ -36,6 +51,7 @@ describe('workspace file changes', () => {
     ['/src/a.ts', '/', 'src/a.ts'],
     ['src/a.ts', '', undefined],
     ['~/secrets/a.ts', '/project', undefined],
+    ['release:2026-11-03.md', '/project', 'release:2026-11-03.md'],
     ['~', '/project', undefined],
   ])('resolves %s inside %s', (file, cwd, expected) => {
     expect(workspaceRelativeChangePath(file, cwd)).toBe(expected);

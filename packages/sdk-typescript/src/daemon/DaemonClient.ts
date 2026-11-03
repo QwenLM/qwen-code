@@ -8124,7 +8124,10 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  /** Classify at most 256 workspace-relative paths using Git's index and ignore rules. */
+  /**
+   * Return confirmed Git-ignored paths for at most 256 inputs.
+   * Paths are relative to cwd, or the workspace root when cwd is omitted.
+   */
   workspaceGitIgnoredPaths(
     paths: readonly string[],
     cwd?: string,

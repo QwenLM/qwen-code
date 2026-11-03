@@ -27,11 +27,13 @@ tool details remain unchanged. If no visible edits remain, omit the file card.
 
 `workspace_git_check_ignore` advertises
 `POST /workspaces/:workspace/git/check-ignore`. The JSON body is
-`{ "paths": ["src/app.ts", "helper.log"] }`; each path is workspace-relative.
+`{ "paths": ["src/app.ts", "helper.log"] }`; each path is relative to `cwd`,
+or the workspace root when `cwd` is omitted.
 At most 256 paths are accepted, each with 1–4096 characters; absolute paths,
 NUL, backslashes and `.`/`..` segments are rejected with HTTP 400 and
 `code: "invalid_paths"`. Success returns
-`{ "v": 1, "ignoredPaths": ["helper.log"] }`.
+`{ "v": 1, "ignoredPaths": ["helper.log"] }`. This lists confirmed ignored
+paths; absence is not a negative verdict when bounded probing stops early.
 `WorkspaceDaemonClient.workspaceGitIgnoredPaths(paths, cwd?, sessionId?)` uses
 REST and forwards the optional execution directory and owning session for the
 existing managed-worktree validation. Unknown, unavailable and untrusted
@@ -46,6 +48,8 @@ rules. Never fall back to the primary runtime. Ask Git directly with
 `check-ignore`, without `--no-index`, so its index, nested rules, negations,
 global excludes and linked worktrees retain Git semantics. Bound subprocess
 runtime and output, sanitize its environment and disable executable Git config.
+Runtime overlays use their snapshots (empty when absent); parent-process runtimes
+without a snapshot inherit the daemon environment captured at boot.
 Limit each request to 32 Git probes and a shared deadline (5 seconds locally,
 30 seconds over SSH). Keep known verdicts when unsupported symlink/submodule
 paths or the budget leave other paths unclassified; unclassified paths remain
@@ -63,10 +67,14 @@ edits do not invalidate the workspace query. Re-query on connection recovery.
 Restored reviews also await classification. Reuse a current session's in-memory
 transcript when it contains the requested edits; page persisted history only
 when they are missing. Reclassify open reviews after visibility or connection
-changes, preserving their original diff snapshots. Restore containment from a
-standalone session's output directory; an unknown root retains edits instead of
-turning them into a missing-content error. Resolve virtual subagent worktrees
-through their real parent session, and keep execution metadata independent of
+changes, preserving their original unfiltered diff snapshots. Keep earlier
+positive ignore verdicts if a later client batch fails; unclassified paths stay
+visible. Restore containment from a standalone session's output directory; an
+unknown root retains edits instead of
+turning them into a missing-content error. Live sessions that do not expose a
+working directory also retain their original per-turn changes. Resolve virtual
+subagent worktrees through their real parent session, even without the Git-ignore
+capability, and keep execution metadata independent of
 session-details presentation. Unknown execution metadata must not use the base
 checkout's ignore rules as if they were authoritative. Standalone sessions use
 their own output directory for containment without issuing a workspace query.
@@ -83,7 +91,9 @@ Older or unavailable daemons retain contained edits when ignore status cannot be
 confirmed. Unknown ignore status is not proof that a file is ignored. Resolve
 fresh verdicts when edit inputs change; this is not a filesystem watcher for
 historical cards. SSH queries must execute against the remote runtime, never
-against local paths. Host-provided transcript data remains unchanged.
+against local paths. SSH retains its existing root-only inspection policy;
+unsupported cwd overrides fall back to containment, without local execution.
+Host-provided transcript data remains unchanged.
 Path comparisons preserve case and do not resolve filesystem aliases; an
 otherwise identical absolute path with different casing can be omitted. A
 home-relative `~/...` path is not treated as workspace-relative.
