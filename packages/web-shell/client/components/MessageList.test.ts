@@ -3659,9 +3659,15 @@ describe('turn-collapse deliverable final answer', () => {
   it('keeps the last deliverable when several stand in the turn', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),
-      { ...makeAssistantMessage('first'), content: '## one\n' + 'a'.repeat(1100) },
+      {
+        ...makeAssistantMessage('first'),
+        content: '## one\n' + 'a'.repeat(1100),
+      },
       makeAssistantMessage('mid'),
-      { ...makeAssistantMessage('second'), content: '## two\n' + 'b'.repeat(1100) },
+      {
+        ...makeAssistantMessage('second'),
+        content: '## two\n' + 'b'.repeat(1100),
+      },
     ]);
     const rows = collapseItems(items);
     expect(rowIds(rows)).toContain('second');
