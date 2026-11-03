@@ -2131,6 +2131,53 @@ describe('GithubChannel', () => {
       ).toHaveLength(0);
     });
 
+    it('bounds the comment-time map under a frozen cursor even when mark-read rejects (R13-M1)', async () => {
+      await initWithoutLoop();
+      const priv = channel as unknown as {
+        abortableSleep: (ms: number) => Promise<void>;
+      };
+      priv.abortableSleep = vi.fn().mockResolvedValue(undefined);
+      // mark-read fails (read-only PAT / rate limit): the cursor freezes and
+      // pollOnce rejects at the commit. The per-poll prune must run BEFORE
+      // that throw, or the map grows without bound under the very outage it
+      // is bounded for.
+      mockOctokit.rest.activity.markNotificationsAsRead.mockRejectedValue(
+        new Error('read-only PAT'),
+      );
+      channel.cursor.lastProcessedAt = '2026-07-01T00:00:00.000Z';
+      // 9000 re-listable non-ring times plus 5 ring keys whose times must
+      // survive the cap; all newer than the frozen cursor.
+      const times: Record<string, string> = {};
+      for (let i = 0; i < 9000; i++) {
+        times[`ambient${i}`] = '2026-07-02T09:00:00.000Z';
+      }
+      const ringKeys = ['ring0', 'ring1', 'ring2', 'ring3', 'ring4'];
+      for (const k of ringKeys) times[k] = '2026-07-02T09:00:00.000Z';
+      channel.cursor.dispatchedCommentTimes = times;
+      channel.cursor.dispatchedComments = [...ringKeys];
+      // A notification advances pendingCursorUpdatedAt so the commit gate
+      // runs mark-read (and throws); its comment is not a mention, so nothing
+      // dispatches and the mid-poll prune never runs either.
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'mention',
+            updated_at: '2026-07-02T10:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({
+            body: 'no mention here',
+            created_at: '2026-07-02T09:00:00.000Z',
+          }),
+        ]);
+      await pollOnce().catch(() => {});
+
+      const after = channel.cursor.dispatchedCommentTimes ?? {};
+      expect(Object.keys(after).length).toBeLessThanOrEqual(8192);
+      for (const k of ringKeys) expect(after[k]).toBeDefined();
+    });
+
     it('skips notifications whose reason is not in reasonFilter', async () => {
       await initWithoutLoop({
         reasonFilter: ['mention', 'review_requested', 'assign'],
@@ -7717,6 +7764,83 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
 
       expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
       expect(channel.inboundEnvelopes).toHaveLength(1);
+    });
+
+    it('iterates past two Gone followers to a live third instead of going public (R13-M2)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      // Three followers of PR 42, newest first; s1 and s2 are Gone, s3 live.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 's1',
+            updatedAt: '2026-07-02T03:00:00.000Z',
+          }),
+          makeBinding({
+            sessionId: 's2',
+            updatedAt: '2026-07-02T02:00:00.000Z',
+          }),
+          makeBinding({
+            sessionId: 's3',
+            updatedAt: '2026-07-02T01:00:00.000Z',
+          }),
+        ],
+        partial: false,
+      });
+      boundSessions.deliverPrompt.mockImplementation(
+        async (sessionId: string) => {
+          if (sessionId === 's1' || sessionId === 's2') {
+            throw new BoundSessionGoneError(sessionId);
+          }
+        },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+
+      // s1 → s2 → s3 all tried; the live third follower takes the event and
+      // nothing falls back to the public channel path.
+      expect(boundSessions.deliverPrompt.mock.calls.map((c) => c[0])).toEqual([
+        's1',
+        's2',
+        's3',
+      ]);
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+    });
+
+    it('excludes a Gone winner a stale refresh re-lists and tries the next follower (R13-M2)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      // A STALE snapshot keeps re-listing the Gone s1 as the newest winner;
+      // s2 is a live follower. The Gone set must exclude s1 regardless.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 's1',
+            updatedAt: '2026-07-02T03:00:00.000Z',
+          }),
+          makeBinding({
+            sessionId: 's2',
+            updatedAt: '2026-07-02T02:00:00.000Z',
+          }),
+        ],
+        partial: false,
+      });
+      boundSessions.deliverPrompt.mockImplementation(
+        async (sessionId: string) => {
+          if (sessionId === 's1') throw new BoundSessionGoneError(sessionId);
+        },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+
+      // s1 (Gone) then s2 (live) — not s1 again, and not the public path.
+      expect(boundSessions.deliverPrompt.mock.calls.map((c) => c[0])).toEqual([
+        's1',
+        's2',
+      ]);
+      expect(channel.inboundEnvelopes).toHaveLength(0);
     });
 
     it('keeps the public fallback for a gone comment under an allowlist (F7)', async () => {

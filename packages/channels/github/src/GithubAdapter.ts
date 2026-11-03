@@ -1899,7 +1899,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const reason = String(notification.reason ?? '').toLowerCase();
       if (this.reasonFilter && !this.reasonFilter.has(reason)) {
         process.stderr.write(
-          `[Channel:${this.name}] skipping notification (reason=${reason} not in reasonFilter, subject=${notification.subject.url})\n`,
+          `[Channel:${this.name}] skipping notification (reason=${sanitizeLogText(reason, 64)} not in reasonFilter, subject=${sanitizeLogText(String(notification.subject.url ?? ''), 200)})\n`,
         );
         this.logDebugPayload('Github', {
           event: 'reasonFilter.skip',
@@ -1985,26 +1985,36 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // cursor: one stuck bound session would otherwise pin mark-as-read and
     // the cursor for EVERY PR the channel follows, re-listing a growing
     // notification window each poll.
-    if (
-      !this.inboundPersistenceBlocked &&
-      !this.publicationAuditBlocked &&
-      !this.hasCursorBlockingTasks() &&
-      this.pendingCursorUpdatedAt
-    ) {
-      const committedAt = this.pendingCursorUpdatedAt;
-      await this.markNotificationsAsRead(committedAt);
-      if (committedAt > this.cursor.lastProcessedAt) {
-        this.cursor.lastProcessedAt = committedAt;
+    try {
+      if (
+        !this.inboundPersistenceBlocked &&
+        !this.publicationAuditBlocked &&
+        !this.hasCursorBlockingTasks() &&
+        this.pendingCursorUpdatedAt
+      ) {
+        const committedAt = this.pendingCursorUpdatedAt;
+        await this.markNotificationsAsRead(committedAt);
+        if (committedAt > this.cursor.lastProcessedAt) {
+          this.cursor.lastProcessedAt = committedAt;
+        }
+        this.pendingCursorUpdatedAt = undefined;
       }
-      this.pendingCursorUpdatedAt = undefined;
+    } finally {
+      // Bound the comment-time map EVERY poll, independent of dispatch: fetch
+      // records a time for every re-listable comment before filtering, so a
+      // mention-only lane with no bot mention, a sender-rejected stream, or a
+      // poll that dispatches nothing would otherwise never prune (the only
+      // other call site is recordDispatched). The finally guarantees it runs
+      // even when markNotificationsAsRead throws (read-only PAT, rate limit,
+      // proxy refusal) and rejects the poll — a prune reachable only after a
+      // successful commit would be skipped under the very frozen-cursor
+      // outage this map is bounded for. After a successful commit it prunes
+      // against the ADVANCED cursor (dropping the just-fetched comments that
+      // are now consumed); after a failed commit it prunes against the frozen
+      // cursor, where the MAX_COMMENT_TIMES cap bounds the re-listable set.
+      // Ring keys' times are always retained.
+      this.pruneCommentTimes();
     }
-    // Bound the comment-time map EVERY poll, independent of dispatch: fetch
-    // records a time for every re-listable comment before filtering, so a
-    // mention-only lane with no bot mention, a sender-rejected stream, or a
-    // poll that dispatches nothing would otherwise never prune (the only
-    // other call site is recordDispatched) and the map would grow without
-    // bound even while the cursor advances. Ring keys' times are retained.
-    this.pruneCommentTimes();
   }
 
   private async processCommentLane(
@@ -3568,6 +3578,45 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   /**
+   * Pick the most-recent live follower of a PR from the full binding list,
+   * excluding sessions already known Gone in this delivery attempt. Unlike
+   * resolveBoundDelivery (the single routing-map winner), this scans every
+   * listed follower so the gone-fallback can iterate past a Gone winner to
+   * the next live session — evicting the winner empties the routing map, and
+   * a stale refresh can re-list an already-Gone session as the winner; both
+   * would otherwise skip a live follower and fall through to an irreversible
+   * public reply while a complete snapshot still lists a follower.
+   */
+  private resolveBoundDeliveryExcluding(
+    chatId: string,
+    issueNumber: number,
+    excluded: Set<string>,
+  ): InboundTaskRecord['delivery'] {
+    if (!this.deliverToBoundSessions) return undefined;
+    const key = this.prBindingKey(chatId, issueNumber);
+    let best: PrBindingSummary | undefined;
+    for (const summary of this.lastBindings) {
+      if (summary.sourceType === 'channel') continue;
+      if (excluded.has(summary.sessionId)) continue;
+      const follows = summary.prs.some((pr) => {
+        const identity = this.parsePrBindingUrl(pr.url);
+        return (
+          !!identity &&
+          identity.number === pr.number &&
+          this.prBindingKey(identity.chatId, identity.number) === key
+        );
+      });
+      if (!follows) continue;
+      if (!best || (summary.updatedAt ?? '') > (best.updatedAt ?? '')) {
+        best = summary;
+      }
+    }
+    return best
+      ? { kind: 'bound-session', sessionId: best.sessionId }
+      : undefined;
+  }
+
+  /**
    * Remove a session the daemon reported permanently gone from both binding
    * maps. A later partial snapshot otherwise retains it by recency (an
    * incomplete enumeration is a non-absence, but an authoritative Gone is),
@@ -3733,11 +3782,24 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // otherwise retain it by recency forever, permanently shadowing a live
       // follower and degrading every comment to the public path.
       this.evictBoundSession(delivery.sessionId);
-      // The session disappeared between selection and delivery. Re-resolve
-      // once; a different candidate takes the event.
       await this.refreshBoundSessions();
-      const next = this.resolveBoundDelivery(envelope.chatId, task.issueNumber);
-      if (next && next.sessionId !== delivery.sessionId) {
+      // Iterate through the PR's remaining live followers (most recent
+      // first), excluding every session already Gone in this attempt. A
+      // single re-resolve is not enough: evicting the Gone winner empties the
+      // routing map (so a still-listed older follower is never tried), and a
+      // stale refresh can re-list an already-Gone session as the winner (so
+      // the `next !== delivery` guard skips the retry entirely). Either skips
+      // a live follower and falls through to an irreversible public reply
+      // while a complete snapshot still lists one. The Gone set bounds the
+      // loop by the finite follower count even if a stale snapshot keeps
+      // re-listing dead sessions.
+      const goneSessions = new Set<string>([delivery.sessionId]);
+      let next = this.resolveBoundDeliveryExcluding(
+        envelope.chatId,
+        task.issueNumber,
+        goneSessions,
+      );
+      while (next) {
         this.transitionInboundTask(task.id, 'running', { delivery: next });
         task.delivery = next;
         try {
@@ -3750,10 +3812,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           return true;
         } catch (retryErr) {
           if (!(retryErr instanceof BoundSessionGoneError)) throw retryErr;
-          // The re-resolved candidate is gone too. Evict it and fall through
-          // to the private-retire / public-fallback contract rather than
-          // letting the Gone consume the failure budget and dead-letter.
+          // This candidate is gone too: evict it and try the next live
+          // follower rather than letting the Gone consume the failure budget
+          // or prematurely falling back to the public path.
+          goneSessions.add(next.sessionId);
           this.evictBoundSession(next.sessionId);
+          await this.refreshBoundSessions();
+          next = this.resolveBoundDeliveryExcluding(
+            envelope.chatId,
+            task.issueNumber,
+            goneSessions,
+          );
         }
       }
       if (isWatch) {
