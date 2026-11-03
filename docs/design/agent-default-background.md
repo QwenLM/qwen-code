@@ -2,6 +2,8 @@
 
 [English](agent-default-background.md) | [简体中文](agent-default-background.zh-CN.md)
 
+This decision supersedes the "A new global setting for the default" non-goal in [Default Background Subagents](2026-07-16-default-background-subagents.md). The built-in default and existing execution guards remain unchanged.
+
 ## Problem and current behavior
 
 Top-level regular subagents default to background execution. Users who need the complete result inline must repeat `run_in_background: false` on each call or set `background: false` in each agent definition. There is no global setting for this preference. This change addresses [#15147](https://github.com/QwenLM/qwen-code/issues/15147).
@@ -36,7 +38,8 @@ Affected code is the CLI settings schema and configuration mapping, the core con
 - Nested agents remain foreground, and explicit nested background requests remain rejected.
 - Caller-owned `working_dir` and named-agent restrictions retain their existing guards. Named teammates retain their separate execution path.
 - Agent definitions, including external executors with `background: false`, take precedence over the global setting.
-- Display and lifecycle consumers continue to use the resolved `executionMode` and `isBackgrounded` values. Legacy transcript classification is unchanged.
+- Display and lifecycle consumers continue to use the resolved `executionMode` and `isBackgrounded` values. Legacy classification for frames without `executionMode` cannot see `agents.defaultBackground` and remains frozen; it may classify a foreground launch as background when the setting is `false`.
+- The external desktop adapter replicates the routing rule without receiving the resolved `executionMode`; it must receive the setting to honor this preference. This integration requirement must be communicated to the fork maintainers.
 - Existing background-task resumption, hosted workspace execution profiles, and external desktop implementations are outside this change.
 
 ## Validation and acceptance criteria

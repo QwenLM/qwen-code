@@ -2,6 +2,8 @@
 
 [English](agent-default-background.md) | [简体中文](agent-default-background.zh-CN.md)
 
+本决策取代 [Default Background Subagents](2026-07-16-default-background-subagents.md) 中将“新增全局默认设置”列为非目标的约定。内置默认值与现有执行约束保持不变。
+
 ## 问题与当前行为
 
 顶层普通子代理默认在后台运行。需要在当前调用中直接获得完整结果的用户，必须在每次调用中重复指定 `run_in_background: false`，或在每个代理定义中设置 `background: false`。目前没有用于表达这一偏好的全局设置。本次变更解决 [#15147](https://github.com/QwenLM/qwen-code/issues/15147)。
@@ -36,7 +38,8 @@ CLI 设置 schema 声明该设置，并生成编辑器使用的 JSON schema。CL
 - 嵌套代理仍在前台运行，嵌套调用中的显式后台请求仍被拒绝。
 - 调用方拥有的 `working_dir` 与命名代理限制继续使用现有约束。具名 teammate 保留独立执行路径。
 - 代理定义优先于全局设置，包括设置了 `background: false` 的外部执行器。
-- 展示和生命周期消费者继续使用解析后的 `executionMode` 与 `isBackgrounded`。旧 transcript 的分类规则保持不变。
+- 展示和生命周期消费者继续使用解析后的 `executionMode` 与 `isBackgrounded`。缺少 `executionMode` 的帧使用的旧分类规则无法读取 `agents.defaultBackground`，因此保持冻结；设置为 `false` 时，它可能仍将前台调用归类为后台。
+- 外部桌面适配器自行复制路由规则，未接收解析后的 `executionMode`；它必须接收该设置才能遵循此偏好。需要向 fork 维护者说明这一集成要求。
 - 已有后台任务恢复、hosted workspace 执行 profile 及外部桌面实现不在本次变更范围内。
 
 ## 验证与验收标准

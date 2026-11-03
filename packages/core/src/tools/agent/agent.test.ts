@@ -1182,10 +1182,11 @@ describe('AgentTool', () => {
         ['For a background fork, do not read or tail its output'],
       ],
       [
-        'advertises background execution as the default with a foreground opt-out',
+        'explains both values of the configurable execution default',
         false,
         [
-          'background by default',
+          '`true` runs in the background with completion notifications',
+          '`false` waits and returns the result inline',
           'run_in_background: false',
           'foreground regular agent returns its result inline',
           'Unnamed caller-owned `working_dir` launches run in the foreground: an explicit `run_in_background: true` request is rejected',
@@ -1259,24 +1260,36 @@ describe('AgentTool', () => {
       expect(await withGrades(new Map())).toBeUndefined();
     });
 
-    it('declares the background default and foreground opt-out', () => {
-      const runInBackground = schemaProps().run_in_background!;
-      expect(runInBackground.default).toBeUndefined();
-      // Teammate clauses are about `name`, undeclared with teams off here.
-      expectText(
-        runInBackground.description,
-        [
-          'agents.defaultBackground (true by default)',
-          'explicit value > definition background > agents.defaultBackground',
-          'Set to false',
-          'interactive fork',
-          'Nested agents run in the foreground unless run_in_background is explicitly true',
-          'explicit run_in_background: true is rejected',
-          'a configured background default is rejected at the top level and downgraded to the foreground for nested launches',
-        ],
-        ['Named teammates are always concurrent'],
-      );
-    });
+    it.each([undefined, true, false])(
+      'declares mode precedence and configurable defaults with setting=%s',
+      async (defaultBackground) => {
+        vi.mocked(config.getAgentsSettings).mockReturnValue({
+          defaultBackground,
+        });
+        const tool = await freshTool();
+        const runInBackground = schemaProps(tool).run_in_background!;
+        expect(runInBackground.default).toBeUndefined();
+        // Teammate clauses are about `name`, undeclared with teams off here.
+        expectText(
+          runInBackground.description,
+          [
+            'agents.defaultBackground (true: background, false: foreground; default: true)',
+            'explicit value > definition background > agents.defaultBackground',
+            'Set to false',
+            'interactive fork',
+            'Nested agents run in the foreground unless run_in_background is explicitly true',
+            'explicit run_in_background: true is rejected',
+            'a configured background default is rejected at the top level and downgraded to the foreground for nested launches',
+          ],
+          ['Named teammates are always concurrent'],
+        );
+        expectText(tool.description, [
+          '`true` runs in the background with completion notifications',
+          '`false` waits and returns the result inline',
+          'For top-level regular subagents, explicit `run_in_background` overrides definition `background`, which overrides `agents.defaultBackground`',
+        ]);
+      },
+    );
 
     it('declares the teammate background rules when teams are enabled', async () => {
       vi.mocked(config.isAgentTeamEnabled).mockReturnValue(true);
