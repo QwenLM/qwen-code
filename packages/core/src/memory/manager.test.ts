@@ -8,6 +8,7 @@ import { chmodSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   ExtractResult,
@@ -4397,36 +4398,43 @@ describe('MemoryManager', () => {
       }
     });
 
-    it('retries recording the failure once when the first marker write throws', async () => {
-      const metaDir = path.dirname(getAutoMemoryMetadataPath(tmp.projectRoot));
-      // A read-only directory lets the read succeed and the atomic write fail.
-      vi.mocked(runManagedAutoMemoryDream).mockImplementationOnce(async () => {
-        chmodSync(metaDir, 0o500);
-        throw new Error('dream agent failed');
-      });
-      // Heal the directory as soon as the first failure is logged so the
-      // outer catch's retry can land.
-      debugWarn.mockClear();
-      debugWarn.mockImplementationOnce(() => {
-        chmodSync(metaDir, 0o700);
-      });
-      try {
-        const mgr = new MemoryManager(fiveSessions);
-        const first = await mgr.scheduleDream(
-          dreamParams('sess-a', APR1_10, 0, 1),
+    it.runIf(arePermissionBitsEnforced())(
+      'retries recording the failure once when the first marker write throws',
+      async () => {
+        const metaDir = path.dirname(
+          getAutoMemoryMetadataPath(tmp.projectRoot),
         );
-        await first.promise;
+        // A read-only directory lets the read succeed and the atomic write fail.
+        vi.mocked(runManagedAutoMemoryDream).mockImplementationOnce(
+          async () => {
+            chmodSync(metaDir, 0o500);
+            throw new Error('dream agent failed');
+          },
+        );
+        // Heal the directory as soon as the first failure is logged so the
+        // outer catch's retry can land.
+        debugWarn.mockClear();
+        debugWarn.mockImplementationOnce(() => {
+          chmodSync(metaDir, 0o700);
+        });
+        try {
+          const mgr = new MemoryManager(fiveSessions);
+          const first = await mgr.scheduleDream(
+            dreamParams('sess-a', APR1_10, 0, 1),
+          );
+          await first.promise;
 
-        expect(debugWarn).toHaveBeenCalledWith(
-          expect.stringContaining('Failed to record failed dream attempt'),
-        );
-        expect((await readMeta(tmp.projectRoot))['lastDreamAttemptAt']).toEqual(
-          expect.any(String),
-        );
-      } finally {
-        chmodSync(metaDir, 0o700);
-      }
-    });
+          expect(debugWarn).toHaveBeenCalledWith(
+            expect.stringContaining('Failed to record failed dream attempt'),
+          );
+          expect(
+            (await readMeta(tmp.projectRoot))['lastDreamAttemptAt'],
+          ).toEqual(expect.any(String));
+        } finally {
+          chmodSync(metaDir, 0o700);
+        }
+      },
+    );
 
     it('still records the failure when the lock cannot be created at all', async () => {
       const lockPath = getAutoMemoryConsolidationLockPath(tmp.projectRoot);
