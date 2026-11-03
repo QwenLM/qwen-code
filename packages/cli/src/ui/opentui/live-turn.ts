@@ -82,6 +82,9 @@ import {
 } from './input-submission.js';
 
 const debugLogger = createDebugLogger('OPENTUI_LIVE_TURN');
+// ink's line for a prompt sent to Mods that failed to load.
+const MODS_FAILED_TO_INITIALIZE =
+  'Mods failed to initialize. Fix the Mod configuration and restart. /help and /quit remain available.';
 
 /** Extension → MIME for composer attachments (core SUPPORTED subset). */
 const IMAGE_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
@@ -471,12 +474,16 @@ export function useOpenTuiLiveTurn(
     return restoreInputSubmissions(entries);
   }, [syncQueue]);
 
-  // A typed prompt the Mods' prompt.submit hooks hear. Slash-form text keeps
-  // its own path, as it does in ink.
+  // A typed prompt the Mods' prompt.submit hooks hear, or may hear once they
+  // finish loading. Slash-form text keeps its own path, as it does in ink.
   const hooksHear = useCallback(
-    (entry: Pick<OpenTuiInputSubmission, 'text' | 'displayText'>) =>
-      getInteractiveModSession(config)?.hearsPrompts === true &&
-      !isSlashCommand((entry.displayText ?? entry.text).trim()),
+    (entry: Pick<OpenTuiInputSubmission, 'text' | 'displayText'>) => {
+      const mods = getInteractiveModSession(config);
+      return (
+        (mods?.hearsPrompts === true || mods?.starting === true) &&
+        !isSlashCommand((entry.displayText ?? entry.text).trim())
+      );
+    },
     [config],
   );
 
@@ -522,6 +529,31 @@ export function useOpenTuiLiveTurn(
           // The Mods hear the prompt before anything shows, records or sends
           // it; until they answer, the transcript has no row for it.
           let typed = editablePrompt;
+          // A prompt sent while the Mods load waits for them, as it does in
+          // ink, so a guard is not bypassed for the session's first prompt.
+          try {
+            if (mods.starting)
+              await new Promise<void>((resolve, reject) => {
+                const onAbort = () => reject(abort.signal.reason);
+                abort.signal.addEventListener('abort', onAbort, {
+                  once: true,
+                });
+                mods.ready
+                  .finally(() =>
+                    abort.signal.removeEventListener('abort', onAbort),
+                  )
+                  .then(resolve, reject);
+              });
+          } catch (error) {
+            // An abort while waiting; finally hands it back.
+            if (abort.signal.aborted) throw error;
+            if (seq !== turnSeqRef.current) return;
+            active.held = false;
+            apply({ type: 'error', text: MODS_FAILED_TO_INITIALIZE });
+            onPromptReturnedRef.current?.(typed);
+            return;
+          }
+          if (seq !== turnSeqRef.current || abort.signal.aborted) return;
           const pastes = typed.pasteExpansions ?? new Map<string, string>();
           const heard = expandPendingPastePlaceholders(
             typed.displayText ?? typed.text,
@@ -655,8 +687,7 @@ export function useOpenTuiLiveTurn(
           // Steering reaches the model mid-turn as no prompt of its own, so
           // while the Mods hear prompts, queued ones wait to become turns.
           drainSteering: () =>
-            seq === turnSeqRef.current &&
-            !getInteractiveModSession(config)?.hearsPrompts
+            seq === turnSeqRef.current && !mods?.hearsPrompts
               ? drainQueue()
               : [],
           restoreSteering: (submissions) => {

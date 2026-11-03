@@ -2980,6 +2980,116 @@ describe('useOpenTuiLiveTurn prompt.submit', () => {
     expect(live.turns).toEqual([]);
   });
 
+  // A Mod session still loading: `ready` settles when the test says so.
+  const installStartingMods = () => {
+    const startup: {
+      resolve?: () => void;
+      reject?: (error: Error) => void;
+    } = {};
+    const state = { starting: true, hearsPrompts: false };
+    const ready = new Promise<void>((resolve, reject) => {
+      startup.resolve = () => {
+        Object.assign(state, { starting: false, hearsPrompts: true });
+        resolve();
+      };
+      startup.reject = (error) => {
+        state.starting = false;
+        reject(error);
+      };
+    });
+    ready.catch(() => {});
+    const submitPrompt = vi.fn(async (text: string) => ({
+      text: text.replace('AKIA1', '[redacted]'),
+    }));
+    vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
+      get starting() {
+        return state.starting;
+      },
+      get hearsPrompts() {
+        return state.hearsPrompts;
+      },
+      ready,
+      submitPrompt,
+      startTurn: vi.fn(() => ({ id: 't', saw: vi.fn(), complete: vi.fn() })),
+    } as unknown as ReturnType<
+      typeof interactiveMods.getInteractiveModSession
+    >);
+    return { startup, submitPrompt };
+  };
+
+  it('holds a prompt sent while the Mods load until their hooks hear it', async () => {
+    const { startup, submitPrompt } = installStartingMods();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('deploy with key AKIA1');
+    });
+    await act(async () => {});
+    expect(submitPrompt).not.toHaveBeenCalled();
+    expect(rows(result.current.items)).toEqual([]);
+    expect(live.turns).toEqual([]);
+    expect(result.current.streaming).toBe(true);
+
+    await act(async () => startup.resolve!());
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    expect(submitPrompt).toHaveBeenCalledExactlyOnceWith(
+      'deploy with key AKIA1',
+      expect.any(AbortSignal),
+    );
+    expect(live.turns[0].prompt).toBe('deploy with key [redacted]');
+    expect(rows(result.current.items).map((row) => row.text)).toEqual([
+      'deploy with key [redacted]',
+    ]);
+    await act(async () => live.waiters.shift()?.());
+  });
+
+  it('refuses a prompt sent to Mods that fail to load and hands it back', async () => {
+    const { startup, submitPrompt } = installStartingMods();
+    const onPromptReturned = vi.fn();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config, onPromptReturned }),
+    );
+    act(() => {
+      result.current.submit('first');
+    });
+    await act(async () => startup.reject!(new Error('bad mod')));
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+    expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ text: 'first' }),
+    );
+    expect(submitPrompt).not.toHaveBeenCalled();
+    expect(live.turns).toEqual([]);
+    expect(rows(result.current.items)).toEqual([]);
+    expect(result.current.items).toContainEqual(
+      expect.objectContaining({
+        kind: 'error',
+        text: expect.stringContaining('Mods failed to initialize'),
+      }),
+    );
+  });
+
+  it('hands back a prompt cancelled while the Mods load', async () => {
+    const { submitPrompt } = installStartingMods();
+    const onPromptReturned = vi.fn();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config, onPromptReturned }),
+    );
+    act(() => {
+      result.current.submit('first');
+    });
+    await act(async () => {});
+    act(() => result.current.interrupt());
+    await vi.waitFor(() =>
+      expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ text: 'first' }),
+      ),
+    );
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+    expect(submitPrompt).not.toHaveBeenCalled();
+    expect(live.turns).toEqual([]);
+  });
+
   it('holds steering while the hooks hear prompts, then runs it through them', async () => {
     const { submitPrompt, answer } = installHooks();
     const { result } = renderHook(() =>

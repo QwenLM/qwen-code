@@ -689,6 +689,8 @@ In the Ink and OpenTUI terminals:
   such as a resumed worktree, stay ahead of a rewritten prompt, images attached
   in OpenTUI stay attached, and a paste the rewrite keeps whole stays collapsed.
 - In OpenTUI, the prompt's row appears once the hooks let it through.
+- A prompt sent while the Mods are still loading waits for them, so their
+  hooks hear it too.
 - A rewrite also stands in the prompt's row and in the input history that the
   Up key recalls.
 - A dropped prompt shows the reason as an error line. It is neither shown nor

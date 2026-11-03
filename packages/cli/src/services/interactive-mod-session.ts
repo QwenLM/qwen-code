@@ -67,6 +67,7 @@ export class InteractiveModSession implements ICommandLoader {
     this.rejectStartup = reject;
   });
   private initialization?: Promise<void>;
+  private started = false;
   private closing?: Promise<void>;
   private listener?: (text: string) => void;
   private readonly logs: Array<{ text: string; sessionId: string }> = [];
@@ -86,7 +87,10 @@ export class InteractiveModSession implements ICommandLoader {
     private readonly config: Config,
     settings: LoadedSettings,
   ) {
-    this.startup.catch(() => {});
+    const settle = () => {
+      this.started = true;
+    };
+    this.startup.then(settle, settle);
     this.session = ModSession.create(config, settings, {
       surface: 'terminal',
       presentation: () => this.presentation,
@@ -144,6 +148,11 @@ export class InteractiveModSession implements ICommandLoader {
 
   get ready(): Promise<void> {
     return this.startup;
+  }
+
+  /** Whether the Mods are still loading, so which hooks they bring is unknown. */
+  get starting(): boolean {
+    return !this.closing && !this.started;
   }
 
   failStartup(error: unknown): void {

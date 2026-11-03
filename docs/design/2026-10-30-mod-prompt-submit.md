@@ -94,9 +94,10 @@ The OpenTUI terminal raises the event in the live turn (`useOpenTuiLiveTurn`), f
 - **Queued prompts wait for the turn to end**, as in Ink: while a Mod hooks `prompt.submit`, the tool boundary takes no queued prompt.
 - **What the hooks hear.** The typed text with its pastes expanded. The composer sends attached images as parts of their own beside the text, and OpenTUI adds no notices to a prompt, so the hooks hear the whole of the prompt's text.
 - **The row waits for the hooks.** Without prompt hooks the row is added when the prompt is submitted. With them, it is added once the hooks let the prompt through, holding the rewrite if there is one; until then the turn shows as working.
+- **A prompt sent while the Mods load waits for them**, as in Ink, so the first prompt of a session cannot pass before its hooks load. If the Mods fail to load, the prompt is refused with the line Ink shows and goes back to the input box.
 - **A rewrite.** It replaces the prompt's text for the model, the row and its recall text, the input history, the cancel restore, the `UserPromptSubmit` provenance and `turn.start`. Attached images stay after it. A paste the rewrite keeps whole is collapsed and framed again. Surrounding whitespace alone is no rewrite.
 - **A drop.** The reason is shown as an error line, the prompt gets no row and no input history entry, and it goes back to the input box with its pastes collapsed, ahead of anything typed since.
-- **Esc while the hooks run.** The prompt goes back to the input box ahead of the prompts queued behind it and of anything typed since.
+- **Esc while the hooks run.** The prompt goes back to the input box ahead of the prompts queued behind it and of anything typed since. When a dialog has the input box closed, the prompt waits for the box to open again and the queued prompts stay queued.
 
 ## Design decisions
 
@@ -132,7 +133,7 @@ These go into the user guide:
   - a `.catch` that drops for a failed guard.
 - Mod session tests: no hooks, the origin, a rewrite with context, a drop's one line and its 4,096 characters, a failed worker, a cancelled prompt, and a prompt too long for a payload.
 - Client test: the Mods' context ahead of UserPromptSubmit's, escaped, with and without UserPromptSubmit hooks, and only for a new prompt.
-- OpenTUI live-turn tests: a rewrite with context in the sent prompt, the row, the input history and `turn.start`; a paste kept whole beside an attached image; a whitespace-only answer; a drop handed back with its pastes; Esc while the hooks run, with and without a composer; queued prompts held from the tool boundary and heard when they run; no event for slash-form text or a generated prompt.
+- OpenTUI live-turn tests: a rewrite with context in the sent prompt, the row, the input history and `turn.start`; a paste kept whole beside an attached image; a whitespace-only answer; a drop handed back with its pastes; Esc while the hooks run, with and without a composer; a prompt sent while the Mods load waiting for them, refused and handed back when they fail, and handed back on Esc while it waits; queued prompts held from the tool boundary and heard when they run; no event for slash-form text or a generated prompt.
 - Headless tests: the rewritten prompt and its context reaching the send and `turn.start`, a drop in JSON and text, and no event for a slash command or a notification.
 - The built CLI against a fixture server in headless JSON, text and stream-json: a rewrite that the model request and the transcript both hold, context in the hidden block, a drop, and a guard whose `.catch` drops.
 

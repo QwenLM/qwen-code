@@ -113,7 +113,7 @@ import { exitSession } from './exit-lifecycle.js';
 import { Command, matchesCommand } from './key-map.js';
 import {
   returnToComposer,
-  type OpenTuiComposerHandle,
+  type OpenTuiComposerSlot,
 } from './input-submission.js';
 import { buildUiHistoryItems } from './session-switch.js';
 import { projectHistoryToStreamEvents } from './item-projection.js';
@@ -165,9 +165,10 @@ function OpenTuiEntryApp({
   }, [config, renderer, width]);
   const { stats, startNewSession } = useSessionStats();
   const logger = useLogger(config.storage, config.getSessionId());
-  // Also an OpenTuiComposerSlot: a prompt handed back while a dialog has the
-  // composer unmounted waits on it.
-  const composerHandle = useRef<OpenTuiComposerHandle | null>(null);
+  // A prompt handed back while a dialog has the composer unmounted waits in
+  // the slot's `returned`.
+  const composerHandle: OpenTuiComposerSlot =
+    useRef<OpenTuiComposerSlot['current']>(null);
   const live = useOpenTuiLiveTurn({
     config,
     logger,
