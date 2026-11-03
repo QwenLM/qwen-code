@@ -116,13 +116,26 @@ class ToolPublicationStoreTest {
     }
 
     private void initialize(javax.sql.DataSource source, boolean csiWorkspace) {
+        initialize(source, csiWorkspace, null);
+    }
+
+    private void initialize(javax.sql.DataSource source, boolean csiWorkspace,
+            ToolPublicationObjectStore objects) {
         com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         csiRegistration = csiWorkspace
                 ? new WorkspaceCsiRegistration("tenant-1", "fixture-storage", "fixture-cluster",
                         "fixture", "fixture-claim", "fixture-pvc", "fixture-volume", "fixture-pv",
                         "fixture.csi", "fixture-handle", "fixture-backend", "fixture-serial", "/workspace", 1)
                 : null;
-        journal = PublicationJournalFixture.create(source, csiRegistration);
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
+        manager = new DataSourceTransactionManager(source);
+        projectionProperties = new ManagedAgentProperties();
+        projectionProperties.getArtifacts().setEnabled(true);
+        publicWorkspaces = org.mockito.Mockito.mock(ManagedWorkspaceRegistry.class);
+        publicSessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, java.time.Clock.systemUTC(), events -> {},
+                publicWorkspaces, projectionProperties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        publicResults = new ManagedToolResultStore(jdbc, manager, publicSessions);
+        journal = PublicationJournalFixture.create(source, csiRegistration, objects, publicResults);
         jdbc = journal.jdbc;
         manager = journal.manager;
         sessions = journal.sessions;
@@ -133,13 +146,6 @@ class ToolPublicationStoreTest {
         checkpoint = journal.checkpoint;
         csiStore = csiWorkspace ? new WorkspaceCsiReservationStore(jdbc, manager, JSON) : null;
         csiReservation = journal.csiReservation;
-        projectionProperties = new ManagedAgentProperties();
-        projectionProperties.getArtifacts().setEnabled(true);
-        publicWorkspaces = org.mockito.Mockito.mock(ManagedWorkspaceRegistry.class);
-        publicSessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, java.time.Clock.systemUTC(), events -> {},
-                publicWorkspaces, projectionProperties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
-        publicResults = new ManagedToolResultStore(jdbc, manager, publicSessions);
-        sessions.setToolResults(publicResults);
     }
 
     javax.sql.DataSource publicationDataSource() {
@@ -887,6 +893,22 @@ class ToolPublicationStoreTest {
     @ValueSource(booleans = {false, true})
     void commitsLargeBlockedOutcomeThroughVerifiedCatalogObject(boolean ambient) {
         List<String> lockOrder = new java.util.ArrayList<>();
+        Map<String, byte[]> objects = new java.util.HashMap<>();
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public void putIfAbsent(String key, byte[] bytes) {
+                objects.putIfAbsent(key, bytes.clone());
+            }
+
+            @Override
+            public InputStream open(String key) {
+                return new ByteArrayInputStream(objects.get(key));
+            }
+
+            @Override
+            public void validateConfiguration() {
+            }
+        };
         initialize(new DelegatingDataSource(publicationDataSource()) {
             @Override
             public Connection getConnection() throws SQLException {
@@ -924,25 +946,8 @@ class ToolPublicationStoreTest {
                             }
                         });
             }
-        });
+        }, false, bucket);
         reserve();
-        Map<String, byte[]> objects = new java.util.HashMap<>();
-        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
-            @Override
-            public void putIfAbsent(String key, byte[] bytes) {
-                objects.putIfAbsent(key, bytes.clone());
-            }
-
-            @Override
-            public InputStream open(String key) {
-                return new ByteArrayInputStream(objects.get(key));
-            }
-
-            @Override
-            public void validateConfiguration() {
-            }
-        };
-        sessions.setPublicationObjects(bucket);
         var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
                 Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
         JsonNode key = binding.get("sessionKey");

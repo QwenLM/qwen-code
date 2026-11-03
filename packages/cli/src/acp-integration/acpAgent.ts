@@ -9572,6 +9572,23 @@ class QwenAgent implements Agent {
               },
             }
           : {}),
+        ...(statsModel?.timingSamples?.length
+          ? {
+              timingSamples: statsModel.timingSamples.map((sample) => ({
+                ...sample,
+              })),
+            }
+          : {}),
+        ...(statsModel?.failures
+          ? {
+              failures: {
+                byKind: { ...statsModel.failures.byKind },
+                recent: statsModel.failures.recent.map((failure) => ({
+                  ...failure,
+                })),
+              },
+            }
+          : {}),
       };
     }
     const sources: ServeSessionStatsStatus['sources'] = [];

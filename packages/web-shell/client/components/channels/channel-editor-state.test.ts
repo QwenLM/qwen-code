@@ -1009,14 +1009,19 @@ describe('Descriptor-driven privatePolicy', () => {
   });
 
   it('writes privatePolicy via descriptor fields, not the hardcoded path', () => {
-    const draft = createChannelEditorDraft(GITHUB);
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...GITHUB,
+      type: 'dws',
+      displayName: 'DWS',
+    };
+    const draft = createChannelEditorDraft(descriptor);
     draft.name = 'my-bot';
     draft.secrets.token = { operation: 'replace', value: 'ghp_test' };
     draft.values.allowedUsers = 'alice, bob';
 
-    const request = buildChannelUpsertRequest(GITHUB, draft, 'rev-1');
+    const request = buildChannelUpsertRequest(descriptor, draft, 'rev-1');
     expect(request.config).toEqual({
-      type: 'github',
+      type: 'dws',
       useLocalGh: false,
       groupPolicy: 'open',
       privatePolicy: 'allowlist',
@@ -1194,5 +1199,214 @@ describe('Descriptor-driven privatePolicy', () => {
     expect(validateChannelEditorDraft(descriptor, invalid, [])).toEqual({
       reasons: 'invalidOption',
     });
+  });
+});
+
+// The registry injects privatePolicy/allowedUsers into every manageable
+// channel, but GitHub traffic is always group traffic, so the adapter never
+// reads them and group IDs are repository full names.
+describe('Repository-only channel access config', () => {
+  it('does not persist the direct-message policy', () => {
+    const draft = createChannelEditorDraft(GITHUB);
+    draft.name = 'release-bot';
+    draft.secrets.token = { operation: 'replace', value: 'ghp_test' };
+    draft.values.allowedUsers = 'alice';
+
+    const request = buildChannelUpsertRequest(GITHUB, draft, 'rev-1');
+    expect(request.config).toEqual({
+      type: 'github',
+      useLocalGh: false,
+      groupPolicy: 'open',
+    });
+  });
+
+  it('drops the private-access residue stored by an earlier save', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'open',
+        privatePolicy: 'pairing',
+        allowedUsers: ['alice'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITHUB, instance);
+
+    const request = buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance);
+    expect(request.config).not.toHaveProperty('privatePolicy');
+    expect(request.config).not.toHaveProperty('allowedUsers');
+  });
+
+  it('requires owner/repo for an allowlisted repository', () => {
+    const draft = createChannelEditorDraft(GITHUB);
+    draft.name = 'release-bot';
+    draft.secrets.token = { operation: 'replace', value: 'ghp_test' };
+    draft.values.groupPolicy = 'allowlist';
+    draft.allowedGroupIds = 'qwen-code';
+
+    expect(validateChannelEditorDraft(GITHUB, draft, [])).toEqual({
+      allowedGroupIds: 'invalidRepoId',
+    });
+
+    draft.allowedGroupIds = 'QwenLM/qwen-code, acme/widgets.js';
+    expect(validateChannelEditorDraft(GITHUB, draft, [])).toEqual({});
+  });
+
+  it('stores repository allowlists under the canonical lower-case key', () => {
+    // The adapter matches the canonical `owner/repo` GitHub reports, so the
+    // editor must not certify a spelling that never matches at runtime.
+    for (const typed of ['qwenlm/qwen-code', 'QwenLM/Qwen-Code']) {
+      const draft = createChannelEditorDraft(GITHUB);
+      draft.name = 'release-bot';
+      draft.secrets.token = { operation: 'replace', value: 'ghp_test' };
+      draft.values.groupPolicy = 'allowlist';
+      draft.allowedGroupIds = typed;
+
+      const request = buildChannelUpsertRequest(GITHUB, draft, 'rev-1');
+      expect(Object.keys(request.config['groups'] as object)).toEqual([
+        'qwenlm/qwen-code',
+      ]);
+    }
+  });
+
+  it('refuses to save when stored repository aliases carry different settings', () => {
+    // Both spellings are one repository to GitHub, but the runtime resolves an
+    // exact key first. Collapsing them would keep the empty entry and drop the
+    // sender restriction on a save the operator meant as a no-op.
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'allowlist',
+        groups: {
+          'QwenLM/qwen-code': { senders: 'allowlist', allowedUsers: ['alice'] },
+          'qwenlm/qwen-code': {},
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITHUB, instance);
+
+    expect(draft.allowedGroupIds).toBe('qwenlm/qwen-code');
+    expect(validateChannelEditorDraft(GITHUB, draft, [], instance)).toEqual({
+      allowedGroupIds: 'conflictingRepoAliases',
+    });
+  });
+
+  it('collapses repository aliases that carry identical settings', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'allowlist',
+        groups: {
+          'QwenLM/qwen-code': { senders: 'allowlist', allowedUsers: ['alice'] },
+          'qwenlm/qwen-code': { senders: 'allowlist', allowedUsers: ['alice'] },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITHUB, instance);
+
+    expect(validateChannelEditorDraft(GITHUB, draft, [], instance)).toEqual({});
+    const request = buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance);
+    expect(request.config['groups']).toEqual({
+      'qwenlm/qwen-code': { senders: 'allowlist', allowedUsers: ['alice'] },
+    });
+  });
+
+  it('treats aliases that differ only in key or allowlist order as identical', () => {
+    // Neither ordering carries meaning, so reporting a conflict here would
+    // block an unrelated save with a message that does not match the reason.
+    const orderings: Array<[Record<string, unknown>, Record<string, unknown>]> =
+      [
+        [
+          { senders: 'allowlist', requireMention: true },
+          { requireMention: true, senders: 'allowlist' },
+        ],
+        [
+          { senders: 'allowlist', allowedUsers: ['alice', 'bob'] },
+          { senders: 'allowlist', allowedUsers: ['bob', 'alice'] },
+        ],
+      ];
+    for (const [first, second] of orderings) {
+      const instance: DaemonChannelInstanceSnapshot = {
+        name: 'release-bot',
+        config: {
+          type: 'github',
+          groupPolicy: 'allowlist',
+          groups: { 'QwenLM/qwen-code': first, 'qwenlm/qwen-code': second },
+        },
+        secrets: { token: { present: true, source: 'literal' } },
+        startsWithServe: false,
+        runtime: { state: 'stopped' },
+      };
+      const draft = createChannelEditorDraft(GITHUB, instance);
+
+      expect(validateChannelEditorDraft(GITHUB, draft, [], instance)).toEqual(
+        {},
+      );
+      const request = buildChannelUpsertRequest(
+        GITHUB,
+        draft,
+        'rev-2',
+        instance,
+      );
+      expect(Object.keys(request.config['groups'] as object)).toEqual([
+        'qwenlm/qwen-code',
+      ]);
+    }
+  });
+
+  it('keeps per-repository settings when the allowlist case changes', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'allowlist',
+        groups: {
+          'QwenLM/qwen-code': {
+            senders: 'allowlist',
+            allowedUsers: ['alice'],
+          },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    expect(draft.allowedGroupIds).toBe('qwenlm/qwen-code');
+
+    const request = buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance);
+    expect(request.config['groups']).toEqual({
+      'qwenlm/qwen-code': { senders: 'allowlist', allowedUsers: ['alice'] },
+    });
+  });
+
+  it('drops a stored token once local gh authentication is selected', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: { type: 'github', useLocalGh: true, groupPolicy: 'open' },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+
+    const draft = createChannelEditorDraft(GITHUB, instance);
+
+    expect(draft.secrets.token).toEqual({ operation: 'clear' });
+    expect(buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance)).toEqual(
+      expect.objectContaining({
+        secrets: { token: { operation: 'clear' } },
+      }),
+    );
   });
 });

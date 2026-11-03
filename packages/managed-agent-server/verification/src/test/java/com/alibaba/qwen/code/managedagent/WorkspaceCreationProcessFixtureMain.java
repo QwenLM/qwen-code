@@ -28,9 +28,9 @@ public final class WorkspaceCreationProcessFixtureMain {
                 required("W0_MYSQL_URL"), required("W0_MYSQL_USER"),
                 System.getenv().getOrDefault("W0_MYSQL_PASSWORD", ""));
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
-        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc,
+        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc,
                 new ObjectMapper(), Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc),
-                new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         TransactionTemplate transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(dataSource));
         String tenant = required("W0_TENANT");
