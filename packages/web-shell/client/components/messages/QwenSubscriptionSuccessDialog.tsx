@@ -13,12 +13,10 @@ import themeStyles from '../dialogs/DialogShell.module.css';
 export function QwenSubscriptionSuccessDialog({
   email,
   plan,
-  model,
   onClose,
 }: {
   email: string;
   plan: string;
-  model: string;
   onClose: () => void;
 }) {
   const { t } = useI18n();
@@ -73,7 +71,7 @@ export function QwenSubscriptionSuccessDialog({
             {t('subscription.successDescription')}
           </DialogDescription>
         </div>
-        <dl className="grid gap-4 border-b pb-6 text-sm">
+        <dl className="grid gap-4 text-sm">
           <div className="flex items-start gap-3">
             <dt className="flex shrink-0 items-center gap-3 text-muted-foreground">
               <UserRoundIcon className="size-4" aria-hidden="true" />
@@ -90,14 +88,6 @@ export function QwenSubscriptionSuccessDialog({
             </dt>
             <dd className="m-0 flex-1 text-right font-medium">Qwen {plan}</dd>
           </div>
-          {model && (
-            <div className="flex items-start gap-3 text-muted-foreground">
-              <dt>{t('subscription.modelLabel')}</dt>
-              <dd className="m-0 min-w-0 flex-1 text-right [overflow-wrap:anywhere]">
-                {model}
-              </dd>
-            </div>
-          )}
         </dl>
         <Button
           className="h-11 w-full bg-[var(--agent-blue-500)] text-white hover:bg-[var(--agent-blue-400)]"

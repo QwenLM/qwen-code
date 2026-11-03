@@ -482,10 +482,21 @@ export function AuthMessage({
         modelIds: normalizeModelIds(models),
         advancedConfig,
       })
-      .then((result) => {
+      .then(async (result) => {
+        if (!isCurrent()) return;
+        let syncFailed = result.runtimeSync?.status === 'failed';
+        if (!syncFailed) {
+          try {
+            await sessionActions.refreshModels(undefined, {
+              reloadProviders: false,
+            });
+          } catch {
+            syncFailed = true;
+          }
+        }
         if (!isCurrent()) return;
         onMessage(
-          result.runtimeSync?.status === 'failed'
+          syncFailed
             ? `${result.message}\n\n${t('settings.models.runtimeSyncFailed')}`
             : result.message,
         );
@@ -512,6 +523,7 @@ export function AuthMessage({
     protocol,
     provider,
     saving,
+    sessionActions,
     t,
     workspaceActions,
   ]);
@@ -1272,6 +1284,11 @@ export function AuthMessage({
             await sessionActions.setModel(
               `${result.modelId}(qwen-subscription)`,
             );
+            signal.throwIfAborted();
+            if (!owner.isCurrent()) throw new Error('Session changed.');
+            await sessionActions.refreshModels(undefined, {
+              reloadProviders: false,
+            });
             signal.throwIfAborted();
             if (!owner.isCurrent()) throw new Error('Session changed.');
           } else {

@@ -119,7 +119,6 @@ export function QwenSubscriptionFlow(props: FlowProps) {
   const [completed, setCompleted] = useState<{
     email: string;
     plan: string;
-    model: string;
     owner: AbortSignal;
   }>();
   const completionDelivered = useRef(false);
@@ -169,12 +168,13 @@ export function QwenSubscriptionFlow(props: FlowProps) {
         const result = {
           email: account.email,
           plan: account.plan,
-          model: model ?? '',
         };
         if (callbacks.current.desktopSuccess) {
           setCompleted({ ...result, owner });
         } else
-          callbacks.current.onActivated?.(t('subscription.connected', result));
+          callbacks.current.onActivated?.(
+            t('subscription.connected', { ...result, model: model ?? '' }),
+          );
       }
     } catch (error) {
       if (!owner.aborted && !controller.signal.aborted && mounted.current) {
@@ -308,29 +308,39 @@ export function QwenSubscriptionFlow(props: FlowProps) {
             <p role="status">{t('subscription.connecting')}</p>
           )}
           {connectionError && props.onActivate && (
-            <Button
-              disabled={
-                connecting || flow.working || connectionRetryAt > Date.now()
-              }
-              onClick={() => {
-                void connect();
-              }}
-            >
-              {t('common.retry')}
-            </Button>
+            <div className={props.desktopSuccess ? styles.actions : 'contents'}>
+              <Button
+                variant={props.desktopSuccess ? 'ghost' : 'default'}
+                className={
+                  props.desktopSuccess ? styles.actionButton : undefined
+                }
+                disabled={
+                  connecting || flow.working || connectionRetryAt > Date.now()
+                }
+                onClick={() => {
+                  void connect();
+                }}
+              >
+                {t('common.retry')}
+              </Button>
+            </div>
           )}
-          <Button
-            variant="outline"
-            disabled={flow.working || connecting}
-            onClick={() => {
-              void signOut();
-            }}
-          >
-            {t('subscription.signOut')}
-          </Button>
-          <Button variant="outline" onClick={close}>
-            {t('subscription.cancel')}
-          </Button>
+          {!props.desktopSuccess && (
+            <>
+              <Button
+                variant="outline"
+                disabled={flow.working || connecting}
+                onClick={() => {
+                  void signOut();
+                }}
+              >
+                {t('subscription.signOut')}
+              </Button>
+              <Button variant="outline" onClick={close}>
+                {t('subscription.cancel')}
+              </Button>
+            </>
+          )}
         </>
       )}
     </QwenSubscriptionView>

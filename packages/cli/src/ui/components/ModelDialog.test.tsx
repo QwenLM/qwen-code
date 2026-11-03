@@ -213,6 +213,50 @@ describe('<ModelDialog />', () => {
     expect(props.showNumbers).toBe(true);
   });
 
+  it('puts membership Max and Flash ahead of runtime and other provider models', () => {
+    renderComponent(
+      {},
+      {
+        getAuthType: () => AuthType.USE_OPENAI,
+        getModel: () => 'api',
+        getAllConfiguredModels: () => [
+          {
+            id: 'runtime',
+            label: 'Runtime',
+            authType: AuthType.USE_OPENAI,
+            isRuntimeModel: true,
+            runtimeSnapshotId: '$runtime|openai|runtime',
+          },
+          { id: 'api', label: 'API', authType: AuthType.USE_OPENAI },
+          {
+            id: 'future',
+            label: 'Future',
+            authType: AuthType.QWEN_SUBSCRIPTION,
+          },
+          {
+            id: 'qwen3.8-flash',
+            label: 'Flash',
+            authType: AuthType.QWEN_SUBSCRIPTION,
+          },
+          {
+            id: 'qwen3.8-max',
+            label: 'Max',
+            authType: AuthType.QWEN_SUBSCRIPTION,
+          },
+        ],
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+    expect(select.items.map(({ value }) => value)).toEqual([
+      'qwen-subscription::qwen3.8-max',
+      'qwen-subscription::qwen3.8-flash',
+      'qwen-subscription::future',
+      '$runtime|openai|runtime',
+      'openai::api',
+    ]);
+    expect(select.items[select.initialIndex!]?.value).toBe('openai::api');
+  });
+
   it('can turn Advisor off when no models are available', async () => {
     const { mockSettings, mockConfig, props } = renderComponent(
       { isAdvisorModelMode: true },

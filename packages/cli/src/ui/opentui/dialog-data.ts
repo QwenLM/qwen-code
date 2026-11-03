@@ -66,6 +66,7 @@ import { getPersistScopeForModelSelection } from '../../config/modelProvidersSco
 import { t } from '../../i18n/index.js';
 import { extensionComponentsSummary } from '../../services/extension-components-summary.js';
 import { publicProviderBaseUrl } from '../../utils/acpModelUtils.js';
+import { sortModelEntriesForDisplay } from '../../utils/model-display-order.js';
 import { getErrorMessage } from '../../utils/errors.js';
 import { getToolInvalidReasons, isToolValid } from '../components/mcp/utils.js';
 import { themeManager, AUTO_THEME_NAME } from '../themes/theme-manager.js';
@@ -209,7 +210,7 @@ export function buildModelEntries(
       model,
     });
   }
-  return entries;
+  return mode === 'primary' ? sortModelEntriesForDisplay(entries) : entries;
 }
 
 /** Parity of ModelDialog's `resolvePersistScope`. */

@@ -33,6 +33,7 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
 import { publicProviderBaseUrl } from '../../utils/acpModelUtils.js';
+import { sortModelEntriesForDisplay } from '../../utils/model-display-order.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
@@ -458,7 +459,14 @@ export function ModelDialog({
       }
     }
 
-    return result;
+    return isFastModelMode ||
+      isAdvisorModelMode ||
+      isVoiceModelMode ||
+      isVisionModelMode ||
+      isCompactionModelMode ||
+      isImageModelMode
+      ? result
+      : sortModelEntriesForDisplay(result);
   }, [
     authType,
     config,
@@ -467,6 +475,7 @@ export function ModelDialog({
     isImageModelMode,
     isVoiceModelMode,
     isVisionModelMode,
+    isCompactionModelMode,
   ]);
 
   const MODEL_OPTIONS = useMemo(() => {

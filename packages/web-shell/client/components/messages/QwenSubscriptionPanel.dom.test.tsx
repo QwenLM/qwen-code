@@ -697,32 +697,54 @@ it.each(['subscription_models_unavailable', 'subscription_model_unavailable'])(
   },
 );
 
-it('shows the backend model permission message in the desktop error area', async () => {
+it('shows the backend model permission message with only retry in the desktop error area', async () => {
   transport.startSubscriptionLogin.mockResolvedValue({
     ...ready,
     userInfo: { ...user, member_type: 'pro' },
   });
   const onModelsUnavailable = vi.fn();
+  const onActivate = vi
+    .fn()
+    .mockRejectedValueOnce({
+      status: 403,
+      body: {
+        code: 'request_failed',
+        errorStatus: 403,
+        message: 'Your account cannot access this model catalog.',
+      },
+    })
+    .mockResolvedValue('actual-model');
   await render(
     {
-      onActivate: vi.fn().mockRejectedValue({
-        status: 403,
-        body: {
-          code: 'request_failed',
-          errorStatus: 403,
-          message: 'Your account cannot access this model catalog.',
-        },
-      }),
+      onActivate,
       onActivated: vi.fn(),
     },
     transport,
-    { dialog: true, onModelsUnavailable },
+    { dialog: true, desktopSuccess: true, onModelsUnavailable },
   );
   expect(document.querySelector('[role="alert"]')?.textContent).toBe(
     'Your account cannot access this model catalog.',
   );
   expect(onModelsUnavailable).not.toHaveBeenCalled();
+  expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+    'Try again',
+  );
+  expect(document.querySelector('[role="dialog"]')?.textContent).not.toContain(
+    'Sign out',
+  );
+  expect(document.querySelector('[role="dialog"]')?.textContent).not.toContain(
+    'Cancel',
+  );
   expect(close).not.toHaveBeenCalled();
+  await act(async () => {
+    [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')]
+      .find((button) => button.textContent === 'Try again')!
+      .click();
+  });
+  expect(onActivate).toHaveBeenCalledTimes(2);
+  expect(transport.startSubscriptionLogin).toHaveBeenCalledOnce();
+  expect(document.querySelector('[data-subscription-success]')).not.toBeNull();
+  expect(transport.signOutSubscription).not.toHaveBeenCalled();
 });
 
 it('respects the activation Retry-After before allowing a manual retry', async () => {
@@ -1004,6 +1026,10 @@ it.each(['Start Using', 'close', 'Escape'])(
       desktopSuccess: true,
     });
     expect(document.querySelector('[data-subscription-success]')).toBeNull();
+    const pending = document.querySelector('[role="dialog"]')!;
+    expect(pending.textContent).toContain('Loading models from provider');
+    expect(pending.textContent).not.toContain('Sign out');
+    expect(pending.textContent).not.toContain('Cancel');
     expect(onActivated).not.toHaveBeenCalled();
     await act(async () => finish('actual-model'));
     await tick(0);
@@ -1011,7 +1037,7 @@ it.each(['Start Using', 'close', 'Escape'])(
     expect(success).not.toBeNull();
     expect(success.textContent).toContain(user.email);
     expect(success.textContent).toContain('Qwen Pro');
-    expect(success.textContent).toContain('actual-model');
+    expect(success.textContent).not.toContain('actual-model');
     expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
     expect(onActivated).not.toHaveBeenCalled();
     const dismiss = () => {
