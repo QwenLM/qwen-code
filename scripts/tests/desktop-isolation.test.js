@@ -110,15 +110,35 @@ describe('desktop rpm build-root dependencies', () => {
     const install = release.jobs.build.steps.find(
       (step) => step.name === 'Install rpm build-root dependencies',
     );
-    // RHEL 10 removed xorg-x11-server-Xvfb from every repository; only the
-    // Fedora leg installs it. RHEL 10 gets a headless weston compositor
-    // plus Xwayland instead — GTK3 has no headless backend, so WebKitGTK
-    // always needs a real display server.
-    expect(install.run).toContain(
-      "matrix.artifact_suffix }}' = 'linux-x64-rpm-fedora44'",
+    // The display server a leg can install is a matrix property: EPEL, which
+    // supplies weston, is only enabled on the leg that has no Xvfb.
+    const displays = Object.fromEntries(
+      release.jobs.build.strategy.matrix.include.map((leg) => [
+        leg.name,
+        leg.display,
+      ]),
     );
-    expect(install.run).toContain('xorg-x11-server-Xvfb');
-    expect(install.run).toContain('weston xorg-x11-server-Xwayland');
+    expect(displays['Linux x64 (rpm, Fedora 44)']).toBe('xvfb');
+    expect(displays['Linux x64 (rpm, RHEL 10)']).toBe('weston');
+
+    // Bound the shared package list by the conditional that follows it, not by
+    // a prose comment: rewording the comment must not move the bound.
+    const conditional = install.run.indexOf("if [ '${{ matrix.display }}'");
+    expect(conditional).toBeGreaterThan(-1);
+    const sharedInstalls = install.run
+      .slice(0, conditional)
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n');
+    expect(sharedInstalls).not.toContain('Xvfb');
+    const elseAt = install.run.indexOf('\nelse');
+    expect(elseAt).toBeGreaterThan(conditional);
+    const xvfbArm = install.run.slice(conditional, elseAt);
+    const westonArm = install.run.slice(elseAt);
+    expect(xvfbArm).toContain('xorg-x11-server-Xvfb');
+    expect(xvfbArm).not.toContain('weston');
+    expect(westonArm).toContain('weston xorg-x11-server-Xwayland');
+
     const smoke = release.jobs.build.steps.find(
       (step) =>
         step.name === 'Smoke packaged application' &&
@@ -126,27 +146,40 @@ describe('desktop rpm build-root dependencies', () => {
     );
     expect(smoke.run).toContain('command -v xvfb-run');
     expect(smoke.run).not.toContain('GDK_BACKEND=dummy');
-    expect(smoke.run).toContain('weston --backend=headless-backend.so');
-    expect(smoke.run).toContain('Xwayland');
-    expect(smoke.run).toContain('XDG_RUNTIME_DIR');
-    expect(smoke.run).toContain('WAYLAND_DISPLAY');
-    // Xwayland resolves its compositor from its own environment, so the
-    // socket name has to be exported before it is launched.
-    expect(smoke.run.indexOf('export WAYLAND_DISPLAY')).toBeLessThan(
-      smoke.run.indexOf('Xwayland :33'),
+    // Both arms must run the same smoke under the step's own -e -u -o pipefail;
+    // a function shipped through `declare -f` into a child shell drops them.
+    expect(smoke.run).not.toContain('declare -f');
+    expect(
+      smoke.run.match(/npm run smoke:packaged -- "\$executable"/gu),
+    ).toHaveLength(2);
+
+    // The compositor socket the step exports has to be the one weston opens,
+    // and the export has to precede the launch: Xwayland reads its own
+    // environment at startup.
+    const socket = /--socket=(\S+)/u.exec(smoke.run)?.[1];
+    expect(socket).toBeTruthy();
+    const waylandExport = `export WAYLAND_DISPLAY=${socket}`;
+    expect(smoke.run).toContain(waylandExport);
+    expect(smoke.run.indexOf(waylandExport)).toBeLessThan(
+      smoke.run.indexOf('Xwayland :'),
     );
+
+    // The display Xwayland serves, the socket the step waits on and the
+    // DISPLAY the app receives must all name the same number.
+    const display = /Xwayland :(\d+)/u.exec(smoke.run)?.[1];
+    expect(display).toBeTruthy();
+    expect(smoke.run).toContain(`wait_for_socket /tmp/.X11-unix/X${display}`);
+    const displayExport = `export DISPLAY=:${display}`;
+    expect(smoke.run).toContain(displayExport);
+    expect(smoke.run.indexOf(displayExport)).toBeGreaterThan(
+      smoke.run.indexOf('Xwayland :'),
+    );
+
     // With both displays exported GTK3 prefers Wayland, which would leave the
-    // X11 bridge this step waits for unused; the app has to be pinned to it.
+    // X11 bridge above unused; the app has to be pinned to it.
     expect(smoke.run.indexOf('export GDK_BACKEND=x11')).toBeGreaterThan(
-      smoke.run.indexOf('Xwayland :33'),
+      smoke.run.indexOf('Xwayland :'),
     );
-    // Only the Fedora leg can install Xvfb; the shared package list must not
-    // bring it back for RHEL 10, which has no such package.
-    const sharedPackages = install.run.slice(
-      0,
-      install.run.indexOf('# Fedora 44 still ships Xvfb'),
-    );
-    expect(sharedPackages).not.toContain('Xvfb');
   });
 });
 

@@ -381,6 +381,7 @@ jobs:
             glibc_floor: '2.43'
             rpm: 'true'
             epel: 'false'
+            display: 'xvfb'
             legacy_arch: ''
             rust_target: 'x86_64-unknown-linux-gnu'
             tauri_config: 'src-tauri/rpm-fedora44.conf.json'
@@ -394,6 +395,7 @@ jobs:
             glibc_floor: '2.39'
             rpm: 'true'
             epel: 'true'
+            display: 'weston'
             legacy_arch: ''
             rust_target: 'x86_64-unknown-linux-gnu'
             tauri_config: 'src-tauri/rpm-rhel10.conf.json'
@@ -486,15 +488,16 @@ jobs:
             gtk3 mesa-libgbm libdrm at-spi2-core dbus-x11 xdg-utils \
             webkit2gtk4.1-devel
           # Fedora 44 still ships Xvfb; RHEL 10 removed it from every
-          # repository, so only the Fedora leg can install it. The smoke
-          # step below falls back to headless weston when xvfb-run is
-          # missing.
-          if [ '${{ matrix.artifact_suffix }}' = 'linux-x64-rpm-fedora44' ]; then
+          # repository (BaseOS, AppStream, CRB, extras and EPEL 10 carry no
+          # such build). `matrix.display` names the server each rpm root can
+          # install, so a leg added later picks one instead of inheriting an
+          # arm by accident.
+          if [ '${{ matrix.display }}' = 'xvfb' ]; then
             dnf install -y --setopt=install_weak_deps=False xorg-x11-server-Xvfb
           else
-            # RHEL 10 removed Xvfb; weston (EPEL) provides a headless
-            # Wayland display, and Xwayland (AppStream) bridges it to X11
-            # for WebKitGTK. The smoke step below starts both.
+            # weston (EPEL) provides a headless Wayland display and Xwayland
+            # (AppStream) bridges it to X11 for WebKitGTK. The smoke step
+            # below starts both.
             dnf install -y --setopt=install_weak_deps=False weston xorg-x11-server-Xwayland
           fi
 
@@ -825,9 +828,7 @@ jobs:
         shell: 'bash'
         run: |
           set -euo pipefail
-          run_smoke() {
-            npm run smoke:packaged -- src-tauri/target/${{ matrix.rust_target }}/release/qwen-code-desktop
-          }
+          executable='src-tauri/target/${{ matrix.rust_target }}/release/qwen-code-desktop'
           # A timed-out wait must fail here: `[ -S ... ] && break` is exempt
           # from `set -e`, so falling through would blame the app instead.
           wait_for_socket() {
@@ -842,7 +843,7 @@ jobs:
           # Fedora keeps Xvfb; RHEL 10 removed it, so there the display is a
           # headless weston compositor with Xwayland on top.
           if command -v xvfb-run >/dev/null 2>&1; then
-            xvfb-run -a bash -c "$(declare -f run_smoke); run_smoke"
+            xvfb-run -a npm run smoke:packaged -- "$executable"
           else
             command -v weston >/dev/null 2>&1 || {
               echo '::error::weston is not installed'; exit 1;
@@ -867,7 +868,7 @@ jobs:
             # GTK3 prefers Wayland when both are exported, which would leave
             # the X11 bridge above unused; pin the app to that display.
             export GDK_BACKEND=x11
-            run_smoke
+            npm run smoke:packaged -- "$executable"
           fi
 
       - name: 'Collect artifacts'
