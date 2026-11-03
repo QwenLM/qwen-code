@@ -69,16 +69,16 @@ class ManagedAgentStoreWiringTest {
             var store = context.getBean(ManagedAgentStore.class);
             assertThat(AopUtils.isAopProxy(store)).isTrue();
             Object target = AopTestUtils.getUltimateTargetObject(store);
-            assertThat(ReflectionTestUtils.getField(target, "creationSkills"))
+            assertThat(com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "creationSkills"))
                     .isSameAs(context.getBean(ManagedSessionSkills.class));
-            assertThat(ReflectionTestUtils.getField(target, "worktreeFiles"))
+            assertThat(com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "worktreeFiles"))
                     .isSameAs(context.getBean(WorktreeFiles.class));
-            assertThat(ReflectionTestUtils.getField(target, "extensionPackages"))
+            assertThat(com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "extensionPackages"))
                     .isSameAs(context.getBean(ExtensionPackages.class));
             for (String name : List.of("lifecycle", "definitions", "sessionWorktrees", "journalEventTransport")) {
-                assertThat(ReflectionTestUtils.getField(target, name)).as(name).isNull();
+                assertThat(com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, name)).as(name).isNull();
             }
-            assertThat(AopUtils.isAopProxy(ReflectionTestUtils.getField(target, "configRecords"))).isTrue();
+            assertThat(AopUtils.isAopProxy(com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "configRecords"))).isTrue();
         });
     }
 
@@ -103,7 +103,7 @@ class ManagedAgentStoreWiringTest {
             assertThat(context).hasNotFailed();
             var store = context.getBean(ManagedAgentStore.class);
             Object target = AopTestUtils.getUltimateTargetObject(store);
-            var records = (Advised) ReflectionTestUtils.getField(target, "configRecords");
+            var records = (Advised) com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "configRecords");
             assertThat(context.getBeanFactory().containsSingleton("recordStore")).isFalse();
             Object resolved = records.getTargetSource().getTarget();
             assertThat(context.getBeanFactory().containsSingleton("recordStore")).isTrue();
@@ -115,11 +115,16 @@ class ManagedAgentStoreWiringTest {
 
     @Test
     void dependencyReferencesAreFinalAndHaveNoPostConstructionInjection() throws Exception {
+        var store = new ManagedAgentStore(new JdbcTemplate(mock(DataSource.class)), new ObjectMapper(),
+                Clock.systemUTC(), events -> {}, mock(ManagedWorkspaceRegistry.class),
+                new ManagedAgentProperties(), mock(HarnessRules.class));
         for (String name : List.of("worktreeFiles", "creationSkills", "extensionPackages", "lifecycle",
                 "definitions", "sessionWorktrees", "journalEventTransport", "configRecords")) {
-            var field = ManagedAgentStore.class.getDeclaredField(name);
-            assertThat(Modifier.isFinal(field.getModifiers())).as(name).isTrue();
-            assertThat(field.isAnnotationPresent(Autowired.class)).as(name).isFalse();
+            for (Object owner : com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreOwners(store, name)) {
+                var field = owner.getClass().getDeclaredField(name);
+                assertThat(Modifier.isFinal(field.getModifiers())).as(name).isTrue();
+                assertThat(field.isAnnotationPresent(Autowired.class)).as(name).isFalse();
+            }
         }
         assertThat(Arrays.stream(ManagedAgentStore.class.getDeclaredMethods())
                 .filter(method -> method.isAnnotationPresent(Autowired.class))).isEmpty();

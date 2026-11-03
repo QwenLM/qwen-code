@@ -1155,6 +1155,81 @@ describe('GithubChannel', () => {
       channel.disconnect();
     });
 
+    describe('repository ID casing', () => {
+      async function connectWithGroups(
+        groups: Record<string, unknown>,
+      ): Promise<void> {
+        channel = new TestableGithubChannel(
+          'test-github',
+          makeConfig({ groupPolicy: 'allowlist', groups }),
+          makeBridge(),
+        );
+        mockOctokit.paginate.mockResolvedValue([]);
+        await channel.connect();
+        channel.usePreflight = true;
+      }
+
+      function comment(chatId: string, senderId = 'alice'): Envelope {
+        return {
+          channelName: 'test-github',
+          senderId,
+          senderName: senderId,
+          chatId,
+          text: 'review this',
+          isGroup: true,
+          isMentioned: true,
+          isReplyToBot: false,
+        };
+      }
+
+      it('admits the canonical repository spelling for a lower-case allowlist', async () => {
+        // GitHub repository paths are case-insensitive, but notifications
+        // report the canonical `owner/repo`. An allowlist typed in lower case
+        // must still admit them instead of dropping every notification.
+        await connectWithGroups({
+          'qwenlm/qwen-code': { requireMention: false },
+        });
+        try {
+          await channel.handleInbound(comment('QwenLM/qwen-code'));
+          expect(channel.inboundEnvelopes).toHaveLength(1);
+        } finally {
+          channel.disconnect();
+        }
+      });
+
+      it('still rejects a repository that is not allowlisted', async () => {
+        await connectWithGroups({
+          'qwenlm/qwen-code': { requireMention: false },
+        });
+        try {
+          await channel.handleInbound(comment('SomeoneElse/other-repo'));
+          expect(channel.inboundEnvelopes).toHaveLength(0);
+        } finally {
+          channel.disconnect();
+        }
+      });
+
+      it('applies the repository sender allowlist across the case difference', async () => {
+        // The sender policy is resolved through the same group lookup, so a
+        // case-insensitive admission must not fall back to the open default.
+        await connectWithGroups({
+          'qwenlm/qwen-code': {
+            requireMention: false,
+            senders: 'allowlist',
+            allowedUsers: ['alice'],
+          },
+        });
+        try {
+          await channel.handleInbound(comment('QwenLM/qwen-code', 'bob'));
+          expect(channel.inboundEnvelopes).toHaveLength(0);
+          await channel.handleInbound(comment('QwenLM/qwen-code', 'alice'));
+          expect(channel.inboundEnvelopes).toHaveLength(1);
+        } finally {
+          channel.disconnect();
+        }
+      });
+    });
+
     it.each(['*', 'owner/restricted'])(
       'warns about bot-only group %s without blocking another repository',
       async (restrictedGroup) => {

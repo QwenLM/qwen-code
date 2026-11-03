@@ -31,6 +31,12 @@ import {
   TooltipTrigger,
 } from '../ui/tooltip';
 import styles from './TokenUsagePanel.module.css';
+import {
+  SpeedSpread,
+  TokenUsageTrend,
+  sampleSpeed,
+  type TrendSeries,
+} from './TokenUsageTrend';
 
 const POLL_INTERVAL_MS = 2_000;
 /** Distinct series colors; later models share a neutral color. */
@@ -291,6 +297,22 @@ function TokenUsageBody({
     },
   );
   const grandTotal = totals.total;
+  const trendSeries: TrendSeries[] = entries
+    .map((entry) => ({
+      key: entry.key,
+      label: entry.label,
+      color: entry.color,
+      samples: entry.metrics.timingSamples ?? [],
+      failures: entry.metrics.failures?.recent ?? [],
+    }))
+    .filter((s) => s.samples.length > 0 || s.failures.length > 0);
+  // One scale for every card's spread so their positions compare directly.
+  const speedScaleMax = Math.max(
+    0,
+    ...trendSeries.flatMap((s) =>
+      s.samples.map((sample) => sampleSpeed(sample) ?? 0),
+    ),
+  );
   // Keep legacy daemon responses correctly ordered when total is omitted.
   const subagentEntries = [...(status.sources ?? [])].sort(
     (a, b) => totalTokens(b.tokens) - totalTokens(a.tokens),
@@ -357,6 +379,12 @@ function TokenUsageBody({
         />
       </div>
 
+      {trendSeries.length > 0 && (
+        <section className={`${styles.section} ${styles.modelSection}`}>
+          <TokenUsageTrend series={trendSeries} />
+        </section>
+      )}
+
       <section className={`${styles.section} ${styles.modelSection}`}>
         <h3 className={styles.sectionTitle}>{t('tokenUsage.models')}</h3>
         {entries.length > 1 && (
@@ -364,7 +392,12 @@ function TokenUsageBody({
         )}
         <div className={styles.modelList}>
           {entries.map((entry) => (
-            <ModelCard key={entry.key} entry={entry} grandTotal={grandTotal} />
+            <ModelCard
+              key={entry.key}
+              entry={entry}
+              grandTotal={grandTotal}
+              speedScaleMax={speedScaleMax}
+            />
           ))}
         </div>
       </section>
@@ -497,9 +530,11 @@ function SuccessRateValue({
 function ModelCard({
   entry,
   grandTotal,
+  speedScaleMax,
 }: {
   entry: ModelEntry;
   grandTotal: number;
+  speedScaleMax: number;
 }) {
   const { t } = useI18n();
   const m = entry.metrics;
@@ -578,8 +613,29 @@ function ModelCard({
           </div>
         ))}
       </dl>
+      {m.timingSamples && (
+        <SpeedSpread samples={m.timingSamples} scaleMax={speedScaleMax} />
+      )}
+      {m.failures && Object.keys(m.failures.byKind).length > 0 && (
+        <FailureKinds byKind={m.failures.byKind} />
+      )}
       <TokenDetails tokens={m.tokens} />
       <ShareBar share={share} />
+    </div>
+  );
+}
+
+function FailureKinds({ byKind }: { byKind: Record<string, number> }) {
+  const { t } = useI18n();
+  const text = t('tokenUsage.failuresByKind', {
+    kinds: Object.entries(byKind)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([kind, count]) => `${kind} ×${formatCount(count)}`)
+      .join(' · '),
+  });
+  return (
+    <div className={styles.failureKinds} title={text}>
+      {text}
     </div>
   );
 }

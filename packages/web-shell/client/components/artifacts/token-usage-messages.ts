@@ -51,6 +51,22 @@ export const TOKEN_USAGE_MESSAGES_EN: Record<string, TokenUsageMessage> = {
       : `${v?.failed} of ${v?.requests ?? 0} requests failed`,
   'tokenUsage.firstTokenDetail': (v) => `First token avg ${v?.duration ?? ''}`,
   'tokenUsage.modelSharesLabel': 'Token share by model',
+  'tokenUsage.trendTitle': 'Speed over time',
+  'tokenUsage.trendSeconds': 'seconds',
+  'tokenUsage.trendFailed': 'Failed',
+  'tokenUsage.trendNote':
+    'Each dot is one request; the line is the median of five neighbors. × marks a failed request.',
+  'tokenUsage.trendSummary': (v) =>
+    `${v?.metric ?? ''} per request over time. Median: ${v?.models ?? ''}`,
+  'tokenUsage.trendFailure': (v) => `Failed · ${v?.kind ?? ''}`,
+  'tokenUsage.trendSpeed': (v) =>
+    `${v?.rate ?? ''} tok/s · first token ${v?.ttft ?? ''}`,
+  'tokenUsage.trendTtftOnly': (v) => `First token ${v?.ttft ?? ''}`,
+  'tokenUsage.trendOutput': (v) =>
+    `${v?.count ?? 0} output tokens in ${v?.duration ?? ''}`,
+  'tokenUsage.speedSpread': (v) =>
+    `p50 ${v?.p50 ?? ''} · p10–p90 ${v?.p10 ?? ''}–${v?.p90 ?? ''} tok/s`,
+  'tokenUsage.failuresByKind': (v) => `Failed: ${v?.kinds ?? ''}`,
   'tokenUsage.unavailable': 'Token usage is unavailable for this session.',
 };
 
@@ -96,5 +112,21 @@ export const TOKEN_USAGE_MESSAGES_ZH: Record<string, TokenUsageMessage> = {
       : `${v?.requests ?? 0} 次请求中 ${v?.failed} 次失败`,
   'tokenUsage.firstTokenDetail': (v) => `首 token 平均 ${v?.duration ?? ''}`,
   'tokenUsage.modelSharesLabel': '各模型 Token 占比',
+  'tokenUsage.trendTitle': '速度趋势',
+  'tokenUsage.trendSeconds': '秒',
+  'tokenUsage.trendFailed': '失败',
+  'tokenUsage.trendNote':
+    '每个点是一次请求，线是相邻 5 次的中位数。× 表示失败的请求。',
+  'tokenUsage.trendSummary': (v) =>
+    `每次请求的${v?.metric ?? ''}随时间变化。中位数：${v?.models ?? ''}`,
+  'tokenUsage.trendFailure': (v) => `失败 · ${v?.kind ?? ''}`,
+  'tokenUsage.trendSpeed': (v) =>
+    `${v?.rate ?? ''} tok/s · 首 token ${v?.ttft ?? ''}`,
+  'tokenUsage.trendTtftOnly': (v) => `首 token ${v?.ttft ?? ''}`,
+  'tokenUsage.trendOutput': (v) =>
+    `输出 ${v?.count ?? 0} token，耗时 ${v?.duration ?? ''}`,
+  'tokenUsage.speedSpread': (v) =>
+    `p50 ${v?.p50 ?? ''} · p10–p90 ${v?.p10 ?? ''}–${v?.p90 ?? ''} tok/s`,
+  'tokenUsage.failuresByKind': (v) => `失败：${v?.kinds ?? ''}`,
   'tokenUsage.unavailable': '当前会话无法读取 Token 消耗。',
 };
