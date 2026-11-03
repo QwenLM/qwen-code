@@ -27,7 +27,10 @@ import {
   SubscriptionOAuthError,
   subscriptionError,
 } from './subscription-oauth-client.js';
-import { subscriptionErrorMessage } from './subscription-errors.js';
+import {
+  logSubscriptionGatewayResponse,
+  subscriptionErrorMessage,
+} from './subscription-errors.js';
 
 class SubscriptionProvider extends DefaultOpenAICompatibleProvider {
   override buildClient(): OpenAI {
@@ -70,10 +73,16 @@ class SubscriptionProvider extends DefaultOpenAICompatibleProvider {
           }
         };
         const token = await getToken();
-        const send = (accessToken: string) => {
+        const send = async (accessToken: string) => {
           const headers = new Headers(init?.headers);
           headers.set('Authorization', `Bearer ${accessToken}`);
-          return baseFetch(input, { ...init, headers, redirect: 'error' });
+          const response = await baseFetch(input, {
+            ...init,
+            headers,
+            redirect: 'error',
+          });
+          logSubscriptionGatewayResponse(response);
+          return response;
         };
         const response = await send(token);
         if (response.status !== 401) return response;

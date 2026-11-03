@@ -25,6 +25,20 @@ vi.mock('../utils/runtimeFetchOptions.js', async (importOriginal) => ({
 }));
 
 const session = vi.hoisted(() => ({ getAccessToken: vi.fn() }));
+const gatewayLog = vi.hoisted(() => vi.fn());
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: (tag?: string) => {
+      const logger = actual.createDebugLogger(tag);
+      return tag === 'QWEN_SUBSCRIPTION'
+        ? { ...logger, debug: gatewayLog }
+        : logger;
+    },
+  };
+});
 vi.mock('./subscription-session.js', () => ({
   QwenSubscriptionSession: class {
     getAccessToken = session.getAccessToken;
@@ -157,7 +171,13 @@ it('consumes a multi-chunk SSE stream through the real Chat pipeline', async () 
     new Response(
       chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join('') +
         'data: [DONE]\n\n',
-      { headers: { 'content-type': 'text/event-stream' } },
+      {
+        headers: {
+          'content-type': 'text/event-stream',
+          'x-request-id': 'stream-request',
+          'x-gateway-request-id': 'stream-gateway',
+        },
+      },
     ),
   );
   const stream = await generator({
@@ -169,6 +189,11 @@ it('consumes a multi-chunk SSE stream through the real Chat pipeline', async () 
       text += part.text ?? '';
   }
   expect(text).toBe('OK');
+  expect(gatewayLog).toHaveBeenCalledWith('Gateway response', {
+    status: 200,
+    requestId: 'stream-request',
+    gatewayRequestId: 'stream-gateway',
+  });
   expect(JSON.parse(fetchMock.mock.calls[0][1]?.body as string)).toMatchObject({
     stream: true,
     stream_options: { include_usage: true },
@@ -363,6 +388,44 @@ it.each([403, 404, 429])(
     ).rejects.toThrow();
     expect(session.getAccessToken).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  },
+);
+
+it.each([402, 403, 429, 503])(
+  'preserves the SDK error and logs distinct gateway IDs for HTTP %s',
+  async (status) => {
+    fetchMock.mockResolvedValue(
+      Response.json(
+        {
+          error: {
+            code: 'PROXY_TEST_ERROR',
+            message: 'Public gateway message',
+            request_id: 'body-request',
+          },
+        },
+        {
+          status,
+          headers: {
+            'x-request-id': 'caller-request',
+            'x-gateway-request-id': 'gateway-request',
+          },
+        },
+      ),
+    );
+    await expect(
+      generator().generateContent(request, 'prompt'),
+    ).rejects.toMatchObject({
+      status,
+      code: 'PROXY_TEST_ERROR',
+      message: `${status} Public gateway message`,
+    });
+    expect(gatewayLog).toHaveBeenCalledWith('Gateway response', {
+      status,
+      requestId: 'caller-request',
+      gatewayRequestId: 'gateway-request',
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(session.getAccessToken).toHaveBeenCalledOnce();
   },
 );
 

@@ -16,6 +16,7 @@ import { QWEN_SUBSCRIPTION_WEB_SEARCH_URL } from '../qwen/oauth-config.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 import { SubscriptionOAuthError } from '../qwen/subscription-oauth-client.js';
 import {
+  logSubscriptionGatewayResponse,
   subscriptionErrorMessage,
   subscriptionHttpError,
 } from '../qwen/subscription-errors.js';
@@ -80,16 +81,18 @@ export class SubscriptionWebSearchBackend implements WebSearchBackend {
               ...(init?.signal ? [init.signal] : []),
             ]);
             const token = await session.getAccessToken(requestSignal);
-            const send = (accessToken: string) => {
+            const send = async (accessToken: string) => {
               const headers = new Headers(init?.headers);
               headers.set('Authorization', `Bearer ${accessToken}`);
-              return baseFetch(input, {
+              const response = await baseFetch(input, {
                 ...runtime?.fetchOptions,
                 ...init,
                 headers,
                 signal: requestSignal,
                 redirect: 'error',
               });
+              logSubscriptionGatewayResponse(response);
+              return response;
             };
             let response = await send(token);
             if (response.status === 401) {

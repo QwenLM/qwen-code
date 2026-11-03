@@ -8,18 +8,55 @@ import {
   SubscriptionOAuthError,
   retryAfterMs,
 } from './subscription-oauth-client.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('QWEN_SUBSCRIPTION');
+
+export function logSubscriptionGatewayResponse(response: Response): void {
+  const requestId = response.headers.get('x-request-id');
+  const gatewayRequestId = response.headers.get('x-gateway-request-id');
+  if (requestId || gatewayRequestId) {
+    debugLogger.debug('Gateway response', {
+      status: response.status,
+      requestId,
+      gatewayRequestId,
+    });
+  }
+}
 
 export function subscriptionHttpError(
   status: number,
   value: unknown,
   retryAfter?: string | null,
 ): SubscriptionOAuthError {
+  const body =
+    value && typeof value === 'object'
+      ? (value as Record<string, unknown>)
+      : {};
+  const detail =
+    body['error'] && typeof body['error'] === 'object'
+      ? (body['error'] as Record<string, unknown>)
+      : {};
+  const code =
+    typeof detail['code'] === 'string' && detail['code'].trim()
+      ? detail['code']
+      : status === 401
+        ? 'invalid_token'
+        : 'request_failed';
   const description =
-    value && typeof value === 'object' && 'error_description' in value
-      ? value.error_description
-      : undefined;
+    typeof detail['message'] === 'string' && detail['message'].trim()
+      ? detail['message']
+      : body['error_description'];
+  debugLogger.debug('Gateway request failed', {
+    status,
+    code,
+    requestId:
+      typeof detail['request_id'] === 'string'
+        ? detail['request_id']
+        : undefined,
+  });
   return new SubscriptionOAuthError(
-    status === 401 ? 'invalid_token' : 'request_failed',
+    code,
     status,
     typeof description === 'string' && description.trim()
       ? description
@@ -36,7 +73,8 @@ export function subscriptionErrorMessage(
   if (
     error.code === 'session_changed' ||
     (error.stage === 'refresh' && error.code === 'invalid_grant') ||
-    error.code === 'invalid_token'
+    error.code === 'invalid_token' ||
+    error.status === 401
   )
     return 'Your Qwen session has expired. Run /auth to sign in again.';
   if (error.status === 429) return 'Too many requests. Please try again later.';
