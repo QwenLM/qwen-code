@@ -105,13 +105,11 @@ delete process.env['QWEN_HOME'];
 // Resolve the (mocked) user-settings path once at module load. Tests mock
 // `os.homedir`, so the value is stable across the suite. Production callers
 // must keep going through `getUserSettingsPath()` to pick up `QWEN_HOME`
-// resolved from `~/.env` after module load.
-// The package test-setup pins QWEN_HOME to a per-worker temp dir so a
-// polluted real ~/.qwen cannot leak into the suite. This file mocks the
-// filesystem outright and keys its fixtures on the os.homedir() mock, so it
-// drops the pin before the module-load path constants below are captured.
+// resolved from `~/.env` after module load. An ambient QWEN_HOME would divert
+// every user-settings and .env path away from the mocked home, so this file
+// cannot run with one set (the suite setup pins a private home when the
+// environment provides none).
 delete process.env['QWEN_HOME'];
-
 const USER_SETTINGS_PATH = getUserSettingsPath();
 
 const MOCK_WORKSPACE_DIR = '/mock/workspace';
@@ -4487,6 +4485,26 @@ describe('Settings Loading and Merging', () => {
       expect(WORKSPACE_RESTRICTED_SETTING_KEYS).toContain(
         'tools.workflowsEnabled',
       );
+    });
+
+    // Named key, not list iteration: dropping the entry must red here.
+    it('strips a workspace-only catalog refresh opt-out', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({ model: { catalogRefresh: false } });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.model?.catalogRefresh).toBeUndefined();
+      expect(
+        getSettingsWarnings(settings).some((warning) =>
+          warning.includes('model.catalogRefresh'),
+        ),
+      ).toBe(true);
     });
   });
 

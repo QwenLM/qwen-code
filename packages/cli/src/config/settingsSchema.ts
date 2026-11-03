@@ -1533,7 +1533,8 @@ const SETTINGS_SCHEMA = {
         category: 'Privacy',
         requiresRestart: true,
         default: true,
-        description: 'Enable collection of usage statistics',
+        description:
+          'Enable collection of usage statistics. Disabling this also stops the models.dev catalog refresh.',
         showInDialog: true,
       },
     },
@@ -1861,6 +1862,16 @@ const SETTINGS_SCHEMA = {
           type: 'string',
           enum: ['none', ...REASONING_EFFORT_TIERS],
         },
+      },
+      catalogRefresh: {
+        type: 'boolean',
+        label: 'Refresh Models.dev Catalog',
+        category: 'Model',
+        requiresRestart: true,
+        default: true,
+        description:
+          'Download the models.dev model catalog in the background at most once every 24 hours. Disable it in managed installations that must not contact models.dev; the bundled and previously downloaded catalog data remain available. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored. QWEN_CODE_MODELS_DEV_REFRESH=off in the process environment still wins, and disabling privacy.usageStatisticsEnabled also disables the refresh.',
+        showInDialog: false,
       },
       maxSessionTurns: {
         type: 'integer',

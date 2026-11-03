@@ -51,6 +51,8 @@ export type {
   DaemonPromptImage,
   DaemonPromptStatus,
   DaemonReasoningControls,
+  DaemonWorkflowMode,
+  DaemonWorkflowModeStatus,
   DaemonSessionActions,
   DaemonSessionContextValue,
   DaemonSessionNotice,

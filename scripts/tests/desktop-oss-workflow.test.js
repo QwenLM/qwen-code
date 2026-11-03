@@ -403,6 +403,12 @@ describe('Desktop OSS mirror workflow', () => {
     expect(prepare).toContain("SOURCE: '${{ steps.release.outputs.source }}'");
     expect(prepare).toContain(`if [ "$SOURCE" = 'release' ]; then`);
     expect(prepare).toContain(
+      'for suffix in linux-x64-rpm-fedora44 linux-x64-rpm-rhel10; do',
+    );
+    expect(prepare).toContain(
+      'find . -maxdepth 1 -name "*-${suffix}.rpm" -print -quit',
+    );
+    expect(prepare).toContain(
       'manifest_args=(--allow-missing-platform linux-aarch64)',
     );
     // Pin the containment, not only the pieces: hoisting the tolerant

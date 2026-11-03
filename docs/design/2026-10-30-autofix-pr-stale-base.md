@@ -73,7 +73,8 @@ Verified against `origin/main` at `38337f7257` (2026-10-30):
   output) answers `false`: the round goes on without the hint.
 - `runSnapshot` (the prepared, non-gate path), after `buildSnapshot`: when
   the snapshot's action is `fix` and its events hold at least one
-  `ci_failed` that is not a `startupFailure`, call `baseIsBehind`; when it
+  `ci_failed` that is not a `startupFailure` and not `exhausted` (a check
+  out of fix pushes, which is not fixed this round), call `baseIsBehind`; when it
   answers `true`, add `baseBehind: true` to the snapshot written to the
   snapshot file and to the one-line stdout summary.
 - `Snapshot` gains `baseBehind?: true`, documented as prepared-mode only:
@@ -108,7 +109,8 @@ Verified against `origin/main` at `38337f7257` (2026-10-30):
   pattern of `snapshot.gate.test.ts`): `baseIsBehind` over mocked `gh`
   (`behind`, `diverged`, `ahead`, `identical`, thrown error); the
   `runSnapshot` flag conditions (failed check present → compare asked;
-  no failures / only `startupFailure` / `lagging` → compare not asked).
+  no failures / only `startupFailure` / only `exhausted` / `lagging` →
+  compare not asked).
 - `SKILL.test.ts`: pins for the new sentences, following the existing
   flattened-text assertion style.
 

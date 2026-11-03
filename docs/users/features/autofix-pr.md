@@ -73,13 +73,14 @@ Comments are acted on when their author is an owner, member or collaborator of t
 
 ## Limits
 
-| Limit                                 | Value | Then                     |
-| ------------------------------------- | ----- | ------------------------ |
-| Pushes per watch                      | 10    | the watch stops          |
-| Re-runs of a failed check on one head | 1     | the next failure is real |
-| Attempts per review comment           | 1     | not offered again        |
-| Pushes by someone else within a round | 2     | the watch stops          |
-| Minutes a background fix may run      | 30    | its agent is stopped     |
+| Limit                                 | Value | Then                                                     |
+| ------------------------------------- | ----- | -------------------------------------------------------- |
+| Pushes per watch                      | 10    | the watch stops                                          |
+| Pushes that leave a failed check red  | 3     | left for a person until it passes or someone else pushes |
+| Re-runs of a failed check on one head | 1     | the next failure is real                                 |
+| Attempts per review comment           | 1     | not offered again                                        |
+| Pushes by someone else within a round | 2     | the watch stops                                          |
+| Minutes a background fix may run      | 30    | its agent is stopped                                     |
 
 ## Stopping and files
 
