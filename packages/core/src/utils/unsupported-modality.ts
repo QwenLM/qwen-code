@@ -1,4 +1,12 @@
 /**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type { ContentGeneratorConfigSourceKind } from '../core/contentGenerator.js';
+
+/**
  * Describe why a model cannot accept a media modality.
  *
  * Both the read_file path and the OpenAI converter build the same refusal, so
@@ -10,7 +18,7 @@
 export function unsupportedModalityReason(
   modality: string,
   model: string,
-  sourceKind?: string,
+  sourceKind?: ContentGeneratorConfigSourceKind,
 ): string {
   const opening = `Model '${model}' does not support ${modality} input`;
   if (sourceKind === 'computed') {

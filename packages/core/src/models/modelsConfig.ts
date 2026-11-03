@@ -24,6 +24,7 @@ import {
   resolveModelSelectionAuthType,
 } from './modelRegistry.js';
 import {
+  type ModelConfig,
   type ModelProvidersConfig,
   type ProviderProtocolConfig,
   type ResolvedModelConfig,
@@ -958,15 +959,30 @@ export class ModelsConfig {
 
     // Generation config: apply all fields from MODEL_GENERATION_CONFIG_FIELDS
     const gc = model.generationConfig;
+    // Whether the entry's own text declared a field, before the registry filled
+    // the missing ones from the model name — `model.generationConfig` cannot
+    // tell the two apart, and a refusal that names a key the entry does not
+    // contain sends the operator to edit something that is not there
+    // (QwenLM/qwen-code#16185).
+    const entry = this.findDeclaredEntry(model);
+    const declared = entry?.generationConfig;
     for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (this._generationConfig as any)[field] = gc[field];
-      this.generationConfigSources[field] = {
-        kind: 'modelProviders',
-        authType: model.authType,
-        modelId: model.id,
-        detail: `generationConfig.${field}`,
-      };
+      this.generationConfigSources[field] =
+        declared?.[field] !== undefined
+          ? {
+              kind: 'modelProviders',
+              authType: model.authType,
+              modelId: model.id,
+              detail: `generationConfig.${field}`,
+            }
+          : // An entry that exists but says nothing about the field got the
+            // registry's model-name default; no entry at all means the value
+            // is the field's own built-in default.
+            entry === undefined
+            ? { kind: 'default' }
+            : { kind: 'computed', detail: 'auto-detected from model' };
     }
 
     // contextWindowSize fallback: auto-detect from model when not set by provider
@@ -986,6 +1002,25 @@ export class ModelsConfig {
         detail: 'auto-detected from model',
       };
     }
+  }
+
+  /**
+   * The provider entry `model` was resolved from, as declared — not the
+   * resolved copy the registry hands back with its name-based defaults
+   * already filled in.
+   */
+  private findDeclaredEntry(
+    model: ResolvedModelConfig,
+  ): ModelConfig | undefined {
+    const providers = this.getModelProvidersConfig();
+    if (!providers) return undefined;
+    const entries = providers[model.authType as keyof ModelProvidersConfig];
+    if (!Array.isArray(entries)) return undefined;
+    return entries.find(
+      (candidate) =>
+        candidate.id === model.id &&
+        (candidate.baseUrl ?? undefined) === model.registryBaseUrl,
+    );
   }
 
   /**

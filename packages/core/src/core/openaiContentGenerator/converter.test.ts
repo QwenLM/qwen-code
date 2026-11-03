@@ -4482,7 +4482,7 @@ describe('modality filtering', () => {
   function userContentPartsWithSource(
     model: string,
     modalities: RequestContext['modalities'],
-    modalitiesSourceKind: string,
+    modalitiesSourceKind: NonNullable<RequestContext['modalitiesSourceKind']>,
     part: Part,
   ): WirePart[] {
     const userMsg = findRole(

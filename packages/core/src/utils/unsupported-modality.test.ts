@@ -5,11 +5,17 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import type { ContentGeneratorConfigSourceKind } from '../core/contentGenerator.js';
 import { unsupportedModalityReason } from './unsupported-modality.js';
 
 describe('unsupportedModalityReason', () => {
   it('names the model for every source', () => {
-    for (const sourceKind of ['computed', 'settings', 'modelProviders']) {
+    const sources: ContentGeneratorConfigSourceKind[] = [
+      'computed',
+      'settings',
+      'modelProviders',
+    ];
+    for (const sourceKind of sources) {
       expect(
         unsupportedModalityReason('image', 'my-model', sourceKind),
       ).toContain("Model 'my-model' does not support image input");

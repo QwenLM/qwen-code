@@ -1259,6 +1259,38 @@ describe('ModelsConfig', () => {
     });
   });
 
+  it('reports a name-inferred modalities as computed, not provider-declared', () => {
+    // The registry fills a missing `modalities` from the model name before
+    // `applyResolvedModelDefaults` sees it, so a stamp of `modelProviders` for
+    // every field would tell a media refusal to point at a
+    // `generationConfig.modalities` key the entry does not contain
+    // (QwenLM/qwen-code#16185).
+    const modelsConfig = openaiConfig([entry('text-only-model', 'Text only')]);
+
+    refreshOpenAI(modelsConfig, 'text-only-model');
+
+    expect(modelsConfig.getGenerationConfigSources()['modalities']?.kind).toBe(
+      'computed',
+    );
+  });
+
+  it('keeps a provider-declared modalities attributed to the entry', () => {
+    const modelsConfig = openaiConfig([
+      entry('vision-model', 'Vision', undefined, undefined, {
+        modalities: { image: true },
+      }),
+    ]);
+
+    refreshOpenAI(modelsConfig, 'vision-model');
+
+    expect(modelsConfig.getGenerationConfigSources()['modalities']).toEqual({
+      kind: 'modelProviders',
+      authType: 'openai',
+      modelId: 'vision-model',
+      detail: 'generationConfig.modalities',
+    });
+  });
+
   it('should maintain consistency between currentModelId and _generationConfig.model during updateCredentials', () => {
     const modelsConfig = new ModelsConfig({
       initialAuthType: AuthType.USE_OPENAI,

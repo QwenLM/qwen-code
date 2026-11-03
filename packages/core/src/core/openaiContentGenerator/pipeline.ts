@@ -1916,7 +1916,14 @@ export class ContentGenerationPipeline {
           { model, originalError: getErrorMessage(error) },
         );
         try {
-          return await executeAttempt({ ...context, modalities: {} });
+          // The retry disables media itself, so its placeholders must not
+          // repeat the configured source: an entry that *does* declare image
+          // support is exactly why the image went on the wire.
+          return await executeAttempt({
+            ...context,
+            modalities: {},
+            modalitiesSourceKind: undefined,
+          });
         } catch (retryError) {
           return await this.handleError(retryError, context, request);
         }
@@ -2032,6 +2039,7 @@ export class ContentGenerationPipeline {
       ? this.config.cliConfig.getContentGeneratorConfigSources?.()['modalities']
           ?.kind
       : undefined;
+    const configModel = this.contentGeneratorConfig.model;
     const toolCallParser = isStreaming
       ? new StreamingToolCallParser()
       : undefined;
@@ -2045,7 +2053,12 @@ export class ContentGenerationPipeline {
     return {
       model: effectiveModel,
       modalities: this.contentGeneratorConfig.modalities ?? {},
-      ...(modalitiesSourceKind ? { modalitiesSourceKind } : {}),
+      // `model` is the wire model, which `extra_body.model` /
+      // `samplingParams.model` can override; the kind describes the config's
+      // own modalities, so a refusal must not pair the two when they differ.
+      ...(modalitiesSourceKind && effectiveModel === configModel
+        ? { modalitiesSourceKind }
+        : {}),
       startTime: Date.now(),
       splitToolMedia:
         providerOverrides.splitToolMedia ??

@@ -12,6 +12,7 @@ import type {
 import type { Config } from '../../config/config.js';
 import type {
   ContentGeneratorConfig,
+  ContentGeneratorConfigSourceKind,
   InputModalities,
 } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
@@ -52,7 +53,7 @@ export interface RequestContext {
    * names it, because a value guessed from the model name and one the user
    * declared need different next steps (QwenLM/qwen-code#16178).
    */
-  modalitiesSourceKind?: string;
+  modalitiesSourceKind?: ContentGeneratorConfigSourceKind;
   startTime: number;
   /**
    * Effective output-token ceiling sent on the wire (`max_tokens` or a
