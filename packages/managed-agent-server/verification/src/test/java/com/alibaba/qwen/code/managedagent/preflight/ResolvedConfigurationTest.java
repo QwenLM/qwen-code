@@ -177,6 +177,112 @@ class ResolvedConfigurationTest {
     }
 
     @Test
+    void reachesTheServerWhereItsConfigurationBindsIt() throws IOException {
+        Map<String, String> defaults = resolve(Map.of());
+        assertEquals("http://127.0.0.1:8080", defaults.get("serverUrl"));
+        assertEquals("http://127.0.0.1:8080/actuator/health",
+                defaults.get("healthUrl"));
+        assertEquals("http://127.0.0.1:4170", defaults.get("harnessBaseUrl"));
+
+        // The port in the launcher's file, where server.env cannot see it.
+        Path config = write("config/application.yml", """
+                server:
+                  port: 9090
+                qwen.managed-agent.harness.base-url: ' http://127.0.0.1:4171 '
+                """);
+        Map<String, String> file = resolve(additional(config));
+        assertEquals("http://127.0.0.1:9090", file.get("serverUrl"));
+        assertEquals("http://127.0.0.1:4171", file.get("harnessBaseUrl"));
+        assertEquals("http://127.0.0.1:9091",
+                resolve(Map.of("SERVER_PORT", "9091")).get("serverUrl"));
+        assertEquals("http://127.0.0.1:9092",
+                resolve(Map.of(), "--server.port=9092").get("serverUrl"));
+
+        // A wildcard serves the loopback interface of its family, and the
+        // relaxed SERVER_ADDRESS outranks the packaged default too. A
+        // link-local address keeps its zone, which the upgrade command
+        // refuses, since no URL carries one.
+        Map<String, String> addresses = Map.of(
+                "0.0.0.0", "http://127.0.0.1:8080",
+                "::", "http://[::1]:8080",
+                "0:0:0:0:0:0:0:1", "http://[::1]:8080",
+                "10.1.2.3", "http://10.1.2.3:8080",
+                "fe80::1%1", "http://[fe80:0:0:0:0:0:0:1%1]:8080",
+                "", "http://127.0.0.1:8080");
+        addresses.forEach((address, url) -> assertEquals(url,
+                resolve(Map.of("QWEN_MANAGED_AGENT_SERVER_ADDRESS", address))
+                        .get("serverUrl"), address));
+        assertEquals("http://10.1.2.4:8080", resolve(Map.of(
+                "SERVER_ADDRESS", "10.1.2.4")).get("serverUrl"));
+
+        assertEquals("https://127.0.0.1:8443", resolve(Map.of(),
+                "--server.port=8443", "--server.ssl.bundle=web")
+                .get("serverUrl"));
+        assertEquals("http://127.0.0.1:8080", resolve(Map.of(),
+                "--server.ssl.enabled=false").get("serverUrl"));
+
+        // 0 picks a port at start, and a negative one opens none.
+        for (String port : new String[] {"0", "-1"}) {
+            Map<String, String> resolved =
+                    resolve(Map.of(), "--server.port=" + port);
+            assertEquals("", resolved.get("serverUrl"), port);
+            assertEquals("", resolved.get("healthUrl"), port);
+        }
+    }
+
+    @Test
+    void readsTheHealthEndpointAsSpringBootPlacesIt() {
+        // A management port of its own binds every interface unless told
+        // otherwise, whatever server.address says.
+        Map<String, String> own = resolve(Map.of(
+                "QWEN_MANAGED_AGENT_SERVER_ADDRESS", "10.1.2.3"),
+                "--management.server.port=9091");
+        assertEquals("http://10.1.2.3:8080", own.get("serverUrl"));
+        assertEquals("http://127.0.0.1:9091/actuator/health",
+                own.get("healthUrl"));
+        // The server's own port, given again, shares its listener, where
+        // the management base path does not apply.
+        assertEquals("http://127.0.0.1:9090/actuator/health", resolve(Map.of(),
+                "--server.port=9090", "--management.server.port=9090",
+                "--management.server.base-path=/manage").get("healthUrl"));
+        assertEquals("http://127.0.0.1:8080/actuator/health", resolve(Map.of(),
+                "--management.server.port=8080").get("healthUrl"));
+        for (String port : new String[] {"0", "-1"}) {
+            assertEquals("", resolve(Map.of(),
+                    "--management.server.port=" + port).get("healthUrl"), port);
+        }
+        assertEquals("http://[::1]:9091/manage/ops/healthz", resolve(Map.of(),
+                "--management.server.port=9091",
+                "--management.server.address=::1",
+                "--management.server.base-path=manage/",
+                "--management.endpoints.web.base-path=/ops/",
+                "--management.endpoints.web.path-mapping.health=healthz")
+                .get("healthUrl"));
+        assertEquals("http://127.0.0.1:8080/health", resolve(Map.of(),
+                "--management.endpoints.web.base-path=/").get("healthUrl"));
+        // A blank mapping, such as an unset ${HEALTH_PATH:}, keeps the name.
+        for (String mapping : new String[] {"", "   "}) {
+            assertEquals("http://127.0.0.1:8080/actuator/health",
+                    resolve(Map.of(),
+                            "--management.endpoints.web.path-mapping.health="
+                                    + mapping).get("healthUrl"),
+                    "'" + mapping + "'");
+        }
+
+        // The server's TLS carries over unless management.server.ssl
+        // replaces it.
+        assertEquals("https://127.0.0.1:9091/actuator/health", resolve(Map.of(),
+                "--server.ssl.bundle=web", "--management.server.port=9091")
+                .get("healthUrl"));
+        assertEquals("http://127.0.0.1:9091/actuator/health", resolve(Map.of(),
+                "--server.ssl.bundle=web", "--management.server.port=9091",
+                "--management.server.ssl.enabled=false").get("healthUrl"));
+        assertEquals("https://127.0.0.1:9091/actuator/health", resolve(Map.of(),
+                "--management.server.port=9091",
+                "--management.server.ssl.bundle=ops").get("healthUrl"));
+    }
+
+    @Test
     void refusesAConfigurationTheServerWouldRefuse() throws IOException {
         Path config = write("config/application.yml",
                 "spring.config.import: file:" + directory.resolve("missing.yml") + "\n");

@@ -489,6 +489,7 @@ describe('runNonInteractive', () => {
       syncSession: vi.fn().mockResolvedValue(undefined),
       hasToolHooks: true,
       toolCall: () => undefined,
+      submitPrompt: vi.fn(async (text: string) => ({ text })),
     } as unknown as ModSession);
   }
 
@@ -6720,6 +6721,16 @@ describe('runNonInteractive', () => {
           return turn;
         },
       );
+      const submitPrompt = vi.fn(
+        async (
+          text: string,
+          _signal: AbortSignal,
+        ): Promise<
+          { text: string; context?: string[] } | { drop: string }
+        > => ({
+          text,
+        }),
+      );
       vi.spyOn(ModSession, 'create').mockImplementation(
         () =>
           ({
@@ -6735,9 +6746,10 @@ describe('runNonInteractive', () => {
             hasToolHooks: shared,
             toolCall: () => undefined,
             startTurn,
+            submitPrompt,
           }) as unknown as ModSession,
       );
-      return { order, turn, startTurn, abort: () => abort() };
+      return { order, turn, startTurn, submitPrompt, abort: () => abort() };
     };
     // Admits the prompt, as core does once UserPromptSubmit lets it through.
     const admitting = (events: () => AsyncGenerator<ServerLlmStreamEvent>) =>
@@ -6776,6 +6788,175 @@ describe('runNonInteractive', () => {
       // The answer ends the turn before the run settles and closes.
       expect(turn.complete.mock.calls[0]).toEqual([]);
       expect(order.slice(0, 3)).toEqual(['start', 'complete', 'close']);
+    });
+
+    it('sends the prompt and context the prompt.submit hooks passed on', async () => {
+      setupMetricsMock();
+      const { order, startTurn, submitPrompt } = installModTurn();
+      submitPrompt.mockImplementation(async (text) => {
+        order.push('submit');
+        return { text: text.toUpperCase(), context: ['note'] };
+      });
+      admitting(() =>
+        createStreamFromEvents([
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: undefined },
+          },
+        ]),
+      );
+
+      await runNonInteractive(mockConfig, mockSettings, 'Fix it', 'rewrite');
+
+      expect(submitPrompt).toHaveBeenCalledExactlyOnceWith(
+        'Fix it',
+        mockLlmClient.sendMessageStream.mock.calls[0][1],
+      );
+      const [request, , , options] =
+        mockLlmClient.sendMessageStream.mock.calls[0];
+      expect(JSON.stringify(request)).toContain('FIX IT');
+      expect(JSON.stringify(request)).not.toContain('Fix it');
+      expect(options).toMatchObject({
+        submittedPrompt: 'FIX IT',
+        promptContext: ['note'],
+      });
+      expect(startTurn.mock.calls[0][0]).toBe('FIX IT');
+      expect(order.slice(0, 2)).toEqual(['submit', 'start']);
+    });
+
+    it('lets the hooks hear and rewrite only the text of a message with other blocks', async () => {
+      setupMetricsMock();
+      const { startTurn, submitPrompt } = installModTurn();
+      submitPrompt.mockImplementation(async (text) => ({
+        text: text.toUpperCase(),
+      }));
+      admitting(() =>
+        createStreamFromEvents([
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: undefined },
+          },
+        ]),
+      );
+      const image = '{"type":"image"}';
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        `Fix it\n${image}`,
+        'blocks',
+        {
+          humanInput: { text: 'Fix it' },
+          promptParts: { text: 'Fix it', blocks: [image] },
+        },
+      );
+
+      expect(submitPrompt).toHaveBeenCalledExactlyOnceWith(
+        'Fix it',
+        expect.any(AbortSignal),
+      );
+      const [request, , , options] =
+        mockLlmClient.sendMessageStream.mock.calls[0];
+      expect(request).toEqual([{ text: `FIX IT\n${image}` }]);
+      expect(options).toMatchObject({
+        submittedPrompt: `FIX IT\n${image}`,
+        humanInput: { text: 'FIX IT' },
+      });
+      expect(startTurn.mock.calls[0][0]).toBe('FIX IT');
+    });
+
+    it.each([OutputFormat.JSON, OutputFormat.TEXT])(
+      'ends a run whose prompt a hook dropped with a result in %s',
+      async (format) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+        setupMetricsMock();
+        const { startTurn, submitPrompt } = installModTurn();
+        submitPrompt.mockResolvedValue({
+          drop: 'Prompt dropped by a hook: no secrets',
+        });
+
+        const exitCode = await runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'a secret',
+          'dropped',
+        );
+
+        expect(exitCode).toBe(1);
+        expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
+        expect(startTurn).not.toHaveBeenCalled();
+        if (format === OutputFormat.JSON) {
+          const messages = JSON.parse(
+            processStdoutSpy.mock.calls.map((call) => String(call[0])).join(''),
+          );
+          expect(messages.at(-1)).toMatchObject({
+            type: 'result',
+            is_error: true,
+            error: { message: 'Prompt dropped by a hook: no secrets' },
+          });
+        } else {
+          expect(processStderrSpy).toHaveBeenCalledWith(
+            'Prompt dropped by a hook: no secrets\n',
+          );
+        }
+      },
+    );
+
+    it('raises no prompt.submit for a message no person typed or without text', async () => {
+      setupMetricsMock();
+      const { submitPrompt } = installModTurn();
+      mockLlmClient.sendMessageStream.mockImplementation(() =>
+        createStreamFromEvents([]),
+      );
+      const result = '{"type":"tool_result","tool_use_id":"t1"}';
+
+      await runNonInteractive(mockConfig, mockSettings, result, 'tool', {
+        promptParts: { text: '', blocks: [result] },
+        fromTool: true,
+      });
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        `Done\n${result}`,
+        'tool-text',
+        {
+          promptParts: { text: 'Done', blocks: [result] },
+          fromTool: true,
+        },
+      );
+      const image = '{"type":"image"}';
+      await runNonInteractive(mockConfig, mockSettings, image, 'image', {
+        promptParts: { text: '', blocks: [image] },
+      });
+
+      expect(submitPrompt).not.toHaveBeenCalled();
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(3);
+    });
+
+    it('raises no prompt.submit for a slash command or a notification', async () => {
+      setupMetricsMock();
+      const { submitPrompt } = installModTurn();
+      mockGetCommands.mockReturnValue([
+        {
+          name: 'review',
+          description: 'review',
+          kind: CommandKind.FILE,
+          action: vi.fn().mockResolvedValue({
+            type: 'submit_prompt',
+            content: [{ text: 'Review the diff' }],
+          }),
+        },
+      ]);
+      mockLlmClient.sendMessageStream.mockImplementation(() =>
+        createStreamFromEvents([]),
+      );
+
+      await runNonInteractive(mockConfig, mockSettings, '/review', 'slash');
+      await runNonInteractive(mockConfig, mockSettings, 'done', 'note', {
+        sendMessageType: SendMessageType.Notification,
+      });
+
+      expect(submitPrompt).not.toHaveBeenCalled();
     });
 
     it('starts no turn for a prompt core never admits', async () => {

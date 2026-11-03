@@ -4797,6 +4797,128 @@ describe('Session', () => {
       expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
     });
 
+    it('runs a channel prompt on the shared round, without a submitted prompt', async () => {
+      const send = useSharedRounds([text('Hello'), finished()]);
+
+      // A channel's own submission is not passed on as the user's.
+      await prompt({
+        _meta: {
+          [CHANNEL_PROMPT_META_KEY]: true,
+          'qwen.daemon.submittedPrompt': 'hello',
+        },
+      });
+
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(send).toHaveBeenCalledOnce();
+      expect(send.mock.calls[0][3]).toMatchObject({
+        type: core.SendMessageType.UserQuery,
+      });
+      expect(send.mock.calls[0][3]).not.toHaveProperty('submittedPrompt');
+      expect(send.mock.calls[0][3]).not.toHaveProperty('humanInput');
+      expect(
+        (
+          mockLlmClient as unknown as {
+            admitUserPrompt: ReturnType<typeof vi.fn>;
+          }
+        ).admitUserPrompt,
+      ).toHaveBeenCalledWith(
+        'hello',
+        'test-session-id########1',
+        expect.objectContaining({ submittedPrompt: undefined }),
+      );
+    });
+
+    it.each([
+      ['the Stop hook reached its cap', 'cap'],
+      ['the guard gave way to a queued prompt', 'queued'],
+      ['the guard gave way to a queued prompt in plan mode', 'plan-queued'],
+      ['the guard was exhausted', 'exhausted'],
+    ] as const)(
+      'does not start the Goal a turn proposed once %s',
+      async (_label, way) => {
+        mockConfig.getGoalProposalHostSupported = vi.fn().mockReturnValue(true);
+        mockConfig.takePendingGoalProposal = vi.fn().mockReturnValue({
+          objective: 'make the tests pass',
+          turnKey: 'test-session-id########1',
+        });
+        const internals = session as unknown as {
+          todoStopGuardQueuedPromptPriority: boolean;
+          todoStopGuard: { decide: () => unknown };
+        };
+        if (way === 'exhausted') {
+          vi.spyOn(internals.todoStopGuard, 'decide').mockReturnValue({
+            kind: 'exhausted',
+            attempt: 2,
+            maxAttempts: 2,
+            unfinishedCount: 1,
+          });
+        }
+        const send = useSharedRounds();
+        send.mockImplementationOnce(
+          (
+            _parts: unknown,
+            signal: AbortSignal,
+            promptId: string,
+            options: { stopPolicies: core.StopPolicy[] },
+          ) =>
+            (async function* () {
+              yield text('Proposed a Goal.');
+              yield finished();
+              const [policy] = options.stopPolicies;
+              if (way === 'cap') {
+                policy!.onStopHookCap?.();
+                return;
+              }
+              if (way === 'queued' || way === 'plan-queued') {
+                internals.todoStopGuardQueuedPromptPriority = true;
+              }
+              if (way === 'plan-queued') {
+                vi.mocked(mockConfig.getApprovalMode).mockReturnValue(
+                  ApprovalMode.PLAN,
+                );
+              }
+              expect(await policy!.continueAt({ promptId, signal })).toBe(
+                undefined,
+              );
+            })(),
+        );
+
+        await prompt({ _meta: { 'qwen.goalProposalApproval': true } });
+
+        expect(send).toHaveBeenCalledOnce();
+        expect(agentText()).toContainEqual(
+          expect.stringContaining('/goal set'),
+        );
+        expect(mockConfig.getGoalRuntimeReady).not.toHaveBeenCalled();
+      },
+    );
+
+    it('starts the Goal a turn proposed when its stop point lets it stop', async () => {
+      mockConfig.getGoalProposalHostSupported = vi.fn().mockReturnValue(true);
+      mockConfig.takePendingGoalProposal = vi.fn().mockReturnValue({
+        objective: 'make the tests pass',
+        turnKey: 'test-session-id########1',
+      });
+      const send = useSharedRounds();
+      send.mockImplementationOnce(
+        (
+          _parts: unknown,
+          signal: AbortSignal,
+          promptId: string,
+          options: { stopPolicies: core.StopPolicy[] },
+        ) =>
+          (async function* () {
+            yield text('Proposed a Goal.');
+            yield finished();
+            await options.stopPolicies[0]!.continueAt({ promptId, signal });
+          })(),
+      );
+
+      await prompt({ _meta: { 'qwen.goalProposalApproval': true } });
+
+      expect(mockConfig.getGoalRuntimeReady).toHaveBeenCalled();
+    });
+
     it('takes the file-history snapshot of a prompt cancelled before its first send', async () => {
       const send = useSharedRounds([text('Hello'), finished()]);
       Object.assign(mockLlmClient, {
@@ -5669,16 +5791,191 @@ describe('Session', () => {
       expect(clientFinished).toBe(true);
     });
 
-    it('keeps a retry on the current path', async () => {
-      const send = useSharedRounds([text('unused'), finished()]);
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValue(createEmptyStream());
+    describe('a turn it re-enters', () => {
+      const promptId = 'test-session-id########7';
+      let orphan: Content;
 
-      await prompt({ retry: true });
+      beforeEach(() => {
+        orphan = { role: 'user', parts: [{ text: 'unanswered' }] };
+        markApiHistoryPrompt(orphan, promptId);
+        vi.mocked(mockChat.getHistory).mockReturnValue([orphan]);
+        vi.mocked(mockChat.stripOrphanedUserEntriesFromHistory).mockReturnValue(
+          [orphan],
+        );
+      });
 
-      expect(send).not.toHaveBeenCalled();
-      expect(mockChat.sendMessageStream).toHaveBeenCalled();
+      const reenter = (mode: 'retry' | 'continue') =>
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt:
+            mode === 'retry' ? [{ type: 'text', text: 'unanswered' }] : [],
+          _meta: {
+            [mode === 'retry'
+              ? 'qwen.daemon.retry'
+              : 'qwen.daemon.continueLastTurn']: true,
+          },
+        });
+
+      it.each(['retry', 'continue'] as const)(
+        'resends through %s as a Retry with the stripped prompt identity',
+        async (mode) => {
+          const send = useSharedRounds([text('done'), finished()]);
+          const admit = (
+            mockLlmClient as unknown as {
+              admitUserPrompt: ReturnType<typeof vi.fn>;
+            }
+          ).admitUserPrompt;
+
+          await reenter(mode);
+
+          expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+          expect(send).toHaveBeenCalledOnce();
+          expect(send.mock.calls[0][3]).toMatchObject({
+            type: core.SendMessageType.Retry,
+            userTurnRecordedByHost: true,
+            historyPromptId: promptId,
+          });
+          // A retry runs UserPromptSubmit, as before; a continue does not.
+          if (mode === 'retry') {
+            expect(admit).toHaveBeenCalledOnce();
+            expect(send.mock.calls[0][3]).toMatchObject({
+              promptAdmission: { blocked: false },
+            });
+          } else {
+            expect(admit).not.toHaveBeenCalled();
+            expect(send.mock.calls[0][3]).not.toHaveProperty('promptAdmission');
+          }
+          expect(
+            mockChatRecordingService.recordUserMessage,
+          ).not.toHaveBeenCalled();
+        },
+      );
+
+      it('keeps one copy of a retry cancelled before its request went out', async () => {
+        Object.assign(mockChat, { getUserContentPushCount: vi.fn(() => 0) });
+        const send = useSharedRounds();
+        send.mockImplementationOnce(() =>
+          (async function* () {
+            await session.cancelPendingPrompt();
+            yield { type: core.LlmEventType.UserCancelled };
+          })(),
+        );
+
+        await expect(reenter('retry')).resolves.toMatchObject({
+          stopReason: 'cancelled',
+        });
+
+        // The prompt puts the stripped attempt back; the unsent resend is not
+        // kept beside it.
+        expect(vi.mocked(mockChat.addHistory).mock.calls).toEqual([[orphan]]);
+      });
+
+      it.each(['retry', 'continue'] as const)(
+        'puts the stripped prompt back once when %s fails before sending',
+        async (mode) => {
+          // The request never reached history.
+          Object.assign(mockChat, { getUserContentPushCount: vi.fn(() => 0) });
+          const send = useSharedRounds();
+          send.mockImplementationOnce(() =>
+            // eslint-disable-next-line require-yield
+            (async function* () {
+              throw new Error('request failed before it went out');
+            })(),
+          );
+
+          await expect(reenter(mode)).rejects.toThrow('before it went out');
+
+          const restored = vi
+            .mocked(mockChat.addHistory)
+            .mock.calls.filter(([entry]) => entry === orphan);
+          expect(restored).toHaveLength(1);
+          expect(
+            vi
+              .mocked(mockChat.addHistory)
+              .mock.calls.filter(([entry]) => entry !== orphan),
+          ).toEqual([]);
+        },
+      );
+
+      it('does not put a retry back once its request reached history and its response failed', async () => {
+        let pushes = 0;
+        Object.assign(mockChat, {
+          getUserContentPushCount: vi.fn(() => pushes),
+        });
+        const send = useSharedRounds();
+        send.mockImplementationOnce(() =>
+          (async function* () {
+            // LlmChat pushed the retry's user entry, then the model failed.
+            pushes = 1;
+            yield {
+              type: core.LlmEventType.Error,
+              value: { error: { message: 'model failed again', status: 500 } },
+            };
+          })(),
+        );
+
+        await expect(reenter('retry')).rejects.toThrow();
+
+        expect(mockChat.addHistory).not.toHaveBeenCalledWith(orphan);
+      });
+
+      it('puts a continue back as it was, with its worktree notice pending, when cancelled before its first request', async () => {
+        Object.assign(mockChat, { getUserContentPushCount: vi.fn(() => 0) });
+        const send = useSharedRounds([text('done'), finished()]);
+        session.pendingWorktreeNotice = 'the worktree is still alive';
+        // The turn is cancelled while it builds its first message.
+        vi.mocked(mockConfig.takeActiveTodoReminder).mockImplementationOnce(
+          () => {
+            void session.cancelPendingPrompt();
+            return undefined;
+          },
+        );
+
+        await expect(reenter('continue')).resolves.toMatchObject({
+          stopReason: 'cancelled',
+        });
+
+        expect(send).not.toHaveBeenCalled();
+        expect(vi.mocked(mockChat.addHistory).mock.calls).toEqual([[orphan]]);
+        expect(session.pendingWorktreeNotice).toBe(
+          'the worktree is still alive',
+        );
+      });
+
+      it('keeps the worktree notice pending when a continue fails before sending', async () => {
+        Object.assign(mockChat, { getUserContentPushCount: vi.fn(() => 0) });
+        const send = useSharedRounds();
+        send.mockImplementationOnce(() =>
+          // eslint-disable-next-line require-yield
+          (async function* () {
+            throw new Error('request failed before it went out');
+          })(),
+        );
+        session.pendingWorktreeNotice = 'the worktree is still alive';
+
+        await expect(reenter('continue')).rejects.toThrow('before it went out');
+
+        expect(session.pendingWorktreeNotice).toBe(
+          'the worktree is still alive',
+        );
+      });
+
+      it('gives a Retry round the session reminders the client leaves to it', async () => {
+        const send = useSharedRounds([text('done'), finished()]);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+
+        await reenter('retry');
+
+        const parts = send.mock.calls[0][0] as Part[];
+        expect(
+          parts.some(
+            (part) =>
+              typeof part.text === 'string' &&
+              part.text.includes('<system-reminder>') &&
+              /plan mode/i.test(part.text),
+          ),
+        ).toBe(true);
+      });
     });
   });
 
@@ -9618,6 +9915,134 @@ describe('Session', () => {
       const sent = firstSentMessage();
       expect(sent[0]?.functionResponse?.id).toBe('call-auq');
       expect(sent[0]?.functionResponse?.name).toBe('ask_user_question');
+    });
+
+    it('on the shared loop, asks with its own executor and sends the answer as a Retry', async () => {
+      mockConfig.isUnifiedAgentLoopEnabled = vi.fn().mockReturnValue(true);
+      mockChat.getHistory = vi.fn().mockReturnValue(danglingAuqHistory());
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'User answers:\nQuestion: Polling',
+        returnDisplay: 'answered',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool('ask_user_question', execute),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        answers: { '0': 'Polling' },
+      });
+      const send = vi.fn(() =>
+        (async function* () {
+          yield { type: core.LlmEventType.Content, value: 'got it' };
+          yield {
+            type: core.LlmEventType.Finished,
+            value: { reason: FinishReason.STOP },
+          };
+        })(),
+      );
+      Object.assign(mockLlmClient, { sendMessageStream: send });
+
+      const result = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [],
+        _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+
+      expect(result).toEqual({ stopReason: 'end_turn' });
+      // The restored question keeps the session's executor for now.
+      expect(runAcpToolBatchSpy).not.toHaveBeenCalled();
+      expect(execute).toHaveBeenCalled();
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(send).toHaveBeenCalledOnce();
+      const [parts, , , options] = send.mock.calls[0] as unknown as [
+        Part[],
+        AbortSignal,
+        string,
+        { type: string; userTurnRecordedByHost?: boolean },
+      ];
+      expect(parts[0]?.functionResponse?.id).toBe('call-auq');
+      expect(options).toMatchObject({
+        type: core.SendMessageType.Retry,
+        userTurnRecordedByHost: true,
+      });
+      expect(options).not.toHaveProperty('promptAdmission');
+    });
+
+    describe('on the shared loop, with notices waiting for the answer', () => {
+      let pushes: number;
+      let send: ReturnType<typeof vi.fn>;
+
+      beforeEach(() => {
+        mockConfig.isUnifiedAgentLoopEnabled = vi.fn().mockReturnValue(true);
+        mockChat.getHistory = vi.fn().mockReturnValue(danglingAuqHistory());
+        mockToolRegistry.getTool.mockReturnValue(
+          mockConfirmingTool(
+            'ask_user_question',
+            vi.fn().mockResolvedValue({
+              llmContent: 'User answers:\nQuestion: Polling',
+              returnDisplay: 'answered',
+            }),
+          ),
+        );
+        vi.mocked(mockClient.requestPermission).mockResolvedValue({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          answers: { '0': 'Polling' },
+        });
+        pushes = 0;
+        Object.assign(mockChat, {
+          getUserContentPushCount: vi.fn(() => pushes),
+        });
+        send = vi.fn();
+        Object.assign(mockLlmClient, { sendMessageStream: send });
+        session.pendingWorktreeNotice = 'the worktree is still alive';
+      });
+
+      const restore = () =>
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        } as unknown as Parameters<typeof session.prompt>[0]);
+
+      it('takes the notices once the answer reached history, even if the response fails', async () => {
+        send.mockImplementationOnce(() =>
+          (async function* () {
+            pushes = 1;
+            yield {
+              type: core.LlmEventType.Error,
+              value: { error: { message: 'model failed', status: 500 } },
+            };
+          })(),
+        );
+
+        await expect(restore()).rejects.toThrow();
+
+        expect(session.pendingWorktreeNotice).toBeNull();
+      });
+
+      it('keeps the answer with its notices, and takes them, when cancelled before it went out', async () => {
+        send.mockImplementationOnce(() =>
+          (async function* () {
+            await session.cancelPendingPrompt();
+            yield { type: core.LlmEventType.UserCancelled };
+          })(),
+        );
+
+        await expect(restore()).resolves.toMatchObject({
+          stopReason: 'cancelled',
+        });
+
+        expect(mockChat.addHistory).toHaveBeenCalledWith(
+          expect.objectContaining({
+            parts: expect.arrayContaining([
+              expect.objectContaining({
+                text: expect.stringContaining('the worktree is still alive'),
+              }),
+            ]),
+          }),
+        );
+        expect(session.pendingWorktreeNotice).toBeNull();
+      });
     });
 
     it('writes a decline result when the restored question is cancelled', async () => {
