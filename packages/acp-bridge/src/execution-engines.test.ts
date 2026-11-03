@@ -5251,53 +5251,63 @@ describe('workspace change propagation', () => {
     await expect(side).resolves.toMatchObject({ answer: 'done' });
   });
 
-  it('lets a running turn settle when a change that keeps permissions is not acknowledged', async () => {
-    const running = deferred<void>();
-    const p = paired(
-      {},
-      engineChannel('legacy'),
-      engineChannel('managed', {
-        extMethodImpl: (method, params) =>
-          method === SERVE_CONTROL_EXT_METHODS.workspaceChange
-            ? {
-                v: 1,
-                revision: Number(params['revision']) + 1,
-                acknowledged: true,
-              }
-            : acknowledge(method, params),
-        promptImpl: async () => {
-          await running.promise;
-          return { stopReason: 'end_turn' };
-        },
-      }),
-    );
-    const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
-    await p.bridge.preheat();
-    const turn = p.bridge.sendPrompt(
-      managed.sessionId,
-      prompt(managed.sessionId, 'running'),
-    );
-    await vi.waitFor(() => expect(p.managed.agent.promptCalls).toHaveLength(1));
+  it.each([false, true])(
+    'lets a running turn settle when a change that keeps permissions is not acknowledged (user=%s)',
+    async (includeUserSettings) => {
+      const running = deferred<void>();
+      const p = paired(
+        {},
+        engineChannel('legacy'),
+        engineChannel('managed', {
+          extMethodImpl: (method, params) =>
+            method === SERVE_CONTROL_EXT_METHODS.workspaceChange
+              ? {
+                  v: 1,
+                  revision: Number(params['revision']) + 1,
+                  acknowledged: true,
+                }
+              : acknowledge(method, params),
+          promptImpl: async () => {
+            await running.promise;
+            return { stopReason: 'end_turn' };
+          },
+        }),
+      );
+      const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await p.bridge.preheat();
+      const turn = p.bridge.sendPrompt(
+        managed.sessionId,
+        prompt(managed.sessionId, 'running'),
+      );
+      await vi.waitFor(() =>
+        expect(p.managed.agent.promptCalls).toHaveLength(1),
+      );
 
-    // An answer carrying another revision is not an acknowledgement.
-    await expect(
-      p.bridge.invokeWorkspaceCommand(
-        SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
-        { cwd: WS_A, reason: 'content' },
-      ),
-    ).rejects.toMatchObject({ kind: 'skills', revision: 1 });
-    expect(p.managed.agent.extMethodCalls.at(-1)?.params).toMatchObject({
-      kind: 'skills',
-      tightening: false,
-      reason: 'content',
-    });
-    expect(promptRefusal(p.bridge, managed.sessionId, 'x')).toMatchObject({
-      reason: 'workspace_change_unacknowledged',
-    });
-    expect(p.managed.agent.cancelCalls).toEqual([]);
-    running.resolve();
-    await expect(turn).resolves.toMatchObject({ stopReason: 'end_turn' });
-  });
+      // An answer carrying another revision is not an acknowledgement.
+      await expect(
+        p.bridge.invokeWorkspaceCommand(
+          SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+          {
+            cwd: WS_A,
+            reason: includeUserSettings ? 'all' : 'content',
+            ...(includeUserSettings ? { includeUserSettings } : {}),
+          },
+        ),
+      ).rejects.toMatchObject({ kind: 'skills', revision: 1 });
+      expect(p.managed.agent.extMethodCalls.at(-1)?.params).toMatchObject({
+        kind: 'skills',
+        tightening: false,
+        reason: includeUserSettings ? 'all' : 'content',
+        ...(includeUserSettings ? { includeUserSettings } : {}),
+      });
+      expect(promptRefusal(p.bridge, managed.sessionId, 'x')).toMatchObject({
+        reason: 'workspace_change_unacknowledged',
+      });
+      expect(p.managed.agent.cancelCalls).toEqual([]);
+      running.resolve();
+      await expect(turn).resolves.toMatchObject({ stopReason: 'end_turn' });
+    },
+  );
 
   it.each([
     [true, 'cancels'],

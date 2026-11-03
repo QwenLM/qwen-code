@@ -521,6 +521,8 @@ type WorkspaceSettingsWrite =
   import('./workspace-service/types.js').WorkspaceSettingsWrite;
 type PersistDisabledSkillsBatchResult =
   import('./workspace-service/types.js').PersistDisabledSkillsBatchResult;
+type PersistUserSkillsActivationResult =
+  import('./workspace-service/types.js').PersistUserSkillsActivationResult;
 type ServeWorkspaceSkillStatus =
   import('@qwen-code/acp-bridge/status').ServeWorkspaceSkillStatus;
 type ChannelWebhookConfigRuntime = {
@@ -2480,6 +2482,7 @@ function currentServeFeaturesForRunQwenServe(
       ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
       : {}),
     persistSettingAvailable: true,
+    userSkillActivationAvailable: true,
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
     sessionGenerationAvailable: true,
@@ -6200,6 +6203,58 @@ async function runQwenServeImpl(
           return { outcomes, settingsChanges };
         });
       });
+    const persistUserSkillsActivationFn = (
+      workspace: string,
+      skillNames: readonly string[],
+      activation: import('../config/skill-settings.js').UserSkillActivation,
+      assertGenerationOpen?: () => void,
+    ): Promise<PersistUserSkillsActivationResult> =>
+      withSettingsLock(workspace, async () => {
+        assertGenerationOpen?.();
+        const { updateUserSkillSettingLists } = await import(
+          '../config/skill-settings.js'
+        );
+        const { SettingScope } = settingsRuntime.settings;
+        const fresh = loadSettingsForPersistence(workspace);
+        const userSkills = fresh.user.originalSettings.skills;
+        const initial = {
+          disabled: userSkills?.disabled ?? [],
+          defaultDisabled: userSkills?.defaultDisabled ?? [],
+          enabled: userSkills?.enabled ?? [],
+        };
+        let next = initial;
+        const outcomes = skillNames.map((skillName) => {
+          const updated = updateUserSkillSettingLists(
+            next,
+            skillName,
+            activation,
+          );
+          const changed = JSON.stringify(updated) !== JSON.stringify(next);
+          next = updated;
+          return { skillName, changed };
+        });
+        const settingsChanges: PersistUserSkillsActivationResult['settingsChanges'] =
+          [];
+        for (const key of ['disabled', 'defaultDisabled', 'enabled'] as const) {
+          if (JSON.stringify(next[key]) !== JSON.stringify(initial[key])) {
+            settingsChanges.push({
+              key: `skills.${key}`,
+              value: next[key].length ? next[key] : undefined,
+            });
+          }
+        }
+        if (settingsChanges.length) {
+          fresh.setValues(
+            settingsChanges.map((change) => ({
+              scope: SettingScope.User,
+              ...change,
+            })),
+            undefined,
+            assertGenerationOpen,
+          );
+        }
+        return { outcomes, settingsChanges };
+      });
     const persistSettingFn = (
       workspace: string,
       scope: import('../config/settings.js').SettingScope,
@@ -8755,6 +8810,7 @@ async function runQwenServeImpl(
       persistDisabledTools: persistDisabledToolsFn,
       persistDisabledSkills: persistDisabledSkillsFn,
       persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
+      persistUserSkillsActivation: persistUserSkillsActivationFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
       sessionArtifactsPersistenceAvailable:

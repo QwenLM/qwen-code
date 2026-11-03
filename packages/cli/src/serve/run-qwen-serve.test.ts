@@ -1402,6 +1402,176 @@ describe('workspace skill settings persistence', () => {
     return deps!;
   };
 
+  it('persists User batches once, preserves unrelated settings, and skips no-op writes', async () => {
+    writeSkillSettings(['workspace-only'], ['pdf', 'rust:pdf']);
+    const settingsPath = path.join(qwenHome, 'settings.json');
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        skills: {
+          disabled: ['pdf', 'rust:pdf'],
+          defaultDisabled: ['rust:pdf', 'other'],
+        },
+        ui: { theme: 'Default' },
+      }),
+    );
+    const { persistUserSkillsActivation: persist } =
+      await captureSkillPersistence([]);
+    const save = vi.spyOn(
+      settingsRuntime.LoadedSettings.prototype,
+      'setValues',
+    );
+    const guard = vi.fn();
+    await expect(
+      persist!(workspace, ['rust:pdf', 'future'], { state: 'enabled' }, guard),
+    ).resolves.toMatchObject({
+      outcomes: [
+        { skillName: 'rust:pdf', changed: true },
+        { skillName: 'future', changed: true },
+      ],
+    });
+    expect(JSON.parse(fs.readFileSync(settingsPath, 'utf8'))).toEqual({
+      $version: 4,
+      skills: {
+        disabled: ['pdf'],
+        defaultDisabled: ['other'],
+        enabled: ['rust:pdf', 'future'],
+      },
+      ui: { theme: 'Default' },
+    });
+    const before = fs.statSync(settingsPath).mtimeMs;
+    await expect(
+      persist!(workspace, ['RUST:PDF', 'future'], { state: 'enabled' }),
+    ).resolves.toEqual({
+      outcomes: [
+        { skillName: 'RUST:PDF', changed: false },
+        { skillName: 'future', changed: false },
+      ],
+      settingsChanges: [],
+    });
+    expect(fs.statSync(settingsPath).mtimeMs).toBe(before);
+    expect(save).toHaveBeenCalledOnce();
+    expect(guard).toHaveBeenCalled();
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(workspace, '.qwen/settings.json'), 'utf8'),
+      ),
+    ).toEqual({ $version: 4, skills: { disabled: ['workspace-only'] } });
+  });
+
+  it('serializes User Skill mutations with other primary User settings writes', async () => {
+    writeSkillSettings([]);
+    const deps = await captureSkillPersistence([]);
+    await Promise.all([
+      deps.persistUserSkillsActivation!(workspace, ['alpha'], {
+        state: 'disabled',
+      }),
+      deps.persistUserSkillsActivation!(workspace, ['beta'], {
+        state: 'enabled',
+      }),
+      deps.persistSetting!(
+        workspace,
+        settingsRuntime.SettingScope.User,
+        'ui.theme',
+        'Default',
+      ),
+      deps.persistUserSkillsActivation!(workspace, ['alpha'], {
+        state: 'disabled',
+        mode: 'default',
+      }),
+    ]);
+    expect(
+      JSON.parse(fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8')),
+    ).toMatchObject({
+      skills: { enabled: ['beta'], defaultDisabled: ['alpha'] },
+      ui: { theme: 'Default' },
+    });
+    expect(
+      JSON.parse(fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'))
+        .skills.disabled,
+    ).toBeUndefined();
+  });
+
+  it('finishes a User write while an already-started workspace catalog read is blocked', async () => {
+    writeSkillSettings([]);
+    let resolveCatalog!: (status: ServeWorkspaceSkillsStatus) => void;
+    const catalog = new Promise<ServeWorkspaceSkillsStatus>((resolve) => {
+      resolveCatalog = resolve;
+    });
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const query = vi.fn(() => {
+      markStarted();
+      return catalog;
+    });
+    const original = workspaceServiceRuntime.createDaemonWorkspaceService;
+    vi.spyOn(
+      workspaceServiceRuntime,
+      'createDaemonWorkspaceService',
+    ).mockImplementation((deps) =>
+      original({
+        ...deps,
+        workspaceSkillsStatusProvider: undefined,
+        queryWorkspaceStatus: query as unknown as QueryWorkspaceStatusFn,
+      }),
+    );
+    const deps = await captureSkillPersistence([]);
+    expect(query).not.toHaveBeenCalled();
+    const workspaceWrite = deps.persistDisabledSkills!(
+      workspace,
+      'rust:pdf',
+      true,
+    );
+    try {
+      await started;
+      await expect(
+        Promise.race([
+          deps.persistUserSkillsActivation!(workspace, ['future'], {
+            state: 'disabled',
+          }).then(() => 'written'),
+          new Promise((resolve) => setTimeout(() => resolve('blocked'), 1000)),
+        ]),
+      ).resolves.toBe('written');
+      expect(
+        JSON.parse(
+          fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'),
+        ).skills.disabled,
+      ).toEqual(['future']);
+    } finally {
+      resolveCatalog({
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: true,
+        skills: [skillStatus('rust:pdf', 'project')],
+      });
+      await workspaceWrite;
+    }
+  });
+
+  it('rejects a closed generation at the commit guard without persisting', async () => {
+    writeSkillSettings([]);
+    const { persistUserSkillsActivation: persist } =
+      await captureSkillPersistence([]);
+    const before = fs.readFileSync(
+      path.join(qwenHome, 'settings.json'),
+      'utf8',
+    );
+    const guard = vi
+      .fn()
+      .mockImplementationOnce(() => undefined)
+      .mockImplementation(() => {
+        throw new Error('generation closed');
+      });
+    await expect(
+      persist!(workspace, ['future'], { state: 'disabled' }, guard),
+    ).rejects.toThrow('generation closed');
+    expect(fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8')).toBe(
+      before,
+    );
+  });
+
   it('uses catalog identity for a non-extension skill whose name contains a colon', async () => {
     writeSkillSettings(['rust:chat', 'chat']);
     const { persistDisabledSkills } = await captureSkillPersistence([
@@ -14093,6 +14263,7 @@ describe('runQwenServe runtime startup failures', () => {
           'capabilities',
           'daemon_status',
           'workspace_settings',
+          'user_skill_activation',
           'workspace_reload',
           'workspace_acp_preheat',
           'workspace_acp_status',

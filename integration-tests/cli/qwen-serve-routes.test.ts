@@ -476,6 +476,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_tool_toggle',
       'workspace_skill_settings_toggle',
       'workspace_skill_settings_batch_toggle',
+      'user_skill_activation',
       'workspace_session_refresh',
       'extension_batch_activation_v2',
       'extension_activation_explicit_refresh',

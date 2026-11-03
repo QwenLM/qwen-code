@@ -7966,6 +7966,43 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('setUserSkillsActivation', () => {
+    it.each([
+      { state: 'enabled' },
+      { state: 'disabled' },
+      { state: 'disabled', mode: 'default' },
+    ] as const)(
+      'sends one PUT with no preliminary read for %j',
+      async (activation) => {
+        const response = {
+          scope: 'user',
+          ...activation,
+          propagation: 'queued',
+          results: [{ skillName: 'rust:pdf', changed: true }],
+        };
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, response),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await expect(
+          client.setUserSkillsActivation(['rust:pdf'], activation, {
+            clientId: 'client-1',
+          }),
+        ).resolves.toEqual(response);
+        expect(calls).toHaveLength(1);
+        expect(calls[0]).toMatchObject({
+          url: 'http://daemon/skills/activation',
+          method: 'PUT',
+          body: JSON.stringify({ skillNames: ['rust:pdf'], ...activation }),
+          headers: {
+            'content-type': 'application/json',
+            'x-qwen-client-id': 'client-1',
+          },
+        });
+      },
+    );
+  });
+
   describe('setWorkspaceSkillsEnabled', () => {
     const response = {
       enabled: false,
