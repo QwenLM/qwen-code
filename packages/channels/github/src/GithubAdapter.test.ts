@@ -25,6 +25,7 @@ import {
   BoundSessionGoneError,
   BoundSessionQueueFullError,
   BoundSessionUnavailableError,
+  channelEventFilePath,
   getWorkspaceScopeDirName,
   PairingStore,
   type ChannelAgentBridge,
@@ -237,6 +238,27 @@ function boundDeadLetterPath(
     getWorkspaceScopeDirName(cwd),
     `${channelName}-${nameHash}-github-bound-deadletter.jsonl`,
   );
+}
+
+/**
+ * Reads the event journal through the production path helper, so a change to
+ * the file naming cannot silently turn these assertions into empty reads.
+ * Keeps `poll` rows: the degraded-dependency rows are part of what is tested.
+ * A journal that does not exist yet reads as empty, so every absence
+ * assertion below is paired with a positive one.
+ */
+function readChannelEvents(): Array<Record<string, unknown>> {
+  try {
+    return readFileSync(
+      channelEventFilePath('test-github', '/tmp/test'),
+      'utf-8',
+    )
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  } catch {
+    return [];
+  }
 }
 
 function makeInboundTaskRecord(overrides: Record<string, unknown> = {}) {
@@ -8648,6 +8670,320 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
     });
   });
 
+  describe('bound delivery event journal', () => {
+    /** Task rows for one source message, in write order. */
+    function taskRows(messageId = '1001'): Array<Record<string, unknown>> {
+      return readChannelEvents().filter(
+        (event) => event['type'] === 'task' && event['messageId'] === messageId,
+      );
+    }
+
+    function degradedRows(reason?: string): Array<Record<string, unknown>> {
+      return readChannelEvents().filter(
+        (event) =>
+          event['type'] === 'poll' &&
+          event['outcome'] === 'degraded' &&
+          (reason === undefined || event['reason'] === reason),
+      );
+    }
+
+    it('closes a private delivery with a terminal row naming the session', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      const rows = taskRows();
+      expect(rows[0]).toMatchObject({
+        outcome: 'accepted',
+        sessionId: 'bound-session',
+        repository: 'owner/repo',
+        thread: 'pr:42',
+        number: 42,
+      });
+      expect(rows.some((row) => row['outcome'] === 'running')).toBe(true);
+      // The acceptance mark is persisted as `running` (the record is removed
+      // right after), but the journal's last word must be terminal: otherwise
+      // a delivered event is indistinguishable from one still in flight.
+      expect(rows.at(-1)).toMatchObject({
+        outcome: 'delivered',
+        sessionId: 'bound-session',
+        messageId: '1001',
+      });
+    });
+
+    it('records a preflight-rejected bound event as retired, never delivered', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          groups: { '*': { senders: 'allowlist', allowedUsers: [] } },
+        },
+        { boundSessions },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      // The gate's own skip row is the positive control: the journal is being
+      // written, so the absence of a delivery row below is meaningful.
+      expect(readChannelEvents()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'inbound', outcome: 'skipped' }),
+        ]),
+      );
+      const rows = taskRows();
+      expect(rows.at(-1)).toMatchObject({
+        outcome: 'retired',
+        reason: 'preflight_rejected',
+      });
+      expect(rows.some((row) => row['outcome'] === 'delivered')).toBe(false);
+    });
+
+    it('names the rebound session on the retarget and delivery rows', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.deliverPrompt
+        .mockRejectedValueOnce(new BoundSessionQueueFullError('session-a'))
+        .mockResolvedValue(undefined);
+      boundSessions.listPrBindings.mockResolvedValueOnce({
+        bindings: [makeBinding({ sessionId: 'session-a' })],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [makeBinding({ sessionId: 'session-b' })],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+
+      const rows = taskRows();
+      expect(rows.some((row) => row['sessionId'] === 'session-a')).toBe(true);
+      expect(rows.at(-1)).toMatchObject({
+        outcome: 'delivered',
+        sessionId: 'session-b',
+      });
+      // The retarget transition carries the new target too, so a rebind is
+      // readable without diffing two separate deliveries.
+      expect(
+        rows.filter((row) => row['sessionId'] === 'session-b').length,
+      ).toBeGreaterThan(1);
+    });
+
+    it('journals the dead-letter retire without copying the message body', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.deliverPrompt.mockRejectedValue(
+        new BoundSessionQueueFullError('bound-session'),
+      );
+      const envelope = {
+        ...makeInboundTaskRecord().envelope,
+        threadId: 'pr:42',
+        messageId: '1001',
+      };
+      writeInboundTasks([
+        makeInboundTaskRecord({
+          state: 'failed',
+          attempts: 0,
+          deferCount: 239,
+          backpressure: true,
+          issueNumber: 42,
+          delivery: { kind: 'bound-session', sessionId: 'bound-session' },
+          source: {
+            chatId: 'owner/repo',
+            threadId: 'pr:42',
+            messageId: '1001',
+          },
+          envelope,
+          dedupe: {},
+        }),
+      ]);
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+
+      expect(
+        readFileSync(boundDeadLetterPath(), 'utf-8').trim().split('\n'),
+      ).toHaveLength(1);
+      const rows = taskRows();
+      expect(rows.at(-1)).toMatchObject({
+        outcome: 'retired',
+        reason: 'dead_letter',
+        sessionId: 'bound-session',
+      });
+      expect(String(rows.at(-1)!['error'])).toContain('backpressure horizon');
+      // The dead-letter record carries the body for operator recovery; the
+      // journal must never become a second copy of conversation history.
+      expect(JSON.stringify(readChannelEvents())).not.toContain(
+        'please fix this',
+      );
+    });
+
+    it('journals a failed dead-letter write as a failure, without the payload', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.deliverPrompt.mockRejectedValue(
+        new Error('delivery exploded'),
+      );
+      const originalAppend = nodeFs.appendFileSync;
+      const spy = vi.spyOn(nodeFs, 'appendFileSync').mockImplementation(((
+        path: unknown,
+        ...args: unknown[]
+      ) => {
+        if (String(path) === boundDeadLetterPath()) {
+          throw Object.assign(new Error('ENOSPC: no space left'), {
+            code: 'ENOSPC',
+          });
+        }
+        return (originalAppend as (p: unknown, ...a: unknown[]) => void)(
+          path,
+          ...args,
+        );
+      }) as unknown as typeof nodeFs.appendFileSync);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        mockOctokit.paginate
+          .mockResolvedValueOnce([prNotification()])
+          .mockResolvedValueOnce([makeComment()]);
+        await pollOnce();
+        for (let i = 0; i < 2; i++) {
+          mockOctokit.paginate.mockResolvedValueOnce([]);
+          await pollOnce();
+        }
+
+        // The task survives a failed dead-letter append, so this is a
+        // failure, not a retire.
+        expect(existsSync(inboundTaskPath())).toBe(true);
+        const rows = taskRows();
+        expect(rows.at(-1)).toMatchObject({
+          outcome: 'failed',
+          reason: 'dead_letter_write_failed',
+        });
+        expect(String(rows.at(-1)!['error'])).toContain('ENOSPC');
+        expect(rows.some((row) => row['outcome'] === 'retired')).toBe(false);
+        // stderr dumps the full payload for the operator; the journal row
+        // carries only the write error.
+        expect(
+          stderr.mock.calls.map((call) => String(call[0])).join(''),
+        ).toContain('please fix this');
+        expect(JSON.stringify(readChannelEvents())).not.toContain(
+          'please fix this',
+        );
+      } finally {
+        spy.mockRestore();
+        stderr.mockRestore();
+      }
+    });
+
+    it('does not claim a private delivery for the gone-session public fallback', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.deliverPrompt.mockRejectedValueOnce(
+        new BoundSessionGoneError('bound-session'),
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [makeBinding()],
+        partial: false,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      const rows = taskRows();
+      expect(rows[0]).toMatchObject({ outcome: 'accepted' });
+      expect(rows.some((row) => row['outcome'] === 'delivered')).toBe(false);
+    });
+
+    it('journals an unreachable binding scan once per throttle window', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockRejectedValue(
+        new Error('route not found'),
+      );
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        await pollOnce();
+        await pollOnce();
+        await pollOnce();
+      } finally {
+        stderr.mockRestore();
+      }
+
+      // The poll itself survived the outage, so without this row a scan
+      // failure that stalls every notification is invisible in the timeline.
+      // One row per throttle window, not one per poll: three polls, one row.
+      const rows = degradedRows('bindings_unreachable');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ detail: { streak: 1 } });
+      expect(String(rows[0]!['error'])).toContain('route not found');
+    });
+
+    it('journals a permanently partial scan with the listed session count', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [makeBinding()],
+        partial: true,
+      });
+      mockOctokit.paginate.mockResolvedValue([]);
+      for (let i = 0; i < 10; i++) await pollOnce();
+
+      const rows = degradedRows('bindings_partial');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ detail: { streak: 10, sessions: 1 } });
+      expect(degradedRows('bindings_unreachable')).toHaveLength(0);
+    });
+
+    it('journals a stalled cold start the poll detail cannot reach', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: true,
+      });
+      await pollOnce();
+
+      const rows = degradedRows('bindings_cold_empty');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ detail: { streak: 1 } });
+      // The cold-start gate returns BEFORE the comment lane sets its poll
+      // detail, so attaching health to that detail would lose exactly this
+      // case: no notification fetch happened at all, yet the degraded row
+      // is written.
+      expect(mockOctokit.paginate).not.toHaveBeenCalled();
+    });
+
+    it('journals the bounded cold-empty escape when the lane opens', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: true,
+      });
+      mockOctokit.paginate.mockResolvedValue([]);
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        for (let i = 0; i < 30; i++) await pollOnce();
+      } finally {
+        stderr.mockRestore();
+      }
+
+      // Gate rows at 1/10/20 (throttled, streak < 30), then the escape row at
+      // 30 when the lane opens. Both share the reason: they are the same
+      // stall, before and after the bounded horizon.
+      expect(
+        degradedRows('bindings_cold_empty').map(
+          (row) => (row['detail'] as { streak: number }).streak,
+        ),
+      ).toEqual([1, 10, 20, 30]);
+      expect(mockOctokit.paginate).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('PR state watch', () => {
     // Routing queues (listForRef / notifications / comments) are consumed
     // per API call, and some tests intentionally leave a value unconsumed
@@ -12559,6 +12895,296 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       } finally {
         stderr.mockRestore();
       }
+    });
+
+    // Watch events are private-only: every retire below is a silent
+    // consumption unless the journal closes it, and none of them may ever
+    // be recorded as a delivery.
+    describe('watch event journal', () => {
+      function watchTaskRows(key: string): Array<Record<string, unknown>> {
+        return readChannelEvents().filter(
+          (event) => event['type'] === 'task' && event['messageId'] === key,
+        );
+      }
+
+      it('closes a fired watch delivery with a terminal delivered row', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await pollOnce();
+
+        mockPull({ updated_at: '2026-07-02T10:00:00.000Z' });
+        mockNotificationsOnce([]);
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        const rows = readChannelEvents().filter(
+          (event) =>
+            event['type'] === 'task' &&
+            String(event['messageId']).startsWith('watch:ci_failure'),
+        );
+        expect(rows[0]).toMatchObject({
+          outcome: 'accepted',
+          sessionId: 'bound-session',
+        });
+        expect(rows.at(-1)).toMatchObject({
+          outcome: 'delivered',
+          sessionId: 'bound-session',
+        });
+      });
+
+      it('closes a privately retired watch event with a retired row', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const key = 'watch:ci_failure:sha-1';
+        writeInboundTasks([
+          makeInboundTaskRecord({
+            state: 'running',
+            attempts: 0,
+            issueNumber: 42,
+            delivery: { kind: 'bound-session', sessionId: 'bound-session' },
+            source: { chatId: 'owner/repo', threadId: 'pr:42', messageId: key },
+            envelope: { ...makePendingWatch({ key }).envelope },
+            dedupe: {},
+          }),
+        ]);
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [],
+          partial: false,
+        });
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          mockNotificationsOnce([]);
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        const rows = watchTaskRows(key);
+        expect(rows.at(-1)).toMatchObject({
+          outcome: 'retired',
+          reason: 'watch_no_candidate',
+        });
+        expect(rows.some((row) => row['outcome'] === 'delivered')).toBe(false);
+      });
+
+      it('journals a watch retire with no bound target as retired', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const key = 'watch:ci_failure:sha-1';
+        // A crash-window watch task whose delivery was cleared: it must be
+        // retired privately, never fallen back to the public channel path.
+        writeInboundTasks([
+          makeInboundTaskRecord({
+            state: 'running',
+            attempts: 0,
+            issueNumber: 42,
+            source: { chatId: 'owner/repo', threadId: 'pr:42', messageId: key },
+            envelope: { ...makePendingWatch({ key }).envelope },
+            dedupe: {},
+          }),
+        ]);
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          mockPull({});
+          mockNotificationsOnce([]);
+          mockChecks([{ status: 'completed', conclusion: 'success' }]);
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(channel.inboundEnvelopes).toHaveLength(0);
+        const rows = watchTaskRows(key);
+        expect(rows.at(-1)).toMatchObject({
+          outcome: 'retired',
+          reason: 'watch_no_target',
+        });
+        expect(rows.some((row) => row['outcome'] === 'delivered')).toBe(false);
+      });
+
+      it('journals a watch retire when every bound follower is gone', async () => {
+        await initChannel(
+          {
+            ...watchConfig,
+            groups: { '*': { senders: 'allowlist', allowedUsers: ['alice'] } },
+          },
+          { boundSessions },
+        );
+        boundSessions.deliverPrompt.mockRejectedValueOnce(
+          new BoundSessionGoneError('bound-session'),
+        );
+        boundSessions.listPrBindings
+          .mockResolvedValueOnce({ bindings: [makeBinding()], partial: false })
+          .mockResolvedValueOnce({ bindings: [makeBinding()], partial: false })
+          .mockResolvedValueOnce({ bindings: [], partial: false });
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          mockPull({});
+          mockNotificationsOnce([]);
+          mockChecks([{ status: 'completed', conclusion: 'success' }]);
+          await pollOnce();
+
+          mockPull({ mergeable: false, mergeable_state: 'dirty' });
+          mockNotificationsOnce([]);
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        const rows = readChannelEvents().filter(
+          (event) =>
+            event['type'] === 'task' &&
+            String(event['messageId']).startsWith('watch:merge_conflict'),
+        );
+        expect(rows[0]).toMatchObject({ outcome: 'accepted' });
+        expect(rows.at(-1)).toMatchObject({
+          outcome: 'retired',
+          reason: 'watch_session_gone',
+        });
+        expect(rows.some((row) => row['outcome'] === 'delivered')).toBe(false);
+      });
+
+      it('journals a pre-claim watch retire as an inbound skip', async () => {
+        const key = 'watch:ci_failure:sha-1';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            mergeableState: 'clean',
+            prState: 'open',
+            fired: [],
+            pending: [makePendingWatch({ key })],
+          },
+        });
+        await initChannel(watchConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [],
+          partial: false,
+        });
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        try {
+          mockNotificationsOnce([]);
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        // Retired before any task was claimed, so the skip is the event's
+        // only journal trace — there is no task row to close.
+        expect(readChannelEvents()).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'inbound',
+              outcome: 'skipped',
+              reason: 'watch_no_candidate',
+              repository: 'owner/repo',
+              number: 42,
+              messageId: key,
+            }),
+          ]),
+        );
+        expect(watchTaskRows(key)).toHaveLength(0);
+      });
+
+      it('journals a blocked watch reconciliation once, not per poll', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const key = 'watch:state_change:42:1:1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            mergeableState: 'clean',
+            prState: 'open',
+            fired: [],
+            pending: [makePendingWatch({ key })],
+          },
+        });
+        const claimable = channel as unknown as {
+          claimInboundTask: (...args: unknown[]) => unknown;
+        };
+        const spy = vi
+          .spyOn(claimable, 'claimInboundTask')
+          .mockImplementation(() => {
+            throw new Error('disk full');
+          });
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        try {
+          mockPull({});
+          mockNotificationsOnce([]);
+          await pollOnce();
+          mockPull({});
+          mockNotificationsOnce([]);
+          await pollOnce();
+        } finally {
+          spy.mockRestore();
+          stderr.mockRestore();
+        }
+
+        // Edge-triggered: the reconcile catch runs on every poll while the
+        // claim keeps failing, and a per-poll row would rotate the journal.
+        const rows = readChannelEvents().filter(
+          (event) =>
+            event['type'] === 'poll' &&
+            event['outcome'] === 'degraded' &&
+            event['reason'] === 'watch_reconcile_blocked',
+        );
+        expect(rows).toHaveLength(1);
+        expect(String(rows[0]!['error'])).toContain('disk full');
+      });
+
+      it('journals watch recovery blocked by disabled subscriptions once', async () => {
+        const key = 'watch:state_change:42:1:1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            mergeableState: 'clean',
+            prState: 'closed',
+            fired: [],
+            pending: [makePendingWatch({ key })],
+          },
+        });
+        writeInboundTasks([
+          makeInboundTaskRecord({
+            state: 'accepted',
+            attempts: 0,
+            issueNumber: 42,
+            delivery: { kind: 'bound-session', sessionId: 'bound-session' },
+            source: { chatId: 'owner/repo', threadId: 'pr:42', messageId: key },
+            envelope: { ...makePendingWatch({ key }).envelope },
+            dedupe: {},
+          }),
+        ]);
+        await initChannel(
+          { deliverToBoundSessions: true, prWatchEvents: [] },
+          { boundSessions },
+        );
+        mockOctokit.paginate.mockResolvedValue([]);
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        try {
+          await pollOnce();
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        const rows = readChannelEvents().filter(
+          (event) =>
+            event['type'] === 'poll' &&
+            event['outcome'] === 'degraded' &&
+            event['reason'] === 'watch_pending_unreconciled',
+        );
+        expect(rows).toHaveLength(1);
+      });
     });
   });
 });

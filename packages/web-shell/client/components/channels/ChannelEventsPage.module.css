@@ -147,7 +147,8 @@
   white-space: nowrap;
 }
 
-.outcome[data-outcome='failed'] {
+.outcome[data-outcome='failed'],
+.outcome[data-outcome='failed_ambiguous'] {
   color: var(--destructive);
 }
 

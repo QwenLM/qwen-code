@@ -1248,7 +1248,14 @@ journal as `{ "events": [...], "truncated": boolean }` with
 message it accepted or skipped (with the machine reason: `reason_filter`,
 `mention_required`, `duplicate`, a sender-gate rejection), a publication
 outcome, an inbound task transition, or a poll result — and never carries
-message text. A GitHub poll that filters more than 20 notifications journals
+message text. `outcome` is an open string: besides the task states it includes
+the publication outcomes `posted`, `suppressed`, `posting`, `failed` and
+`failed_ambiguous` (the write may have landed, so it is never retried publicly),
+the private-delivery terminals `delivered` and `retired` (with a reason such as
+`preflight_rejected`, `watch_no_candidate` or `dead_letter`), and `degraded` for
+a dependency the poll survived. A `task` event whose target is a PR-bound
+session carries that session's `sessionId`; a `degraded` poll carries
+`detail.streak`. A GitHub poll that filters more than 20 notifications journals
 the first 20 individually and one further `reason_filter` row whose
 `detail.filtered` counts the rest, so a pinned poll cursor cannot flood the
 journal with repeats of the same batch. Query parameters: `limit` (1-500, default 100), `type`

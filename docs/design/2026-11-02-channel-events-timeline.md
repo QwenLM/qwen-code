@@ -2,7 +2,8 @@
 
 [English](2026-11-02-channel-events-timeline.md) | [简体中文](2026-11-02-channel-events-timeline.zh-CN.md)
 
-Status: implemented. Date: 2026-11-02.
+Status: implemented. Date: 2026-11-02. Updated 2026-11-04 for private
+PR-bound-session delivery (§5) and the `failed_ambiguous` publication outcome.
 
 ## Problem
 
@@ -73,23 +74,23 @@ state files, so a Channel name cannot escape the directory.
 
 Record:
 
-| Field         | Meaning                                                               |
-| ------------- | --------------------------------------------------------------------- |
-| `at`          | ISO timestamp                                                         |
-| `channel`     | Channel instance name, kept in full (see limits below)                |
-| `type`        | `inbound` / `outbound` / `task` / `poll`                              |
-| `outcome`     | `accepted` / `skipped` / `posted` / `failed` / `ok` / a task state    |
-| `reason`      | machine reason code for skips (`sender_denied`, `reason_filter`, ...) |
-| `triggerKind` | Channel-specific trigger (`mention`, `assign`, ...)                   |
-| `repository`  | conversation container (for GitHub, `owner/repo`)                     |
-| `thread`      | thread identity (`issue:12`, `pr:34`)                                 |
-| `number`      | issue or PR number                                                    |
-| `actor`       | sender login                                                          |
-| `sessionId`   | session that handled the message                                      |
-| `messageId`   | source message identity                                               |
-| `durationMs`  | poll duration                                                         |
-| `error`       | sanitized single-line error, capped at 200 characters                 |
-| `detail`      | flat primitive map, at most 12 keys                                   |
+| Field         | Meaning                                                                 |
+| ------------- | ----------------------------------------------------------------------- |
+| `at`          | ISO timestamp                                                           |
+| `channel`     | Channel instance name, kept in full (see limits below)                  |
+| `type`        | `inbound` / `outbound` / `task` / `poll`                                |
+| `outcome`     | `accepted` / `skipped` / `posted` / `failed` / `ok` / a task state (§5) |
+| `reason`      | machine reason code for skips (`sender_denied`, `reason_filter`, ...)   |
+| `triggerKind` | Channel-specific trigger (`mention`, `assign`, ...)                     |
+| `repository`  | conversation container (for GitHub, `owner/repo`)                       |
+| `thread`      | thread identity (`issue:12`, `pr:34`)                                   |
+| `number`      | issue or PR number                                                      |
+| `actor`       | sender login                                                            |
+| `sessionId`   | session that handled the message                                        |
+| `messageId`   | source message identity                                                 |
+| `durationMs`  | poll duration                                                           |
+| `error`       | sanitized single-line error, capped at 200 characters                   |
+| `detail`      | flat primitive map, at most 12 keys                                     |
 
 Limits: free-text fields and `detail` values are capped at 200 characters. The
 Channel identity is the exception: the management API accepts names up to 255
@@ -113,9 +114,13 @@ handling.
 | `GithubAdapter` reason filter                                      | `inbound` / `skipped`, reason `reason_filter`; past 20 in one poll, one row with `detail.filtered` counting the rest |
 | `GithubAdapter` comment lane (`onlyMentioned` miss)                | `inbound` / `skipped`, reason `mention_required`                                                                     |
 | `GithubAdapter` dedupe hit                                         | `inbound` / `skipped`, reason `duplicate`                                                                            |
-| `GithubAdapter.claimInboundTask`                                   | `task` / `accepted`                                                                                                  |
-| `GithubAdapter.transitionInboundTask`                              | `task` / `<state>` with `attempts` and `error`                                                                       |
+| `GithubAdapter.claimInboundTask`                                   | `task` / `accepted`, with `sessionId` when the target is a bound session                                             |
+| `GithubAdapter.transitionInboundTask`                              | `task` / `<state>` with `attempts`, `error` and the bound `sessionId`; §5 overrides the terminal word                |
 | `GithubAdapter.recordPublicationAudit`                             | `outbound` / `<outcome>` (also keep the audit file)                                                                  |
+| `GithubAdapter.runInboundTask` (bound verdict)                     | `task` / `delivered`, or `task` / `retired` with a reason (§5)                                                       |
+| `GithubAdapter.retireBoundTask`                                    | `task` / `retired`, reason `dead_letter`; `task` / `failed`, reason `dead_letter_write_failed` (§5)                  |
+| `GithubAdapter.drainPendingWatch` (retire before claim)            | `inbound` / `skipped`, reason `watch_no_candidate` (§5)                                                              |
+| `GithubAdapter` binding scan and watch guard                       | `poll` / `degraded` with a reason and `detail.streak`, at the existing throttles or on a state edge (§5)             |
 
 `PollingChannelBase` gains a `setPollEventDetail` seam so an adapter can attach
 its own counters (GitHub reports how many notifications a poll returned)
@@ -194,15 +199,115 @@ must not be the answer when the journal could not be read.
 - `ChannelEventsPage` renders a newest-first timeline with a workspace
   selector, a Channel filter, a type filter, and a row per event: time, Channel,
   type, outcome, target (`owner/repo#12`), actor, reason or trigger kind,
-  duration, and error. The workspace selector lists the registered, non-live
+  duration, and error. A bound delivery also shows the session it reached as a
+  chip truncated to 8 characters, with the full identity in `title` — a UUID
+  would otherwise push the reason and the counters out of the column. A
+  degraded poll shows `detail.streak` and, for a partial binding scan,
+  `detail.sessions`. The workspace selector lists the registered, non-live
   workspaces exactly as the management page does, because the provider's cwd is
   the daemon-wide primary workspace and a Channel started in a secondary
   workspace would otherwise be unreachable. Changing the workspace resets the
   Channel filter.
+- Every outcome the adapter can write has an English and a Chinese label.
+  `KNOWN_OUTCOMES` is exported so a test can assert both catalogs cover it: the
+  translator falls back to English and then to the raw key, so a missing
+  Chinese label would otherwise render English silently. An outcome the page
+  does not know still renders as its raw token, which is unreadable but safe.
 - It is a standalone page: `activePanel` value `channel-events`, URL
   `/channel-events`, and a sidebar primary-nav item `channelEvents`.
 - It is gated by the `channel_management` capability and a trusted workspace,
   matching the management page.
+
+### 5. Private delivery into PR-bound sessions
+
+PR #16117 added a second delivery lane: with `deliverToBoundSessions`, a GitHub
+event on a PR that a daemon session follows is injected into that session
+instead of being answered publicly, and `prWatchEvents` adds operator-facing PR
+state transitions that are **private-only** — they must never reach the public
+reply path. The journal described above could not tell that lane's story:
+
+| Fact                                                       | Before                                         |
+| ---------------------------------------------------------- | ---------------------------------------------- |
+| The prompt was accepted into a session                     | last row `task` / `running`, then nothing      |
+| Which session received it, and that it was private         | no `sessionId` on any task row                 |
+| The channel gates rejected it before delivery              | `inbound` / `skipped`, then two `running` rows |
+| A watch event was retired privately (three separate exits) | stderr only                                    |
+| The event was dead-lettered at the backpressure horizon    | stderr and the dead-letter file only           |
+| The binding scan stalled every notification                | stderr only; the poll still reported `ok`      |
+
+The first row is the worst of them: a delivered event and an event still in
+flight ended on the same word.
+
+**A verdict, not a boolean.** `deliverToBoundSession` is private and has one
+caller. Its `boolean` meant "settled", which conflated an injected prompt, a
+private retire and the public fallback — only the first is a delivery. It now
+returns `{ kind: 'delivered' }`, `{ kind: 'retired', reason }`,
+`{ kind: 'public' }` or `{ kind: 'deferred' }`, and `runInboundTask` derives the
+journal's terminal word from it. No routing, fallback, budget or cursor
+decision changed: the deferred verdict is the old `false`, and every other
+verdict is the old `true`. The public verdict emits nothing because the public
+path journals its own acceptance and publication.
+
+`transitionInboundTask` takes an optional journal override so the bound
+acceptance mark can be persisted as `running` (there is no `delivered` task
+state — the record is removed immediately after) while the journal's last word
+is terminal. Without the override a preflight-rejected event would be recorded
+as delivered, because that exit consumes the task with its delivery still set.
+
+**New outcomes.** `task` / `delivered` and `task` / `retired` are journal-only
+terminal words, not persisted task states. `retired` carries a reason:
+`preflight_rejected`, `watch_no_target`, `watch_no_candidate`,
+`watch_session_gone`, `dead_letter`. A failed dead-letter append journals
+`task` / `failed` with reason `dead_letter_write_failed`, because the task is
+kept and stays recoverable — it is not a retire. Both dead-letter rows are
+written after the durable step they describe, so a throwing removal or save
+cannot leave a retire claim behind.
+
+**No new event type, no protocol change.** `outcome` is a free string in the
+journal, the SDK and the route, so the four types and both routes are unchanged;
+only the page's label catalog grows. Reusing `outbound` for a private injection
+was rejected: that type means "published to GitHub", and a bound reply is
+explicitly not published.
+
+**Never the message body.** The dead-letter record carries `text` for operator
+recovery, and its write-failure path dumps the whole payload to stderr. Neither
+is copied into the journal: the failure row carries only the write error. A
+test asserts the body appears in stderr and does not appear in any journal row.
+
+**Degraded dependencies.** The binding scan is a new hard dependency: while it
+has never succeeded, the cold-start gate defers the comment lane and _every_
+notification stalls, yet the poll itself reports `ok`. The adapter now journals
+`poll` / `degraded` beside the stderr lines it already throttles —
+`bindings_unreachable` (first failure, then every tenth), `bindings_partial`
+(tenth, then every sixtieth, with `detail.sessions`), `bindings_cold_empty`
+(first, then every tenth, and once more when the bounded escape opens the lane)
+— and `watch_reconcile_blocked` / `watch_pending_unreconciled` on the false→true
+edge of the existing `watchReconcileBlocked` flag. Reusing those throttles and
+that flag means no new adapter state and no new flood: a permanent outage
+cannot rotate the useful rows out of the journal. Recovery is implicit in the
+`poll` / `ok` rows that follow.
+
+Attaching this to the existing poll detail instead was considered and rejected:
+`setPollEventDetail` is called by the comment lane, and both cold-start gates
+return _before_ it — the detail would be missing in exactly the case it exists
+to report.
+
+Two stderr sites are deliberately not journaled: the watch pass failure and the
+"keeping previous map" refresh failure. Both run on every poll with no throttle
+and no existing flag to edge-trigger on, so covering them would mean new
+adapter state for diagnostics alone.
+
+One volume note: a dead-letter append that keeps failing leaves the task
+recoverable, so the retry — and its `dead_letter_write_failed` row — repeats
+every poll. That matches the rows the existing backpressure and failure
+transitions already write per poll for a stuck task, and rotation bounds it.
+Throttling it would mean new per-task state for a disk-full emergency whose
+whole point is that the event has no durable surface left.
+
+**Publication vocabulary.** `failed_ambiguous` (an ambiguous post error: the
+comment may have landed, so a second public reply would be irreversible) was
+already written to the journal but had no label, and rendered as a raw token.
+It is now labelled in both languages and coloured as a failure.
 
 ## Files affected
 
@@ -219,6 +324,11 @@ must not be the answer when the journal could not be read.
 - `packages/web-shell/client/App.tsx`,
   `components/sidebar/WebShellSidebar.tsx`, `utils/navigationUrl.ts`,
   `i18n.tsx`
+
+§5 touches only `packages/channels/github/src/GithubAdapter.ts` and its test,
+`ChannelEventsPage.tsx` / `.module.css` / `.test.tsx`, and
+`channel-events-messages.ts`. The journal module, the base classes, the daemon
+route, the SDK types and the protocol are unchanged.
 
 ## Design decisions
 
@@ -275,6 +385,17 @@ must not be the answer when the journal could not be read.
 - Manual: run a GitHub Channel against a test repository, confirm the page
   shows the filter skips before any session exists, and confirm an accepted
   trigger, a task transition, and the publication outcome appear in order.
+- §5 unit: a private delivery ends on `delivered` naming the session; a
+  preflight rejection ends on `retired` and never on `delivered`; a rebind
+  shows both session ids; each watch retire and the dead-letter (both outcomes)
+  are journaled; the body reaches stderr but no journal row; each degraded
+  reason appears once per throttle window or state edge, and the cold-start
+  escape is journaled at the horizon. Every one of these guards was
+  mutation-verified: 20 mutations, 20 killed.
+- §5 Web Shell: `failed_ambiguous` renders its label in English and Chinese
+  rather than the raw token, the session chip truncates with the full id in
+  `title`, the degraded counters render, and both catalogs cover every entry of
+  `KNOWN_OUTCOMES`.
 
 ## Acceptance criteria
 
@@ -286,3 +407,7 @@ must not be the answer when the journal could not be read.
   count.
 - No message body is written to the journal, and no route can read outside the
   resolved workspace's Channel state.
+- A privately delivered event ends on a terminal row that names the session it
+  reached; an event that was retired without delivery never claims otherwise.
+- A binding scan that stalls the comment lane is visible in the timeline
+  without reading stderr, and cannot flood the journal while it stays broken.

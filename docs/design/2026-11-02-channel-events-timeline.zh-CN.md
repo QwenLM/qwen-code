@@ -2,7 +2,7 @@
 
 [English](2026-11-02-channel-events-timeline.md) | [简体中文](2026-11-02-channel-events-timeline.zh-CN.md)
 
-状态：已实现。日期：2026-11-02。
+状态：已实现。日期：2026-11-02。2026-11-04 更新：覆盖 PR 绑定会话的私投递（§5）与 `failed_ambiguous` 发表结果。
 
 ## 问题
 
@@ -45,23 +45,23 @@
 
 记录字段：
 
-| 字段          | 含义                                                           |
-| ------------- | -------------------------------------------------------------- |
-| `at`          | ISO 时间戳                                                     |
-| `channel`     | 渠道实例名，完整保留（见下方上限）                             |
-| `type`        | `inbound` / `outbound` / `task` / `poll`                       |
-| `outcome`     | `accepted` / `skipped` / `posted` / `failed` / `ok` / 任务状态 |
-| `reason`      | 跳过原因的机器码（`sender_denied`、`reason_filter` 等）        |
-| `triggerKind` | 渠道特定的触发类型（`mention`、`assign` 等）                   |
-| `repository`  | 会话容器（GitHub 下为 `owner/repo`）                           |
-| `thread`      | 线程标识（`issue:12`、`pr:34`）                                |
-| `number`      | issue 或 PR 编号                                               |
-| `actor`       | 发送方登录名                                                   |
-| `sessionId`   | 处理该消息的会话                                               |
-| `messageId`   | 来源消息标识                                                   |
-| `durationMs`  | 轮询耗时                                                       |
-| `error`       | 单行化错误信息，上限 200 字符                                  |
-| `detail`      | 扁平原始类型映射，最多 12 个键                                 |
+| 字段          | 含义                                                                    |
+| ------------- | ----------------------------------------------------------------------- |
+| `at`          | ISO 时间戳                                                              |
+| `channel`     | 渠道实例名，完整保留（见下方上限）                                      |
+| `type`        | `inbound` / `outbound` / `task` / `poll`                                |
+| `outcome`     | `accepted` / `skipped` / `posted` / `failed` / `ok` / 任务状态（见 §5） |
+| `reason`      | 跳过原因的机器码（`sender_denied`、`reason_filter` 等）                 |
+| `triggerKind` | 渠道特定的触发类型（`mention`、`assign` 等）                            |
+| `repository`  | 会话容器（GitHub 下为 `owner/repo`）                                    |
+| `thread`      | 线程标识（`issue:12`、`pr:34`）                                         |
+| `number`      | issue 或 PR 编号                                                        |
+| `actor`       | 发送方登录名                                                            |
+| `sessionId`   | 处理该消息的会话                                                        |
+| `messageId`   | 来源消息标识                                                            |
+| `durationMs`  | 轮询耗时                                                                |
+| `error`       | 单行化错误信息，上限 200 字符                                           |
+| `detail`      | 扁平原始类型映射，最多 12 个键                                          |
 
 上限：自由文本字段与 `detail` 的值截断到 200 字符。渠道标识是例外：管理接口接受最长 255 UTF-8 字节的名字，而码点数不会超过字节数，因此标识保留到 255 个码点——任何合法名字都完整保留，并且仍能被 `channel` 过滤匹配。只有界面在展示时缩短它。
 
@@ -78,9 +78,13 @@
 | `GithubAdapter` 原因过滤                                       | `inbound` / `skipped`，原因 `reason_filter`；单轮超过 20 条后，其余合并为一条带 `detail.filtered` 计数的记录 |
 | `GithubAdapter` 评论通道（`onlyMentioned` 未命中）             | `inbound` / `skipped`，原因 `mention_required`                                                               |
 | `GithubAdapter` 去重命中                                       | `inbound` / `skipped`，原因 `duplicate`                                                                      |
-| `GithubAdapter.claimInboundTask`                               | `task` / `accepted`                                                                                          |
-| `GithubAdapter.transitionInboundTask`                          | `task` / `<state>`，带 `attempts` 与 `error`                                                                 |
+| `GithubAdapter.claimInboundTask`                               | `task` / `accepted`；目标是绑定会话时带 `sessionId`                                                          |
+| `GithubAdapter.transitionInboundTask`                          | `task` / `<state>`，带 `attempts`、`error` 与绑定的 `sessionId`；终态用词由 §5 覆盖                          |
 | `GithubAdapter.recordPublicationAudit`                         | `outbound` / `<outcome>`（审计文件继续保留）                                                                 |
+| `GithubAdapter.runInboundTask`（私投递判定）                   | `task` / `delivered`，或 `task` / `retired` 带原因（§5）                                                     |
+| `GithubAdapter.retireBoundTask`                                | `task` / `retired`，原因 `dead_letter`；`task` / `failed`，原因 `dead_letter_write_failed`（§5）             |
+| `GithubAdapter.drainPendingWatch`（claim 前退休）              | `inbound` / `skipped`，原因 `watch_no_candidate`（§5）                                                       |
+| `GithubAdapter` 绑定扫描与 watch 守卫                          | `poll` / `degraded`，带原因与 `detail.streak`，只打在既有限流点或状态边沿上（§5）                            |
 
 `PollingChannelBase` 增加 `setPollEventDetail` 挂点，适配器可以挂自己的计数（GitHub 报告本次轮询取到多少条通知），基类不需要知道这些字段。基类在轮询开始前清空该字段，并在本次轮询结束后才消费它，因此事件绝不会把上一次轮询的计数记到本次的时间戳上。
 
@@ -106,9 +110,45 @@ GET /workspaces/:workspace/channels/events
 ### 4. Web Shell
 
 - `useChannelEvents` 在页面挂载且可见期间轮询该路由（5 秒），标签页隐藏时暂停、重新可见时刷新；页面另提供手动刷新。**同一时刻只允许一个轮询周期在途**：请求未完成时恢复可见绝不能再启动一个，否则两者结束时都会 schedule，而只保留最后一个定时器句柄，另一个成为永远轮询的孤儿——慢响应下的普通标签页切换会永久倍增日志读取。因此请求在途时恢复可见，是让该请求结束后再重新排程。两条读取路径都有时间上界（SDK 默认 30 秒 fetch 超时与 action 超时），所以该守卫不会让循环停摆。每份快照都带上产生它的查询（工作区、渠道、类型、limit），不匹配的数据会被遮蔽，做法与 `useDaemonChannels` 一致：底层 resource 在请求进行中或失败后仍保留旧数据，没有这个标记的话，上一个工作区的行——以及过滤选项里它的渠道名——就会显示在新选中的工作区下。
-- `ChannelEventsPage` 渲染按时间倒序的时间线，带工作区选择器、渠道过滤、类型过滤，每行显示：时间、渠道、类型、结果、目标（`owner/repo#12`）、操作者、原因或触发类型、耗时、错误。工作区选择器与管理页一样列出已注册的非 live 工作区，因为 provider 的 cwd 是 daemon 全局的主工作区，否则在次工作区启动的渠道将无法查看。切换工作区会重置渠道过滤。
+- `ChannelEventsPage` 渲染按时间倒序的时间线，带工作区选择器、渠道过滤、类型过滤，每行显示：时间、渠道、类型、结果、目标（`owner/repo#12`）、操作者、原因或触发类型、耗时、错误。私投递还会显示它到达的会话：一个截断到 8 个字符的标记，完整标识放在 `title` 里——否则一个 UUID 会把原因和计数挤出该列。降级轮询显示 `detail.streak`，绑定扫描不完整时还显示 `detail.sessions`。工作区选择器与管理页一样列出已注册的非 live 工作区，因为 provider 的 cwd 是 daemon 全局的主工作区，否则在次工作区启动的渠道将无法查看。切换工作区会重置渠道过滤。
+- 适配器能写出的每个结果都有中英文标签。`KNOWN_OUTCOMES` 被导出，以便测试断言两份目录都覆盖它：翻译器会先回退到英文、再回退到原始键，所以缺一个中文标签只会静默显示英文。页面不认识的结果仍按原始 token 渲染——不好读，但安全。
 - 它是独立页面：`activePanel` 取值 `channel-events`，URL 为 `/channel-events`，侧边栏主导航项为 `channelEvents`。
 - 由 `channel_management` 能力位与受信任工作区门禁，与管理页一致。
+
+### 5. 投递到 PR 绑定会话（私投递）
+
+PR #16117 增加了第二条投递通道：开启 `deliverToBoundSessions` 后，落在某个 daemon 会话所关注 PR 上的 GitHub 事件会被注入该会话，而不是公开回复；`prWatchEvents` 又增加了面向运维的 PR 状态变化，这类事件**只能私投递**——绝不能走公开回复路径。上面那套日志讲不清这条通道的故事：
+
+| 事实                                 | 改动前                                      |
+| ------------------------------------ | ------------------------------------------- |
+| prompt 已被会话接受                  | 最后一行是 `task` / `running`，然后没有下文 |
+| 是哪个会话收到的、以及它是私投递     | 任何 task 行都没有 `sessionId`              |
+| 投递前被渠道门禁拒绝                 | `inbound` / `skipped`，后面跟两条 `running` |
+| watch 事件被私下退休（三个不同出口） | 只有 stderr                                 |
+| 事件在背压上限处被投入死信           | 只有 stderr 和死信文件                      |
+| 绑定扫描让所有通知停摆               | 只有 stderr；轮询本身仍报 `ok`              |
+
+第一行最糟：已投递的事件和仍在途的事件，最后一个词是同一个。
+
+**用判定结果，而不是布尔值。** `deliverToBoundSession` 是私有方法且只有一个调用方。它原来的 `boolean` 含义是「已了结」，把「注入成功」「私下退休」「公开回退」混为一谈——只有第一个才是投递。现在它返回 `{ kind: 'delivered' }`、`{ kind: 'retired', reason }`、`{ kind: 'public' }` 或 `{ kind: 'deferred' }`，由 `runInboundTask` 据此推导日志的终态用词。路由、回退、预算与游标判定一个都没改：deferred 就是原来的 `false`，其余判定都是原来的 `true`。public 判定不发任何事件，因为公开路径自己会记接受与发表。
+
+`transitionInboundTask` 增加一个可选的日志覆盖参数，使私投递的接受标记仍能按 `running` 持久化（不存在 `delivered` 这个任务状态——记录紧接着就被删除），而日志的最后一个词是终态。没有这个覆盖，被 preflight 拒绝的事件会被记成已投递，因为那个出口在 delivery 仍然挂着的情况下就消费掉了任务。
+
+**新增结果词。** `task` / `delivered` 与 `task` / `retired` 只是日志用的终态词，不是持久化的任务状态。`retired` 带原因：`preflight_rejected`、`watch_no_target`、`watch_no_candidate`、`watch_session_gone`、`dead_letter`。死信追加失败记 `task` / `failed`，原因 `dead_letter_write_failed`，因为任务被保留、仍可恢复——那不是退休。两条死信记录都写在它们所描述的持久化步骤**之后**，因此删除或保存抛错时不会留下一个虚假的退休声明。
+
+**不新增事件类型，不改协议。** `outcome` 在日志、SDK 和路由里都是自由字符串，所以四个类型与两条路由都不变，只有页面的标签目录变大。曾考虑用 `outbound` 表示私投递注入，被否掉了：那个类型的含义是「已发表到 GitHub」，而绑定会话的回复明确不发表。
+
+**绝不记录消息正文。** 死信记录为了运维恢复会带 `text`，其写失败路径还会把整个 payload dump 到 stderr。两者都不进日志：失败行只带写盘错误。有一条测试断言正文出现在 stderr、且不出现在任何日志行里。
+
+**依赖降级。** 绑定扫描是一个新的硬依赖：只要它从未成功过，冷启动门就会推迟评论通道，于是**所有**通知停摆，而轮询本身仍报 `ok`。适配器现在在它**本来就限流**的那几行 stderr 旁边记 `poll` / `degraded`——`bindings_unreachable`（首次失败，之后每十次）、`bindings_partial`（第十次，之后每六十次，带 `detail.sessions`）、`bindings_cold_empty`（首次，之后每十次，以及有界逃逸打开评论通道时再记一次）——并在既有 `watchReconcileBlocked` 标志的 false→true 边沿记 `watch_reconcile_blocked` / `watch_pending_unreconciled`。复用这些限流和这个标志意味着不新增适配器状态、也不新增洪水：永久故障不会把有用的行挤出日志轮转窗口。恢复由随后的 `poll` / `ok` 行隐含表达。
+
+曾考虑把这些信息挂到现有轮询 detail 上，被否掉了：`setPollEventDetail` 由评论通道调用，而两个冷启动门都在它**之前**就 return——恰恰在它最该报告的那种情况下，detail 永远设不上。
+
+有两处 stderr 是刻意不记的：watch pass 失败，以及「保留旧映射」的刷新失败。两者每轮都打、没有限流，也没有现成标志可做边沿触发，覆盖它们就得为诊断新增适配器状态。
+
+一条量级说明：死信追加持续失败时任务保持可恢复，因此重试——以及它的 `dead_letter_write_failed` 行——每轮都会重复。这与既有的背压/失败转换对卡住的任务本来就每轮写一行是一致的，并由轮转封顶。给它加限流就得为「磁盘满」这种紧急状态新增按任务的状态，而这种状态的要害恰恰是事件已经没有任何持久化落点了。
+
+**发表结果词汇。** `failed_ambiguous`（歧义的发表错误：评论可能已经落地，再发一条公开回复就不可逆）本来就会写进日志，却没有标签，界面上显示为原始 token。现在它有了中英文标签，并按失败着色。
 
 ## 涉及文件
 
@@ -125,6 +165,8 @@ GET /workspaces/:workspace/channels/events
 - `packages/web-shell/client/App.tsx`、
   `components/sidebar/WebShellSidebar.tsx`、`utils/navigationUrl.ts`、
   `i18n.tsx`
+
+§5 只动 `packages/channels/github/src/GithubAdapter.ts` 及其测试、`ChannelEventsPage.tsx` / `.module.css` / `.test.tsx`，以及 `channel-events-messages.ts`。日志模块、基类、daemon 路由、SDK 类型与协议均未改动。
 
 ## 设计决策
 
@@ -145,6 +187,8 @@ GET /workspaces/:workspace/channels/events
 - 单元测试：日志的追加/读取/过滤/轮转/上限与被吞掉的写失败；GitHub 的入站跳过、任务与发表事件；路由按渠道和类型过滤、夹在解析后的工作区内、支持 `since`。
 - Web Shell：页面渲染行、两个过滤器生效、空态与错误态正确。
 - 手工：用一个测试仓库跑 GitHub 渠道，确认页面能看到会话创建之前的过滤跳过，并按顺序看到接受的触发、任务状态变化与发表结果。
+- §5 单元测试：私投递以 `delivered` 收尾并点名会话；preflight 拒绝以 `retired` 收尾、绝不是 `delivered`；rebind 能看到两个会话 id；每一处 watch 退休与死信（两种结果）都被记录；正文进了 stderr 但没进任何日志行；每个降级原因在一个限流窗口或状态边沿上只出现一次，冷启动逃逸在上限处被记录。以上每个守卫都做了变异验证：20 个变异，20 个被杀。
+- §5 Web Shell：`failed_ambiguous` 在中英文下都渲染标签而不是原始 token；会话标记截断显示、完整 id 在 `title` 里；降级计数正确渲染；两份目录覆盖 `KNOWN_OUTCOMES` 的每一项。
 
 ## 验收标准
 
@@ -152,3 +196,5 @@ GET /workspaces/:workspace/channels/events
 - 发表结果与入站任务失败出现在同一条时间线上。
 - 轮询失败与恢复以 `poll` 事件出现，并带上连续错误次数。
 - 日志不写消息正文，任何路由都无法读到解析工作区之外的渠道状态。
+- 私投递的事件以一条点名目标会话的终态行收尾；未投递就被退休的事件绝不会声称自己投递成功。
+- 让评论通道停摆的绑定扫描能在时间线上看到，不必翻 stderr；并且在它一直坏着的时候不会灌满日志。
