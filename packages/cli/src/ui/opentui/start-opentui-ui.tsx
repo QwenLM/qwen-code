@@ -111,7 +111,10 @@ import { consumeLastRenderError } from './opentui-error-boundary.js';
 import { createExitGuard, exitGuardHint } from './exit-guard.js';
 import { exitSession } from './exit-lifecycle.js';
 import { Command, matchesCommand } from './key-map.js';
-import type { OpenTuiComposerHandle } from './input-submission.js';
+import {
+  returnToComposer,
+  type OpenTuiComposerHandle,
+} from './input-submission.js';
 import { buildUiHistoryItems } from './session-switch.js';
 import { projectHistoryToStreamEvents } from './item-projection.js';
 import {
@@ -162,13 +165,15 @@ function OpenTuiEntryApp({
   }, [config, renderer, width]);
   const { stats, startNewSession } = useSessionStats();
   const logger = useLogger(config.storage, config.getSessionId());
+  // Also an OpenTuiComposerSlot: a prompt handed back while a dialog has the
+  // composer unmounted waits on it.
   const composerHandle = useRef<OpenTuiComposerHandle | null>(null);
   const live = useOpenTuiLiveTurn({
     config,
     logger,
     dualOutput: runtime.dualOutputBridge,
     onPromptReturned: (submission) =>
-      composerHandle.current?.restoreSubmission?.(submission),
+      returnToComposer(composerHandle, submission),
   });
   const { applyEvent, submit, interrupt, resetTranscript, settleWaitingCall } =
     live;

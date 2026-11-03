@@ -89,7 +89,7 @@ import {
   restoreInputSubmissions,
   type OpenTuiInputSubmission,
   type OpenTuiCancelSettled,
-  type OpenTuiComposerHandle,
+  type OpenTuiComposerSlot,
 } from './input-submission.js';
 import { rewindSession } from '../utils/session-rewind.js';
 import { isRewindableUserTurn } from '../utils/historyMapping.js';
@@ -269,9 +269,7 @@ export interface OpenTuiAppProps {
   onRenderError?: (error: Error) => void;
   vim?: InputPromptProps['vim'];
   /** Entry-owned composer buffer handle (early-input injection). */
-  composerHandle?: {
-    current: OpenTuiComposerHandle | null;
-  };
+  composerHandle?: OpenTuiComposerSlot;
   /** U-7: finished follow-up suggestion, shown as the ghost placeholder. */
   promptSuggestion?: string | null;
   /** U-7: clears the published suggestion (accept/typing/submit). */

@@ -122,3 +122,29 @@ export interface OpenTuiComposerHandle {
   restoreSubmission?(submission: OpenTuiInputSubmission): void;
   invalidateImportedInput?(): void;
 }
+
+/**
+ * The entry's hold on the composer. A dialog unmounts the composer, so a
+ * prompt handed back meanwhile waits in `returned` for the next one to mount.
+ */
+export interface OpenTuiComposerSlot {
+  current: OpenTuiComposerHandle | null;
+  returned?: OpenTuiInputSubmission;
+}
+
+/** Puts a prompt back in the composer, or keeps it until one mounts. */
+export function returnToComposer(
+  slot: OpenTuiComposerSlot,
+  submission: OpenTuiInputSubmission,
+): void {
+  const restore = slot.current?.restoreSubmission;
+  if (restore) {
+    restore(submission);
+    return;
+  }
+  // Each prompt goes back ahead of what came back before it, as it does in a
+  // mounted composer.
+  slot.returned = slot.returned
+    ? restoreInputSubmissions([submission, slot.returned], '\n')
+    : submission;
+}
