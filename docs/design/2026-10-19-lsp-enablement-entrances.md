@@ -122,6 +122,11 @@ a workspace `.lsp.json` is exactly that.
 
 ## Follow-ups
 
+- A settings-panel toggle can persist `tools.lspEnabled` beside an
+  operator-scope `tools.executionSandbox`, which refuses startup. The refusal
+  stays: its message names the entrance and the escape hatches, so the failure
+  is self-diagnosing. If the panel ever has to refuse the combination itself,
+  the settings write route is the place — one shared guard, no new surface.
 - The startup execution-sandbox guard in `llm.tsx` still reads the flag only;
   it fails closed through `loadCliConfig`, but the two guards answer different
   questions.

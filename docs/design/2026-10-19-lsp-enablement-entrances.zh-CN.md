@@ -70,5 +70,6 @@
 
 ## 后续项
 
+- 设置面板可能持久化 `tools.lspEnabled` 与运维作用域 `tools.executionSandbox` 的组合，后者会在启动时拒绝。该拒绝保留：错误信息点名了入口与逃生口，失败本身可自诊断。若面板今后需要自行拒绝该组合，settings 写入路由是合适位置——一处共享守卫，不新增表面。
 - `llm.tsx` 中启动期的执行沙箱守卫仍只读参数；它经由 `loadCliConfig` 失败关闭，但两个守卫回答的是不同问题。
 - `docs/design/hot-reload/lsp-runtime-reinitialization.md` 仍把参数描述为唯一开关。修正它必须补齐其缺失的简体中文版，因此另起纯文档变更。
