@@ -589,6 +589,24 @@ All other slash commands (e.g., `/compress`, `/summary`) are forwarded to the ag
 
 Named-task commands work on all channel types (Telegram, WeChat, QQ, DingTalk, WeCom, Feishu, GitHub). `/cancel` is currently registered only by Telegram, and loop creation requires proactive delivery support for the current adapter and target.
 
+## Channel Events in the Web Shell
+
+The Web Shell's **Channel events** page shows a timeline of what every Channel
+in the current workspace did: the inbound messages it accepted, and the ones it
+skipped and why (`reason_filter`, `mention_required`, `duplicate`, a sender-gate
+rejection), the replies it published or suppressed, its inbound task
+transitions, and how each poll went. Pick the workspace whose Channels you want
+to inspect, then filter by Channel and by event type; the page refreshes every
+few seconds while its tab is visible, pauses in a background tab, and has a
+manual refresh.
+
+Use it to answer "why did the bot not reply to that comment?" without reading
+the daemon log. Events never include message text — only routing decisions,
+identifiers, and errors. The page and its route exist wherever Channel
+management is available (`channel_management`), and each Channel keeps its
+journal under `~/.qwen/channels/<workspace>/` with one rotated file, so it
+never grows without bound.
+
 ## Running
 
 ```bash
