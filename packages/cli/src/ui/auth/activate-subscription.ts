@@ -34,11 +34,7 @@ export async function activateSubscription(
     throw new Error('An active Qwen Plus or Pro subscription is required.');
   }
   const { models } = await config.refreshSubscriptionModels(signal);
-  const selected =
-    settings.merged.security?.auth?.selectedType === AuthType.QWEN_SUBSCRIPTION
-      ? settings.merged.model?.name
-      : undefined;
-  const modelId = selectSubscriptionModel(models, selected);
+  const modelId = selectSubscriptionModel(models);
   signal.throwIfAborted();
   // After committing settings, finish the runtime switch even if the dialog closes.
   await applyProviderInstallPlan(

@@ -96,12 +96,7 @@ export function registerWorkspaceSubscriptionRoutes(
           controller.signal,
         );
         assertActive();
-        const modelId = selectSubscriptionModel(
-          models,
-          settings.security?.auth?.selectedType === AuthType.QWEN_SUBSCRIPTION
-            ? settings.model?.name
-            : undefined,
-        );
+        const modelId = selectSubscriptionModel(models);
         await deps.persistSettings(
           runtime.workspaceCwd,
           [

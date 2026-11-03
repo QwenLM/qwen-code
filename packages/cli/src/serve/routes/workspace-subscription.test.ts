@@ -276,32 +276,35 @@ it.each(['failed', 'deferred'])(
   },
 );
 
-it('preserves a removed selection and recovers after the saved model is changed', async () => {
-  const { app, persistSettings } = setup();
-  mocks.models.mockResolvedValue({ models: ['replacement'], cached: false });
-  mocks.loadSettings.mockReturnValue({
-    merged: {
-      security: { auth: { selectedType: 'qwen-subscription' } },
-      model: { name: 'removed' },
-    },
-  });
-  const unavailable = await request(app).post(
-    '/workspaces/secondary/auth/subscription',
-  );
-  expect(unavailable.status).toBe(409);
-  expect(unavailable.body).toEqual({
-    code: 'subscription_model_unavailable',
-  });
-  expect(persistSettings).not.toHaveBeenCalled();
-  mocks.loadSettings.mockReturnValue({
-    merged: {
-      security: { auth: { selectedType: 'qwen-subscription' } },
-      model: { name: 'replacement' },
-    },
-  });
-  const selected = await request(app).post(
-    '/workspaces/secondary/auth/subscription',
-  );
-  expect(selected.status).toBe(200);
-  expect(selected.body.modelId).toBe('replacement');
-});
+it.each(['qwen3.8-flash', 'removed-model'])(
+  'activates Max on explicit sign-in instead of the saved model %s',
+  async (savedModel) => {
+    const { app, persistSettings } = setup();
+    mocks.models.mockResolvedValue({
+      models: ['qwen3.8-flash', 'qwen3.8-max'],
+      cached: false,
+    });
+    mocks.loadSettings.mockReturnValue({
+      merged: {
+        security: { auth: { selectedType: 'qwen-subscription' } },
+        model: { name: savedModel },
+      },
+    });
+    const response = await request(app).post(
+      '/workspaces/secondary/auth/subscription',
+    );
+    expect(response.status).toBe(200);
+    expect(response.body.modelId).toBe('qwen3.8-max');
+    expect(persistSettings).toHaveBeenCalledWith(
+      '/secondary',
+      expect.arrayContaining(
+        [SettingScope.User, SettingScope.Workspace].map((scope) => ({
+          scope,
+          key: 'model.name',
+          value: 'qwen3.8-max',
+        })),
+      ),
+      expect.any(Function),
+    );
+  },
+);

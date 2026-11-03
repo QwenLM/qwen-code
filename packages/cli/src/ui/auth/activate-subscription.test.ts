@@ -107,7 +107,7 @@ it.each([
   expect(mocks.apply).not.toHaveBeenCalled();
 });
 
-it('selects a server model without a fixed allowlist and preserves an existing choice', async () => {
+it('selects the first served model when Max is unavailable', async () => {
   const runtime = config();
   vi.mocked(runtime.refreshSubscriptionModels).mockResolvedValue({
     models: ['future-model', 'other-model'],
@@ -117,23 +117,39 @@ it('selects a server model without a fixed allowlist and preserves an existing c
   expect(mocks.apply.mock.calls[0][0].modelSelection.modelId).toBe(
     'future-model',
   );
-  const existing = {
-    ...settings,
-    merged: {
-      security: { auth: { selectedType: 'qwen-subscription' } },
-      model: { name: 'other-model' },
-    },
-  } as LoadedSettings;
-  await activateSubscription(existing, runtime, new AbortController().signal);
-  expect(mocks.apply.mock.calls[1][0].modelSelection.modelId).toBe(
-    'other-model',
-  );
-  existing.merged.model!.name = 'removed-model';
-  await expect(
-    activateSubscription(existing, runtime, new AbortController().signal),
-  ).rejects.toThrow('Run /model');
-  expect(mocks.apply).toHaveBeenCalledTimes(2);
 });
+
+it.each(['qwen3.8-flash', 'removed-model'])(
+  'selects Max on explicit sign-in instead of the saved model %s',
+  async (savedModel) => {
+    const runtime = config();
+    vi.mocked(runtime.refreshSubscriptionModels).mockResolvedValue({
+      models: ['qwen3.8-flash', 'qwen3.8-max'],
+      cached: false,
+    });
+    const existing = {
+      ...settings,
+      merged: {
+        security: { auth: { selectedType: 'qwen-subscription' } },
+        model: { name: savedModel },
+      },
+      setValues: vi.fn(),
+    } as unknown as LoadedSettings;
+    await activateSubscription(existing, runtime, new AbortController().signal);
+    expect(mocks.apply.mock.calls[0][0].modelSelection.modelId).toBe(
+      'qwen3.8-max',
+    );
+    expect(existing.setValues).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        {
+          scope: SettingScope.User,
+          key: 'model.name',
+          value: 'qwen3.8-max',
+        },
+      ]),
+    );
+  },
+);
 it('honors the authentication policy without DEV', async () => {
   const restricted = {
     isTrusted: true,
