@@ -24,6 +24,7 @@ Add short English and Chinese descriptions to the five desktop entries and the
 corresponding mobile reference entries. Describe Extensions and MCP as reference
 actions, not management or connection actions. Keep accessible labels stable and
 provide the supplementary text as accessible descriptions.
+Use regular font weight for both action labels and descriptions.
 
 In the Extensions and MCP submenus, keep each item's description to one line
 with an ellipsis when it overflows. Preserve the full text in the native title.
