@@ -1044,7 +1044,7 @@ describe('subscription development entry', () => {
     },
   );
 
-  it.each(['cancel', 'session-change'])(
+  it.each(['unmount', 'session-change'])(
     'ignores a late model loading failure after %s',
     async (change) => {
       actions.getSubscriptionConfig.mockResolvedValue({
@@ -1075,7 +1075,7 @@ describe('subscription development entry', () => {
         await act(async () => button.click());
       };
       await clickButton('Qwen');
-      if (change === 'cancel') await clickButton('Cancel');
+      if (change === 'unmount') await act(async () => root!.render(null));
       expect(completion.onClose).not.toHaveBeenCalled();
       await act(async () => {
         if (change === 'session-change') ownerState.version += 1;

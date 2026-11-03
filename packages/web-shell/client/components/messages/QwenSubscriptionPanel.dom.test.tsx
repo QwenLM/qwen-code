@@ -97,6 +97,34 @@ async function tick(ms: number) {
   });
 }
 
+it('does not flash Sign out while the VS Code login activates the subscription', async () => {
+  transport.startSubscriptionLogin.mockResolvedValue({
+    ...ready,
+    userInfo: { ...user, member_type: 'plus' },
+  });
+  let finish!: (model: string) => void;
+  const onActivate = vi.fn(
+    () =>
+      new Promise<string>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const onActivated = vi.fn();
+  await render({ onActivate, onActivated });
+  expect(onActivate).toHaveBeenCalledOnce();
+  expect(container.textContent).toContain('Loading models from provider');
+  expect.soft(container.textContent).not.toContain('Sign out');
+  expect(container.textContent).not.toContain('Cancel');
+  expect(container.textContent).not.toContain('Qwen Code is ready');
+
+  await act(async () => finish('qwen3.8-max'));
+  expect(onActivated).toHaveBeenCalledOnce();
+  expect(container.textContent).not.toContain('Sign out');
+  expect(container.textContent).not.toContain('Qwen Code is ready');
+  expect(container.textContent).not.toContain('Cancel');
+  expect(container.textContent).toContain('Loading models from provider');
+});
+
 it('starts authorization directly after the native picker selection and opens the actual link once', async () => {
   transport.startSubscriptionLogin.mockResolvedValue({
     id: 'flow-one',
@@ -880,6 +908,8 @@ it('keeps activation failure visible without looping and retries only on request
     'Could not connect Qwen Subscription',
   );
   expect(container.textContent).not.toContain('private upstream details');
+  expect(container.textContent).toContain('Sign out');
+  expect(container.textContent).toContain('Cancel');
   expect(onActivated).not.toHaveBeenCalled();
   await tick(10000);
   expect(onActivate).toHaveBeenCalledOnce();
@@ -888,7 +918,7 @@ it('keeps activation failure visible without looping and retries only on request
   expect(onActivated).toHaveBeenCalledOnce();
 });
 
-it('aborts automatic activation on close and ignores late completion', async () => {
+it('aborts automatic activation on unmount and ignores late completion', async () => {
   transport.startSubscriptionLogin.mockResolvedValue({
     ...ready,
     userInfo: { ...user, member_type: 'pro' },
@@ -903,7 +933,7 @@ it('aborts automatic activation on close and ignores late completion', async () 
   });
   const onActivated = vi.fn();
   await render({ onActivate, onActivated });
-  await click('Cancel');
+  await act(async () => root!.render(null));
   expect(signal.aborted).toBe(true);
   await act(async () => finish());
   expect(onActivated).not.toHaveBeenCalled();

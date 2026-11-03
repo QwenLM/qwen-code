@@ -289,10 +289,14 @@ export function QwenSubscriptionFlow(props: FlowProps) {
     completed?.owner === flow.readySignal && !completed?.owner.aborted
       ? completed
       : undefined;
+  const autoCompleting =
+    canActivate && !props.desktopSuccess && !connectionError;
   return (
     <QwenSubscriptionView
       dialog={props.dialog}
-      hideReadyStatus={props.desktopSuccess && !activeCompletion}
+      hideReadyStatus={
+        autoCompleting || (props.desktopSuccess && !activeCompletion)
+      }
       state={
         flow.state.status === 'ready' && activeCompletion
           ? {
@@ -320,6 +324,7 @@ export function QwenSubscriptionFlow(props: FlowProps) {
         <>
           {connectionError && <p role="alert">{connectionError}</p>}
           {(connecting ||
+            autoCompleting ||
             (props.desktopSuccess &&
               !activeCompletion &&
               !connectionError)) && (
@@ -343,7 +348,7 @@ export function QwenSubscriptionFlow(props: FlowProps) {
               </Button>
             </div>
           )}
-          {!props.desktopSuccess && (
+          {!props.desktopSuccess && !autoCompleting && (
             <>
               <Button
                 variant="outline"
