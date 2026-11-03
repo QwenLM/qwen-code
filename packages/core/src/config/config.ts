@@ -11760,15 +11760,16 @@ export class Config {
 
   /**
    * Get project-level hooks configuration.
-   * Returns hooks from workspace settings, only in trusted folders.
+   * Returns hooks from workspace settings, only in explicitly trusted folders.
    * Used by HookRegistry to load project-specific hooks with proper source attribution.
    */
   getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
     if (this.getBareMode() || this.isSafeMode()) {
       return undefined;
     }
-    // Only return project hooks if workspace is trusted
-    if (!this.isTrustedFolder()) {
+    // Repo-supplied hooks need explicit trust: a disabled folder-trust
+    // feature must not silently authorize them.
+    if (!this.isExplicitlyTrustedFolder()) {
       return undefined;
     }
     // The legacy merged `hooks` stands in only when no scope was supplied.
