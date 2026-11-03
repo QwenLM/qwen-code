@@ -569,6 +569,9 @@ export function parseRule(raw: string): PermissionRule {
   };
 }
 
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
+
 /**
  * Report a rule that parsed but will never match.
  *
@@ -584,8 +587,6 @@ export function parseRule(raw: string): PermissionRule {
  * still identifies the original rule without reaching the operator's terminal.
  */
 
-// eslint-disable-next-line no-control-regex
-const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 export function warnDroppedPermissionRule(raw: string, kind?: string): void {
   const printable = stripBidiControls(stripVTControlCharacters(raw)).replace(
     CONTROL_CHARS,

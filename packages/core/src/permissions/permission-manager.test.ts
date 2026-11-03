@@ -2816,6 +2816,15 @@ describe('PermissionManager', () => {
       expect(rules[0]!.rule.invalid).toBe(true);
       expect(rules[1]!.rule.toolName).toBe('read_file');
     });
+
+    it('removes a malformed persistent rule by its raw value', async () => {
+      const raw = 'Bash(rm -rf /)*';
+      pm = makePm({ permissionsDeny: [raw] });
+      expect(pm.listRules()).toHaveLength(1);
+
+      expect(pm.removePersistentRule(raw, 'deny')).toBe(true);
+      expect(pm.listRules()).toEqual([]);
+    });
   });
 
   describe('malformed rule warnings', () => {

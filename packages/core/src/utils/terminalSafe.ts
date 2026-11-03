@@ -70,15 +70,14 @@ export function isBidiControlChar(code: number): boolean {
   );
 }
 
+const BIDI_CONTROLS_REGEX = new RegExp(
+  `[${String.fromCharCode(0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069)}]`,
+  'g',
+);
+
 /** Remove ALM/LRM/RLM and every bidi embedding, override, and isolate. */
 export function stripBidiControls(text: string): string {
-  let out = '';
-  for (const char of text) {
-    if (!isBidiControlChar(char.codePointAt(0)!)) {
-      out += char;
-    }
-  }
-  return out;
+  return text.replace(BIDI_CONTROLS_REGEX, '');
 }
 
 /**

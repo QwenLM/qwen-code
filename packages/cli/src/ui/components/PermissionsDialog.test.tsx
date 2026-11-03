@@ -122,4 +122,23 @@ describe('PermissionsDialog malformed rule rows', () => {
     expect(lastFrame()).toContain('Bash(git *)');
     expect(lastFrame()).not.toContain(BADGE);
   });
+
+  it('sanitizes bidi and carriage returns in a valid row label', async () => {
+    const rlo = String.fromCharCode(0x202e);
+    const { lastFrame } = await renderRuleList([
+      {
+        rule: {
+          raw: `Bash(git ${rlo}*\rstatus)`,
+          toolName: 'run_shell_command',
+        },
+        type: 'allow',
+        scope: 'user',
+      },
+    ]);
+
+    expect(lastFrame()).toContain('Bash(git * status)');
+    expect(lastFrame()).not.toContain(rlo);
+    expect(lastFrame()).not.toContain('\r');
+    expect(lastFrame()).not.toContain(BADGE);
+  });
 });
