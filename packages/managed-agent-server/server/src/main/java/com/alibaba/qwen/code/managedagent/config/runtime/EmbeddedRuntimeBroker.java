@@ -636,5 +636,4 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
                                 com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE)
                 : supportsWorkspaceClose();
     }
-
 }
