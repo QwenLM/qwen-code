@@ -46,8 +46,8 @@ import static org.mockito.Mockito.when;
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.is_enabled=false",
-        "qwen.managed-agent.session-store.is_enabled=true",
+        "qwen.managed-agent.harness.enabled=false",
+        "qwen.managed-agent.session-store.enabled=true",
         // The scheduled pass would race the notices this test hands over.
         "qwen.managed-agent.events.materialize-interval=1h"
 })

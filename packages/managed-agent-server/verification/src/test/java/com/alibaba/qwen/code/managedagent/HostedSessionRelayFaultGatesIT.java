@@ -2045,18 +2045,18 @@ class HostedSessionRelayFaultGatesIT {
                         + System.getProperty("mysql.user"),
                 "--spring.datasource.password="
                         + System.getProperty("mysql.password", ""),
-                "--qwen.managed-agent.session-store.is_enabled=true",
+                "--qwen.managed-agent.session-store.enabled=true",
                 "--qwen.managed-agent.session-store.base-url="
                         + storeProxy.baseUrl(),
                 "--qwen.managed-agent.session-store.workspace-id=unused-global-workspace",
                 "--qwen.managed-agent.session-store.writer-lease-duration=15s",
-                "--qwen.managed-agent.harness.is_enabled=true",
-                "--qwen.managed-agent.harness.workspace-files-is_enabled=true",
+                "--qwen.managed-agent.harness.enabled=true",
+                "--qwen.managed-agent.harness.workspace-files-enabled=true",
                 "--qwen.managed-agent.harness.base-url="
                         + "http://127.0.0.1:" + harnessPort,
                 "--qwen.managed-agent.harness.token=" + TOKEN,
                 "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
-                "--qwen.managed-agent.runtime-broker.is_enabled=true",
+                "--qwen.managed-agent.runtime-broker.enabled=true",
                 "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                 "--qwen.managed-agent.runtime-broker.durable-local-process=false",
@@ -2086,7 +2086,7 @@ class HostedSessionRelayFaultGatesIT {
             // it so a future default flip cannot move the floor underneath
             // the assertions.
             arguments.add(
-                    "--qwen.managed-agent.events.replay-floor-is_enabled=false");
+                    "--qwen.managed-agent.events.replay-floor-enabled=false");
         }
         for (int i = 0; i < caseCount; i++) {
             arguments.add("--qwen.managed-agent.runtime-broker.workspace-mounts["

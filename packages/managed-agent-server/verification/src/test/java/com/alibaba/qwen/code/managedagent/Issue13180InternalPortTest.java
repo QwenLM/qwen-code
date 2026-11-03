@@ -32,8 +32,8 @@ import static org.assertj.core.api.Assertions.assertThat;
             "spring.datasource.driver-class-name=org.h2.Driver",
             "spring.datasource.username=sa",
             "spring.datasource.password=",
-            "qwen.managed-agent.harness.is_enabled=false",
-            "qwen.managed-agent.session-store.is_enabled=true",
+            "qwen.managed-agent.harness.enabled=false",
+            "qwen.managed-agent.session-store.enabled=true",
             "qwen.managed-agent.session-store.binding-key=0123456789abcdef0123456789abcdef",
             "qwen.managed-agent.internal-server.address=127.0.0.1"
         })

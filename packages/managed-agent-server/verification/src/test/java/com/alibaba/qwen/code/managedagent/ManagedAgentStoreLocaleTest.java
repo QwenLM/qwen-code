@@ -37,12 +37,12 @@ class ManagedAgentStoreLocaleTest {
                 mock(ManagedWorkspaceRegistry.class),
                 new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
 
-        Admission session = store.insertSessionCommand("tenant-locale",
+        Admission session = store.insertSessionCommand("tenant-locale", "owner",
                 "CREATE_SESSION", "create-key", "digest-create", "qwen-code",
                 "1", null, List.of(), null);
         Admission turn = store.insertTurnCommand("tenant-locale", "SUBMIT",
                 "submit-key", "digest-submit", session.sessionId(),
-                List.of(Map.of("type", "text", "text", "hi")), "payload");
+                List.of(Map.of("type", "text", "text", "hi")), "payload", "owner");
 
         Locale previous = Locale.getDefault();
         Locale.setDefault(new Locale("tr", "TR"));

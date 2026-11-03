@@ -54,7 +54,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.is_enabled=false"
+        "qwen.managed-agent.harness.enabled=false"
 })
 @AutoConfigureMockMvc
 @Import(ManagedAgentServerIntegrationTest.FixtureConfiguration.class)
@@ -329,24 +329,24 @@ class ManagedTurnQueryTest {
         String sessionId = emptySession(tenant);
         turn(tenant, sessionId, "turn_a1", "COMPLETED", 1_000, 2_000L, null);
         for (String limit : List.of("0", "101", "-1")) {
-            error(mvc.perform(get("/v1/agents/sessions/{id}/turns", sessionId)
-                    .header(TENANT, tenant).param("limit", limit)), 400,
+            error(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/turns", sessionId)
+                    .header(TENANT, tenant).param("limit", limit), "owner")), 400,
                     "invalid_limit");
         }
         // A limit that is not a 32-bit integer never reaches the range
         // check.
         for (String limit : List.of("abc", "2147483648")) {
-            error(mvc.perform(get("/v1/agents/sessions/{id}/turns", sessionId)
-                    .header(TENANT, tenant).param("limit", limit)), 400,
+            error(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/turns", sessionId)
+                    .header(TENANT, tenant).param("limit", limit), "owner")), 400,
                     "invalid_request");
         }
         // A request is validated before its Session is looked up.
         String unknown = UUID.randomUUID().toString();
-        error(mvc.perform(get("/v1/agents/sessions/{id}/turns", unknown)
-                .header(TENANT, tenant).param("limit", "0")), 400,
+        error(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/turns", unknown)
+                .header(TENANT, tenant).param("limit", "0"), "owner")), 400,
                 "invalid_limit");
-        error(mvc.perform(get("/v1/agents/sessions/{id}/turns", unknown)
-                .header(TENANT, tenant).param("cursor", "bad")), 400,
+        error(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/turns", unknown)
+                .header(TENANT, tenant).param("cursor", "bad"), "owner")), 400,
                 "invalid_cursor");
         error(turnRead(tenant, unknown, "t".repeat(65)), 400,
                 "invalid_request");
@@ -355,12 +355,12 @@ class ManagedTurnQueryTest {
         for (String raw : List.of("5000", "5000:", ":turn_a1", "-1:turn_a1",
                 "01:turn_a1", "9999999999999999999:turn_a1",
                 "5000:turn a1", "5000:" + "t".repeat(65))) {
-            error(mvc.perform(get("/v1/agents/sessions/{id}/turns", sessionId)
-                    .header(TENANT, tenant).param("cursor", cursor(raw))),
+            error(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/turns", sessionId)
+                    .header(TENANT, tenant).param("cursor", cursor(raw)), "owner")),
                     400, "invalid_cursor");
         }
-        error(mvc.perform(get("/v1/agents/sessions/{id}/turns", sessionId)
-                .header(TENANT, tenant).param("cursor", "not base64!")), 400,
+        error(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/turns", sessionId)
+                .header(TENANT, tenant).param("cursor", "not base64!"), "owner")), 400,
                 "invalid_cursor");
         assertThat(list(tenant, sessionId,
                 cursor(Long.MAX_VALUE + ":turn_z"), null).get("data"))
@@ -395,8 +395,8 @@ class ManagedTurnQueryTest {
         error(turnRead(tenant, sessionId, "turn_other"), 404,
                 "turn_not_found");
         String otherTenant = tenant + "-other";
-        error(mvc.perform(get("/v1/agents/sessions/{id}/turns", sessionId)
-                .header(TENANT, otherTenant)), 404, "session_not_found");
+        error(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/turns", sessionId)
+                .header(TENANT, otherTenant), "owner")), 404, "session_not_found");
         error(turnRead(otherTenant, sessionId, "turn_own"), 404,
                 "session_not_found");
         error(turnRead(tenant, sessionId, "t".repeat(64)), 404,
@@ -412,8 +412,8 @@ class ManagedTurnQueryTest {
         error(turnRead(tenant, sessionId, "turn_own "), 404,
                 "turn_not_found");
         String unknown = UUID.randomUUID().toString();
-        error(mvc.perform(get("/v1/agents/sessions/{id}/turns", unknown)
-                .header(TENANT, tenant)), 404, "session_not_found");
+        error(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/turns", unknown)
+                .header(TENANT, tenant), "owner")), 404, "session_not_found");
         error(turnRead(tenant, unknown, "turn_own"), 404, "session_not_found");
 
         jdbc.update("UPDATE ma_session SET status = 'ARCHIVED'"
@@ -422,8 +422,8 @@ class ManagedTurnQueryTest {
         jdbc.update("UPDATE ma_session SET status = 'DELETED',"
                         + " deleted_at = 1 WHERE tenant_id = ? AND"
                         + " session_id = ?", tenant, sessionId);
-        error(mvc.perform(get("/v1/agents/sessions/{id}/turns", sessionId)
-                .header(TENANT, tenant)), 404, "session_not_found");
+        error(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/turns", sessionId)
+                .header(TENANT, tenant), "owner")), 404, "session_not_found");
         error(turnRead(tenant, sessionId, "turn_own"), 404, "session_not_found");
     }
 
@@ -439,7 +439,7 @@ class ManagedTurnQueryTest {
                         + " workspace_id, actor_id, role)"
                         + " VALUES (?, 'ws-a', ?, 'OPERATOR')", tenant,
                 "actor-a".getBytes(StandardCharsets.UTF_8));
-        String sessionId = objectMapper.readTree(mvc.perform(post(
+        String sessionId = objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(
                         "/v1/agents/sessions").header(TENANT, tenant)
                         .header("Idempotency-Key", "bound")
                         .principal(actor(tenant, "actor-a"))
@@ -447,28 +447,28 @@ class ManagedTurnQueryTest {
                         .content("""
                                 {"agent_id":"qwen-code","input":[],
                                  "workspace":{"workspace_id":"ws-a"}}
-                                """))
+                                """), "owner"))
                 .andExpect(status().isAccepted())
                 .andReturn().getResponse().getContentAsString())
                 .get("id").asText();
         turn(tenant, sessionId, "turn_bound", "COMPLETED", 1_000, 2_000L,
                 null);
 
-        mvc.perform(get("/v1/agents/sessions/{id}/turns", sessionId)
+        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/turns", sessionId)
                         .header(TENANT, tenant)
-                        .principal(actor(tenant, "actor-a")))
+                        .principal(actor(tenant, "actor-a")), "owner"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data[0].id").value("turn_bound"));
-        mvc.perform(get("/v1/agents/sessions/{id}/turns/{turn}", sessionId,
+        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/turns/{turn}", sessionId,
                         "turn_bound").header(TENANT, tenant)
-                        .principal(actor(tenant, "actor-a")))
+                        .principal(actor(tenant, "actor-a")), "owner"))
                 .andExpect(status().isOk());
-        error(mvc.perform(get("/v1/agents/sessions/{id}/turns", sessionId)
-                .header(TENANT, tenant).principal(actor(tenant, "actor-b"))),
+        error(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/turns", sessionId)
+                .header(TENANT, tenant).principal(actor(tenant, "actor-b")), "owner")),
                 404, "session_not_found");
-        error(mvc.perform(get("/v1/agents/sessions/{id}/turns/{turn}",
+        error(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/turns/{turn}",
                 sessionId, "turn_bound").header(TENANT, tenant)
-                .principal(actor(tenant, "actor-b"))), 404,
+                .principal(actor(tenant, "actor-b")), "owner")), 404,
                 "session_not_found");
     }
 
@@ -483,15 +483,15 @@ class ManagedTurnQueryTest {
         if (limit != null) {
             request.param("limit", limit);
         }
-        return objectMapper.readTree(mvc.perform(request)
+        return objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(request, "owner"))
                 .andExpect(status().isOk()).andReturn().getResponse()
                 .getContentAsString());
     }
 
     private ResultActions turnRead(String tenant, String sessionId,
             String turnId) throws Exception {
-        return mvc.perform(get("/v1/agents/sessions/{id}/turns/{turn}",
-                sessionId, turnId).header(TENANT, tenant));
+        return mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/turns/{turn}",
+                sessionId, turnId).header(TENANT, tenant), "owner"));
     }
 
     private static void error(ResultActions result, int status, String code)
@@ -514,11 +514,11 @@ class ManagedTurnQueryTest {
     }
 
     private String emptySession(String tenant) throws Exception {
-        return objectMapper.readTree(mvc.perform(post("/v1/agents/sessions")
+        return objectMapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
                         .header(TENANT, tenant)
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
+                        .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"), "owner"))
                 .andExpect(status().isAccepted())
                 .andReturn().getResponse().getContentAsString())
                 .get("id").asText();

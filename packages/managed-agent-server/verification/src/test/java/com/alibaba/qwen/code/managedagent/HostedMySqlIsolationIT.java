@@ -90,7 +90,7 @@ class HostedMySqlIsolationIT {
                         "--spring.datasource.username=" + System.getProperty("mysql.user"),
                         "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
                         "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
-                        "--qwen.managed-agent.harness.is_enabled=false",
-                        "--qwen.managed-agent.runtime-broker.is_enabled=false");
+                        "--qwen.managed-agent.harness.enabled=false",
+                        "--qwen.managed-agent.runtime-broker.enabled=false");
     }
 }

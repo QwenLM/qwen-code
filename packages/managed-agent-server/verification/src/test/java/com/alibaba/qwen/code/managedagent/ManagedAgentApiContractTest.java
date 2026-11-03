@@ -126,9 +126,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.is_enabled=false",
-        "qwen.managed-agent.automation.is_enabled=true",
-        "qwen.managed-agent.session-store.is_enabled=true",
+        "qwen.managed-agent.harness.enabled=false",
+        "qwen.managed-agent.automation.enabled=true",
+        "qwen.managed-agent.session-store.enabled=true",
         "qwen.managed-agent.dispatch.scan-delay=50ms",
         "qwen.managed-agent.events.poll-interval=10ms",
         "qwen.managed-agent.events.materialize-interval=10ms"
@@ -646,61 +646,61 @@ class ManagedAgentApiContractTest {
     void archivedHistoryFiltersBeforePaginationAndBindsItsCursor() throws Exception {
         String tenant = "tenant-filter-" + UUID.randomUUID();
         for (String state : List.of("ACTIVE", "ARCHIVED", "CLOSED", "ARCHIVED", "ACTIVE")) {
-            String id = json(mvc.perform(post(WEB_SHELL + "/sessions/create").header(TENANT, tenant)
+            String id = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/create").header(TENANT, tenant)
                     .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
-                            "idempotencyKey", UUID.randomUUID().toString(), "agentId", "qwen-code", "input", List.of()))))
+                            "idempotencyKey", UUID.randomUUID().toString(), "agentId", "qwen-code", "input", List.of()))), "owner"))
                     .andExpect(status().isAccepted()).andReturn().getResponse().getContentAsString())
                     .path("sessionId").asText();
             jdbc.update("UPDATE ma_session SET status = ? WHERE tenant_id = ? AND session_id = ?", state, tenant, id);
         }
-        String firstBody = mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
-                .contentType(MediaType.APPLICATION_JSON).content("{\"archiveState\":\"archived\",\"limit\":1}"))
+        String firstBody = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"archiveState\":\"archived\",\"limit\":1}"), "owner"))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
         JsonNode first = json(firstBody);
         assertThat(first.path("data")).hasSize(1);
         assertThat(first.at("/data/0/status").asText()).isEqualTo("archived");
         String cursor = first.path("nextCursor").asText();
         assertThat(cursor).isNotBlank();
-        JsonNode next = json(mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+        JsonNode next = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
                 .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
-                        "archiveState", "archived", "limit", 1, "cursor", cursor))))
+                        "archiveState", "archived", "limit", 1, "cursor", cursor))), "owner"))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
         assertThat(next.path("data")).hasSize(1);
         assertThat(next.at("/data/0/sessionId").asText()).isNotEqualTo(first.at("/data/0/sessionId").asText());
         assertThat(next.path("nextCursor").isNull()).isTrue();
-        mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
                 .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
-                        "archiveState", "unarchived", "cursor", cursor))))
+                        "archiveState", "unarchived", "cursor", cursor))), "owner"))
                 .andExpect(status().isBadRequest());
         for (String filter : List.of("unarchived", "all")) {
-            JsonNode page = json(mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+            JsonNode page = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
                     .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
-                            "archiveState", filter, "limit", 100))))
+                            "archiveState", filter, "limit", 100))), "owner"))
                     .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
             assertThat(page.path("data")).hasSize(filter.equals("all") ? 5 : 3);
         }
-        JsonNode all = json(mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
-                .contentType(MediaType.APPLICATION_JSON).content("{\"limit\":1}"))
+        JsonNode all = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"limit\":1}"), "owner"))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
         String decoded = new String(java.util.Base64.getUrlDecoder().decode(all.path("nextCursor").asText()),
                 StandardCharsets.UTF_8);
         String prefix = "v3:all:" + org.apache.commons.codec.digest.DigestUtils.sha256Hex("") + ":";
         assertThat(decoded).startsWith(prefix);
-        mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
                 .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(
-                        Map.of("cursor", all.path("nextCursor").asText()))))
+                        Map.of("cursor", all.path("nextCursor").asText()))), "owner"))
                 .andExpect(status().isOk());
         for (String oldPrefix : List.of("", "v2:all:")) {
             String legacy = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
                     (oldPrefix + decoded.substring(prefix.length())).getBytes(StandardCharsets.UTF_8));
-            mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
-                    .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of("cursor", legacy))))
+            mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                    .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of("cursor", legacy))), "owner"))
                     .andExpect(status().isBadRequest());
-            mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant).param("cursor", legacy))
+            mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions").header(TENANT, tenant).param("cursor", legacy), "owner"))
                     .andExpect(status().isBadRequest());
         }
-        mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
-                .contentType(MediaType.APPLICATION_JSON).content("{\"archiveState\":\"bad\"}"))
+        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"archiveState\":\"bad\"}"), "owner"))
                 .andExpect(status().isBadRequest());
     }
 
@@ -708,65 +708,65 @@ class ManagedAgentApiContractTest {
     void titleSearchIsLiteralAndBindsBothApisToTheirFilters() throws Exception {
         String tenant = "tenant-title-query-" + UUID.randomUUID();
         for (String title : List.of("Alpha_%", "Unrelated", "alpha_% next")) {
-            String id = json(mvc.perform(post(WEB_SHELL + "/sessions/create").header(TENANT, tenant)
+            String id = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/create").header(TENANT, tenant)
                     .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
-                            "idempotencyKey", UUID.randomUUID().toString(), "agentId", "qwen-code", "input", List.of()))))
+                            "idempotencyKey", UUID.randomUUID().toString(), "agentId", "qwen-code", "input", List.of()))), "owner"))
                     .andExpect(status().isAccepted()).andReturn().getResponse().getContentAsString())
                     .path("sessionId").asText();
             jdbc.update("UPDATE ma_session SET title = ?, status = ? WHERE tenant_id = ? AND session_id = ?",
                     title, title.equals("Alpha_%") ? "ARCHIVED" : "CLOSED", tenant, id);
         }
-        JsonNode first = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
-                .param("title_query", " ALPHA_% ").param("limit", "1"))
+        JsonNode first = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions").header(TENANT, tenant)
+                .param("title_query", " ALPHA_% ").param("limit", "1"), "owner"))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
         assertThat(first.path("data")).hasSize(1);
         assertThat(first.path("has_more").asBoolean()).isTrue();
         String cursor = first.path("next_cursor").asText();
-        JsonNode next = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
-                .param("title_query", "ALPHA_%").param("limit", "1").param("cursor", cursor))
+        JsonNode next = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions").header(TENANT, tenant)
+                .param("title_query", "ALPHA_%").param("limit", "1").param("cursor", cursor), "owner"))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
         assertThat(next.path("data")).hasSize(1);
         assertThat(next.at("/data/0/id").asText()).isNotEqualTo(first.at("/data/0/id").asText());
         assertThat(next.path("has_more").asBoolean()).isFalse();
-        mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
-                .param("title_query", "Unrelated").param("cursor", cursor))
+        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions").header(TENANT, tenant)
+                .param("title_query", "Unrelated").param("cursor", cursor), "owner"))
                 .andExpect(status().isBadRequest());
-        mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
-                .param("archive_state", "archived").param("title_query", "ALPHA_%").param("cursor", cursor))
+        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions").header(TENANT, tenant)
+                .param("archive_state", "archived").param("title_query", "ALPHA_%").param("cursor", cursor), "owner"))
                 .andExpect(status().isBadRequest());
         for (String state : List.of("all", "unarchived", "archived")) {
-            JsonNode web = json(mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+            JsonNode web = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
                     .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
-                            "titleQuery", "_%", "archiveState", state))))
+                            "titleQuery", "_%", "archiveState", state))), "owner"))
                     .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
-            JsonNode api = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
-                    .param("title_query", "_%").param("archive_state", state))
+            JsonNode api = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions").header(TENANT, tenant)
+                    .param("title_query", "_%").param("archive_state", state), "owner"))
                     .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
             assertThat(web.path("data")).hasSize(state.equals("all") ? 2 : 1);
             assertThat(api.path("data")).hasSize(state.equals("all") ? 2 : 1);
         }
         for (String query : List.of("\u00a0\ufeff _% \u00a0", "\u00a0\ufeff")) {
             int expected = query.contains("_%") ? 2 : 3;
-            JsonNode web = json(mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+            JsonNode web = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
                     .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
-                            "titleQuery", query))))
+                            "titleQuery", query))), "owner"))
                     .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
-            JsonNode api = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
-                    .param("title_query", query))
+            JsonNode api = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions").header(TENANT, tenant)
+                    .param("title_query", query), "owner"))
                     .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
             assertThat(web.path("data")).hasSize(expected);
             assertThat(api.path("data")).hasSize(expected);
         }
-        JsonNode alias = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant)
-                .param("archive_state", "unarchived").param("title_query", "_%"))
+        JsonNode alias = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions").header(TENANT, tenant)
+                .param("archive_state", "unarchived").param("title_query", "_%"), "owner"))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
         assertThat(alias.path("data")).hasSize(1);
-        mvc.perform(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
+        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/query").header(TENANT, tenant)
                 .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
-                        "titleQuery", "other", "cursor", cursor))))
+                        "titleQuery", "other", "cursor", cursor))), "owner"))
                 .andExpect(status().isBadRequest());
-        JsonNode other = json(mvc.perform(get("/v1/agents/sessions").header(TENANT, tenant + "-other")
-                .param("title_query", "_%"))
+        JsonNode other = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions").header(TENANT, tenant + "-other")
+                .param("title_query", "_%"), "owner"))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
         assertThat(other.path("data")).isEmpty();
     }
@@ -774,27 +774,27 @@ class ManagedAgentApiContractTest {
     @Test
     void lifecycleCommandsEchoTraceIdentityAndExposeTheirOperation() throws Exception {
         String tenant = "tenant-lifecycle-ui-" + UUID.randomUUID();
-        String id = json(mvc.perform(post(WEB_SHELL + "/sessions/create").header(TENANT, tenant)
+        String id = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/create").header(TENANT, tenant)
                 .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
-                        "idempotencyKey", UUID.randomUUID().toString(), "agentId", "qwen-code", "input", List.of()))))
+                        "idempotencyKey", UUID.randomUUID().toString(), "agentId", "qwen-code", "input", List.of()))), "owner"))
                 .andExpect(status().isAccepted()).andReturn().getResponse().getContentAsString()).path("sessionId").asText();
-        var response = mvc.perform(post(WEB_SHELL + "/sessions/close").header(TENANT, tenant)
+        var response = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/close").header(TENANT, tenant)
                 .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
-                        "sessionId", id, "idempotencyKey", "close-ui", "requestId", "ui-trace"))))
+                        "sessionId", id, "idempotencyKey", "close-ui", "requestId", "ui-trace"))), "owner"))
                 .andExpect(status().isAccepted()).andReturn().getResponse();
         assertThat(response.getHeader(RequestIdFilter.HEADER)).isEqualTo("ui-trace");
         assertThat(json(response.getContentAsString()).path("operationId").asText()).isNotBlank();
-        var replay = mvc.perform(post(WEB_SHELL + "/sessions/close").header(TENANT, tenant)
+        var replay = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/close").header(TENANT, tenant)
                 .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of(
-                        "sessionId", id, "idempotencyKey", "close-ui", "requestId", "retry-trace"))))
+                        "sessionId", id, "idempotencyKey", "close-ui", "requestId", "retry-trace"))), "owner"))
                 .andExpect(status().isAccepted()).andReturn().getResponse();
         assertThat(replay.getHeader(RequestIdFilter.HEADER)).isEqualTo("retry-trace");
         assertThat(json(replay.getContentAsString()).path("operationId").asText())
                 .isEqualTo(json(response.getContentAsString()).path("operationId").asText());
         assertThat(json(replay.getContentAsString()).path("replayed").asBoolean()).isTrue();
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
-            JsonNode session = json(mvc.perform(post(WEB_SHELL + "/sessions/get").header(TENANT, tenant)
-                    .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of("sessionId", id))))
+            JsonNode session = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/get").header(TENANT, tenant)
+                    .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(Map.of("sessionId", id))), "owner"))
                     .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
             assertThat(session.path("status").asText()).isEqualTo("closed");
             assertThat(session.hasNonNull("lifecycleOperation")).isFalse();
@@ -1092,8 +1092,8 @@ class ManagedAgentApiContractTest {
                  "metadata":{"clientId":"contract"},"input":[]}
                 """)).get("sessionId").asText();
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
-                mvc.perform(get("/v1/agents/sessions/{id}/items", webSessionId)
-                                .header(TENANT, tenant))
+                mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions/{id}/items", webSessionId)
+                                .header(TENANT, tenant), "owner"))
                         .andExpect(status().isOk()));
         exchange(drift, "webShellExportSession", 200,
                 post(WEB_SHELL + "/sessions/export/query").header(TENANT, tenant),
@@ -1240,9 +1240,9 @@ class ManagedAgentApiContractTest {
             exchange(drift, operation.getKey(), 200,
                     post(WEB_SHELL + operation.getValue()).header(TENANT, tenant), liveRead);
             // The removed selector is tolerated by MVC, outside the current request schema.
-            var legacy = mvc.perform(post(WEB_SHELL + operation.getValue()).header(TENANT, tenant)
+            var legacy = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + operation.getValue()).header(TENANT, tenant)
                     .contentType(MediaType.APPLICATION_JSON)
-                    .content(liveRead.replace("\"limit\":1", "\"view\":\"messages\",\"limit\":1")))
+                    .content(liveRead.replace("\"limit\":1", "\"view\":\"messages\",\"limit\":1")), "owner"))
                     .andReturn().getResponse();
             assertThat(legacy.getStatus()).isEqualTo(200);
             collect(drift, "legacy view response " + operation.getKey(), CONTRACT.validate(
@@ -1608,14 +1608,14 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/sessions/compress").header(TENANT, workspaceTenant).principal(actor),
                 "{\"sessionId\":\"" + webBoundId + "\",\"idempotencyKey\":\"compress-web-disabled\","
                         + "\"expectedCompactionRevision\":0}");
-        mvc.perform(post("/v1/agents/sessions/{id}/cwd", publicBoundId)
+        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions/{id}/cwd", publicBoundId)
                         .header(TENANT, workspaceTenant).principal(actor)
                         .header(IDEMPOTENCY_KEY, "retired-cwd")
-                        .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{}"), "owner"))
                 .andExpect(status().isNotFound());
-        mvc.perform(post(WEB_SHELL + "/sessions/cwd/change")
+        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/cwd/change")
                         .header(TENANT, workspaceTenant).principal(actor)
-                        .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{}"), "owner"))
                 .andExpect(status().isNotFound());
         exchangeActions(drift, tenant);
         exchangeTasks(drift, tenant, otherTenant);
@@ -1895,11 +1895,11 @@ class ManagedAgentApiContractTest {
      */
     private void exchangeTasks(Map<String, String> drift, String tenant,
             String otherTenant) throws Exception {
-        String sessionId = json(mvc.perform(post("/v1/agents/sessions")
+        String sessionId = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
                         .header(TENANT, tenant)
                         .header(IDEMPOTENCY_KEY, "contract-tasks")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"agent_id\":\"qwen-code\"}"))
+                        .content("{\"agent_id\":\"qwen-code\"}"), "owner"))
                 .andReturn().getResponse()
                 .getContentAsString(StandardCharsets.UTF_8)).get("id")
                 .asText();
@@ -2093,11 +2093,11 @@ class ManagedAgentApiContractTest {
         // A Session with no Stage H record lists no task at all, the only
         // response today's production offers, and the detail of another
         // Session's task is the documented 404, not an error.
-        String emptySession = json(mvc.perform(post("/v1/agents/sessions")
+        String emptySession = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
                         .header(TENANT, tenant)
                         .header(IDEMPOTENCY_KEY, "contract-empty-tasks")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"agent_id\":\"qwen-code\"}"))
+                        .content("{\"agent_id\":\"qwen-code\"}"), "owner"))
                 .andReturn().getResponse()
                 .getContentAsString(StandardCharsets.UTF_8)).get("id")
                 .asText();
@@ -2486,11 +2486,11 @@ class ManagedAgentApiContractTest {
                 post("/v1/agent-automations").header(TENANT, tenant)
                         .principal(actor)
                         .header(IDEMPOTENCY_KEY, "automation-create"), body);
-        MockHttpServletResponse replay = mvc.perform(
+        MockHttpServletResponse replay = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
                 post("/v1/agent-automations").header(TENANT, tenant)
                         .principal(actor)
                         .header(IDEMPOTENCY_KEY, "automation-create")
-                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                        .contentType(MediaType.APPLICATION_JSON).content(body), "owner"))
                 .andReturn().getResponse();
         assertThat(replay.getStatus()).isEqualTo(202);
         assertThat(replay.getHeader("X-Qwen-Idempotent-Replay"))
@@ -2594,10 +2594,10 @@ class ManagedAgentApiContractTest {
         assertThat(run.path("occurrence_key").asText())
                 .isEqualTo("manual:automation-run-1");
         assertThat(run.path("id").asText()).startsWith("arun_");
-        MockHttpServletResponse runReplay = mvc.perform(
+        MockHttpServletResponse runReplay = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
                 post("/v1/agent-automations/{id}/runs", automationId)
                         .header(TENANT, tenant).principal(actor)
-                        .header(IDEMPOTENCY_KEY, "automation-run-1"))
+                        .header(IDEMPOTENCY_KEY, "automation-run-1"), "owner"))
                 .andReturn().getResponse();
         assertThat(runReplay.getStatus()).isEqualTo(202);
         assertThat(runReplay.getHeader("X-Qwen-Idempotent-Replay"))
@@ -2774,14 +2774,14 @@ class ManagedAgentApiContractTest {
 
     private void exchangeTurns(Map<String, String> drift, String tenant,
             String otherTenant) throws Exception {
-        String sessionId = json(mvc.perform(post("/v1/agents/sessions")
+        String sessionId = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post("/v1/agents/sessions")
                         .header(TENANT, tenant)
                         .header(IDEMPOTENCY_KEY, "contract-turns")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"agent_id":"qwen-code",
                                  "input":[{"type":"input_text","text":"turns"}]}
-                                """))
+                                """), "owner"))
                 .andReturn().getResponse()
                 .getContentAsString(StandardCharsets.UTF_8)).get("id")
                 .asText();
@@ -2873,14 +2873,14 @@ class ManagedAgentApiContractTest {
     @Test
     void bothSurfacesReportTheSameSession() throws Exception {
         String tenant = "tenant-parity-" + UUID.randomUUID();
-        String sessionId = json(mvc.perform(post(WEB_SHELL + "/sessions/create")
+        String sessionId = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/create")
                         .header(TENANT, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"idempotencyKey":"parity-create",
                                  "agentId":"qwen-code",
                                  "input":[{"type":"input_text","text":"hi"}]}
-                                """))
+                                """), "owner"))
                 .andReturn().getResponse()
                 .getContentAsString(StandardCharsets.UTF_8))
                 .get("sessionId").asText();
@@ -2893,13 +2893,13 @@ class ManagedAgentApiContractTest {
                     .isEqualTo(transcript.get("lastSequence").asLong());
         });
 
-        JsonNode publicSession = json(mvc.perform(
+        JsonNode publicSession = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
                         get("/v1/agents/sessions/{id}", sessionId)
-                                .header(TENANT, tenant))
+                                .header(TENANT, tenant), "owner"))
                 .andReturn().getResponse()
                 .getContentAsString(StandardCharsets.UTF_8));
-        JsonNode publicListed = json(mvc.perform(get("/v1/agents/sessions")
-                        .header(TENANT, tenant))
+        JsonNode publicListed = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions")
+                        .header(TENANT, tenant), "owner"))
                 .andReturn().getResponse()
                 .getContentAsString(StandardCharsets.UTF_8))
                 .get("data").get(0);
@@ -2907,9 +2907,9 @@ class ManagedAgentApiContractTest {
                 "{\"sessionId\":\"%s\"}".formatted(sessionId)));
         JsonNode webShellListed = json(webShell(tenant, "/sessions/query",
                 "{}")).get("data").get(0);
-        JsonNode items = json(mvc.perform(
+        JsonNode items = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
                         get("/v1/agents/sessions/{id}/items", sessionId)
-                                .param("limit", "100").header(TENANT, tenant))
+                                .param("limit", "100").header(TENANT, tenant), "owner"))
                 .andReturn().getResponse()
                 .getContentAsString(StandardCharsets.UTF_8));
         long snapshotThrough = items.get("snapshot_through_sequence").asLong();
@@ -2921,10 +2921,10 @@ class ManagedAgentApiContractTest {
             item.get("content").forEach(part ->
                     ids.add(part.get("part_id").asText()));
         });
-        JsonNode events = json(mvc.perform(
+        JsonNode events = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
                         get("/v1/agents/sessions/{id}/events", sessionId)
                                 .param("limit", "1000").header(TENANT, tenant)
-                                .accept(MediaType.APPLICATION_JSON))
+                                .accept(MediaType.APPLICATION_JSON), "owner"))
                 .andReturn().getResponse()
                 .getContentAsString(StandardCharsets.UTF_8)).get("data");
         List<String> named = new ArrayList<>();
@@ -2977,7 +2977,7 @@ class ManagedAgentApiContractTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"sessionId\":\"%s\"}"
                                 .formatted(sessionId)))) {
-            MockHttpServletResponse response = mvc.perform(foreign)
+            MockHttpServletResponse response = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(foreign, "owner"))
                     .andReturn().getResponse();
             assertThat(response.getStatus()).isEqualTo(404);
             assertThat(json(response.getContentAsString(
@@ -3091,7 +3091,7 @@ class ManagedAgentApiContractTest {
         // The public events route enforces the same budget, not just the
         // WebShell one; there the idempotency key travels in the
         // Idempotency-Key header instead of the body.
-        MockHttpServletResponse publicRefusal = mvc.perform(
+        MockHttpServletResponse publicRefusal = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
                         post("/v1/agents/sessions/{id}/events", sessionId)
                                 .header(TENANT, tenant)
                                 .header(IDEMPOTENCY_KEY,
@@ -3099,7 +3099,7 @@ class ManagedAgentApiContractTest {
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content("{\"type\":\"agent.session.input."
                                         + "message\",\"input\":["
-                                        + oversizedInput + "]}"))
+                                        + oversizedInput + "]}"), "owner"))
                 .andReturn().getResponse();
         assertThat(publicRefusal.getStatus())
                 .as("public events route refuses the oversized body")
@@ -3137,23 +3137,23 @@ class ManagedAgentApiContractTest {
         // is active is a 409, not a budget decision.
         String emojiBlock = "{\"type\":\"input_text\",\"text\":\""
                 + "\uD83D\uDE00".repeat(600_000) + "\"}";
-        mvc.perform(post(WEB_SHELL + "/turns/submit").header(TENANT, tenant)
+        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/turns/submit").header(TENANT, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"idempotencyKey\":\"budget-emoji-block\","
                                 + "\"sessionId\":\"" + budgetSession(tenant, 1)
-                                + "\",\"input\":[" + emojiBlock + "]}"))
+                                + "\",\"input\":[" + emojiBlock + "]}"), "owner"))
                 .andExpect(status().isAccepted());
         // 2,000,001 code points stay inside the 4,000,000 aggregate but are
         // 4,000,002 UTF-16 units: admitted only when the aggregate counts
         // code points too.
         String emojiThird = "{\"type\":\"input_text\",\"text\":\""
                 + "\uD83D\uDE00".repeat(666_667) + "\"}";
-        mvc.perform(post(WEB_SHELL + "/turns/submit").header(TENANT, tenant)
+        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/turns/submit").header(TENANT, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"idempotencyKey\":\"budget-emoji-sum\","
                                 + "\"sessionId\":\"" + budgetSession(tenant, 2)
                                 + "\",\"input\":[" + emojiThird + ","
-                                + emojiThird + "," + emojiThird + "]}"))
+                                + emojiThird + "," + emojiThird + "]}"), "owner"))
                 .andExpect(status().isAccepted());
     }
 
@@ -3177,24 +3177,24 @@ class ManagedAgentApiContractTest {
     @Test
     void requestIdsAreEchoedOnlyWhenSafe() throws Exception {
         String tenant = "tenant-request-id-" + UUID.randomUUID();
-        MockHttpServletResponse traced = mvc.perform(get("/v1/agents/sessions")
+        MockHttpServletResponse traced = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get("/v1/agents/sessions")
                         .header(TENANT, tenant)
-                        .header(RequestIdFilter.HEADER, "gateway-trace-1"))
+                        .header(RequestIdFilter.HEADER, "gateway-trace-1"), "owner"))
                 .andReturn().getResponse();
         assertThat(traced.getHeader(RequestIdFilter.HEADER))
                 .isEqualTo("gateway-trace-1");
 
         for (String unsafe : List.of("two words", "x".repeat(129))) {
-            MockHttpServletResponse replaced = mvc.perform(
+            MockHttpServletResponse replaced = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
                             get("/v1/agents/sessions")
                                     .header(TENANT, tenant)
-                                    .header(RequestIdFilter.HEADER, unsafe))
+                                    .header(RequestIdFilter.HEADER, unsafe), "owner"))
                     .andReturn().getResponse();
             assertThat(UUID.fromString(
                     replaced.getHeader(RequestIdFilter.HEADER))).isNotNull();
         }
 
-        MockHttpServletResponse ignored = mvc.perform(
+        MockHttpServletResponse ignored = mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
                         post(WEB_SHELL + "/sessions/create")
                                 .header(TENANT, tenant)
                                 .header(RequestIdFilter.HEADER,
@@ -3204,19 +3204,19 @@ class ManagedAgentApiContractTest {
                                         {"requestId":"line\\nbreak",
                                          "idempotencyKey":"request-id",
                                          "agentId":"qwen-code","input":[]}
-                                        """))
+                                        """), "owner"))
                 .andReturn().getResponse();
         assertThat(ignored.getStatus()).isEqualTo(202);
         assertThat(ignored.getHeader(RequestIdFilter.HEADER))
                 .isEqualTo("gateway-trace-2");
 
-        assertThat(mvc.perform(post(WEB_SHELL + "/sessions/create")
+        assertThat(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/create")
                         .header(TENANT, tenant)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"requestId":"%s","idempotencyKey":"too-long",
                                  "agentId":"qwen-code","input":[]}
-                                """.formatted("x".repeat(129))))
+                                """.formatted("x".repeat(129))), "owner"))
                 .andReturn().getResponse().getStatus()).isEqualTo(400);
     }
 
@@ -3245,8 +3245,8 @@ class ManagedAgentApiContractTest {
 
     private String webShell(String tenant, String path, String body)
             throws Exception {
-        return mvc.perform(post(WEB_SHELL + path).header(TENANT, tenant)
-                        .contentType(MediaType.APPLICATION_JSON).content(body))
+        return mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + path).header(TENANT, tenant)
+                        .contentType(MediaType.APPLICATION_JSON).content(body), "owner"))
                 .andReturn().getResponse()
                 .getContentAsString(StandardCharsets.UTF_8);
     }
@@ -3502,7 +3502,7 @@ class ManagedAgentApiContractTest {
                     CONTRACT.requestPointer(CONTRACT.operation(operationId)),
                     objectMapper.readTree(body)));
         }
-        return mvc.perform(request.accept(MediaType.TEXT_EVENT_STREAM))
+        return mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(request.accept(MediaType.TEXT_EVENT_STREAM), "owner"))
                 .andReturn().getResponse();
     }
 
@@ -3622,9 +3622,9 @@ class ManagedAgentApiContractTest {
     private void awaitOperation(String tenant, String sessionId,
             String operationId) {
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
-                assertThat(json(mvc.perform(get(
+                assertThat(json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(get(
                                 "/v1/agents/sessions/{id}/operations/{op}",
-                                sessionId, operationId).header(TENANT, tenant))
+                                sessionId, operationId).header(TENANT, tenant), "owner"))
                         .andReturn().getResponse()
                         .getContentAsString(StandardCharsets.UTF_8))
                         .get("status").asText()).isEqualTo("completed"));
@@ -3651,9 +3651,9 @@ class ManagedAgentApiContractTest {
 
     private void awaitMaterialized(String tenant, String sessionId) {
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
-            JsonNode items = json(mvc.perform(
+            JsonNode items = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
                             get("/v1/agents/sessions/{id}/items", sessionId)
-                                    .header(TENANT, tenant))
+                                    .header(TENANT, tenant), "owner"))
                     .andReturn().getResponse()
                     .getContentAsString(StandardCharsets.UTF_8));
             assertThat(items.get("data")).hasSizeGreaterThanOrEqualTo(2);
@@ -3662,9 +3662,9 @@ class ManagedAgentApiContractTest {
 
     private void awaitIdle(String tenant, String sessionId) {
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
-            JsonNode session = json(mvc.perform(
+            JsonNode session = json(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
                             get("/v1/agents/sessions/{id}", sessionId)
-                                    .header(TENANT, tenant))
+                                    .header(TENANT, tenant), "owner"))
                     .andReturn().getResponse()
                     .getContentAsString(StandardCharsets.UTF_8));
             assertThat(session.has("active_turn")).isFalse();

@@ -68,7 +68,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:workspace-retention;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE",
         "spring.datasource.driver-class-name=org.h2.Driver", "spring.datasource.username=sa", "spring.datasource.password=",
-        "qwen.managed-agent.harness.is_enabled=false", "qwen.managed-agent.dispatch.scan-delay=20ms",
+        "qwen.managed-agent.harness.enabled=false", "qwen.managed-agent.dispatch.scan-delay=20ms",
         "qwen.managed-agent.dispatch.retry-initial-delay=50ms", "qwen.managed-agent.dispatch.retry-max-delay=100ms"})
 @AutoConfigureMockMvc
 @Import(WorkspaceSessionRetentionTest.Configuration.class)

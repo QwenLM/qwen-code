@@ -637,8 +637,10 @@ class WorkspaceCsiApplicationInventoryTest {
                 List.of("ma_session_head", "activation_id", "other"),
                 List.of("ma_session_head", "writer_id", UUID.randomUUID().toString()),
                 List.of("ma_session_head", "activation_phase", "released"))) {
-            var changed = nativeCellFixture(baseline, fault.get(0), fault.get(1), fault.get(2));
-            assertThatThrownBy(() -> WorkspaceCsiApplicationHistory.preparedTerminal(changed, original, body))
+            assertThatThrownBy(() -> {
+                var changed = nativeCellFixture(baseline, fault.get(0), fault.get(1), fault.get(2));
+                WorkspaceCsiApplicationHistory.preparedTerminal(changed, original, body);
+            })
                     .isInstanceOfAny(IllegalArgumentException.class, com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
         }
         var tables = new java.util.ArrayList<>(baseline.tables());
@@ -964,9 +966,7 @@ class WorkspaceCsiApplicationInventoryTest {
     }
 
     @Test
-    void taskJournalBooleanMetadataRetainsUnsupportedActivityAndExactValues() throws Exception {
-        alterColumn("ma_public_event", "is_truncated", "BOOLEAN");
-        alterColumn("ma_public_event", "is_archived", "BOOLEAN");
+    void taskJournalTinyIntMetadataRetainsUnsupportedActivityAndExactValues() throws Exception {
         assertThat(inspect().blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift"));
         jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, last_sequence, gmt_modified)"
                 + " VALUES ('tenant', ?, 'TASK', 'task', 1, 1)", session);

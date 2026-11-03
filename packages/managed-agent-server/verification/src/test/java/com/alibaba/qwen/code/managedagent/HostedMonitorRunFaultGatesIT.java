@@ -171,19 +171,19 @@ class HostedMonitorRunFaultGatesIT {
                         + System.getProperty("mysql.user"),
                 "--spring.datasource.password="
                         + System.getProperty("mysql.password", ""),
-                "--qwen.managed-agent.session-store.is_enabled=true"));
+                "--qwen.managed-agent.session-store.enabled=true"));
         arguments.addAll(HostedGateTestSupport.toolPublicationArgs(port,
                 "fg8-fixture", 1073741824));
         arguments.addAll(List.of(
-                "--qwen.managed-agent.harness.is_enabled=false",
+                "--qwen.managed-agent.harness.enabled=false",
                 "--qwen.managed-agent.harness.capability-digest=sha256:"
                         + "a".repeat(64),
-                "--qwen.managed-agent.runtime-broker.is_enabled=true",
+                "--qwen.managed-agent.runtime-broker.enabled=true",
                 "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.token=hosted-tools-broker-token",
                 "--qwen.managed-agent.runtime-broker.durable-local-process=false",
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
-                "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-is_enabled="
+                "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
                         + "Linux".equals(System.getProperty("os.name")),
                 "--qwen.managed-agent.runtime-broker.workspace-cwd="
                         + temporary,

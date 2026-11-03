@@ -47,7 +47,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
             "spring.datasource.driver-class-name=org.h2.Driver",
             "spring.datasource.username=sa",
             "spring.datasource.password=",
-            "qwen.managed-agent.harness.is_enabled=false"
+            "qwen.managed-agent.harness.enabled=false"
         })
 @AutoConfigureMockMvc
 class ManagedApprovalSelectionTest {
@@ -215,50 +215,50 @@ class ManagedApprovalSelectionTest {
                 "{\"agentId\":\"qwen-code\",\"idempotencyKey\":\"api\","
                         + "\"approvalMode\":\"auto-edit\",\"workspace\":{\"workspaceId\":\"ws\"}}";
         String response =
-                mvc.perform(
+                mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
                                 post(BASE + "/sessions/create")
                                         .header(TenantContextFilter.HEADER, tenant)
                                         .principal(actor(tenant))
                                         .contentType(MediaType.APPLICATION_JSON)
-                                        .content(body))
+                                        .content(body), "owner"))
                         .andExpect(status().isAccepted())
                         .andReturn()
                         .getResponse()
                         .getContentAsString();
         String id = json.readTree(response).path("sessionId").asText();
-        mvc.perform(
+        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
                         post(BASE + "/sessions/get")
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .principal(actor(tenant))
                                 .contentType(MediaType.APPLICATION_JSON)
-                                .content("{\"sessionId\":\"" + id + "\"}"))
+                                .content("{\"sessionId\":\"" + id + "\"}"), "owner"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.approvalMode").value("auto-edit"));
-        mvc.perform(
+        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
                         post(BASE + "/sessions/create")
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content(
-                                        "{\"agentId\":\"qwen-code\",\"idempotencyKey\":\"unbound\",\"approvalMode\":\"default\"}"))
+                                        "{\"agentId\":\"qwen-code\",\"idempotencyKey\":\"unbound\",\"approvalMode\":\"default\"}"), "owner"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("unsupported_approval_mode"));
         String legacy =
-                mvc.perform(
+                mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
                                 post(BASE + "/sessions/create")
                                         .header(TenantContextFilter.HEADER, tenant)
                                         .contentType(MediaType.APPLICATION_JSON)
                                         .content(
-                                                "{\"agentId\":\"qwen-code\",\"idempotencyKey\":\"legacy\"}"))
+                                                "{\"agentId\":\"qwen-code\",\"idempotencyKey\":\"legacy\"}"), "owner"))
                         .andExpect(status().isAccepted())
                         .andReturn()
                         .getResponse()
                         .getContentAsString();
         String legacyId = json.readTree(legacy).path("sessionId").asText();
-        mvc.perform(
+        mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(
                         post(BASE + "/sessions/get")
                                 .header(TenantContextFilter.HEADER, tenant)
                                 .contentType(MediaType.APPLICATION_JSON)
-                                .content("{\"sessionId\":\"" + legacyId + "\"}"))
+                                .content("{\"sessionId\":\"" + legacyId + "\"}"), "owner"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.approvalMode").doesNotExist());
     }

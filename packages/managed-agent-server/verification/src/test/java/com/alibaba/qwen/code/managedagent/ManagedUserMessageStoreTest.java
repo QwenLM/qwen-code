@@ -35,7 +35,7 @@ import static org.mockito.Mockito.when;
         "spring.datasource.driver-class-name=${qwen.queue-test.jdbc-driver:org.h2.Driver}",
         "spring.datasource.username=${qwen.queue-test.jdbc-user:sa}",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.is_enabled=false"
+        "qwen.managed-agent.harness.enabled=false"
 })
 @Transactional
 class ManagedUserMessageStoreTest {
@@ -59,7 +59,7 @@ class ManagedUserMessageStoreTest {
 
     @BeforeEach
     void setUp() {
-        session = agents.createSession(TENANT, "create-" + UUID.randomUUID(),
+        session = agents.createSession(TENANT, ACTOR, "create-" + UUID.randomUUID(),
                 "qwen-code", null, "queue", Map.of(), List.of()).sessionId();
         ManagedAgentService queueAgents = mock(ManagedAgentService.class);
         when(queueAgents.supportsUserMessageQueue()).thenReturn(true);

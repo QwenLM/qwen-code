@@ -233,9 +233,9 @@ public class ManagedSchemaBusinessStoreTest {
                 "INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id,"
                     + " session_id, publication_id, execution_key, capture_id, binding_json,"
                     + " binding_digest, token_hash, state, capture_bytes, producer_bytes,"
-                    + " admission_bytes, producer_phase, is_write_evidence, is_accepted_complete) VALUES"
+                    + " admission_bytes, producer_phase, is_write_evidence, is_accepted_complete, gmt_create, gmt_modified) VALUES"
                     + " (?, ?, ?, 'workspace', ?, 'capture', ?, 'capture-id', '{}', ?, ?, 'FENCED',"
-                    + " 1000, 1000, 1000, 'REFERENCED', TRUE, TRUE)",
+                    + " 1000, 1000, 1000, 'REFERENCED', TRUE, TRUE, 1, 1)",
                 scope, ToolPublicationRetentionStore.hash(tenant), tenant, session, hash, hash, hash);
         var writes = new java.util.concurrent.atomic.AtomicInteger();
         ToolPublicationObjectStore unknown = new ToolPublicationObjectStore() {
@@ -443,9 +443,9 @@ public class ManagedSchemaBusinessStoreTest {
                 "INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id,"
                     + " session_id, publication_id, execution_key, capture_id, binding_json,"
                     + " binding_digest, token_hash, state, capture_bytes, producer_bytes,"
-                    + " admission_bytes, producer_phase, is_write_evidence, is_accepted_complete) VALUES"
+                    + " admission_bytes, producer_phase, is_write_evidence, is_accepted_complete, gmt_create, gmt_modified) VALUES"
                     + " (?, ?, ?, 'workspace', ?, 'capture', ?, 'capture-id', '{}', ?, ?, 'FENCED',"
-                    + " 1000, 1000, 1000, 'REFERENCED', TRUE, TRUE)",
+                    + " 1000, 1000, 1000, 'REFERENCED', TRUE, TRUE, 1, 1)",
                 scope, ToolPublicationRetentionStore.hash(tenant), tenant, session, hash, hash, hash);
         return key;
     }

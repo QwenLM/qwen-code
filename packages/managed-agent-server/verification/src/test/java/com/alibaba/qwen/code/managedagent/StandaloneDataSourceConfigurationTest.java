@@ -16,8 +16,8 @@ import static org.assertj.core.api.Assertions.assertThat;
         "spring.datasource.druid.max-wait=5000",
         "spring.datasource.druid.connect-properties.connectTimeout=5000",
         "spring.datasource.druid.connect-properties.socketTimeout=10000",
-        "qwen.managed-agent.harness.is_enabled=false",
-        "qwen.managed-agent.runtime-broker.is_enabled=false"
+        "qwen.managed-agent.harness.enabled=false",
+        "qwen.managed-agent.runtime-broker.enabled=false"
 })
 class StandaloneDataSourceConfigurationTest {
     @Autowired

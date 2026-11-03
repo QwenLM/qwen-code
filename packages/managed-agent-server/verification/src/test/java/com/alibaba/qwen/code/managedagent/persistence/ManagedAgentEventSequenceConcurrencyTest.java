@@ -134,12 +134,12 @@ class ManagedAgentEventSequenceConcurrencyTest {
 
     private Admission createTurn() {
         Admission turn = transactions.execute(status -> {
-            Admission session = store.insertSessionCommand(TENANT,
+            Admission session = store.insertSessionCommand(TENANT, "owner",
                     "CREATE_SESSION", "create", "create-digest", "qwen-code",
                     "1", null, List.of(), null);
             Admission admitted = store.insertTurnCommand(TENANT,
                     "SUBMIT_TURN", "submit", "submit-digest", session.sessionId(),
-                    List.of(Map.of("type", "text", "text", "hello")), "payload");
+                    List.of(Map.of("type", "text", "text", "hello")), "payload", "owner");
             assertThat(store.claimTurn(TENANT, session.sessionId(),
                     admitted.turnId(), OWNER, Duration.ofMinutes(1))).isPresent();
             store.recordAdmission(TENANT, session.sessionId(), admitted.turnId(),

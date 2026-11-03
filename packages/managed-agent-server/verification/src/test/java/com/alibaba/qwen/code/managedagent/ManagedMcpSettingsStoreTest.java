@@ -35,7 +35,7 @@ import static org.mockito.Mockito.when;
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:managed-mcp-settings;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE",
         "spring.datasource.driver-class-name=org.h2.Driver", "spring.datasource.username=sa", "spring.datasource.password=",
-        "qwen.managed-agent.harness.is_enabled=false"
+        "qwen.managed-agent.harness.enabled=false"
 })
 class ManagedMcpSettingsStoreTest {
     @Autowired private ManagedSessionStore store;

@@ -126,9 +126,9 @@ class HostedHarnessMySqlIT {
                 "--spring.datasource.druid.max-wait=5000",
                 "--spring.datasource.druid.connect-properties.connectTimeout=5000",
                 "--spring.datasource.druid.connect-properties.socketTimeout=10000",
-                "--qwen.managed-agent.session-store.is_enabled=true",
-                "--qwen.managed-agent.harness.is_enabled=false",
-                "--qwen.managed-agent.runtime-broker.is_enabled=false");
+                "--qwen.managed-agent.session-store.enabled=true",
+                "--qwen.managed-agent.harness.enabled=false",
+                "--qwen.managed-agent.runtime-broker.enabled=false");
         springPort = spring.getWebServer().getPort();
         startModel();
         startHarness(cli);
@@ -237,15 +237,15 @@ class HostedHarnessMySqlIT {
                 "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
                 "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
                 "--spring.datasource.druid.max-active=3",
-                "--qwen.managed-agent.session-store.is_enabled=true",
+                "--qwen.managed-agent.session-store.enabled=true",
                 "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:" + springPort,
                 "--qwen.managed-agent.session-store.workspace-id=hosted-lifecycle-workspace",
-                "--qwen.managed-agent.harness.is_enabled=true",
+                "--qwen.managed-agent.harness.enabled=true",
                 "--qwen.managed-agent.harness.base-url=http://127.0.0.1:" + harnessPort,
                 "--qwen.managed-agent.harness.token=" + TOKEN,
                 "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
                 "--qwen.managed-agent.trusted-actor-header=X-Qwen-Actor-Id",
-                "--qwen.managed-agent.runtime-broker.is_enabled=false",
+                "--qwen.managed-agent.runtime-broker.enabled=false",
                 "--qwen.managed-agent.dispatch.scan-delay=100ms");
         try {
             String id = api("POST", "/v1/agents/sessions", "create", """

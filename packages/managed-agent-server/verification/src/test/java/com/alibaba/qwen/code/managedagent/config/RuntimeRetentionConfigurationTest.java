@@ -49,8 +49,8 @@ class RuntimeRetentionConfigurationTest {
                     .run(context -> assertThat(context).doesNotHaveBean(RuntimeRetentionJob.class)
                             .doesNotHaveBean("runtimeRetentionScheduler"));
         }
-        context().withPropertyValues("qwen.managed-agent.runtime-broker.is_enabled=true",
-                        "qwen.managed-agent.runtime-broker.retention.is_enabled=true")
+        context().withPropertyValues("qwen.managed-agent.runtime-broker.enabled=true",
+                        "qwen.managed-agent.runtime-broker.retention.enabled=true")
                 .run(context -> assertThat(context).hasSingleBean(RuntimeRetentionJob.class)
                         .hasBean("runtimeRetentionScheduler"));
     }

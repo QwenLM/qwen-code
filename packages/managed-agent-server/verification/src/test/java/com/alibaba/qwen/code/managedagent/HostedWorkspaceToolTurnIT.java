@@ -304,10 +304,10 @@ class HostedWorkspaceToolTurnIT {
                 "--spring.datasource.driver-class-name=" + (mysql ? "com.mysql.cj.jdbc.Driver" : "org.h2.Driver"),
                 "--spring.datasource.username=" + System.getProperty("mysql.user", "sa"),
                 "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
-                "--qwen.managed-agent.session-store.is_enabled=true",
-                "--qwen.managed-agent.harness.is_enabled=false",
+                "--qwen.managed-agent.session-store.enabled=true",
+                "--qwen.managed-agent.harness.enabled=false",
                 "--qwen.managed-agent.harness.capability-digest=sha256:" + "a".repeat(64),
-                "--qwen.managed-agent.runtime-broker.is_enabled=true",
+                "--qwen.managed-agent.runtime-broker.enabled=true",
                 "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.token=hosted-tools-broker-token",
                 "--qwen.managed-agent.runtime-broker.durable-local-process=" + operatorRecovery,
@@ -332,7 +332,7 @@ class HostedWorkspaceToolTurnIT {
             Files.setLastModifiedTime(workspaces.get(index), FileTime.fromMillis(1));
         }
         boolean verifiedRecovery = List.of("Linux", "Mac OS X").contains(System.getProperty("os.name"));
-        arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-is_enabled=" + verifiedRecovery);
+        arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled=" + verifiedRecovery);
         var application = new SpringApplicationBuilder(ManagedAgentServerApplication.class);
         if (unicode) {
             application.initializers(context -> registerUnicodePublication((GenericApplicationContext) context));

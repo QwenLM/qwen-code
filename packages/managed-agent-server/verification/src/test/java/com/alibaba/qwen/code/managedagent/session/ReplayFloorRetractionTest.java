@@ -30,7 +30,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
             "spring.datasource.driver-class-name=org.h2.Driver",
             "spring.datasource.username=sa",
             "spring.datasource.password=",
-            "qwen.managed-agent.harness.is_enabled=false",
+            "qwen.managed-agent.harness.enabled=false",
             "qwen.managed-agent.dispatch.scan-delay=1h",
             "qwen.managed-agent.events.materialize-interval=1h"
         })
@@ -56,7 +56,7 @@ class ReplayFloorRetractionTest {
                         "digest-turn",
                         session,
                         List.of(),
-                        "payload-turn");
+                        "payload-turn", "owner");
         String owner = "owner";
         assertThat(store.claimTurn(tenant, session, turn.turnId(), owner, Duration.ofMinutes(1)))
                 .isPresent();
@@ -156,7 +156,7 @@ class ReplayFloorRetractionTest {
         try (var executor = Executors.newCachedThreadPool()) {
             var expired = new EventStreams.RecordingEmitter();
             EventStreams.streams(service, hub, executor, expired)
-                    .publicStream(tenant, null, session, window.floorSequence() - 1);
+                    .publicStream(tenant,"owner", session, window.floorSequence() - 1);
             assertThat(expired.completed.await(10, TimeUnit.SECONDS)).isTrue();
             assertThat(expired.ids).isEmpty();
             assertThat(expired.failed).isEmpty();
@@ -183,7 +183,7 @@ class ReplayFloorRetractionTest {
                                 "digest",
                                 session,
                                 List.of(),
-                                "payload")
+                                "payload", "owner")
                         .turnId();
         store.claimTurn(tenant, session, turn, "owner", Duration.ofMinutes(1));
         store.appendPublicEventIfAbsent(
@@ -283,7 +283,7 @@ class ReplayFloorRetractionTest {
         try (var executor = Executors.newCachedThreadPool()) {
             var expired = new EventStreams.RecordingEmitter();
             EventStreams.streams(service, hub, executor, expired)
-                    .publicStream(tenant, null, session, initial.lastSequence());
+                    .publicStream(tenant,"owner", session, initial.lastSequence());
             assertThat(expired.completed.await(10, TimeUnit.SECONDS)).isTrue();
             assertThat(expired.failed).isEmpty();
             assertThat(expired.resync).containsExactly(new SessionResyncRequired(
@@ -308,7 +308,7 @@ class ReplayFloorRetractionTest {
 
     private String session(String tenant) {
         return store.insertSessionCommand(
-                        tenant,
+                        tenant, "owner",
                         "CREATE_SESSION",
                         UUID.randomUUID().toString(),
                         "digest",

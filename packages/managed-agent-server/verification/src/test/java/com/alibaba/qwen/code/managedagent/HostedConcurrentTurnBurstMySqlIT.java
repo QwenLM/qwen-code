@@ -75,8 +75,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 // close its Workspace Sessions. For the same reason a round that stalls
 // has its work ended before the context closes.
 @SpringBootTest(properties = {
-        "qwen.managed-agent.harness.is_enabled=false",
-        "qwen.managed-agent.runtime-broker.is_enabled=false",
+        "qwen.managed-agent.harness.enabled=false",
+        "qwen.managed-agent.runtime-broker.enabled=false",
         "qwen.managed-agent.dispatch.scan-delay=50ms",
         "qwen.managed-agent.events.poll-interval=10ms",
         "qwen.managed-agent.events.materialize-interval=10ms"})

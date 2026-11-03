@@ -39,7 +39,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.is_enabled=false",
+        "qwen.managed-agent.harness.enabled=false",
         "qwen.managed-agent.dispatch.scan-delay=50ms",
         "qwen.managed-agent.events.poll-interval=10ms",
         "qwen.managed-agent.events.materialize-interval=10ms"
@@ -175,23 +175,23 @@ class ManagedWebShellRenameTest {
 
     private String create(String tenant, boolean activeTurn) throws Exception {
         List<Map<String, String>> input = activeTurn ? List.of(Map.of("type", "text", "text", "hold")) : List.of();
-        JsonNode response = mapper.readTree(mvc.perform(post(WEB_SHELL + "/sessions/create")
+        JsonNode response = mapper.readTree(mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/create")
                         .header(TENANT, tenant).contentType(MediaType.APPLICATION_JSON)
                         .content(mapper.writeValueAsString(Map.of("idempotencyKey", UUID.randomUUID().toString(),
-                                "agentId", "qwen-code", "title", "original", "input", input))))
+                                "agentId", "qwen-code", "title", "original", "input", input))), "owner"))
                 .andExpect(status().isAccepted()).andReturn().getResponse().getContentAsString());
         return response.get("sessionId").asText();
     }
 
     private ResultActions get(String tenant, String session) throws Exception {
-        return mvc.perform(post(WEB_SHELL + "/sessions/get").header(TENANT, tenant)
-                .contentType(MediaType.APPLICATION_JSON).content(mapper.writeValueAsString(Map.of("sessionId", session))));
+        return mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/get").header(TENANT, tenant)
+                .contentType(MediaType.APPLICATION_JSON).content(mapper.writeValueAsString(Map.of("sessionId", session))), "owner"));
     }
 
     private ResultActions rename(String tenant, String session, String key, String title) throws Exception {
-        return mvc.perform(post(WEB_SHELL + "/sessions/rename").header(TENANT, tenant)
+        return mvc.perform(com.alibaba.qwen.code.managedagent.VerificationFixtures.authenticated(post(WEB_SHELL + "/sessions/rename").header(TENANT, tenant)
                 .contentType(MediaType.APPLICATION_JSON).content(mapper.writeValueAsString(Map.of("requestId", "rename-trace",
-                        "sessionId", session, "idempotencyKey", key, "title", title))));
+                        "sessionId", session, "idempotencyKey", key, "title", title))), "owner"));
     }
 
     private static String tenant() {

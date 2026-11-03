@@ -901,12 +901,12 @@ public class RuntimeBrokerHttpServerTest {
             fixture.service.startExecution("harness", runtime, id).toCompletableFuture().join();
             assertEquals(ToolExecutionRecord.State.UNKNOWN,
                     fixture.service.getExecution("harness", runtime, id).toCompletableFuture().join().getState());
-            fixture.transport.runtimeStatus = Map.of("state", "is_cancel_requested");
+            fixture.transport.runtimeStatus = Map.of("state", "cancel_requested");
             HttpResponse<String> cancelling = fixture.post("/executions/" + id + ":cancel", Map.of(
                     "protocolVersion", 1, "requestId", "cancel", "harnessSessionId", "harness",
                     "runtimeSessionId", runtime));
             assertEquals(200, cancelling.statusCode(), cancelling.body());
-            assertEquals("is_cancel_requested",
+            assertEquals("cancel_requested",
                     JSON.parseObject(cancelling.body()).getJSONObject("status").getString("state"));
             // The cancellation reached the worker still running the call.
             assertEquals(1, fixture.transport.cancellations.get());
@@ -975,13 +975,13 @@ public class RuntimeBrokerHttpServerTest {
                     JSON.parseObject(running.body()).getJSONObject("status").keySet());
             assertEquals(ToolExecutionRecord.State.UNKNOWN,
                     fixture.service.getExecution("harness", "runtime", id).toCompletableFuture().join().getState());
-            fixture.transport.runtimeStatus = Map.of("state", "is_cancel_requested");
+            fixture.transport.runtimeStatus = Map.of("state", "cancel_requested");
             // A mutation's response never serves the cooldown cache, so no
             // wait is needed before this cancel.
             HttpResponse<String> cancelling = fixture.post("/executions/" + id + ":cancel", Map.of(
                     "protocolVersion", 1, "requestId", "cancel", "harnessSessionId", "harness", "runtimeSessionId", "runtime"));
             assertEquals(200, cancelling.statusCode(), cancelling.body());
-            assertEquals("is_cancel_requested", JSON.parseObject(cancelling.body()).getJSONObject("status").getString("state"));
+            assertEquals("cancel_requested", JSON.parseObject(cancelling.body()).getJSONObject("status").getString("state"));
             assertEquals(Set.of("state", "cancelRequested", "lastSeq", "firstAvailableSeq", "progressGap", "progress"),
                     JSON.parseObject(cancelling.body()).getJSONObject("status").keySet());
             assertTrue(JSON.parseObject(cancelling.body()).getJSONObject("status").getBooleanValue("cancelRequested"));

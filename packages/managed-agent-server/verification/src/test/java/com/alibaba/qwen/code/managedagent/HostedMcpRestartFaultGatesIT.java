@@ -1688,21 +1688,21 @@ class HostedMcpRestartFaultGatesIT {
                         "--qwen.managed-agent.trusted-actor-header=X-Qwen-Actor-Id",
                         "--qwen.managed-agent.definition-tool-profiles="
                                 + PROFILE,
-                        "--qwen.managed-agent.session-store.is_enabled=true",
+                        "--qwen.managed-agent.session-store.enabled=true",
                         "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:"
                                 + port,
                         "--qwen.managed-agent.session-store.workspace-id=unused-global-workspace",
                         "--qwen.managed-agent.session-store.writer-lease-duration=3s",
-                        "--qwen.managed-agent.harness.is_enabled=false",
+                        "--qwen.managed-agent.harness.enabled=false",
                         "--qwen.managed-agent.harness.capability-digest="
                                 + CAPABILITY,
-                        "--qwen.managed-agent.runtime-broker.is_enabled=true",
+                        "--qwen.managed-agent.runtime-broker.enabled=true",
                         "--qwen.managed-agent.runtime-broker.port="
                                 + brokerPort,
                         "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                         "--qwen.managed-agent.runtime-broker.durable-local-process=true",
                         "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
-                        "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-is_enabled=true",
+                        "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled=true",
                         "--qwen.managed-agent.runtime-broker.workspace-cwd="
                                 + temporary.resolve("decoy"),
                         "--qwen.managed-agent.runtime-broker.state-directory="

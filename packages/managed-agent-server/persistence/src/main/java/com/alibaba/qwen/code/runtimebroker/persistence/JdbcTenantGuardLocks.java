@@ -50,11 +50,11 @@ public final class JdbcTenantGuardLocks {
         if (timeoutSeconds < 0 || tenant == null || domain == null) {
             throw new IllegalArgumentException("Invalid tenant guard request");
         }
-        if (connection.getAutoCommit()) {
-            throw new SQLException("Tenant guard requires an explicit transaction");
-        }
         if (!"MySQL".equals(connection.getMetaData().getDatabaseProductName())) {
             return portable(connection, tenant, domain, timeoutSeconds, create);
+        }
+        if (connection.getAutoCommit()) {
+            throw new SQLException("Tenant guard requires an explicit transaction");
         }
         Scope scope = scope(connection);
         GuardKey key = new GuardKey(tenant, domain);

@@ -1480,16 +1480,16 @@ class HostedPublicWorkspaceIT {
                 "--spring.datasource.driver-class-name=" + (mysql ? "com.mysql.cj.jdbc.Driver" : "org.h2.Driver"),
                 "--spring.datasource.username=" + System.getProperty("mysql.user", "sa"),
                 "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
-                "--qwen.managed-agent.session-store.is_enabled=true",
+                "--qwen.managed-agent.session-store.enabled=true",
                 "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:"
                         + (storeRelay == null ? port : storeRelay.getAddress().getPort()),
                 "--qwen.managed-agent.session-store.workspace-id=unused-global-workspace",
-                "--qwen.managed-agent.harness.is_enabled=true",
-                "--qwen.managed-agent.harness.workspace-files-is_enabled=true",
+                "--qwen.managed-agent.harness.enabled=true",
+                "--qwen.managed-agent.harness.workspace-files-enabled=true",
                 "--qwen.managed-agent.harness.base-url=http://127.0.0.1:" + harnessPort,
                 "--qwen.managed-agent.harness.token=" + TOKEN,
                 "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
-                "--qwen.managed-agent.runtime-broker.is_enabled=true",
+                "--qwen.managed-agent.runtime-broker.enabled=true",
                 "--qwen.managed-agent.runtime-broker.port=" + brokerPort,
                 "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
@@ -1504,20 +1504,20 @@ class HostedPublicWorkspaceIT {
                     + (shell && "deny".equals(shellDecision) ? "auto-edit" : "default"));
         }
         if (shell) {
-            arguments.add("--qwen.managed-agent.harness.workspace-shell-is_enabled=true");
+            arguments.add("--qwen.managed-agent.harness.workspace-shell-enabled=true");
         }
         if (definitionApproval) {
             arguments.add("--qwen.managed-agent.definition-tool-profiles=hosted-workspace-shell/1");
         }
         if (!publicChildren) {
-            arguments.add("--qwen.managed-agent.harness.workspace-child-agents-is_enabled=false");
+            arguments.add("--qwen.managed-agent.harness.workspace-child-agents-enabled=false");
         }
         if (shellLifecycleV2) {
             arguments.addAll(HostedGateTestSupport.toolPublicationArgs(port,
                     "private-test-bucket", 1048576));
         }
         arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=" + (durableClose || definitionApproval));
-        arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-is_enabled="
+        arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
                 + (definitionApproval || "Linux".equals(System.getProperty("os.name"))));
         if (resident) {
             com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.arguments(arguments, tenant, roots.getFirst());

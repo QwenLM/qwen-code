@@ -47,7 +47,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.is_enabled=false"
+        "qwen.managed-agent.harness.enabled=false"
 })
 class ManagedSessionMessageStoreTest {
     private static final String TENANT = "tenant-extension";
@@ -576,7 +576,7 @@ class ManagedSessionMessageStoreTest {
     }
 
     private String session() {
-        return agents.createSession(TENANT, "message-" + UUID.randomUUID(),
+        return agents.createSession(TENANT, "owner", "message-" + UUID.randomUUID(),
                 "qwen-code", null, "messages", Map.of(), List.of())
                 .sessionId();
     }

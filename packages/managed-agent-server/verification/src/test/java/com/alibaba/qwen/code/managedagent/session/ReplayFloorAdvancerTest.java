@@ -39,9 +39,9 @@ import static org.mockito.Mockito.when;
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.is_enabled=false",
+        "qwen.managed-agent.harness.enabled=false",
         "qwen.managed-agent.events.materialize-interval=10ms",
-        "qwen.managed-agent.events.replay-floor-is_enabled=true",
+        "qwen.managed-agent.events.replay-floor-enabled=true",
         "qwen.managed-agent.events.replay-floor-interval=10ms"
 })
 class ReplayFloorAdvancerTest {
@@ -169,7 +169,7 @@ class ReplayFloorAdvancerTest {
     }
 
     private String session(String tenant) {
-        return store.insertSessionCommand(tenant, "CREATE_SESSION",
+        return store.insertSessionCommand(tenant, "owner", "CREATE_SESSION",
                 "replay-floor-" + UUID.randomUUID(), "digest", "qwen-code",
                 null, null, List.of(), "payload").sessionId();
     }

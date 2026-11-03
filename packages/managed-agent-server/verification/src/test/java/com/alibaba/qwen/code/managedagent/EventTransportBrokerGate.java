@@ -92,11 +92,11 @@ import static org.mockito.Mockito.when;
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.is_enabled=false",
-        "qwen.managed-agent.session-store.is_enabled=true",
+        "qwen.managed-agent.harness.enabled=false",
+        "qwen.managed-agent.session-store.enabled=true",
         // The scheduled pass would race the notices the rows hand over.
         "qwen.managed-agent.events.materialize-interval=1h",
-        "qwen.managed-agent.event-transport.is_enabled=true",
+        "qwen.managed-agent.event-transport.enabled=true",
         "qwen.managed-agent.event-transport.endpoints=${qwen.gate.rocketmq.endpoints}",
         "qwen.managed-agent.event-transport.topic=${qwen.gate.rocketmq.topic}",
         "qwen.managed-agent.event-transport.owner-reconcile-interval=200ms"
@@ -719,7 +719,7 @@ class EventTransportBrokerGate {
                 .withUserConfiguration(EventTransportConfiguration.class,
                         PropertiesConfiguration.class)
                 .withPropertyValues(
-                        "qwen.managed-agent.event-transport.is_enabled=true",
+                        "qwen.managed-agent.event-transport.enabled=true",
                         "qwen.managed-agent.event-transport.endpoints="
                                 + properties.getEventTransport().getEndpoints(),
                         "qwen.managed-agent.event-transport.topic=" + topic,

@@ -101,7 +101,7 @@ class JdbcCsiBindingControlTest {
         var fixture = fixture();
         try (var connection = fixture.source().getConnection()) {
             sql(connection,
-                    "INSERT INTO ma_tenant_guard VALUES ('"
+                    "INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES ('"
                             + com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys
                                     .key("tenant")
                             + "', 'other', 'output_publication')");

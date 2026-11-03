@@ -26,10 +26,10 @@ import static org.assertj.core.api.Assertions.assertThat;
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.is_enabled=false",
+        "qwen.managed-agent.harness.enabled=false",
         "qwen.managed-agent.dispatch.scan-delay=1h",
         "qwen.managed-agent.events.materialize-interval=1h",
-        "qwen.managed-agent.events.replay-floor-is_enabled=true",
+        "qwen.managed-agent.events.replay-floor-enabled=true",
         "qwen.managed-agent.events.replay-floor-interval=1h"
 })
 class ReplayFloorAdvancerBacklogTest {
@@ -43,14 +43,14 @@ class ReplayFloorAdvancerBacklogTest {
         String tenant = "tenant-replay-backlog-" + UUID.randomUUID();
         List<String> quiet = new ArrayList<>();
         for (int index = 0; index < BATCH_LIMIT; index++) {
-            String sessionId = store.insertSessionCommand(tenant,
+            String sessionId = store.insertSessionCommand(tenant, "owner",
                     "CREATE_SESSION", "backlog-" + UUID.randomUUID(),
                     "digest", "qwen-code", null, null, List.of(), "payload")
                     .sessionId();
             append(tenant, sessionId, 5);
             quiet.add(sessionId);
         }
-        String busy = store.insertSessionCommand(tenant, "CREATE_SESSION",
+        String busy = store.insertSessionCommand(tenant, "owner", "CREATE_SESSION",
                 "backlog-busy-" + UUID.randomUUID(), "digest", "qwen-code",
                 null, null, List.of(), "payload").sessionId();
         append(tenant, busy, 5);

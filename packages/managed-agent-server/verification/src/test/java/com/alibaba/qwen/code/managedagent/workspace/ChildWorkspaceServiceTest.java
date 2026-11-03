@@ -64,7 +64,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.is_enabled=false",
+        "qwen.managed-agent.harness.enabled=false",
         // The context's own scan judges claims by the real clock, while
         // these tests drive their own service on a fake one.
         "qwen.managed-agent.child-workspace.scan-delay=1h"

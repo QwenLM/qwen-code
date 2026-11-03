@@ -90,7 +90,7 @@ class ManagedTurnCommandOperationTest {
         store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), clock,
                 ignored -> {}, new ManagedWorkspaceRegistry(jdbc),
                 new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION",
+        sessionId = store.insertSessionCommand(TENANT, "owner", "CREATE_SESSION",
                 "create", "digest", "qwen-code", null, null, List.of(), null)
                 .sessionId();
     }

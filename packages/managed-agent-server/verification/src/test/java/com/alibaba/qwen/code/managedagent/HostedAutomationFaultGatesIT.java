@@ -2392,24 +2392,24 @@ class HostedAutomationFaultGatesIT {
                 "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
                 "--spring.datasource.username=" + System.getProperty("mysql.user", "root"),
                 "--spring.datasource.password=" + System.getProperty("mysql.password", ""),
-                "--qwen.managed-agent.session-store.is_enabled=true",
+                "--qwen.managed-agent.session-store.enabled=true",
                 "--qwen.managed-agent.session-store.base-url="
                         + (storeRelay == null ? "http://127.0.0.1:" + port : storeRelay.uri()),
                 "--qwen.managed-agent.session-store.workspace-id=unused-global-workspace",
-                "--qwen.managed-agent.harness.is_enabled=true",
-                "--qwen.managed-agent.harness.workspace-files-is_enabled=true",
+                "--qwen.managed-agent.harness.enabled=true",
+                "--qwen.managed-agent.harness.workspace-files-enabled=true",
                 "--qwen.managed-agent.harness.base-url=" + harnessRelay.uri(),
                 "--qwen.managed-agent.harness.token=" + TOKEN,
                 "--qwen.managed-agent.harness.capability-digest=" + DIGEST,
-                "--qwen.managed-agent.automation.is_enabled=true",
+                "--qwen.managed-agent.automation.enabled=true",
                 "--qwen.managed-agent.automation.scan-delay=1s",
-                "--qwen.managed-agent.runtime-broker.is_enabled=true",
+                "--qwen.managed-agent.runtime-broker.enabled=true",
                 "--qwen.managed-agent.runtime-broker.port=" + brokerPort,
                 "--qwen.managed-agent.runtime-broker.token=" + TOKEN,
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
                 "--qwen.managed-agent.runtime-broker.durable-local-process="
                         + (publicationFaults != null || workspaceLifecycle || shellSessions),
-                "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-is_enabled="
+                "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
                         + (publicationFaults != null || workspaceLifecycle || shellSessions
                                 || "Linux".equals(System.getProperty("os.name"))),
                 "--qwen.managed-agent.runtime-broker.workspace-cwd=" + decoy,
@@ -2425,14 +2425,14 @@ class HostedAutomationFaultGatesIT {
         if (publicationFaults != null) {
             arguments.addAll(HostedGateTestSupport.toolPublicationArgs(port, "fg11f-bucket", 4L * 1024 * 1024));
             arguments.add("--qwen.managed-agent.definition-tool-profiles=hosted-workspace-shell/1");
-            arguments.add("--qwen.managed-agent.harness.workspace-shell-is_enabled=true");
+            arguments.add("--qwen.managed-agent.harness.workspace-shell-enabled=true");
             // Workspace Shell refuses the server default of yolo; the session
             // still runs yolo from its definition, so the wake turn needs no
             // approval round-trip.
             arguments.add("--qwen.managed-agent.harness.approval-mode=default");
         } else if (shellSessions) {
             arguments.add("--qwen.managed-agent.definition-tool-profiles=hosted-workspace-shell/1");
-            arguments.add("--qwen.managed-agent.harness.workspace-shell-is_enabled=true");
+            arguments.add("--qwen.managed-agent.harness.workspace-shell-enabled=true");
             arguments.add("--qwen.managed-agent.harness.approval-mode=default");
         }
         spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(ManagedAgentServerApplication.class)

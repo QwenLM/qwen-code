@@ -72,7 +72,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.is_enabled=false"
+        "qwen.managed-agent.harness.enabled=false"
 })
 @AutoConfigureMockMvc
 class ManagedWorkspaceAdmissionTest {
@@ -1176,7 +1176,7 @@ class ManagedWorkspaceAdmissionTest {
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         grant(tenant, "ws-a", "actor-a", true);
-        grant(tenant, "ws-b", "actor-b", true);
+        grant(tenant, "ws-b", "actor-a", true);
         String sessionX = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                 .tenantId(tenant)
                 .actorId("actor-a")
@@ -1187,7 +1187,7 @@ class ManagedWorkspaceAdmissionTest {
                 .build()).sessionId();
         String sessionY = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                 .tenantId(tenant)
-                .actorId("actor-b")
+                .actorId("actor-a")
                 .idempotencyKey("create-y")
                 .requestDigest("sha256:" + "b".repeat(64))
                 .agentId("qwen-code")
@@ -1204,7 +1204,7 @@ class ManagedWorkspaceAdmissionTest {
         // recorded request, so no replay — and Y keeps its title.
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> service.renameSession(tenant,
-                        "actor-b", "rename", sessionY, "new title"))
+                        "actor-a", "rename", sessionY, "new title"))
                         .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                             assertThat(error.getCode())
                                     .isEqualTo("idempotency_conflict");
@@ -2103,7 +2103,7 @@ class ManagedWorkspaceAdmissionTest {
                                 .selection(new WorkspaceSelection("ws-a", "."))
                                 .build());
                     } else {
-                        store.insertSessionCommand(tenant, "CREATE_SESSION", "key",
+                        store.insertSessionCommand(tenant, "actor-a", "CREATE_SESSION", "key",
                                 "legacy-digest", "qwen-code", null, null, List.of(), null);
                     }
                     return "created";

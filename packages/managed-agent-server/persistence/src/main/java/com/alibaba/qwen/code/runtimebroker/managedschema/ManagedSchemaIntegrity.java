@@ -37,7 +37,7 @@ public final class ManagedSchemaIntegrity {
     private static final Set<String> DOMAIN_OPERATION_EXECUTION_MODE =
             Set.of("SYNC", "ASYNC");
     private static final Set<String> DOMAIN_OPERATION_OPERATION_KIND =
-            enumNames(ManagedSchemaContract.OperationKind.values());
+            enumNames(ManagedSchemaContract.OperationKind.values(), "WORKSPACE_CREATE");
     private static final Set<String> DOMAIN_OPERATION_WORK_WORK_KIND =
             enumNames(ManagedSchemaContract.WorkKind.values());
     private static final Set<String> DOMAIN_WORKSPACE_STATE =
@@ -693,11 +693,13 @@ public final class ManagedSchemaIntegrity {
         return unknown ? null : false;
     }
 
-    private static Set<String> enumNames(Enum<?>[] values) {
+    private static Set<String> enumNames(Enum<?>[] values, String... additional) {
         Set<String> names = new HashSet<>();
         for (Enum<?> value : values) {
             names.add(value.name());
         }
+        // 工作区创建沿用字符串操作名，仍属于原始 CHECK 明确允许的取值。
+        names.addAll(List.of(additional));
         return Set.copyOf(names);
     }
 

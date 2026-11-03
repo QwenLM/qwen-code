@@ -298,9 +298,9 @@ public class ToolPublicationAsyncVerificationTest {
                         com.alibaba.qwen.code.managedagent.config.AliyunToolPublicationStorageAutoConfiguration.class))
                 .withUserConfiguration(SchedulingHarness.class,
                         com.alibaba.qwen.code.managedagent.config.ToolPublicationConfiguration.class)
-                .withPropertyValues("qwen.managed-agent.tool-publication.is_enabled=true",
+                .withPropertyValues("qwen.managed-agent.tool-publication.enabled=true",
                         "qwen.managed-agent.tool-publication.service-base-url=https://test.invalid",
-                        "qwen.managed-agent.tool-publication.async-verification-is_enabled=" + asyncEnabled,
+                        "qwen.managed-agent.tool-publication.async-verification-enabled=" + asyncEnabled,
                         "qwen.managed-agent.tool-publication.execution-bytes=104857600",
                         "qwen.managed-agent.tool-publication.session-bytes=104857600",
                         "qwen.managed-agent.tool-publication.tenant-bytes=104857600",

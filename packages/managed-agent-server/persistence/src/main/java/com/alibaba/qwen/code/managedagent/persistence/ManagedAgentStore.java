@@ -393,7 +393,7 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest) {
-        return insertSessionCommand(tenantId,
+        return insertPrincipalSessionCommand(tenantId,
                 actorId == null ? null
                         : SessionPrincipal.ofUser(tenantId, actorId),
                 operation, idempotencyKey, requestDigest, agentId,
@@ -403,6 +403,16 @@ public class ManagedAgentStore implements AgentStateStore {
     @Override
     @Transactional
     public Admission insertSessionCommand(String tenantId,
+            SessionPrincipal principal, String operation,
+            String idempotencyKey, String requestDigest, String agentId,
+            String requestedRevision, String title,
+            List<Map<String, Object>> input, String payloadDigest) {
+        return insertPrincipalSessionCommand(tenantId, principal, operation,
+                idempotencyKey, requestDigest, agentId, requestedRevision,
+                title, input, payloadDigest);
+    }
+
+    private Admission insertPrincipalSessionCommand(String tenantId,
             SessionPrincipal principal, String operation,
             String idempotencyKey, String requestDigest, String agentId,
             String requestedRevision, String title,
@@ -5900,7 +5910,7 @@ public class ManagedAgentStore implements AgentStateStore {
         // Harness park enters only the coordinator's read-only observation
         // branch; cancellation still uses the normal dispatch lane.
         return jdbc.query(
-                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR error_code IS NULL OR error_code NOT IN ('" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "', '" + AgentStateStore.RUNTIME_RECOVERY_BLOCKED + "')) AND (status = 'CANCELLING' OR NOT EXISTS (SELECT 1 FROM ma_session_worktree w WHERE w.tenant_id = ma_turn.tenant_id AND w.session_id = ma_turn.session_id AND w.state <> 'READY')) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
+                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR error_code IS NULL OR error_code NOT IN ('" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "', '" + AgentStateStore.RUNTIME_RECOVERY_BLOCKED + "')) AND (status = 'CANCELLING' OR NOT EXISTS (SELECT 1 FROM ma_session_worktree w WHERE w.tenant_id = ma_turn.tenant_id AND w.session_id = ma_turn.session_id AND w.state <> 'READY')) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.is_csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
                 (result, row) -> new DispatchTarget(
                         result.getString("tenant_id"),
                         result.getString("session_id"),
@@ -5914,7 +5924,7 @@ public class ManagedAgentStore implements AgentStateStore {
         return jdbc.query(
                 "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING') AND error_code = '"
                         + AgentStateStore.RUNTIME_RECOVERY_BLOCKED
-                        + "' AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY retry_after ASC, gmt_modified ASC LIMIT ?",
+                        + "' AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.is_csi_guard = FALSE) ORDER BY retry_after ASC, gmt_modified ASC LIMIT ?",
                 (result, row) -> new DispatchTarget(
                         result.getString("tenant_id"),
                         result.getString("session_id"),
