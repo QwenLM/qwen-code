@@ -82,8 +82,8 @@ Three properties of this shape are the problem:
   Updating membership still takes the index record locks needed for the write.
 - G2: Two directories, whether of one tenant or of two, admit execution and
   check occupancy without blocking each other.
-- G3: The occupancy rules keep their current outcomes: shared ordinary
-  members, exclusive rewind, maintenance and upload exclusion, zero-member
+- G3: The occupancy rules are: shared ordinary
+  members (including uploads), exclusive rewind, maintenance exclusion, zero-member
   physical steps, exact release, lost-worker cleanup scoped to one binding
   and generation, and retention that preserves bindings with members.
 - G4: Every condition that decides success or failure is in an
@@ -111,7 +111,8 @@ Three properties of this shape are the problem:
 Add two columns to `ma_storage_owner`:
 
 - `member_count BIGINT UNSIGNED NOT NULL DEFAULT 0`, the number of `ma_runtime_session`
-  rows whose `execution_storage_key` equals this row's `storage_key`.
+  rows whose `execution_storage_key` equals this row's `storage_key`, plus `RUNNING`
+  `WORKSPACE_UPLOAD` operations whose `physical_key` equals it.
 - `exclusive_member_key CHAR(64)`, null unless one member holds exclusive
   rewind. Its value is the existing SHA-256 key of the binding id, runtime
   generation, and runtime session id, the same construction operator recovery
@@ -136,6 +137,10 @@ inventory. The summary answers only directory-level questions, and only the
 write paths listed in D4 may change it.
 
 ### D2. No tenant guard on per-call membership
+
+This applies to Runtime execution membership and to upload admission and
+completion (`WorkspaceFileUploadStore.admit` and `finish`); see the
+[shared uploads design](2026-11-03-managed-shared-workspace-uploads.md).
 
 `claim`, `release` (including mount handback), `beginRewind`, and `endRewind`
 stop calling `WorkspaceStorageKindGuard.lockDomain` on the LOCAL and
@@ -201,6 +206,8 @@ filesystem checks happen before it opens.
 
 | Path                                              | Member rows                                                 | Directory row, same transaction                                                                 |
 | ------------------------------------------------- | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `WorkspaceFileUploadStore.admit`                  | inserts one running upload operation                        | `member_count + 1` at the scope's `mount_revision`; no holder, maintenance or rewind            |
+| `WorkspaceFileUploadStore.finish`                 | settles one running upload operation                        | `member_count - 1`; a terminal replay changes neither row                                       |
 | `WorkspaceExecutionStore.claim`                   | sets `execution_storage_key` for one session                | `member_count + 1` under the D3 predicate                                                       |
 | `WorkspaceExecutionStore.release`                 | clears the key and `is_execution_exclusive` for one session | `member_count - N`; clears `exclusive_member_key` when it equals this member and `N > 0`        |
 | `WorkspaceExecutionStore.releaseLost`             | clears every member of one binding and generation           | `member_count - N` for the one physical key those rows share                                    |
@@ -212,8 +219,8 @@ filesystem checks happen before it opens.
 `N` is the affected-row count of the member-row statement in the same
 transaction, and the directory statement subtracts exactly `N`. A directory
 statement that changes zero rows rolls the transaction back. Nothing repairs a
-mismatch in place: a count that does not match its rows is a defect, and the
-`CHECK` constraints reject the write instead.
+mismatch in place. Guarded decrements and `CHECK` constraints reject underflow
+and contradictory exclusivity; invariant tests compare the count with its rows.
 
 Because retention deletes session rows without passing through a membership
 write, its delete predicate must exclude rows that still carry a membership.
@@ -227,8 +234,8 @@ directory row it already locks:
 
 - `WorkspaceExecutionStore.holdForMaintenance`, which requires
   `member_count = 0` before taking `holder_key` and `maintenance_id`.
-- `WorkspaceFileUploadStore.admit`, which requires `member_count = 0` before
-  its short `holder_key` occupancy.
+- `WorkspaceFileUploadStore.admit`, which requires null holder, maintenance and
+  exclusive-rewind keys, then adds shared membership. Other members may remain.
 - `WorkspaceStorageGuard`: registration, `fence`, `restoreOriginal`,
   `requireFenced`, and the occupancy half of `inspect`.
 
@@ -301,7 +308,9 @@ another order today are:
   row; its binding-then-session order already matches.
 
 The remaining multi-row transactions in this domain already follow the order:
-`fence` and `restoreOriginal` lock the guard, then alias rows through
+upload `admit` locks the alias row, then the directory row, then inserts its
+operation row, and upload `finish` locks the directory row before its operation
+row; `fence` and `restoreOriginal` lock the guard, then alias rows through
 `LocalStorageOwners.lockCovered`, then the directory row; registration and
 migration source reads do the same; `releaseLost` locks the guard, the
 directory row, then the binding row.
@@ -358,7 +367,7 @@ write that makes the conditional update fail. All of them already update
 | Restore                      | `WorkspaceStorageGuard.restoreOriginal`                            | `mount_state = 'READY'`, `mount_revision` incremented        |
 | Registration completes       | `WorkspaceStorageGuard` registration, `SshWorkspaceStore.publish`  | `mount_state = 'READY'`, `mount_revision` set or incremented |
 | Maintenance hold and release | `holdForMaintenance`, `releaseMaintenance`, `reconcileAfterReboot` | `holder_key` and `maintenance_id` set or cleared             |
-| Upload occupancy             | `WorkspaceFileUploadStore.admit` and `finish`                      | `holder_key` set or cleared                                  |
+| Upload occupancy             | `WorkspaceFileUploadStore.admit` and `finish`                      | `member_count` incremented or decremented                    |
 | Exclusive rewind             | `beginRewind`, `endRewind`                                         | `exclusive_member_key` set or cleared                        |
 | Alias removed                | `SshWorkspaceStore.releaseParked`                                  | deletes the `SSH_LOCAL` owner row                            |
 
@@ -391,7 +400,8 @@ rows. "Change" names the reordering D7 requires; the others already match.
 | `compareAndSet`, `recoverLost`                   | binding control, guard, slot, binding              | none                                          |
 | `WorkspaceOperatorRecoveryStore.prepare`         | guard, binding, directory, session                 | directory before the binding                  |
 | `WorkspaceStorageGuard.fence`, `restoreOriginal` | guard, aliases, directory, then the member scan    | member scan replaced by the summary           |
-| `WorkspaceFileUploadStore.admit`                 | guard, operation, directory, then the member scan  | member scan replaced by the summary           |
+| `WorkspaceFileUploadStore.admit`                 | guard, operation, directory, then the member scan  | drop the guard; alias, directory, operation   |
+| `WorkspaceFileUploadStore.finish`                | guard, operation, directory                        | drop the guard; directory before operation    |
 | `WorkspaceMigrationStore` fence installation     | guard, alias fence row                             | none                                          |
 | `JdbcRuntimeRetention` sweep                     | guard, slot, binding, executions, sessions         | none; the session delete excludes member rows |
 
@@ -450,7 +460,8 @@ graph while the transactions are still open, before releasing their blockers:
   released, providing a positive control. A pending exclusive rewind similarly
   blocks and then rejects another member; admission succeeds after rewind ends.
 - After every scenario, `member_count` equals the number of session rows
-  carrying that `execution_storage_key`, and `exclusive_member_key` matches
+  carrying that `execution_storage_key` plus running upload operations for the
+  physical key, and `exclusive_member_key` matches
   the one exclusive member or is null.
 
 H2 does not exercise InnoDB gap locks or deadlock detection, so it is not
@@ -464,8 +475,9 @@ the module's verification budget; the full MySQL matrix stays with CI.
 2. Distinct directories never block each other's admission or occupancy
    checks, and occupancy checks take no member-index gap or next-key range
    locks. Membership writes may hold index record locks.
-3. The occupancy outcomes listed under G3 are unchanged on the existing suites.
-4. `member_count` and `exclusive_member_key` match the member rows after every
+3. The occupancy outcomes listed under G3 hold on the affected suites.
+4. `member_count` matches Runtime members plus running uploads, and
+   `exclusive_member_key` matches the sole rewind member after every
    tested scenario, and a write that would break the `CHECK` constraints rolls
    back.
 5. The transactions in the lock-order inventory acquire locks in the D7 order,
