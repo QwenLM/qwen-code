@@ -18474,7 +18474,7 @@ describe('Session', () => {
       ])(
         'consumes a same-turn $kind result in the next tool continuation',
         async ({ notify, result }) => {
-          const execute = vi.fn(async () => {
+          const execute = vi.fn(async (_signal?: AbortSignal) => {
             const sourceTurnId = core.promptIdContext.getStore();
             if (!sourceTurnId) throw new Error('missing prompt context');
             notify(sourceTurnId);
@@ -18569,7 +18569,9 @@ describe('Session', () => {
             mockChat.sendMessageStream,
           ).mock.calls;
           expect(
-            firstRequest[1].message.some((part) => part.text === result),
+            (firstRequest[1].message as Part[]).some(
+              (part) => part.text === result,
+            ),
           ).toBe(false);
           expect(secondRequest[1].message).toEqual(
             expect.arrayContaining([
@@ -18582,7 +18584,9 @@ describe('Session', () => {
             ]),
           );
           expect(
-            secondRequest[1].message.filter((part) => part.text === result),
+            (secondRequest[1].message as Part[]).filter(
+              (part) => part.text === result,
+            ),
           ).toHaveLength(1);
         },
       );
