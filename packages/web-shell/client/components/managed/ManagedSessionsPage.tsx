@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useI18n } from '../../i18n';
@@ -109,6 +110,7 @@ interface PendingPrompt {
   draftText?: string;
   queued?: boolean;
   sessionId?: string;
+  workspaceId?: string;
   input?: ManagedInputBlock[];
 }
 
@@ -194,6 +196,8 @@ export function ManagedSessionsPage({
   navigationTarget,
   archivedNavigationTarget,
   onArchivedSessionsStatusChange,
+  renderNavigation,
+  renderArchivedNavigation,
   interactive = true,
   creationSkills,
   navigationActive = interactive,
@@ -223,6 +227,9 @@ export function ManagedSessionsPage({
   onArchivedSessionsStatusChange?: (
     status: ManagedArchivedSessionsStatus,
   ) => void;
+  /** Wraps the portaled Session list so a host slot outside the shell keeps scoped CSS. */
+  renderNavigation?: (navigation: ReactNode) => ReactNode;
+  renderArchivedNavigation?: (archived: ReactNode) => ReactNode;
   interactive?: boolean;
   creationSkills?: ManagedCreationSkillsSource;
   navigationActive?: boolean;
@@ -252,6 +259,8 @@ export function ManagedSessionsPage({
         navigationTarget={navigationTarget}
         archivedNavigationTarget={archivedNavigationTarget}
         onArchivedSessionsStatusChange={onArchivedSessionsStatusChange}
+        renderNavigation={renderNavigation}
+        renderArchivedNavigation={renderArchivedNavigation}
         interactive={interactive}
         creationSkills={creationSkills}
         navigationActive={navigationActive}
@@ -321,6 +330,8 @@ function ManagedSessionsContent({
   navigationTarget,
   archivedNavigationTarget,
   onArchivedSessionsStatusChange,
+  renderNavigation,
+  renderArchivedNavigation,
   interactive,
   creationSkills,
   navigationActive,
@@ -350,6 +361,8 @@ function ManagedSessionsContent({
   onArchivedSessionsStatusChange?: (
     status: ManagedArchivedSessionsStatus,
   ) => void;
+  renderNavigation?: (navigation: ReactNode) => ReactNode;
+  renderArchivedNavigation?: (archived: ReactNode) => ReactNode;
   interactive: boolean;
   creationSkills?: ManagedCreationSkillsSource;
   navigationActive: boolean;
@@ -451,6 +464,7 @@ function ManagedSessionsContent({
     tasks.refresh,
     tasks.apply,
   );
+  const waitingForHostSession = hostSessionOnly && !sessionId;
   useEffect(() => {
     const element = pageRef.current;
     if (!element) return;
@@ -467,7 +481,9 @@ function ManagedSessionsContent({
       observer?.disconnect();
       window.removeEventListener('resize', resize);
     };
-  }, []);
+    // The waiting state renders no wrapper, so re-run when the host supplies an
+    // ID: otherwise the pane is never measured and never observes resizes.
+  }, [waitingForHostSession]);
   useEffect(() => setTaskPanelSession(undefined), [provider, sessionId]);
   const [sessions, setSessions] = useState<ManagedAgentSessionSummary[]>([]);
   const [archivedSummaries, setArchivedSummaries] = useState<
@@ -845,7 +861,7 @@ function ManagedSessionsContent({
       focusComposer.current = undefined;
       return;
     }
-    sessionsNavRef.current?.focus();
+    (sessionsNavRef.current ?? pageRef.current)?.focus();
     // detail.summary is the re-arm trigger: a poll or clean pass lifts the
     // disablement by delivering a new summary without touching the record.
   }, [pending, sessionId, detail.summary, interactive]);
@@ -1094,6 +1110,7 @@ function ManagedSessionsContent({
         text: submittedText,
         draftText: composerRef.current?.getText(),
         sessionId,
+        workspaceId: summary?.workspace?.workspaceId,
         ...(input.some(
           (block) =>
             block.type !== 'input_text' || block.text !== submittedText,
@@ -1615,6 +1632,7 @@ function ManagedSessionsContent({
   return (
     <div
       ref={pageRef}
+      tabIndex={-1}
       className={`flex h-full min-h-0 flex-col ${home ? '' : 'gap-3'}`}
     >
       {/* The uncertain-request row unmounts on the Discard click itself, so
@@ -1626,20 +1644,24 @@ function ManagedSessionsContent({
         home &&
         provider.lifecycle &&
         archivedNavigationTarget &&
-        createPortal(
-          <ManagedArchivedSessions
-            key={listRevision}
-            provider={provider}
-            clientId={clientId}
-            sessionId={sessionId}
-            active={navigationActive}
-            onSelectSession={openSession}
-            renderSessionActions={sessionActions}
-            onSessionsChange={setArchivedSummaries}
-            onStatusChange={onArchivedSessionsStatusChange}
-          />,
-          archivedNavigationTarget,
-        )}
+        (() => {
+          const archived = (
+            <ManagedArchivedSessions
+              key={listRevision}
+              provider={provider}
+              clientId={clientId}
+              sessionId={sessionId}
+              active={navigationActive}
+              onSelectSession={openSession}
+              renderSessionActions={sessionActions}
+              onSessionsChange={setArchivedSummaries}
+              onStatusChange={onArchivedSessionsStatusChange}
+            />
+          );
+          return renderArchivedNavigation
+            ? renderArchivedNavigation(archived)
+            : createPortal(archived, archivedNavigationTarget);
+        })()}
       {confirmation && (
         <ManagedLifecycleConfirmation
           {...confirmation}
@@ -1739,14 +1761,20 @@ function ManagedSessionsContent({
           ? null
           : home
             ? navigationTarget
-              ? createPortal(navigation, navigationTarget)
+              ? renderNavigation
+                ? renderNavigation(navigation)
+                : createPortal(navigation, navigationTarget)
               : null
             : navigation}
         <section
           className={`${shellStyles.chatPane} ${home ? '' : 'gap-3'}`}
           data-managed-home={home || undefined}
           data-managed-empty={
-            home && messages.length === 0 && !summary?.failure
+            home &&
+            messages.length === 0 &&
+            !detail.loading &&
+            !busy &&
+            !summary?.failure
               ? true
               : undefined
           }
@@ -2054,7 +2082,24 @@ function ManagedSessionsContent({
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => onSelectSession(pending?.sessionId)}
+                onClick={() => {
+                  if (!pending) return;
+                  // An unconfirmed create has no owning Session yet: its home is
+                  // the new-conversation page, not a Session open.
+                  if (pending.sessionId === undefined) {
+                    onSelectSession(undefined);
+                    setError(undefined);
+                    return;
+                  }
+                  const ownerWorkspaceId =
+                    pending.workspaceId ??
+                    lifecycleSummaries.find(
+                      (session) => session.sessionId === pending.sessionId,
+                    )?.workspace?.workspaceId;
+                  const targetWorkspaceId =
+                    ownerWorkspaceId ?? summary?.workspace?.workspaceId;
+                  openSession(pending.sessionId, targetWorkspaceId);
+                }}
               >
                 {t('managed.openPendingOwner')}
               </Button>
@@ -2771,7 +2816,7 @@ function ManagedSessionsContent({
             restoreFocus={() => {
               if (taskTriggerRef.current?.isConnected)
                 taskTriggerRef.current.focus();
-              else sessionsNavRef.current?.focus();
+              else (sessionsNavRef.current ?? pageRef.current)?.focus();
             }}
           />
         )}

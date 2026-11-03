@@ -397,19 +397,90 @@ describe('ManagedSessionsPage', () => {
     });
     const oldSignal = mocks.client.getSession.mock.calls[0][1]
       .signal as AbortSignal;
+    // Only the provider changes: a session switch alone would abort the old
+    // signal and filter the late transcript by id, so it could not pin the
+    // provider teardown a short-lived token refresh depends on.
     const next = { ...provider, storageKey: 'tenant-b:actor-b' };
-    await render('s2', 'en', next, undefined, true, { hostSessionOnly: true });
+    await render('s1', 'en', next, undefined, true, { hostSessionOnly: true });
     expect(oldSignal.aborted).toBe(true);
     await act(async () => {
       resolveOld({ events: [event(1, 'Private old scope')], lastEventId: 1 });
       await flush();
     });
     expect(container.textContent).not.toContain('Private old scope');
-    expect(mocks.editorProps?.composerScopeKey).toContain(
-      'tenant-b:actor-b:s2',
+    expect(mocks.editorProps?.composerScopeKey).toBe(
+      'managed:tenant-b:actor-b:s1',
     );
     expect(mocks.client.listSessions).not.toHaveBeenCalled();
     expect(mocks.client.createSession).not.toHaveBeenCalled();
+  });
+
+  it('keeps focus inside the host page when a discard has no composer to focus', async () => {
+    provider = { ...provider, canCancel: false };
+    const key = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}:host:s1`;
+    sessionStorage.setItem(
+      key,
+      JSON.stringify({
+        idempotencyKey: 'host-pending',
+        sessionId: 's1',
+        text: 'Host request',
+      }),
+    );
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', { capabilities: { canSend: false, canCancel: false } }),
+    );
+    await render('s1', 'en', provider, undefined, true, {
+      hostSessionOnly: true,
+    });
+    expect(container.textContent).toContain('not confirmed as submitted');
+    await click('Discard this request');
+    // Host mode renders no session-list nav, so the focus fallback must land on
+    // the page wrapper rather than dropping to <body>.
+    expect(document.activeElement).not.toBe(document.body);
+    expect(container.contains(document.activeElement)).toBe(true);
+  });
+
+  it('measures the host page after waiting for an explicit Session ID', async () => {
+    const width = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect');
+    const host = { hostSessionOnly: true };
+    try {
+      await render(undefined, 'en', provider, undefined, true, host);
+      expect(
+        container.querySelector('[data-managed-host-waiting]'),
+      ).not.toBeNull();
+      width.mockReturnValue({ width: 1400 } as DOMRect);
+      await render('s1', 'en', provider, undefined, true, host);
+      // The waiting state renders no page wrapper, so the measurement must run
+      // again once the host supplies an ID; otherwise wideTasks stays false and
+      // the task panel opens as a blocking dialog on a wide host.
+      expect(width).toHaveBeenCalled();
+      provider = {
+        ...provider,
+        tasks: {
+          ...provider.tasks!,
+          list: vi.fn().mockResolvedValue({ data: [task], hasMore: false }),
+        },
+      };
+      mocks.client.getSession.mockResolvedValue(
+        summary('s1', {
+          capabilities: { canSend: true, canCancel: false, tasks: true },
+        }),
+      );
+      await render('s1', 'en', provider, undefined, true, host);
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-web-shell-environment-toggle]',
+          )!
+          .click();
+        await flush();
+      });
+      expect(
+        container.querySelector('[data-managed-task-panel="side"]'),
+      ).not.toBeNull();
+    } finally {
+      width.mockRestore();
+    }
   });
 
   it('uses the host capability to keep a single-turn session read-only', async () => {
@@ -4025,19 +4096,123 @@ describe('ManagedSessionsPage', () => {
     },
   );
 
+  it('replaces the welcome with the failure banner for an empty failed Session', async () => {
+    mocks.client.getTranscript.mockResolvedValue({
+      events: [],
+      lastEventId: 0,
+    });
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        failure: { code: 'runtime_lost', message: 'Runtime lost' },
+      }),
+    );
+    await render('s1');
+    const alerts = [...container.querySelectorAll('[role="alert"]')];
+    expect(alerts.map((alert) => alert.textContent)).toEqual([
+      '⚠Runtime lost',
+    ]);
+    expect(container.textContent).not.toContain('Welcome to');
+  });
+
+  it('does not mark a selected Session empty while its transcript is loading', async () => {
+    let resolveTranscript!: (value: ManagedAgentSessionTranscript) => void;
+    mocks.client.getTranscript.mockImplementationOnce(
+      () =>
+        new Promise<ManagedAgentSessionTranscript>((resolve) => {
+          resolveTranscript = resolve;
+        }),
+    );
+    const navigationTarget = document.createElement('nav');
+    document.body.appendChild(navigationTarget);
+    try {
+      await render('s1', 'en', provider, navigationTarget);
+      // The transcript is still in flight: centering here would snap back to a
+      // full-height top-aligned list once the history lands.
+      expect(
+        container
+          .querySelector('[data-managed-home]')
+          ?.getAttribute('data-managed-empty'),
+      ).toBeNull();
+      await act(async () => {
+        resolveTranscript({ events: [], lastEventId: 0 });
+        await flush();
+      });
+      expect(container.textContent).toContain('Welcome to');
+    } finally {
+      navigationTarget.remove();
+    }
+  });
+
+  it('isolates host pending records per Session and clears notices on a switch', async () => {
+    const host = { hostSessionOnly: true };
+    const base = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}`;
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        capabilities: {
+          canSend: false,
+          canCancel: false,
+        },
+      }),
+    );
+    sessionStorage.setItem(
+      `${base}:host:s1`,
+      JSON.stringify({
+        idempotencyKey: 'host-s1',
+        sessionId: 's1',
+        text: 'Only for session A',
+      }),
+    );
+    await render('s1', 'en', provider, undefined, true, host);
+    expect(container.textContent).toContain('not confirmed as submitted');
+    expect(container.textContent).not.toContain(
+      'Another conversation has an unconfirmed request',
+    );
+
+    await render('s2', 'en', provider, undefined, true, host);
+    // A per-Session key keeps session A's pending send out of session B
+    // entirely; a shared key would disable B behind a foreign-request banner.
+    expect(container.textContent).not.toContain('not confirmed as submitted');
+    expect(container.textContent).not.toContain(
+      'Another conversation has an unconfirmed request',
+    );
+    expect(sessionStorage.getItem(`${base}:host:s1`)).not.toBeNull();
+  });
+
+  it('drops a host notice when the host switches to another Session', async () => {
+    const host = { hostSessionOnly: true };
+    const base = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}`;
+    sessionStorage.setItem(
+      `${base}:host:s1`,
+      JSON.stringify({ storage: 'indexeddb', pendingId: 'missing' }),
+    );
+    await render('s1', 'en', provider, undefined, true, host);
+    expect(container.textContent).toContain('may already have been submitted');
+    vi.spyOn(pendingStorage, 'saveManagedPending').mockResolvedValueOnce(false);
+    await click('Discard this request');
+    expect(container.textContent).toContain('Could not discard this request.');
+
+    await render('s2', 'en', provider, undefined, true, host);
+    // `error` describes session A and no list/detail read depends on sessionId
+    // here, so only the switch effect can retire it.
+    expect(container.textContent).not.toContain(
+      'Could not discard this request.',
+    );
+  });
+
   it('marks the managed home conversation as empty only without messages or failure', async () => {
     mocks.client.getTranscript.mockResolvedValue({
       events: [],
       lastEventId: 0,
     });
-    await render('s1', 'en', provider, undefined, true, {
-      hostSessionOnly: true,
-    });
+    const navigationTarget = document.createElement('nav');
+    document.body.appendChild(navigationTarget);
+    await render(undefined, 'en', provider, navigationTarget);
     expect(
       container
         .querySelector('[data-managed-home]')
         ?.getAttribute('data-managed-empty'),
     ).toBe('true');
+    navigationTarget.remove();
 
     await act(async () => root.unmount());
     container.remove();
@@ -4045,16 +4220,23 @@ describe('ManagedSessionsPage', () => {
     document.body.appendChild(container);
     root = createRoot(container);
     mocks.client.getSession.mockImplementation(async (id: string) =>
-      id === 's1' ? { ...summary(id), failure: 'runtime lost' } : summary(id),
+      id === 's1'
+        ? {
+            ...summary(id),
+            failure: { code: 'runtime_lost', message: 'Runtime lost' },
+          }
+        : summary(id),
     );
-    await render('s1', 'en', provider, undefined, true, {
-      hostSessionOnly: true,
-    });
+    const failureTarget = document.createElement('nav');
+    document.body.appendChild(failureTarget);
+    await render('s1', 'en', provider, failureTarget);
+    expect(container.textContent).toContain('Runtime lost');
     expect(
       container
         .querySelector('[data-managed-home]')
         ?.getAttribute('data-managed-empty'),
     ).toBeNull();
+    failureTarget.remove();
   });
 
   it('renders Chinese Managed labels and states without English fallback overriding them', async () => {
@@ -4239,6 +4421,14 @@ describe('ManagedSessionsPage', () => {
   }
 
   it('preserves another session draft when opening the owner of a restored pending prompt', async () => {
+    mocks.client.listSessions.mockResolvedValue({
+      sessions: [
+        summary('s1', {
+          workspace: { workspaceId: 'workspace-a', cwdRelative: '.' },
+        }),
+        summary('s2'),
+      ],
+    });
     seedPending({
       idempotencyKey: 'restored-a',
       sessionId: 's1',
@@ -4256,7 +4446,45 @@ describe('ManagedSessionsPage', () => {
     expect(container.querySelector('textarea')?.value).toBe(
       'Saved draft for session B',
     );
-    expect(onSelect).toHaveBeenLastCalledWith('s1');
+    expect(onSelect).toHaveBeenLastCalledWith('s1', 'workspace-a');
+  });
+
+  it('preserves a live pending owner workspace and the foreign draft after switching away', async () => {
+    const pendingKey = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}`;
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          workspaceTurns: true,
+        },
+        workspace: { workspaceId: `workspace-${id}`, cwdRelative: '.' },
+      }),
+    );
+    mocks.client.submitPrompt.mockRejectedValueOnce(
+      new TypeError('Lost response'),
+    );
+    await render('s1');
+    await input('For workspace A');
+    await click('Send');
+    expect(sessionStorage.getItem(pendingKey)).toContain(
+      '"workspaceId":"workspace-s1"',
+    );
+    mocks.restoreEditorDraft.mockReturnValue('Saved draft for session B');
+    await render('s2');
+    expect(container.textContent).toContain(
+      'Another conversation has an unconfirmed request',
+    );
+
+    await click('Open the original conversation');
+
+    expect(onSelect).toHaveBeenLastCalledWith('s1', 'workspace-s1');
+    expect(container.querySelector('textarea')?.value).toBe(
+      'Saved draft for session B',
+    );
+    await render('s1');
+    expect(container.textContent).toContain('not confirmed as submitted');
+    expect(container.querySelector('textarea')?.value).toBe('For workspace A');
   });
 
   it.each(['  For session A  ', 'A newer different draft'])(

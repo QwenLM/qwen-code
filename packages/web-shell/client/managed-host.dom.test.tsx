@@ -97,7 +97,17 @@ it('accepts a real composer submission without a public durable operation ID', a
     );
     expect(editor.state.doc.toString()).toBe('');
     expect(container.querySelector('[role="alert"]')).toBeNull();
-    expect(container.textContent).not.toContain('unconfirmed');
+    // Name the row the assertion excludes: the pending notice is a status
+    // region, so the alert check above does not cover it, and the copy no
+    // longer contains the word "unconfirmed".
+    expect(container.textContent).not.toContain(
+      'The previous message was not confirmed as submitted.',
+    );
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (button) => button.textContent === 'Retry the same request',
+      ),
+    ).toBe(false);
     expect(unsupported).not.toHaveBeenCalled();
     expect(unexpectedFetch).not.toHaveBeenCalled();
   } finally {

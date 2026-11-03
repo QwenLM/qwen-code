@@ -13,7 +13,9 @@ implements transport, authentication, authorization and actual browser acceptanc
 
 `ManagedAgentWebShell` accepts `managedAgentProvider?: ManagedAgentProvider` and
 `hostSessionOnly?: boolean` (default `false`). An injected provider is used
-without constructing the Java provider; omission preserves Java behavior.
+without constructing the Java provider, and `baseUrl` is only required on the
+Java path. With neither a provider nor a `baseUrl` the entry renders the
+unavailable notice instead of constructing a client against `/undefined/...`.
 
 Host-only mode opens only the explicit `sessionId`. Missing IDs render an empty
 conversation region, without listing, choosing or creating Sessions. The internal
@@ -43,16 +45,34 @@ container and scoped CSS retain their existing implementation.
 `{ update(nextProps), unmount() }`. Updates replace the complete props object.
 The host owns the container and calls `unmount()` on disposal. No daemon provider,
 service or alternate conversation page is introduced. Containers inside a ShadowRoot
-reuse existing Web Shell style adoption and release adopted styles on unmount.
+reuse existing Web Shell style adoption and release adopted styles on unmount;
+release is idempotent so a second disposal cannot strip a sibling mount's sheet.
+
+Navigation slots may live outside the shell container. Compiled CSS only matches
+the shell and portal scopes, so the entry wraps each portaled list in a
+`data-web-shell-portal-root` container and copies the shell's custom properties,
+theme class and language onto it. `onArchivedSessionsStatusChange` is routed
+through a ref so an inline host callback cannot retrigger the status effect.
+
+The empty-state rule centers with auto margins on the content wrapper rather
+than `justify-content: center`, keeping the session header at the top and its
+content reachable when the group is taller than the pane. The marker is only set
+for an idle, non-failed conversation with an empty transcript, so loading and the
+first send do not center and then snap back. Returning to a pending request's
+owner routes through the shared open path and carries the owning workspace id.
 
 ## Build and constraints
 
 Run `npx vite build --config vite.lib.config.ts --mode managed-host` from
-`packages/web-shell`. Output is `dist/managed-host/index.js` with relative chunks.
+`packages/web-shell`. Output is `dist-managed-host/index.js` with relative chunks.
 This separate mode bundles React, React DOM and runtime dependencies and reuses
 the existing CSS scoping and injection plugin. Serve the complete output directory
 with JavaScript MIME types; no import map or separate CSS import is required.
 The normal default and transcript builds keep their previous entry/external rules.
+The mode runs as part of the package `build`, so ordinary CI builds catch it
+rotting, and its output lives outside `dist/` so the app build's `emptyOutDir`
+cannot delete a bundle a host is already serving. It stays out of `exports` and
+`files`, so the published package still does not advertise it.
 
 The full-page host entry (`--mode app-host`) was removed from this PR: it had
 no build wiring, no test coverage, and hardcoded host-specific sidebar/footer
@@ -68,3 +88,9 @@ the unconditional catalog effect fails the host-only request assertion; restorin
 creation without an ID fails the no-ID composer assertion. Package typecheck and
 both default and managed-host builds validate integration. Real browser acceptance
 is delegated to the host agent; no browser or cloud operation is performed here.
+
+The follow-up additionally pins: an injected provider without `baseUrl`, a stable
+archived-status callback across host rerenders, scoped wrappers and theme
+variables in host slots, a pending-owner redirect that keeps the owning workspace
+after the catalog drops it, and a repeated style release leaving a sibling mount
+styled.

@@ -5,7 +5,9 @@ Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 
 
 ## 宿主已有 Managed Session
 
-`ManagedAgentWebShell` 支持注入 `managedAgentProvider`，省略时仍创建 Java provider。
+`ManagedAgentWebShell` 支持注入 `managedAgentProvider`；省略时按 `baseUrl` 创建 Java
+provider，注入 provider 时不需要 `baseUrl`。两者都缺省时渲染不可用提示，不会向
+`/undefined/...` 发请求。
 宿主传 `hostSessionOnly: true` 时只打开显式给定的 `sessionId`，隐藏内部会话列表、
 New 与列表刷新；没有 ID 时等待宿主选择，不自动选择或创建。官方消息列表和 composer
 沿用 provider 的真实 capabilities；四 API 宿主应设置 `canCancel: false`、省略不支持的
@@ -27,10 +29,13 @@ const shell = renderManagedAgentWebShell(container, {
 ```
 
 在包内执行 `npx vite build --config vite.lib.config.ts --mode managed-host`，输出
-`dist/managed-host/index.js` 及相对 chunks，已 bundle React/React DOM 和运行时依赖，
+`dist-managed-host/index.js` 及相对 chunks，已 bundle React/React DOM 和运行时依赖，
 复用原有 scoped CSS 注入，无需单独 CSS 或 import map。需提供整个输出目录。
-该入口仅随源码提供：没有接入 `build`、`exports` 和 `files`，不随 npm 包发布（
-`dist/types/managed-host.d.ts` 也在发布产物之外），需要时按上述命令自行构建。
+该模式已接入包的 `build`，因此常规 CI 构建会覆盖它；产物目录在 `dist/` 之外，
+普通应用构建清空 `dist/` 不会删掉它。入口仍未接入 `exports` 和 `files`，不随 npm
+包发布（`dist/types/managed-host.d.ts` 也在发布产物之外）。
+`navigationTarget` / `archivedNavigationTarget` 指向 shell 容器之外的宿主插槽时，
+入口会把列表包进带作用域标记的容器并同步主题变量，宿主无需自行引入 CSS。
 自定义 provider 的 `storageKey` 必须包含租户/账号身份；切换身份时更换 provider 与
 storageKey，旧 scope 沿用的 ID 会先丢弃，再由宿主显式给出新选择。详见
 [宿主接入设计](../../docs/design/2026-10-29-managed-host-webshell.zh-CN.md)。

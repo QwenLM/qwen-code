@@ -12,7 +12,8 @@
 
 `ManagedAgentWebShell` 接受 `managedAgentProvider?: ManagedAgentProvider` 和
 `hostSessionOnly?: boolean`（默认 `false`）。注入 provider 时直接使用，不构造 Java
-provider；省略时保留 Java 行为。
+provider，`baseUrl` 仅在 Java 路径上必填。两者都缺省时渲染不可用提示，不会针对
+`/undefined/...` 构造客户端。
 
 host-only 仅打开显式的 `sessionId`。没有 ID 时渲染空对话区域，不查询、自动选择或
 创建会话。隐藏内部列表、New 与列表刷新。已有会话只通过 `getSession`、
@@ -34,16 +35,30 @@ Session ID 隔离。短期 token 刷新应保持 provider 身份稳定。品牌�
 `renderManagedAgentWebShell(container, props)` 创建 React root，返回
 `{ update(nextProps), unmount() }`。更新替换完整 props 对象。宿主拥有容器并在销毁时
 调用 `unmount()`。不引入 daemon provider、服务或替代对话页面。容器位于 ShadowRoot 时复用
-已有 Web Shell 样式 adoption，unmount 时释放注入样式。
+已有 Web Shell 样式 adoption，unmount 时释放注入样式；释放是幂等的，重复销毁不会
+摘掉兄弟挂载仍在使用的样式表。
+
+导航插槽可以位于 shell 容器之外。编译后的 CSS 只匹配 shell 与 portal 作用域，因此
+入口把每个 portal 出去的列表包进 `data-web-shell-portal-root` 容器，并把 shell 的
+自定义属性、主题 class 与语言同步上去。`onArchivedSessionsStatusChange` 经 ref 转发，
+宿主内联回调不会反复触发状态 effect。
+
+空态规则改用内容容器上的 auto margin 居中，而不是 `justify-content: center`，
+会话头部因此留在顶部，且内容高于容器时顶部仍可滚动到达。该标记只在转录为空、空闲、
+无失败态时设置，加载中和首次发送不会先居中再跳回。返回未决请求的归属会话走统一的
+打开路径，并带上归属工作区 id。
 
 ## 构建与约束
 
 在 `packages/web-shell` 运行
 `npx vite build --config vite.lib.config.ts --mode managed-host`。产物为
-`dist/managed-host/index.js` 及相对 chunks。独立模式 bundle React、React DOM 与运行时
+`dist-managed-host/index.js` 及相对 chunks。独立模式 bundle React、React DOM 与运行时
 依赖，复用已有 CSS 隔离和注入插件。宿主需按 JavaScript MIME 类型提供完整产物目录，
 无需 import map 或单独 CSS import。普通 default 与 transcript 构建保持既有入口和 external
 规则。
+该模式已接入包的 `build`，常规 CI 构建即可发现它腐坏；产物目录在 `dist/` 之外，
+应用构建的 `emptyOutDir` 不会删掉宿主正在使用的产物。它仍未接入 `exports` 与 `files`，
+发布包不会对外声明该入口。
 
 整页宿主入口（`--mode app-host`）已从本 PR 移除：它没有构建接线、没有测试覆盖、
 硬编码了特定宿主的侧栏/footer 配置。等有明确消费者后，可以在后续 PR 中补上
@@ -56,3 +71,7 @@ React 集成测试覆盖已有 ID 的加载和发送、不访问列表/创建/da
 host-only 请求断言失败；恢复无 ID 创建会触发无 ID 输入框断言失败。包内 typecheck 与
 普通、managed-host 构建验证集成。真实浏览器验收由宿主 agent 执行；此处不进行浏览器或
 云端操作。
+
+后续修复另外固定了：注入 provider 时可省略 `baseUrl`、宿主重渲染时归档状态回调保持
+稳定、宿主插槽具备作用域容器与主题变量、目录丢失归属会话后跳转仍保留归属工作区，
+以及重复释放样式后兄弟挂载仍有样式。

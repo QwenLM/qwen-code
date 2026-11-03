@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 
-import { act, startTransition, Suspense } from 'react';
+import {
+  act,
+  startTransition,
+  Suspense,
+  type ComponentProps,
+  type ReactNode,
+} from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -11,6 +17,7 @@ const captured = vi.hoisted(() => ({
   requests: [] as Array<Promise<unknown>>,
   // Providers from commits only — a discarded render never fires an effect.
   committed: [] as unknown[],
+  navigation: null as unknown,
 }));
 
 vi.mock('./components/managed/ManagedSessionsPage', async () => {
@@ -19,9 +26,13 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
     ManagedSessionsPage: (props: unknown) => {
       captured.props = props;
       captured.renders.push(props);
-      const { managedAgentProvider } = props as {
+      const { managedAgentProvider, renderNavigation } = props as {
         managedAgentProvider: ManagedAgentProvider;
+        renderNavigation?: (navigation: unknown) => unknown;
       };
+      captured.navigation = renderNavigation
+        ? renderNavigation(<nav>host list</nav>)
+        : null;
       // Issues a request from a child effect whenever the provider identity
       // changes — the same trigger ManagedSessionsContent's list effect has.
       useEffect(() => {
@@ -31,12 +42,30 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
             managedAgentProvider.listSessions({ clientId: 'probe', limit: 1 }),
           );
       }, [managedAgentProvider]);
-      return <div>managed-only</div>;
+      return (
+        <div>
+          managed-only
+          {captured.navigation as ReactNode}
+        </div>
+      );
     },
   };
 });
 
+vi.mock('./components/managed/java-managed-agent-provider', async () => {
+  const actual = await import(
+    './components/managed/java-managed-agent-provider'
+  );
+  return {
+    ...actual,
+    createJavaManagedAgentProvider: vi.fn(
+      actual.createJavaManagedAgentProvider,
+    ),
+  };
+});
+
 import { ManagedAgentWebShell } from './ManagedAgentWebShell';
+import { createJavaManagedAgentProvider } from './components/managed/java-managed-agent-provider';
 import shellStyles from './App.module.css';
 import { artifact } from './components/managed/managed-tool-result.test-fixtures';
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
@@ -50,6 +79,8 @@ describe('ManagedAgentWebShell', () => {
     captured.probeRequests = false;
     captured.requests = [];
     captured.committed = [];
+    captured.navigation = null;
+    vi.mocked(createJavaManagedAgentProvider).mockClear();
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -101,6 +132,56 @@ describe('ManagedAgentWebShell', () => {
     await render(second);
     expect(captured.props).toMatchObject({ sessionId: undefined });
     expect(fetchImpl).not.toHaveBeenCalled();
+    expect(createJavaManagedAgentProvider).not.toHaveBeenCalled();
+  });
+
+  it('renders the unavailable notice without a provider or base URL', async () => {
+    await act(async () => root.render(<ManagedAgentWebShell />));
+    expect(createJavaManagedAgentProvider).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('managed-only');
+  });
+
+  it('wraps a host navigation slot in the portal scope and syncs theme variables', async () => {
+    const provider = { storageKey: 'slot-scope' } as ManagedAgentProvider;
+    const navigationTarget = document.createElement('div');
+    document.body.appendChild(navigationTarget);
+    try {
+      await act(async () =>
+        root.render(
+          <ManagedAgentWebShell
+            managedAgentProvider={provider}
+            navigationTarget={navigationTarget}
+            language="zh-CN"
+          />,
+        ),
+      );
+      const slot = navigationTarget.firstElementChild as HTMLElement;
+      expect(slot.hasAttribute('data-web-shell-portal-root')).toBe(true);
+      expect(slot.hasAttribute('data-web-shell-shadcn')).toBe(true);
+      expect(slot.classList.contains('dark')).toBe(true);
+      expect(slot.lang).toBe('zh-CN');
+      expect(slot.textContent).toBe('host list');
+      await act(async () =>
+        root.render(
+          <ManagedAgentWebShell
+            managedAgentProvider={provider}
+            navigationTarget={navigationTarget}
+            theme="light"
+            language="en"
+            style={{ ['--background' as string]: 'oklch(0.9 0 0)' }}
+          />,
+        ),
+      );
+      expect(slot.classList.contains('dark')).toBe(false);
+      expect(slot.lang).toBe('en');
+      // The host slot lives outside the shell, so it only inherits theme tokens
+      // if the entry copies them across.
+      expect(slot.style.getPropertyValue('--background')).toBe(
+        'oklch(0.9 0 0)',
+      );
+    } finally {
+      navigationTarget.remove();
+    }
   });
 
   it('discards internal selection when a host takes ownership without an ID', async () => {
@@ -542,7 +623,7 @@ describe('ManagedAgentWebShell', () => {
     ).toBe(true);
   });
 
-  it('forwards the navigation slot props unchanged to the sessions page', async () => {
+  it('forwards navigation slots and stabilizes archived status callbacks', async () => {
     const provider = { storageKey: 'navigation-props' } as ManagedAgentProvider;
     const navigationTarget = document.createElement('nav');
     const archivedNavigationTarget = document.createElement('section');
@@ -562,9 +643,54 @@ describe('ManagedAgentWebShell', () => {
     expect(captured.props).toMatchObject({
       navigationTarget,
       archivedNavigationTarget,
-      onArchivedSessionsStatusChange,
       navigationActive: false,
       navigationSearch: 'release',
+    });
+    const forwardedStatus = (
+      captured.props as {
+        onArchivedSessionsStatusChange: NonNullable<
+          ComponentProps<
+            typeof ManagedAgentWebShell
+          >['onArchivedSessionsStatusChange']
+        >;
+      }
+    ).onArchivedSessionsStatusChange;
+    const status = { count: 2, loading: false, error: false };
+    await act(async () => forwardedStatus(status));
+    expect(onArchivedSessionsStatusChange).toHaveBeenCalledWith(status);
+    const nextStatusChange = vi.fn();
+    await act(async () =>
+      root.render(
+        <ManagedAgentWebShell
+          managedAgentProvider={provider}
+          navigationTarget={navigationTarget}
+          archivedNavigationTarget={archivedNavigationTarget}
+          onArchivedSessionsStatusChange={nextStatusChange}
+          navigationActive={false}
+          navigationSearch="release"
+        />,
+      ),
+    );
+    expect(captured.props).toMatchObject({
+      onArchivedSessionsStatusChange: forwardedStatus,
+    });
+    const nextStatus = { count: 3, loading: false, error: false };
+    await act(async () => forwardedStatus(nextStatus));
+    expect(nextStatusChange).toHaveBeenCalledWith(nextStatus);
+    expect(onArchivedSessionsStatusChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts an injected provider without a Java base URL', async () => {
+    const provider = { storageKey: 'injected' } as ManagedAgentProvider;
+    const props: ComponentProps<typeof ManagedAgentWebShell> = {
+      managedAgentProvider: provider,
+      hostSessionOnly: true,
+      sessionId: 'existing',
+    };
+    await act(async () => root.render(<ManagedAgentWebShell {...props} />));
+    expect(captured.props).toMatchObject({
+      managedAgentProvider: provider,
+      sessionId: 'existing',
     });
   });
 

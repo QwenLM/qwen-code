@@ -282,7 +282,9 @@ export default defineConfig(({ mode }) => ({
   },
   build: {
     emptyOutDir: false,
-    outDir: mode === 'managed-host' ? 'dist/managed-host' : 'dist',
+    // Outside `dist/`: the app build empties that directory, which would
+    // silently delete a host bundle a maintainer had just produced.
+    outDir: mode === 'managed-host' ? 'dist-managed-host' : 'dist',
     // Same floor as the app build: the lib bundle minifies the same xterm
     // (it is not external), and Vite 5's default target lowers its logical
     // assignments into code that throws on the first mode query. Also covers
