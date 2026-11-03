@@ -83,6 +83,25 @@ function canonicalChart(title = 'Weekly orders'): string {
   });
 }
 
+function canonicalGraphChart(): string {
+  return JSON.stringify({
+    version: 1,
+    renderer: 'echarts',
+    data: {
+      kind: 'inline',
+      shape: 'graph',
+      source: {
+        nodes: [
+          { id: 'orders', name: 'Orders', category: 'sales' },
+          { id: 'billing', name: 'Billing', category: 'finance' },
+        ],
+        links: [{ source: 'orders', target: 'billing', value: 3 }],
+      },
+    },
+    spec: { series: [{ type: 'graph' }] },
+  });
+}
+
 function chartTree({
   content,
   registry,
@@ -677,6 +696,93 @@ describe('Web Shell markdown-chart integration', () => {
     });
     container.remove();
     expect(instance.dispose).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the card and falls back to the data view when the renderer mount fails', async () => {
+    const runtime = {
+      init: vi.fn(() => {
+        throw new Error('mount exploded');
+      }),
+    };
+    const onError = vi.fn();
+    const registry = createMarkdownChartRegistry({
+      loadECharts: async () => runtime,
+      resizeObserver: false,
+    });
+    const { container } = await mount(
+      <I18nProvider language="en">
+        <WebShellCustomizationProvider
+          value={{ markdown: { chart: { registry, onError } } }}
+        >
+          <Markdown
+            content={`\`\`\`markdown-chart\n${canonicalChart()}\n\`\`\``}
+            source="assistant"
+          />
+        </WebShellCustomizationProvider>
+      </I18nProvider>,
+    );
+    await flushChart();
+
+    expect(runtime.init).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledOnce();
+    expect(container.querySelector('.markdown-chart-card')).not.toBeNull();
+    expect(
+      container.querySelector('[data-markdown-chart-data-view="true"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'ECharts failed to render the chart',
+    );
+  });
+
+  it('localizes graph data-view tabs and column headers', async () => {
+    const { runtime } = createFakeRuntime();
+    const registry = createMarkdownChartRegistry({
+      loadECharts: async () => runtime,
+      resizeObserver: false,
+    });
+    const { container } = await mount(
+      <I18nProvider language="zh-CN">
+        <ThemeProvider value="dark">
+          <WebShellCustomizationProvider
+            value={{ markdown: { chart: { registry } } }}
+          >
+            <Markdown
+              content={`\`\`\`markdown-chart\n${canonicalGraphChart()}\n\`\`\``}
+              source="assistant"
+            />
+          </WebShellCustomizationProvider>
+        </ThemeProvider>
+      </I18nProvider>,
+    );
+    await flushChart();
+
+    const showData = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="显示数据"]',
+    );
+    expect(showData).not.toBeNull();
+    await act(async () => {
+      showData?.click();
+    });
+
+    expect(
+      Array.from(container.querySelectorAll('[role="tab"]')).map(
+        (tab) => tab.textContent,
+      ),
+    ).toEqual(['节点', '连线']);
+    expect(
+      Array.from(container.querySelectorAll('th')).map(
+        (cell) => cell.textContent,
+      ),
+    ).toEqual([
+      '名称',
+      '分类',
+      'ID',
+      '起点',
+      '终点',
+      '数值',
+      '起点 ID',
+      '终点 ID',
+    ]);
   });
 });
 

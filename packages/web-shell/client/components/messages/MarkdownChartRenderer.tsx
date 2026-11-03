@@ -205,6 +205,18 @@ function useWebShellMarkdownChartLabels(
       showChart: t('echartsChart.showChart'),
       showData: t('echartsChart.showData'),
       noData: t('echartsChart.noData'),
+      nodes: t('echartsChart.nodes'),
+      links: t('echartsChart.links'),
+      name: t('echartsChart.name'),
+      category: t('echartsChart.category'),
+      id: t('echartsChart.id'),
+      source: t('echartsChart.source'),
+      target: t('echartsChart.target'),
+      value: t('echartsChart.value'),
+      depth: t('echartsChart.depth'),
+      path: t('echartsChart.path'),
+      idPath: t('echartsChart.idPath'),
+      subtreeTotal: t('echartsChart.subtreeTotal'),
       tableNotice: ({ visibleRows, totalRows, visibleColumns, totalColumns }) =>
         t('echartsChart.tableNotice', {
           visibleRows,
