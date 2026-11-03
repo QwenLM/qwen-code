@@ -4714,6 +4714,31 @@ describe('qwen-triage verify hardening round 2', () => {
         );
         expect(run([ownReport], { ...flaky, ...env })).toBe('');
       }
+      // The exemption keys on the gate verdict, not on the rendered body.
+      // The skipped, n/a and prepare-failure bodies stay ⚠️ under `flaky`;
+      // only the gate step's condition keeps them from meeting one.
+      expect(
+        stepIn('verify', 'Flakiness gate: re-run changed test files'),
+      ).toContain(
+        `if: "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''"`,
+      );
+      // The verify lane runs only on an open PR, and a closed PR is where
+      // a results-unavailable notice can now land: either variant scopes
+      // its re-run advice to an open PR.
+      for (const [comments, env] of [
+        [[], { ...flaky, DOWNLOAD_OUTCOME: 'failure' }],
+        [[status(555, 1)], { ...closed, DOWNLOAD_OUTCOME: 'failure' }],
+      ]) {
+        writeFileSync(bodyOut, '');
+        run(comments, env);
+        const body = readFileSync(bodyOut, 'utf8');
+        expect(body).toContain(
+          'while the PR is open, re-run `@qwen-code /verify` for a fresh report',
+        );
+        expect(body).toContain(
+          'PR 未关闭时，如需完整报告请重新运行 `@qwen-code /verify`',
+        );
+      }
       // A round whose agent wrote no report.md gets the report body
       // without the marker: a notice, posted only when the gate demoted it.
       rmSync(join(art, 'report.md'));
