@@ -696,30 +696,39 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
 
   const steps = workflow.jobs.release.steps;
   const step = (name) => steps.find((item) => item.name === name);
-  const javadocRepair = step('Repair the 0.26.5 Javadoc');
-  const javadocPaths = [
+  const releaseRepair = step('Repair the 0.26.5 release inputs');
+  const verificationPom = 'packages/managed-agent-server/verification/pom.xml';
+  const repairPaths = [
     'packages/managed-agent-server/adapters/src/main/java/com/alibaba/qwen/code/runtimebroker/provisioning/ExternalRuntimeProvisioner.java',
     'packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/event/ManagedEventEnvelopes.java',
+    verificationPom,
   ];
 
-  function javadocFixture() {
-    const fixed = javadocPaths.map((file) =>
+  function releaseFixture() {
+    // The patches still target the released layout after source moves.
+    const currentPaths = [
+      'packages/managed-agent-server/runtime-external/src/main/java/com/alibaba/qwen/code/runtimebroker/provisioning/external/ExternalRuntimeProvisioner.java',
+      ...repairPaths.slice(1),
+    ];
+    const fixed = currentPaths.map((file) =>
       fs.readFileSync(path.join(root, file), 'utf8'),
     );
-    for (const [index, file] of javadocPaths.entries()) {
+    for (const [index, file] of repairPaths.entries()) {
       const target = path.join(temporary, file);
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.writeFileSync(target, fixed[index]);
     }
-    const patch = path.join(
-      temporary,
-      '.qwen/managed-release-tools/scripts/patches/managed-runtime-v0.26.5-javadoc.patch',
-    );
-    fs.mkdirSync(path.dirname(patch), { recursive: true });
-    fs.copyFileSync(
-      path.join(root, 'scripts/patches/managed-runtime-v0.26.5-javadoc.patch'),
-      patch,
-    );
+    const patches = ['javadoc', 'verification'].map((kind) => {
+      const relative = `scripts/patches/managed-runtime-v0.26.5-${kind}.patch`;
+      const patch = path.join(
+        temporary,
+        '.qwen/managed-release-tools',
+        relative,
+      );
+      fs.mkdirSync(path.dirname(patch), { recursive: true });
+      fs.copyFileSync(path.join(root, relative), patch);
+      return patch;
+    });
     const git = (...args) => {
       const result = spawnSync(
         'git',
@@ -739,19 +748,27 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
       expect(result.status, result.stderr).toBe(0);
     };
     git('init', '--quiet');
-    git('apply', '--reverse', patch);
+    git('apply', '--reverse', ...patches);
     fs.writeFileSync(path.join(temporary, 'product.java'), 'original product');
-    git('add', ...javadocPaths, 'product.java');
-    git('commit', '--quiet', '-m', 'Original 0.26.5 documentation fixture');
-    return { fixed, patch };
+    git('add', ...repairPaths, 'product.java');
+    git('commit', '--quiet', '-m', 'Pinned release input fixture');
+    return {
+      fixed,
+      patches,
+      originalPom: fs.readFileSync(
+        path.join(temporary, verificationPom),
+        'utf8',
+      ),
+    };
   }
 
-  it('repairs only the pinned 0.26.5 Javadoc before the complete build gates', () => {
-    expect(javadocRepair.if).toBe("${{ env.RELEASE_TAG == 'v0.26.5' }}");
-    expect(steps.indexOf(javadocRepair)).toBeLessThan(
+  it('repairs the pinned 0.26.5 release inputs while preserving every specialist test profile', () => {
+    expect(releaseRepair.if).toBe("${{ env.RELEASE_TAG == 'v0.26.5' }}");
+    expect(steps.indexOf(releaseRepair)).toBeLessThan(
       steps.indexOf(step('Build the matching CLI prerequisites')),
     );
-    const { fixed, patch } = javadocFixture();
+    const { fixed, patches, originalPom } = releaseFixture();
+    const [patch] = patches;
     const additions = fs
       .readFileSync(patch, 'utf8')
       .split('\n')
@@ -768,13 +785,13 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
     ).toEqual([
       '-     * decimal form while 1e-6 ≤ |x| < 1e21, exponential outside it.',
     ]);
-    const result = run(javadocRepair.run, {
+    const result = run(releaseRepair.run, {
       RELEASE_TAG: 'v0.26.5',
       SOURCE_SHA: 'db0e4e24a0d89b211b2a15f4af2be22adac71dfc',
       GITHUB_STEP_SUMMARY: path.join(temporary, 'summary'),
     });
     expect(result.status, result.stderr).toBe(0);
-    for (const [index, file] of javadocPaths.entries()) {
+    for (const [index, file] of repairPaths.entries()) {
       expect(fs.readFileSync(path.join(temporary, file), 'utf8')).toBe(
         fixed[index],
       );
@@ -782,6 +799,22 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
     expect(fs.readFileSync(path.join(temporary, 'product.java'), 'utf8')).toBe(
       'original product',
     );
+    const pom = fs.readFileSync(path.join(temporary, verificationPom), 'utf8');
+    expect(pom.slice(pom.indexOf('<profiles>'))).toBe(
+      originalPom.slice(originalPom.indexOf('<profiles>')),
+    );
+    const defaultBuild = pom
+      .slice(pom.indexOf('<build>'), pom.indexOf('<profiles>'))
+      .replace(/<pluginManagement>[\s\S]*?<\/pluginManagement>/, '');
+    expect(defaultBuild).not.toContain(
+      '<artifactId>maven-failsafe-plugin</artifactId>',
+    );
+    const packaging = (xml) =>
+      xml.match(
+        /<execution>\s*<id>artifact-packaging<\/id>[\s\S]*?<\/execution>/,
+      )?.[0];
+    expect(packaging(pom)).toBeTruthy();
+    expect(packaging(pom)).toBe(packaging(originalPom));
     expect(fs.readFileSync(path.join(temporary, 'summary'), 'utf8')).toContain(
       'original tag unchanged',
     );
@@ -790,21 +823,27 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
     );
   });
 
-  it.each(['wrong source', 'changed patch', 'dirty checkout'])(
-    'refuses the 0.26.5 Javadoc repair with %s before applying it',
+  it.each([
+    'wrong source',
+    'changed Javadoc patch',
+    'changed verification patch',
+    'dirty checkout',
+  ])(
+    'refuses the 0.26.5 release repair with %s before applying either patch',
     (failure) => {
-      const { patch } = javadocFixture();
-      if (failure === 'changed patch') {
+      const { patches } = releaseFixture();
+      if (failure.startsWith('changed ')) {
+        const patch = patches[failure === 'changed Javadoc patch' ? 0 : 1];
         fs.writeFileSync(patch, `${fs.readFileSync(patch, 'utf8')}\n`);
       }
       if (failure === 'dirty checkout') {
-        const target = path.join(temporary, javadocPaths[0]);
+        const target = path.join(temporary, repairPaths[0]);
         fs.writeFileSync(target, `${fs.readFileSync(target, 'utf8')}\n`);
       }
-      const before = javadocPaths.map((file) =>
+      const before = repairPaths.map((file) =>
         fs.readFileSync(path.join(temporary, file), 'utf8'),
       );
-      const result = run(javadocRepair.run, {
+      const result = run(releaseRepair.run, {
         RELEASE_TAG: 'v0.26.5',
         SOURCE_SHA:
           failure === 'wrong source'
@@ -813,7 +852,7 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
         GITHUB_STEP_SUMMARY: path.join(temporary, 'summary'),
       });
       expect(result.status).not.toBe(0);
-      for (const [index, file] of javadocPaths.entries()) {
+      for (const [index, file] of repairPaths.entries()) {
         expect(fs.readFileSync(path.join(temporary, file), 'utf8')).toBe(
           before[index],
         );

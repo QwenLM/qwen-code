@@ -11,6 +11,13 @@
 # Usage: check-disk-floor.sh [DIR ...]
 # With no directories, checks GITHUB_WORKSPACE and RUNNER_TEMP.
 #
+# The OS temp directory (TMPDIR, defaulting to /tmp) is ALWAYS checked in
+# addition to the caller's directories (deduplicated): on 2026-10-31 the hz
+# fleet's /tmp tmpfs hit 100% inodes while the workspace and RUNNER_TEMP sat
+# on a data disk with millions free, so every gate was green and the jobs
+# died on mkdtemp ENOSPC mid-suite. os.tmpdir() writes (node, surefire,
+# tsx, git subprocess temp files) do not follow RUNNER_TEMP.
+#
 # Floors, checked per directory's filesystem (env-overridable):
 #   DISK_FLOOR_MIN_FREE_KB      default 2097152 (2 GiB)
 #   DISK_FLOOR_MIN_FREE_INODES  default 100000
@@ -39,6 +46,20 @@ TAG="runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_AT
 
 if [ "$#" -eq 0 ]; then
   set -- "${GITHUB_WORKSPACE:-.}" "${RUNNER_TEMP:-/tmp}"
+fi
+
+# Always include the OS temp directory: it is a distinct filesystem from the
+# caller's directories on this fleet, and its exhaustion is exactly the
+# failure class this gate exists to catch before the heavy step.
+os_tmp="${TMPDIR:-/tmp}"
+for existing in "$@"; do
+  if [ "$existing" = "$os_tmp" ]; then
+    os_tmp=''
+    break
+  fi
+done
+if [ -n "$os_tmp" ]; then
+  set -- "$@" "$os_tmp"
 fi
 
 status=0
