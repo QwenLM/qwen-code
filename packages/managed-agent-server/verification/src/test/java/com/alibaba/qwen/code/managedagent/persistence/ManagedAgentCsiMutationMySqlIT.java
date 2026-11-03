@@ -195,8 +195,8 @@ class ManagedAgentCsiMutationMySqlIT {
             jdbc.update(
                     "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                             + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
-            var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
-                    new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+            var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
+                    new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             var transaction = new TransactionTemplate(manager);
             transaction.setIsolationLevel(isolation);
             transaction.setTimeout(15);
@@ -297,7 +297,7 @@ class ManagedAgentCsiMutationMySqlIT {
             jdbc.update(
                     "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                             + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
-            var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+            var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
             var transaction = new TransactionTemplate(manager);
             transaction.setIsolationLevel(isolation);
             transaction.setTimeout(15);
@@ -385,7 +385,7 @@ class ManagedAgentCsiMutationMySqlIT {
             String session = com.alibaba.qwen.code.managedagent.persistence.PrivateCsiFixture.create(jdbc, manager, json, properties,
                     new com.alibaba.qwen.code.managedagent.contracts.workspace.PrivateCsiSession.Request(registration, "actor", "original", null, null,
                             new WorkspaceSelection("workspace", "."))).sessionId();
-            var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+            var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
             var transaction = new TransactionTemplate(manager);
             var hold = manager.getTransaction(new DefaultTransactionDefinition());
             try {

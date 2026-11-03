@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
@@ -52,7 +51,7 @@ class ManagedSchemaJournalAtomicityTest {
         transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
         journal =
                 new ExtensionRecordJournal(
-                        com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)), tenant, "workspace", session);
+                        com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc), tenant, "workspace", session);
         transactions.executeWithoutResult(status -> journal.open());
     }
 

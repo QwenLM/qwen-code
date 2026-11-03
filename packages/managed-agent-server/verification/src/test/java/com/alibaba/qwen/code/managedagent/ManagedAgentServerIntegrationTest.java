@@ -213,8 +213,8 @@ class ManagedAgentServerIntegrationTest {
         ManagedWorkspaceRegistry workspaces = applicationContext.getBean(
                 ManagedWorkspaceRegistry.class);
         ManagedAgentService upgraded = new ManagedAgentService(
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, objectMapper, Clock.systemUTC(),
-                        ignored -> {}, workspaces, changed, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules())),
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, objectMapper, Clock.systemUTC(),
+                        ignored -> {}, workspaces, changed, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()),
                 applicationContext.getBean(RequestDigests.class),
                 applicationContext.getBean(HarnessCoordinator.class),
                 harness, workspaces, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
