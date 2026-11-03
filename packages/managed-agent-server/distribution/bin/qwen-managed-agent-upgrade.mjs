@@ -2612,8 +2612,12 @@ const PROBE_TIMEOUT_MS = 5000;
 // C1 byte with U+FFFD breaks the escape introducer (ESC) and keeps the row on
 // one line, while leaving the readable text intact.
 function printable(text) {
+  // A JSON value that is no string prints as its JSON: String() throws on an
+  // object whose own toString is no function, as {"toString":1} has.
+  const shown =
+    typeof text === 'string' ? text : (JSON.stringify(text) ?? String(text));
   // eslint-disable-next-line no-control-regex -- matching control bytes is the point
-  return String(text).replace(/[\u0000-\u001F\u007F-\u009F]/g, '\uFFFD');
+  return shown.replace(/[\u0000-\u001F\u007F-\u009F]/g, '\uFFFD');
 }
 
 // Why fetch rejected: fetch itself words every failure as "fetch failed", and

@@ -2513,6 +2513,21 @@ test('health reports neutralize terminal control bytes from the endpoint', async
     row.includes('PASS') && row.includes('split'),
     `readable text stays: ${row}`,
   );
+
+  // A status that is valid JSON and no string, one String() throws on, is
+  // shown as its JSON: verify still prints its row, and start keeps probing.
+  host.responses['GET /actuator/health'] = { status: { toString: 1 } };
+  assert.equal(await host.upgrade('verify'), 1);
+  assert.equal(
+    rowsOf(host.output).health,
+    'FAIL http://127.0.0.1:18080/actuator/health is not UP: HTTP 200, status {"toString":1}',
+  );
+  assert.equal(await host.upgrade('stop'), 0);
+  assert.equal(await host.upgrade('start', '--timeout', '3'), 1);
+  assert.match(
+    host.output.at(-1),
+    /within 3s \(the last answer: HTTP 200, status \{"toString":1\}\) and keeps running/,
+  );
 });
 
 test('verify sanitizes a malicious health body over a real socket', async (t) => {
@@ -2599,6 +2614,20 @@ test('verify says why an API read failed, in text the endpoint cannot steer', as
   const failed = rowsOf(host.output).session;
   assert.ok(failed.startsWith('FAIL GET /v1/agents/sessions?limit=1: 500 x'));
   assert.ok(!control.test(failed), JSON.stringify(failed));
+  // An error reason that is no string is shown as its JSON.
+  host.system.fetch = async (url, init) =>
+    url.includes('/v1/agents/sessions?limit=1')
+      ? {
+          ok: false,
+          status: 500,
+          json: async () => ({ error: { message: { toString: 1 } } }),
+        }
+      : fake(url, init);
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 1);
+  assert.equal(
+    rowsOf(host.output).session,
+    'FAIL GET /v1/agents/sessions?limit=1: 500 {"toString":1}',
+  );
   // A cause can quote what the peer sent, as a TLS alert or a parser does.
   host.system.fetch = async () => {
     throw new TypeError('fetch failed', { cause: new Error(steer) });
