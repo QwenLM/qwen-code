@@ -185,16 +185,18 @@ so the session that follows the PR handles the event with its existing context.
   for the first successful binding lookup. While the lookup has never
   succeeded — or keeps answering an **empty partial** snapshot (a draining or
   unreadable workspace) — `pollOnce` returns before fetching notifications, so
-  no GitHub event for any PR is processed; a throttled stderr line names the
+  no GitHub event is processed; a throttled stderr line names the
   state. The empty-partial deferral is bounded (30 consecutive polls): after
   that the lane opens, and events whose PR is still absent from the incomplete
   snapshot defer per-event (backpressure above) instead of taking the public
-  path — an incomplete scan never establishes that a PR is unbound. Issue
-  events are never held by the binding scan: bindings are PR-only, so an
-  issue's absence needs no snapshot and it routes publicly at once, even under
-  a permanently partial scan. Once a complete snapshot lands, deferred events
-  are re-resolved: delivered privately to a follower, or publicly once the
-  complete snapshot establishes there is none. (2) _Backpressure_: a deferred bound event keeps its own durable
+  path — an incomplete scan never establishes that a PR is unbound. That
+  per-event deferral is PR-scoped: bindings are PR-only, so once the lane is
+  open an issue event is never deferred by it (its absence needs no snapshot)
+  and routes publicly even under a permanently partial scan. The lane-level
+  cold start above still holds every notification, issue events included,
+  until the first successful binding lookup. Once a complete snapshot lands,
+  deferred events are re-resolved: delivered privately to a follower, or
+  publicly once the complete snapshot establishes there is none. (2) _Backpressure_: a deferred bound event keeps its own durable
   retry (previous bullet) while the rest of the channel continues normally.
 - The injected prompt names the comment author and marks truncation
   explicitly at every level: comment content is capped at 6,000 code points
