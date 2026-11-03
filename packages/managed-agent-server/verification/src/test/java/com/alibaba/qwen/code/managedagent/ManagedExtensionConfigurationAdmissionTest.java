@@ -220,6 +220,12 @@ class ManagedExtensionConfigurationAdmissionTest {
         assertThat(secondIds).containsAll(firstIds)
                 .contains(bundleResource.resourceId(), contributions.resourceId(), part.resourceId());
         assertThat(secondIds.size()).isGreaterThan(firstIds.size());
+        // R2-8 / R2-5: the retained seed must keep every recovery resource
+        // projected exactly once across revisions. If the dedupe is lost, the
+        // prepared commit re-projects a resource the preparing commit already
+        // retained and its id appears a second time — projection growth would
+        // then track the revision count instead of the delta.
+        assertThat(secondIds).doesNotHaveDuplicates();
     }
 
     private void commit(ExtensionRecordJournal journal, String id, String workspace, ObjectNode body,
