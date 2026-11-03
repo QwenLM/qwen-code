@@ -12790,6 +12790,47 @@ describe('App touch navigation focus', () => {
     expectChatFocus(container);
   });
 
+  it.each(['before replay', 'after replay'])(
+    'preserves panel focus when Settings opens %s during a session switch',
+    async (timing) => {
+      const { container, rerender } = renderApp();
+      await flush();
+      editorFocus.mockClear();
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="load-session"]')!
+          .click(),
+      );
+      mockConnection.sessionId = 'session-2';
+      mockConnection.loadingTranscript = true;
+      rerender();
+      await flush();
+
+      if (timing === 'after replay') {
+        mockConnection.loadingTranscript = false;
+        rerender();
+      }
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="open-sidebar-settings"]',
+          )!
+          .click(),
+      );
+      const back = container.querySelector('[data-testid="panel-back"]');
+      expect(back).not.toBeNull();
+      expect(document.activeElement).toBe(back);
+
+      if (timing === 'before replay') {
+        mockConnection.loadingTranscript = false;
+        rerender();
+      }
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+      expect(document.activeElement).toBe(back);
+      expect(editorFocus).not.toHaveBeenCalled();
+    },
+  );
+
   it('returns focus to the chat when a panel closes', async () => {
     const { container } = renderApp();
     await flush();

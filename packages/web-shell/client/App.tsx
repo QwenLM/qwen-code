@@ -8873,7 +8873,9 @@ export function App({
   const statusBarRef = useRef<StatusBarHandle>(null);
   const messageListRef = useRef<MessageListHandle | null>(null);
   const editorRef = useRef<EditorHandle | null>(null);
+  const chatFocusBlockedRef = useRef(false);
   const focusChatAfterNavigation = useCallback(() => {
+    if (chatFocusBlockedRef.current) return;
     // Keep touch navigation accessible without opening the soft keyboard.
     if (isCoarsePointerDevice()) {
       chatPaneRef.current?.focus({ preventScroll: true });
@@ -12958,6 +12960,7 @@ export function App({
   // this daemon composer; its shortcuts must not reach the Local session.
   const interactionBlocked =
     managedMode || dialogOpen || mainView !== 'chat' || artifactPanelFullscreen;
+  chatFocusBlockedRef.current = interactionBlocked;
   const mainVoiceTarget = useMemo(
     () =>
       workspaceContextActive
@@ -15664,6 +15667,7 @@ export function App({
         if (
           request !== composerFocusRequestRef.current ||
           approvalOverlayActiveRef.current ||
+          chatFocusBlockedRef.current ||
           (sessionId !== undefined &&
             connectionRef.current.sessionId !== sessionId)
         ) {
