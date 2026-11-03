@@ -78,7 +78,8 @@ guard，再锁住物理目录行，然后用 `FOR UPDATE` 扫描该目录的成�
 ## 非目标
 
 - CSI 预留、CSI 退役，以及 resident 档位的准入。`claim` 和 `release` 的
-  resident 分支保持现状，包括它的租户 guard。
+  resident 分支保持现状；它的租户 guard 由
+  [resident claim 设计](2026-11-03-managed-resident-claim-tenant-guard.zh-CN.md)单独去掉。
 - 其他领域持有的租户 guard：Runtime placement、publication、迁移 fence 的
   安装、lifecycle 准入，以及 retention 清扫。
 - 替换共享基线的主键。本设计以当前基线为前提，即
