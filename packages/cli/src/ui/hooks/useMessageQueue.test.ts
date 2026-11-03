@@ -1576,6 +1576,32 @@ describe('useMessageQueue', () => {
       expect(result.current.messageQueue).toEqual(['<envelope one>']);
     });
 
+    it('arms the barrier only on the boundary saying it will deliver', () => {
+      // The off side of the same contract as the case above: the identical
+      // queue shape — a pinned `"now"` envelope ahead of typed text — with
+      // only the third argument flipped must steer the user text. A boundary
+      // that is not delivering owes no barrier, and hardcoding either verdict
+      // (always-barrier or never-barrier) breaks one of the two cases.
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addPeerMessage('<envelope one>', 'Session A: one', {
+          msgId: 'm1',
+          from: '/tmp/peer.sock',
+          toSessionId: 's1',
+          priority: 'now',
+        });
+        result.current.addMessage('typed text');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue(false, false, false);
+      });
+      expect(drained).toEqual(['typed text']);
+      expect(result.current.messageQueue).toEqual(['<envelope one>']);
+    });
+
     it('ignores a "next" envelope as a barrier even with mid-turn delivery on', () => {
       // Gating the barrier on the setting alone is not enough: `drainPeerEntries`
       // skips a "next" by design, so this boundary takes nothing and the input
@@ -1626,6 +1652,32 @@ describe('useMessageQueue', () => {
         '<envelope one>',
         'typed text',
       ]);
+    });
+
+    it('keeps the goal-turn bypass ahead of the barrier', () => {
+      // The other half of the scan guard: while a Goal turn owns the session,
+      // `/goal` commands steer with barrier-free priority even behind an
+      // envelope this boundary is taking — deleting `goalTurnActive ||` from
+      // the scan guard would hold the command for the rest of the turn, and
+      // no other case passes both flags true.
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addPeerMessage('<envelope one>', 'Session A: one', {
+          msgId: 'm1',
+          from: '/tmp/peer.sock',
+          toSessionId: 's1',
+          priority: 'now',
+        });
+        result.current.addMessage('/goal stop');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue(false, true, true);
+      });
+      expect(drained).toEqual(['/goal stop']);
+      expect(result.current.messageQueue).toEqual(['<envelope one>']);
     });
 
     it('holds text queued behind an envelope its own steer drain promotes', () => {
@@ -1682,36 +1734,69 @@ describe('useMessageQueue', () => {
     it('keeps an entry the barrier left behind in the queue', () => {
       // `rest` is identity-based, not predicate-based. Whatever `scan` excluded
       // must stay queued whether or not it would have been drainable: reverting
-      // `rest` to `current.filter(!shouldDrain)` deletes `typed later` — it
-      // never entered `drained`, yet the predicate would drop it from the queue
-      // without steering, popping, projecting or reporting it. Reachable while
-      // the drain may take deferred entries, which is the whole `rest` contract.
+      // `rest` to a predicate filter deletes the deferred entry — it never
+      // entered `drained`, yet the predicate would drop it from the queue
+      // without steering, popping, projecting or reporting it. The drainable
+      // entry behind the barrier is a deferred USER message, so the witness
+      // stays on the raw-string channel's own terms.
       const { result } = renderHook(() => useMessageQueue());
+      const now = (msgId: string) => ({
+        msgId,
+        from: '/tmp/peer.sock',
+        toSessionId: 's1',
+        priority: 'now' as const,
+      });
 
       act(() => {
-        result.current.addPeerMessage('<envelope next>', 'Session A: next', {
-          msgId: 'm1',
-          from: '/tmp/peer.sock',
-          toSessionId: 's1',
-          priority: 'next',
-        });
-        result.current.addPeerMessage('<envelope now>', 'Session A: now', {
-          msgId: 'm2',
-          from: '/tmp/peer.sock',
-          toSessionId: 's1',
-          priority: 'now',
-        });
-        result.current.addMessage('typed later');
+        result.current.addMessage('typed first');
+        result.current.addPeerMessage(
+          '<envelope now>',
+          'Session A: now',
+          now('m1'),
+        );
+        result.current.addMessage('typed later', true);
       });
 
       let drained: string[] = [];
       act(() => {
         drained = result.current.drainQueue(true, false, true);
       });
-      // The scan stops at the envelope this boundary takes, so only the
-      // skipped "next" ahead of it is a candidate here.
-      expect(drained).toEqual(['<envelope next>']);
+      // The scan stops at the envelope this boundary takes, so only the user
+      // entry ahead of it is a candidate here; the deferred entry behind it
+      // stays queued even though `includeDeferred` would take it.
+      expect(drained).toEqual(['typed first']);
       expect(result.current.messageQueue).toEqual([
+        '<envelope now>',
+        'typed later',
+      ]);
+
+      // And peer text never rides this raw-string channel, whatever the flags
+      // say: the exclusion is structural (`!message.peer` in `shouldDrain`),
+      // so an envelope inside the drainable scan is left queued, not steered.
+      // Dropping that exclusion turns this arm red with the envelope's raw
+      // text as the drained steer.
+      act(() => {
+        result.current.clearQueue();
+        result.current.addPeerMessage('<envelope next>', 'Session A: next', {
+          msgId: 'm2',
+          from: '/tmp/peer.sock',
+          toSessionId: 's1',
+          priority: 'next',
+        });
+        result.current.addPeerMessage(
+          '<envelope now>',
+          'Session A: now',
+          now('m3'),
+        );
+        result.current.addMessage('typed later');
+      });
+      let peerDrained: string[] = [];
+      act(() => {
+        peerDrained = result.current.drainQueue(true, false, true);
+      });
+      expect(peerDrained).toEqual([]);
+      expect(result.current.messageQueue).toEqual([
+        '<envelope next>',
         '<envelope now>',
         'typed later',
       ]);
@@ -1786,9 +1871,18 @@ describe('useMessageQueue', () => {
       expect(
         result.current.firstMidTurnTakeablePeerDelivery(),
       ).not.toBeUndefined();
-      expect(
-        result.current.drainPeerEntries(1).map(({ modelText }) => modelText),
-      ).toEqual(['<envelope now>']);
+      // The only state-mutating call of this test, so it runs inside act()
+      // like its siblings: unflushed, the queue read below would still show
+      // the skipped "next" and the taken envelope.
+      let taken: ReturnType<typeof result.current.drainPeerEntries> = [];
+      act(() => {
+        taken = result.current.drainPeerEntries(1);
+      });
+      expect(taken.map(({ modelText }) => modelText)).toEqual([
+        '<envelope now>',
+      ]);
+      // The identity-based `rest` keeps the skipped "next" queued.
+      expect(result.current.messageQueue).toEqual(['<envelope next>']);
     });
 
     it('walls the takeable scan at an entry the steer drain leaves behind', () => {
@@ -1826,6 +1920,53 @@ describe('useMessageQueue', () => {
       });
       expect(result.current.firstMidTurnTakeablePeerDelivery()).toBeUndefined();
       expect(result.current.drainPeerEntries(1)).toEqual([]);
+
+      // The wall must hold through the drain layer too, not only the scan:
+      // with the wall gone the barrier sits on the envelope, `drained` comes
+      // back empty ahead of it, and the `drained.length === 0` early return
+      // freezes `typed text` behind a delivery the pop cannot make. The
+      // trailing drainable entry is what makes the two outcomes differ.
+      act(() => {
+        result.current.clearQueue();
+        result.current.addMessage('/help');
+        result.current.addPeerMessage('<envelope again>', 'Session A: now', {
+          msgId: 'm3',
+          from: '/tmp/peer.sock',
+          toSessionId: 's1',
+          priority: 'now',
+        });
+        result.current.addMessage('typed text');
+      });
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue(false, false, true);
+      });
+      expect(drained).toEqual(['typed text']);
+      expect(result.current.messageQueue).toEqual([
+        '/help',
+        '<envelope again>',
+      ]);
+
+      // Same through-drain check with the deferred entry as the wall.
+      act(() => {
+        result.current.clearQueue();
+        result.current.addMessage('typed later', true);
+        result.current.addPeerMessage('<envelope again>', 'Session A: now', {
+          msgId: 'm4',
+          from: '/tmp/peer.sock',
+          toSessionId: 's1',
+          priority: 'now',
+        });
+        result.current.addMessage('typed text');
+      });
+      act(() => {
+        drained = result.current.drainQueue(false, false, true);
+      });
+      expect(drained).toEqual(['typed text']);
+      expect(result.current.messageQueue).toEqual([
+        'typed later',
+        '<envelope again>',
+      ]);
     });
 
     it('drains leading peer envelopes with projection and delivery pin', () => {
@@ -2045,6 +2186,28 @@ describe('useMessageQueue', () => {
         '<envelope one>',
         'typed text',
       ]);
+
+      // Same restored entry with the barrier OFF: only the typed text leaves
+      // by the raw-text channel, and the restored envelope waits for its own
+      // structured route. (The peer tag alone now pins that — the structural
+      // `!message.peer` exclusion — so this is the belt to that braces.)
+      act(() => {
+        result.current.clearQueue();
+        result.current.restorePeerEntries(
+          batch.map((entry) => ({ ...entry, displayed: true })),
+        );
+        result.current.addMessage('typed text');
+      });
+      act(() => {
+        drained = result.current.drainQueue(false, false, false);
+      });
+      expect(drained).toEqual(['typed text']);
+      expect(result.current.messageQueue).toEqual(['<envelope one>']);
+      // Put the typed text back so the idle pops below see the same queue the
+      // barrier arm above left.
+      act(() => {
+        result.current.addMessage('typed text');
+      });
 
       let submission: ReturnType<typeof result.current.popNextSubmission> =
         null;

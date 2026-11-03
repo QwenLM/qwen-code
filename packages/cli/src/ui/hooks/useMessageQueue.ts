@@ -62,8 +62,12 @@ export interface QueuedPeerSubmission {
 /**
  * A peer envelope taken by the mid-turn drain. Same payload as the idle
  * submission: attribution and the recipient re-check need both fields, which
- * the raw `string[]` steer channel cannot carry. An alias, not a re-declaration,
- * so a field added to the idle submission cannot silently drop off this route.
+ * the raw `string[]` steer channel cannot carry. An alias, not a
+ * re-declaration: it pins the type relationship between the two shapes, but
+ * the conversions between them are hand-written projections (the idle pop,
+ * `drainPeerEntries`, `restorePeerEntries`), so a newly added field still has
+ * to be carried across each conversion explicitly — an optional field can
+ * silently drop even though this type says otherwise.
  */
 export type QueuedPeerSteer = Omit<QueuedPeerSubmission, 'kind'>;
 
@@ -655,7 +659,12 @@ export function useMessageQueue(): UseMessageQueueReturn {
     ): string[] => {
       const current = queueRef.current;
       if (current.length === 0) return [];
+      // Peer text never leaves by this raw-string channel: it would lose its
+      // attribution and reach user preprocessing (`addPeerMessage`). The
+      // exclusion is structural — not a `deferUntilIdle` consequence — so no
+      // `includeDeferred` caller can steer an envelope as raw text.
       const shouldDrain = (message: QueuedMessage) =>
+        !message.peer &&
         (goalTurnActive
           ? GOAL_COMMAND_RE.test(message.text)
           : !isSlashCommand(message.text)) &&
@@ -671,9 +680,9 @@ export function useMessageQueue(): UseMessageQueueReturn {
       // the window is spent — is not a barrier, because holding the user's own
       // input for the rest of the turn to keep the place of a delivery that
       // will not happen is the freeze this narrowing exists to prevent. Peer
-      // text still stays out of this raw-string channel by `deferUntilIdle`,
-      // as it always has. Goal commands keep their barrier-free priority, as
-      // they do there.
+      // text is excluded from this raw-string channel by `shouldDrain` itself,
+      // so even `includeDeferred` cannot steer an envelope as raw text. Goal
+      // commands keep their barrier-free priority, as they do there.
       const barrierIndex = peerMidTurnActive
         ? firstMidTurnTakeablePeerIndex(current, shouldDrain)
         : -1;
