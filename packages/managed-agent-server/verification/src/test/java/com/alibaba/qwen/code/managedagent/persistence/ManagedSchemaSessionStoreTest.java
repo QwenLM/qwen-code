@@ -243,7 +243,7 @@ public class ManagedSchemaSessionStoreTest {
     @Test
     void projectionCleanupPreservesJournalReferencesAndRecoveryProtection() {
         alignProjectionClock();
-        var privateBody = tx.execute(status -> com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc))
+        var privateBody = tx.execute(status -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc)
                 .publishAgentInstructions(tenant, "workspace", session, "private instructions"));
         event("big", "a".repeat(70_000));
         materialize();
@@ -459,7 +459,7 @@ public class ManagedSchemaSessionStoreTest {
 
     @Test
     void writerHeartbeatCompletesWhileMessagePageReadIsPaused() throws Exception {
-        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String token = "a".repeat(32);
         var grant = tx.execute(status -> privateStore.acquireWriter(tenant, session, token,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 60_000L)));
@@ -492,7 +492,7 @@ public class ManagedSchemaSessionStoreTest {
                 tenant,
                 session,
                 session);
-        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         assertThatThrownBy(() -> privateStore.restore(tenant, "workspace", session, token))
                 .isInstanceOfSatisfying(
                         ManagedAgentException.class,

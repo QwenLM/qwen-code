@@ -337,6 +337,9 @@ describe('ModRuntime with the real QuickJS worker', () => {
         return next(e);
       });
       on('classic.Stop', ($, e, next) => next(e));
+      // Added in Claude Code 2.1.316.
+      on('prompt.paint', ($, e, next) => next(e));
+      on('ui.place', ($, e, next) => next(e));
       on('ui.render', {component:'Spinner'}, ($, e, next) => next(e));
       on('session.start', async ($, e, next) => {
         await $.command.register({name:'hello',description:'Hello'});
@@ -347,7 +350,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
     expect(logs).toEqual([
       {
         to: 'transcript',
-        text: 'Hooks for unsupported events will not run: classic.Stop, prompt.*, prompt.edit, ui.render',
+        text: 'Hooks for unsupported events will not run: classic.Stop, prompt.*, prompt.edit, prompt.paint, ui.place, ui.render',
       },
     ]);
     expect(await runtime.runCommand('hello', '', signal())).toBe('still works');
@@ -419,7 +422,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
       {
         version: '1.2.3+wrapped',
         qwen: {
-          claudeCode: '2.1.310',
+          claudeCode: '2.1.316',
           events: [
             'clock.now',
             'clock.sleep',
