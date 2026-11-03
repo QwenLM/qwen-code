@@ -37794,6 +37794,94 @@ describe('Session', () => {
           expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
         });
 
+        it('runs the memory tasks the client skips when it finishes a user Goal turn', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'user-turn-memory',
+          };
+          mockGoalRuntime.getSnapshot.mockReturnValue(
+            activeGoalSnapshot('idle'),
+          );
+          mockGoalRuntime.beginTurn.mockReturnValue(permit);
+          mockGoalRuntime.permitForTurn.mockReturnValue(permit);
+          sharedRounds(() => [
+            { type: core.LlmEventType.Content, value: 'done' },
+          ]);
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'hello' }],
+            }),
+          ).resolves.toEqual({ stopReason: 'end_turn' });
+
+          expect(mockLlmClient.captureCacheSafeParams).toHaveBeenCalled();
+          expect(
+            mockLlmClient.runManagedAutoMemoryBackgroundTasks,
+          ).toHaveBeenCalledExactlyOnceWith(core.SendMessageType.UserQuery);
+        });
+
+        it('marks a continuation delivered at its stop when no model event follows the request', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-silent',
+          };
+          const turnKey = 'goal-runtime:turn-silent';
+          mockGoalRuntime.getSnapshot.mockReturnValue(
+            activeGoalSnapshot('running'),
+          );
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+          const sends = sharedRounds();
+          let deliveredAtStop: number | undefined;
+          const send = (
+            mockLlmClient as unknown as {
+              sendMessageStream: ReturnType<typeof vi.fn>;
+            }
+          ).sendMessageStream;
+          const pushOnly = send.getMockImplementation()!;
+          send.mockImplementation(
+            (
+              parts: Part[],
+              signal: AbortSignal,
+              promptId: string,
+              options: Record<string, unknown>,
+            ) => {
+              const inner = pushOnly(parts, signal, promptId, options);
+              return (async function* () {
+                yield* inner;
+                // The client runs its stop policies, then finishes the turn.
+                const [policy] = options['stopPolicies'] as Array<{
+                  continueAt: (stop: {
+                    promptId: string;
+                    signal: AbortSignal;
+                  }) => Promise<unknown>;
+                }>;
+                await policy.continueAt({ promptId, signal });
+                deliveredAtStop =
+                  mockGoalRuntime.markTurnDelivered.mock.calls.length;
+              })();
+            },
+          );
+
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'check weather',
+          });
+
+          await vi.waitFor(() => {
+            expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+          });
+          expect(sends).toHaveLength(1);
+          expect(deliveredAtStop).toBe(1);
+          expect(
+            mockGoalRuntime.markTurnDelivered,
+          ).toHaveBeenCalledExactlyOnceWith(turnKey);
+        });
+
         it('names the pause the client takes when a Goal round fails or hits the Stop hook cap', async () => {
           const permit: core.GoalTurnPermit = {
             goalId: 'goal-1',

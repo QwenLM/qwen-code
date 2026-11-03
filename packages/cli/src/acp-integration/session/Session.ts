@@ -3370,6 +3370,17 @@ export class Session implements SessionContext {
    * `releaseTurn`, and only this confirmation keeps that turn's objective
    * announcement from rolling back and re-firing on the next continuation.
    */
+  /**
+   * The Goal turn's model request went out: `#settleGoalTurn` finishes it
+   * rather than releasing it, and a continuation's objective was delivered.
+   */
+  #markGoalModelStarted(turn: AcpGoalTurn): void {
+    turn.modelStarted = true;
+    if (turn.origin === 'runtime') {
+      this.#markGoalTurnDelivered(turn.turnKey);
+    }
+  }
+
   #markGoalTurnDelivered(turnKey: string): void {
     try {
       this.config.getGoalRuntime().markTurnDelivered(turnKey);
@@ -7845,6 +7856,9 @@ export class Session implements SessionContext {
             // Keeps the turn with the session once its round's response
             // finished, to answer the input the round took.
             let roundKeepTurnForInput = () => {};
+            // Marks the round's Goal turn model-started once its request is
+            // in history.
+            let roundMarkGoalModelStarted = () => {};
             // The client paused the Goal and released the turn's permit when
             // the Stop hook reached its cap. A round that still answers input
             // taken then runs outside the Goal.
@@ -7887,6 +7901,10 @@ export class Session implements SessionContext {
                           promptId: string;
                           signal: AbortSignal;
                         }) => {
+                          // The client finishes the Goal turn right after its
+                          // stop policies, so delivery is marked here, not on
+                          // a later model event that may never come.
+                          roundMarkGoalModelStarted();
                           const parts =
                             await todoStopGuardPolicy.continueAt(stop);
                           if (!parts?.length && (await roundTookInput())) {
@@ -8193,11 +8211,9 @@ export class Session implements SessionContext {
                     if (!goalTurn || goalTurn.modelStarted || requestUnsent()) {
                       return;
                     }
-                    goalTurn.modelStarted = true;
-                    if (goalTurn.origin === 'runtime') {
-                      this.#markGoalTurnDelivered(goalTurn.turnKey);
-                    }
+                    this.#markGoalModelStarted(goalTurn);
                   };
+                  roundMarkGoalModelStarted = markGoalModelStarted;
                   try {
                     ({ stop: roundStop } = await runModelRound(
                       this.config.getLlmClient(),
@@ -8547,6 +8563,9 @@ export class Session implements SessionContext {
                     if (roundStop === 'max_session_turns') {
                       return { stopReason: 'max_turn_requests' };
                     }
+                    // The client has already paused the Goal for its guard;
+                    // this covers a pause or release that failed there, so
+                    // `#settleGoalTurn` still pauses with the loop reason.
                     pauseGoalForLoopStop();
                     if (rejectOnLoopDetected) {
                       throw createLoopDetectedTurnError({
@@ -8561,7 +8580,11 @@ export class Session implements SessionContext {
                     functionCalls.length === 0 &&
                     !stopHookCapped &&
                     !streamFailed &&
-                    !cutForInput();
+                    !cutForInput() &&
+                    // The client's Goal stop finishes the turn before its
+                    // memory tasks, so a round under the permit leaves them
+                    // to the session.
+                    (!goalTurn || goalPermitReleasedByClient);
                 } else {
                   try {
                     // Set where the model request is actually issued, not at
@@ -8575,12 +8598,7 @@ export class Session implements SessionContext {
                     // a completed iteration — a phantom turn on the goal's
                     // count and a checkpoint recording work that never ran.
                     // Re-assigning on later loop laps is harmless.
-                    if (goalTurn) {
-                      goalTurn.modelStarted = true;
-                      if (goalTurn.origin === 'runtime') {
-                        this.#markGoalTurnDelivered(goalTurn.turnKey);
-                      }
-                    }
+                    if (goalTurn) this.#markGoalModelStarted(goalTurn);
                     const sendResult =
                       await this.#sendMessageStreamWithAutoCompression(
                         promptId,
