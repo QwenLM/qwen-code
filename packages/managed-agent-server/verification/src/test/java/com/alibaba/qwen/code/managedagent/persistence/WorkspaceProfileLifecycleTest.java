@@ -384,11 +384,11 @@ class WorkspaceProfileLifecycleTest {
         assertThat(f.jdbc.queryForObject("SELECT producer_phase FROM ma_output_capture WHERE tenant_id = ?", String.class, "tenant-1")).isEqualTo("OPEN");
         verifyPublications.run();
         verifyResources.run();
-        for (String mutation : java.util.List.of("state = 'FENCED'", "producer_phase = 'FINISHING'", "quarantined = TRUE", "terminal_resource_id = 'unexpected'")) {
+        for (String mutation : java.util.List.of("state = 'FENCED'", "producer_phase = 'FINISHING'", "is_quarantined = TRUE", "terminal_resource_id = 'unexpected'")) {
             f.jdbc.update("UPDATE ma_output_capture SET " + mutation + " WHERE tenant_id = ?", "tenant-1");
             assertThatThrownBy(verifyPublications::run).isInstanceOf(ManagedAgentException.class);
             assertThatThrownBy(verifyResources::run).isInstanceOf(ManagedAgentException.class);
-            f.jdbc.update("UPDATE ma_output_capture SET state = 'NOT_STARTED', producer_phase = 'OPEN', quarantined = FALSE, terminal_resource_id = NULL WHERE tenant_id = ?", "tenant-1");
+            f.jdbc.update("UPDATE ma_output_capture SET state = 'NOT_STARTED', producer_phase = 'OPEN', is_quarantined = FALSE, terminal_resource_id = NULL WHERE tenant_id = ?", "tenant-1");
         }
         var conflicting = publication.binding.deepCopy().put("runtimeBindingId", "other-binding");
         f.jdbc.update("UPDATE ma_output_capture SET binding_json = ?, binding_digest = ? WHERE tenant_id = ?",
@@ -506,7 +506,7 @@ class WorkspaceProfileLifecycleTest {
             f.jdbc.update("UPDATE ma_resource SET storage_kind = 'TOOL_PUBLICATION', inline_bytes = NULL WHERE resource_id = X'6f7574636f6d65'");
             assertThatThrownBy(() -> verifier.verifyPublications(operation)).isInstanceOf(ManagedAgentException.class);
             verify.run();
-            f.jdbc.update("UPDATE ma_output_capture SET quarantined = TRUE WHERE publication_id = X'7075622d31'");
+            f.jdbc.update("UPDATE ma_output_capture SET is_quarantined = TRUE WHERE publication_id = X'7075622d31'");
             assertThatThrownBy(verify::run).isInstanceOf(ManagedAgentException.class);
             return;
         }

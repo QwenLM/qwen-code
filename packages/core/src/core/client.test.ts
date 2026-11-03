@@ -11099,6 +11099,39 @@ Other open files:
       );
     });
 
+    it.each([
+      { type: SendMessageType.Cron, record: 'recordCronPrompt' as const },
+      {
+        type: SendMessageType.Notification,
+        record: 'recordNotification' as const,
+      },
+    ])(
+      'leaves the record of a $type send to a host that records it',
+      async ({ type, record }) => {
+        const recorder = {
+          recordCronPrompt: vi.fn(),
+          recordNotification: vi.fn(),
+          recordAttributionSnapshot: vi.fn(),
+          recordFileHistorySnapshot: vi.fn(),
+        };
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(
+          recorder as unknown as ReturnType<Config['getChatRecordingService']>,
+        );
+        mockTurnRunFn.mockReturnValue(textTurn('Hello'));
+        installChat();
+
+        await run([{ text: 'tick' }], `prompt-host-${type}`, {
+          type,
+          userTurnRecordedByHost: true,
+        });
+        expect(mockTurnRunFn).toHaveBeenCalledOnce();
+        expect(recorder[record]).not.toHaveBeenCalled();
+
+        await run([{ text: 'tick' }], `prompt-client-${type}`, { type });
+        expect(recorder[record]).toHaveBeenCalledOnce();
+      },
+    );
+
     /** A recall that never settles; returns a spy on its abort listener. */
     const recallAbortHandler = () => {
       const abortHandler = vi.fn();

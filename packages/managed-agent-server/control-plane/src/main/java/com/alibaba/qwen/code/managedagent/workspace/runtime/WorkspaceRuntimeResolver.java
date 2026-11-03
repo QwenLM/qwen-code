@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
@@ -20,7 +20,7 @@ import java.util.Map;
 import java.util.Objects;
 
 public final class WorkspaceRuntimeResolver {
-    private final AgentStateStore sessions;
+    private final SessionQueryStore sessions;
     private final WorkspaceExecutionStore authority;
     private final SshWorkspaceService ssh;
     private final com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog residents;
@@ -29,12 +29,12 @@ public final class WorkspaceRuntimeResolver {
     private final boolean local;
     private final ManagedAgentSettings.ManagedExtensions managedExtensions;
 
-    public WorkspaceRuntimeResolver(AgentStateStore sessions, WorkspaceExecutionStore authority,
+    public WorkspaceRuntimeResolver(SessionQueryStore sessions, WorkspaceExecutionStore authority,
             ManagedAgentSettings properties) {
         this(sessions, authority, properties, null);
     }
 
-    public WorkspaceRuntimeResolver(AgentStateStore sessions, WorkspaceExecutionStore authority,
+    public WorkspaceRuntimeResolver(SessionQueryStore sessions, WorkspaceExecutionStore authority,
             ManagedAgentSettings properties, SshWorkspaceService ssh) {
         this.ssh = ssh;
         this.managedExtensions = properties.getManagedExtensions();

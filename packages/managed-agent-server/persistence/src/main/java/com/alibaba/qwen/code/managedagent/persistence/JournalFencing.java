@@ -279,6 +279,19 @@ final class JournalFencing {
         }
     }
 
+    JournalStoreRows.HeadRow requireHeadAfterCsiCheck(String tenantId, String sessionId) {
+        // A null continuation proves nothing in standalone mode. Only the CSI check
+        // on this DataSource's transaction connection has retained the root lock.
+        Boolean transactional = jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>) connection -> {
+            var target = org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(connection);
+            return !target.getAutoCommit() && org.springframework.jdbc.datasource.DataSourceUtils
+                    .isConnectionTransactional(target, jdbc.getDataSource());
+        });
+        return Boolean.TRUE.equals(transactional)
+                ? storeRows.requireHeadWithRootLocked(tenantId, sessionId)
+                : storeRows.requireHeadForUpdate(tenantId, sessionId);
+    }
+
     JdbcCsiFilesRetirementGuard.Original lockCsiOriginal(String tenantId, String sessionId) {
         var continuation = lockCsiContinuation(tenantId, sessionId);
         return continuation == null ? null : continuation.original();
@@ -295,9 +308,9 @@ final class JournalFencing {
                                     .isConnectionTransactional(target, jdbc.getDataSource())) {
                                 var privatePins =
                                         jdbc.query(
-                                                "SELECT csi_guard FROM ma_session WHERE tenant_id ="
-                                                    + " ? AND session_id = ? AND csi_guard = TRUE",
-                                                (row, index) -> row.getBoolean("csi_guard"),
+                                                "SELECT is_csi_guard FROM ma_session WHERE tenant_id ="
+                                                    + " ? AND session_id = ? AND is_csi_guard = TRUE",
+                                                (row, index) -> row.getBoolean("is_csi_guard"),
                                                 tenantId,
                                                 sessionId);
                                 if (!privatePins.isEmpty()) {
@@ -312,7 +325,7 @@ final class JournalFencing {
                             // range locks: taking them on every writer path
                             // would couple per-turn traffic of unrelated
                             // Sessions again (#13800). The root is locked
-                            // first, by primary key once it exists, so its pin
+                            // first, by unique business key once it exists, so its pin
                             // is read as committed now even under an older
                             // REPEATABLE READ snapshot, no gap is taken that
                             // another tenant's first writer inserts into, and

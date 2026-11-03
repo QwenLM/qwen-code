@@ -1329,6 +1329,8 @@ export interface ConfigParameters {
   outboundCorrelation?: OutboundCorrelationSettings;
   gitCoAuthor?: GitCoAuthorParam;
   usageStatisticsEnabled?: boolean;
+  /** Whether to refresh the models.dev catalog during initialization. */
+  modelCatalogRefreshEnabled?: boolean;
   /**
    * If true, disables the per-session FileReadCache short-circuit
    * (file_unchanged placeholder). Useful for sessions that may undergo
@@ -3099,6 +3101,7 @@ export class Config {
   private readonly outboundCorrelationSettings: OutboundCorrelationSettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
+  private readonly modelCatalogRefreshEnabled: boolean;
   private readonly fileReadCacheDisabled: boolean;
   private activeTodoReminders = new Map<string, string>();
   private activeTodoWorkChainOwners = new Map<string, string>();
@@ -3569,6 +3572,7 @@ export class Config {
       email: 'qwen-coder@alibabacloud.com',
     };
     this.usageStatisticsEnabled = params.usageStatisticsEnabled ?? true;
+    this.modelCatalogRefreshEnabled = params.modelCatalogRefreshEnabled ?? true;
     // A Managed session reads in its Runtime worker, so this process could
     // neither elide a repeated read nor prove the read an edit requires.
     this.fileReadCacheDisabled =
@@ -4239,7 +4243,9 @@ export class Config {
   ): Promise<void> {
     this.debugLogger.info('Config initialization started');
     await this.proxyDispatcherReady;
-    void refreshModelCatalog();
+    if (this.modelCatalogRefreshEnabled && this.usageStatisticsEnabled) {
+      void refreshModelCatalog();
+    }
     options?.signal?.throwIfAborted();
     // Omni multimodal support declares ffmpeg/ffprobe as hard runtime
     // prerequisites: fail fast at startup with an actionable message
@@ -11936,6 +11942,13 @@ export class Config {
     }
 
     return this.trustedFolder ?? !this.folderTrust;
+  }
+
+  isExplicitlyTrustedFolder(): boolean {
+    const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+    return (
+      (this.folderTrust || ideTrust !== undefined) && this.isTrustedFolder()
+    );
   }
 
   setIdeMode(value: boolean): void {

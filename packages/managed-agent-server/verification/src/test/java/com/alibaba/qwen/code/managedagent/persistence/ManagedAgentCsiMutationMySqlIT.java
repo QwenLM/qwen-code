@@ -77,7 +77,7 @@ class ManagedAgentCsiMutationMySqlIT {
             jdbc.update(
                     "UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ?,"
                         + " retirement_operation_id = 'delete', retirement_generation = 1,"
-                        + " retired_at = 1, recovery_protected = FALSE WHERE tenant_id = 'tenant'"
+                        + " retired_at = 1, is_recovery_protected = FALSE WHERE tenant_id = 'tenant'"
                         + " AND session_id = ?",
                     ToolPublicationRetentionStore.hash("tenant"), ToolPublicationRetentionStore.hash(ordinary),
                     scope,
@@ -143,7 +143,7 @@ class ManagedAgentCsiMutationMySqlIT {
                     var created = creation.get(5, TimeUnit.SECONDS);
                     var collected = collection.get(5, TimeUnit.SECONDS);
                     assertThat(jdbc.queryForObject(
-                                            "SELECT csi_guard FROM ma_session WHERE session_id = ?",
+                                            "SELECT is_csi_guard FROM ma_session WHERE session_id = ?",
                             Boolean.class, created.sessionId())).isTrue();
                     if (page) {
                         assertThat(collected).isEqualTo(Boolean.TRUE);
@@ -227,9 +227,9 @@ class ManagedAgentCsiMutationMySqlIT {
                     var before = allTables(jdbc, json);
                     originalLock.setAutoCommit(false);
                     try (var query = originalLock.prepareStatement(
-                                    "SELECT csi_guard FROM ma_session FORCE INDEX"
-                                        + " (ma_session_csi_guard_idx) WHERE tenant_id = 'tenant'"
-                                        + " AND session_id = ? AND csi_guard = TRUE FOR UPDATE")) {
+                                    "SELECT is_csi_guard FROM ma_session FORCE INDEX"
+                                        + " (idx_ma_session_csi_guard) WHERE tenant_id = 'tenant'"
+                                        + " AND session_id = ? AND is_csi_guard = TRUE FOR UPDATE")) {
                         query.setQueryTimeout(5);
                         query.setString(1, original.sessionId());
                         try (var rows = query.executeQuery()) {

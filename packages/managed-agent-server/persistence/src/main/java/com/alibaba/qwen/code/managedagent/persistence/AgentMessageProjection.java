@@ -78,7 +78,7 @@ final class AgentMessageProjection {
             String cursor, int limit, boolean backward, long afterSequence) {
         storeRows.requireSession(tenantId, sessionId);
         ManagedLegacySessionGuard.requireLegacyMutation(Boolean.TRUE.equals(jdbc.queryForObject(
-                "SELECT csi_guard FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                "SELECT is_csi_guard FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 Boolean.class, tenantId, sessionId)));
         if (limit < 1 || limit > 100) {
             throw new ManagedAgentException(400, "invalid_limit",
@@ -293,7 +293,7 @@ final class AgentMessageProjection {
                     + " AND s.covered_sequence > s.replay_floor_sequence"
                     + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE"
                     + " private_scope.tenant_id = s.tenant_id AND private_scope.session_id = s.session_id"
-                    + " AND private_scope.csi_guard = FALSE)"
+                    + " AND private_scope.is_csi_guard = FALSE)"
                     + " AND NOT EXISTS (SELECT 1 FROM ma_turn t JOIN ma_public_event e ON"
                     + " e.tenant_id = t.tenant_id AND e.session_id = t.session_id AND e.turn_id = t.turn_id"
                     + " WHERE t.tenant_id = s.tenant_id AND t.session_id = s.session_id"
@@ -339,7 +339,7 @@ final class AgentMessageProjection {
 
     List<MaterializationTarget> findMaterializationTargets(int limit) {
         return jdbc.query(
-                "SELECT s.tenant_id, s.session_id FROM ma_session s JOIN ma_event_stream p ON p.tenant_id = s.tenant_id AND p.session_id = s.session_id AND p.stream_kind = 'SESSION' AND p.stream_id = X'' WHERE s.session_kind = 'PUBLIC' AND s.csi_guard = FALSE AND s.retired_at IS NULL AND s.status <> 'DELETED' AND p.projection_pending = TRUE ORDER BY p.gmt_modified ASC LIMIT ?",
+                "SELECT s.tenant_id, s.session_id FROM ma_session s JOIN ma_event_stream p ON p.tenant_id = s.tenant_id AND p.session_id = s.session_id AND p.stream_kind = 'SESSION' AND p.stream_id = X'' WHERE s.session_kind = 'PUBLIC' AND s.is_csi_guard = FALSE AND s.retired_at IS NULL AND s.status <> 'DELETED' AND p.is_projection_pending = TRUE ORDER BY p.gmt_modified ASC LIMIT ?",
                 (result, row) ->
                         new MaterializationTarget(
                                 result.getString("tenant_id"), result.getString("session_id")),

@@ -332,7 +332,16 @@ reclaim anything. If the database check fails, capacity remains skipped.
 MySQL is the supported database family; full integration CI uses MySQL 8.4.
 MariaDB no longer has a CI lane or an ongoing compatibility guarantee.
 Existing dialect handling remains in place; this change does not reject
-connections that previously worked or introduce a catalog migration.
+MariaDB solely by product name or introduce a catalog migration.
+
+MySQL and MariaDB require `STRICT_TRANS_TABLES` or `STRICT_ALL_TABLES` in both
+global and session `sql_mode`. Schema admission and validation reject non-strict
+connections before schema writes. Strict mode prevents ordinary writes to unsigned
+counters from silently clamping negative values to zero; `IGNORE` writes can
+downgrade these errors to warnings. Configure the database defaults and
+every application connection to retain strict mode throughout operation; a
+startup check does not police later administrative or connection-mode changes.
+The application does not change the server's SQL mode.
 
 Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
 process (the credentialed launch is spelled out in the Full WebShell
@@ -948,7 +957,52 @@ Schema V6 preserves the original policy and adds a current override plus per-Tur
 
 Workspace-bound WebShell Session summaries can include `modelContext` with the actual observed `modelId`, optional latest-request `inputTokens` and resolved `contextWindowSize`, and `observedAt`. The Hosted CLI records capacity beside successful provider usage; the Java Session Store projects only committed main-model attempts into one private latest-resource pointer. Lists read these observations in one batch without scanning journal history. Older or invalid usage advances the pointer but leaves missing values unknown; cumulative billing totals and inferred capacities never substitute for them. The shared usage popover does not offer manual compression. New tasks continue to select published AgentDefinition presets. This observation projection uses existing SQL tables and resource-reference cleanup without changing the recovery format.
 
-To allow an existing Workspace Session to change its next Turn's model, publish an explicit `qwen.managed-agent.model-catalog` list of `{modelId, label}` entries in the server configuration. The default is empty. IDs must identify configured, cached-credential models in the Hosted CLI; the browser supplies neither provider settings nor credentials. The Harness must advertise `model-selection/1`. `POST /api/agent/web-shell/v1/session-models/query` returns the catalog and current selection; `POST /api/agent/web-shell/v1/session-models/change` takes `sessionId`, `modelId`, `expectedRevision` and `idempotencyKey` and synchronously returns the saved selection. The caller needs Workspace OPERATOR or OWNER and the Session must be idle, without pending approval, context/lifecycle work or recovery. Same-key retries return their original result before mutable catalog and role gates, provided the caller still has read access. They never reapply a change.
+To allow an existing Workspace Session to change its next Turn's model, publish an explicit `qwen.managed-agent.model-catalog` list of `{modelId, label}` entries in the server configuration. The default is empty. IDs must identify configured, cached-credential models in the Hosted CLI; this selection path supplies only an ID. The Harness must advertise `model-selection/1`. `POST /api/agent/web-shell/v1/session-models/query` returns the catalog and current selection; `POST /api/agent/web-shell/v1/session-models/change` takes `sessionId`, `modelId`, `expectedRevision` and `idempotencyKey` and synchronously returns the saved selection. The caller needs Workspace OPERATOR or OWNER and the Session must be idle, without pending approval, context/lifecycle work or recovery. Same-key retries return their original result before mutable catalog and role gates, provided the caller still has read access. They never reapply a change.
+
+Creation can instead supply a complete connection in public `model_config` or
+WebShell `modelConfig`:
+
+```json
+{
+  "protocol": "openai",
+  "model": "qwen3-coder-plus",
+  "base_url": "https://models.example/v1",
+  "api_key": "application-supplied-key",
+  "generation_config": { "temperature": 0.7, "max_tokens": 4096 }
+}
+```
+
+Configure `qwen.managed-agent.model-config-base-urls` as a YAML list containing
+the exact allowed base URLs; its empty default disables this path. The Session
+Store and `session-model-config/1` Harness capability are required. The standard
+server also needs the Runtime Broker's `SecretProtector` and credential key ring.
+Protocols are `openai`, `openai-responses`, `anthropic` and `gemini`; accepted
+generation fields are `temperature`, `top_p`, `top_k`, `max_tokens`,
+`presence_penalty`, `frequency_penalty` and `seed`. The Anthropic adapter forwards
+only `temperature`, `top_p`, `top_k` and `max_tokens`; it ignores `seed` and both
+penalty fields. Other provider support varies, and providers may reject parameters
+they do not support. URL userinfo, query strings, fragments, OAuth and arbitrary
+headers are not supported. Credentials are literal values, without environment
+substitution.
+
+The complete configuration is encrypted with tenant/Session binding and included
+in creation idempotency through its digest. It is immutable, inherited by child
+Sessions and restored after Harness reattachment. It overrides host model
+settings, including auxiliary and fallback choices, for this Session's execution.
+Do not combine it with `modelId`; host-catalog switching is disabled for these
+Sessions. Public responses and journal resources never include the credentials.
+Retain encryption keys while `ma_session.model_config_key_id` references them,
+including for closed Sessions. The unreleased V1 schema gains these columns;
+recreate development catalogs under the existing schema policy. No browser
+credential editor is included.
+
+For multi-tenant deployments, a trusted application service or gateway must
+authenticate tenant/actor identity and retain the platform signing key. The
+endpoint allowlist is deployment-wide; tenant-specific model permissions,
+parameter limits, quotas and outbound network restrictions must be enforced by
+the caller or deployment. Each Session retains an immutable credential snapshot,
+so replacing a provider key requires a new Session. See the
+[deployment boundary](../../docs/design/managed-session-model-config.md#multi-tenant-deployment-boundary).
 
 Idle Workspace Sessions support manual context compression when the Harness advertises `context-compression/1`. Send `POST /v1/agents/sessions/{sessionId}/compress` with `Idempotency-Key` and `{ "expected_compaction_revision": 0 }`, using the Session's current `compaction_revision`; WebShell uses `/api/agent/web-shell/v1/sessions/compress` and camelCase fields. The public `context_compression` capability advertises deployment support; the WebShell `contextCompression` capability also reflects the current caller grant and execution facts. A Workspace OPERATOR or OWNER can admit the durable `context_compression` operation; the existing operation query returns `pending`, `running`, `recovery_blocked`, `completed` or `failed`, and a completed outcome is `compressed` or `noop`. Same-key retries resolve the original operation before mutable capability, revision and busy checks. Compression refuses active or queued Turns, approvals, unsettled Hooks and conflicting context work. It does not create a user Turn or change approval, Plan or Workspace context revisions. After compression, context usage stays unknown until the next main-model observation. Deploy matching Server/Broker, Harness and WebShell builds using the current V1 baseline; stop new compression admission and settle accepted operations before rollback. Existing retained journals establish their compaction revision on first read; if that evidence is unavailable, the capability is false and the revision is omitted.
 
@@ -1137,8 +1191,12 @@ every tenant and workspace on the host. This does not isolate files: a worker
 runs as the service account and can read whatever that account can.
 
 After a credential-key rotation, keep each prior key in
-`previous-credential-keys` until no persisted Runtime binding references its
-key ID. The brackets are not decoration: Spring's relaxed binder strips `/`,
+`previous-credential-keys` while any persisted row references it: Runtime
+bindings, complete Session model configurations and extension settings all
+retain key IDs. Use the retirement query in the runbook linked below to check
+all three scopes.
+
+The brackets are not decoration: Spring's relaxed binder strips `/`,
 `:` and spaces from plain map keys, so an unbracketed ID binds as a key that
 matches no persisted row.
 
