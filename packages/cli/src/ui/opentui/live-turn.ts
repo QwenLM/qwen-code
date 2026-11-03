@@ -474,13 +474,16 @@ export function useOpenTuiLiveTurn(
     return restoreInputSubmissions(entries);
   }, [syncQueue]);
 
-  // A typed prompt the Mods' prompt.submit hooks hear, or may hear once they
-  // finish loading. Slash-form text keeps its own path, as it does in ink.
+  // A typed prompt the Mods' prompt.submit hooks hear, may hear once they
+  // finish loading, or that Mods which failed to load refuse; until then it
+  // has no row. Slash-form text keeps its own path, as it does in ink.
   const hooksHear = useCallback(
     (entry: Pick<OpenTuiInputSubmission, 'text' | 'displayText'>) => {
       const mods = getInteractiveModSession(config);
       return (
-        (mods?.hearsPrompts === true || mods?.starting === true) &&
+        (mods?.hearsPrompts === true ||
+          mods?.starting === true ||
+          mods?.failed === true) &&
         !isSlashCommand((entry.displayText ?? entry.text).trim())
       );
     },
@@ -525,35 +528,48 @@ export function useOpenTuiLiveTurn(
       skipRetryDelayRef.current = undefined;
       let promptContext: readonly string[] | undefined;
       try {
+        // Every turn waits for the Mods to load, as it does in ink, so no
+        // prompt or steering reaches the model before a guard can hear it;
+        // Mods that failed to load refuse every turn.
+        if (mods && (mods.starting || mods.failed)) {
+          try {
+            await new Promise<void>((resolve, reject) => {
+              const onAbort = () => reject(abort.signal.reason);
+              abort.signal.addEventListener('abort', onAbort, { once: true });
+              mods.ready
+                .finally(() =>
+                  abort.signal.removeEventListener('abort', onAbort),
+                )
+                .then(resolve, reject);
+            });
+          } catch (error) {
+            // An abort while waiting; finally hands a held prompt back.
+            if (abort.signal.aborted) throw error;
+            if (seq !== turnSeqRef.current) return;
+            apply({ type: 'error', text: MODS_FAILED_TO_INITIALIZE });
+            // The prompts waiting behind this one would each be refused in
+            // turn, so they come back with it, in the order they were sent.
+            const returned = [
+              ...(active.held && editablePrompt ? [editablePrompt] : []),
+              ...queueRef.current.filter((entry) => !entry.generated),
+            ];
+            active.held = false;
+            queueRef.current = [];
+            syncQueue();
+            if (returned.length > 0)
+              onPromptReturnedRef.current?.(
+                returned.length === 1
+                  ? returned[0]
+                  : restoreInputSubmissions(returned),
+              );
+            return;
+          }
+          if (seq !== turnSeqRef.current || abort.signal.aborted) return;
+        }
         if (active.held && editablePrompt && mods) {
           // The Mods hear the prompt before anything shows, records or sends
           // it; until they answer, the transcript has no row for it.
           let typed = editablePrompt;
-          // A prompt sent while the Mods load waits for them, as it does in
-          // ink, so a guard is not bypassed for the session's first prompt.
-          try {
-            if (mods.starting)
-              await new Promise<void>((resolve, reject) => {
-                const onAbort = () => reject(abort.signal.reason);
-                abort.signal.addEventListener('abort', onAbort, {
-                  once: true,
-                });
-                mods.ready
-                  .finally(() =>
-                    abort.signal.removeEventListener('abort', onAbort),
-                  )
-                  .then(resolve, reject);
-              });
-          } catch (error) {
-            // An abort while waiting; finally hands it back.
-            if (abort.signal.aborted) throw error;
-            if (seq !== turnSeqRef.current) return;
-            active.held = false;
-            apply({ type: 'error', text: MODS_FAILED_TO_INITIALIZE });
-            onPromptReturnedRef.current?.(typed);
-            return;
-          }
-          if (seq !== turnSeqRef.current || abort.signal.aborted) return;
           const pastes = typed.pasteExpansions ?? new Map<string, string>();
           const heard = expandPendingPastePlaceholders(
             typed.displayText ?? typed.text,

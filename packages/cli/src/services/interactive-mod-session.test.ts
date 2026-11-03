@@ -134,16 +134,21 @@ describe('interactive Mod owner', () => {
     expect(getInteractiveModSession(config)).toBe(owner);
   });
 
-  it('reports startup until the Mods load, fail or close', async () => {
+  it('reports startup until the Mods load, fail or close, and a failed load', async () => {
     const loaded = setup();
     expect(loaded.owner.starting).toBe(true);
     await loaded.owner.initialize();
     expect(loaded.owner.starting).toBe(false);
+    expect(loaded.owner.failed).toBe(false);
 
     const failed = setup();
+    expect(failed.owner.failed).toBe(false);
     failed.owner.failStartup(new Error('Config failed'));
     await expect(failed.owner.ready).rejects.toThrow('Config failed');
     expect(failed.owner.starting).toBe(false);
+    expect(failed.owner.failed).toBe(true);
+    void failed.owner.close();
+    expect(failed.owner.failed).toBe(false);
 
     const closed = setup();
     void closed.owner.close();

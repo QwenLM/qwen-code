@@ -2986,14 +2986,14 @@ describe('useOpenTuiLiveTurn prompt.submit', () => {
       resolve?: () => void;
       reject?: (error: Error) => void;
     } = {};
-    const state = { starting: true, hearsPrompts: false };
+    const state = { starting: true, hearsPrompts: false, failed: false };
     const ready = new Promise<void>((resolve, reject) => {
       startup.resolve = () => {
         Object.assign(state, { starting: false, hearsPrompts: true });
         resolve();
       };
       startup.reject = (error) => {
-        state.starting = false;
+        Object.assign(state, { starting: false, failed: true });
         reject(error);
       };
     });
@@ -3007,6 +3007,9 @@ describe('useOpenTuiLiveTurn prompt.submit', () => {
       },
       get hearsPrompts() {
         return state.hearsPrompts;
+      },
+      get failed() {
+        return state.failed;
       },
       ready,
       submitPrompt,
@@ -3061,6 +3064,93 @@ describe('useOpenTuiLiveTurn prompt.submit', () => {
     expect(submitPrompt).not.toHaveBeenCalled();
     expect(live.turns).toEqual([]);
     expect(rows(result.current.items)).toEqual([]);
+    expect(result.current.items).toContainEqual(
+      expect.objectContaining({
+        kind: 'error',
+        text: expect.stringContaining('Mods failed to initialize'),
+      }),
+    );
+  });
+
+  it('refuses every later prompt once the Mods failed to load, with those queued behind', async () => {
+    const { startup, submitPrompt } = installStartingMods();
+    const onPromptReturned = vi.fn();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config, onPromptReturned }),
+    );
+    act(() => {
+      result.current.submit('deploy AKIA1');
+    });
+    act(() => {
+      result.current.submit('key AKIA2');
+    });
+    await act(async () => startup.reject!(new Error('bad mod')));
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+    expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ text: 'deploy AKIA1\n\nkey AKIA2' }),
+    );
+    expect(result.current.messageQueue).toEqual([]);
+
+    onPromptReturned.mockClear();
+    act(() => {
+      result.current.submit('later AKIA3');
+    });
+    await vi.waitFor(() =>
+      expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ text: 'later AKIA3' }),
+      ),
+    );
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+    expect(submitPrompt).not.toHaveBeenCalled();
+    expect(live.turns).toEqual([]);
+    expect(rows(result.current.items)).toEqual([]);
+  });
+
+  it('holds a generated turn until the Mods load, so a queued prompt cannot steer it', async () => {
+    const { startup, submitPrompt } = installStartingMods();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('generated', undefined, { invocationEchoed: true });
+    });
+    act(() => {
+      result.current.submit('secret AKIA1');
+    });
+    await act(async () => {});
+    expect(live.turns).toEqual([]);
+
+    await act(async () => startup.resolve!());
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    const options = live.turns[0].options as LivePromptOptions;
+    expect(options.drainSteering!()).toEqual([]);
+    await act(async () => live.waiters.shift()?.());
+    await vi.waitFor(() => expect(live.turns).toHaveLength(2));
+    expect(submitPrompt).toHaveBeenCalledExactlyOnceWith(
+      'secret AKIA1',
+      expect.any(AbortSignal),
+    );
+    expect(live.turns[1].prompt).toBe('secret [redacted]');
+  });
+
+  it('refuses a generated turn when the Mods fail to load and hands back the prompts queued behind it', async () => {
+    const { startup } = installStartingMods();
+    const onPromptReturned = vi.fn();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config, onPromptReturned }),
+    );
+    act(() => {
+      result.current.submit('generated', undefined, { invocationEchoed: true });
+    });
+    act(() => {
+      result.current.submit('secret AKIA1');
+    });
+    await act(async () => startup.reject!(new Error('bad mod')));
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+    expect(live.turns).toEqual([]);
+    expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ text: 'secret AKIA1' }),
+    );
     expect(result.current.items).toContainEqual(
       expect.objectContaining({
         kind: 'error',
