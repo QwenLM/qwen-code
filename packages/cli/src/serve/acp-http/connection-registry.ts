@@ -335,6 +335,20 @@ export class AcpConnection {
     return this.ownedSessions.has(sessionId);
   }
 
+  /**
+   * True when a client request (a permission vote) is still outstanding for
+   * this session. Such a prompt cannot make progress without the client: once
+   * the entrance is revoked the vote can never arrive, so it must not be
+   * preserved across disconnect — it has to go through teardown, which
+   * abandons the pending request and releases the connection.
+   */
+  hasPendingClientRequest(sessionId: string): boolean {
+    for (const req of this.pending.values()) {
+      if (req.sessionId === sessionId) return true;
+    }
+    return false;
+  }
+
   captureSessionOwnershipIdentity(sessionId: string): SessionOwnershipIdentity {
     let state = this.sessionOwnershipStates.get(sessionId);
     if (!state) {
@@ -875,11 +889,16 @@ export class AcpConnection {
     binding.graceTimer = setTimeout(() => {
       binding.graceTimer = undefined;
       // Revoking a remote entrance detaches its client, not the running job.
-      // The prompt's finally path releases this binding once it settles.
+      // The prompt's finally path releases this binding once it settles. A
+      // prompt blocked on a client permission vote is the exception: the vote
+      // can never arrive after the credential is revoked, so preserving it
+      // would hang the turn and pin the connection forever. Let it fall through
+      // to teardown, which abandons the pending request.
       if (
         this.preserveRunningPromptsOnDisconnect &&
         binding.promptAbort &&
-        !binding.promptAbort.signal.aborted
+        !binding.promptAbort.signal.aborted &&
+        !this.hasPendingClientRequest(sessionId)
       )
         return;
       // Grace expired with no reconnect → full teardown (aborts the prompt,
