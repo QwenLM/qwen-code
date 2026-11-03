@@ -957,9 +957,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * False until ANY binding snapshot succeeds (complete or partial). The
    * cold-start comment-lane gate uses this, not boundSnapshotTrusted: the
    * map is populated from partial snapshots too. Gating on complete-only
-   * would stall the lane forever under a permanent partial (multi-page
-   * scan / non-active workspace). An EMPTY partial answer is additionally
-   * bounded by coldEmptyPartialStreak: success of an incomplete scan does
+   * would stall the lane forever under a permanent partial (an unreadable
+   * sidecar / a workspace without a runtime). An EMPTY partial answer is
+   * additionally bounded by coldEmptyPartialStreak: success of an
+   * incomplete scan does
    * not establish absence, so the first such answers must not open the
    * lane onto an empty map.
    */
@@ -972,9 +973,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    */
   private coldEmptyPartialStreak = 0;
   // Consecutive partial snapshots (any partial). A NON-empty partial — e.g. a
-  // workspace with more active sessions than one page — is permanent and
+  // sidecar the daemon persistently cannot read — can be permanent and
   // otherwise silent; this drives a throttled diagnostic so the operator sees
-  // a pagination hint before the dead-letter alert hours later (doudouOUC).
+  // a hint before the dead-letter alert hours later (doudouOUC).
   private partialSnapshotStreak = 0;
   /**
    * True while the most recent pending-watch reconciliation FAILED (e.g.
@@ -1870,9 +1871,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // claiming delivery against an empty map would permanently freeze events
     // onto the public channel path. Any successful snapshot (even partial)
     // populates the map, so gate on boundSnapshotSeen — complete-only would
-    // stall the lane forever under a permanent partial (multi-page scan /
-    // non-active workspace). Defer the comment lane (cursor does not advance)
-    // instead; persisted tasks still recover above.
+    // stall the lane forever under a permanent partial (unreadable sidecar /
+    // workspace without a runtime). Defer the comment lane (cursor does not
+    // advance) instead; persisted tasks still recover above.
     if (this.deliverToBoundSessions && !this.boundSnapshotSeen) {
       return;
     }
@@ -3602,16 +3603,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       }
       if (snapshot.partial) {
         this.partialSnapshotStreak += 1;
-        // A non-empty partial is the silent permanent case (a multi-page
-        // scan): surface a throttled hint naming the listed session count so
-        // the operator is not left with only a dead-letter alert hours later.
+        // A non-empty partial can be the silent permanent case (a sidecar or
+        // transcript the daemon persistently cannot read): surface a throttled
+        // hint naming the listed session count so the operator is not left
+        // with only a dead-letter alert hours later.
         if (
           map.size > 0 &&
           (this.partialSnapshotStreak === 10 ||
             this.partialSnapshotStreak % 60 === 0)
         ) {
           process.stderr.write(
-            `[Channel:${this.name}] binding snapshot has been partial for ${this.partialSnapshotStreak} consecutive polls (${map.size} sessions listed): a multi-page scan — more active sessions than one page — is always partial, so unmatched PR events defer to the dead-letter horizon instead of the channel (issue events are unaffected). Verify the daemon's per-workspace session counts.\n`,
+            `[Channel:${this.name}] binding snapshot has been partial for ${this.partialSnapshotStreak} consecutive polls (${map.size} sessions listed): the daemon could not read every PR sidecar or transcript, so unmatched PR events defer to the dead-letter horizon instead of the channel (issue events are unaffected). Check the daemon's stderr for the failing workspace or session.\n`,
           );
         }
       } else {
@@ -4194,7 +4196,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       }
     }
     // Prune only against a complete snapshot: a partial answer (workspace
-    // failure, non-active workspace or multi-page scan) must not destroy
+    // failure, unreadable sidecar or missing runtime) must not destroy
     // the edge-triggered memory of PRs it failed to list. Prune against the
     // full candidate set, not the capped watch set, so PRs rotating out of
     // the cap keep their baseline. Never delete an entry that still holds

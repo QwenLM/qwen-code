@@ -6891,8 +6891,8 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
 
     it('routes an issue event publicly under a permanent partial snapshot (R14-B1)', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });
-      // A PERMANENT partial (a multi-page scan or a long-lived non-active
-      // workspace) never lands a complete snapshot, so boundSnapshotTrusted
+      // A PERMANENT partial (a sidecar the daemon persistently cannot read)
+      // never lands a complete snapshot, so boundSnapshotTrusted
       // stays false forever. Bindings are PR-only and GitHub's issue/PR
       // number space is exclusive, so an issue event can never have a bound
       // target: its absence is provable without any snapshot and it must
