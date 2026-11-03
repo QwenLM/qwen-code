@@ -5,10 +5,9 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, realpathSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
-import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { env } from 'node:process';
 import fs from 'node:fs';

@@ -11771,7 +11771,9 @@ export class Config {
     // disabled folder-trust feature must not silently authorize them.
     // Non-interactive invocations (`-p`, piped stdin, ACP/SDK embeddings)
     // treat trust as implicit — the caller chose the directory and there is
-    // no prompt surface; only run them in directories you trust.
+    // no prompt surface; only run them in directories you trust. An explicit
+    // refusal is already enforced upstream: an untrusted workspace
+    // contributes no settings, so it supplies no project hooks.
     if (this.isInteractive() && !this.isExplicitlyTrustedFolder()) {
       return undefined;
     }

@@ -1984,7 +1984,9 @@ export const AppContainer = (props: AppContainerProps) => {
       !config.isInteractive() ||
       config.isExplicitlyTrustedFolder() ||
       config.getBareMode() ||
-      config.isSafeMode()
+      config.isSafeMode() ||
+      // With every hook disabled the trust gate is not why they are absent.
+      config.getDisableAllHooks()
     ) {
       return;
     }
