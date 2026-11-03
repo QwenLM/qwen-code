@@ -68,6 +68,7 @@ import {
 import type { DirectUserAdmission, QueuedGoalTurn } from './useMessageQueue.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
+import { framePasteExpansion } from '../utils/paste-placeholders.js';
 
 // --- MOCKS ---
 const pendingToolPersistence = vi.hoisted(() => ({
@@ -14446,6 +14447,121 @@ describe('useLlmStream', () => {
           expect(userRows().map((item) => item.text)).toEqual(['Fix it now']);
         });
 
+        // A prompt as the composer sends it: a notice, an attachment and a
+        // framed paste ahead of and around the typed text.
+        const placeholder = '[Pasted text #1 +2 lines]';
+        const pastes = new Map([[placeholder, 'line1\nline2']]);
+        const resumed = '<system-reminder>\nResumed\n</system-reminder>\n\n';
+        const composed = (display: string) =>
+          `${resumed}@a.txt\n\n${framePasteExpansion(display, pastes)}`;
+
+        it('keeps attachments, notices and a framed paste around a rewrite', async () => {
+          const { submitPrompt } = installModTurn();
+          submitPrompt.mockImplementationOnce(async (text) => ({
+            text: `${text} please`,
+          }));
+          handleAtCommandSpy.mockResolvedValueOnce({
+            processedQuery: [{ text: 'resolved' }],
+            shouldProceed: true,
+          });
+          admitted(finished);
+          const { result } = renderTestHook();
+
+          await act(async () => {
+            await result.current.submitQuery(
+              composed(`look ${placeholder}`),
+              SendMessageType.UserQuery,
+              undefined,
+              {
+                submittedPrompt: `look ${placeholder}`,
+                displayText: `look ${placeholder}`,
+                pasteExpansions: pastes,
+              },
+            );
+          });
+
+          expect(submitPrompt.mock.calls[0][0]).toBe('look line1\nline2');
+          expect(handleAtCommandSpy.mock.calls[0][0].query).toBe(
+            composed(`look ${placeholder} please`),
+          );
+          expect(userRows()).toEqual([
+            expect.objectContaining({
+              text: `look ${placeholder} please`,
+              recallText: 'look line1\nline2 please',
+            }),
+          ]);
+          expect(mockSendMessageStream.mock.calls[0][3]).toEqual(
+            expect.objectContaining({
+              submittedPrompt: `look ${placeholder} please`,
+            }),
+          );
+        });
+
+        it('takes an answer that differs only in surrounding whitespace as the prompt it heard', async () => {
+          const { submitPrompt } = installModTurn();
+          submitPrompt.mockImplementationOnce(async (text) => ({
+            text: `${text}\n`,
+          }));
+          handleAtCommandSpy.mockResolvedValueOnce({
+            processedQuery: [{ text: 'resolved' }],
+            shouldProceed: true,
+          });
+          admitted(finished);
+          const { result } = renderTestHook();
+
+          await act(async () => {
+            await result.current.submitQuery(
+              composed(`look ${placeholder}`),
+              SendMessageType.UserQuery,
+              undefined,
+              {
+                submittedPrompt: `look ${placeholder}`,
+                displayText: `look ${placeholder}`,
+                pasteExpansions: pastes,
+              },
+            );
+          });
+
+          expect(handleAtCommandSpy.mock.calls[0][0].query).toBe(
+            composed(`look ${placeholder}`),
+          );
+          expect(userRows()[0].text).toBe(`look ${placeholder}`);
+        });
+
+        it('hands back a dropped prompt with its pastes collapsed', async () => {
+          const { submitPrompt } = installModTurn();
+          submitPrompt.mockResolvedValueOnce({ drop: 'Prompt dropped' });
+          const onPromptReturned = vi.fn();
+          const { result } = renderTestHook(
+            [],
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            false,
+            onPromptReturned,
+          );
+
+          await act(async () => {
+            await result.current.submitQuery(
+              composed(`look ${placeholder}`),
+              SendMessageType.UserQuery,
+              undefined,
+              {
+                submittedPrompt: `look ${placeholder}`,
+                displayText: `look ${placeholder}`,
+                pasteExpansions: pastes,
+              },
+            );
+          });
+
+          expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+            `look ${placeholder}`,
+            pastes,
+          );
+        });
+
         it('shows a drop, keeps the prompt out of the transcript and recall, and hands it back', async () => {
           const { startTurn, submitPrompt } = installModTurn();
           submitPrompt.mockResolvedValueOnce({
@@ -14486,7 +14602,10 @@ describe('useLlmStream', () => {
           expect(logMessage).not.toHaveBeenCalled();
           expect(mockSendMessageStream).not.toHaveBeenCalled();
           expect(startTurn).not.toHaveBeenCalled();
-          expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith('key AKIA');
+          expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+            'key AKIA',
+            undefined,
+          );
           expect(result.current.streamingState).toBe(StreamingState.Idle);
         });
 
@@ -14527,7 +14646,10 @@ describe('useLlmStream', () => {
             await submission;
           });
 
-          expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith('Fix it');
+          expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+            'Fix it',
+            undefined,
+          );
           expect(userRows()).toEqual([]);
           expect(mockSendMessageStream).not.toHaveBeenCalled();
         });

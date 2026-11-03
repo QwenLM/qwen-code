@@ -227,6 +227,8 @@ describe('interactive Mod owner', () => {
   it('raises prompt.submit only when its first initialize says so, until it closes', async () => {
     const { owner, host, runtime } = setup();
     expect(host.prompts!()).toBe(false);
+    Object.defineProperty(runtime, 'hearsPrompts', { value: true });
+    expect(owner.hearsPrompts).toBe(true);
     await owner.initialize(['AbovePrompt'], { prompts: true });
     await owner.initialize(['AbovePrompt']);
     expect(host.prompts!()).toBe(true);
@@ -239,6 +241,7 @@ describe('interactive Mod owner', () => {
       signal,
     );
     await owner.close();
+    expect(owner.hearsPrompts).toBe(false);
     // A closed owner lets the prompt through as typed.
     expect(await owner.submitPrompt('Fix it', signal)).toEqual({
       text: 'Fix it',

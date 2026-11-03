@@ -709,6 +709,11 @@ export class ModSession implements ICommandLoader {
    * never blocks a prompt, and neither does a prompt too long for a Mod
    * payload, which no hook hears. `signal` is the prompt's own.
    */
+  /** Whether a loaded Mod hooks `prompt.submit`. */
+  get hearsPrompts(): boolean {
+    return !this.closing && (this.runtime?.promptHooks.length ?? 0) > 0;
+  }
+
   async submitPrompt(
     text: string,
     signal: AbortSignal,

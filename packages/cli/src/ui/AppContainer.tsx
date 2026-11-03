@@ -1635,13 +1635,20 @@ export const AppContainer = (props: AppContainerProps) => {
   setBufferTextRef.current = setBufferText;
   const bufferRef = useRef(buffer);
   bufferRef.current = buffer;
-  // A typed prompt the Mods did not let in comes back to an empty composer,
-  // as typed text whose provenance is gone.
+  const pendingPastesRef = useRef(pendingPastes);
+  pendingPastesRef.current = pendingPastes;
+  // A typed prompt the Mods did not let in comes back to the composer with
+  // its pastes collapsed, ahead of anything typed since, as typed text whose
+  // provenance is gone.
   const returnPrompt = useCallback(
-    (text: string) => {
-      if (bufferRef.current.text.length > 0) return;
+    (text: string, pastes: ReadonlyMap<string, string> = new Map()) => {
+      const draft = restorePasteDraft(text, pastes, pendingPastesRef.current);
+      const current = bufferRef.current.text;
       invalidateSubmittedPromptProvenance();
-      bufferRef.current.setText(text);
+      setPendingPastes(draft.pasteExpansions);
+      bufferRef.current.setText(
+        current ? `${draft.text}\n${current}` : draft.text,
+      );
     },
     [invalidateSubmittedPromptProvenance],
   );
@@ -2728,7 +2735,11 @@ export const AppContainer = (props: AppContainerProps) => {
     restorePeerMessage,
   } = useMessageQueue();
 
-  midTurnDrainRef.current = drainQueue;
+  // While a Mod hooks prompt.submit, prompts typed during a turn are not
+  // steered into it at a tool boundary: they wait for the turn to end and are
+  // sent, and heard by the hooks, then.
+  midTurnDrainRef.current = (...args) =>
+    getInteractiveModSession(config)?.hearsPrompts ? [] : drainQueue(...args);
   midTurnRestoreRef.current = restoreMessages;
   goalQueueRef.current = {
     peekNextUserBatchKey,

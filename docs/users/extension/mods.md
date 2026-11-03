@@ -685,17 +685,22 @@ on('prompt.submit', guard).catch(($, e, next) =>
 
 In the Ink terminal:
 
-- The hooks hear what the person typed. Notices Qwen Code adds to a prompt for the
-  model alone, such as a resumed worktree, stay ahead of a rewritten prompt.
+- The hooks hear what the person typed, with pasted text expanded. Attachment
+  references and the notices Qwen Code adds to a prompt for the model alone,
+  such as a resumed worktree, stay ahead of a rewritten prompt, and a paste the
+  rewrite keeps whole stays collapsed.
 - A rewrite also stands in the prompt's row and in the input history that the
   Up key recalls.
 - A dropped prompt shows the reason as an error line. It is neither shown nor
   kept in the input history, since it may hold what the hook kept out. It comes
-  back to the input box when the box is empty, to be edited and sent again.
+  back to the input box, ahead of anything typed since, to be edited and sent
+  again.
 - Esc while the hooks run cancels the prompt and hands it back the same way.
 - Slash commands, shell-mode commands, `/btw` questions and scheduled prompts
-  raise no `prompt.submit`. A prompt queued while a turn runs raises it when it
-  is sent.
+  raise no `prompt.submit`.
+- While a Mod hooks `prompt.submit`, a prompt typed during a turn is not sent
+  into that turn when a tool finishes. It waits for the turn to end, and the
+  hooks hear it when it is sent.
 
 A prompt longer than 128 KiB as JSON reaches no hook, and the line
 `prompt.submit hook skipped: the prompt is too long for a Mod payload` appears

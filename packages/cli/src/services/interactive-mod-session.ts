@@ -214,6 +214,11 @@ export class InteractiveModSession implements ICommandLoader {
     return this.session.syncSession(reason);
   }
 
+  /** Whether a loaded Mod hooks `prompt.submit`. */
+  get hearsPrompts(): boolean {
+    return !this.closing && this.session.hearsPrompts;
+  }
+
   submitPrompt(
     text: string,
     signal: AbortSignal,

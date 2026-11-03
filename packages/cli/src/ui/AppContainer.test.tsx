@@ -894,19 +894,28 @@ describe('AppContainer State Management', () => {
     },
   );
 
-  it('raises prompt.submit in Ink and hands a returned prompt only to an empty composer', async () => {
+  it('raises prompt.submit in Ink, holds steering for its hooks and hands a prompt back', async () => {
     const initialize = vi.fn().mockResolvedValue(undefined);
+    const modSession = {
+      ready: Promise.resolve(),
+      hearsPrompts: true,
+      initialize,
+      subscribe: () => () => {},
+      setPresentation: vi.fn(),
+      setRenderInput: vi.fn(),
+    };
     const owner = vi
       .spyOn(interactiveMods, 'getInteractiveModSession')
-      .mockReturnValue({
-        ready: Promise.resolve(),
-        initialize,
-        subscribe: () => () => {},
-        setPresentation: vi.fn(),
-        setRenderInput: vi.fn(),
-      } as unknown as interactiveMods.InteractiveModSession);
+      .mockReturnValue(
+        modSession as unknown as interactiveMods.InteractiveModSession,
+      );
     vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
     vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+    const drainQueue = vi.fn().mockReturnValue(['queued']);
+    mockedUseMessageQueue.mockReturnValue({
+      ...mockedUseMessageQueue(),
+      drainQueue,
+    });
     const setText = vi.fn();
     const buffer = { text: '', setText };
     mockedUseTextBuffer.mockReturnValue(buffer);
@@ -925,15 +934,35 @@ describe('AppContainer State Management', () => {
           prompts: true,
         }),
       );
+
+      // Prompts typed during a turn wait for it to end while hooks hear them.
+      const drain = (
+        mockedUseLlmStream.mock.lastCall![19] as {
+          current: (includeDeferred?: boolean) => string[];
+        }
+      ).current;
+      expect(drain(false)).toEqual([]);
+      expect(drainQueue).not.toHaveBeenCalled();
+      modSession.hearsPrompts = false;
+      expect(drain(false)).toEqual(['queued']);
+      expect(drainQueue).toHaveBeenCalledOnce();
+
       const returnPrompt = mockedUseLlmStream.mock.lastCall![25] as (
         text: string,
+        pastes?: ReadonlyMap<string, string>,
       ) => void;
-      act(() => returnPrompt('key AKIA'));
-      expect(setText).toHaveBeenCalledExactlyOnceWith('key AKIA');
-      // A composer the person already typed in again keeps its text.
+      const placeholder = '[Pasted text #1 +2 lines]';
+      act(() =>
+        returnPrompt(
+          `look ${placeholder}`,
+          new Map([[placeholder, 'line1\nline2']]),
+        ),
+      );
+      expect(setText).toHaveBeenLastCalledWith(`look ${placeholder}`);
+      // What the person typed since stays, after the prompt handed back.
       buffer.text = 'next prompt';
       act(() => returnPrompt('key AKIA'));
-      expect(setText).toHaveBeenCalledOnce();
+      expect(setText).toHaveBeenLastCalledWith('key AKIA\nnext prompt');
     } finally {
       owner.mockRestore();
     }

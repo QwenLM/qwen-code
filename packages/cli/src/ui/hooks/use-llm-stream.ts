@@ -113,7 +113,11 @@ import {
   findLastUserItemIndex,
   stripLeadingSystemReminders,
 } from '../utils/historyUtils.js';
-import { expandPendingPastePlaceholders } from '../utils/paste-placeholders.js';
+import {
+  collapsePastes,
+  expandPendingPastePlaceholders,
+  framePasteExpansion,
+} from '../utils/paste-placeholders.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import {
   handleAtCommand,
@@ -547,6 +551,13 @@ function charIndexAfterLine(text: string, keptLines: number): number {
  * `pendingHistoryItem` was just set from a stream chunk but the consumer's
  * React-state copy still reads as empty.
  */
+/** What the Mods' `prompt.submit` hooks let in, when they heard a prompt. */
+interface PromptSubmitted {
+  /** A rewrite: its text, and the same with its pastes collapsed. */
+  rewritten?: { text: string; display: string };
+  context?: string[];
+}
+
 export interface CancelSubmitInfo {
   /** `pendingHistoryItemRef.current` captured before any cancel mutation. */
   pendingItem: HistoryItemWithoutId | null;
@@ -646,8 +657,12 @@ export const useLlmStream = (
     submissionInFlightRef?: React.RefObject<boolean>;
     onSubmissionSettled?: () => void;
   } | null>,
-  // Hands a typed prompt that was not sent back to the composer.
-  onPromptReturned?: (text: string) => void,
+  // Hands a typed prompt that was not sent back to the composer, with the
+  // pastes its placeholders stand for.
+  onPromptReturned?: (
+    text: string,
+    pasteExpansions?: ReadonlyMap<string, string>,
+  ) => void,
 ) => {
   const [workflowKeywordActive, setWorkflowKeywordActive] = useState(false);
   const workflowConfigRef = useRef(config);
@@ -1804,7 +1819,7 @@ export const useLlmStream = (
         restoreResponseBinding?: RestoreToolResponseBinding;
       };
       /** What the Mods' `prompt.submit` hooks let in, when they heard it. */
-      promptSubmitted?: { rewritten?: string; context?: string[] };
+      promptSubmitted?: PromptSubmitted;
     }> => {
       if (turnCancelledRef.current && !preserveTurnOwnership) {
         return { queryToSend: null, shouldProceed: false };
@@ -1822,9 +1837,7 @@ export const useLlmStream = (
       }
 
       let localQueryToSendToLlm: PartListUnion | null = null;
-      let promptSubmitted:
-        | { rewritten?: string; context?: string[] }
-        | undefined;
+      let promptSubmitted: PromptSubmitted | undefined;
 
       if (typeof query === 'string') {
         let trimmedQuery = query.trim();
@@ -1886,7 +1899,7 @@ export const useLlmStream = (
             submitted = await mods.submitPrompt(recallText, abortSignal);
           } catch (error) {
             if (!abortSignal.aborted) throw error;
-            onPromptReturned?.(recallText);
+            onPromptReturned?.(userText, pasteExpansions);
             return { queryToSend: null, shouldProceed: false };
           }
           // A dropped prompt is neither shown nor recalled, since it may hold
@@ -1896,7 +1909,7 @@ export const useLlmStream = (
               { type: MessageType.ERROR, text: submitted.drop },
               userMessageTimestamp,
             );
-            onPromptReturned?.(recallText);
+            onPromptReturned?.(userText, pasteExpansions);
             return { queryToSend: null, shouldProceed: false };
           }
           promptSubmitted = {
@@ -1904,20 +1917,40 @@ export const useLlmStream = (
               ? { context: submitted.context }
               : {}),
           };
-          if (submitted.text !== recallText) {
-            // Notices folded in ahead of the typed text stay ahead of the
-            // rewrite, which then stands wherever the typed text would.
-            const typed = recallText.trim();
-            const notices = trimmedQuery.endsWith(typed)
+          const rewritten = submitted.text.trim();
+          if (rewritten !== recallText.trim()) {
+            // The typed text as the composer sent it: pastes framed. What the
+            // composer put ahead of it, attachment references and model-only
+            // notices, stays ahead of the rewrite.
+            const typed = (
+              pasteExpansions?.size
+                ? framePasteExpansion(userText, pasteExpansions)
+                : recallText
+            ).trim();
+            const found = trimmedQuery.endsWith(typed);
+            if (!found) {
+              debugLogger.warn(
+                'prompt.submit: the typed text was not found in the prompt; sending the rewrite alone',
+              );
+            }
+            const ahead = found
               ? trimmedQuery.slice(0, trimmedQuery.length - typed.length)
               : '';
-            const rewritten = submitted.text.trim();
-            trimmedQuery = notices + rewritten;
-            userText = recallText = rewritten;
-            submittedPrompt = rewritten;
-            pasteExpansions = undefined;
+            // A paste the rewrite kept whole stays collapsed and framed.
+            const collapsed = collapsePastes(rewritten, pasteExpansions);
+            pasteExpansions = collapsed.pasteExpansions.size
+              ? collapsed.pasteExpansions
+              : undefined;
+            userText = collapsed.text;
+            recallText = rewritten;
+            trimmedQuery =
+              ahead +
+              (pasteExpansions
+                ? framePasteExpansion(userText, pasteExpansions)
+                : rewritten);
+            submittedPrompt = userText;
             if (humanInput) humanInput = { text: rewritten };
-            promptSubmitted.rewritten = rewritten;
+            promptSubmitted.rewritten = { text: rewritten, display: userText };
           }
         }
         await logger?.logMessage(MessageSenderType.USER, recallText);
@@ -4233,7 +4266,7 @@ export const useLlmStream = (
             request: ToolCallRequestInfo;
             restoreResponseBinding?: RestoreToolResponseBinding;
           };
-          promptSubmitted?: { rewritten?: string; context?: string[] };
+          promptSubmitted?: PromptSubmitted;
         };
         try {
           preparedQuery =
@@ -4287,11 +4320,11 @@ export const useLlmStream = (
         // what workflow keywords are read from.
         const promptRewrite = preparedQuery.promptSubmitted?.rewritten;
         const promptContext = preparedQuery.promptSubmitted?.context;
-        const sentPrompt = promptRewrite ?? submittedPrompt;
+        const sentPrompt = promptRewrite?.display ?? submittedPrompt;
         const typedInput =
           promptRewrite === undefined || !metadata?.humanInput
             ? metadata?.humanInput
-            : { text: promptRewrite };
+            : { text: promptRewrite.text };
 
         if (scheduledClientTool && foregroundAbortController) {
           if (scheduledClientTool.restoreResponseBinding) {
@@ -4547,6 +4580,7 @@ export const useLlmStream = (
                       submitType === SendMessageType.Retry
                         ? ''
                         : (typedInput?.text ??
+                            promptRewrite?.text ??
                             sentPrompt ??
                             (typeof query === 'string' ? query : '')),
                       AbortSignal.any([abortSignal, cancel.signal]),

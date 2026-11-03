@@ -709,6 +709,16 @@ describe('Mod session ownership', () => {
     return loaded;
   };
 
+  it('says whether a loaded Mod hooks prompt.submit', async () => {
+    const quiet = setup();
+    await quiet.session.initialize(new AbortController().signal);
+    expect(quiet.session.hearsPrompts).toBe(false);
+    const { session } = await loadPrompts();
+    expect(session.hearsPrompts).toBe(true);
+    await session.close();
+    expect(session.hearsPrompts).toBe(false);
+  });
+
   it('passes a prompt through when no hook hears prompt.submit', async () => {
     const { session, runtime } = setup();
     await session.initialize(new AbortController().signal);
