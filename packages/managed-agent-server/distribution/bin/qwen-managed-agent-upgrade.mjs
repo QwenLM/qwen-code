@@ -532,6 +532,19 @@ export function fetchRefusal(url) {
   return undefined;
 }
 
+/** `url` as a refusal may print it: a password in it shows as `***`. */
+export function withoutPassword(url) {
+  if (!URL.canParse(url)) {
+    return url;
+  }
+  const parsed = new URL(url);
+  if (!parsed.password) {
+    return url;
+  }
+  parsed.password = '***';
+  return parsed.href;
+}
+
 // ---------------------------------------------------------------------------
 // Host access
 
@@ -2550,8 +2563,8 @@ async function listeners(
     if (refusal) {
       throw new Refusal(
         options.serverUrl
-          ? `--server-url ${JSON.stringify(options.serverUrl)} ${refusal}.`
-          : `The server's configuration puts ${name} at ${JSON.stringify(url)}, which ${refusal}. Bind it where fetch can reach it, or pass --server-url <a URL that serves /actuator/health>.`,
+          ? `--server-url ${JSON.stringify(withoutPassword(options.serverUrl))} ${refusal}.`
+          : `The server's configuration puts ${name} at ${JSON.stringify(withoutPassword(url))}, which ${refusal}. Bind it where fetch can reach it, or pass --server-url <a URL that serves /actuator/health>.`,
       );
     }
   }
@@ -2603,6 +2616,13 @@ function printable(text) {
   return String(text).replace(/[\u0000-\u001F\u007F-\u009F]/g, '\uFFFD');
 }
 
+// Why fetch rejected: fetch itself words every failure as "fetch failed", and
+// the cause says why, or, for a connection refused on each address of a name,
+// only its code.
+function fetchFailure(error) {
+  return printable(error.cause?.message || error.cause?.code || error.message);
+}
+
 /**
  * Whether the health endpoint reports UP, and what it answered when it does
  * not: its status, or why fetch failed, which fetch itself words only as
@@ -2615,13 +2635,9 @@ async function health(system, url, budgetMs, capMs = PROBE_TIMEOUT_MS) {
       signal: AbortSignal.timeout(Math.min(budgetMs, capMs)),
     });
   } catch (error) {
-    // The cause says why, or, for a connection refused on each address of a
-    // name, only its code.
     return {
       up: false,
-      answer: printable(
-        error.cause?.message || error.cause?.code || error.message,
-      ),
+      answer: fetchFailure(error),
       // How fetch rejects once the timeout signal fires.
       timedOut: error.name === 'TimeoutError',
     };
@@ -2810,7 +2826,7 @@ async function api(system, client, route, init = {}, capMs = Infinity) {
       },
     });
   } catch (error) {
-    throw new ApiError(`${label}: ${error.message}`, true);
+    throw new ApiError(`${label}: ${fetchFailure(error)}`, true);
   }
   let body;
   try {
@@ -2820,7 +2836,7 @@ async function api(system, client, route, init = {}, capMs = Infinity) {
     // an empty answer; a poll may pass it. An error answer keeps its status.
     if (response.ok) {
       throw new ApiError(
-        `${label}: ${response.status} with an unreadable body (${error.message})`,
+        `${label}: ${response.status} with an unreadable body (${printable(error.message)})`,
         true,
       );
     }
@@ -2828,7 +2844,7 @@ async function api(system, client, route, init = {}, capMs = Infinity) {
   if (!response.ok) {
     const reason = body?.error?.message ?? body?.message ?? response.statusText;
     throw new ApiError(
-      `${label}: ${response.status} ${reason}`,
+      `${label}: ${response.status} ${printable(reason)}`,
       response.status >= 500,
     );
   }
@@ -2865,7 +2881,7 @@ async function sessionRow(system, client) {
     return row(
       'session',
       'PASS',
-      `read Session ${session.id} and ${items?.data?.length ?? 0} item(s)`,
+      `read Session ${printable(session.id)} and ${items?.data?.length ?? 0} item(s)`,
     );
   } catch (error) {
     return row('session', 'FAIL', error.message);
@@ -2920,21 +2936,25 @@ async function turnRow(system, client, timeout) {
       return row(
         'turn',
         'FAIL',
-        `Session ${session.id}: no terminal event within ${timeout}s${lastError ? `; the last poll failed: ${lastError.message}` : ''}`,
+        `Session ${printable(session.id)}: no terminal event within ${timeout}s${lastError ? `; the last poll failed: ${lastError.message}` : ''}`,
       );
     }
     return /fail|error|cancel/i.test(terminal.type)
-      ? row('turn', 'FAIL', `Session ${session.id} ended with ${terminal.type}`)
+      ? row(
+          'turn',
+          'FAIL',
+          `Session ${printable(session.id)} ended with ${printable(terminal.type)}`,
+        )
       : row(
           'turn',
           'PASS',
-          `Session ${session.id} ended with ${terminal.type}; archive it when done`,
+          `Session ${printable(session.id)} ended with ${printable(terminal.type)}; archive it when done`,
         );
   } catch (error) {
     return row(
       'turn',
       'FAIL',
-      `${session ? `Session ${session.id}: ` : ''}${error.message}`,
+      `${session ? `Session ${printable(session.id)}: ` : ''}${error.message}`,
     );
   }
 }

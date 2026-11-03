@@ -50,6 +50,7 @@ import {
   runUpgrade,
   serverBaseUrl,
   verifyChecksums,
+  withoutPassword,
 } from '../../packages/managed-agent-server/distribution/bin/qwen-managed-agent-upgrade.mjs';
 
 const SERVER = 'qwen-managed-agent-server';
@@ -285,6 +286,21 @@ test('refuses only the URLs fetch refuses', async () => {
     fetchRefusal('https://127.0.0.1:6000'),
     'is on port 6000, so fetch refuses to dial it',
   );
+  // A refusal prints the URL with its password masked, and nothing else changed.
+  for (const [url, shown] of [
+    [
+      'http://admin:secret@127.0.0.1:18080',
+      'http://admin:***@127.0.0.1:18080/',
+    ],
+    ['http://:secret@127.0.0.1:8080/x', 'http://:***@127.0.0.1:8080/x'],
+    ['http://a:p%40ss@[::1]:1', 'http://a:***@[::1]:1/'],
+    ['http://admin@127.0.0.1:8080', 'http://admin@127.0.0.1:8080'],
+    ['http://127.0.0.1:6000', 'http://127.0.0.1:6000'],
+    ['proxy.test:8443', 'proxy.test:8443'],
+    ['http://[fe80::1%eth0]:8080', 'http://[fe80::1%eth0]:8080'],
+  ]) {
+    assert.equal(withoutPassword(url), shown, url);
+  }
 
   // Each URL it refuses, the runtime's fetch rejects before it dials: a port
   // it blocks, a scheme it does not fetch, or credentials.
@@ -2428,11 +2444,12 @@ test('start refuses listeners it cannot reach before it starts anything', async 
     /puts the control plane at "http:\/\/127\.0\.0\.1:6000", which is on port 6000, so fetch refuses to dial it\. Bind it where fetch can reach it, or pass --server-url/,
   );
   host.resolved = {};
-  for (const [serverUrl, refusal] of [
+  for (const [serverUrl, refusal, shown = serverUrl.replace(/\/$/, '')] of [
     ['proxy.test:8443', 'is not an http or https URL'],
     [
       'http://admin:secret@127.0.0.1:18080',
       'carries a user name or password, so fetch refuses it',
+      'http://admin:***@127.0.0.1:18080/',
     ],
     [
       'http://127.0.0.1:10080/',
@@ -2442,11 +2459,13 @@ test('start refuses listeners it cannot reach before it starts anything', async 
     assert.equal(await host.upgrade('start', '--server-url', serverUrl), 1);
     assert.ok(
       host.output.includes(
-        `start refused: --server-url ${JSON.stringify(serverUrl.replace(/\/$/, ''))} ${refusal}.`,
+        `start refused: --server-url ${JSON.stringify(shown)} ${refusal}.`,
       ),
       host.output.join('\n'),
     );
   }
+  // The password the operator typed stays out of what start prints.
+  assert.ok(!host.output.join('\n').includes('secret'), host.output.join('\n'));
   assert.equal(host.units[HARNESS].ActiveState, 'inactive');
   assert.equal(host.units[SERVER].ActiveState, 'inactive');
   assert.ok(host.services.every(({ args }) => args.includes(RESOLVER)));
@@ -2538,6 +2557,95 @@ test('verify sanitizes a malicious health body over a real socket', async (t) =>
     row.includes('\uFFFD') && row.includes('PASS') && row.includes('split'),
     row,
   );
+});
+
+test('verify says why an API read failed, in text the endpoint cannot steer', async (t) => {
+  const { host, target } = await backedUp(t);
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  host.responses['GET /actuator/health'] = { status: 'UP' };
+  assert.equal(await host.upgrade('start'), 0);
+  // fetch words every failure as "fetch failed"; the session row says why,
+  // as the health row above it does.
+  host.responses['GET /v1/agents/sessions'] = () => {
+    throw new TypeError('fetch failed', {
+      cause: Object.assign(
+        new Error('self-signed certificate in certificate chain'),
+        { code: 'SELF_SIGNED_CERT_IN_CHAIN' },
+      ),
+    });
+  };
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 1);
+  assert.equal(
+    rowsOf(host.output).session,
+    'FAIL GET /v1/agents/sessions?limit=1: self-signed certificate in certificate chain',
+  );
+
+  // Text the API hands back cannot drive the terminal either: an error
+  // reason, a Session ID and an event type.
+  const steer = 'x\u001b[2K\u001b[32mPASS\u001b[0m\nsplit\u009b1A';
+  // eslint-disable-next-line no-control-regex -- detecting surviving control bytes is the assertion
+  const control = /[\u0000-\u001F\u007F-\u009F]/;
+  const fake = host.system.fetch;
+  host.system.fetch = async (url, init) =>
+    url.includes('/v1/agents/sessions?limit=1')
+      ? {
+          ok: false,
+          status: 500,
+          statusText: 'Internal Server Error',
+          json: async () => ({ error: { message: steer } }),
+        }
+      : fake(url, init);
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 1);
+  const failed = rowsOf(host.output).session;
+  assert.ok(failed.startsWith('FAIL GET /v1/agents/sessions?limit=1: 500 x'));
+  assert.ok(!control.test(failed), JSON.stringify(failed));
+  // A cause can quote what the peer sent, as a TLS alert or a parser does.
+  host.system.fetch = async () => {
+    throw new TypeError('fetch failed', { cause: new Error(steer) });
+  };
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 1);
+  const caused = rowsOf(host.output);
+  for (const name of ['health', 'session']) {
+    assert.ok(caused[name].startsWith('FAIL '), caused[name]);
+    assert.ok(caused[name].includes('x\uFFFD[2K'), caused[name]);
+    assert.ok(!control.test(caused[name]), JSON.stringify(caused[name]));
+  }
+  // A success whose body is no JSON: the parse error quotes the body.
+  host.system.fetch = async (url, init) =>
+    url.includes('/v1/agents/sessions?limit=1')
+      ? { ok: true, status: 200, json: async () => JSON.parse(steer) }
+      : fake(url, init);
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 1);
+  const unreadable = rowsOf(host.output).session;
+  assert.match(
+    unreadable,
+    /^FAIL .*: 200 with an unreadable body \(.*x\uFFFD\[2K/,
+  );
+  assert.ok(!control.test(unreadable), JSON.stringify(unreadable));
+  host.system.fetch = fake;
+
+  const id = encodeURIComponent(steer);
+  host.responses['GET /v1/agents/sessions'] = { data: [{ id: steer }] };
+  host.responses[`GET /v1/agents/sessions/${id}`] = { id: steer };
+  host.responses[`GET /v1/agents/sessions/${id}/items`] = { data: [] };
+  host.responses['POST /v1/agents/sessions'] = { id: steer };
+  host.responses[`GET /v1/agents/sessions/${id}/events`] = {
+    data: [{ sequence: 1, type: `turn.completed${steer}`, terminal: true }],
+  };
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme', '--turn'), 0);
+  const rows = rowsOf(host.output);
+  for (const name of ['session', 'turn']) {
+    assert.ok(rows[name].startsWith('PASS '), rows[name]);
+    assert.ok(!control.test(rows[name]), JSON.stringify(rows[name]));
+    assert.ok(rows[name].includes('\uFFFD') && rows[name].includes('split'));
+  }
+  host.responses[`GET /v1/agents/sessions/${id}/events`] = {
+    data: [{ sequence: 2, type: `turn.failed${steer}`, terminal: true }],
+  };
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme', '--turn'), 1);
+  const turn = rowsOf(host.output).turn;
+  assert.ok(turn.startsWith('FAIL Session x'), turn);
+  assert.ok(!control.test(turn), JSON.stringify(turn));
 });
 
 test('verify refuses a URL fetch refuses before it probes', async (t) => {
