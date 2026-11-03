@@ -351,14 +351,14 @@ describe('AddMenu', () => {
     expect(plan.getAttribute('role')).toBe('menuitemcheckbox');
     expect(plan.getAttribute('aria-checked')).toBe('true');
     expect(plan.textContent).toBe('Plan modePlan first, run after you approve');
-    // The description hides below the small-screen breakpoint, like the
-    // siblings' secondary text.
     const description = Array.from(plan.querySelectorAll('span')).find(
       (element) => element.textContent === 'Plan first, run after you approve',
     )!;
     expect(description).toBeDefined();
-    expect(description.className).toContain('hidden');
-    expect(description.className).toContain('sm:block');
+    expect(
+      plan.querySelector('[data-checked]')?.getAttribute('data-checked'),
+    ).toBe('true');
+    expect(plan.querySelector('button, [role="switch"]')).toBeNull();
   });
 
   it('puts the Plan entry last and states why it is disabled', async () => {
@@ -373,12 +373,14 @@ describe('AddMenu', () => {
     const rows = portalRoot!.querySelectorAll('[role^="menuitem"]');
     const plan = menuItem('composer-add-menu-plan')!;
     expect(rows[rows.length - 1]).toBe(plan);
-    // A separator sets the mode row apart from the add actions, and only this
-    // row carries a leading icon.
+    // A separator keeps the mode row apart from the add actions.
     expect(plan.previousElementSibling?.getAttribute('role')).toBe('separator');
     expect(plan.querySelector('span[style*="mode-icon-url"]')).not.toBeNull();
     expect(plan.hasAttribute('data-disabled')).toBe(true);
     expect(plan.textContent).toContain('Switching mode');
+    expect(
+      plan.querySelector('[data-checked]')?.getAttribute('data-checked'),
+    ).toBe('false');
     await act(async () => {
       plan.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
     });
@@ -1279,9 +1281,12 @@ describe('mobile AddMenu', () => {
       const row = menuItem('composer-add-menu-plan') as HTMLButtonElement;
       const t = getTranslator(language);
       expect(row.textContent).toBe(
-        `${t('composerAdd.plan.label')}${t('composerAdd.plan.busy')}`,
+        `${t('composerAdd.plan.label')}${t('composerAdd.plan.description')}${t('composerAdd.plan.busy')}`,
       );
       expect(row.disabled).toBe(true);
+      expect(row.getAttribute('aria-description')).toBe(
+        t('composerAdd.plan.busy'),
+      );
       await act(async () => row.click());
       expect(onToggle).not.toHaveBeenCalled();
     },

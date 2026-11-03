@@ -105,11 +105,15 @@ test('simple mobile add drawer keeps advanced controls in advanced mode @smoke',
   await expect(drawer.locator('[data-web-shell-model-button]')).toHaveCount(0);
   await expect(drawer.locator('[data-web-shell-mode-button]')).toHaveCount(0);
   expect(
-    await drawer
-      .getByRole('button')
-      .evaluateAll((buttons) =>
-        buttons.map((button) => button.textContent?.trim()).filter(Boolean),
-      ),
+    await drawer.getByRole('button').evaluateAll((buttons) =>
+      buttons
+        .filter((button) => button.textContent?.trim())
+        .map(
+          (button) =>
+            button.getAttribute('aria-label') ?? button.textContent?.trim(),
+        )
+        .filter(Boolean),
+    ),
   ).toEqual([
     'Photos',
     'Take photo',
