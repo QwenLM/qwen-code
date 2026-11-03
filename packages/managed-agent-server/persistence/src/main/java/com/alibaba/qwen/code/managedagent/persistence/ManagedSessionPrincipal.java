@@ -74,4 +74,25 @@ public final class ManagedSessionPrincipal {
                         : principal.actorSubjectId());
         return joined.getBytes(StandardCharsets.UTF_8);
     }
+
+    static boolean ownsSession(JdbcTemplate jdbc, String tenantId,
+            String sessionId, SessionPrincipal principal) {
+        return principal != null && principal.tenantId().equals(tenantId)
+                && matches(find(jdbc, tenantId, sessionId), principal);
+    }
+
+    static void requireSessionOwnership(JdbcTemplate jdbc, String tenantId,
+            String sessionId, SessionPrincipal principal) {
+        if (!ownsSession(jdbc, tenantId, sessionId, principal)) {
+            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(
+                    404, "session_not_found", "The Session was not found.");
+        }
+    }
+
+    static void requirePrincipalTenant(String tenantId, SessionPrincipal principal) {
+        if (principal == null || !principal.tenantId().equals(tenantId)) {
+            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(
+                    404, "session_not_found", "The Session was not found.");
+        }
+    }
 }

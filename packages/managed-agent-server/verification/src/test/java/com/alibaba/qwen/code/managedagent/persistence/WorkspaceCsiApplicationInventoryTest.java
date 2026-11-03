@@ -1540,7 +1540,7 @@ class WorkspaceCsiApplicationInventoryTest {
             catalog.add(Map.of("name", "imported-" + i, "description", "Imported Skill",
                     "body", i == 0 ? "x".repeat(404465) : "Instruction", "model_invocable", false));
         }
-        var resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         resources.publishAgentSkills("foreign", "foreign-workspace", "foreign-session", catalog);
         assertThat(readHistory(expected, new java.util.ArrayList<>(), true).blockers()).isEmpty();
         resources.publishAgentSkills("foreign", "foreign-workspace", "foreign-session", List.of(

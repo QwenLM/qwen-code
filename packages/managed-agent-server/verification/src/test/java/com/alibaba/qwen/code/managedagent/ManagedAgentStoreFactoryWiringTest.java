@@ -83,9 +83,9 @@ class ManagedAgentStoreFactoryWiringTest {
                             "definitions", ManagedAgentDefinitionStore.class,
                             "sessionWorktrees", SessionWorktreeStore.class,
                             "journalEventTransport", JournalEventTransport.class)
-                            .forEach((field, type) -> assertThat(ReflectionTestUtils.getField(target, field))
+                            .forEach((field, type) -> assertThat(com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, field))
                                     .as(field).isSameAs(context.getBean(type)));
-                    var records = (Advised) ReflectionTestUtils.getField(target, "configRecords");
+                    var records = (Advised) com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "configRecords");
                     assertThat(records).isNotNull();
                     assertThat(context.getBeanFactory().containsSingleton("factoryRecordStore")).isFalse();
                     Object resolved = records.getTargetSource().getTarget();

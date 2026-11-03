@@ -41,7 +41,7 @@ class EmbeddedRuntimeBrokerTest {
         // slow-but-healthy runtime is cut mid-wait and never converges.
         long stepCallTimeoutMillis = EmbeddedRuntimeBroker.LEASE.toMillis() * 2;
         assertThat(stepCallTimeoutMillis)
-                .isGreaterThan(com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner.READY_TIMEOUT.toMillis());
+                .isGreaterThan(com.alibaba.qwen.code.runtimebroker.provisioning.local.LocalProcessRuntimeProvisioner.READY_TIMEOUT.toMillis());
         assertThat(stepCallTimeoutMillis)
                 .isGreaterThan(com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport.REQUEST_TIMEOUT.toMillis());
     }
@@ -435,6 +435,7 @@ class EmbeddedRuntimeBrokerTest {
             throws Exception {
         ManagedAgentProperties properties = properties();
         properties.getRuntimeBroker().setProvisioner("kubernetes");
+        properties.getRuntimeBroker().setWorkspaceCwd("/workspace");
         // Blank derives the canonical workspace ID for the k8s/local path.
         properties.getRuntimeBroker().setWorkspaceId("");
 
@@ -442,7 +443,33 @@ class EmbeddedRuntimeBrokerTest {
                 properties))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("not supported")
-                .hasMessageContaining("local-process, static");
+                .hasMessageContaining("static").hasMessageContaining("local-process");
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"/", "/workspace", "/workspace/project with spaces"})
+    void keepsKubernetesPathsIndependentOfTheServerFilesystem(String cwd) throws Exception {
+        var config = properties().getRuntimeBroker();
+        config.setProvisioner("kubernetes-workspace");
+        config.setWorkspaceId("resident-workspace");
+        config.setWorkspaceCwd(cwd);
+
+        assertThat(EmbeddedRuntimeBroker.workspaceId(config)).isEqualTo("resident-workspace");
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.NullAndEmptySource
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"workspace", ".", "C:\\workspace", "\\\\server\\workspace",
+            "//workspace", "/workspace/", "/workspace//project", "/workspace/.", "/workspace/../project", "/workspace/\0project"})
+    void rejectsNonNormalizedKubernetesWorkspacePathsBeforeAssembly(String cwd) throws Exception {
+        var config = properties().getRuntimeBroker();
+        config.setProvisioner("kubernetes-workspace");
+        config.setWorkspaceId("resident-workspace");
+        config.setWorkspaceCwd(cwd);
+
+        assertThatThrownBy(() -> EmbeddedRuntimeBroker.workspaceId(config))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("workspace cwd must be an absolute normalized path");
     }
 
     @Test
@@ -593,7 +620,7 @@ class EmbeddedRuntimeBrokerTest {
     private static RuntimeProvisioner provisionerOf(EmbeddedRuntimeBroker broker)
             throws Exception {
         java.lang.reflect.Field field = EmbeddedRuntimeBroker.class
-                .getDeclaredField("localProvisioner");
+                .getDeclaredField("primaryProvisioner");
         field.setAccessible(true);
         return (RuntimeProvisioner) field.get(broker);
     }
