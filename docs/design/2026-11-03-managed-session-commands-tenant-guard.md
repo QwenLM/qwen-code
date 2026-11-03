@@ -51,14 +51,29 @@ followed two levels deep; none takes the guard (criterion 2).
 | `changeSessionModel`, `changeSessionApproval` | Remove | The receipt scope is `(operation, Session, actor)`, so the Session lock serializes replays. `requirePolicyChange` checks the fence. The receipt is written `COMPLETED`. |
 | `beginContextCompression`, `beginTaskCancelOperation`, `ManagedActionStore.admit` | Remove | The idempotency key is Session-scoped. Each checks the fence through `requireOpen` or `requireSessionOpen` before writing `TASK_CANCEL` or `ACTION_RESPONSE`, which the migration prepare fix covers. |
 | `requireMcpManagement`, `requireExtensionManagement` | Remove | Standalone read-only validation transactions. The configuration commit validates again in its own transaction. |
-| `beginSessionRename`, `beginSessionMutation` | Keep | The command key is tenant-scoped. The guard serializes two Sessions reusing one key; without it the loser gets an unhandled `DuplicateKeyException` instead of `idempotency_conflict` (criterion 5). |
+| `beginSessionRename`, `beginSessionMutation` | Remove, with changes below | The command key is tenant-scoped, so two Sessions reusing one key were serialized only by the guard (criterion 5). The receipt's unique key now decides that race. |
 | `insertWorkspaceSessionCommand`, `insertInternalTeamLeadSessionCommand`, `insertChildSession` | Keep | Not audited here. Creation relies on the guard coming before the transaction's first consistent read, and its Workspace resolution and admission helpers were not traced (criteria 2 and 4). |
 | Lifecycle (`beginLifecycle`, `beginOperation`, `beginWorkspaceClose`, `beginChildClose`, `unarchiveWorkspaceSession`) | Keep | The L3 lifecycle protocol. Low frequency. |
 
 ## Design
 
-Delete the `WorkspaceMigrationAdmission.lockTenant` call from the fourteen
-commands marked "Remove". No other code changes. This depends on the migration
+Delete the `WorkspaceMigrationAdmission.lockTenant` call from the sixteen
+commands marked "Remove". Rename and mutation admission also change:
+
+- The replay probe in `beginSessionMutation` becomes a nonlocking read for every
+  kind. `UNARCHIVE` used a locking read; on a missing key that gap-locks the
+  tenant-shared receipt index, and without the guard two admissions of different
+  keys would deadlock inserting into the same gap, the hazard Turn admission
+  already avoids. The Session lock still serializes one Session's commands, and
+  it is taken first, so the probe's snapshot follows it.
+- A `DuplicateKeyException` from inserting the receipt means another request
+  committed the same tenant-scoped key first, because every receipt unique key
+  derives from it. Nothing has been written yet. The command re-reads the
+  receipt with a locking read and applies the existing rules: a different
+  Session or digest answers `409 idempotency_conflict`. If the engine still
+  hides the receipt, it answers the same conflict.
+
+Other code is unchanged. This depends on the migration
 prepare change in the Turn admission design, because task cancel and action
 responses create work that migration counts.
 
@@ -74,14 +89,15 @@ responses create work that migration counts.
 
 1. `ManagedModelSelectionTest`: a model change completes while another
    transaction holds the tenant placement guard.
-2. Existing suites for rename, model, approval, MCP, extension, context
+2. `ManagedSchemaSessionStoreTest` (and its MySQL subclass): with a snapshot
+   pinned before another Session commits a rename under the same key, the
+   rename answers `idempotency_conflict` and writes nothing.
+3. Existing suites for rename, model, approval, MCP, extension, context
    compression, task cancel, cwd change, action response, migration and CSI
    Session refusal pass, including the MySQL profiles in CI.
 
 ## Follow-up
 
-- Handle `DuplicateKeyException` for tenant-scoped rename and mutation keys,
-  then drop their guard.
 - Audit Session creation: trace its Workspace resolution and admission helpers
   and replace the guard's ordering role with a locking read of the Session's
   rows before its first consistent read.

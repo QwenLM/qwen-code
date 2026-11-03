@@ -42,14 +42,24 @@ action 响应，都在同一行上排队，而且没有 Turn 提交那样的五�
 | `changeSessionModel`、`changeSessionApproval` | 去掉 | 回执作用域为（操作、Session、actor），所以 Session 锁会串行化重放。`requirePolicyChange` 会检查 fence。回执以 `COMPLETED` 写入。 |
 | `beginContextCompression`、`beginTaskCancelOperation`、`ManagedActionStore.admit` | 去掉 | 幂等键按 Session 划分。它们在写入 `TASK_CANCEL` 或 `ACTION_RESPONSE` 之前，都通过 `requireOpen` 或 `requireSessionOpen` 检查 fence，迁移 prepare 的修复覆盖了这种情况。 |
 | `requireMcpManagement`、`requireExtensionManagement` | 去掉 | 独立的只读校验事务。配置提交会在自己的事务中再次校验。 |
-| `beginSessionRename`、`beginSessionMutation` | 保留 | 命令键按租户划分。guard 会串行化两个复用同一键的 Session；去掉后失败方会得到未处理的 `DuplicateKeyException`，而不是 `idempotency_conflict`（标准 5）。 |
+| `beginSessionRename`、`beginSessionMutation` | 去掉，并做下述修改 | 命令键按租户划分，两个复用同一键的 Session 原本只由 guard 串行化（标准 5）。现在由回执的唯一键决定这一竞争。 |
 | `insertWorkspaceSessionCommand`、`insertInternalTeamLeadSessionCommand`、`insertChildSession` | 保留 | 本次未审计。创建流程依赖 guard 排在事务首次一致性读之前，且其 Workspace 解析与准入辅助方法尚未追踪（标准 2 与 4）。 |
 | 生命周期（`beginLifecycle`、`beginOperation`、`beginWorkspaceClose`、`beginChildClose`、`unarchiveWorkspaceSession`） | 保留 | L3 生命周期协议，频率低。 |
 
 ## 设计
 
-从标记为"去掉"的十四个命令中删除 `WorkspaceMigrationAdmission.lockTenant` 调用，不做其他
-代码改动。本改动依赖 Turn 准入设计中的迁移 prepare 修改，因为任务取消和 action 响应会创建
+从标记为"去掉"的十六个命令中删除 `WorkspaceMigrationAdmission.lockTenant` 调用。改名与
+mutation 准入另有以下修改：
+
+- `beginSessionMutation` 的重放探测对所有类型都改为非锁定读。`UNARCHIVE` 原先使用锁定读；
+  键不存在时，它会对租户共享的回执索引加间隙锁，去掉 guard 后，两个不同键的准入会在向同一
+  间隙插入时死锁，这正是 Turn 准入已经规避的问题。Session 锁仍会串行化同一 Session 的命令，
+  并且它最先获取，因此探测的快照在该锁之后。
+- 插入回执时出现 `DuplicateKeyException`，说明另一请求已先提交了同一按租户划分的键，因为回执
+  的所有唯一键都由它派生。此时尚未写入任何数据。命令以锁定读重新读取该回执，并沿用现有规则：
+  Session 或摘要不同则返回 `409 idempotency_conflict`。若引擎仍看不到该回执，同样返回该冲突。
+
+其他代码不变。本改动依赖 Turn 准入设计中的迁移 prepare 修改，因为任务取消和 action 响应会创建
 迁移需要统计的工作。
 
 ## 风险
@@ -61,10 +71,11 @@ action 响应，都在同一行上排队，而且没有 Turn 提交那样的五�
 ## 验证与验收
 
 1. `ManagedModelSelectionTest`：另一事务持有租户 placement guard 时，模型修改仍能完成。
-2. 现有的改名、模型、审批、MCP、扩展、上下文压缩、任务取消、cwd 变更、action 响应、
+2. `ManagedSchemaSessionStoreTest`（及其 MySQL 子类）：在另一 Session 以同一键提交改名之前
+   固定快照，改名仍返回 `idempotency_conflict`，且不写入任何数据。
+3. 现有的改名、模型、审批、MCP、扩展、上下文压缩、任务取消、cwd 变更、action 响应、
    迁移以及 CSI Session 拒绝测试继续通过，包括 CI 中的 MySQL profile。
 
 ## 后续工作
 
-- 为按租户划分的改名和 mutation 键处理 `DuplicateKeyException`，然后去掉它们的 guard。
 - 审计 Session 创建：追踪其 Workspace 解析与准入辅助方法，并在首次一致性读之前改用对相关行的锁定读，替代 guard 的排序作用。

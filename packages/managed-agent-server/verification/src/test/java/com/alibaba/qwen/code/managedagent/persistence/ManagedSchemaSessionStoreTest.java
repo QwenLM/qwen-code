@@ -317,6 +317,53 @@ public class ManagedSchemaSessionStoreTest {
         jdbc.update("UPDATE ma_resource SET retention_until = 946684800000 WHERE tenant_id = ? AND retention_until IS NOT NULL", tenant);
     }
 
+    // Rename keys are tenant-scoped and admission takes no tenant guard: a Session that
+    // reuses another Session's key concurrently loses on the receipt's unique key and still
+    // answers idempotency_conflict, without writing anything.
+    @Test
+    void aRacingSessionReusingARenameKeyAnswersConflictFromTheReceiptKey() {
+        String other =
+                tx.execute(
+                                status ->
+                                        store.insertSessionCommand(
+                                                tenant,
+                                                "actor",
+                                                "CREATE_SESSION",
+                                                "create-other",
+                                                "create-other-digest",
+                                                "qwen-code",
+                                                null,
+                                                "title",
+                                                List.of(),
+                                                null))
+                        .sessionId();
+        var winner = new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
+        winner.setPropagationBehavior(org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        assertThatThrownBy(
+                        () ->
+                                tx.executeWithoutResult(
+                                        status -> {
+                                            // Pin this transaction's snapshot before the winner commits.
+                                            assertThat(jdbc.queryForObject(
+                                                            "SELECT COUNT(*) FROM ma_request_receipt"
+                                                                    + " WHERE namespace = 'SESSION_COMMAND'",
+                                                            Long.class))
+                                                    .isZero();
+                                            winner.execute(ignored -> store.beginSessionRename(
+                                                    tenant, "shared", "digest", other, "theirs"));
+                                            store.beginSessionRename(tenant, "shared", "digest", session, "mine");
+                                        }))
+                .isInstanceOfSatisfying(
+                        com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
+        assertThat(store.requireSession(tenant, session).title()).isEqualTo("title");
+        assertThat(jdbc.queryForObject(
+                        "SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ?",
+                        Long.class,
+                        tenant))
+                .isEqualTo(1);
+    }
+
     @Test
     void renameRevisionAndClaimGenerationFenceStaleWorkers() {
         var command =
