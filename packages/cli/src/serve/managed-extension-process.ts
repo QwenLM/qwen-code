@@ -127,7 +127,7 @@ export class ManagedExtensionProcessOwners {
   }): Promise<{
     ownerId: string;
     child: ChildProcess;
-    preread?: { stdout: Buffer[]; stderr: Buffer[] };
+    preread?: { stdout: Buffer[]; stderr: Buffer[]; overflow: boolean };
     detachPreread?: () => void;
   }> {
     await this.recovering;
@@ -170,12 +170,33 @@ export class ManagedExtensionProcessOwners {
     // Attaching here, synchronously after spawn, leaves no window for bytes to
     // be drained unread; the caller detaches and replays these buffers before
     // wiring its live capture.
-    let preread: { stdout: Buffer[]; stderr: Buffer[] } | undefined;
+    let preread:
+      | { stdout: Buffer[]; stderr: Buffer[]; overflow: boolean }
+      | undefined;
     let detachPreread: (() => void) | undefined;
     if (input.prereadOutput) {
-      const buffers = { stdout: [] as Buffer[], stderr: [] as Buffer[] };
-      const onStdout = (chunk: Buffer) => buffers.stdout.push(chunk);
-      const onStderr = (chunk: Buffer) => buffers.stderr.push(chunk);
+      const buffers = {
+        stdout: [] as Buffer[],
+        stderr: [] as Buffer[],
+        overflow: false,
+      };
+      // Bound the preread against the shell's own 1 MiB capture budget. Keep
+      // draining once the budget is spent (the listener stays attached) so the
+      // child never blocks on a full pipe, but flag the overflow so the shell
+      // can report outputCaptureLimitExceeded truthfully instead of silently
+      // dropping bytes.
+      let retained = 0;
+      const capture = (id: 'stdout' | 'stderr') => (chunk: Buffer) => {
+        const remaining = Math.max(0, 1024 * 1024 - retained);
+        if (chunk.length > remaining) buffers.overflow = true;
+        if (remaining) {
+          const prefix = chunk.subarray(0, remaining);
+          buffers[id].push(prefix);
+          retained += prefix.length;
+        }
+      };
+      const onStdout = capture('stdout');
+      const onStderr = capture('stderr');
       child.stdout?.on('data', onStdout);
       child.stderr?.on('data', onStderr);
       preread = buffers;

@@ -77,6 +77,9 @@ export async function runManagedExtensionShell(
   if (preread) {
     for (const chunk of preread.stdout) consume('stdout', chunk);
     for (const chunk of preread.stderr) consume('stderr', chunk);
+    // The preread capped itself at the same 1 MiB budget; bytes beyond it were
+    // drained but not retained, so report the truncation truthfully.
+    if (preread.overflow) exceeded = true;
   }
   for (const id of ['stdout', 'stderr'] as const)
     child[id]?.on('data', (chunk: Buffer) => consume(id, chunk));

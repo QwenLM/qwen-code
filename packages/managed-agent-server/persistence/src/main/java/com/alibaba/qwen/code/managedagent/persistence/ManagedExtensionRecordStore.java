@@ -45,6 +45,7 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -718,75 +719,107 @@ public class ManagedExtensionRecordStore
                     + " WHERE session_scope_key=? AND record_key=? AND revision=?",
                     revision, resource.resourceId(), settledAt, scope, key, revision - 1);
         }
-        jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key=? AND owner_kind='SESSION_RECORD' AND owner_key=?", scope, key);
-        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key,"
-                        + " tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?, "
-                        + ManagedSchemaTime.SQL_NOW + ")", scope, key, revision,
-                ManagedSchemaKeys.key(scope, resource.resourceId()), tenantId, workspaceId, sessionId, resource.resourceId());
+        Set<String> retained = new HashSet<>(jdbc.queryForList(
+                "SELECT resource_id FROM ma_resource_ref WHERE session_scope_key=? AND owner_kind='SESSION_RECORD' AND owner_key=?",
+                String.class, scope, key));
+        if (retained.add(resource.resourceId())) {
+            referenceProjectionResource(scope, key, revision, tenantId, workspaceId,
+                    sessionId, resource.resourceId());
+        }
         if (ManagedConfigInstall.isPackageConfig(settings)) {
             // A sealed writer cannot rely on its old journal to retain the
             // recovery resources named by the active package configuration.
             retainPackageConfiguration(scope, key, revision, tenantId, workspaceId,
-                    sessionId, settings, resources, new HashSet<>(Set.of(resource.resourceId())));
+                    sessionId, settings, resources, retained);
         }
     }
 
+    private static final Set<String> RETAINED_REFERENCE_KINDS = Set.of(
+            "managed-config_install", "managed-extension-config-bundle",
+            "managed-extension-contributions", "managed-extension-root",
+            "managed-extension-stage-ack", "managed-extension-enable-ack");
+
+    // Resources are immutable per (scope, resourceId) and every settings revision links its
+    // predecessor, so a resource retained by an earlier commit already pins its whole reference
+    // closure: the walk only has to name the resources this commit adds, probing existence once
+    // per level instead of per resource and leaving the rows it already wrote untouched.
     private void retainPackageConfiguration(String scope, String key, long revision,
             String tenantId, String workspaceId, String sessionId, JsonNode settings,
             Function<String, StoredResource> resources, Set<String> retained) {
-        for (String field : List.of("previousBundleRef", "restoresBundleRef", "bundleRef",
-                "rootSnapshotRef", "previousRecordRef")) {
-            retainPackageReference(scope, key, revision, tenantId, workspaceId, sessionId,
-                    settings.get(field), resources, retained);
-        }
-        for (String field : List.of("stageAckRefs", "enableAckRefs")) {
-            for (JsonNode ref : settings.path(field)) {
-                retainPackageReference(scope, key, revision, tenantId, workspaceId, sessionId,
-                        ref, resources, retained);
+        List<JsonNode> level = configurationReferences(settings);
+        while (!level.isEmpty()) {
+            Map<String, JsonNode> candidates = new LinkedHashMap<>();
+            for (JsonNode ref : level) {
+                if (ref != null && !ref.isNull()
+                        && retained.add(ref.path("resourceId").asText())) {
+                    candidates.put(ref.path("resourceId").asText(), ref);
+                }
+            }
+            level = new ArrayList<>();
+            if (candidates.isEmpty()) {
+                continue;
+            }
+            Set<String> existing = existingResources(scope, candidates.keySet());
+            for (Map.Entry<String, JsonNode> candidate : candidates.entrySet()) {
+                String resourceId = candidate.getKey();
+                if (!existing.contains(resourceId)) {
+                    continue;
+                }
+                StoredResource resource = resources.apply(resourceId);
+                requireReference(resource, candidate.getValue());
+                referenceProjectionResource(scope, key, revision, tenantId, workspaceId,
+                        sessionId, resourceId);
+                if (RETAINED_REFERENCE_KINDS.contains(resource.kind())) {
+                    level.addAll(packageReferences(resource.kind(), readBody(resource)));
+                }
             }
         }
     }
 
-    private void retainPackageReference(String scope, String key, long revision,
-            String tenantId, String workspaceId, String sessionId, JsonNode ref,
-            Function<String, StoredResource> resources, Set<String> retained) {
-        if (ref == null || ref.isNull() || !retained.add(ref.path("resourceId").asText())) {
-            return;
+    private static List<JsonNode> configurationReferences(JsonNode settings) {
+        List<JsonNode> refs = new ArrayList<>();
+        for (String field : List.of("previousBundleRef", "restoresBundleRef", "bundleRef",
+                "rootSnapshotRef", "previousRecordRef")) {
+            refs.add(settings.get(field));
         }
-        String resourceId = ref.path("resourceId").asText();
-        if (jdbc.queryForList("SELECT 1 FROM ma_resource WHERE session_scope_key = ? AND resource_id = ?",
-                scope, resourceId).isEmpty()) {
-            return;
-        }
-        StoredResource resource = resources.apply(resourceId);
-        requireReference(resource, ref);
-        referenceProjectionResource(scope, key, revision, tenantId, workspaceId, sessionId,
-                resource.resourceId());
-        if (!Set.of("managed-config_install", "managed-extension-config-bundle",
-                "managed-extension-contributions", "managed-extension-root",
-                "managed-extension-stage-ack", "managed-extension-enable-ack").contains(resource.kind())) {
-            return;
-        }
-        JsonNode body = readBody(resource);
-        if ("managed-config_install".equals(resource.kind())) {
-            retainPackageConfiguration(scope, key, revision, tenantId, workspaceId,
-                    sessionId, body, resources, retained);
-        } else if ("managed-extension-config-bundle".equals(resource.kind())) {
-            for (JsonNode entry : body.path("packages")) {
-                retainPackageReference(scope, key, revision, tenantId, workspaceId,
-                        sessionId, entry.get("contributionsRef"), resources, retained);
+        for (String field : List.of("stageAckRefs", "enableAckRefs")) {
+            for (JsonNode ref : settings.path(field)) {
+                refs.add(ref);
             }
-        } else if ("managed-extension-contributions".equals(resource.kind())) {
+        }
+        return refs;
+    }
+
+    private static List<JsonNode> packageReferences(String kind, JsonNode body) {
+        if ("managed-config_install".equals(kind)) {
+            return configurationReferences(body);
+        }
+        List<JsonNode> refs = new ArrayList<>();
+        if ("managed-extension-config-bundle".equals(kind)) {
+            for (JsonNode entry : body.path("packages")) {
+                refs.add(entry.get("contributionsRef"));
+            }
+        } else if ("managed-extension-contributions".equals(kind)) {
             for (JsonNode part : body.path("parts")) {
-                retainPackageReference(scope, key, revision, tenantId, workspaceId,
-                        sessionId, part, resources, retained);
+                refs.add(part);
             }
         } else {
-            retainPackageReference(scope, key, revision, tenantId, workspaceId, sessionId,
-                    body.get("rootSnapshotRef"), resources, retained);
-            retainPackageReference(scope, key, revision, tenantId, workspaceId, sessionId,
-                    body.get("bundleRef"), resources, retained);
+            refs.add(body.get("rootSnapshotRef"));
+            refs.add(body.get("bundleRef"));
         }
+        return refs;
+    }
+
+    private Set<String> existingResources(String scope, Set<String> resourceIds) {
+        String placeholders = String.join(",",
+                java.util.Collections.nCopies(resourceIds.size(), "?"));
+        List<Object> args = new ArrayList<>();
+        args.add(scope);
+        args.addAll(resourceIds);
+        return new HashSet<>(jdbc.queryForList(
+                "SELECT resource_id FROM ma_resource WHERE session_scope_key = ?"
+                        + " AND resource_id IN (" + placeholders + ")",
+                String.class, args.toArray()));
     }
 
     private static void requireConfigurationBinding(JsonNode settings, String[] lines) {

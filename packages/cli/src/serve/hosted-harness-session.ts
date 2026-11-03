@@ -9087,8 +9087,16 @@ export function registerHostedHarnessSessionRoutes(
             session.hooks &&
             session.hooks.broker.runtimeSessionId !==
               extensionBroker.runtimeSessionId
-          )
-            session.hooks.delegateBrokerToMcp(extensionBroker);
+          ) {
+            // The owner moved (configRevision changed) while the Hook catalog
+            // pin stayed the same, so drain kept this session. Close it to
+            // release its mount claim and let the rebuild below bind the new
+            // owner. Swapping the broker under a held mount would orphan the
+            // claim, and refusing the swap would park a previously-valid apply
+            // at recovery_required.
+            await session.hooks.close();
+            session.hooks = undefined;
+          }
           if (bundle.hookCatalog && !session.hooks) {
             session.hooks = new HostedHookSession(
               options,

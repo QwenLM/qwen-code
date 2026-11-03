@@ -12,17 +12,20 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ManagedRuntimeLedger } from './managed-runtime-ledger.js';
 import { ManagedExtensionProcessOwners } from './managed-extension-process.js';
 
-// The Linux preread regression below mocks only the cgroup unit so a real
+// The Linux preread regressions below mock only the cgroup unit so a real
 // child is spawned through the real start() attach path without a delegated
-// cgroup root. Developer-mode tests never touch this module.
+// cgroup root. Developer-mode tests never touch this module. The launch script
+// is hoisted-mutable so the overflow case can write past the capture budget
+// before acknowledging membership.
+const cgroupMock = vi.hoisted(() => ({
+  script:
+    "require('fs').writeSync(3,'joined\\n');process.stdout.write('stdout-sentinel');process.stderr.write('stderr-sentinel');setInterval(()=>{},1000)",
+}));
 vi.mock('@qwen-code/qwen-code-core/hooks/hook-command-cgroup.js', () => {
   const unit = {
     launch: (executable: string, _args: string[], env: NodeJS.ProcessEnv) => ({
       executable,
-      args: [
-        '-e',
-        "require('fs').writeSync(3,'joined\\n');process.stdout.write('stdout-sentinel');process.stderr.write('stderr-sentinel');setInterval(()=>{},1000)",
-      ],
+      args: ['-e', cgroupMock.script],
       env,
     }),
     terminate: async () => {},
@@ -402,6 +405,49 @@ describe('ManagedExtensionProcessOwners', () => {
         expect(retained[0].child?.stderr?.listenerCount('data')).toBe(0);
       } finally {
         save.mockRestore();
+        await owners.stopAll();
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'caps the spawn-time preread at the shell budget and reports overflow',
+    async () => {
+      const directory = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'extension-preread-cap-'),
+      );
+      directories.push(directory);
+      const owners = new ManagedExtensionProcessOwners('linux-cgroup', {
+        cgroupRoot: directory,
+        directory: path.join(directory, 'owners'),
+      });
+      // Write past the 1 MiB budget BEFORE acknowledging membership, so the
+      // overflow happens inside the pre-handoff preread window. An unbounded
+      // preread would retain all 2 MiB and never flag overflow.
+      const defaultScript = cgroupMock.script;
+      cgroupMock.script =
+        'process.stdout.write("x".repeat(2 * 1024 * 1024));require(\'fs\').writeSync(3,"joined\\n");setInterval(()=>{},1000)';
+      let spawned: ChildProcess | undefined;
+      try {
+        const started = await owners.start({
+          sessionId: 'root',
+          configRevision: 1,
+          executable: process.execPath,
+          args: ['-e', 'ignored-by-mock-launch'],
+          env: { PATH: '/usr/bin:/bin' },
+          cwd: directory,
+          prereadOutput: true,
+        });
+        spawned = started.child;
+        started.detachPreread!();
+        const retainedBytes =
+          started.preread!.stdout.reduce((n, b) => n + b.length, 0) +
+          started.preread!.stderr.reduce((n, b) => n + b.length, 0);
+        expect(retainedBytes).toBeLessThanOrEqual(1024 * 1024);
+        expect(started.preread!.overflow).toBe(true);
+      } finally {
+        cgroupMock.script = defaultScript;
+        spawned?.kill('SIGKILL');
         await owners.stopAll();
       }
     },

@@ -231,7 +231,9 @@ export class ManagedExtensionCommandRuntime {
             },
             { mode: 0o600, forceMode: true, noFollow: true },
           );
-          this.dependencies.acknowledge(reference);
+          // No acknowledge here: reaching this branch means prepareInput threw
+          // before execute ran (started is false), so no native journal entry
+          // exists for this reference and there is nothing to release.
         }
       })
       .finally(() => this.running.delete(key));

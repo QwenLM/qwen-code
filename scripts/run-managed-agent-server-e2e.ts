@@ -4895,6 +4895,36 @@ try {
           throw new Error(
             'A3 recovery changed an Action inputRef or toolStageId',
           );
+        // State alone proves a decision was committed, not which option won.
+        // Read each command Allow's committed decision back and hold it to the
+        // revisions the browser answered; the generic else-branch read-back is
+        // arm-agnostic and must not be skipped by the command-rewrite split.
+        for (const [actionId, options] of [
+          [originalApprovalId!, originalApprovalOptions!],
+          [siblingApprovalId!, siblingApprovalOptions!],
+        ] as const) {
+          const decisionHex = runMysql(
+            mysqlPort,
+            `SELECT HEX(r.inline_bytes) FROM qwen_managed_agent.ma_resource_ref rr JOIN qwen_managed_agent.ma_resource r ON r.resource_key = rr.resource_key WHERE rr.owner_kind='SESSION_RECORD' AND rr.owner_key = (SELECT record_key FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' AND action_id=${sqlString(actionId)}) AND r.kind='managed-action-decision'`,
+          );
+          if (!decisionHex || decisionHex === 'NULL')
+            throw new Error(`A3 command decision is unavailable: ${actionId}`);
+          const decision = JSON.parse(
+            Buffer.from(decisionHex, 'hex').toString('utf8'),
+          ) as {
+            optionId: string;
+            inputRevision: number;
+            policyRevision: string;
+          };
+          if (
+            decision.optionId !== 'allow' ||
+            decision.inputRevision !== options.inputRevision ||
+            decision.policyRevision !== options.policyRevision
+          )
+            throw new Error(
+              `A3 command decision differs from the chosen option: ${JSON.stringify(decision)}`,
+            );
+        }
         saveEvidence('command-rewrite-result.json', evidence);
         approvalResultJson = JSON.stringify(
           {

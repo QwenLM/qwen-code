@@ -920,46 +920,6 @@ it('keeps its mount while a Hook outcome is unknown (#13800)', async () => {
   expect(linked.mountHandback()).toBeUndefined();
 });
 
-it('refuses to swap its broker while it still holds the mount', async () => {
-  await hooks.ensureReady();
-  await hooks.acquire();
-  // The mount is held with no outstanding Hook work, so the pre-existing
-  // mountWorkUnproven() guard does NOT fire — only the mount-held clause can
-  // refuse the swap. This pins the new clause itself rather than letting the
-  // older guard satisfy the assertion.
-  expect(hooks.mountHeld).toBe(true);
-  expect(hooks.mountWorkUnproven()).toBe(false);
-  const owned = hooks.broker;
-  const extensionBroker = new HostedWorkspaceBroker(
-    options,
-    session.authority.sessionHeader.sessionKey,
-    'extensions-components-other',
-  );
-  expect(() => hooks.delegateBrokerToMcp(extensionBroker)).toThrow(
-    HostedHookRecoveryRequiredError,
-  );
-  expect(hooks.broker).toBe(owned);
-  expect(hooks.mountHeld).toBe(true);
-});
-
-it('swaps to a free extension broker and keeps ownership for close', async () => {
-  expect(hooks.mountHeld).toBe(false);
-  const extensionBroker = new HostedWorkspaceBroker(
-    options,
-    session.authority.sessionHeader.sessionKey,
-    'extensions-components-other',
-  );
-  hooks.delegateBrokerToMcp(extensionBroker);
-  expect(hooks.broker).toBe(extensionBroker);
-  await hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
-  expect(hooks.mountHeld).toBe(true);
-  const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
-  release.mockClear();
-  await hooks.close();
-  // Ownership survived the swap: close releases the new owner, not the old.
-  expect(release.mock.instances).toContain(extensionBroker);
-});
-
 it('still disowns a shared broker while holding the mount', async () => {
   await hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal());
   expect(hooks.mountHeld).toBe(true);

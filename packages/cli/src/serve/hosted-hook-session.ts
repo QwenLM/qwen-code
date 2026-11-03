@@ -348,7 +348,7 @@ export function parseHostedHookPin(value: unknown): ManagedHookCatalogPin {
 }
 
 export class HostedHookSession {
-  broker: HostedWorkspaceBroker;
+  readonly broker: HostedWorkspaceBroker;
   private ownsBroker: boolean;
   private acquired = false;
   private acquiring?: Promise<void>;
@@ -639,17 +639,9 @@ export class HostedHookSession {
     return this.acquired || this.broker.acquired;
   }
 
-  delegateBrokerToMcp(broker?: HostedWorkspaceBroker): void {
+  delegateBrokerToMcp(): void {
     if (this.mountWorkUnproven()) throw new HostedHookRecoveryRequiredError();
-    // A different broker carries a different mount claim. Swapping while this
-    // owner still holds the mount would orphan that claim and leave `acquired`
-    // pointing at the old broker, so the handback gate refuses until a fresh
-    // load binds the new owner. The no-argument handover keeps the same broker
-    // (MCP takes over its release), so it stays valid while the mount is held.
-    if (broker !== undefined && broker !== this.broker && this.mountHeld)
-      throw new HostedHookRecoveryRequiredError();
-    this.broker = broker ?? this.broker;
-    this.ownsBroker = broker === undefined ? false : this.ownsBroker;
+    this.ownsBroker = false;
   }
 
   /**

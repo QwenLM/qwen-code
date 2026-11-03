@@ -167,6 +167,62 @@ class ManagedExtensionConfigurationAdmissionTest {
                         ExtensionRecordJournal.resourceId(ExtensionRecordJournal.bytes(committed)));
     }
 
+    @Test
+    void packageConfigProjectionGrowsByDeltaWithoutRewritingRetainedRows() throws Exception {
+        String workspace = registerWorkspace();
+        String id = UUID.randomUUID().toString();
+        var journal = publicJournal(id, workspace);
+        byte[] partBytes = "{\"commands\":[]}".getBytes(StandardCharsets.UTF_8);
+        var part = new CommitResource("part", "managed-extension-contributions-part", 1,
+                partBytes.length, DigestUtils.sha256Hex(partBytes), Base64.getEncoder().encodeToString(partBytes));
+        ObjectNode manifest = json.createObjectNode().put("kind", "managed-extension-contributions")
+                .put("formatVersion", 1).put("byteLength", partBytes.length).put("digest", part.digest());
+        manifest.putArray("parts").addObject().put("resourceId", part.resourceId()).put("kind", part.kind())
+                .put("schemaVersion", 1).put("byteLength", part.byteLength()).put("digest", part.digest());
+        byte[] manifestBytes = ExtensionRecordJournal.bytes(manifest);
+        var contributions = new CommitResource("contributions", "managed-extension-contributions", 1,
+                manifestBytes.length, DigestUtils.sha256Hex(manifestBytes), Base64.getEncoder().encodeToString(manifestBytes));
+        ObjectNode bundle = json.createObjectNode();
+        bundle.putArray("packages").addObject().putObject("contributionsRef")
+                .put("resourceId", contributions.resourceId()).put("kind", contributions.kind())
+                .put("schemaVersion", 1).put("byteLength", contributions.byteLength()).put("digest", contributions.digest());
+        byte[] bundleBytes = ExtensionRecordJournal.bytes(bundle);
+        var bundleResource = new CommitResource("bundle", "managed-extension-config-bundle", 1,
+                bundleBytes.length, DigestUtils.sha256Hex(bundleBytes), Base64.getEncoder().encodeToString(bundleBytes));
+        ObjectNode bundleRef = json.createObjectNode().put("resourceId", bundleResource.resourceId())
+                .put("kind", bundleResource.kind()).put("schemaVersion", 1)
+                .put("byteLength", bundleResource.byteLength()).put("digest", bundleResource.digest());
+        ObjectNode inheritedRef = json.createObjectNode().put("resourceId", "inherited-baseline")
+                .put("kind", "managed-extension-config-bundle").put("schemaVersion", 1)
+                .put("byteLength", 2).put("digest", DigestUtils.sha256Hex("{}"));
+        List<CommitResource> resources = new ArrayList<>(resources());
+        resources.removeIf(resource -> resource.resourceId().equals("bundle"));
+        resources.addAll(List.of(bundleResource, contributions, part));
+        ObjectNode preparing = phase("nullable_preparing", 1, null).set("previousBundleRef", inheritedRef);
+        commit(journal, id, workspace, preparing, false, false, resources);
+
+        byte[] session = id.getBytes(StandardCharsets.UTF_8);
+        long sentinel = 12345L;
+        int firstCount = jdbc.update("UPDATE ma_resource_ref SET gmt_create = ?"
+                + " WHERE owner_kind='SESSION_RECORD' AND session_id = ?", sentinel, session);
+        assertThat(firstCount).isPositive();
+        List<String> firstIds = jdbc.queryForList("SELECT resource_id FROM ma_resource_ref"
+                + " WHERE owner_kind='SESSION_RECORD' AND session_id = ?", String.class, session);
+
+        ObjectNode prepared = (ObjectNode) phase("prepared", 2, preparing).set("bundleRef", bundleRef);
+        prepared.set("previousBundleRef", inheritedRef);
+        commit(journal, id, workspace, prepared, false, false, resources);
+
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref"
+                        + " WHERE owner_kind='SESSION_RECORD' AND session_id = ? AND gmt_create = ?",
+                        Integer.class, session, sentinel)).isEqualTo(firstCount);
+        List<String> secondIds = jdbc.queryForList("SELECT resource_id FROM ma_resource_ref"
+                + " WHERE owner_kind='SESSION_RECORD' AND session_id = ?", String.class, session);
+        assertThat(secondIds).containsAll(firstIds)
+                .contains(bundleResource.resourceId(), contributions.resourceId(), part.resourceId());
+        assertThat(secondIds.size()).isGreaterThan(firstIds.size());
+    }
+
     private void commit(ExtensionRecordJournal journal, String id, String workspace, ObjectNode body,
             boolean binding, boolean mismatch) {
         commit(journal, id, workspace, body, binding, mismatch, resources());

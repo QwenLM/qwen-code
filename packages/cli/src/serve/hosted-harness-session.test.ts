@@ -23851,6 +23851,259 @@ describe('Hosted Harness tool approvals', () => {
     ).expect(204);
   });
 
+  it('rebuilds the Hook session on the new owner when a revision bump keeps the catalog while the mount is held', async () => {
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'capabilityDigest',
+      'get',
+    ).mockReturnValue(MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST);
+    vi.mocked(HostedWorkspaceBroker.prototype.warm).mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        this.runtime = {
+          bindingId: 'original-binding',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
+    const catalog: ManagedHookCatalog = {
+      ...hookPin,
+      hooks: [
+        {
+          hookId: 'Notification',
+          eventName: HookEventName.Notification,
+          sequential: false,
+          async: false,
+          failClosed: true,
+          onceKey: null,
+          config: { type: 'command' },
+        },
+      ],
+    };
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl').mockImplementation(
+      async (operation) => {
+        if (operation.kind === 'hook-catalog')
+          return {
+            operationId: operation.operationId,
+            state: 'settled',
+            catalog,
+          };
+        return {
+          operationId: operation.operationId,
+          state: 'settled',
+          result: {
+            success: true,
+            outcome: 'success',
+            duration: 0,
+            output: { hookSpecificOutput: { additionalContext: 'checked' } },
+          },
+        };
+      },
+    );
+    const runtimeStates = new Map<string, string>();
+    let currentRevision = 0;
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'extensionControl',
+    ).mockImplementation(async (operation) => {
+      const common = {
+        operationId: operation.operationId,
+        executionMode: 'developer-process-group',
+      };
+      if (operation.kind === 'extension-prepare') {
+        runtimeStates.set(operation.operationId, 'prepared');
+        currentRevision = operation.expectedRevision + 1;
+        return {
+          ...common,
+          state: 'prepared',
+          expectedRevision: operation.expectedRevision,
+          revision: currentRevision,
+          packages: operation.extensions.map((pin) => ({
+            pin,
+            assetRoot: `extension://${pin.extensionId}/`,
+            contributions: {
+              skills: [],
+              commands: [],
+              agents: [],
+              context: [],
+              mcpServers: {},
+              hooks: {},
+              settings: [],
+            },
+          })),
+          mcpServers: [],
+          hookCatalog: hookPin,
+        };
+      }
+      if (operation.kind === 'extension-activate')
+        runtimeStates.set(operation.operationId, 'active');
+      return {
+        ...common,
+        state: runtimeStates.get(operation.operationId),
+        revision: currentRevision,
+      };
+    });
+    const selection = (expectedRevision: number) => ({
+      operationId: randomUUID(),
+      actorKey: 'a'.repeat(64),
+      expectedRevision,
+      extensions: [
+        {
+          extensionId: 'sample',
+          packageRevision: 1,
+          packageDigest: 'b'.repeat(64),
+        },
+      ],
+    });
+    const definition = {
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+      publicChildAgentsVersion: 1,
+      agentDefinition: {
+        agentId: `agent_${'c'.repeat(32)}`,
+        revision: '1',
+        digest: 'd'.repeat(64),
+      },
+      initialSelection: selection(0),
+    };
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({ ...definition, sessionId: SESSION_ID, sessionScope: 'thread' })
+      .expect(200);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', created.body.clientId);
+    // The initial selection already booted the extension to revision 1 with
+    // the Hook catalog bound. Fire a Hook so the session acquires and holds
+    // its Workspace mount.
+    await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
+    )
+      .send({
+        operationId: randomUUID(),
+        event: 'Notification',
+        input: { message: 'ready', notification_type: 'test' },
+      })
+      .expect(200);
+    // A revision bump that keeps the Hook catalog pin must close and rebuild
+    // the Hook session on the new owner — not park the apply at
+    // recovery_required because the mount is held.
+    const second = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/extensions/management`),
+    )
+      .send(selection(1))
+      .expect(202);
+    expect(second.body).toMatchObject({
+      revision: 2,
+      operation: { state: 'active' },
+    });
+    await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/detach`),
+    ).expect(204);
+  });
+
+  it('refuses the tool_stage recovery domain when extensions are disabled', async () => {
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const journalStore = new LocalJsonlManagedSessionJournalStore({
+      runtimeBaseDir: state.root,
+      sessionId: SESSION_ID,
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+    });
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore,
+      resourceStore: resources,
+      create: {
+        definitionRef: await resources.publish(
+          'managed-definition',
+          Buffer.from(
+            JSON.stringify({
+              engine: 'managed',
+              sessionId: SESSION_ID,
+              toolProfile: 'hosted-workspace-shell/1',
+            }),
+          ),
+        ),
+        rootSnapshotRef: await resources.publish(
+          'managed-root',
+          Buffer.from(JSON.stringify({ cwd: state.root })),
+        ),
+        createdBy: 'hosted-harness',
+      },
+    });
+    const inputRef = await resources.publish(
+      'managed-extension-command-input',
+      Buffer.from(JSON.stringify({ command: 'printf x', timeout: 120000 })),
+    );
+    const toolStageId = `command-step-${'a'.repeat(64)}`;
+    await managed.authority.commitExtensionRecord(
+      {
+        operation: 'commandStep.stage',
+        commandId: randomUUID(),
+        sessionKey: key,
+        contentDigest: 'f'.repeat(64),
+      },
+      {
+        domain: 'tool_stage',
+        record: {
+          kind: 'tool_stage',
+          toolStageId,
+          stepIndex: 0,
+          toolName: 'shell',
+          expansionId: `expansion-${'b'.repeat(32)}`,
+          inputRef,
+          permissionRef: null,
+          resultRef: null,
+          run: {
+            state: 'admitted',
+            reason: null,
+            definition: {
+              definitionId: 'shell',
+              definitionRevision: 1,
+              definitionDigest: 'c'.repeat(64),
+            },
+            executionCallId: toolStageId,
+            effectId: null,
+            dispatchId: null,
+            deliveryId: null,
+            execution: 'intent',
+            runtime: null,
+            delivery: null,
+          },
+        },
+      },
+      { class: 'trusted_entry' },
+    );
+    await managed.close();
+
+    // Without extensions the tool_stage domain is unsupported and the load
+    // must refuse restore verification rather than silently admit it.
+    const plain = await app(true);
+    const refused = await headers(
+      supertest(plain).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+    });
+    expect(refused.status).toBe(409);
+    expect(refused.body.reason).toBe('restore_verification_failed');
+    await new Promise<void>((resolve) => plain.close(() => resolve()));
+  });
+
   it.each(['write_file', 'exit_plan_mode'] as const)(
     'rechecks live approval after a cold restore while preserving %s approval semantics',
     async (toolName) => {

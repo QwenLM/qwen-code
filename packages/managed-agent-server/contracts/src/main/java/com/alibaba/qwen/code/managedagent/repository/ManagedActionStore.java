@@ -11,9 +11,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 public interface ManagedActionStore {
     String ACTION_ID_PATTERN = "(?:tool_approval_[0-9a-f]{32}|command_approval_[0-9a-f]{48})";
+    Pattern ACTION_ID = Pattern.compile(ACTION_ID_PATTERN);
 
     public record Action(
             String id,

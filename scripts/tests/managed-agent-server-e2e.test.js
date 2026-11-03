@@ -356,6 +356,12 @@ describe('managed-agent-server e2e runner', () => {
         for (const event of Object.values(manifest.hooks)) {
           expect(event[0].matcher).toBe('run_shell_command');
           expect(event[0].hooks[0].type).toBe('command');
+          expect(event[0].hooks[0].command).toContain(
+            '"${extensionPath}/hook.cjs"',
+          );
+          expect(event[0].hooks[0].command).toContain(
+            JSON.stringify(join(temporary, 'hooks.jsonl')),
+          );
         }
         const command = readFileSync(
           join(temporary, 'source', 'commands', 'two-step.md'),
@@ -613,7 +619,7 @@ describe('managed-agent-server e2e runner', () => {
       actions,
       checkpoint: {
         phase: 'await_action',
-        requestId: 'command_approval_2',
+        requestId: actions[1].id,
       },
       stages,
       durableHooks,
@@ -696,6 +702,7 @@ describe('managed-agent-server e2e runner', () => {
           (hook) => hook.eventName === 'PostToolUse',
         ).resultRef = null;
       },
+      /A3 durable PostToolUse Hook evidence differs/,
     ],
     [
       'durable Hook occurrence used as the command stage identity',
@@ -703,6 +710,7 @@ describe('managed-agent-server e2e runner', () => {
         evidence.durableHooks[0].toolUseId =
           evidence.durableHooks[0].occurrenceId;
       },
+      /A3 durable PreToolUse Hook evidence differs/,
     ],
     [
       'only a plan marker remains for the command step',
@@ -715,18 +723,43 @@ describe('managed-agent-server e2e runner', () => {
             hook.hookId = '__plan__';
         }
       },
+      /A3 durable PreToolUse Hook evidence differs/,
     ],
     [
       'step two ran before the crash',
       (evidence) => {
         evidence.effects[1] = 'REWRITTEN_SECOND';
       },
+      /A3 crash physical Hook\/effect boundary differs/,
     ],
     [
       'the two steps shared an Action',
       (evidence) => {
         evidence.actions[1].id = evidence.actions[0].id;
+        evidence.checkpoint.requestId = evidence.actions[1].id;
       },
+      /A3 crash did not land/,
+    ],
+    [
+      'the pending Action was already decided',
+      (evidence) => {
+        evidence.actions[1].state = 'decided';
+      },
+      /A3 crash did not land/,
+    ],
+    [
+      'the checkpoint pointed at the decided Action',
+      (evidence) => {
+        evidence.checkpoint.requestId = evidence.actions[0].id;
+      },
+      /A3 crash did not land/,
+    ],
+    [
+      'the checkpoint had left await_action',
+      (evidence) => {
+        evidence.checkpoint.phase = 'dispatch';
+      },
+      /A3 crash did not land/,
     ],
     [
       'step two PostToolUse physically ran',
@@ -737,16 +770,20 @@ describe('managed-agent-server e2e runner', () => {
           tool_input: {},
         });
       },
+      /A3 crash physical Hook\/effect boundary differs/,
     ],
-  ])('rejects a command-rewrite crash barrier with %s', (_name, mutate) => {
-    const assertions = commandRewriteAssertions();
-    const evidence = commandRewriteFixture(false);
-    const identity = withCommandRewriteReceipts(assertions, evidence);
-    mutate(evidence);
-    expect(() =>
-      assertions.assertCommandRewriteCrashBarrier(evidence, identity),
-    ).toThrow();
-  });
+  ])(
+    'rejects a command-rewrite crash barrier with %s',
+    (_name, mutate, expected) => {
+      const assertions = commandRewriteAssertions();
+      const evidence = commandRewriteFixture(false);
+      const identity = withCommandRewriteReceipts(assertions, evidence);
+      mutate(evidence);
+      expect(() =>
+        assertions.assertCommandRewriteCrashBarrier(evidence, identity),
+      ).toThrow(expected);
+    },
+  );
 
   it.each([
     [
@@ -754,12 +791,21 @@ describe('managed-agent-server e2e runner', () => {
       (evidence) => {
         evidence.actions[1].state = 'requested';
       },
+      /A3 final Action identities/,
+    ],
+    [
+      'the two steps shared an Action',
+      (evidence) => {
+        evidence.actions[1].id = evidence.actions[0].id;
+      },
+      /A3 final Action identities/,
     ],
     [
       'a repeated physical Hook',
       (evidence) => {
         evidence.physicalHooks.push(evidence.physicalHooks[0]);
       },
+      /A3 physical PreToolUse count differs/,
     ],
     [
       'a third extension command receipt',
@@ -770,28 +816,34 @@ describe('managed-agent-server e2e runner', () => {
           state: 'settled',
         });
       },
+      /A3 extension command receipts differ/,
     ],
     [
       'a receipt for different input',
       (evidence) => {
         evidence.receipts[0].fingerprint = '0'.repeat(64);
       },
+      /A3 extension command receipts differ/,
     ],
     [
       'a duplicate toolStageId',
       (evidence) => {
         evidence.stages[1].toolStageId = evidence.stages[0].toolStageId;
       },
+      /A3 command stage evidence differs/,
     ],
-  ])('rejects command-rewrite final evidence with %s', (_name, mutate) => {
-    const assertions = commandRewriteAssertions();
-    const evidence = commandRewriteFixture(true);
-    const identity = withCommandRewriteReceipts(assertions, evidence);
-    mutate(evidence);
-    expect(() =>
-      assertions.assertCommandRewriteFinalEvidence(evidence, identity),
-    ).toThrow();
-  });
+  ])(
+    'rejects command-rewrite final evidence with %s',
+    (_name, mutate, expected) => {
+      const assertions = commandRewriteAssertions();
+      const evidence = commandRewriteFixture(true);
+      const identity = withCommandRewriteReceipts(assertions, evidence);
+      mutate(evidence);
+      expect(() =>
+        assertions.assertCommandRewriteFinalEvidence(evidence, identity),
+      ).toThrow(expected);
+    },
+  );
 
   it('pins the #14481 approval fault arms to durable barriers', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
