@@ -1274,6 +1274,8 @@ class ManagedAgentPreflightTest {
         broker.setCredentialKey(encoded(32));
         broker.setStateDirectory(state.toString());
         broker.setProvisioner("static");
+        broker.setIsolationClass("workspace");
+        broker.setTrustedLocalRebootRecovery(false);
         broker.setStaticEndpoint("http://127.0.0.1:1");
         broker.setStaticToken("token");
         List<ManagedAgentPreflight.Check> checks =
@@ -1293,6 +1295,8 @@ class ManagedAgentPreflightTest {
         broker.setCredentialKey(encoded(31));
         broker.setStateDirectory(state.toString());
         broker.setProvisioner("static");
+        broker.setIsolationClass("workspace");
+        broker.setTrustedLocalRebootRecovery(false);
         broker.setStaticEndpoint("http://127.0.0.1:1");
         broker.setStaticToken("token");
         List<ManagedAgentPreflight.Check> checks =

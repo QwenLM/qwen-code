@@ -607,7 +607,7 @@ class ManagedAgentDefinitionAdmissionTest {
         var definitions = new com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore(jdbc, new RequestDigests());
         assertThat(definitions.pinnedContent(session).get("instructions"))
                 .isEqualTo("Review in Chinese.");
-        var resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore(jdbc));
+        var resources = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         var first = resources.publishAgentInstructions(tenant, "workspace", session.sessionId(),
                 "Review in Chinese.");
         assertThat(resources.publishAgentInstructions(tenant, "workspace", session.sessionId(),

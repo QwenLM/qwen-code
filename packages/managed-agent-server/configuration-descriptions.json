@@ -554,9 +554,14 @@
       "zh": "密钥轮换后保留的旧 Runtime 凭据密钥，形式为 key ID 到 base64 编码 32 字节密钥的映射，使以旧密钥加密的行仍可读取，而写入始终只使用当前密钥。属于机密。须在配置文件（YAML）中设置，并用方括号包住每个 ID，例如 `'[old-v1]': <key>`；无法通过环境变量提供。密钥不是 32 字节，或 ID 与 `qwen.managed-agent.runtime-broker.credential-key-id` 相同时启动时拒绝。",
       "default": ""
     },
+    "qwen.managed-agent.runtime-broker.provider-options": {
+      "en": "Provider-specific string settings passed to the selected Runtime factory, configured as a YAML map. Their meaning and validation belong to that provider; built-in backends continue to use their existing settings. Defaults to an empty map.",
+      "zh": "传递给选中 Runtime 工厂的专用字符串配置，以 YAML 映射设置。其含义及校验由该 provider 决定；内置后端继续使用原有配置项。默认为空映射。",
+      "default": "{}"
+    },
     "qwen.managed-agent.runtime-broker.provisioner": {
-      "en": "Which provisioner places Runtime workers: `local-process` (Node.js workers on this host), `static` (one preconfigured worker at `qwen.managed-agent.runtime-broker.static-endpoint`), `external-scratch` or `external-workspace` (an operator-run HTTP provider at `qwen.managed-agent.runtime-broker.external-provider-url`), or `kubernetes-workspace` (resident Workspaces from `qwen.managed-agent.runtime-broker.resident-workspaces`). Startup refuses any other value, including `kubernetes`.",
-      "zh": "放置 Runtime worker 所用的 provisioner：`local-process`（本机上的 Node.js worker）、`static`（位于 `qwen.managed-agent.runtime-broker.static-endpoint` 的单个预配置 worker）、`external-scratch` 或 `external-workspace`（位于 `qwen.managed-agent.runtime-broker.external-provider-url` 的运维方 HTTP provider），或 `kubernetes-workspace`（来自 `qwen.managed-agent.runtime-broker.resident-workspaces` 的常驻 Workspace）。其他取值（包括 `kubernetes`）启动时拒绝。"
+      "en": "The installed factory kind that places Runtime workers: `local-process` (local Node.js workers), `ssh-process` (registered SSH Workspaces), `static` (a preconfigured worker), `external-scratch` or `external-workspace` (an operator-run HTTP provider), or `kubernetes-workspace` (resident CSI Workspaces). A trusted additional provider may register its own kind. With the Broker enabled, missing or duplicate kinds fail before resources are created; `kubernetes` remains reserved and rejected. Embedding hosts must explicitly include the selected backend artifact.",
+      "zh": "放置 Runtime worker 所用的已安装工厂 kind：`local-process`（本机 Node.js worker）、`ssh-process`（已注册 SSH Workspace）、`static`（预配置 worker）、`external-scratch` 或 `external-workspace`（运维方 HTTP provider），或 `kubernetes-workspace`（常驻 CSI Workspace）。其他可信 provider 可以注册自己的 kind。Broker 启用时，缺失或重复的 kind 在创建资源前拒绝；`kubernetes` 仍为保留值且被拒绝。嵌入服务须显式添加所选后端产物。"
     },
     "qwen.managed-agent.runtime-broker.resident-kubernetes-api-url": {
       "en": "The HTTPS origin of the Kubernetes API server that the `kubernetes-workspace` provisioner calls for `qwen.managed-agent.runtime-broker.resident-workspaces`, together with `qwen.managed-agent.runtime-broker.resident-kubernetes-token-file` and `qwen.managed-agent.runtime-broker.resident-kubernetes-ca-file`. Startup refuses resident Workspaces without it, and refuses a URL that is not `https` or has a path, credentials, query or fragment. The resident-retirement maintenance command reads it too.",

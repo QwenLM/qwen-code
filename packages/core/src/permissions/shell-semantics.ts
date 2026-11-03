@@ -2059,16 +2059,10 @@ export function extractShellOperations(
   const cmdName = tokens[0];
   if (!cmdName) {
     // Only assignments and/or redirections were present.
-    return [
-      ...redirectReads.map((p) => ({
-        virtualTool: 'read_file' as const,
-        filePath: p,
-      })),
-      ...redirectWrites.map((p) => ({
-        virtualTool: 'write_file' as const,
-        filePath: p,
-      })),
-    ];
+    return toRedirectOperations({
+      readFiles: redirectReads,
+      writeFiles: redirectWrites,
+    });
   }
 
   const ops: ShellOperation[] = [];
@@ -2126,14 +2120,10 @@ export function extractShellOperations(
 
   // Append redirect-derived operations
   ops.push(
-    ...redirectReads.map((p) => ({
-      virtualTool: 'read_file' as const,
-      filePath: p,
-    })),
-    ...redirectWrites.map((p) => ({
-      virtualTool: 'write_file' as const,
-      filePath: p,
-    })),
+    ...toRedirectOperations({
+      readFiles: redirectReads,
+      writeFiles: redirectWrites,
+    }),
   );
 
   return ops;
@@ -2165,8 +2155,13 @@ const MAX_SHELL_UNWRAP_DEPTH = 4;
  */
 type CdResolution =
   | { kind: 'not-cd' }
-  | { kind: 'dynamic' }
-  | { kind: 'static'; cwd: string; cwdUnknown: boolean };
+  | { kind: 'dynamic'; redirects: RedirectResult }
+  | {
+      kind: 'static';
+      cwd: string;
+      cwdUnknown: boolean;
+      redirects: RedirectResult;
+    };
 
 function isDynamicShellPath(word: string): boolean {
   return word.includes('$') || word.includes('`');
@@ -2180,15 +2175,15 @@ function resolveCdTargetCwd(
   const fdRedirects = new Set<number>();
   const fdCloses = new Set<number>();
   const words = tokenize(command, fdRedirects, fdCloses);
-  extractRedirects(words, cwd, fdRedirects, fdCloses);
+  const redirects = extractRedirects(words, cwd, fdRedirects, fdCloses);
 
-  if (words[0] === 'popd') return { kind: 'dynamic' };
+  if (words[0] === 'popd') return { kind: 'dynamic', redirects };
   if (words[0] !== 'cd' && words[0] !== 'pushd') return { kind: 'not-cd' };
 
   if (words[0] === 'pushd') {
-    if (words.length === 1) return { kind: 'dynamic' };
-    if (/^[+-]\d+$/.test(words[1]!)) return { kind: 'dynamic' };
-    if (words[1] === '-n') return { kind: 'dynamic' };
+    if (words.length === 1) return { kind: 'dynamic', redirects };
+    if (/^[+-]\d+$/.test(words[1]!)) return { kind: 'dynamic', redirects };
+    if (words[1] === '-n') return { kind: 'dynamic', redirects };
   }
 
   // Skip POSIX `cd` flags (-L, -P, --, -e, -@) without consuming the special
@@ -2208,14 +2203,31 @@ function resolveCdTargetCwd(
 
   const target = words[targetIndex] ?? process.env['HOME'];
   if (!target || target === '-' || isDynamicShellPath(target)) {
-    return { kind: 'dynamic' };
+    return { kind: 'dynamic', redirects };
   }
 
   return {
     kind: 'static',
     cwd: resolvePath(target, cwd),
     cwdUnknown: cwdUnknown && !isShellAbsolutePath(target),
+    redirects,
   };
+}
+
+function toRedirectOperations({
+  readFiles,
+  writeFiles,
+}: RedirectResult): ShellOperation[] {
+  return [
+    ...readFiles.map((filePath) => ({
+      virtualTool: 'read_file' as const,
+      filePath,
+    })),
+    ...writeFiles.map((filePath) => ({
+      virtualTool: 'write_file' as const,
+      filePath,
+    })),
+  ];
 }
 
 /**
@@ -2230,7 +2242,8 @@ function resolveCdTargetCwd(
  * Behaviour:
  *   - `splitCompoundCommand` produces the segment boundaries.
  *   - Literal `cd <dir>` segments shift the effective cwd for subsequent
- *     segments and themselves emit no ops.
+ *     segments; redirects on a `cd` segment are reported from the cwd where
+ *     that segment starts.
  *   - Dynamic `cd` targets (variables, substitutions, `cd -`) keep the last
  *     known cwd for best-effort path extraction and mark subsequent relative
  *     file operations with `cwdUnknown`.
@@ -2394,16 +2407,20 @@ function walkCompoundCommand(
     const backgrounded = terminator === '&';
 
     const cdTarget = resolveCdTargetCwd(sub, effectiveCwd, cwdUnknown);
-    if (cdTarget.kind === 'static') {
+    if (cdTarget.kind !== 'not-cd') {
+      const redirectOps = toRedirectOperations(cdTarget.redirects);
+      ops.push(
+        ...(cwdUnknown
+          ? markCwdUnknownOps(redirectOps, sub, effectiveCwd)
+          : redirectOps),
+      );
       if (!backgrounded) {
-        effectiveCwd = cdTarget.cwd;
-        cwdUnknown = cdTarget.cwdUnknown;
-      }
-      continue;
-    }
-    if (cdTarget.kind === 'dynamic') {
-      if (!backgrounded) {
-        cwdUnknown = true;
+        if (cdTarget.kind === 'static') {
+          effectiveCwd = cdTarget.cwd;
+          cwdUnknown = cdTarget.cwdUnknown;
+        } else {
+          cwdUnknown = true;
+        }
       }
       continue;
     }

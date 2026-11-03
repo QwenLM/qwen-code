@@ -82,7 +82,7 @@ class SessionRecoveryInitialStateTest {
         var registry = mock(ManagedWorkspaceRegistry.class);
         store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), events -> {}, registry,
                 new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        journals = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        journals = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         when(harness.isAvailable()).thenReturn(true);
         when(harness.supportsFencedTitles()).thenReturn(true);
         sessions = new ManagedAgentService(store, digests, coordinator, harness, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
@@ -318,7 +318,7 @@ class SessionRecoveryInitialStateTest {
                 return result;
             }
         };
-        assertThat(recovery(com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(moving))).query(TENANT, "actor", sessionId).nextTurnAllowed()).isFalse();
+        assertThat(recovery(com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(moving)).query(TENANT, "actor", sessionId).nextTurnAllowed()).isFalse();
     }
 
     private SessionRecoveryService recovery(ManagedSessionStore nativeStore) {
