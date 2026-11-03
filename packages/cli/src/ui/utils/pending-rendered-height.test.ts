@@ -109,6 +109,36 @@ describe('isTableStart', () => {
 describe('fitPendingSlice', () => {
   const CLAMP = 1000; // effectively unclamped unless a test sets it small
 
+  it.each([100, 300])(
+    'charges all %i bare table separators as source rows in raw mode',
+    (separatorCount) => {
+      const lines = [
+        '| A | B |',
+        '| --- | --- |',
+        ...Array.from({ length: separatorCount }, () => '--- | ---'),
+        '| x | y |',
+        'Done',
+      ];
+
+      expect(fitPendingSlice(lines, 80, 22, CLAMP)).toEqual({
+        keptLines: lines.length,
+        clipped: false,
+      });
+      expect(
+        fitPendingSlice(lines, 80, 22, CLAMP, { visualTables: false }),
+      ).toEqual({ keptLines: 22, clipped: true });
+    },
+  );
+
+  it('charges table source wrapping in raw mode instead of applying a table clamp', () => {
+    const lines = ['| abcdefghijklmnop | B |', '| --- | --- |', '| x | y |'];
+
+    expect(fitPendingSlice(lines, 10, 3, 2, { visualTables: false })).toEqual({
+      keptLines: 1,
+      clipped: true,
+    });
+  });
+
   it('keeps everything when the content fits the budget', () => {
     const lines = ['a', 'b', 'c'];
     expect(fitPendingSlice(lines, 80, 10, CLAMP)).toEqual({
@@ -379,6 +409,79 @@ describe('fitPendingSlice', () => {
     const { keptLines, clipped } = fitPendingSlice(lines, 80, 12, CLAMP);
     expect(clipped).toBe(true);
     expect(keptLines).toBe(1);
+  });
+
+  it.each([80, 20])(
+    'skips bare separators but charges outer-pipe body rows at width %s',
+    (width) => {
+      const lines = [
+        'intro',
+        '| A | B |',
+        '| --- | --- |',
+        '--- | ---',
+        ':--- | ---:',
+        '| --- | --- |',
+        '| a | b |',
+        '--- | ---',
+        '| c | d |',
+        'Done.',
+      ];
+      const budget = width === 80 ? 13 : 12;
+      expect(fitPendingSlice(lines, width, budget, CLAMP)).toEqual({
+        keptLines: lines.length,
+        clipped: false,
+      });
+      expect(fitPendingSlice(lines, width, budget - 1, CLAMP)).toEqual({
+        keptLines: lines.length - 1,
+        clipped: true,
+      });
+      expect(fitPendingSlice(lines, width, budget - 2, CLAMP)).toEqual({
+        keptLines: 1,
+        clipped: true,
+      });
+      expect(fitPendingSlice(lines.slice(1), width, 1, CLAMP)).toEqual({
+        keptLines: lines.length - 2,
+        clipped: true,
+      });
+    },
+  );
+
+  it('anchors the vertical trigger to the first actual body row after bare separators', () => {
+    const wide = 'w'.repeat(30);
+    const lines = [
+      'intro',
+      '| A | B | C | D | E | F | G |',
+      '| - | - | - | - | - | - | - |',
+      '- | - | - | - | - | - | -',
+      ...Array.from(
+        { length: 4 },
+        () => `| ${Array.from({ length: 7 }, () => wide).join(' | ')} |`,
+      ),
+    ];
+    expect(fitPendingSlice(lines, 80, 30, CLAMP)).toEqual({
+      keptLines: 1,
+      clipped: true,
+    });
+  });
+
+  it('keeps the first actual short body row as the format anchor across bare separators', () => {
+    const lines = [
+      'intro',
+      '| A | B |',
+      '| - | - |',
+      '- | -',
+      '| x | y |',
+      '- | -',
+      `| ${'z'.repeat(180)} | y |`,
+    ];
+    expect(fitPendingSlice(lines, 80, 12, CLAMP)).toEqual({
+      keptLines: 1,
+      clipped: true,
+    });
+    expect(fitPendingSlice(lines, 80, 15, CLAMP)).toEqual({
+      keptLines: lines.length,
+      clipped: false,
+    });
   });
 
   it('accounts for wrapping of non-table lines', () => {

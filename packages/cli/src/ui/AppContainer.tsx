@@ -1534,6 +1534,8 @@ export const AppContainer = (props: AppContainerProps) => {
   // with it so the commit loop reads width and height consistently (both live).
   const availableTerminalHeightRef = useRef(0);
   const terminalWidthRef = useRef(0);
+  // Running streams retain their callback, so mode toggles need a live ref too.
+  const renderModeRef = useRef<RenderMode>('render');
   const updateHandlerRef = useRef<{
     cleanup: () => void;
     flush: () => void;
@@ -2582,6 +2584,7 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalWidthRef,
     midTurnRestoreRef,
     goalQueueRef,
+    renderModeRef,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
   clearPendingStateRef.current = clearPendingState;
@@ -4227,6 +4230,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const [renderMode, setRenderMode] = useState<RenderMode>(
     configuredRenderMode === 'raw' ? 'raw' : 'render',
   );
+  renderModeRef.current = renderMode;
   const renderModeConfigMountedRef = useRef(false);
   useEffect(() => {
     if (!renderModeConfigMountedRef.current) {
