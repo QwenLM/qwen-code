@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   NOTIFICATION_LABEL_MAX_LENGTH,
+  isBidiControlChar,
   stripDisplayControlChars,
   stripBidiControls,
   stripTerminalControlSequences,
@@ -86,8 +87,17 @@ describe('stripBidiControls', () => {
       0x2067, 0x2068, 0x2069,
     ];
     for (const mark of marks) {
+      expect(isBidiControlChar(mark)).toBe(true);
       expect(stripBidiControls(`left${String.fromCharCode(mark)}right`)).toBe(
         'leftright',
+      );
+    }
+  });
+
+  it('keeps the predicate and stripper in parity across all code points', () => {
+    for (let code = 0; code <= 0x2100; code++) {
+      expect(stripBidiControls(String.fromCharCode(code)) === '').toBe(
+        isBidiControlChar(code),
       );
     }
   });

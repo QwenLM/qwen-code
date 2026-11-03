@@ -9,6 +9,7 @@ import { act } from '@testing-library/react';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { RuleWithSource } from '@qwen-code/qwen-code-core/permissions/types.js';
 import { render } from 'ink-testing-library';
+import { LoadedSettings, SettingScope } from '../../config/settings.js';
 import { withProviders } from '../../test-utils/render.js';
 import { PermissionsDialog } from './PermissionsDialog.js';
 
@@ -33,11 +34,15 @@ function stubConfig(
   } as unknown as Config;
 }
 
-async function renderRuleList(rules: RuleWithSource[]) {
+async function renderRuleList(
+  rules: RuleWithSource[],
+  settings?: LoadedSettings,
+) {
   const removePersistentRule = vi.fn();
   const instance = render(
     withProviders(<PermissionsDialog onExit={vi.fn()} />, {
       config: stubConfig(rules, removePersistentRule),
+      settings,
     }),
   );
   // The rules arrive through an effect, so the first frame is still empty.
@@ -108,6 +113,49 @@ describe('PermissionsDialog malformed rule rows', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(removePersistentRule).toHaveBeenCalledWith(raw, 'allow');
+  });
+
+  it('deletes a settings rule whose stored spelling has surrounding whitespace', async () => {
+    const raw = 'Bash(docker *';
+    const settings = new LoadedSettings(
+      { path: '', settings: {}, originalSettings: {} },
+      { path: '', settings: {}, originalSettings: {} },
+      {
+        path: '',
+        settings: { permissions: { allow: [`  ${raw}  `] } },
+        originalSettings: {},
+      },
+      { path: '', settings: {}, originalSettings: {} },
+      true,
+      new Set(),
+    );
+    const { stdin, removePersistentRule } = await renderRuleList(
+      [invalidRule(raw)],
+      settings,
+    );
+    const setValue = vi
+      .spyOn(settings, 'setValue')
+      .mockImplementation(() => {});
+
+    await act(async () => {
+      stdin.write('\u001B[B');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      stdin.write('\r');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      stdin.write('\r');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(removePersistentRule).toHaveBeenCalledWith(raw, 'allow');
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'permissions.allow',
+      [],
+    );
   });
 
   it('leaves a valid rule unmarked', async () => {

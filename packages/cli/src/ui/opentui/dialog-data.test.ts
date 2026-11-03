@@ -1185,6 +1185,21 @@ describe('permissions data and mutations', () => {
       value: [],
     });
   });
+
+  it('deletes a settings rule whose stored spelling has surrounding whitespace', () => {
+    const { settings, written } = createFakeSettings({
+      user: { permissions: { allow: ['  Bash(docker *  '] } } as Settings,
+    });
+
+    deletePermissionRule(config, settings, 'Bash(docker *', 'allow');
+
+    expect(removePersistentRule).toHaveBeenCalledWith('Bash(docker *', 'allow');
+    expect(written).toContainEqual({
+      scope: SettingScope.User,
+      key: 'permissions.allow',
+      value: [],
+    });
+  });
 });
 
 describe('mcp and extension feeds', () => {

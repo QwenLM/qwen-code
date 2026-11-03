@@ -536,9 +536,9 @@ export function PermissionsDialog({
         'permissions'
       ] as Record<string, string[]> | undefined;
       const scopeRules = perms?.[ruleType];
-      if (scopeRules?.includes(deleteTarget.rule.raw)) {
+      if (scopeRules?.some((r: string) => r.trim() === deleteTarget.rule.raw)) {
         const updated = scopeRules.filter(
-          (r: string) => r !== deleteTarget.rule.raw,
+          (r: string) => r.trim() !== deleteTarget.rule.raw,
         );
         settings.setValue(scope, `permissions.${ruleType}`, updated);
         break;

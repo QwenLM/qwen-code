@@ -11,6 +11,7 @@ import { stripVTControlCharacters } from 'node:util';
 import picomatch from 'picomatch';
 import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { CONTROL_CHARS_RE } from '../utils/textUtils.js';
 import { stripBidiControls } from '../utils/terminalSafe.js';
 import {
   generateLegacyMcpToolName,
@@ -569,9 +570,6 @@ export function parseRule(raw: string): PermissionRule {
   };
 }
 
-// eslint-disable-next-line no-control-regex
-const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
-
 /**
  * Report a rule that parsed but will never match.
  *
@@ -589,7 +587,7 @@ const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 
 export function warnDroppedPermissionRule(raw: string, kind?: string): void {
   const printable = stripBidiControls(stripVTControlCharacters(raw)).replace(
-    CONTROL_CHARS,
+    CONTROL_CHARS_RE,
     (char) => {
       if (char === '\n') return '\\n';
       if (char === '\t') return '\\t';
