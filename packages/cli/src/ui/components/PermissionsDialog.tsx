@@ -532,9 +532,15 @@ export function PermissionsDialog({
       const scopeRules = perms?.[ruleType];
       // `parseRule` trims, so compare against the trimmed stored entry or a
       // rule written with surrounding whitespace is removed from memory only.
-      if (scopeRules?.some((r: string) => r.trim() === deleteTarget.rule.raw)) {
+      if (
+        scopeRules?.some(
+          (r: string) =>
+            typeof r === 'string' && r.trim() === deleteTarget.rule.raw,
+        )
+      ) {
         const updated = scopeRules.filter(
-          (r: string) => r.trim() !== deleteTarget.rule.raw,
+          (r: string) =>
+            typeof r !== 'string' || r.trim() !== deleteTarget.rule.raw,
         );
         settings.setValue(scope, `permissions.${ruleType}`, updated);
         break;

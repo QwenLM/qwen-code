@@ -1231,6 +1231,23 @@ describe('permissions data and mutations', () => {
       value: [],
     });
   });
+
+  it('deletes a padded rule when the stored list also holds a non-string entry', () => {
+    // Settings loading does not validate element types and `parseRules` drops
+    // falsy entries, so a `null` can sit in the stored list while the session
+    // runs normally. The trim comparison must not call a method on it.
+    const { settings, written } = createFakeSettings({
+      user: {
+        permissions: { allow: [' Bash(git *) ', null] },
+      } as unknown as Settings,
+    });
+    deletePermissionRule(config, settings, 'Bash(git *)', 'allow');
+    expect(written).toContainEqual({
+      scope: SettingScope.User,
+      key: 'permissions.allow',
+      value: [null],
+    });
+  });
 });
 
 describe('mcp and extension feeds', () => {

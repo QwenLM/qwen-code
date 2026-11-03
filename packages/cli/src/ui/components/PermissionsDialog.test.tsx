@@ -106,4 +106,32 @@ describe('PermissionsDialog', () => {
       expect(setValue).toHaveBeenCalledWith('User', 'permissions.allow', []),
     );
   });
+
+  it('deletes a padded rule when the stored list also holds a non-string entry', async () => {
+    // Settings loading does not validate element types and `parseRules` drops
+    // falsy entries, so a `null` can sit in the stored list while the session
+    // runs normally. The trim comparison must not call a method on it.
+    const { lastFrame, stdin, setValue } = renderWithRules(
+      [{ raw: 'Bash(docker *)' }],
+      { storedAllowRules: ['  Bash(docker *)  ', null as unknown as string] },
+    );
+
+    await vi.waitFor(() =>
+      expect(lastFrame() ?? '').toContain('Bash(docker *)'),
+    );
+    stdin.write('\u001B[B');
+    await vi.waitFor(() =>
+      expect(lastFrame() ?? '').toContain('› 2. Bash(docker *)'),
+    );
+    stdin.write('\r');
+    await vi.waitFor(() =>
+      expect(lastFrame() ?? '').toContain('Delete allow rule?'),
+    );
+    stdin.write('\r');
+    await vi.waitFor(() =>
+      expect(setValue).toHaveBeenCalledWith('User', 'permissions.allow', [
+        null,
+      ]),
+    );
+  });
 });
