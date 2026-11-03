@@ -24,6 +24,7 @@ const {
   saveConnection,
   removeConnection,
   findConnection,
+  findConnectionChecked,
 } = vi.hoisted(() => ({
   issueEnrollment: vi.fn(),
   writeStderrLine: vi.fn(),
@@ -32,6 +33,7 @@ const {
   saveConnection: vi.fn(),
   removeConnection: vi.fn(),
   findConnection: vi.fn(),
+  findConnectionChecked: vi.fn(),
 }));
 vi.mock('@qwen-code/qwen-code-core/agents/workspace-agents/store.js', () => ({
   issueAgentHostEnrollment: issueEnrollment,
@@ -46,6 +48,7 @@ vi.mock('../agent-host-connections.js', () => ({
   saveAgentHostConnection: saveConnection,
   removeAgentHostConnection: removeConnection,
   findAgentHostConnection: findConnection,
+  findAgentHostConnectionChecked: findConnectionChecked,
 }));
 vi.mock('../agent-host-programs.js', () => ({
   getHostProgramProbe: async () => [
@@ -417,7 +420,7 @@ it('answers busy, and stops nothing, when the saved connections are locked', asy
       'The saved Agent Host connections are busy, so nothing was stopped. Retry the request.',
   });
   expect(stopConnection).not.toHaveBeenCalled();
-  expect(findConnection).not.toHaveBeenCalled();
+  expect(findConnectionChecked).not.toHaveBeenCalled();
 });
 
 it('leaves the connection as it was when it cannot forget its saved record', async () => {
@@ -426,7 +429,7 @@ it('leaves the connection as it was when it cannot forget its saved record', asy
   removeConnection.mockRejectedValue(
     Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }),
   );
-  findConnection.mockResolvedValue(joined);
+  findConnectionChecked.mockResolvedValue({ kind: 'found', record: joined });
 
   const response = await disconnect();
 
@@ -448,17 +451,38 @@ it.each([true, false])(
         code: 'EACCES',
       }),
     );
-    findConnection.mockResolvedValue(undefined);
+    findConnectionChecked.mockResolvedValue({ kind: 'absent' });
     stopConnection.mockReturnValue(running);
 
     const response = await disconnect();
 
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ disconnected: running });
-    expect(findConnection).toHaveBeenCalledWith(joined);
+    expect(findConnectionChecked).toHaveBeenCalledWith(joined);
     expect(stopConnection).toHaveBeenCalledWith(joined);
   },
 );
+
+it('refuses to stop when the saved connections cannot be read', async () => {
+  // The Critical: an unreadable file (a transient EMFILE/EIO, a mode change)
+  // is not "no record". removeAgentHostConnection failed, and the lookup
+  // cannot confirm the record is gone, so stopping would abort the turns and
+  // the restore loop would reconnect the record still on disk — undoing the
+  // disconnect. Refuse instead.
+  removeConnection.mockRejectedValue(
+    Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' }),
+  );
+  findConnectionChecked.mockResolvedValue({ kind: 'unreadable' });
+
+  const response = await disconnect();
+
+  expect(response.status).toBe(400);
+  expect(response.body).toEqual({
+    error:
+      'Could not read the saved Agent Host connections, so nothing was stopped. Retry the request.',
+  });
+  expect(stopConnection).not.toHaveBeenCalled();
+});
 
 it('stops a connection whose record was already gone', async () => {
   removeConnection.mockResolvedValue(false);

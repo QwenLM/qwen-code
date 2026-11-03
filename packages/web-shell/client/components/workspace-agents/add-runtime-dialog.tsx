@@ -390,13 +390,16 @@ export function AddRuntimeDialog({
   const submitJoin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!onJoinCoordinator) return;
+    // Clear the previous attempt's notice before validating, like generate()
+    // and submitExisting(): a malformed link must not leave a stale unsaved
+    // notice standing beside the new validation error.
+    setNotSaved(undefined);
     if (!joinTarget) {
       setError(t('collab.runtime.joinBadLink'));
       return;
     }
     setBusy(true);
     setError(undefined);
-    setNotSaved(undefined);
     try {
       const outcome = await onJoinCoordinator({
         serverUrl: joinTarget.serverUrl,
@@ -534,7 +537,12 @@ export function AddRuntimeDialog({
                     type="button"
                     role="tab"
                     aria-selected={method === value}
-                    onClick={() => setMethod(value)}
+                    onClick={() => {
+                      setMethod(value);
+                      // A notice about one machine must not stay pinned under
+                      // another machine's form.
+                      setNotSaved(undefined);
+                    }}
                     className={`-mb-px border-b-2 pb-2 ${
                       method === value
                         ? 'border-foreground font-medium'

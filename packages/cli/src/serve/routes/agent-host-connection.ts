@@ -210,7 +210,7 @@ export function registerAgentHostRuntimeRoutes(
       const { normalizeServerUrl, stopAgentHostConnection } = await import(
         '../agent-host-client.js'
       );
-      const { findAgentHostConnection, removeAgentHostConnection } =
+      const { findAgentHostConnectionChecked, removeAgentHostConnection } =
         await import('../agent-host-connections.js');
       const target = {
         serverUrl: normalizeServerUrl(url, allowHttp),
@@ -225,14 +225,19 @@ export function registerAgentHostRuntimeRoutes(
         async (error: unknown) => {
           // A held lock clears soon, and another writer may be about to
           // change the file: answered as busy below, for the caller to
-          // retry. Past that, a connection with no record (joined at boot,
-          // or a join that was not saved) has nothing for the restore loop
-          // to bring back: stop it anyway, or nothing could. One with a
-          // record is left as it was.
+          // retry. Past that, only stop a connection we can confirm is
+          // forgotten: a readable file with no record (joined at boot, or a
+          // join that was not saved) has nothing for the restore loop to
+          // bring back, so stop it anyway. An UNREADABLE file is not "no
+          // record" — the restore loop would reconnect and undo the
+          // disconnect — so refuse rather than stop.
           if ((error as NodeJS.ErrnoException).code === 'ELOCKED') throw error;
-          if ((await findAgentHostConnection(target)) !== undefined) {
+          const lookup = await findAgentHostConnectionChecked(target);
+          if (lookup.kind !== 'absent') {
             throw new Error(
-              `Could not forget the saved connection, so nothing was stopped: ${error instanceof Error ? error.message : String(error)}`,
+              lookup.kind === 'unreadable'
+                ? 'Could not read the saved Agent Host connections, so nothing was stopped. Retry the request.'
+                : `Could not forget the saved connection, so nothing was stopped: ${error instanceof Error ? error.message : String(error)}`,
             );
           }
           return false;

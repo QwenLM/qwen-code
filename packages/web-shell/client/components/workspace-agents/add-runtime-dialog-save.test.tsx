@@ -121,14 +121,52 @@ it.each([
   },
 );
 
-it('says so when a remote it pulled in could not save the connection', async () => {
-  const onConnectExisting = vi.fn(async () => ({ saveError: 'disk full' }));
-  await renderDialog({ onConnectExisting });
+it.each([
+  ['an unsaved remote connect', { saveError: 'disk full' }, NOT_SAVED_THERE],
+  ['a saved remote connect', {}, undefined],
+] as const)(
+  'says so after %s it pulled in',
+  async (_label, outcome, notice) => {
+    const onConnectExisting = vi.fn(async () => outcome);
+    await renderDialog({ onConnectExisting });
+    await chooseTab('I have its address and token');
+    await connectExisting();
+
+    expect(onConnectExisting).toHaveBeenCalledOnce();
+    expect(notSavedNotice()).toBe(notice);
+  },
+);
+
+it('renders the unsaved notice with a period when a join reports no save error', async () => {
+  // joinOutcome maps {connected: true, saved: false} with no saveError to
+  // {saveError: ''}; the notice must still render, ending in the '.' fallback
+  // rather than a dangling colon. Pins both the render guard (!== undefined,
+  // not truthiness) and the message's empty-error fallback.
+  const onJoinCoordinator = vi.fn(async () => ({ saveError: '' }));
+  await renderDialog({ onJoinCoordinator });
+  await chooseTab('Join a coordinator');
+  await type('joinLink', 'https://hub.example:4170/join/ws_1');
+  await type('enrollmentToken', 'join-token');
+  await submit('join-coordinator');
+
+  expect(notSavedNotice()).toBe(
+    'This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload.',
+  );
+});
+
+it('clears the unsaved notice when switching to another tab', async () => {
+  // A warning about one machine must not stay pinned under another's form.
+  await renderDialog({
+    onConnectExisting: vi.fn(async () => ({ saveError: 'disk full' })),
+    onJoinCoordinator: vi.fn(async () => ({})),
+  });
   await chooseTab('I have its address and token');
   await connectExisting();
-
-  expect(onConnectExisting).toHaveBeenCalledOnce();
   expect(notSavedNotice()).toBe(NOT_SAVED_THERE);
+
+  await chooseTab('Join a coordinator');
+
+  expect(notSavedNotice()).toBeUndefined();
 });
 
 it('drops the notice when the next connect fails', async () => {

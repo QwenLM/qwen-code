@@ -67,24 +67,40 @@ function sameConnection(a: ConnectionKey, b: ConnectionKey): boolean {
   );
 }
 
-/** Every saved connection; an unreadable file reads as none. */
+/**
+ * Every saved connection, or a throw when the file cannot be trusted: a
+ * missing file (ENOENT) is legitimately empty, but an unreadable one (a
+ * transient `EMFILE`/`EIO`, a mode change) or a corrupt one is NOT "no
+ * connections". A caller that must not mistake unreadable for absent — the
+ * disconnect guard — reads through this and refuses on a throw.
+ */
+async function readAgentHostConnectionsStrict(): Promise<
+  AgentHostConnectionRecord[]
+> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(agentHostConnectionsPath(), 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+  const parsed = JSON.parse(raw) as Partial<ConnectionsFile>;
+  if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.connections)) {
+    throw new Error(`unexpected schema in ${agentHostConnectionsPath()}`);
+  }
+  return parsed.connections.filter(isRecord);
+}
+
+/** Every saved connection; an unreadable file reads as none (restore loop). */
 export async function readAgentHostConnections(): Promise<
   AgentHostConnectionRecord[]
 > {
   try {
-    const parsed = JSON.parse(
-      await fs.readFile(agentHostConnectionsPath(), 'utf8'),
-    ) as Partial<ConnectionsFile>;
-    if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.connections)) {
-      return [];
-    }
-    return parsed.connections.filter(isRecord);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      writeStderrLine(
-        `qwen serve: ignoring unreadable ${agentHostConnectionsPath()}.`,
-      );
-    }
+    return await readAgentHostConnectionsStrict();
+  } catch {
+    writeStderrLine(
+      `qwen serve: ignoring unreadable ${agentHostConnectionsPath()}.`,
+    );
     return [];
   }
 }
@@ -98,7 +114,11 @@ async function updateConnections(
   await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
   const release = await lockfile.lock(filePath, {
     realpath: false,
-    retries: { retries: 10, minTimeout: 5, maxTimeout: 100 },
+    // A few seconds of retry, not fractions of one: two daemons on one machine,
+    // or $HOME on slow/NFS storage, hold the lock past a sub-second budget while
+    // a join lands. A spent enrollment token must not be reported as a permanent
+    // loss just because the lock was briefly held.
+    retries: { retries: 10, minTimeout: 50, maxTimeout: 500 },
   });
   const temporary = `${filePath}.${randomUUID()}.tmp`;
   try {
@@ -151,6 +171,29 @@ export async function findAgentHostConnection(
   );
 }
 
+/**
+ * A lookup that tells "no record" apart from "could not read": the disconnect
+ * guard may only stop a connection it can confirm is forgotten, and an
+ * unreadable file is not an absent record — the restore loop would reconnect.
+ */
+export type AgentHostConnectionLookup =
+  | { kind: 'found'; record: AgentHostConnectionRecord }
+  | { kind: 'absent' }
+  | { kind: 'unreadable' };
+
+export async function findAgentHostConnectionChecked(
+  target: ConnectionKey,
+): Promise<AgentHostConnectionLookup> {
+  let connections: AgentHostConnectionRecord[];
+  try {
+    connections = await readAgentHostConnectionsStrict();
+  } catch {
+    return { kind: 'unreadable' };
+  }
+  const record = connections.find((entry) => sameConnection(entry, target));
+  return record ? { kind: 'found', record } : { kind: 'absent' };
+}
+
 const RESTORE_RETRY_MS = 30_000;
 /** How often a restored connection checks that it is still up. */
 const RESTORE_WATCH_MS = 5_000;
@@ -199,9 +242,7 @@ export async function restoreAgentHostConnections(
   const { signal } = options;
   const keep = async (saved: AgentHostConnectionRecord) => {
     while (!signal?.aborted) {
-      const record = (await readAgentHostConnections()).find((entry) =>
-        sameConnection(entry, saved),
-      );
+      const record = await findAgentHostConnection(saved);
       if (!record || signal?.aborted) return;
       const runtime = options.runtimeFor(record.workspaceCwd);
       if (runtime && !runtime.generationGuard?.closed) {

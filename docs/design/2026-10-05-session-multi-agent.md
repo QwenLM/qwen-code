@@ -115,7 +115,7 @@ Live state is not in the transcript. After a reload, the web shell fetches the c
 | The remote is not running     | `qwen serve --join <link>`.                                                                                          |
 
 - The runtime routes do not depend on the boot-time collaboration flag; only authentication is required (§8-5).
-- Connections persist and reconnect after a restart.
+- A connection whose record was saved persists and reconnects after a restart or a workspace reload. `POST /hosts/connect` answers `200 {connected: true, saved: false, saveError}` when the record write fails (a lock held past its retry budget, an unreadable or full disk): the join is live for this run, but the clients tell the operator it will not return after a restart, because the restore loop only reconnects records it finds saved.
 - After joining, the Host probes for the local CLIs. The coordinator creates one agent per available program, named like `claude-<machine>` (§8-4).
 - The Host protocol is v2:
   - enroll, heartbeat, pickup;

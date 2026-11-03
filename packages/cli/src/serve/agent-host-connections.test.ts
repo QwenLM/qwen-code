@@ -14,6 +14,7 @@ import {
   type AgentHostRestoreRuntime,
   agentHostConnectionsPath,
   findAgentHostConnection,
+  findAgentHostConnectionChecked,
   readAgentHostConnections,
   removeAgentHostConnection,
   restoreAgentHostConnections,
@@ -86,6 +87,36 @@ it('finds a saved connection by its key, reading an unreadable file as none', as
   ]) {
     expect(await findAgentHostConnection(other)).toBeUndefined();
   }
+  await fs.writeFile(agentHostConnectionsPath(), '{not json');
+  expect(await findAgentHostConnection(record)).toBeUndefined();
+});
+
+it('tells an absent record apart from an unreadable file', async () => {
+  // The disconnect guard may only stop a connection it can confirm is
+  // forgotten; "could not read" must not pass for "no record", or the restore
+  // loop reconnects the record still on disk and undoes the disconnect.
+  expect(await findAgentHostConnectionChecked(record)).toEqual({
+    kind: 'absent',
+  });
+  await saveAgentHostConnection(record);
+  expect(await findAgentHostConnectionChecked(record)).toEqual({
+    kind: 'found',
+    record,
+  });
+  // A corrupt file is not a readable empty one.
+  await fs.writeFile(agentHostConnectionsPath(), '{not json');
+  expect(await findAgentHostConnectionChecked(record)).toEqual({
+    kind: 'unreadable',
+  });
+  // Nor is a read failure: a path that is a directory reads as EISDIR, a
+  // non-ENOENT error the strict reader must surface rather than swallow.
+  await fs.rm(agentHostConnectionsPath(), { force: true });
+  await fs.mkdir(agentHostConnectionsPath());
+  expect(await findAgentHostConnectionChecked(record)).toEqual({
+    kind: 'unreadable',
+  });
+  // The resilient lookup the restore loop uses still reads unreadable as none.
+  await fs.rm(agentHostConnectionsPath(), { recursive: true, force: true });
   await fs.writeFile(agentHostConnectionsPath(), '{not json');
   expect(await findAgentHostConnection(record)).toBeUndefined();
 });
