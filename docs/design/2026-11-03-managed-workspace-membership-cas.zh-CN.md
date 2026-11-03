@@ -4,8 +4,9 @@
 
 ## 状态与范围
 
-状态：Implemented。本次变更已跑下面列出的 H2 套件。Validation 里的 MySQL
-间隙锁和死锁用例没有在本地运行，仍交给 CI。
+状态：Implemented。针对性的 H2 用例和现有 MySQL 恢复、盘点用例已通过。
+下面专门的 MySQL 并发用例补充这些证据，执行结果记录在 PR 验证报告中。
+完整验收仍等待所需 CI 门禁通过。
 
 本变更替换普通 Workspace 执行占用的串行化方式。现在 LOCAL 或 SSH_LOCAL
 目录上的每一次工具调用准入、释放和文件 rewind 都要先拿租户级 placement
@@ -62,14 +63,15 @@ guard，再锁住物理目录行，然后用 `FOR UPDATE` 扫描该目录的成�
 ## 目标
 
 - G1：一个目录上的执行准入、释放和 rewind 从不等待租户 placement guard，也
-  从不在 `idx_ma_runtime_execution_storage` 上加锁。
+  不在 `idx_ma_runtime_execution_storage` 上通过成员扫描获取间隙锁或 next-key
+  范围锁。更新成员身份仍会获取写入所需的索引记录锁。
 - G2：两个目录，无论属于同一租户还是两个租户，都可以互不阻塞地准入执行、检查
   占用。
 - G3：占用规则的结果保持不变：共享的普通成员、独占的 rewind、维护和上传的
   互斥、要求零成员的物理步骤、精确释放、只清理一个 binding 加 generation 的
   丢失 worker 清理，以及 retention 保留仍有成员的 binding。
 - G4：每个决定成败的条件要么写在 `UPDATE ... WHERE` 的谓词里，要么读自本事务
-  已经用点锁锁住的行。普通读不决定任何结论。
+  已经用点锁锁住的行的当前锁定读。快照读不决定任何结论。
 - G5：一个事务持有的锁遵循一份明确的顺序，本领域内没有事务以别的顺序获取
   其中的两把。
 
@@ -160,8 +162,8 @@ UPDATE ma_runtime_session
 同一 generation 下的 `READY`，或者 `is_drain_requested` 已置位，事务回滚并返回
 `unavailable`。
 
-这条 `FOR SHARE` 读是 `claim` 除目录行之外唯一持有的锁，而且是单个 binding 行
-上的点锁。它的作用是：一个先于本事务提交的、把 binding 转为 `DRAINING` 或
+这条 `FOR SHARE` 读锁住单个 binding 行，更新语句同时锁住目录和 session 记录。
+它的作用是：一个先于本事务提交的、把 binding 转为 `DRAINING` 或
 `LOST` 的变更，不能再被一个新成员跟在后面。它不是目录锁，也不是租户锁。H2
 没有共享锁语法，所以 H2 测试对这一行使用 `FOR UPDATE`。MySQL 和 MariaDB 使用
 `FOR SHARE`。
@@ -209,9 +211,15 @@ retention 删除 session 行时不经过成员写路径，所以它的删除谓�
 
 本变更涉及的每条路径都遵循三条规则。
 
-一个条件只有出现在 `UPDATE ... WHERE` 里，或者读自本事务已经用点锁锁住的行，
-才可以决定结果。预检查的读只用于快速失败和绑定参数。这消除了这样一类缺陷：
+一个条件只有出现在 `UPDATE ... WHERE` 里，或者通过当前锁定读读取本事务已经
+用点锁锁住的行，才可以决定结果。预检查的读只用于快速失败和绑定参数。
+这消除了这样一类缺陷：
 一条放在锁等待之前的普通读把事务的快照建立得太早。
+
+具体而言，`WorkspaceStorageGuard` 在注册、fence、恢复和已 fenced 的权限检查中，
+通过 `FOR UPDATE` 读取成员数。MySQL fence 竞争用例复现了普通读在获取目录锁后
+仍然读取到旧的零计数：获取锁不会刷新之前已经建立的 REPEATABLE READ 快照。
+诊断 inspection 保留非锁定读。
 
 影响行数只对确实修改了存储值的语句做判断。MySQL 和 MariaDB 的 Connector/J
 默认返回匹配行数而不是变更行数，H2 同样如此，所以一条把列写回原值的更新无法
@@ -223,7 +231,9 @@ retention 删除 session 行时不经过成员写路径，所以它的删除谓�
 
 ### D7. 统一的加锁顺序
 
-一个事务如果要锁住下面几类中的多个，必须按这个顺序获取，并且只加点锁：
+一个事务如果要锁住下面几类中的多个，必须按这个顺序获取。目录和 binding 锁
+使用唯一键点查；被移除的占用扫描不得获取成员索引范围锁。Session 写入仍可能
+锁住其他二级索引范围，这不在此处较窄的保证内：
 
 1. 租户 placement guard，仅限 D2 仍然允许的位置。
 2. `ma_storage` 里的别名行，按 `alias_key` 升序。
@@ -350,16 +360,22 @@ fence 会阻塞在这行上。别名改指向在持有别名行时更新别名�
 
 ### 新增的 MySQL 覆盖
 
-一个新的集成测试，针对可丢弃的 MySQL 8.4，在竞争持续期间从
-`performance_schema.data_locks` 取锁等待快照：
+`WorkspaceExecutionMembershipMySqlIT` 针对可丢弃的 MySQL 8.4 运行。
+并发用例在事务仍然打开、阻塞者尚未释放时，观察
+`performance_schema.data_locks` 或锁等待图：
 
 - 一个外部事务在整个运行期间持有该租户的 placement guard。该租户目录上的
-  `claim`、`release` 和 `beginRewind` 都能完成。
-- 两个连接分别在两个不同目录上准入执行，并各自做一次零成员检查。双方都不
-  阻塞，并且不出现 `idx_ma_runtime_execution_storage` 上的锁。
-- `claim` 与 `WorkspaceOperatorRecoveryStore.prepare` 在同一个目录上并发。
-  双方都不因死锁失败，并且恰好一方观察到这个目录。
-- `claim` 分别与 fence、维护、独占 rewind 竞争。每一对里恰好一方成功。
+  `claim`、重入 `claim`、rewind 开始和结束、释放和重复释放都能完成。
+- 两个连接分别在两个不同目录上准入执行，覆盖同租户和不同租户。双方互不等待，
+  都能到达提交前的暂停点。活动快照必须包含目录记录锁；
+  `idx_ma_runtime_execution_storage` 上的锁只能是记录锁（`REC_NOT_GAP`），
+  不允许成员扫描的范围锁。
+- `WorkspaceOperatorRecoveryStore.prepare` 在已持有目录行锁的情况下，等待外部
+  事务故意持有的 binding 行锁。重入 `claim` 随后排在它后面。释放阻塞者后，
+  运维准备完成，claim 被拒绝，服务器死锁计数不增加。
+- 尚未提交的成员身份阻塞 fence 和维护，两者在成员提交后拒绝执行。释放成员后，
+  每个物理操作都能成功，作为正向对照。尚未提交的独占 rewind 同样先阻塞、
+  再拒绝另一个成员；rewind 结束后，该成员准入成功。
 - 每个场景结束后，`member_count` 等于携带该 `execution_storage_key` 的
   session 行数，`exclusive_member_key` 要么与唯一的独占成员一致，要么为 null。
 
@@ -370,7 +386,8 @@ MySQL 用例在本模块的验证预算内本地运行；完整的 MySQL 矩阵�
 
 1. 任何每次调用的成员路径都不再获取租户 placement guard，一把被持有的 guard
    不会拖延 `claim`、`release` 或 rewind。
-2. 不同目录的准入和占用检查互不阻塞，这些路径不在成员索引上留下锁。
+2. 不同目录的准入和占用检查互不阻塞，占用检查不获取成员索引间隙锁或 next-key
+   范围锁。成员写入可以持有索引记录锁。
 3. G3 列出的占用结果在现有测试套件上保持不变。
 4. 每个被测场景结束后，`member_count` 和 `exclusive_member_key` 与成员行一致；
    会破坏 `CHECK` 约束的写入被回滚。

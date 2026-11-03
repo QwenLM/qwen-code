@@ -112,7 +112,7 @@ public class WorkspaceStorageGuard {
         }
         boolean held = row.holderKey() != null || row.bindingId() != null
                 || row.runtimeGeneration() != null || row.runtimeSessionId() != null
-                || occupied(physical);
+                || occupied(physical, false);
         boolean valid = "READY".equals(row.state()) && row.revision() > 0
                 && row.operationId() == null && validId(row.completedOperationId())
                 || "FENCED".equals(row.state()) && row.revision() > 0
@@ -179,7 +179,7 @@ public class WorkspaceStorageGuard {
                 || !operationId.equals(saved.operationId()) || saved.holderKey() != null
                 || saved.bindingId() != null || saved.runtimeGeneration() != null
                 || saved.runtimeSessionId() != null || !validId(saved.registrationId())
-                || saved.completedOperationId() != null || occupied(physical)) {
+                || saved.completedOperationId() != null || occupied(physical, true)) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
     }
@@ -484,13 +484,14 @@ public class WorkspaceStorageGuard {
     }
 
     private void requireNoExecutionMembers(String physical) {
-        if (occupied(physical)) {
+        if (occupied(physical, true)) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
     }
 
-    private boolean occupied(String physical) {
-        List<Number> counts = jdbc.query("SELECT member_count FROM ma_storage_owner WHERE storage_key = ?",
+    private boolean occupied(String physical, boolean lock) {
+        List<Number> counts = jdbc.query("SELECT member_count FROM ma_storage_owner WHERE storage_key = ?"
+                + (lock ? " FOR UPDATE" : ""),
                 (row, index) -> (Number) row.getObject("member_count"), physical);
         return !counts.isEmpty() && counts.getFirst().longValue() > 0;
     }

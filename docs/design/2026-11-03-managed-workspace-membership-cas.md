@@ -4,9 +4,10 @@
 
 ## Status and scope
 
-Status: Implemented. The H2 suites below were run for this change. The MySQL
-gap-lock and deadlock cases in Validation were not run locally and remain
-CI work.
+Status: Implemented. Focused H2 and existing MySQL recovery and inventory cases
+have passed. The dedicated MySQL concurrency cases below supplement that
+evidence; their execution results are recorded in the PR validation report.
+Full acceptance remains pending the required CI gates.
 
 This change replaces the serialization of ordinary Workspace execution
 membership. Today every tool-call admission, release, and file rewind of a
@@ -76,8 +77,9 @@ Three properties of this shape are the problem:
 ## Goals
 
 - G1: Admitting, releasing, or rewinding execution on one directory never
-  waits on the tenant placement guard, and never takes a lock on
-  `idx_ma_runtime_execution_storage`.
+  waits on the tenant placement guard, and does not scan
+  `idx_ma_runtime_execution_storage` with gap or next-key range locks.
+  Updating membership still takes the index record locks needed for the write.
 - G2: Two directories, whether of one tenant or of two, admit execution and
   check occupancy without blocking each other.
 - G3: The occupancy rules keep their current outcomes: shared ordinary
@@ -85,8 +87,8 @@ Three properties of this shape are the problem:
   physical steps, exact release, lost-worker cleanup scoped to one binding
   and generation, and retention that preserves bindings with members.
 - G4: Every condition that decides success or failure is in an
-  `UPDATE ... WHERE` predicate or was read from a row this transaction has
-  already locked point-wise. A plain read decides nothing.
+  `UPDATE ... WHERE` predicate or a current locking read of a row this
+  transaction has already point-locked. A snapshot read decides nothing.
 - G5: The locks one transaction holds are a documented order, and no
   transaction in this domain takes two of them in another order.
 
@@ -185,8 +187,8 @@ first statement is `workspace_busy`; zero on the third is `unavailable`. A bindi
 row that is no longer `READY` at the same generation, or that has
 `is_drain_requested`, rolls the transaction back with `unavailable`.
 
-The `FOR SHARE` read is the one lock `claim` takes besides the directory row,
-and it is a point lock on the single binding row. It exists so that a binding
+The `FOR SHARE` read locks the single binding row in addition to the directory
+and session records locked by the updates. It exists so that a binding
 transition to `DRAINING` or `LOST` that commits before this transaction cannot
 be followed by a new member. It is not a directory lock and not a tenant lock.
 H2 has no share-lock syntax, so the H2 tests take `FOR UPDATE` on that one
@@ -242,11 +244,18 @@ reads.
 
 Three rules apply to every path this change touches.
 
-A condition decides an outcome only inside an `UPDATE ... WHERE`, or as a read
-of a row this transaction has already locked with a point lock. The pre-check
+A condition decides an outcome only inside an `UPDATE ... WHERE`, or as a
+current locking read of a row this transaction has point-locked. The pre-check
 reads exist to fail fast and to bind parameters. This removes the class of
 defect in which a plain read placed before a lock wait pins the transaction's
 snapshot too early.
+
+In particular, `WorkspaceStorageGuard` reads the membership count with
+`FOR UPDATE` for registration, fencing, restore and fenced-authority checks.
+The MySQL fence contender reproduced a stale zero count from a plain read even
+after the directory lock had been acquired. A previously established
+REPEATABLE READ snapshot is not refreshed by acquiring that lock. Diagnostic
+inspection keeps its nonlocking read.
 
 Affected-row counts are checked only for statements that change a stored
 value. MySQL and MariaDB Connector/J report matched rows by default rather
@@ -260,8 +269,10 @@ Both already require the row to exist before they reach it.
 
 ### D7. One lock order
 
-A transaction that locks more than one of these takes them in this order, and
-takes point locks only:
+A transaction that locks more than one of these takes them in this order.
+Directory and binding locks use unique point lookups; the removed occupancy
+scan must not acquire member-index range locks. Session writes can still lock
+other secondary-index ranges, which is outside this narrower guarantee:
 
 1. The tenant placement guard, only where D2 still allows it.
 2. Alias rows in `ma_storage`, in ascending `alias_key` order.
@@ -418,21 +429,26 @@ changes.
 
 ### New MySQL coverage
 
-One new integration test, against disposable MySQL 8.4, with a lock-wait
-snapshot taken from `performance_schema.data_locks` while the contention is
-held:
+`WorkspaceExecutionMembershipMySqlIT` runs against disposable MySQL 8.4.
+The concurrency cases observe `performance_schema.data_locks` or the lock-wait
+graph while the transactions are still open, before releasing their blockers:
 
 - An external transaction holds the tenant placement guard for the whole run.
-  `claim`, `release`, and `beginRewind` on that tenant's directory all
-  complete.
-- Two connections admit execution on two different directories and each runs a
-  zero-member check. Neither blocks, and no lock on
-  `idx_ma_runtime_execution_storage` appears.
-- `claim` runs concurrently with `WorkspaceOperatorRecoveryStore.prepare` on
-  one directory. Neither fails with a deadlock, and exactly one of them
-  observes the directory.
-- `claim` competes separately with fencing, with maintenance, and with an
-  exclusive rewind. Exactly one side succeeds in each pair.
+  `claim`, reentrant `claim`, rewind start/end, release and repeated release on
+  that tenant's directory all complete.
+- Two connections admit execution on two different directories, for both one
+  tenant and two tenants. Both reach a pause immediately before commit without
+  waiting on each other. The live snapshot contains directory record locks;
+  any locks on `idx_ma_runtime_execution_storage` must be record-only
+  (`REC_NOT_GAP`), with no member-scan range locks.
+- `WorkspaceOperatorRecoveryStore.prepare` waits on a deliberately held binding
+  row while already holding the directory row. A reentrant `claim` then queues
+  behind it. Releasing the blocker lets preparation finish and rejects the
+  claim, with no increase in the server's deadlock counter.
+- A pending membership commit blocks fencing and maintenance, which refuse
+  after that commit. Each physical operation succeeds after membership is
+  released, providing a positive control. A pending exclusive rewind similarly
+  blocks and then rejects another member; admission succeeds after rewind ends.
 - After every scenario, `member_count` equals the number of session rows
   carrying that `execution_storage_key`, and `exclusive_member_key` matches
   the one exclusive member or is null.
@@ -446,7 +462,8 @@ the module's verification budget; the full MySQL matrix stays with CI.
 1. No per-call membership path acquires the tenant placement guard, and a held
    guard does not delay `claim`, `release`, or rewind.
 2. Distinct directories never block each other's admission or occupancy
-   checks, and the member index carries no locks from those paths.
+   checks, and occupancy checks take no member-index gap or next-key range
+   locks. Membership writes may hold index record locks.
 3. The occupancy outcomes listed under G3 are unchanged on the existing suites.
 4. `member_count` and `exclusive_member_key` match the member rows after every
    tested scenario, and a write that would break the `CHECK` constraints rolls
