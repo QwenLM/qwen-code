@@ -206,7 +206,11 @@ cross-cutting "how the system works today" tour.
    (`MessageMaterializer`, `ReplayFloorAdvancer`, `ManagedToolResultStore`),
    and turn execution (`SessionWorktreeService`). Most of the remaining
    consumers span roles or forward the store into multi-role dependencies
-   (Harness and broker wiring) and keep the composite.
+   and keep the composite. The broker wiring is no longer one of them:
+   `EmbeddedRuntimeBroker` forwards the store only into
+   `WorkspaceRuntimeResolver` and `ManagedRuntimeCoordinator`, which both
+   take `SessionQueryStore`, so it is itself a candidate for the same
+   narrowing.
    Four more single-role consumers were initially deferred because their
    `this(...)` calls are constructor delegation within the same class, not
    forwarding; they have since been narrowed too: `ChildWorkspaceService`,
