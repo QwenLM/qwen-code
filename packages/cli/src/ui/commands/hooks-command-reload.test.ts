@@ -23,16 +23,24 @@ import {
   resetHookApprovalsForTesting,
 } from '../../config/hook-approvals.js';
 import { normalizeProjectRoot } from '../../config/approval-project-root.js';
+import { readProjectEnvFiles } from '../../config/environment.js';
 
 const hook = (command: string) => [
   { matcher: '*', hooks: [{ type: 'command' as const, command }] },
 ];
-// The repo ships no .env and no settings.env.
-const approvalFor = (root: string, hooks: Record<string, unknown>) => ({
+// Build the fixture from the same env sources the production hash reads:
+// findEnvFiles walks above the temp root, so an ancestor .env (CI runners
+// have one) must land in the recorded hash too, or the reloaded block reads
+// pending on those machines.
+const approvalFor = (
+  root: string,
+  hooks: Record<string, unknown>,
+  merged: Settings,
+) => ({
   root,
   hooks,
   resolved: hooks,
-  env: { files: {}, settings: null },
+  env: { files: readProjectEnvFiles(merged, root), settings: null },
 });
 
 describe('/hooks reload with real settings files', () => {
@@ -40,6 +48,9 @@ describe('/hooks reload with real settings files', () => {
 
   beforeEach(() => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'hooks-reload-'));
+    // An ancestor .env of the repo, so the approval hash provably covers
+    // project env files on every machine, not only on CI runners.
+    fs.writeFileSync(path.join(directory, '.env'), 'HOOKS_RELOAD_FIXTURE=1\n');
     vi.stubEnv('QWEN_HOME', path.join(directory, 'user'));
     vi.stubEnv(
       'QWEN_CODE_HOOK_APPROVALS_PATH',
@@ -155,12 +166,12 @@ describe('/hooks reload with real settings files', () => {
   });
 
   it('keeps approved project hooks after a worktree move and withholds an edited block', async () => {
+    const { settings, context, entries } = await setup(true, true, {}, false);
     const repo = path.join(directory, 'repo');
     await loadHookApprovals().setState(
-      approvalFor(repo, { PreToolUse: hook('echo project') }),
+      approvalFor(repo, { PreToolUse: hook('echo project') }, settings.merged),
       'approved',
     );
-    const { settings, context, entries } = await setup(true, true, {}, false);
 
     await hooksCommand.action!(context, '');
     expect(sources(entries)).toContainEqual({
@@ -177,15 +188,16 @@ describe('/hooks reload with real settings files', () => {
   });
 
   it('re-reads the approvals file, so a decision edited by hand applies', async () => {
+    const { settings, context, entries } = await setup(false, true, {}, true);
     const repo = path.join(directory, 'repo');
     const block = { PreToolUse: hook('echo project') };
-    await loadHookApprovals().setState(approvalFor(repo, block), 'rejected');
-    const { context, entries } = await setup(false, true, {}, true);
+    const approval = approvalFor(repo, block, settings.merged);
+    await loadHookApprovals().setState(approval, 'rejected');
     fs.writeFileSync(
       path.join(directory, 'hookApprovals.json'),
       JSON.stringify({
         [normalizeProjectRoot(repo)]: {
-          hash: hashProjectHooks(approvalFor(repo, block)),
+          hash: hashProjectHooks(approval),
           status: 'approved',
         },
       }),
