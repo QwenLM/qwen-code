@@ -753,7 +753,7 @@ mod tests {
     // stop would hang the update after the daemon is already dead (#15276).
     #[cfg(windows)]
     #[test]
-    fn pending_stop_reaps_a_child_taken_from_the_shared_handle_on_windows() {
+    fn pending_stop_returns_and_takes_the_handle_on_windows() {
         let mut command = std::process::Command::new("powershell.exe");
         command.args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep 60"]);
         let mut group_child =

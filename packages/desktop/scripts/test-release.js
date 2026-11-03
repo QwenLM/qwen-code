@@ -1795,8 +1795,13 @@ function testUpdaterMirrorConfiguration() {
   );
   assert.match(
     checkForUpdate,
-    /\.on_before_exit\(move \|\| \{\s*stop_runtime\(&exit_handle\);\s*exit_handle\.cleanup_before_exit\(\);\s*\}\)/,
+    /\n\s*\.on_before_exit\(move \|\| \{\s*stop_runtime\(&exit_handle\);\s*exit_handle\.cleanup_before_exit\(\);\s*\}\)/,
     'check_for_update must stop the bundled runtime and keep the default cleanup hook before the installer exits the app.',
+  );
+  assert.equal(
+    (main.match(/Open sessions will be closed\./g) ?? []).length,
+    2,
+    'both update prompts must warn that open sessions end when the runtime stops.',
   );
   assert.match(main, /"QWEN_DESKTOP_DISABLE_UPDATES"/);
   // The adapter must actually read the env var: without this pin, rewiring
