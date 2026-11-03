@@ -250,6 +250,78 @@ afterEach(() => {
 });
 
 describe('EmbeddedApp host wiring', () => {
+  it('refreshes models automatically after successful native subscription sign-in', async () => {
+    const props = await renderApp();
+    const refreshModels = vi.fn().mockResolvedValue(undefined);
+    const shellRef = props.shellRef as {
+      current: { refreshModels: typeof refreshModels } | null;
+    };
+    shellRef.current = { refreshModels };
+
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'authSuccess',
+            data: {
+              message: 'Qwen Code is ready. Model: qwen3.8-max.',
+            },
+          },
+        }),
+      );
+    });
+
+    expect(document.body.textContent).toContain(
+      'Qwen Code is ready. Model: qwen3.8-max.',
+    );
+    expect(refreshModels).toHaveBeenCalledOnce();
+  });
+
+  it('keeps sign-in successful when refreshing models fails', async () => {
+    const props = await renderApp();
+    const error = new Error('Model readback failed');
+    const refreshModels = vi.fn().mockRejectedValue(error);
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const shellRef = props.shellRef as { current: unknown };
+    shellRef.current = { refreshModels };
+    try {
+      await act(async () => {
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: {
+              type: 'authSuccess',
+              data: { message: 'Signed in successfully.' },
+            },
+          }),
+        );
+      });
+      expect(consoleError).toHaveBeenCalledWith(
+        'Unable to refresh models after sign-in',
+        error,
+      );
+      expect(document.body.textContent).toContain('Signed in successfully.');
+      expect(document.body.textContent).not.toContain('Get Started');
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it.each(['agentConnected', 'authCancelled'])(
+    'does not refresh models on %s',
+    async (type) => {
+      const props = await renderApp();
+      const refreshModels = vi.fn().mockResolvedValue(undefined);
+      const shellRef = props.shellRef as { current: unknown };
+      shellRef.current = { refreshModels };
+      await act(async () => {
+        window.dispatchEvent(new MessageEvent('message', { data: { type } }));
+      });
+      expect(refreshModels).not.toHaveBeenCalled();
+    },
+  );
+
   it('forwards model connection changes so the native host can cancel stale account actions', async () => {
     const props = await renderApp();
     callback<(modelId: string, authType: string) => void>(

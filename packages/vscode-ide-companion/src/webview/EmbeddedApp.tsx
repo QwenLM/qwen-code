@@ -1087,6 +1087,9 @@ export function EmbeddedApp() {
         setAuthConnecting(false);
         setAuthError(undefined);
         if (message.type === 'authSuccess') {
+          void shellRef.current?.refreshModels().catch((error: unknown) => {
+            console.error('Unable to refresh models after sign-in', error);
+          });
           setHostNotice({
             tone: 'info',
             text:
