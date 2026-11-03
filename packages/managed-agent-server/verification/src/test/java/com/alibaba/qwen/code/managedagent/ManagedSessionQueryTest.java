@@ -40,7 +40,7 @@ class ManagedSessionQueryTest {
         DataSource source = dataSource();
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
-        sessions = VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        sessions = VerificationFixtures.managedSessionStore(jdbc);
         tx = new TransactionTemplate(new DataSourceTransactionManager(source));
         journal = new ExtensionRecordJournal(sessions, TENANT, WORKSPACE, SESSION);
         tx.executeWithoutResult(status -> journal.open());

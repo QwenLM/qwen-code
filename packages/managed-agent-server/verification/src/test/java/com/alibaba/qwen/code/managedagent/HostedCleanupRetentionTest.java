@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedRuntimeRetentionGuard;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
@@ -74,7 +73,7 @@ class HostedCleanupRetentionTest {
         transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("key", new byte[32]));
         runtimeSessions = new JdbcRuntimeSessionRepository(source);
-        journal = transactions.execute(ignored -> new ExtensionRecordJournal(com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)),
+        journal = transactions.execute(ignored -> new ExtensionRecordJournal(com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc),
                 "tenant", "workspace", "harness").open());
         scope = new RuntimeScope("tenant", "workspace", "1", "/workspace", "sha256:" + "a".repeat(64), "session");
         original = retire(new RuntimeProvisionRequest(scope, "harness", "local-process", "storage"));

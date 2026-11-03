@@ -107,7 +107,7 @@ class WorkspaceCsiNativeActivationGateTest {
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
         sessions = new JdbcRuntimeSessionRepository(source);
         executions = new JdbcToolExecutionRepository(source, bindings);
-        journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         binding = bindings.findOrCreate(request);
         binding = bindings.claimOperation(binding.getBindingId(), "operator", Duration.ofSeconds(120));
         reservation = reservations.reserve(registration, bindings, binding, UUID.randomUUID().toString());

@@ -163,7 +163,7 @@ Patterns select among the engine events `session.start`, `session.end`,
 `*`, or a single negation such as `!session.*`. The patterns `!*` and `!!...` are
 rejected.
 
-Claude Code 2.1.310 also defines events that Qwen Code does not run yet, such as
+Claude Code 2.1.316 also defines events that Qwen Code does not run yet, such as
 `prompt.fill` or `classic.Stop`. `prompt.submit` runs only in headless runs, and
 `ui.render` only where a host draws it. A registration for one of them,
 or for a prefix such as `prompt.*` that matches none of the events above, loads
@@ -416,7 +416,7 @@ supports:
 {
   "version": "0.26.0",
   "qwen": {
-    "claudeCode": "2.1.310",
+    "claudeCode": "2.1.316",
     "events": [
       "clock.now",
       "clock.sleep",
@@ -513,7 +513,7 @@ Mod discovery. Mod manifests must be relative paths inside the extension.
 directory, the one that holds `qwen-extension.json` or
 `.claude-plugin/plugin.json`. They are plain properties.
 
-The other methods are API events that resolve to the shapes Claude Code 2.1.310
+The other methods are API events that resolve to the shapes Claude Code 2.1.316
 declares:
 
 | Method                                | Resolves to                                                                             |
@@ -722,7 +722,7 @@ its props and its children flattened into an array, and throws for a string tag 
 JSX in a `.tsx` or `.jsx` file compiles to these calls, as described in
 [TypeScript, JSX and relative imports](#typescript-jsx-and-relative-imports).
 
-A tree a hook returns is judged with Claude Code 2.1.310's rules for `Box` and
+A tree a hook returns is judged with Claude Code 2.1.316's rules for `Box` and
 `Text`, and any other element refuses it with
 `<Element> is not drawn by Qwen Code yet`.
 
@@ -969,6 +969,6 @@ Own `__proto__` keys in tool inputs and results are ordinary data on both sides.
 A hook answer whose getter throws while Qwen Code reads it fails as a whole;
 Claude Code 2.1.299 drops only that key.
 
-The author API follows the Claude Code 2.1.310 declarations, event names
+The author API follows the Claude Code 2.1.316 declarations, event names
 included, and the
 [official Mod documentation](https://code.claude.com/docs/en/plugins/mods/create).
