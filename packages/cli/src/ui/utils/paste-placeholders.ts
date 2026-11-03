@@ -26,6 +26,29 @@ export function expandPendingPastePlaceholders(
   );
 }
 
+/**
+ * Collapse each paste whose text appears once, whole, in `text` back to its
+ * placeholder, so text rewritten around a paste keeps the paste collapsed.
+ */
+export function collapsePastes(
+  text: string,
+  pastes: ReadonlyMap<string, string> | undefined,
+): { text: string; pasteExpansions: Map<string, string> } {
+  const pasteExpansions = new Map<string, string>();
+  let collapsed = text;
+  const longestFirst = Array.from(pastes ?? []).sort(
+    (a, b) => b[1].length - a[1].length,
+  );
+  for (const [placeholder, body] of longestFirst) {
+    const at = body ? collapsed.indexOf(body) : -1;
+    if (at < 0 || collapsed.indexOf(body, at + 1) >= 0) continue;
+    collapsed =
+      collapsed.slice(0, at) + placeholder + collapsed.slice(at + body.length);
+    pasteExpansions.set(placeholder, body);
+  }
+  return { text: collapsed, pasteExpansions };
+}
+
 export function restorePasteDraft(
   text: string,
   restored: ReadonlyMap<string, string>,
