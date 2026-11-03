@@ -549,6 +549,9 @@ final class AgentSessionPolicies {
             throw new ManagedAgentException(403, "session_operation_forbidden",
                     "Only a Workspace operator may change the model");
         }
+        if (session.modelConfigDigest() != null) {
+            throw new ManagedAgentException(409, "model_config_immutable", "This Session has an immutable model configuration.");
+        }
         if (!supported || modelCatalog.isEmpty() || !workspaceFilesEnabled) {
             throw new ManagedAgentException(409, "unsupported_feature", "Model selection is unavailable");
         }
