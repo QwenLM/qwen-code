@@ -78,7 +78,7 @@ class ResidentWorkspaceGraceDeadlineTest {
         assertThat(fixture.store().inspect(fixture.request).state()).isEqualTo("RELEASED");
     }
 
-    private com.alibaba.qwen.code.runtimebroker.provisioning.KubernetesHttpRuntimeClient prepared() {
+    private com.alibaba.qwen.code.runtimebroker.provisioning.kubernetes.KubernetesHttpRuntimeClient prepared() {
         fixture.preparePlatform();
         fixture.store().begin(fixture.request);
         var api = fixture.api();

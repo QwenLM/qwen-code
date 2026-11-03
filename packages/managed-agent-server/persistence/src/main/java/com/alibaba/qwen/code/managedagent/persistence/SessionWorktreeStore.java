@@ -202,7 +202,7 @@ public class SessionWorktreeStore
     public List<String[]> failedInitialSessions() {
         return jdbc.query("SELECT DISTINCT w.tenant_id, w.session_id, w.failure_code FROM ma_session_worktree w"
                 + " JOIN ma_turn t ON t.tenant_id = w.tenant_id AND t.session_id = w.session_id"
-                + " WHERE w.state IN ('FAILED','BLOCKED') AND t.status = 'ACCEPTED' AND t.submission_attempted = FALSE LIMIT 20",
+                + " WHERE w.state IN ('FAILED','BLOCKED') AND t.status = 'ACCEPTED' AND t.is_submission_attempted = FALSE LIMIT 20",
                 (result, index) -> new String[] {result.getString("tenant_id"), result.getString("session_id"), result.getString("failure_code")});
     }
 

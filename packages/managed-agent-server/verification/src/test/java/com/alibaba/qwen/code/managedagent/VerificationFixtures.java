@@ -111,13 +111,13 @@ public final class VerificationFixtures {
         store.configureWorktreeFiles(
                 new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles());
         store.configureLocalFiles(
-                new com.alibaba.qwen.code.runtimebroker.provisioning.WorkspaceFileProcess());
+                new com.alibaba.qwen.code.runtimebroker.host.WorkspaceFileProcess());
         return store;
     }
 
     public static WorkspaceFileUploadStore configure(WorkspaceFileUploadStore store) {
         store.configureLocalFiles(
-                new com.alibaba.qwen.code.runtimebroker.provisioning.WorkspaceFileProcess());
+                new com.alibaba.qwen.code.runtimebroker.host.WorkspaceFileProcess());
         return store;
     }
 

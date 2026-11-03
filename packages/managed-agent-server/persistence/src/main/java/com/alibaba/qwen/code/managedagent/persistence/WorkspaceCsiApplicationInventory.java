@@ -69,7 +69,7 @@ final class WorkspaceCsiApplicationInventory {
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     private static final List<Declaration> CATALOGUE = List.of(
             declaration("ma_agent_definition", "tenant_id,agent_id,revision",
-                    "tenant_id:VARBINARY,agent_id:VARBINARY,revision:BIGINT,digest:VARCHAR,definition_json:LONGTEXT,"
+                    "tenant_id:VARBINARY,agent_id:VARBINARY,revision:BIGINT,digest:CHAR,definition_json:LONGTEXT,"
                     + "gmt_create:BIGINT"),
             declaration("ma_artifact", "artifact_id",
                     "artifact_id:VARBINARY,result_id:VARBINARY,scope_key:CHAR,descriptor_json:MEDIUMTEXT,"
@@ -95,7 +95,7 @@ final class WorkspaceCsiApplicationInventory {
                     "tenant_id:VARBINARY,session_id:VARBINARY,stream_kind:VARCHAR,stream_id:VARBINARY,last_sequence:BIGINT,"
                     + "replay_floor_sequence:BIGINT,covered_sequence:BIGINT,wake_covered_sequence:BIGINT,"
                     + "projection_version:INT,"
-                    + "artifact_refs_resource_key:CHAR,output_ranges_json:LONGTEXT,projection_pending:BOOLEAN,"
+                    + "artifact_refs_resource_key:CHAR,output_ranges_json:LONGTEXT,is_projection_pending:BOOLEAN,"
                     + "gmt_modified:BIGINT"),
             declaration("ma_extension_operation", "operation_key",
                     "operation_key:CHAR,scope_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,actor_key:CHAR,"
@@ -125,7 +125,7 @@ final class WorkspaceCsiApplicationInventory {
                     + "session_status_before:VARCHAR,receipt_id:VARBINARY,claim_owner:VARBINARY,claim_generation:BIGINT,"
                     + "claim_until:BIGINT,available_at:BIGINT,attempt_count:INT,budget_exempt_attempt:INT,deadline:BIGINT,"
                     + "recovery_deadline:BIGINT,execution_mode:VARCHAR,verification_request_json:LONGTEXT,"
-                    + "verification_ready:BOOLEAN,verification_next_at:BIGINT,publication_id:VARBINARY,"
+                    + "is_verification_ready:BOOLEAN,verification_next_at:BIGINT,publication_id:VARBINARY,"
                     + "publication_command_id:VARBINARY,slot_key:VARBINARY,execution_key:CHAR,item_id:VARBINARY,"
                     + "policy_version:VARBINARY,failure_status:INT,failure_code:VARCHAR,gmt_create:BIGINT,gmt_modified:BIGINT,"
                     + "completed_at:BIGINT,progress_format:VARCHAR,progress_version:BIGINT,progress_stage:VARCHAR,"
@@ -141,28 +141,28 @@ final class WorkspaceCsiApplicationInventory {
                     "scope_key:CHAR,tenant_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,session_id:VARBINARY,"
                     + "publication_id:VARBINARY,execution_key:CHAR,capture_id:VARBINARY,binding_json:MEDIUMTEXT,"
                     + "binding_digest:CHAR,token_hash:CHAR,state:VARCHAR,expires_at:BIGINT,capture_bytes:BIGINT,"
-                    + "producer_bytes:BIGINT,admission_bytes:BIGINT,producer_phase:VARCHAR,quarantined:BOOLEAN,"
+                    + "producer_bytes:BIGINT,admission_bytes:BIGINT,producer_phase:VARCHAR,is_quarantined:BOOLEAN,"
                     + "active_operation_id:VARBINARY,finish_operation_id:VARBINARY,finish_predecessor_id:VARBINARY,"
                     + "finish_digest:CHAR,terminal_resource_id:VARBINARY,admission_resource_id:VARBINARY,"
                     + "receipt_sequence:BIGINT,receipt_revision:BIGINT,capture_held_bytes:BIGINT,producer_held_bytes:BIGINT,"
                     + "admission_held_bytes:BIGINT,capture_used_bytes:BIGINT,producer_used_bytes:BIGINT,"
-                    + "admission_used_bytes:BIGINT,retention_state:VARCHAR,write_evidence:BOOLEAN,accepted_complete:BOOLEAN,"
+                    + "admission_used_bytes:BIGINT,retention_state:VARCHAR,is_write_evidence:BOOLEAN,is_accepted_complete:BOOLEAN,"
                     + "collected_at:BIGINT,collected_bytes:BIGINT,released_held_bytes:BIGINT,manifest_resource_key:CHAR,"
                     + "manifest_sha256:CHAR,seal_manifest_resource_key:CHAR,seal_manifest_sha256:CHAR,gmt_create:BIGINT,"
                     + "gmt_modified:BIGINT"),
             declaration("ma_public_event", "tenant_id,session_id,stream_kind,stream_id,sequence_id",
                     "tenant_id:VARBINARY,session_id:VARBINARY,sequence_id:BIGINT,event_id:VARBINARY,turn_id:VARBINARY,"
-                    + "event_type:VARCHAR,data_json:LONGTEXT,terminal:BOOLEAN,source_key:VARBINARY,gmt_create:BIGINT,"
+                    + "event_type:VARCHAR,data_json:LONGTEXT,is_terminal:BOOLEAN,source_key:VARBINARY,gmt_create:BIGINT,"
                     + "schema_version:INT,projection_version:INT,item_id:VARBINARY,content_part_id:VARBINARY,"
                     + "stream_kind:VARCHAR,stream_id:VARBINARY,state:VARCHAR,runtime_state:VARCHAR,text:LONGTEXT,"
-                    + "truncated:BOOLEAN,artifact_id:VARBINARY,capture_id:VARBINARY,output_stream_id:VARBINARY,"
-                    + "first_ordinal:BIGINT,end_ordinal:BIGINT,archived:BOOLEAN"),
+                    + "is_truncated:BOOLEAN,artifact_id:VARBINARY,capture_id:VARBINARY,output_stream_id:VARBINARY,"
+                    + "first_ordinal:BIGINT,end_ordinal:BIGINT,is_archived:BOOLEAN"),
             declaration("ma_read_lease", "lease_id",
                     "lease_id:VARBINARY,tenant_key:CHAR,session_key:CHAR,retirement_generation:BIGINT,expires_at:BIGINT"),
             declaration("ma_request_receipt", "receipt_key",
                     "receipt_key:CHAR,namespace:VARCHAR,tenant_key:CHAR,tenant_id:VARBINARY,scope_kind:VARCHAR,"
                     + "scope_key:CHAR,scope_id:VARBINARY,idempotency_key:VARBINARY,idempotency_digest:CHAR,"
-                    + "request_digest:VARCHAR,actor_id:VARBINARY,operation:VARCHAR,state:VARCHAR,workspace_bound:BOOLEAN,"
+                    + "request_digest:VARCHAR,actor_id:VARBINARY,operation:VARCHAR,state:VARCHAR,is_workspace_bound:BOOLEAN,"
                     + "session_id:VARBINARY,turn_id:VARBINARY,agent_id:VARBINARY,agent_revision:BIGINT,schedule_id:VARBINARY,"
                     + "channel_id:VARBINARY,account_generation:BIGINT,semantic_revision:BIGINT,action_id:VARBINARY,"
                     + "action_version:BIGINT,decision_scope_key:CHAR,mutation_attempt_sequence:BIGINT,"
@@ -185,11 +185,11 @@ final class WorkspaceCsiApplicationInventory {
                     + "workspace_generation:VARBINARY,canonical_cwd:VARCHAR,capability_digest:VARBINARY,"
                     + "isolation_class:VARCHAR,isolation_key:VARBINARY,provisioner_kind:VARCHAR,storage_id:VARBINARY,"
                     + "storage_alias_key:CHAR,runtime_generation:BIGINT,binding_state:VARCHAR,provision_request_id:VARBINARY,"
-                    + "provision_seed_ciphertext:LONGTEXT,provision_seeded:BOOLEAN,credential_key_id:VARBINARY,"
+                    + "provision_seed_ciphertext:LONGTEXT,is_provision_seeded:BOOLEAN,credential_key_id:VARBINARY,"
                     + "resource_handle_version:INT,resource_handle_json:LONGTEXT,loss_evidence_json:LONGTEXT,"
                     + "stop_evidence_json:LONGTEXT,runtime_instance_id:VARBINARY,runtime_endpoint:VARCHAR,"
                     + "runtime_lease_id:VARBINARY,runtime_epoch:BIGINT,runtime_credential_ciphertext:LONGTEXT,"
-                    + "runtime_credential_key_id:VARBINARY,attestation_generation:BIGINT,drain_requested:BOOLEAN,"
+                    + "runtime_credential_key_id:VARBINARY,attestation_generation:BIGINT,is_drain_requested:BOOLEAN,"
                     + "operation_owner:VARBINARY,operation_lease_until:BIGINT,operation_generation:BIGINT,"
                     + "record_version:BIGINT,last_health_at:BIGINT,last_reconciled_at:BIGINT,last_active_at:BIGINT,"
                     + "drain_receipt_json:LONGTEXT,first_activation_journal_revision:BIGINT"),
@@ -198,7 +198,7 @@ final class WorkspaceCsiApplicationInventory {
                     + "workspace_generation:VARBINARY,canonical_cwd:VARCHAR,capability_digest:VARBINARY,"
                     + "isolation_class:VARCHAR,harness_session_id:VARBINARY,turn_kind:VARCHAR,binding_id:VARBINARY,"
                     + "runtime_generation:BIGINT,session_state:VARCHAR,record_version:BIGINT,last_active_at:BIGINT,"
-                    + "execution_storage_key:CHAR,execution_exclusive:BOOLEAN"),
+                    + "execution_storage_key:CHAR,is_execution_exclusive:BOOLEAN"),
             declaration("ma_runtime_slot", "request_key",
                     "request_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,workspace_generation:VARBINARY,"
                     + "canonical_cwd:VARCHAR,capability_digest:VARBINARY,isolation_class:VARCHAR,isolation_key:VARBINARY,"
@@ -207,7 +207,7 @@ final class WorkspaceCsiApplicationInventory {
                     "tenant_id:VARBINARY,schedule_id:VARBINARY,session_id:VARBINARY,workspace_id:VARBINARY,"
                     + "actor_id:VARBINARY,record_revision:BIGINT,definition_revision:BIGINT,definition_digest:CHAR,"
                     + "goal:VARCHAR,cron:VARCHAR,timezone:VARCHAR,session_mode:VARCHAR,overlap:VARCHAR,catch_up:VARCHAR,"
-                    + "catch_up_limit:BIGINT,enabled:BOOLEAN,state:VARCHAR,blocked_reason:VARCHAR,armed_at:BIGINT,"
+                    + "catch_up_limit:BIGINT,is_enabled:BOOLEAN,state:VARCHAR,blocked_reason:VARCHAR,armed_at:BIGINT,"
                     + "watermark_slot:BIGINT,lease_owner:VARBINARY,lease_until:BIGINT,fence:BIGINT,gmt_create:BIGINT,"
                     + "gmt_modified:BIGINT,gate:VARCHAR,gate_last_outcome:VARCHAR,gate_last_at:BIGINT,"
                     + "gate_quiet_since_delivery:INT,gate_failures:INT,gate_last_error:VARCHAR"),
@@ -226,12 +226,14 @@ final class WorkspaceCsiApplicationInventory {
                     + "approval_mode:VARCHAR,tool_profile:VARCHAR,"
                     + "creator_actor_key:VARBINARY,owner_actor_key:VARBINARY,parent_session_id:VARBINARY,"
                     + "root_session_id:VARBINARY,parent_child_run_id:VARBINARY,child_depth:INT,"
-                    + "agent_definition_digest:VARCHAR,session_kind:VARCHAR,tenant_key:CHAR,session_key:CHAR,"
+                    + "agent_definition_digest:CHAR,session_kind:VARCHAR,tenant_key:CHAR,session_key:CHAR,"
                     + "session_scope_key:CHAR,title_revision:BIGINT,retirement_operation_id:VARBINARY,"
-                    + "retirement_generation:BIGINT,retired_at:BIGINT,recovery_protected:BOOLEAN,"
-                    + "resource_gc_completed:BOOLEAN,runtime_request_key:CHAR,csi_guard:BOOLEAN,"
-                    + "model_id:VARBINARY,model_revision:BIGINT,selected_approval_mode:VARCHAR,approval_revision:BIGINT,"
-                    + "plan_enabled:BOOLEAN,permission_rules_json:LONGTEXT,public_child_agents_version:INT,harness_instance_id:VARBINARY,harness_owner_boot_id:VARBINARY,"
+                    + "retirement_generation:BIGINT,retired_at:BIGINT,is_recovery_protected:BOOLEAN,"
+                    + "is_resource_gc_completed:BOOLEAN,runtime_request_key:CHAR,is_csi_guard:BOOLEAN,"
+                    + "model_id:VARBINARY,model_revision:BIGINT,"
+                    + "model_config_digest:VARCHAR,model_config_key_id:VARCHAR,model_config_ciphertext:LONGTEXT,"
+                    + "selected_approval_mode:VARCHAR,approval_revision:BIGINT,"
+                    + "is_plan_enabled:BOOLEAN,permission_rules_json:LONGTEXT,public_child_agents_version:INT,harness_instance_id:VARBINARY,harness_owner_boot_id:VARBINARY,"
                     + "harness_placement_epoch:BIGINT,harness_placement_state:VARCHAR"),
             declaration("ma_session_head", "tenant_key,harness_key",
                     "tenant_id:VARBINARY,workspace_id:VARBINARY,session_id:VARBINARY,storage_version:INT,state:VARCHAR,"
@@ -242,8 +244,8 @@ final class WorkspaceCsiApplicationInventory {
                     + "activation_id:VARBINARY,activation_phase:VARCHAR,activation_event_epoch:BIGINT,"
                     + "activation_expires_at:BIGINT,activation_head_revision:BIGINT,tenant_key:CHAR,harness_key:CHAR,"
                     + "harness_session_id:VARBINARY,head_kind:VARCHAR,phase:VARCHAR,operation_id:VARBINARY,"
-                    + "claim_generation:BIGINT,claim_lease_until:BIGINT,wake_pending:BOOLEAN,wake_head_revision:BIGINT,"
-                    + "wake_retry_at:BIGINT,wake_scan_pending:BOOLEAN,cleanup_head_revision:BIGINT"),
+                    + "claim_generation:BIGINT,claim_lease_until:BIGINT,is_wake_pending:BOOLEAN,wake_head_revision:BIGINT,"
+                    + "wake_retry_at:BIGINT,is_wake_scan_pending:BOOLEAN,cleanup_head_revision:BIGINT"),
             declaration("ma_session_journal_tx", "tenant_id,session_id,journal_revision",
                     "tenant_id:VARBINARY,workspace_id:VARBINARY,session_id:VARBINARY,journal_revision:BIGINT,"
                     + "command_key_hash:CHAR,transaction_id:VARBINARY,operation:LONGTEXT,command_id:VARBINARY,"
@@ -287,27 +289,27 @@ final class WorkspaceCsiApplicationInventory {
                     + "idempotency_key:VARBINARY,binding_id:VARBINARY,runtime_generation:BIGINT,harness_session_id:VARBINARY,"
                     + "runtime_session_id:VARBINARY,runtime_session_key:CHAR,turn_id:VARBINARY,tool_call_id:VARBINARY,"
                     + "request_digest:VARCHAR,reference_json:LONGTEXT,execution_state:VARCHAR,execution_status:VARCHAR,"
-                    + "result_json:LONGTEXT,last_sequence:BIGINT,cancel_requested:BOOLEAN,dispatch_owner:VARBINARY,"
+                    + "result_json:LONGTEXT,last_sequence:BIGINT,is_cancel_requested:BOOLEAN,dispatch_owner:VARBINARY,"
                     + "dispatch_lease_until:BIGINT,dispatch_generation:BIGINT,record_version:BIGINT,settled_at:BIGINT,"
                     + "abandoned_at:BIGINT,loss_evidence_id:VARBINARY,authorized_dispatch_generation:BIGINT,"
                     + "authorized_binding_version:BIGINT,native_authorization_json:LONGTEXT"),
             declaration("ma_turn", "tenant_id,session_id,turn_id",
                     "tenant_id:VARBINARY,session_id:VARBINARY,turn_id:VARBINARY,prompt_id:VARBINARY,input_json:LONGTEXT,"
-                    + "payload_digest:VARCHAR,status:VARCHAR,submission_attempted:BOOLEAN,harness_event_epoch:VARBINARY,"
+                    + "payload_digest:CHAR,status:VARCHAR,is_submission_attempted:BOOLEAN,harness_event_epoch:VARBINARY,"
                     + "harness_last_event_id:BIGINT,dispatch_owner:VARBINARY,dispatch_lease_until:BIGINT,error_code:VARCHAR,"
                     + "error_message:VARCHAR,gmt_create:BIGINT,gmt_modified:BIGINT,completed_at:BIGINT,version:BIGINT,"
                     + "retry_count:INT,consecutive_failures:INT,budget_exempt_failures:INT,retry_after:BIGINT,"
                     + "model_id:VARBINARY,model_revision:BIGINT,approval_mode:VARCHAR,approval_revision:BIGINT,"
-                    + "plan_enabled:BOOLEAN,permission_rules_json:LONGTEXT"),
+                    + "is_plan_enabled:BOOLEAN,permission_rules_json:LONGTEXT"),
             declaration("ma_user_message", "tenant_id,session_id,message_id",
                     "tenant_id:VARBINARY,session_id:VARBINARY,message_id:VARBINARY,sequence_number:BIGINT,"
                     + "revision:BIGINT,actor_id:VARBINARY,input_json:LONGTEXT,state:VARCHAR,context_revision:BIGINT,"
                     + "turn_id:VARBINARY,prompt_id:VARBINARY,consumed_sequence:BIGINT"),
             declaration("ma_user_message_command", "tenant_id,session_id,command_key",
                     "tenant_id:VARBINARY,session_id:VARBINARY,command_key:CHAR,actor_id:VARBINARY,"
-                    + "request_digest:VARCHAR,result_json:LONGTEXT"),
+                    + "request_digest:CHAR,result_json:LONGTEXT"),
             declaration("ma_user_message_queue", "tenant_id,session_id",
-                    "tenant_id:VARBINARY,session_id:VARBINARY,paused:BOOLEAN,resumed_turn_id:VARBINARY,"
+                    "tenant_id:VARBINARY,session_id:VARBINARY,is_paused:BOOLEAN,resumed_turn_id:VARBINARY,"
                     + "next_sequence:BIGINT,last_dispatch_at:BIGINT"),
             declaration("ma_workspace", "tenant_id,workspace_id",
                     "tenant_id:VARBINARY,workspace_id:VARBINARY,workspace_generation:BIGINT,storage_id:VARBINARY,"
@@ -939,7 +941,7 @@ final class WorkspaceCsiApplicationInventory {
                 && hash(utf8(initial.toString())).equals(row.text("request_digest"))
                 && Objects.equals(read.number("started_at"), row.number("gmt_create"))
                 && row.number("gmt_modified") != null && row.number("gmt_modified") >= read.number("started_at"));
-        for (String field : List.of("actor_id", "workspace_bound", "turn_id", "agent_id", "agent_revision", "schedule_id",
+        for (String field : List.of("actor_id", "is_workspace_bound", "turn_id", "agent_id", "agent_revision", "schedule_id",
                 "channel_id", "account_generation", "semantic_revision", "action_id", "action_version", "decision_scope_key",
                 "mutation_attempt_sequence", "session_status_before", "result_operation_key")) {
             requireEncoded(row.cell(field).isNull());
@@ -1982,7 +1984,11 @@ final class WorkspaceCsiApplicationInventory {
     }
 
     private static boolean schema(ResultSetMetaData metadata, Declaration declaration) throws SQLException {
-        if (metadata.getColumnCount() != declaration.columns().size()) {
+        int identity = declaration.columns().size() + 1;
+        if (metadata.getColumnCount() != identity
+                || !"id".equalsIgnoreCase(metadata.getColumnName(identity))
+                || metadata.getColumnType(identity) != Types.BIGINT
+                || !metadata.isAutoIncrement(identity)) {
             return false;
         }
         for (int index = 0; index < declaration.columns().size(); index++) {
@@ -2377,7 +2383,7 @@ final class WorkspaceCsiApplicationInventory {
                 return false;
             }
             if (namespace == com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace.SESSION_CREATE_MODE) {
-                Boolean bound = row.bool("workspace_bound");
+                Boolean bound = row.bool("is_workspace_bound");
                 return scopeKind == com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope.TENANT
                         && ownerTenant.equals(scopeId) && bound != null && "RESERVED".equals(row.text("state"))
                         && row.cell("session_id").isNull() && row.cell("turn_id").isNull() && row.cell("actor_id").isNull()
@@ -2385,7 +2391,7 @@ final class WorkspaceCsiApplicationInventory {
             }
             if (namespace != com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace.SESSION_CREATE_ACTOR
                     || scopeKind != com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope.ACTOR
-                    || !Boolean.TRUE.equals(row.bool("workspace_bound")) || !"COMPLETED".equals(row.text("state"))
+                    || !Boolean.TRUE.equals(row.bool("is_workspace_bound")) || !"COMPLETED".equals(row.text("state"))
                     || row.binary("actor_id") == null || !ManagedReceipts.actorScope(row.binary("actor_id")).equals(scopeId)
                     || !otherSession(ownerTenant, null, row.text("session_id"))) {
                 return false;
@@ -2409,7 +2415,7 @@ final class WorkspaceCsiApplicationInventory {
                     || !row.text("idempotency_key").matches("[\\x21-\\x7e]{1,128}")) {
                 return false;
             }
-            for (String field : List.of("workspace_bound", "session_id", "turn_id", "agent_id", "agent_revision",
+            for (String field : List.of("is_workspace_bound", "session_id", "turn_id", "agent_id", "agent_revision",
                     "schedule_id", "channel_id", "account_generation", "semantic_revision", "action_id", "action_version",
                     "decision_scope_key", "mutation_attempt_sequence", "session_status_before", "result_operation_key")) {
                 if (!row.cell(field).isNull()) {
@@ -2844,8 +2850,10 @@ final class WorkspaceCsiApplicationInventory {
                     expect(table, row, rawSession(row) && "ACTIVE".equals(row.text("status")) && row.cell("deleted_at").isNull()
                             && CsiFilesRetirementProfile.PROFILE.equals(row.text("tool_profile"))
                             && row.cell("model_id").isNull() && Objects.equals(0L, row.number("model_revision"))
+                            && row.cell("model_config_digest").isNull() && row.cell("model_config_key_id").isNull()
+                            && row.cell("model_config_ciphertext").isNull()
                             && row.cell("selected_approval_mode").isNull() && Objects.equals(0L, row.number("approval_revision"))
-                            && Boolean.FALSE.equals(row.bool("plan_enabled")) && row.cell("permission_rules_json").isNull()
+                            && Boolean.FALSE.equals(row.bool("is_plan_enabled")) && row.cell("permission_rules_json").isNull()
                             && Objects.equals(0L, row.number("public_child_agents_version"))
                             && row.cell("harness_instance_id").isNull() && row.cell("harness_owner_boot_id").isNull()
                             && Objects.equals(0L, row.number("harness_placement_epoch"))
@@ -2858,7 +2866,7 @@ final class WorkspaceCsiApplicationInventory {
                             && CsiFilesRetirementProfile.CONFIG_REF.equals(row.text("workspace_config_ref"))
                             && CsiFilesRetirementProfile.POLICY_REF.equals(row.text("workspace_policy_ref"))
                             && row.number("context_revision") != null && row.number("context_revision") > 0
-                            && "qwen-code".equals(row.text("agent_id")) && Boolean.TRUE.equals(row.bool("csi_guard"))
+                            && "qwen-code".equals(row.text("agent_id")) && Boolean.TRUE.equals(row.bool("is_csi_guard"))
                             && row.cell("parent_session_id").isNull() && row.cell("root_session_id").isNull()
                             && row.cell("parent_child_run_id").isNull() && row.cell("child_depth").isNull()
                             && row.binary("creator_actor_key") != null
@@ -2868,7 +2876,7 @@ final class WorkspaceCsiApplicationInventory {
                             && "PUBLIC".equals(row.text("session_kind"))
                             && Objects.equals(0L, row.number("retirement_generation"))
                             && row.cell("retired_at").isNull() && row.cell("retirement_operation_id").isNull()
-                            && Boolean.FALSE.equals(row.bool("recovery_protected")) && Boolean.FALSE.equals(row.bool("resource_gc_completed"))
+                            && Boolean.FALSE.equals(row.bool("is_recovery_protected")) && Boolean.FALSE.equals(row.bool("is_resource_gc_completed"))
                             && Objects.equals(0L, row.number("harness_last_event_id"))
                             && row.cell("harness_boot_id").isNull() && row.cell("harness_event_epoch").isNull()
                             && Objects.equals(row.number("gmt_create"), row.number("gmt_modified")));
@@ -2881,7 +2889,7 @@ final class WorkspaceCsiApplicationInventory {
                     JsonNode data = parse(row.text("data_json"));
                     Row parent = originalRow("ma_session");
                     expect(table, row, rawSession(row) && "SESSION".equals(row.text("stream_kind")) && "".equals(row.text("stream_id")) && "session.created".equals(row.text("event_type"))
-                            && row.cell("turn_id").isNull() && row.cell("source_key").isNull() && Boolean.FALSE.equals(row.bool("terminal"))
+                            && row.cell("turn_id").isNull() && row.cell("source_key").isNull() && Boolean.FALSE.equals(row.bool("is_terminal"))
                             && Objects.equals(1L, row.number("sequence_id")) && data != null && data.isObject()
                             && data.size() == 1 && session.equals(data.path("sessionId").textValue())
                             && parent != null && Objects.equals(parent.number("gmt_create"), row.number("gmt_create"))
@@ -2948,14 +2956,14 @@ final class WorkspaceCsiApplicationInventory {
                 case "ma_runtime_binding" -> expect(table, row, request(row)
                         && original.bindingId().equals(row.text("binding_id")) && has("Bscope", row.text("scope_key"))
                         && Objects.equals(original.generation(), row.number("runtime_generation"))
-                        && "DRAINING".equals(row.text("binding_state")) && Boolean.TRUE.equals(row.bool("drain_requested"))
+                        && "DRAINING".equals(row.text("binding_state")) && Boolean.TRUE.equals(row.bool("is_drain_requested"))
                         && intent.runtimeInstanceId().equals(row.text("runtime_instance_id"))
                         && intent.leaseId().equals(row.text("runtime_lease_id")) && Objects.equals(intent.epoch(), row.number("runtime_epoch"))
                         && matches(parse(row.text("resource_handle_json")), parse(intent.resourceHandleJson()))
                         && Objects.equals(intent.resourceHandleVersion().longValue(), row.number("resource_handle_version"))
                         && Objects.equals(intent.attestationGeneration(), row.number("attestation_generation")));
                 case "ma_runtime_session" -> expect(table, row, scope(row)
-                        && row.cell("execution_storage_key").isNull() && Boolean.FALSE.equals(row.bool("execution_exclusive"))
+                        && row.cell("execution_storage_key").isNull() && Boolean.FALSE.equals(row.bool("is_execution_exclusive"))
                         && original.bindingId().equals(row.text("binding_id")) && session.equals(row.text("runtime_session_id"))
                         && session.equals(row.text("harness_session_id")) && "bootstrap".equals(row.text("turn_kind"))
                         && Objects.equals(original.generation(), row.number("runtime_generation"))
@@ -3015,7 +3023,7 @@ final class WorkspaceCsiApplicationInventory {
                             && Objects.equals(0L, row.number("covered_sequence")) && Objects.equals(0L, row.number("replay_floor_sequence"))
                             && row.cell("wake_covered_sequence").isNull() && row.cell("artifact_refs_resource_key").isNull()
                             && row.cell("output_ranges_json").isNull() && Objects.equals(1L, row.number("projection_version"))
-                            && Boolean.TRUE.equals(row.bool("projection_pending")) && parent != null
+                            && Boolean.TRUE.equals(row.bool("is_projection_pending")) && parent != null
                             && Objects.equals(parent.number("gmt_create"), row.number("gmt_modified")));
                 }
                 case "ma_request_receipt" -> {
@@ -3040,7 +3048,7 @@ final class WorkspaceCsiApplicationInventory {
                             && ManagedReceipts.scope(tenant, scopeId).equals(row.text("scope_key"))
                             && com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(idempotency).equals(row.text("idempotency_digest"))
                             && row.cell("turn_id").isNull() && row.cell("operation").isNull() && row.cell("session_status_before").isNull()
-                            && Boolean.TRUE.equals(row.bool("workspace_bound")) && row.text("request_digest") != null);
+                            && Boolean.TRUE.equals(row.bool("is_workspace_bound")) && row.text("request_digest") != null);
                     if (namespace == com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace.SESSION_CREATE_MODE) {
                         expect(table, row, scopeKind == com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope.TENANT
                                 && tenant.equals(scopeId) && has("creation", idempotency) && row.cell("session_id").isNull()
