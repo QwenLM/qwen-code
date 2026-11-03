@@ -344,6 +344,11 @@ describe('bundled autofix-pr skill', () => {
     ]) {
       expect(section).toContain(`\`${code}\``);
     }
+    // `prepare` gives `pr_closed` the step `report` (a start has no watch to
+    // stop): a resume, which has one, keys on the code instead.
+    expect(body).toContain(
+      'A refusal with `refused: "pr_closed"` (the PR is merged or closed) → Section "Stop" for this PR',
+    );
     // Nothing matches a refusal by its wording any more.
     expect(body).not.toContain('another autofix-pr helper is working');
     expect(body).not.toContain('fails saying');

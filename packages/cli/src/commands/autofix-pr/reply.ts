@@ -333,8 +333,28 @@ export interface ReplyArgs {
   task?: string;
 }
 
+/** The plan at `path`: one that is no JSON, or not shaped as a plan, is
+ * the plan's to fix (`plan_invalid`); one that cannot be read is not. */
+function readPlan(path: string): Required<ReplyPlan> {
+  const text = readFileSync(path, 'utf8');
+  try {
+    return parsePlan(JSON.parse(text));
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      throw new AutofixPrRefusal(
+        'plan_invalid',
+        `the reply plan is not JSON: ${err.message}`,
+      );
+    }
+    if (err instanceof TypeError) {
+      throw new AutofixPrRefusal('plan_invalid', err.message);
+    }
+    throw err;
+  }
+}
+
 export function runReply(args: ReplyArgs): ReplyOutcome {
-  const plan = parsePlan(JSON.parse(readFileSync(args.planPath, 'utf8')));
+  const plan = readPlan(args.planPath);
   const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
   return withWatchLock(paths, args.pr, () => replyLocked(args, plan, paths));
 }

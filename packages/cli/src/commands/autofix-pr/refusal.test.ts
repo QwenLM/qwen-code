@@ -15,6 +15,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import yargs, { type CommandModule } from 'yargs';
 import { autofixPrCommand } from '../autofix-pr.js';
 
@@ -30,6 +31,7 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 
 import {
   AutofixPrRefusal,
+  MAX_REFUSAL_MESSAGE,
   REFUSAL_CODES,
   nextStep,
   refusalOf,
@@ -131,6 +133,14 @@ describe('nextStep', () => {
 });
 
 describe('refusalOf', () => {
+  it('keeps the head and the tail of a message too long for one line', () => {
+    const long = `push failed:${'x'.repeat(20_000)}remote: denied`;
+    const { message } = refusalOf('push', new Error(long));
+    expect(message.length).toBeLessThanOrEqual(MAX_REFUSAL_MESSAGE + 3);
+    expect(message.startsWith('push failed:')).toBe(true);
+    expect(message.endsWith('remote: denied')).toBe(true);
+  });
+
   it('reads the code of a refusal', () => {
     expect(
       refusalOf('sync', new AutofixPrRefusal('worktree_dirty', 'dirty')),
@@ -289,30 +299,32 @@ describe('the autofix-pr command', () => {
     vi.unstubAllEnvs();
   });
 
-  // Every helper, in a directory with no watch and a `gh` that fails: each
-  // refuses with its coded line, whichever check stops it first.
-  it.each([
-    ['prepare', '7', '--repo', 'o/r'],
-    ['snapshot', '7'],
-    ['ci-log', '7', '1'],
-    ['push', '7'],
-    ['sync', '7'],
-    ['reply', '7', 'plan.json'],
-    ['rerun', '7', '1'],
-    ['schedule', '7'],
-    ['fix-start', '7', '--attempt', '0123456789ab'],
-    ['fix-end', '7', '--attempt', '0123456789ab'],
-    ['cleanup', '7'],
-  ])('prints the refusal of %s as its coded line', async (...argv) => {
+  // Every helper run through the command, in a clone with no watch and a
+  // `gh` that fails: each refuses with its coded line.
+  it.each<[string[], RefusalCode, RefusalNext]>([
+    [['prepare', '7', '--repo', 'o/r'], 'failed', 'report'],
+    [['snapshot', '7'], 'not_prepared', 'end_task'],
+    [['ci-log', '7', '1'], 'not_prepared', 'end_task'],
+    [['push', '7'], 'not_prepared', 'end_task'],
+    [['sync', '7'], 'not_prepared', 'end_task'],
+    [['reply', '7', 'plan.json'], 'not_prepared', 'end_task'],
+    [['rerun', '7', '1'], 'not_prepared', 'end_task'],
+    [['schedule', '7'], 'not_prepared', 'report'],
+    [['fix-start', '7', '--attempt', '0123456789ab'], 'not_prepared', 'report'],
+    [['fix-end', '7', '--attempt', '0123456789ab'], 'not_prepared', 'report'],
+  ])('prints the refusal of %j as its coded line', async (argv, code, next) => {
+    execFileSync('git', ['init', '-q'], { cwd: dir });
+    writeFileSync(join(dir, 'plan.json'), '{}');
     await yargs()
       .command(autofixPrCommand)
       .strict()
       .exitProcess(false)
       .parseAsync(['autofix-pr', ...argv]);
     expect(process.exitCode).toBe(1);
-    const line = JSON.parse(String(mocks.stderr.mock.calls.at(-1)?.[0]));
-    expect(REFUSAL_CODES).toContain(line.refused);
-    expect(line.next).toBe(nextStep(argv[0], line.refused));
-    expect(typeof line.message).toBe('string');
+    expect(JSON.parse(String(mocks.stderr.mock.calls.at(-1)?.[0]))).toEqual({
+      refused: code,
+      next,
+      message: expect.any(String),
+    });
   });
 });

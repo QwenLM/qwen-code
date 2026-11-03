@@ -332,9 +332,19 @@ export function requireWorktree(
     return;
   }
   if (branch !== `refs/heads/${paths.branch}`) {
+    const checkedOut = `${worktreePath} has ${branch ? branch.replace(/^refs\/heads\//, 'branch ') : 'a detached HEAD'} checked out, not ${paths.branch}`;
+    // Asked to switch back (`sync --discard`), git refused: the branch is
+    // checked out elsewhere, or a lock or a missing branch stops it.
+    // Discarding again would only ask the same.
+    if (switchBack && !inPlace) {
+      throw new AutofixPrRefusal(
+        'failed',
+        `${checkedOut}, and git could not switch it back; remove the watch with \`qwen autofix-pr cleanup ${prNumber} --force\` and prepare it again.`,
+      );
+    }
     throw new AutofixPrRefusal(
       'worktree_dirty',
-      `${worktreePath} has ${branch ? branch.replace(/^refs\/heads\//, 'branch ') : 'a detached HEAD'} checked out, not ${paths.branch}; switch it back before pushing or syncing.`,
+      `${checkedOut}; switch it back before pushing or syncing.`,
     );
   }
 }

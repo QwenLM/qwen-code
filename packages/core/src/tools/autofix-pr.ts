@@ -776,17 +776,23 @@ export function codedRefusal(
   stderr: string,
 ): { line: string; before: string } | null {
   const lines = stderr.trimEnd().split('\n');
-  const line = lines.at(-1)?.trim() ?? '';
-  try {
-    const parsed = JSON.parse(line) as Record<string, unknown>;
-    if (
-      typeof parsed?.['refused'] === 'string' &&
-      typeof parsed['next'] === 'string'
-    ) {
-      return { line, before: lines.slice(0, -1).join('\n').trim() };
+  // The last coded line: a warning Node prints as the process exits may
+  // come after it.
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i].trim();
+    if (!line.startsWith('{')) continue;
+    try {
+      const parsed = JSON.parse(line) as Record<string, unknown>;
+      if (
+        typeof parsed?.['refused'] === 'string' &&
+        typeof parsed['next'] === 'string'
+      ) {
+        const others = [...lines.slice(0, i), ...lines.slice(i + 1)];
+        return { line, before: others.join('\n').trim() };
+      }
+    } catch {
+      // Not a coded refusal.
     }
-  } catch {
-    // Not a coded refusal.
   }
   return null;
 }
@@ -1462,7 +1468,7 @@ export class AutofixPrTool extends BaseDeclarativeTool<
       ToolDisplayNames.AUTOFIX_PR,
       [
         'Runs one `qwen autofix-pr` helper of the /autofix-pr skill and returns the JSON line it prints. Use it only as that skill says; outside it, never.',
-        'A failed call is the helper refusing, with its message: report it, do not work around it. Run calls one at a time.',
+        'A failed call is the helper refusing: its result starts with the coded line {"refused","next","message"}; act on its `next` as the skill says, never work around it. Run calls one at a time.',
         '`command: "unattended"` asks the user whether the fix agent of a watch this session runs may run its commands without asking; `command: "attended"` takes that back, asking nothing.',
       ].join(' '),
       Kind.Execute,

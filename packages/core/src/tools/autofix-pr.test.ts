@@ -851,8 +851,12 @@ describe('running a helper', () => {
       before: 'git said this',
     });
     expect(codedRefusal(line)).toEqual({ line, before: '' });
-    // A code with no step, a step with no code, other JSON, a stack, or
-    // the line not last: the old form, reported.
+    // A warning Node printed as the helper exited comes after it.
+    expect(
+      codedRefusal(`git said this\n${line}\n(node:1) Warning: late\n`),
+    ).toEqual({ line, before: 'git said this\n(node:1) Warning: late' });
+    // A code with no step, a step with no code, other JSON, or a stack:
+    // the old form, reported.
     for (const stderr of [
       JSON.stringify({ refused: 'busy' }),
       JSON.stringify({ next: 'retry' }),
@@ -860,7 +864,6 @@ describe('running a helper', () => {
       'null',
       '[1]',
       'Error: no round of PR #12 has a fix to start\n    at runFixStart (fix.js:1:1)',
-      `${line}\nsomething after`,
       '',
     ]) {
       expect(codedRefusal(stderr)).toBeNull();

@@ -148,10 +148,19 @@ export interface RefusalLine {
   message: string;
 }
 
+/** The longest message a refusal line carries: the tool keeps the last
+ * 16 KiB of a helper's stderr, and the line must fit whole. */
+export const MAX_REFUSAL_MESSAGE = 8000;
+
 export function refusalOf(command: string, error: unknown): RefusalLine {
   const code = error instanceof AutofixPrRefusal ? error.code : 'failed';
-  const message =
+  let message =
     error instanceof Error ? error.message : String(error ?? 'unknown error');
+  if (message.length > MAX_REFUSAL_MESSAGE) {
+    // What failed comes first, and what git or gh said last.
+    const half = MAX_REFUSAL_MESSAGE / 2;
+    message = `${message.slice(0, half)} … ${message.slice(-half)}`;
+  }
   return { refused: code, next: nextStep(command, code), message };
 }
 

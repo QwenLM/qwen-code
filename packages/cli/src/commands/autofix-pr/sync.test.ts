@@ -1021,6 +1021,16 @@ describe('runSync (real git, bare remote)', () => {
     expect(run(repo, 'rev-parse', 'mine')).toBe(featSha);
   });
 
+  it('with --discard refuses as failed, not dirty, a worktree git cannot switch back', () => {
+    run(paths.worktreePath, 'switch', '-q', '-c', 'fix/ci');
+    // The watch's branch checked out in another worktree: git refuses to
+    // check it out twice, and discarding again would ask the same.
+    run(repo, 'worktree', 'add', '-q', join(base, 'other-wt'), paths.branch);
+    expect(() => runSync(7, true)).toThrow(
+      refused('failed', /could not switch it back/),
+    );
+  });
+
   it('with --discard takes the worktree back to the watch branch from one a fix switched to', () => {
     run(paths.worktreePath, 'switch', '-q', '-c', 'fix/ci');
     const theirs = commitIn(paths.worktreePath, 'on-fix-branch.txt');

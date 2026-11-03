@@ -1260,6 +1260,31 @@ describe('runReply', () => {
     ).toThrow(refused('pr_closed', /is merged/));
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
   });
+
+  it('takes a plan that is no JSON, or not shaped as a plan, for the plan to fix', () => {
+    writeFileSync(planPath, '{"replies": [');
+    expect(() => runReply({ pr: 7, planPath, post: true })).toThrow(
+      refused('plan_invalid', /the reply plan is not JSON/),
+    );
+    expect(() =>
+      reply({
+        replies: [
+          { replyTo: 101, body: 'x', handled: ['PRRC_101'] },
+          { replyTo: 101, body: 'y', handled: ['PRRC_102'] },
+        ],
+      }),
+    ).toThrow(refused('plan_invalid', /thread 101 has more than one reply/));
+    // One that cannot be read is no plan's fault: no code of its own.
+    let unread: unknown;
+    try {
+      runReply({ pr: 7, planPath: `${planPath}.missing`, post: true });
+    } catch (err) {
+      unread = err;
+    }
+    expect(unread).toBeInstanceOf(Error);
+    expect((unread as { code?: unknown }).code).toBe('ENOENT');
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+  });
 });
 
 describe('parsePlan', () => {
