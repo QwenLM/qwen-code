@@ -76,6 +76,26 @@ describe('serve command args', () => {
     );
   });
 
+  it.each([
+    ['--conversations-dir', '/srv/a', '--conversations-dir', '/srv/b'],
+    ['--conversations-dir=/srv/a', '--conversations-dir=/srv/b'],
+  ])(
+    'rejects repeated Conversations roots in %j before dispatch',
+    (...args) => {
+      const handler = vi.fn();
+      const parser = yargs([])
+        .exitProcess(false)
+        .fail(false)
+        .locale('en')
+        .command({ ...serveCommand, handler });
+
+      expect(() => parser.parseSync(['serve', ...args])).toThrow(
+        'pass --conversations-dir once.',
+      );
+      expect(handler).not.toHaveBeenCalled();
+    },
+  );
+
   it('parses and isolates the Managed Web gateway deployment options', () => {
     const parsed = buildParser().parseSync(
       '--managed-web-config /etc/qwen-web/gateway.json --hostname 0.0.0.0 --port 4171 --allow-origin https://managed.example',

@@ -76,11 +76,11 @@ function liveIdentityError(
         );
       case 'wrong_owner':
         throw new Error(
-          'Live conversation root must be owned by the daemon user',
+          `Live conversation root ${JSON.stringify(rootPath)} must be owned by the daemon user; check --conversations-dir / QWEN_CONVERSATIONS_DIR.`,
         );
       case 'wrong_mode':
         throw new Error(
-          'Live conversation root must be accessible only to its owner',
+          `Live conversation root ${JSON.stringify(rootPath)} must be accessible only to its owner; check --conversations-dir / QWEN_CONVERSATIONS_DIR.`,
         );
       case 'canonical_path_changed':
         throw new Error('Live conversation root canonical path changed');

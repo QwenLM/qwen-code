@@ -534,6 +534,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Allow unencrypted Agent Host HTTP connections outside loopback (trusted demo networks only).',
       })
       .check((argv) => {
+        if (Array.isArray(argv['conversations-dir'])) {
+          throw new Error('pass --conversations-dir once.');
+        }
         if (argv['local-control'] === true && argv['web'] === false) {
           throw new Error('Local Control requires the Web Shell.');
         }

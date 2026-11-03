@@ -214,11 +214,14 @@ describe('Live conversation workspace root', () => {
     const permissiveRoot = getConversationRootPath(permissiveHome);
     await mkdir(permissiveRoot, { recursive: true, mode: 0o700 });
     await chmod(permissiveRoot, 0o755);
-    await expect(
-      new ConversationWorkspace({ homeDir: permissiveHome }).getRoot(),
-    ).rejects.toThrow(/only to its owner/);
+    await expect
+      .soft(new ConversationWorkspace({ rootPath: permissiveRoot }).getRoot())
+      .rejects.toThrow(
+        `Live conversation root ${JSON.stringify(permissiveRoot)} must be accessible only to its owner; check --conversations-dir / QWEN_CONVERSATIONS_DIR.`,
+      );
 
     const ownerHome = await tempHome();
+    const ownerRoot = getConversationRootPath(ownerHome);
     const getuid = process.getuid;
     if (!getuid) return;
     const originalDescriptor = Object.getOwnPropertyDescriptor(
@@ -230,9 +233,11 @@ describe('Live conversation workspace root', () => {
       value: () => getuid() + 1,
     });
     try {
-      await expect(
-        new ConversationWorkspace({ homeDir: ownerHome }).getRoot(),
-      ).rejects.toThrow(/owned by the daemon user/);
+      await expect
+        .soft(new ConversationWorkspace({ rootPath: ownerRoot }).getRoot())
+        .rejects.toThrow(
+          `Live conversation root ${JSON.stringify(ownerRoot)} must be owned by the daemon user; check --conversations-dir / QWEN_CONVERSATIONS_DIR.`,
+        );
     } finally {
       if (originalDescriptor) {
         Object.defineProperty(process, 'getuid', originalDescriptor);
