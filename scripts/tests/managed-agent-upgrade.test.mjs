@@ -263,10 +263,10 @@ function zip(entries) {
   const locals = [];
   const centrals = [];
   let offset = 0;
-  for (const [index, [name, text]] of entries.entries()) {
+  for (const [index, [name, text, forced]] of entries.entries()) {
     const data = Buffer.from(text);
-    // Alternate the two methods a jar uses.
-    const method = index % 2 === 0 ? 8 : 0;
+    // Alternate the two methods a jar uses, unless the entry names one.
+    const method = forced ?? (index % 2 === 0 ? 8 : 0);
     const body = method === 8 ? deflateRawSync(data) : data;
     const nameBytes = Buffer.from(name);
     const local = Buffer.alloc(30);
@@ -296,9 +296,23 @@ function zip(entries) {
   return Buffer.concat([...locals, directory, end]);
 }
 
+// A jar whose scripts live in the nested jar of a module, stored as Spring
+// Boot stores one, as the server ships them since its split into modules.
+function moduleJar(scripts) {
+  return zip([
+    ['BOOT-INF/classes/application.yml', 'server: {}\n'],
+    ['BOOT-INF/lib/qwencode-sdk.jar', zip([['A.class', 'x']]), 0],
+    [
+      'BOOT-INF/lib/qwen-managed-agent-persistence.jar',
+      zip(Object.entries(scripts)),
+      0,
+    ],
+  ]);
+}
+
 async function writeDistribution(
   root,
-  { version, scripts = BASELINE, files = {} },
+  { version, scripts = BASELINE, files = {}, nested = false },
 ) {
   const contents = {
     'manifest.json': `${JSON.stringify(
@@ -318,13 +332,15 @@ async function writeDistribution(
     )}\n`,
     'bin/qwen-managed-agent-server': '#!/usr/bin/env sh\n',
     'config/application.example.yml': 'template\n',
-    'lib/server.jar': zip([
-      ['BOOT-INF/classes/application.yml', 'server: {}\n'],
-      ...Object.entries(scripts).map(([name, text]) => [
-        `BOOT-INF/classes/${name}`,
-        text,
-      ]),
-    ]),
+    'lib/server.jar': nested
+      ? moduleJar(scripts)
+      : zip([
+          ['BOOT-INF/classes/application.yml', 'server: {}\n'],
+          ...Object.entries(scripts).map(([name, text]) => [
+            `BOOT-INF/classes/${name}`,
+            text,
+          ]),
+        ]),
     'systemd/qwen-managed-agent-server.service': '[Service]\n',
     'systemd/qwen-hosted-harness.service': '[Service]\n',
     ...files,
@@ -362,6 +378,7 @@ async function rig(t, overrides = {}) {
   await writeDistribution(current, {
     version: '0.1.0',
     scripts: overrides.installedScripts,
+    nested: overrides.installedNested,
   });
   await writeFile(path.join(current, 'config/application.yml'), 'key: x\n', {
     mode: 0o600,
@@ -370,6 +387,7 @@ async function rig(t, overrides = {}) {
     version: overrides.version ?? '0.2.0',
     scripts: overrides.scripts,
     files: overrides.files,
+    nested: overrides.nested,
   });
   // As root extracts it with umask 077.
   await chmod(path.join(distribution, 'lib/server.jar'), 0o600);
@@ -770,6 +788,58 @@ test('reads the Flyway scripts out of a jar by content', async (t) => {
   });
 });
 
+test('reads the Flyway scripts out of the nested jar of a module', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'qwen-upgrade-jar-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const jar = path.join(root, 'server.jar');
+  const module = zip([
+    ['META-INF/MANIFEST.MF', 'Manifest-Version: 1.0\n'],
+    ['db/managed-schema/V2__more.sql', 'create table b;\n'],
+    ['db/managed-schema/V3__upper.SQL', 'insert;\n'],
+    ['db/managed-schema/README.md', 'not a script'],
+    // Only the nested jar's root is on the classpath.
+    ['BOOT-INF/classes/db/managed-schema/V8__deep.sql', 'ignored'],
+  ]);
+  await writeFile(
+    jar,
+    zip([
+      ['BOOT-INF/classes/db/managed-schema/V1__base.sql', 'create table a;\n'],
+      ['BOOT-INF/lib/qwen-managed-agent-persistence.jar', module, 0],
+      ['BOOT-INF/lib/library.jar', zip([['org/A.class', 'x']]), 0],
+      // Spring Boot loads no compressed nested jar, and nothing elsewhere.
+      [
+        'BOOT-INF/lib/deflated.jar',
+        zip([['db/managed-schema/V9__deflated.sql', 'ignored']]),
+        8,
+      ],
+      ['lib/other.jar', zip([['db/managed-schema/V10__x.sql', 'ignored']]), 0],
+    ]),
+  );
+  assert.deepEqual(Object.fromEntries(await migrationScripts(jar)), {
+    'db/managed-schema/V1__base.sql': sha256('create table a;\n'),
+    'db/managed-schema/V2__more.sql': sha256('create table b;\n'),
+    'db/managed-schema/V3__upper.SQL': sha256('insert;\n'),
+  });
+
+  // A nested jar that is none, or whose directory runs past its end, is a
+  // misread, not a module without scripts.
+  await writeFile(jar, zip([['BOOT-INF/lib/broken.jar', 'not a jar', 0]]));
+  await assert.rejects(
+    migrationScripts(jar),
+    /^Error: BOOT-INF\/lib\/broken\.jar in .*server\.jar is not a zip archive$/,
+  );
+  const past = Buffer.from(module);
+  past.writeUInt32LE(past.length, past.length - 22 + 16);
+  await writeFile(
+    jar,
+    zip([['BOOT-INF/lib/qwen-managed-agent-persistence.jar', past, 0]]),
+  );
+  await assert.rejects(
+    migrationScripts(jar),
+    /^Error: BOOT-INF\/lib\/qwen-managed-agent-persistence\.jar in .*server\.jar ends early$/,
+  );
+});
+
 test('check keeps the releases outside the distribution', async (t) => {
   const host = await rig(t);
   assert.equal(
@@ -964,6 +1034,31 @@ test('check refuses what the new release cannot replace', async (t) => {
       { files: { 'lib/server.jar': 'not a jar' } },
       'database',
       /^WARN cannot compare the Flyway scripts \(.*server.jar is not a zip archive\)/,
+    ],
+    // Since the server's split into modules its scripts ship in the nested
+    // jar of one: moved there unchanged, they are the scripts the database ran.
+    [
+      { nested: true },
+      'database',
+      /^PASS the 1 Flyway script\(s\) did not change$/,
+    ],
+    [
+      {
+        installedNested: true,
+        nested: true,
+        scripts: { ...BASELINE, 'db/managed-schema/V2__more.sql': 'b;\n' },
+      },
+      'database',
+      /^WARN start applies V2__more.sql; only the database backup undoes it/,
+    ],
+    [
+      {
+        installedNested: true,
+        nested: true,
+        scripts: { 'db/managed-schema/V1__managed_schema.sql': 'changed;\n' },
+      },
+      'database',
+      /^FAIL this release changed or removed V1__managed_schema.sql/,
     ],
     [
       { harnessEnv: ['QWEN_HOSTED_HARNESS_BROKER_ARGS=--x'] },
