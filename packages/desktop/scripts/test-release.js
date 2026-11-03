@@ -1934,12 +1934,13 @@ function testBootstrapBridgeConfiguration() {
     }
     // `webview.url()` is the top-level document, so a cross-origin frame inside
     // the shell passes the origin gate above; the launch nonce is what it lacks.
-    const nonceAt = body.indexOf(
-      'require_shell_nonce(state.inner(), &nonce)?;',
+    // Anchored like the gate above, so a `//`-commented call does not satisfy it.
+    const nonce = body.match(
+      /\n\s*require_shell_nonce\(state\.inner\(\), &nonce\)\?;/,
     );
-    assert.ok(nonceAt >= 0, `${command} must check the launch nonce.`);
+    assert.ok(nonce, `${command} must check the launch nonce.`);
     assert.ok(
-      nonceAt < storeAt,
+      nonce.index < storeAt,
       `${command} must check the launch nonce before touching the store.`,
     );
   }

@@ -569,10 +569,11 @@ async fn install_update(webview: WebviewWindow, app: AppHandle) -> Result<(), St
 const REMOTE_CONNECTIONS_KEY: &str = "qwen-remote-connections";
 const WORKSPACE_HOSTS_KEY: &str = "qwen-workspace-hosts";
 
-// Past roughly 24 KB of URL the daemon answers 431 and the shell cannot load at
-// all — and nothing in the app can reset that, only hand-editing the settings
-// file. Thirty-two origins keep the boot URL near a kilobyte; hosts past the cap
-// stay in the catalog and are reachable the way they always were, after a reload.
+// The daemon answers 431 once the request line passes Node's ~16 KiB header
+// limit, and the shell then cannot load at all — nothing in the app can reset
+// that, only hand-editing the settings file. Thirty-two origins keep the boot URL
+// near a kilobyte; hosts past the cap stay in the catalog and are reachable the
+// way they always were, after a reload.
 const MAX_LAUNCH_FANOUT_ORIGINS: usize = 32;
 
 /// Origins the very first document of a launch must be served with. The daemon

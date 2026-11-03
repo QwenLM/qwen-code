@@ -275,10 +275,38 @@ describe('desktop shell state', () => {
     const rust = readFileSync(rustPath, 'utf8');
     const start = rust.indexOf('pub const SHELL_STATE_KEYS');
     expect(start).toBeGreaterThanOrEqual(0);
-    const slice = rust.slice(start, rust.indexOf('];', start));
+    // Comments carry quoted words too, so they are dropped before the parse:
+    // a commented-out key must not count as an allowlisted one.
+    const slice = rust
+      .slice(start, rust.indexOf('];', start))
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n');
     const rustKeys = [...slice.matchAll(/"([^"]+)"/g)].map(([, key]) => key);
 
     const { SHELL_STATE_KEYS } = await import('./shell-state');
     expect([...rustKeys].sort()).toEqual([...SHELL_STATE_KEYS].sort());
+  });
+
+  it('reads the fragment key the desktop boot URL writes', async () => {
+    const runtimePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      '../../../desktop/src-tauri/src/runtime.rs',
+    );
+    const runtime = readFileSync(runtimePath, 'utf8');
+    // The Rust side owns the spelling; the read above must match it.
+    expect(runtime).toContain('"token={}&shell={}"');
+
+    window.history.replaceState(null, '', '/#shell=from-boot');
+    const invoke = vi.fn(async (): Promise<unknown> => null);
+    installDesktop(invoke);
+
+    const { hydrateShellState } = await import('./shell-state');
+    await hydrateShellState();
+
+    expect(invoke).toHaveBeenCalledWith('shell_state_read', {
+      key: 'qwen-remote-connections',
+      nonce: 'from-boot',
+    });
   });
 });
