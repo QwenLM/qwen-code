@@ -666,6 +666,7 @@ export function ReadonlyComposerTag({
     console.warn('[WebShell] user message tag tooltip render failed', error);
   }
   const clickable = Boolean(onComposerTagClick);
+  const quoteTag = tag.kind === 'quote';
   const viewModel = preserveCustomKindLabel
     ? getComposerTagViewModel(tag, composerTagIcons)
     : null;
@@ -685,7 +686,7 @@ export function ReadonlyComposerTag({
     <span
       className={`${styles.messageTag}${
         clickable ? ` ${styles.messageTagClickable}` : ''
-      }`}
+      }${quoteTag ? ` ${styles.messageTagQuote}` : ''}`}
       role={clickable ? 'button' : undefined}
       tabIndex={clickable ? 0 : undefined}
       title={title ?? getTagText(tag)}

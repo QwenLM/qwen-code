@@ -923,6 +923,28 @@ describe('UserMessage', () => {
     );
   });
 
+  it('keeps the full quoted text visible in a quote reference chip', () => {
+    const quoted = 'the full quoted fragment stays visible in the bubble';
+    const content = `see ${quoted} here`;
+    const container = render(
+      <UserMessage
+        content={content}
+        inputAnnotations={[
+          referenceAnnotation(content, quoted, {
+            id: 'quote:12345678-1',
+            kind: 'quote',
+            value: quoted,
+            serialized: `> ${quoted}`,
+          }),
+        ]}
+      />,
+    );
+    const chip = container.querySelector('[class*="messageTag"]')!;
+    expect(chip).not.toBeNull();
+    expect(chip.className).toContain('messageTagQuote');
+    expect(chip.textContent).toContain(quoted);
+  });
+
   it('renders images when provided', () => {
     const container = render(
       <UserMessage
