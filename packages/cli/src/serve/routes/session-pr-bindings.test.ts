@@ -450,15 +450,16 @@ describe('GET /sessions/pr-bindings', () => {
     ]);
 
     expect(body.partial).toBe(false);
+    // Directory listing order is filesystem-specific; compare as a set.
     expect(
-      body.bindings
-        .map((binding) => [binding.workspaceCwd, binding.sessionId])
-        .sort(),
-    ).toEqual([
-      [a, SESSION_A],
-      [b, SESSION_B],
-      [b, SESSION_C],
-    ]);
+      new Set(
+        body.bindings.map(
+          (binding) => `${binding.workspaceCwd}|${binding.sessionId}`,
+        ),
+      ),
+    ).toEqual(
+      new Set([`${a}|${SESSION_A}`, `${b}|${SESSION_B}`, `${b}|${SESSION_C}`]),
+    );
   });
 
   it('keeps other workspaces and names the failing one when a chats dir cannot be listed', async () => {
