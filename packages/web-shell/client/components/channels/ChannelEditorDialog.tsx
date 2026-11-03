@@ -128,6 +128,11 @@ const SHARED_SESSION_FIELD_KEYS = new Set([
   'multiSession',
   'instructions',
 ]);
+// One panel: watch events only mean something with bound delivery enabled.
+const BOUND_SESSION_FIELD_KEYS = new Set([
+  'deliverToBoundSessions',
+  'prWatchEvents',
+]);
 
 const SHARED_FIELD_LABEL_KEYS: Record<string, string> = {
   outputMode: 'channels.editor.field.shared.outputMode',
@@ -306,7 +311,11 @@ export function ChannelEditorDialog({
   const credentialFields = descriptor.fields.filter(
     (field) =>
       !SHARED_ACCESS_FIELD_KEYS.has(field.key) &&
-      !SHARED_SESSION_FIELD_KEYS.has(field.key),
+      !SHARED_SESSION_FIELD_KEYS.has(field.key) &&
+      !BOUND_SESSION_FIELD_KEYS.has(field.key),
+  );
+  const boundSessionFields = descriptor.fields.filter((field) =>
+    BOUND_SESSION_FIELD_KEYS.has(field.key),
   );
 
   useEffect(() => {
@@ -375,6 +384,8 @@ export function ChannelEditorDialog({
       return t('channels.editor.validation.conflictingRepoAliases');
     if (code === 'invalidOption')
       return t('channels.editor.validation.invalidOption');
+    if (code === 'requiresBoundDelivery')
+      return t('channels.editor.validation.requiresBoundDelivery');
     if (code === 'number') return t('channels.editor.validation.number');
     if (code === 'outOfRange') {
       const numberField = field && field.kind === 'number' ? field : undefined;
@@ -668,6 +679,9 @@ export function ChannelEditorDialog({
     }
     if (field.kind === 'string-list' && field.options?.length) {
       const options = field.options;
+      const disabled =
+        field.key === 'prWatchEvents' &&
+        draft.values['deliverToBoundSessions'] !== true;
       const selected = toList(String(value ?? ''));
       // The adapter matches these values case-insensitively, so a stored
       // `COMMENT` has to tick the canonical `comment` box instead of rendering
@@ -705,41 +719,50 @@ export function ChannelEditorDialog({
           description={fieldDescription(field)}
           error={error}
         >
-          <div
-            id={id}
-            className={styles.optionGrid}
-            role="group"
-            aria-label={fieldLabel(field)}
-          >
-            {[
-              ...options,
-              ...stored.map((entry) => ({ value: entry, label: entry })),
-            ].map((option) => {
-              const isSelected = selectedKeys.has(option.value.toLowerCase());
-              const optionLabel = fieldOptionLabel(
-                field,
-                option.value,
-                option.label,
-              );
-              return (
-                <label
-                  key={option.value}
-                  className={styles.optionRow}
-                  data-selected={isSelected}
-                >
-                  <input
-                    type="checkbox"
-                    className={styles.optionCheckbox}
-                    checked={isSelected}
-                    onChange={(event) =>
-                      toggleValue(option.value, event.target.checked)
-                    }
-                  />
-                  <span className={styles.optionLabel}>{optionLabel}</span>
-                </label>
-              );
-            })}
-          </div>
+          <>
+            <div
+              id={id}
+              className={styles.optionGrid}
+              role="group"
+              aria-label={fieldLabel(field)}
+            >
+              {[
+                ...options,
+                ...stored.map((entry) => ({ value: entry, label: entry })),
+              ].map((option) => {
+                const isSelected = selectedKeys.has(option.value.toLowerCase());
+                const optionLabel = fieldOptionLabel(
+                  field,
+                  option.value,
+                  option.label,
+                );
+                return (
+                  <label
+                    key={option.value}
+                    className={styles.optionRow}
+                    data-selected={isSelected}
+                    data-disabled={disabled}
+                  >
+                    <input
+                      type="checkbox"
+                      className={styles.optionCheckbox}
+                      checked={isSelected}
+                      disabled={disabled}
+                      onChange={(event) =>
+                        toggleValue(option.value, event.target.checked)
+                      }
+                    />
+                    <span className={styles.optionLabel}>{optionLabel}</span>
+                  </label>
+                );
+              })}
+            </div>
+            {disabled ? (
+              <p className={styles.fieldDescription}>
+                {t('channels.editor.field.github.prWatchEvents.disabledHint')}
+              </p>
+            ) : null}
+          </>
         </FieldShell>
       );
     }
@@ -1202,6 +1225,20 @@ export function ChannelEditorDialog({
                 );
               },
             )}
+
+            {boundSessionFields.length > 0 ? (
+              <section className={styles.settingsPanel}>
+                <div className={styles.settingsPanelHeader}>
+                  <h3 className={styles.settingsPanelTitle}>
+                    {t('channels.editor.section.boundSessions')}
+                  </h3>
+                  <p className={styles.settingsPanelDescription}>
+                    {t('channels.editor.section.boundSessions.description')}
+                  </p>
+                </div>
+                {boundSessionFields.map(renderField)}
+              </section>
+            ) : null}
 
             {sessionFields.length > 0 ? (
               <section className={styles.settingsPanel}>

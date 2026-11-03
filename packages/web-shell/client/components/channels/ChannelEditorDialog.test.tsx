@@ -467,6 +467,15 @@ function descriptionOf(element: HTMLElement | null): string {
   return element?.parentElement?.querySelector('p')?.textContent?.trim() ?? '';
 }
 
+// The watch-events field carries a second paragraph (the disabled hint)
+// ahead of the description while bound delivery is off, so copy assertions
+// scan every paragraph in the field wrapper.
+function fieldParagraphsOf(element: HTMLElement | null): string {
+  return Array.from(element?.parentElement?.querySelectorAll('p') ?? [])
+    .map((p) => p.textContent ?? '')
+    .join('\n');
+}
+
 beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -820,7 +829,7 @@ describe('ChannelEditorDialog', () => {
     expect(
       descriptionOf(fieldByLabel('Deliver To PR-Bound Sessions')),
     ).toContain('instead of a channel-owned session');
-    expect(descriptionOf(fieldByLabel('PR Watch Events'))).toContain(
+    expect(fieldParagraphsOf(fieldByLabel('PR Watch Events'))).toContain(
       'Leave empty to disable',
     );
   });
@@ -842,8 +851,128 @@ describe('ChannelEditorDialog', () => {
     expect(descriptionOf(fieldByLabel('投递到 PR 绑定会话'))).toContain(
       '以 prompt 形式投递进该会话，而不是频道自有会话',
     );
-    expect(descriptionOf(fieldByLabel('PR 状态监视事件'))).toContain(
+    expect(fieldParagraphsOf(fieldByLabel('PR 状态监视事件'))).toContain(
       '为绑定 PR 监视的状态转换',
+    );
+  });
+
+  it('frames both bound-session fields in one panel', async () => {
+    await renderDialog({ descriptor: GITHUB_BOUND });
+
+    const delivery = fieldByLabel('Deliver To PR-Bound Sessions');
+    const watch = fieldByLabel('PR Watch Events');
+    expect(delivery).not.toBeNull();
+    expect(watch).not.toBeNull();
+    expect(delivery!.closest('section')).toBe(watch!.closest('section'));
+    expect(sectionHeadingOf(delivery)).toBe('PR-bound sessions');
+  });
+
+  it('disables the watch boxes with an inline hint until delivery is on', async () => {
+    await renderDialog({ descriptor: GITHUB_BOUND });
+
+    const boxes = () =>
+      Array.from(
+        document.querySelectorAll<HTMLInputElement>(
+          '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
+        ),
+      );
+    expect(boxes().length).toBeGreaterThan(0);
+    expect(boxes().every((box) => box.disabled)).toBe(true);
+    expect(document.body.textContent).toContain(
+      'Enable "Deliver To PR-Bound Sessions" above to select watch events.',
+    );
+
+    const toggle = document.querySelector<HTMLButtonElement>(
+      'button[role="switch"]',
+    );
+    expect(toggle).not.toBeNull();
+    await act(async () => {
+      toggle!.click();
+    });
+
+    expect(boxes().every((box) => box.disabled)).toBe(false);
+    expect(document.body.textContent).not.toContain(
+      'above to select watch events.',
+    );
+  });
+
+  it('shows the disabled hint in zh-CN', async () => {
+    await renderDialog({ descriptor: GITHUB_BOUND, language: 'zh-CN' });
+
+    expect(document.body.textContent).toContain(
+      '开启上方「投递到 PR 绑定会话」后即可选择监视事件。',
+    );
+  });
+
+  it('saves the selected watch events once delivery is enabled', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor: GITHUB_BOUND, onSave });
+
+    await act(async () => {
+      setInputValue(inputByLabel('Instance name')!, 'github-bot');
+      setInputValue(inputByLabel('Personal Access Token')!, 'ghp_test');
+      document
+        .querySelector<HTMLButtonElement>('button[role="switch"]')!
+        .click();
+    });
+    const box = Array.from(
+      document.querySelectorAll<HTMLInputElement>(
+        '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
+      ),
+    ).find((b) => b.closest('label')?.textContent?.includes('ci_failure'));
+    expect(box).toBeDefined();
+    await act(async () => {
+      box!.click();
+    });
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).toHaveBeenCalledWith(
+      'github-bot',
+      expect.objectContaining({
+        config: expect.objectContaining({
+          deliverToBoundSessions: true,
+          prWatchEvents: ['ci_failure'],
+        }),
+      }),
+    );
+  });
+
+  it('names the delivery dependency when a stored selection lacks it', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'github-bot',
+      config: {
+        type: 'github',
+        prWatchEvents: ['ci_failure'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    await renderDialog({ descriptor: GITHUB_BOUND, instance, onSave });
+
+    const box = document.querySelector<HTMLInputElement>(
+      '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
+    );
+    expect(box!.checked).toBe(true);
+    expect(box!.disabled).toBe(true);
+
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Save',
+    );
+    await act(async () => {
+      save?.click();
+    });
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      'Enable "Deliver To PR-Bound Sessions" to save the selected watch events.',
     );
   });
 
