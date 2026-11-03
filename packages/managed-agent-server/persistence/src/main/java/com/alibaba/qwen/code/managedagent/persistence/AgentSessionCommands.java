@@ -365,7 +365,6 @@ final class AgentSessionCommands {
     SessionRecord settleRename(RenameDelivery delivery, String owner, String bootId) {
         String tenantId = delivery.tenantId();
         String sessionId = delivery.sessionId();
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         var rows =
                 jdbc.queryForList(
@@ -435,7 +434,6 @@ final class AgentSessionCommands {
     }
 
     void abandonSessionRename(String tenantId, String key, String sessionId, long revision, String owner) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (jdbc.queryForObject(
                         "SELECT COUNT(*) FROM ma_operation WHERE operation_key = ? AND operation_kind = 'RENAME' AND state = 'RUNNING' AND claim_owner = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "",
@@ -466,7 +464,6 @@ final class AgentSessionCommands {
     }
 
     Optional<RenameDelivery> claimRename(RenameDelivery delivery, String owner, Duration lease) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, delivery.tenantId());
         storeRows.requireLegacySessionForUpdate(delivery.tenantId(), delivery.sessionId());
         long now = clock.millis();
         int claimed =
@@ -507,7 +504,6 @@ final class AgentSessionCommands {
     }
 
     void retryRename(RenameDelivery delivery, String owner, long availableAt) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, delivery.tenantId());
         storeRows.requireLegacyMutation(delivery.tenantId(), delivery.sessionId());
         String key = renameKey(delivery.tenantId(), delivery.sessionId(), delivery.revision());
         parkRename(Map.of("operation_key", key, "tenant_id", delivery.tenantId(),
@@ -635,7 +631,6 @@ final class AgentSessionCommands {
     SessionRecord completeSessionMutation(String tenantId,
             String operation, String idempotencyKey, String sessionId,
             SessionMutationKind kind, String title, String harnessBootId) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
