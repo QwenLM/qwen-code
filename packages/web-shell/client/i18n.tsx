@@ -4488,6 +4488,14 @@ const EN: Messages = {
   'channels.editor.field.github.prWatchEvents': 'PR Watch Events',
   'channels.editor.field.github.prWatchEvents.description':
     'Optional. State transitions to watch for bound PRs (requires Deliver To PR-Bound Sessions). Leave empty to disable.',
+  'channels.editor.field.github.prWatchEvents.option.ci_failure':
+    'ci_failure — CI checks turn red on a head commit',
+  'channels.editor.field.github.prWatchEvents.option.merge_conflict':
+    'merge_conflict — the PR develops a merge conflict',
+  'channels.editor.field.github.prWatchEvents.option.head_change':
+    'head_change — the PR’s head commit changes',
+  'channels.editor.field.github.prWatchEvents.option.state_change':
+    'state_change — the PR is merged or closed',
   'channels.editor.field.gitlab.token': 'Personal Access Token',
   'channels.editor.field.gitlab.token.description':
     'PAT with "read_api" + "api" scopes',
@@ -8868,6 +8876,14 @@ const ZH: Messages = {
   'channels.editor.field.github.prWatchEvents': 'PR 状态监视事件',
   'channels.editor.field.github.prWatchEvents.description':
     '可选。为绑定 PR 监视的状态转换（需开启"投递到 PR 绑定会话"）。留空则禁用。',
+  'channels.editor.field.github.prWatchEvents.option.ci_failure':
+    'ci_failure — CI 检查在 head 提交上变红',
+  'channels.editor.field.github.prWatchEvents.option.merge_conflict':
+    'merge_conflict — PR 出现合并冲突',
+  'channels.editor.field.github.prWatchEvents.option.head_change':
+    'head_change — PR 的 head 提交变更',
+  'channels.editor.field.github.prWatchEvents.option.state_change':
+    'state_change — PR 被合并或关闭',
   'channels.editor.field.gitlab.token': '个人访问令牌',
   'channels.editor.field.gitlab.token.description':
     '需要 "read_api" + "api" 权限的 PAT',

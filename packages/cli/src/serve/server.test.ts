@@ -20837,6 +20837,86 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls).toHaveLength(2);
     });
 
+    it('evicts the oldest key past the per-session idempotency ring bound (R2-4)', async () => {
+      // The ring keeps the newest 128 keys per session. Evicting a live
+      // key is the documented trade-off for bounding daemon-lifetime
+      // growth: the evicted event re-admits instead of deduping forever.
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const post = (key: string) =>
+        request(app)
+          .post('/session/ring-key-bound-session/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'event' }],
+            idempotencyKey: key,
+          });
+      const admitted: string[] = [];
+      for (let i = 0; i < 129; i++) {
+        const res = await post(`ring-key-${i}`);
+        expect(res.status).toBe(202);
+        expect(res.body.deduplicated).toBeUndefined();
+        admitted.push(res.body.promptId);
+      }
+      // The first key fell out of the 128-key window: it re-admits fresh.
+      const evicted = await post('ring-key-0');
+      expect(evicted.status).toBe(202);
+      expect(evicted.body.deduplicated).toBeUndefined();
+      expect(evicted.body.promptId).not.toBe(admitted[0]);
+      // The newest keys still dedupe into their original admissions.
+      for (const i of [127, 128]) {
+        const retry = await post(`ring-key-${i}`);
+        expect(retry.status).toBe(202);
+        expect(retry.body.deduplicated).toBe(true);
+        expect(retry.body.promptId).toBe(admitted[i]);
+      }
+      // Re-admitting ring-key-0 pushed ring-key-1 out: FIFO, not LRU.
+      const nextEvicted = await post('ring-key-1');
+      expect(nextEvicted.status).toBe(202);
+      expect(nextEvicted.body.deduplicated).toBeUndefined();
+      expect(nextEvicted.body.promptId).not.toBe(admitted[1]);
+      // 129 admissions + 2 re-admissions; deduped retries never reach the
+      // bridge.
+      expect(bridge.promptCalls).toHaveLength(131);
+    });
+
+    // 1027 sequential HTTP round-trips: above the I/O-bound default.
+    it('evicts the oldest session past the idempotency session bound (R2-4)', async () => {
+      // The ring spans at most 1024 sessions; admitting a new session
+      // evicts the oldest one's keys (the documented trade-off), so its
+      // retry re-admits instead of deduping into an evicted admission.
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const post = (sessionId: string) =>
+        request(app)
+          .post(`/session/${sessionId}/prompt`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'event' }],
+            idempotencyKey: 'ring-shared-key',
+          });
+      const first = await post('ring-session-0');
+      expect(first.status).toBe(202);
+      expect(first.body.deduplicated).toBeUndefined();
+      let newestPromptId = '';
+      for (let i = 1; i <= 1024; i++) {
+        const res = await post(`ring-session-${i}`);
+        expect(res.status).toBe(202);
+        expect(res.body.deduplicated).toBeUndefined();
+        if (i === 1024) newestPromptId = res.body.promptId;
+      }
+      // The oldest session was evicted: its key re-admits fresh.
+      const evicted = await post('ring-session-0');
+      expect(evicted.status).toBe(202);
+      expect(evicted.body.deduplicated).toBeUndefined();
+      expect(evicted.body.promptId).not.toBe(first.body.promptId);
+      // The newest session still dedupes into its original admission.
+      const newest = await post('ring-session-1024');
+      expect(newest.status).toBe(202);
+      expect(newest.body.deduplicated).toBe(true);
+      expect(newest.body.promptId).toBe(newestPromptId);
+    }, 60_000);
+
     it('rejects a malformed idempotency key (W4)', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(baseOpts, undefined, { bridge });

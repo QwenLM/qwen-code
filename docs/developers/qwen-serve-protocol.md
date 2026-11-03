@@ -3792,22 +3792,31 @@ per session, and a repeat POST with the same key returns the original
 admission — `202 { promptId, lastEventId, eventEpoch, deduplicated: true }`
 with the FIRST prompt's `promptId` and a fresh cursor/epoch — without
 enqueueing a second turn. This lets a relay that marks acceptance durably
-after the `202` (or loses the response) retry safely. The dedupe ring is
-in-memory and bounded (128 keys per session, 1024 sessions, FIFO eviction at
-both levels); it normally lives exactly as long as the prompt queue it
-protects, so a daemon restart loses both together and re-injection becomes
-the correct recovery. The session cap is the one exception: a key can be
-evicted while its queue is still live if more than 1024 sessions hold keys,
-and a retry after such an eviction re-injects. Keys are scoped per session;
-the field is admission metadata and is never forwarded to the agent.
+after the `202` (or loses the response) retry safely. Dedupe is best-effort
+within a daemon's lifetime: the ring is in-memory and bounded (128 keys per
+session, 1024 sessions, FIFO eviction at both levels). Either cap can evict
+a key while its event's queue entry is still live — the per-session cap in
+the ordinary case of one long-lived session admitting more than 128 distinct
+events, the session cap when more than 1024 sessions hold keys — and a retry
+after such an eviction re-injects. The ring also dies with the in-memory
+prompt queue it protects, so a daemon restart loses both together and
+re-injection becomes the correct recovery. Keys are scoped per session; the
+field is admission metadata and is never forwarded to the agent.
 
-Channel relays ride two `_meta` keys that the route strips before forwarding:
-`qwen.channel.prompt` (channel-turn classification) requires a registered
-channel-worker authorization token — the per-workspace registration for the
-target workspace, or, for a CROSS-workspace bound delivery, any registered
-worker token plus the explicit `qwen.daemon.channelBoundRelay: true` marker
-and a primary/trusted target. A plain prompt carrying a foreign worker token
-gets no channel classification and no caller-supplied display projection.
+Channel relays ride three `_meta` keys that the route strips before
+forwarding: `qwen.channel.prompt` (channel-turn classification),
+`qwen.daemon.channelBoundRelay: true` (cross-workspace bound-delivery
+intent), and `qwen.daemon.channelPromptAuthorization` (the channel-worker
+authorization token; the reference worker sends it only when it holds a
+credential). `qwen.channel.prompt` requires a registered channel-worker
+authorization token — the per-workspace registration for the target
+workspace, or, for a CROSS-workspace bound delivery, any registered worker
+token plus the explicit `qwen.daemon.channelBoundRelay: true` marker and a
+primary/trusted target. A relay that sends only the two markers without the
+credential gets no channel classification: it is admitted as an ordinary
+interactive prompt (loop-detected rejection, live PR-binding backfill on the
+relayed text). A plain prompt carrying a foreign worker token likewise gets
+no channel classification and no caller-supplied display projection.
 
 Response:
 

@@ -192,7 +192,14 @@ so the session that follows the PR handles the event with its existing context.
   path — an incomplete scan never establishes that a PR is unbound. That
   per-event deferral is PR-scoped: bindings are PR-only, so once the lane is
   open an issue event is never deferred by it (its absence needs no snapshot)
-  and routes publicly even under a permanently partial scan. The lane-level
+  and routes publicly even under a permanently partial scan. A permanently
+  partial snapshot has a steady-state cause besides a degraded workspace: the
+  binding scan reads at most 100 sessions per page and flags any multi-page
+  scan partial, so a workspace with more than 100 active sessions never
+  produces a complete snapshot. In that state a comment on a PR that no
+  session follows defers per-event until the dead-letter horizon (~4 hours at
+  the default poll) rather than falling back to the channel; issue events are
+  unaffected, since the per-event absence gate is PR-scoped. The lane-level
   cold start above still holds every notification, issue events included,
   until the first successful binding lookup. Once a complete snapshot lands,
   deferred events are re-resolved: delivered privately to a follower, or

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { plugin } from './index.js';
+import { PR_WATCH_EVENTS } from './GithubAdapter.js';
 
 function validate(overrides: Record<string, unknown>): string | undefined {
   return plugin.management?.validateConfig?.({
@@ -63,5 +64,16 @@ describe('github plugin validateConfig', () => {
 
   it('accepts an empty watch list without delivery', () => {
     expect(validate({ prWatchEvents: [] })).toBeUndefined();
+  });
+
+  it('builds the prWatchEvents UI options from the adapter vocabulary (R2-18)', () => {
+    const field = plugin.management?.fields.find(
+      (candidate) => candidate.key === 'prWatchEvents',
+    );
+    // The UI option list must equal the exported constant the validator and
+    // emit path use, so editing either literal alone goes red here.
+    expect(field?.options?.map((option) => option.value)).toEqual([
+      ...PR_WATCH_EVENTS,
+    ]);
   });
 });

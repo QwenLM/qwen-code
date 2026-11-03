@@ -4859,6 +4859,50 @@ describe('createBoundSessionsAccessor', () => {
     expect(requestRest).toHaveBeenCalledTimes(3);
   });
 
+  it('wakes a dormant session beyond the wake-cwd cache cap on a complete snapshot (R2-1)', async () => {
+    // A complete snapshot with more than MAX_WAKE_CWD_CACHE (1024) rows
+    // truncates the FIFO hint cache. The target sits in the FIRST rows, so
+    // the refill evicts it; the cold-cache branch must read its cwd from the
+    // fresh FULL snapshot, not the capped cache, or it misreports the live
+    // dormant session as gone — an irreversible public reply on a complete
+    // snapshot. The cap stays a bound; only the cold-cache lookup changes.
+    const makeRows = (): Array<Record<string, unknown>> => {
+      const rows: Array<Record<string, unknown>> = [
+        {
+          sessionId: 'target-session',
+          workspaceCwd: '/ws/target',
+          prs: [{ number: 42, url: 'https://github.com/o/r/pull/42' }],
+        },
+      ];
+      for (let i = 0; i < 1029; i++) {
+        rows.push({
+          sessionId: `filler-${i}`,
+          workspaceCwd: '/ws/filler',
+          prs: [{ number: 1, url: 'https://github.com/o/r/pull/1' }],
+        });
+      }
+      return rows;
+    };
+    const requestRest = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, { bindings: makeRows(), partial: false }),
+      )
+      .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
+      .mockResolvedValueOnce(
+        jsonResponse(200, { bindings: makeRows(), partial: false }),
+      )
+      .mockResolvedValueOnce(jsonResponse(202, { promptId: 'p-1' }));
+    const wake = vi.fn().mockResolvedValue(undefined);
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest), wake);
+    await accessor.listPrBindings();
+
+    await accessor.deliverPrompt('target-session', 'x');
+
+    expect(wake).toHaveBeenCalledWith('target-session', '/ws/target');
+    expect(requestRest).toHaveBeenCalledTimes(4);
+  });
+
   it('throws when the bindings route fails', async () => {
     const res = jsonResponse(500, { error: 'boom' });
     const cancel = vi.spyOn(res.body!, 'cancel');
@@ -5728,21 +5772,24 @@ describe('createBoundSessionsAccessor', () => {
         jsonResponse(200, { bindings: many, partial: true }),
       )
       .mockResolvedValueOnce(jsonResponse(404, { code: 'session_not_found' }))
-      .mockImplementation(async () =>
+      .mockResolvedValueOnce(
         jsonResponse(200, { bindings: many, partial: true }),
-      );
+      )
+      .mockResolvedValueOnce(jsonResponse(202, { promptId: 'p-1' }));
     const wake = vi.fn().mockResolvedValue(undefined);
     const accessor = createBoundSessionsAccessor(makeClient(requestRest), wake);
     await accessor.listPrBindings();
 
-    // s-0 is the oldest entry: the 1024 FIFO cap evicted it, and the
-    // refresh evicts it again (1030 > 1024). The 404 must therefore trigger
-    // a bindings refresh (a cached entry would skip it) and then defer as
-    // backpressure instead of waking with a stale cwd.
-    await expect(accessor.deliverPrompt('s-0', 'x')).rejects.toBeInstanceOf(
-      BoundSessionUnavailableError,
-    );
-    expect(wake).not.toHaveBeenCalled();
+    // s-0 is the oldest entry: the 1024 FIFO cap evicted it from the hint
+    // cache, and the refresh evicts it again (1030 > 1024). But s-0 is still
+    // LISTED in the fresh snapshot, so the cold-cache branch reads its cwd
+    // from there and wakes it: a bounded hint cache must not turn a present
+    // session into a deferral (or, on a complete snapshot, a false gone —
+    // R2-1). Presence is authoritative even on a partial answer; only an
+    // ABSENT session defers there. The 404 still triggers a bindings refresh
+    // (a cached entry would skip it).
+    await accessor.deliverPrompt('s-0', 'x');
+    expect(wake).toHaveBeenCalledWith('s-0', '/ws/a');
     expect(requestRest.mock.calls[2]![0]).toBe('/sessions/pr-bindings');
   });
 });

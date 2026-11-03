@@ -239,11 +239,13 @@ export interface ChannelBoundSessions {
    * derives it from the source chat and message id, so it survives task
    * re-creation after a crash): the daemon deduplicates repeated admissions
    * of the same key, and a retry after a lost acceptance mark or a lost
-   * response re-injects nothing. The key's dedupe lifetime is the
-   * daemon process — a daemon restart loses the queue with it, making
-   * re-injection the correct recovery there. The one exception is the
-   * daemon's 1024-session ring cap: a key can be evicted while its queue
-   * is still live, and a retry after such an eviction re-injects.
+   * response re-injects nothing within the daemon's lifetime. Dedupe is
+   * best-effort under two FIFO caps — 128 keys per session and 1024
+   * sessions — and a key can be evicted while its queue is still live (the
+   * per-session cap bites in a single long-lived session, the ordinary
+   * case), so a retry after such an eviction re-injects. The ring also dies
+   * with the in-memory queue: a daemon restart loses both, making
+   * re-injection the correct recovery there.
    */
   deliverPrompt(
     sessionId: string,

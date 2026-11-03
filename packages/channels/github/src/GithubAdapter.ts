@@ -219,6 +219,13 @@ const MAX_COMMENT_TIMES = 8192;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const MAX_AGGREGATE_COMMENTS = 20;
 const MAX_AGGREGATE_COMMENT_CHARS = 400;
+/**
+ * FIFO ceiling on the aggregate-batch → anchor-comment map that lets the
+ * working (eyes) reaction target the batch's first comment even though the
+ * batch's messageId is a non-numeric content hash. Entries are removed on
+ * prompt end; the cap only bounds orphans (a batch whose end never runs).
+ */
+const MAX_ACK_ANCHORS = 1024;
 
 interface GithubComment {
   id: number;
@@ -299,12 +306,20 @@ function normalizeReasonFilter(
   return reasons.length > 0 ? new Set(reasons) : null;
 }
 
-const KNOWN_PR_WATCH_EVENTS = new Set([
+/**
+ * The prWatchEvents vocabulary, shared by the config validator, the watch
+ * emit path, and the management UI's option list (built from this constant
+ * in index.ts) so the three cannot drift apart (R2-18). Lowercase: the
+ * editor and normalizePrWatchEvents both lowercase before matching.
+ */
+export const PR_WATCH_EVENTS = [
   'ci_failure',
   'merge_conflict',
   'head_change',
   'state_change',
-]);
+] as const;
+
+const KNOWN_PR_WATCH_EVENTS = new Set<string>(PR_WATCH_EVENTS);
 
 /** Bounds one poll's watch fan-out (2-3 GitHub calls per watched PR). */
 const MAX_WATCHED_PRS = 30;
@@ -838,11 +853,29 @@ function isWatchFailFastError(err: unknown): boolean {
  * walking the rest of the set would issue one doomed request per PR per
  * poll (~1,800 rejected calls/hour at the cap) for the whole reset window.
  * Per-PR permanent statuses (404/410/451) stay isolated: one deleted PR
- * must not stop the others from being watched.
+ * must not stop the others from being watched. A 403 aborts the pass only
+ * when it is provably a shared rate limit; a per-repo permission 403 (a
+ * fine-grained token lacking access to one repo) is isolated to that PR,
+ * since bindings come from sessions, not the token's grants (R1-11).
  */
 function isWatchPassAbortError(err: unknown): boolean {
-  const e = err as { status?: number };
-  return e.status === 401 || e.status === 403 || e.status === 429;
+  const e = err as {
+    status?: number;
+    response?: { headers?: Record<string, string | number> };
+  };
+  if (e.status === 401 || e.status === 429) return true;
+  if (e.status === 403) {
+    // GitHub does not always send x-ratelimit-remaining === 0 on a
+    // secondary/abuse limit, but it does send retry-after; either marks a
+    // shared rate limit. A bare permission 403 (remaining > 0, no
+    // retry-after) stays per-PR so it cannot starve the other watched PRs.
+    const headers = e.response?.headers;
+    return (
+      Number(headers?.['x-ratelimit-remaining']) === 0 ||
+      headers?.['retry-after'] !== undefined
+    );
+  }
+  return false;
 }
 
 function parseTriggerKind(metadata: string | undefined): string | undefined {
@@ -897,6 +930,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private webOrigin = 'https://github.com';
   private readonly activeReactions = new Map<string, WorkingReaction>();
   private readonly reactionsPendingRemoval = new Set<string>();
+  // Aggregate batches carry a non-numeric content-hash messageId (the dedupe
+  // identity, Key decision 10), so the eyes reaction cannot parse a comment
+  // id from it. Map the batch id to its first comment's id for the reaction
+  // overrides; cleaned on prompt end, FIFO-bounded for orphans (R2-2).
+  private readonly ackAnchorByBatch = new Map<string, string>();
   private pendingFinalDeliveryRetry: Promise<void> | undefined;
   private pendingFinalDeliveryRetryAbort: AbortController | undefined;
   private pendingFinalDeliveryRequestsActive = 0;
@@ -933,6 +971,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * answer.
    */
   private coldEmptyPartialStreak = 0;
+  // Consecutive partial snapshots (any partial). A NON-empty partial — e.g. a
+  // workspace with more active sessions than one page — is permanent and
+  // otherwise silent; this drives a throttled diagnostic so the operator sees
+  // a pagination hint before the dead-letter alert hours later (doudouOUC).
+  private partialSnapshotStreak = 0;
   /**
    * True while the most recent pending-watch reconciliation FAILED (e.g.
    * the watch file is unreadable). Generic recovery must then leave watch
@@ -1645,10 +1688,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     _sessionId: string,
     messageId?: string,
   ): void {
-    if (!messageId || !/^\d+$/.test(messageId)) return;
+    // An aggregate batch's messageId is a non-numeric content hash; resolve
+    // its anchor comment id so the eyes reaction still targets the batch's
+    // first comment instead of silently no-op'ing (R2-2).
+    const ackId =
+      (messageId && this.ackAnchorByBatch.get(messageId)) || messageId;
+    if (!ackId || !/^\d+$/.test(ackId)) return;
     const [owner, repo] = chatId.split('/');
     if (!owner || !repo) return;
-    const commentId = Number(messageId);
+    const commentId = Number(ackId);
     const key = this.reactionKey(chatId, commentId);
     if (this.activeReactions.has(key)) return;
     const reaction: WorkingReaction = { owner, repo, commentId };
@@ -1683,8 +1731,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     _sessionId: string,
     messageId?: string,
   ): void {
-    if (!messageId || !/^\d+$/.test(messageId)) return;
-    const key = this.reactionKey(chatId, Number(messageId));
+    const ackId =
+      (messageId && this.ackAnchorByBatch.get(messageId)) || messageId;
+    // Drop the anchor whether or not a reaction is active (the start may have
+    // bailed or failed); the FIFO cap bounds any orphan whose end never runs.
+    if (messageId) this.ackAnchorByBatch.delete(messageId);
+    if (!ackId || !/^\d+$/.test(ackId)) return;
+    const key = this.reactionKey(chatId, Number(ackId));
     const reaction = this.activeReactions.get(key);
     if (!reaction) return;
     if (reaction.reactionId === undefined) {
@@ -2235,6 +2288,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       )
       .digest('hex')
       .slice(0, 40)}`;
+    // Remember the batch's first comment as the reaction anchor: the batch
+    // messageId is a non-numeric hash, so onPromptStart/End resolve the eyes
+    // reaction's comment id from here (R2-2). FIFO-bounded; cleaned on end.
+    if (
+      this.ackAnchorByBatch.size >= MAX_ACK_ANCHORS &&
+      !this.ackAnchorByBatch.has(batchId)
+    ) {
+      const oldest = this.ackAnchorByBatch.keys().next().value;
+      if (oldest !== undefined) this.ackAnchorByBatch.delete(oldest);
+    }
+    this.ackAnchorByBatch.set(batchId, String(first.id));
     const envelope: Envelope = {
       channelName: this.name,
       senderId: (first.user?.login || 'unknown').toLowerCase(),
@@ -3536,6 +3600,23 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       } else {
         this.coldEmptyPartialStreak = 0;
       }
+      if (snapshot.partial) {
+        this.partialSnapshotStreak += 1;
+        // A non-empty partial is the silent permanent case (a multi-page
+        // scan): surface a throttled hint naming the listed session count so
+        // the operator is not left with only a dead-letter alert hours later.
+        if (
+          map.size > 0 &&
+          (this.partialSnapshotStreak === 10 ||
+            this.partialSnapshotStreak % 60 === 0)
+        ) {
+          process.stderr.write(
+            `[Channel:${this.name}] binding snapshot has been partial for ${this.partialSnapshotStreak} consecutive polls (${map.size} sessions listed): a multi-page scan — more active sessions than one page — is always partial, so unmatched PR events defer to the dead-letter horizon instead of the channel (issue events are unaffected). Verify the daemon's per-workspace session counts.\n`,
+          );
+        }
+      } else {
+        this.partialSnapshotStreak = 0;
+      }
     } catch (err) {
       // Keep the previous map: a stale candidate fails with 404 at delivery
       // time and falls back to the channel path; an empty map would silently
@@ -3547,14 +3628,30 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         err instanceof Error ? err.message : String(err),
         200,
       );
-      if (!this.boundSnapshotSeen) {
-        // No snapshot has EVER succeeded: the cold-start gate defers the
-        // comment lane, so every notification is stalled. A permanent
-        // failure (an old daemon lacking the route, rotated credentials)
-        // would otherwise freeze the channel with only a misleading
-        // "keeping previous map" line — there is no previous map. Surface it
-        // distinctly and actionably, throttled so a transient outage does
-        // not spam; the gate itself stays fail-closed.
+      // No authoritative map exists: either no snapshot has ever succeeded,
+      // or only empty partials / failures have (boundSnapshotSeen may already
+      // be true). The cold-start gate defers the comment lane, so every
+      // notification is stalled.
+      const noAuthoritativeMap =
+        !this.boundSnapshotTrusted && this.boundSessionByPr.size === 0;
+      if (noAuthoritativeMap) {
+        // A failing refresh with no authoritative map is as non-authoritative
+        // as an empty partial: advance the SAME bounded cold-empty escape so
+        // a permanent failure cannot wedge the lane forever. The streak used
+        // to advance only on the success path, so once a single empty partial
+        // had set boundSnapshotSeen the escape was unreachable and a later
+        // failing refresh stalled the lane indefinitely (R1-7).
+        this.lastBindingsPartial = true;
+        this.coldEmptyPartialStreak += 1;
+        if (this.coldEmptyPartialStreak === MAX_COLD_EMPTY_PARTIAL_POLLS) {
+          process.stderr.write(
+            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence — verify the daemon's workspaces are active and readable.\n`,
+          );
+        }
+        // Surface the stall distinctly and actionably, throttled so a
+        // transient outage does not spam; the misleading "keeping previous
+        // map" line would name a map that does not exist. The gate itself
+        // stays fail-closed.
         this.boundSnapshotFailureStreak += 1;
         if (
           this.boundSnapshotFailureStreak === 1 ||

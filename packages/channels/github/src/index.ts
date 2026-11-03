@@ -1,5 +1,9 @@
 import type { ChannelPlugin } from '@qwen-code/channel-base';
-import { GithubChannel, validateBoundSessionConfig } from './GithubAdapter.js';
+import {
+  GithubChannel,
+  validateBoundSessionConfig,
+  PR_WATCH_EVENTS,
+} from './GithubAdapter.js';
 
 export { GithubChannel };
 
@@ -93,12 +97,9 @@ export const plugin: ChannelPlugin = {
         kind: 'string-list',
         description:
           'Optional. State transitions to watch for bound PRs (requires Deliver To PR-Bound Sessions). Leave empty to disable.',
-        options: [
-          { value: 'ci_failure', label: 'ci_failure' },
-          { value: 'merge_conflict', label: 'merge_conflict' },
-          { value: 'head_change', label: 'head_change' },
-          { value: 'state_change', label: 'state_change' },
-        ],
+        // Built from the adapter's exported vocabulary so the UI options can
+        // never drift from the validator/emit path (R2-18).
+        options: PR_WATCH_EVENTS.map((value) => ({ value, label: value })),
       },
     ],
     validateConfig: (config) => {

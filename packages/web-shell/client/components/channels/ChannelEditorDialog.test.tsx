@@ -811,6 +811,18 @@ describe('ChannelEditorDialog', () => {
     expect(labels.some((t) => t.includes('PR Watch Events'))).toBe(true);
     // No descriptor fallback may leak through for these keys.
     expect(labels.some((t) => t.includes('(descriptor)'))).toBe(false);
+    // fieldDescription falls back to field.description whenever the
+    // `<labelKey>.description` key is missing, so label-only assertions would
+    // stay green with the raw descriptor copy rendered under each field.
+    expect(document.body.textContent ?? '').not.toContain(
+      'Descriptor description',
+    );
+    expect(
+      descriptionOf(fieldByLabel('Deliver To PR-Bound Sessions')),
+    ).toContain('instead of a channel-owned session');
+    expect(descriptionOf(fieldByLabel('PR Watch Events'))).toContain(
+      'Leave empty to disable',
+    );
   });
 
   it('renders the bound-session fields with translated zh-CN labels', async () => {
@@ -821,6 +833,18 @@ describe('ChannelEditorDialog', () => {
     expect(labels.some((t) => t.includes('投递到 PR 绑定会话'))).toBe(true);
     expect(labels.some((t) => t.includes('PR 状态监视事件'))).toBe(true);
     expect(labels.some((t) => t.includes('(descriptor)'))).toBe(false);
+    // With the `.description` keys dropped from BOTH locale maps the
+    // translator falls through to field.description, so pin the rendered
+    // description copy too — the ZH substrings occur in no other locale.
+    expect(document.body.textContent ?? '').not.toContain(
+      'Descriptor description',
+    );
+    expect(descriptionOf(fieldByLabel('投递到 PR 绑定会话'))).toContain(
+      '以 prompt 形式投递进该会话，而不是频道自有会话',
+    );
+    expect(descriptionOf(fieldByLabel('PR 状态监视事件'))).toContain(
+      '为绑定 PR 监视的状态转换',
+    );
   });
 
   it('localizes the instructions copy for zh-CN operators', async () => {

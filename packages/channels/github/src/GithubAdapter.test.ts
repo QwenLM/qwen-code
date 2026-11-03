@@ -2131,6 +2131,43 @@ describe('GithubChannel', () => {
       ).toHaveLength(0);
     });
 
+    it('records fetched comment times from a real poll, not just hand-seeded tests (R2-5)', async () => {
+      await initWithoutLoop();
+      const priv = channel as unknown as {
+        abortableSleep: (ms: number) => Promise<void>;
+      };
+      priv.abortableSleep = vi.fn().mockResolvedValue(undefined);
+      // Freeze the cursor before the comment (mark-read rejects) so the
+      // captured time survives the poll's prune; a healthy mark-read would
+      // advance past it and drop it (see R12-P2).
+      channel.cursor.lastProcessedAt = '2026-07-01T00:00:00.000Z';
+      mockOctokit.rest.activity.markNotificationsAsRead.mockRejectedValue(
+        new Error('read-only PAT'),
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'mention',
+            updated_at: '2026-07-02T10:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({
+            id: 1,
+            node_id: 'C_1',
+            body: 'no mention here',
+            created_at: '2026-07-02T09:00:00.000Z',
+          }),
+        ]);
+      await pollOnce().catch(() => {});
+      // The real fetch path captured the comment's created_at under its node
+      // id; deleting the capture loop in fetchNewComments leaves this empty
+      // (every other time-map test seeds the map by hand).
+      expect(channel.cursor.dispatchedCommentTimes?.['C_1']).toBe(
+        '2026-07-02T09:00:00.000Z',
+      );
+    });
+
     it('bounds the comment-time map under a frozen cursor even when mark-read rejects (R13-M1)', async () => {
       await initWithoutLoop();
       const priv = channel as unknown as {
@@ -5146,6 +5183,70 @@ describe('GithubChannel', () => {
       });
     });
 
+    it('acknowledges an aggregate batch on its first comment and removes it on end (R2-2)', async () => {
+      const { promise: reactionPending, resolve: resolveReaction } =
+        Promise.withResolvers<{ data: { id: number } }>();
+      mockOctokit.rest.reactions.createForIssueComment.mockReturnValue(
+        reactionPending,
+      );
+      const liveChannel = new LiveGithubChannel(
+        'test-github',
+        makeConfig(),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await liveChannel.connect();
+      liveChannel.disconnect();
+      liveChannel.setCursorForTest('2026-07-01T00:00:00.000Z');
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            subject: {
+              title: 'Test PR',
+              url: 'https://api.github.com/repos/owner/repo/pulls/42',
+              type: 'PullRequest',
+            },
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({ id: 1001, body: 'first remark' }),
+          makeComment({ id: 1002, body: 'second remark' }),
+        ]);
+
+      await liveChannel.pollForTest();
+
+      // The batch messageId is a non-numeric content hash (the dedupe
+      // identity); the eyes reaction must still target the batch's FIRST
+      // comment instead of silently no-op'ing (R2-2).
+      expect(
+        mockOctokit.rest.reactions.createForIssueComment,
+      ).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        comment_id: 1001,
+        content: 'eyes',
+      });
+
+      // Prompt end removes the reaction from the same anchor comment.
+      const batchId = `agg:${createHash('sha256')
+        .update(['C_1001', 'C_1002'].sort().join('\n'))
+        .digest('hex')
+        .slice(0, 40)}`;
+      resolveReaction({ data: { id: 9000 } });
+      liveChannel.endPromptForTest('owner/repo', 'session-1', batchId);
+      await vi.waitFor(() => {
+        expect(
+          mockOctokit.rest.reactions.deleteForIssueComment,
+        ).toHaveBeenCalledWith({
+          owner: 'owner',
+          repo: 'repo',
+          comment_id: 1001,
+          reaction_id: 9000,
+        });
+      });
+    });
+
     it('does not wait for the acknowledgment before replying', async () => {
       const { promise: reactionPending, resolve: resolveReaction } =
         Promise.withResolvers<{ data: { id: number } }>();
@@ -6628,6 +6729,32 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
       expect(channel.inboundEnvelopes).toHaveLength(0);
       expect(existsSync(inboundTaskPath())).toBe(false);
+    });
+
+    it('advances the bounded empty-partial escape on persistent refresh failures (R1-7)', async () => {
+      await initChannel({ deliverToBoundSessions: true }, { boundSessions });
+      // One successful empty partial sets boundSnapshotSeen and streak=1.
+      boundSessions.listPrBindings.mockResolvedValueOnce({
+        bindings: [],
+        partial: true,
+      });
+      mockOctokit.paginate.mockResolvedValue([]);
+      await pollOnce();
+      expect(mockOctokit.paginate).not.toHaveBeenCalled();
+
+      // Every later refresh fails (an old daemon lacking the route, rotated
+      // credentials). The bounded escape must advance on the failure path
+      // too: before the fix the streak froze at 1 once boundSnapshotSeen was
+      // true, so the cold-empty gate held the lane forever and the escape
+      // that exists to prevent exactly this was unreachable.
+      boundSessions.listPrBindings.mockRejectedValue(new Error('daemon cold'));
+      for (let i = 0; i < 29; i++) {
+        await pollOnce();
+      }
+
+      // 1 successful empty partial + 29 failures = streak 30 → the lane
+      // opens at the cap (paginate is reached only once the gate opens).
+      expect(mockOctokit.paginate).toHaveBeenCalled();
     });
 
     it('opens the lane on a non-empty partial snapshot and delivers known targets (R1-7)', async () => {
@@ -11237,7 +11364,10 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         partial: false,
       });
       mockOctokit.rest.pulls.get.mockRejectedValue(
-        Object.assign(new Error('API rate limit exceeded'), { status: 403 }),
+        Object.assign(new Error('API rate limit exceeded'), {
+          status: 403,
+          response: { headers: { 'x-ratelimit-remaining': '0' } },
+        }),
       );
       const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
       try {
@@ -11311,6 +11441,45 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       mockOctokit.rest.pulls.get
         .mockRejectedValueOnce(
           Object.assign(new Error('Not Found'), { status: 404 }),
+        )
+        .mockResolvedValue({ data: makePrMeta() });
+      mockNotificationsOnce([]);
+      mockChecks([{ status: 'completed', conclusion: 'success' }]);
+      await pollOnce();
+
+      expect(mockOctokit.rest.pulls.get).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps watching the other PRs on a per-repo permission 403 (R1-11)', async () => {
+      await initChannel(watchConfig, { boundSessions });
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding(),
+          makeBinding({
+            sessionId: 'other-session',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+            prs: [
+              {
+                number: 43,
+                url: 'https://github.com/owner/repo/pull/43',
+                state: 'open',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      // A fine-grained token lacking access to ONE repo answers a permission
+      // 403 with x-ratelimit-remaining > 0 and no retry-after. Bindings come
+      // from sessions, not the token's grants, so this is per-PR: the pass
+      // must continue to the next PR, not abort and starve every other
+      // watched PR of detection.
+      mockOctokit.rest.pulls.get
+        .mockRejectedValueOnce(
+          Object.assign(new Error('Resource not accessible by integration'), {
+            status: 403,
+            response: { headers: { 'x-ratelimit-remaining': '4999' } },
+          }),
         )
         .mockResolvedValue({ data: makePrMeta() });
       mockNotificationsOnce([]);

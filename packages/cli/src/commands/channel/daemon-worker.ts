@@ -512,7 +512,18 @@ export function createBoundSessionsAccessor(
           let cwd = cwdBySession.get(sessionId);
           if (cwd === undefined) {
             const snapshot = await listPrBindings();
-            cwd = cwdBySession.get(sessionId);
+            // Read the target's cwd from the FRESH FULL snapshot, not the
+            // capped hint cache: a complete snapshot with more than
+            // MAX_WAKE_CWD_CACHE rows truncates the cache (FIFO), so a
+            // listed, live, dormant session beyond the cap is still present
+            // in snapshot.bindings and must be woken — reading the capped
+            // cache here would miss it and misreport it as gone (an
+            // irreversible public reply on a complete snapshot). The hint
+            // cache stays the pre-refresh fast path above; the cap still
+            // bounds it.
+            cwd = snapshot.bindings.find(
+              (binding) => binding.sessionId === sessionId,
+            )?.workspaceCwd;
             if (cwd === undefined && snapshot.partial) {
               // Cold cache meets an incomplete enumeration: absence from a
               // partial snapshot is not evidence of deletion. Defer to the
