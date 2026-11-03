@@ -31,8 +31,6 @@ import { parse } from 'shell-quote';
 import type { Config, MCPServerConfig } from '../config/config.js';
 import { AuthProviderType, isSdkMcpServerConfig } from '../config/config.js';
 import { validateAgentPluginStdioRuntimePaths } from '../extension/agent-plugins-v1/mcp.js';
-import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
-import { ServiceAccountImpersonationProvider } from '../mcp/sa-impersonation-provider.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import type { McpToolAnnotations } from './mcp-tool.js';
 import { SdkControlClientTransport } from './sdk-control-client-transport.js';
@@ -2636,6 +2634,11 @@ export async function createTransport(
     mcpServerConfig.authProviderType ===
     AuthProviderType.SERVICE_ACCOUNT_IMPERSONATION
   ) {
+    // Loaded on demand: google-auth-library would otherwise ride along in
+    // every process that imports this module, MCP servers or not.
+    const { ServiceAccountImpersonationProvider } = await import(
+      '../mcp/sa-impersonation-provider.js'
+    );
     const provider = new ServiceAccountImpersonationProvider(mcpServerConfig);
     const transportOptions:
       | StreamableHTTPClientTransportOptions
@@ -2665,6 +2668,9 @@ export async function createTransport(
   if (
     mcpServerConfig.authProviderType === AuthProviderType.GOOGLE_CREDENTIALS
   ) {
+    const { GoogleCredentialProvider } = await import(
+      '../mcp/google-auth-provider.js'
+    );
     const provider = new GoogleCredentialProvider(mcpServerConfig);
     const transportOptions:
       | StreamableHTTPClientTransportOptions
