@@ -3611,6 +3611,119 @@ it('shows the tagged ack, not the raw notification, in the timeline when no answ
   expect(entries[0].detail).not.toContain('<task-notification>');
 });
 
+describe('turn-collapse deliverable final answer', () => {
+  // A collapsed turn must show its report, not a short closer that
+  // follows a substantial answer (a guard or todo-stop line). The final
+  // candidate stands only if it is a deliverable: an ordinary assistant
+  // reply (never an agent reply) with at least 1000 characters and a
+  // Markdown heading. Otherwise the nearest preceding deliverable in the
+  // turn stands; with none, the original candidate stands
+  // (fail-toward-showing-more, so nothing extra is hidden).
+
+  const report = '## RLS-26042 — shard-router v29\n' + 'x'.repeat(1200);
+
+  it('shows the report, not the short closer that follows it', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      { ...makeAssistantMessage('report'), content: report },
+      makeAssistantMessage('closer'),
+    ]);
+    const rows = collapseItems(items);
+    expect(collapseOf(rows, 'u1')).toMatchObject({ collapsed: true });
+    expect(rowIds(rows)).toContain('report');
+    expect(rowIds(rows)).not.toContain('closer');
+  });
+
+  it('keeps the short final line when the preceding text carries no heading', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      { ...makeAssistantMessage('log'), content: 'y'.repeat(1500) },
+      makeAssistantMessage('done'),
+    ]);
+    const rows = collapseItems(items);
+    expect(rowIds(rows)).toContain('done');
+    expect(rowIds(rows)).not.toContain('log');
+  });
+
+  it('keeps the deliverable final when a plain interim note precedes it', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeAssistantMessage('mid'),
+      { ...makeAssistantMessage('report'), content: report },
+    ]);
+    const rows = collapseItems(items);
+    expect(rowIds(rows)).toContain('report');
+    expect(rowIds(rows)).not.toContain('mid');
+  });
+
+  it('keeps the last deliverable when several stand in the turn', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      { ...makeAssistantMessage('first'), content: '## one\n' + 'a'.repeat(1100) },
+      makeAssistantMessage('mid'),
+      { ...makeAssistantMessage('second'), content: '## two\n' + 'b'.repeat(1100) },
+    ]);
+    const rows = collapseItems(items);
+    expect(rowIds(rows)).toContain('second');
+    expect(rowIds(rows)).not.toContain('first');
+  });
+
+  it('keeps the short final line when the only headed reply is below the length floor', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      { ...makeAssistantMessage('mini'), content: '## mini\nshort' },
+      makeAssistantMessage('closer'),
+    ]);
+    const rows = collapseItems(items);
+    expect(rowIds(rows)).toContain('closer');
+    expect(rowIds(rows)).not.toContain('mini');
+  });
+
+  it('folds the tagged shell ack, not the report, when both stand in the turn', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      { ...makeAssistantMessage('report'), content: report },
+      makeBackgroundTurnMarker('marker'),
+      makeAckMessage('ack'),
+    ]);
+    const rows = collapseItems(items, { backgroundSummaryGraceActive: false });
+    expect(rowIds(rows)).toContain('report');
+    expect(rowIds(rows)).not.toContain('ack');
+  });
+
+  it('never treats an agent reply as the deliverable', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeThinkingMessage('thought'),
+      {
+        ...makeAssistantMessage('agent'),
+        content: report,
+        agentMessage: { kind: 'agent_message' },
+      },
+      makeAssistantMessage('closer'),
+    ]);
+    const rows = collapseItems(items);
+    expect(collapseOf(rows, 'u1')).toMatchObject({ collapsed: true });
+    expect(rowIds(rows)).toContain('agent');
+    expect(rowIds(rows)).toContain('closer');
+  });
+
+  it('accepts a deliverable at exactly the length floor', () => {
+    // '## exact\n' is 9 characters, so 991 fillers make exactly 1000.
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      {
+        ...makeAssistantMessage('exact'),
+        content: '## exact\n' + 'z'.repeat(991),
+      },
+      makeAssistantMessage('closer'),
+    ]);
+    const rows = collapseItems(items);
+    expect(rowIds(rows)).toContain('exact');
+    expect(rowIds(rows)).not.toContain('closer');
+  });
+});
+
 describe('background completion markers', () => {
   it.each(['agent', 'shell', 'peer'] as const)(
     'folds a %s result marker even when it is the only step',

@@ -886,6 +886,47 @@ function findFinalAnswerIndex(
   return -1;
 }
 
+/**
+ * A collapsed turn must show its report, not a short closer: a turn that
+ * produced a substantial answer and then a one-line completion note
+ * (a guard or todo-stop line) would otherwise fold the report and show
+ * the note. The final candidate stands only if it is itself a
+ * deliverable; otherwise the nearest preceding deliverable in the same
+ * turn stands instead. Fail-toward-showing-more: with no preceding
+ * deliverable the original candidate stands, so nothing is hidden.
+ * The shell-ack fold already ran inside findFinalAnswerIndex; the two
+ * rules compose, because a well-formed ack never carries report text.
+ */
+const DELIVERABLE_MIN_LENGTH = 1000;
+const DELIVERABLE_HEADING = /^(#{1,6} )/m;
+
+function isDeliverableAnswer(item: DisplayItem): boolean {
+  if (item.type !== 'message' || item.message.role !== 'assistant') {
+    return false;
+  }
+  if (isAgentReply(item)) return false;
+  const content = item.message.content;
+  return (
+    typeof content === 'string' &&
+    content.length >= DELIVERABLE_MIN_LENGTH &&
+    DELIVERABLE_HEADING.test(content)
+  );
+}
+
+function resolveDeliverableAnswerIdx(
+  items: readonly DisplayItem[],
+  start: number,
+  candidateIdx: number,
+): number {
+  if (candidateIdx < 0 || isDeliverableAnswer(items[candidateIdx]!)) {
+    return candidateIdx;
+  }
+  for (let i = candidateIdx - 1; i > start; i--) {
+    if (isDeliverableAnswer(items[i]!)) return i;
+  }
+  return candidateIdx;
+}
+
 function collectFinalAssistantTurnIds(
   items: readonly DisplayItem[],
   {
@@ -2174,7 +2215,8 @@ export function applyTurnCollapse(
       pendingApprovalCallId,
     );
 
-    const answerIdx = findFinalAnswerIndex(items, start, end);
+    const rawAnswerIdx = findFinalAnswerIndex(items, start, end);
+    const answerIdx = resolveDeliverableAnswerIdx(items, start, rawAnswerIdx);
     let answerStartIdx = answerIdx;
     // A passive completion can split one streamed answer into several rows.
     // Keep those segments, but stop at work or an automatic execution marker.

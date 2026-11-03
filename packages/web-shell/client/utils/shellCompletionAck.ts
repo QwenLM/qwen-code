@@ -1,5 +1,5 @@
 import type { DaemonBackgroundTurn } from '@qwen-code/sdk/daemon';
-import type { Message } from '../adapters/types';
+import type { Message } from '../adapters/types.js';
 
 /**
  * Row view the shell-completion-ack rule reads from a transcript. The
