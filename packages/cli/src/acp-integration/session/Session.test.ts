@@ -18348,16 +18348,16 @@ describe('Session', () => {
       });
 
       it('consumes a same-turn shell result without an automatic rerun', async () => {
-        const notifyShell =
-          mockBackgroundShellRegistry.setNotificationCallback.mock.calls[0][0] as (
-            display: string,
-            model: string,
-            meta: {
-              shellId: string;
-              status: string;
-              sourceTurnId?: string;
-            },
-          ) => void;
+        const notifyShell = mockBackgroundShellRegistry.setNotificationCallback
+          .mock.calls[0][0] as (
+          display: string,
+          model: string,
+          meta: {
+            shellId: string;
+            status: string;
+            sourceTurnId?: string;
+          },
+        ) => void;
         mockChat.sendMessageStream = vi
           .fn()
           .mockImplementationOnce(async () => {
