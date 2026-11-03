@@ -302,6 +302,11 @@ const allowOnce = () => ({
         NO_PROXY: noProxy,
         no_proxy: noProxy,
         QWEN_HOME: qwenHome,
+        // TestRig keeps QWEN_RUNTIME_DIR inside the workspace; leaving it
+        // there lets the session runtime write `tmp/<hash>` into the directory
+        // each surface's request snapshot encodes, so pin both surfaces to the
+        // same scratch runtime.
+        QWEN_RUNTIME_DIR: qwenHome,
       };
       delete env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'];
       if (shared) env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = '1';
@@ -498,6 +503,10 @@ const allowOnce = () => ({
         });
         await removeScratchDir(qwenHome);
       }
+      // The scratch runtime is what keeps the session runtime's `tmp/<hash>`
+      // out of the workspace, so pin its absence rather than relying on the
+      // snapshot diff, which only trips on the losing side of a race.
+      expect(existsSync(join(dir, '.qwen-home', 'tmp'))).toBe(false);
       return {
         requests: modelRequests(server, dir),
         dateReminders: streamingMessages(server).filter((messages) =>
