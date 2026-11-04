@@ -57,6 +57,8 @@ interface Scenario {
   shows?: string;
   /** Text both runs' session records must contain. */
   recorded?: string;
+  /** Text both runs' model requests must contain. */
+  sent?: string;
   /**
    * The model's reply to a streaming request, from its message history;
    * `index` counts this run's streaming requests, retries included.
@@ -76,6 +78,12 @@ interface Run {
   /** How many model rounds the debug log says ran on the shared loop. */
   sharedRounds: number;
 }
+
+/**
+ * The root config's `retry: 2` would rerun both TUI sessions after a stall,
+ * tripling its cost in the required gate.
+ */
+const PARITY_CASE_OPTIONS = { retry: 0, timeout: 240_000 };
 
 /** What the TUI logs for each model round it sends on the shared loop. */
 const SHARED_ROUND_LOG = 'model round on the shared agent loop';
@@ -164,7 +172,11 @@ function normalize(value: unknown, dir: string, scratch: string): unknown {
   return strip(replaced);
 }
 
-/** Each request's messages, system prompt included, and the tools offered. */
+/**
+ * Each request body as the client sent it, without the date reminder: every
+ * message field, `reasoning_content` included, the tools offered and the
+ * sampling options.
+ */
 function modelRequests(
   server: FakeOpenAIServer,
   dir: string,
@@ -175,16 +187,13 @@ function modelRequests(
     .map((request) =>
       normalize(
         {
-          tools: request.body['tools'],
-          tool_choice: request.body['tool_choice'],
+          ...request.body,
           messages: ((request.body['messages'] ?? []) as JsonObject[])
             .map((message) => ({
-              role: message['role'],
+              ...message,
               content: Array.isArray(message['content'])
                 ? message['content'].filter((part) => !isDateReminder(part))
                 : message['content'],
-              tool_calls: message['tool_calls'],
-              tool_call_id: message['tool_call_id'],
             }))
             .filter(
               (message) =>
@@ -404,6 +413,23 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
       recorded: '"totalTokenCount":49',
     },
     {
+      // The second request replays the assistant turn that carried the
+      // reasoning, so its `reasoning_content` is compared.
+      name: 'a thought before a tool',
+      requests: 2,
+      rounds: 2,
+      prompts: ['Think, then read the readme.'],
+      files: { 'readme.txt': 'readme body\n' },
+      sent: '"reasoning_content":"Deciding to read."',
+      reply: (messages, dir) =>
+        toolResults(messages) === 0
+          ? {
+              reasoningChunks: ['Deciding ', 'to read.'],
+              toolCalls: [read(join(dir, 'readme.txt'), 'call_think_read')],
+            }
+          : { content: 'It says readme body.' },
+    },
+    {
       name: 'one tool',
       requests: 2,
       rounds: 2,
@@ -515,26 +541,22 @@ describeInk('Ink TUI agent loop parity (experimental.unifiedAgentLoop)', () => {
     },
   ];
 
-  it.each(scenarios)(
-    '$name',
-    async (scenario) => {
-      const current = await run(scenario, false);
-      const shared = await run(scenario, true);
-      // Only the run with the setting on sends its rounds on the shared loop.
-      expect(current.sharedRounds).toBe(0);
-      expect(shared.sharedRounds).toBe(scenario.rounds);
-      for (const run of [current, shared]) {
-        expect(run.requests).toHaveLength(scenario.requests);
-        if (scenario.shows) expect(run.screen).toContain(scenario.shows);
-        else expect(run.records.length).toBeGreaterThan(0);
-        if (scenario.recorded)
-          expect(JSON.stringify(run.records)).toContain(scenario.recorded);
-      }
-      expect(shared.requests).toEqual(current.requests);
-      expect(shared.records).toEqual(current.records);
-    },
-    // The root config's `retry: 2` would rerun both TUI sessions after a
-    // stall, tripling its cost in the required gate.
-    { retry: 0, timeout: 240_000 },
-  );
+  it.each(scenarios)('$name', PARITY_CASE_OPTIONS, async (scenario) => {
+    const current = await run(scenario, false);
+    const shared = await run(scenario, true);
+    // Only the run with the setting on sends its rounds on the shared loop.
+    expect(current.sharedRounds).toBe(0);
+    expect(shared.sharedRounds).toBe(scenario.rounds);
+    for (const run of [current, shared]) {
+      expect(run.requests).toHaveLength(scenario.requests);
+      if (scenario.shows) expect(run.screen).toContain(scenario.shows);
+      else expect(run.records.length).toBeGreaterThan(0);
+      if (scenario.recorded)
+        expect(JSON.stringify(run.records)).toContain(scenario.recorded);
+      if (scenario.sent)
+        expect(JSON.stringify(run.requests)).toContain(scenario.sent);
+    }
+    expect(shared.requests).toEqual(current.requests);
+    expect(shared.records).toEqual(current.records);
+  });
 });

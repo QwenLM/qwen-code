@@ -21,6 +21,11 @@ const source = readFileSync(
 
 describe('Ink agent loop parity suite source pins', () => {
   it('runs each scenario once, without the root config retries', () => {
-    expect(source).toMatch(/\{\s*retry: 0,\s*timeout: 240_000,?\s*\}/);
+    // Both halves: the scenario table takes the options, and they keep
+    // `retry: 0`. The ceiling is free to change.
+    expect(source).toMatch(
+      /it\.each\(scenarios\)\(\s*'\$name',\s*PARITY_CASE_OPTIONS,/,
+    );
+    expect(source).toMatch(/const PARITY_CASE_OPTIONS = \{[^}]*\bretry: 0\b/);
   });
 });

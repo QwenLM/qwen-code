@@ -474,9 +474,10 @@ A difference fails the scenario unless it is listed with a linked issue.
 
 A continuation's request runs under a prompt id of its own on the current loop and under the turn's prompt id on the shared loop; the suite compares them as one.
 
-**Ink scenarios** (`integration-tests/interactive/ink-agent-loop-parity.test.ts`). The TUI runs in a pseudo-terminal against the fake server. The suite compares the two runs' requests, with the system prompt and the tools offered, and their session's chat records, with usage. It also checks each run's number of requests, and, through the debug log, that only the run with the setting on sends its rounds on the shared loop. A scenario that sends and records nothing, such as a blocked prompt, checks the notice on each run's last screen instead; the screen is not compared otherwise, since it repaints on timers:
+**Ink scenarios** (`integration-tests/interactive/ink-agent-loop-parity.test.ts`). The TUI runs in a pseudo-terminal against the fake server. The suite compares the two runs' request bodies as sent, with the system prompt, the tools offered and each message's `reasoning_content`, and their session's chat records, with usage. It also checks each run's number of requests, and, through the debug log, that only the run with the setting on sends its rounds on the shared loop. A scenario that sends and records nothing, such as a blocked prompt, checks the notice on each run's last screen instead; the screen is not compared otherwise, since it repaints on timers:
 
 - plain text, and streamed text with a thought;
+- a thought before a tool, whose second request replays the reasoning;
 - one tool, and two reads in one response;
 - an edit cut off by the output limit;
 - a stream that drops and is retried;

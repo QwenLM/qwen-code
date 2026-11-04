@@ -24554,6 +24554,33 @@ describe('useLlmStream', () => {
       ).toEqual(['kept_a', 'kept_b']);
     });
 
+    it('schedules the calls the round collected, without those a model fallback replaced', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield toolRequest('dropped');
+          yield {
+            type: ServerLlmEventType.ModelFallback,
+            fromModel: 'primary-model',
+            toModel: 'fallback-model',
+            fallbackIndex: 1,
+          };
+          yield toolRequest('kept');
+        })(),
+      );
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+
+      expect(mockScheduleToolCalls).toHaveBeenCalledTimes(1);
+      expect(
+        mockScheduleToolCalls.mock.calls[0][0].map(
+          (request: { callId: string }) => request.callId,
+        ),
+      ).toEqual(['kept']);
+    });
+
     it('schedules nothing when the round ends on a stop reason', async () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {

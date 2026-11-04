@@ -474,9 +474,10 @@ PR 4–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两�
 
 续发请求在现有 loop 上使用自己的 prompt id，在共享 loop 上沿用这一轮的 prompt id；对拍测试把两者视为相同。
 
-**Ink 场景**（`integration-tests/interactive/ink-agent-loop-parity.test.ts`）。TUI 在伪终端里对着假服务器运行。测试比较两次运行的请求（包括 system prompt 和提供的工具）以及会话的聊天记录（包括 usage）。它还检查每次运行的请求数，并通过 debug 日志确认只有开启设置的那次运行在共享 loop 上发送模型轮。对于既不发送也不记录任何内容的场景（例如被拦截的 prompt），改为检查每次运行最后屏幕上的提示；除此之外不比较屏幕，因为屏幕按定时器重绘：
+**Ink 场景**（`integration-tests/interactive/ink-agent-loop-parity.test.ts`）。TUI 在伪终端里对着假服务器运行。测试比较两次运行实际发送的请求体（包括 system prompt、提供的工具和每条消息的 `reasoning_content`）以及会话的聊天记录（包括 usage）。它还检查每次运行的请求数，并通过 debug 日志确认只有开启设置的那次运行在共享 loop 上发送模型轮。对于既不发送也不记录任何内容的场景（例如被拦截的 prompt），改为检查每次运行最后屏幕上的提示；除此之外不比较屏幕，因为屏幕按定时器重绘：
 
 - 纯文本，以及带 thought 的流式文本；
+- 先有 thought 再调用工具，第二个请求会回传这段 reasoning；
 - 一个工具，以及一次响应中的两次读取；
 - 被输出上限截断的编辑；
 - 断开后重试的流；
