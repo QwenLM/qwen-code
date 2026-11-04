@@ -418,18 +418,24 @@ export function redactApprovedPlansInHistory(
  * Exported for tests; callers should prefer the inline use inside
  * `recordAssistantTurn` invocation below.
  */
-export function redactStructuredOutputArgsForRecording(
-  part: Part,
-): { functionCall: NonNullable<Part['functionCall']> } | null {
+export function redactStructuredOutputArgsForRecording(part: Part): {
+  functionCall: NonNullable<Part['functionCall']>;
+  thoughtSignature?: string;
+} | null {
   if (!part.functionCall) return null;
+  const signed = part.thoughtSignature !== undefined;
   if (part.functionCall.name !== ToolNames.STRUCTURED_OUTPUT) {
-    return { functionCall: part.functionCall };
+    return {
+      functionCall: part.functionCall,
+      ...(signed ? { thoughtSignature: part.thoughtSignature } : {}),
+    };
   }
   return {
     functionCall: {
       ...part.functionCall,
       args: { ...STRUCTURED_OUTPUT_REDACTED_ARGS },
     },
+    ...(signed ? { thoughtSignature: part.thoughtSignature } : {}),
   };
 }
 
