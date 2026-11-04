@@ -33,10 +33,12 @@ Only `reserve` changes tenant totals upward. Upload, verify, finish, admission
 and receipt move bytes within an existing reservation (`*_used_bytes` never
 exceeds `*_held_bytes`), and collection only releases bytes.
 
-The lanes take the publication row (`lockOriginalSettledResult`) before the
-Session root and head (`lockPublicationWriter`); collection takes the private
-head before the publication row. The two orders are opposite, and today the
-shared tenant row taken first by both keeps them from deadlocking.
+Collection and retention take the publication guard, then the Session root
+and head (`lockGenericSession`), then publication and operation rows. Ordinary
+lanes take placement, the publication guard, then the root and head
+(`lockPublicationWriter`), then publication rows: the same order below the
+guard. Only CSI lanes lock the publication row before the root
+(`lockOriginalSettledResult` returns early for an ordinary Runtime).
 
 ## Proposal
 
@@ -70,21 +72,15 @@ row with a conditional update. Either keeps tenant-wide serialization of every
 reservation for an exact cap that a protective limit does not need; the
 counter row would also need updates at every held-byte shrink.
 
-### C2. Publication lanes order on the Session, not the tenant
+### C2. Other ordinary publication lanes
 
-Drop `output_publication` from the non-reserving lanes and give lanes and
-collection one per-Session order: Session root, private head, publication
-row, public Session.
-
-- Lanes move `lockPublicationWriter` (root, head) ahead of the publication
-  row lock. The publication row is still read and checked against the stored
-  binding after the lock, as the
-  [publication lock order design](2026-10-11-publication-lock-order-split.md)
-  requires.
-- Collection keeps its order without the tenant row.
-- The snapshot rule from the journal commit design applies: the first
-  statement of each lane is a locking read, so later plain reads see what the
-  other side committed.
+Apply C1 to the ordinary upload, verify, finish, admission and receipt lanes,
+the tool-result projection worker and the snapshot writer: skip the
+publication guard and keep root, head, publication rows. No lane changes its
+order. The work is the audit C1 needed: after the root, nothing in the lane
+may take the publication guard again (C1's evidence read lease did, through
+`ToolPublicationRetentionStore.read`). Such a call either takes the
+Session-locked variant or the lane keeps the guard. CSI lanes keep it.
 
 ### C3. Original Runtime binding instead of placement
 
@@ -102,9 +98,9 @@ cleanup references; the same handshake can then serve those references.
 
 ## Open questions
 
-1. C2's lock order change touches every publication lane. The lanes' existing
-   MySQL suites (`ToolPublicationLockOrderMySqlIT`, the publication fault
-   gates) pin today's order and will need to change with it.
+1. C2's post-root audit covers the receipt lane's journal commit and resource
+   installation in the same transaction; `ToolPublicationLockOrderMySqlIT`
+   is the check that found C1's case.
 2. C3 needs the binding's position in the global order: the sweep takes slot
    then binding under placement; lanes would take binding after the Session
    root. The sweep never locks Session rows after the binding, so no cycle is

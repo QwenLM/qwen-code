@@ -29,9 +29,10 @@
 只有 `reserve` 会增加租户总量。上传、校验、finish、准入和回执只在已有预留内移动字节
 （`*_used_bytes` 不会超过 `*_held_bytes`），回收只释放字节。
 
-车道先锁 publication 行（`lockOriginalSettledResult`），再锁 Session root 和 head
-（`lockPublicationWriter`）；回收先锁私有 head，再锁 publication 行。两者顺序相反，目前靠双方
-都先获取同一租户行才不会死锁。
+回收与 retention 先获取 publication guard，再锁 Session root 和 head（`lockGenericSession`），
+然后锁 publication 行与操作行。普通车道依次获取 placement、publication guard，再锁 root 和
+head（`lockPublicationWriter`），然后锁 publication 行：guard 之下的顺序相同。只有 CSI 车道会
+在 root 之前锁 publication 行（对普通 Runtime，`lockOriginalSettledResult` 会提前返回）。
 
 ## 方案
 
@@ -56,17 +57,13 @@
 考虑过但未采用：独立的 `publication_quota` guard，或计数行加条件更新。两者都会为了精确上限
 继续按租户串行每一次预留，而保护性上限并不需要；计数行还需要在每次 held 字节缩小时更新。
 
-### C2. 发布车道按 Session 排序，而不是按租户
+### C2. 其他普通发布车道
 
-不预留的车道去掉 `output_publication`，车道与回收统一按 Session 排序：Session root、私有
-head、publication 行、公共 Session。
-
-- 车道把 `lockPublicationWriter`（root、head）移到 publication 行锁之前。按照
-  [发布锁顺序设计](2026-10-11-publication-lock-order-split.zh-CN.md)的要求，加锁之后仍会
-  读取 publication 行并与存储的 binding 核对。
-- 回收保持原顺序但去掉租户行。
-- 沿用 journal commit 设计中的快照规则：每条车道的第一条语句是锁定读，之后的普通读能看到
-  另一侧已提交的内容。
+把 C1 的做法用到普通的上传、校验、finish、准入和回执车道，以及工具结果投影 worker 和快照
+写入方：跳过 publication guard，保持 root、head、publication 行的顺序，不调整任何车道的顺序。
+工作量在于 C1 也需要的审计：锁 root 之后，车道中不能再获取 publication guard（C1 的证据读租约
+就经由 `ToolPublicationRetentionStore.read` 获取过）。这类调用要么改用 Session 已锁定的变体，
+要么该车道保留 guard。CSI 车道保留。
 
 ### C3. 用原始 Runtime binding 取代 placement
 
@@ -80,8 +77,8 @@ binding 握手；同一握手之后也可用于这些引用。
 
 ## 待定问题
 
-1. C2 的锁顺序调整涉及所有发布车道。车道现有的 MySQL 测试
-   （`ToolPublicationLockOrderMySqlIT`、发布故障门禁）固定了目前的顺序，需要随之修改。
+1. C2 锁 root 之后的审计要覆盖回执车道在同一事务中的 journal commit 与资源安装；
+   `ToolPublicationLockOrderMySqlIT` 就是发现 C1 那处问题的检查。
 2. C3 需要确定 binding 在全局顺序中的位置：清扫在 placement 下先锁 slot 再锁 binding；
    车道会在 Session root 之后锁 binding。清扫锁定 binding 之后不再锁 Session 行，预计不会
    形成环路，但审计必须覆盖车道和清扫对 `ma_tool_execution` 的加锁。
