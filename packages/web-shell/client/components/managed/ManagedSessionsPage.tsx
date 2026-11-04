@@ -190,6 +190,7 @@ export function ManagedSessionsPage({
   onSelectWorkspace,
   onSessionWorkspaceChange,
   managedAgentProvider,
+  hostSessionOnly = false,
   navigationTarget,
   archivedNavigationTarget,
   onArchivedSessionsStatusChange,
@@ -215,6 +216,7 @@ export function ManagedSessionsPage({
   onSelectWorkspace?: (workspaceId: string) => void;
   onSessionWorkspaceChange?: (workspaceId: string | null) => void;
   managedAgentProvider?: ManagedAgentProvider;
+  hostSessionOnly?: boolean;
   /** Null keeps home layout while its sidebar slot is temporarily unmounted. */
   navigationTarget?: HTMLElement | null;
   archivedNavigationTarget?: HTMLElement | null;
@@ -245,6 +247,7 @@ export function ManagedSessionsPage({
         onSelectWorkspace={onSelectWorkspace}
         onSessionWorkspaceChange={onSessionWorkspaceChange}
         provider={managedAgentProvider}
+        hostSessionOnly={hostSessionOnly}
         cancellationEnabled={managedAgentProvider.canCancel}
         navigationTarget={navigationTarget}
         archivedNavigationTarget={archivedNavigationTarget}
@@ -313,6 +316,7 @@ function ManagedSessionsContent({
   onSelectWorkspace,
   onSessionWorkspaceChange,
   provider,
+  hostSessionOnly,
   cancellationEnabled,
   navigationTarget,
   archivedNavigationTarget,
@@ -339,6 +343,7 @@ function ManagedSessionsContent({
   onSelectWorkspace?: (workspaceId: string) => void;
   onSessionWorkspaceChange?: (workspaceId: string | null) => void;
   provider: ManagedAgentProvider;
+  hostSessionOnly: boolean;
   cancellationEnabled: boolean;
   navigationTarget?: HTMLElement | null;
   archivedNavigationTarget?: HTMLElement | null;
@@ -352,7 +357,7 @@ function ManagedSessionsContent({
 }) {
   const { t, language } = useI18n();
   const recoveryText = useManagedRecoveryText();
-  const home = navigationTarget !== undefined;
+  const home = hostSessionOnly || navigationTarget !== undefined;
   const clientId = useMemo(
     () => getManagedClientId(provider.storageKey),
     [provider.storageKey],
@@ -372,9 +377,9 @@ function ManagedSessionsContent({
   const turnCancel = useManagedTurnCancel(
     provider,
     clientId,
-    sessionId,
+    hostSessionOnly && !cancellationEnabled ? undefined : sessionId,
     detail.summary,
-    interactive,
+    interactive && (!hostSessionOnly || cancellationEnabled),
     detail.refreshSummary,
   );
   const [handoff, setHandoff] = useState<ManagedRecoveryHandoff>();
@@ -553,10 +558,13 @@ function ManagedSessionsContent({
     },
     [sessionId],
   );
-  const pendingKey = `qwen-managed-pending:${provider.storageKey}:${clientId}`;
+  const pendingKey = `qwen-managed-pending:${provider.storageKey}:${clientId}${hostSessionOnly ? `:host:${sessionId ?? ''}` : ''}`;
   const [pending, setPending] = useState<PendingPrompt | undefined>(() =>
     readPending(pendingKey),
   );
+  // 未确认记录仍按原 client key 保存；切会话只改变展示归属，不能覆盖或重放别人的请求。
+  const pendingHere = pending?.sessionId === sessionId ? pending : undefined;
+  const pendingElsewhere = pending !== undefined && pendingHere === undefined;
   const pendingRef = useRef(pending);
   const encoding = useRef(false);
   const focusComposer = useRef<{ sessionId: string | undefined } | undefined>(
@@ -794,6 +802,16 @@ function ManagedSessionsContent({
     return () => abort.abort();
   }, [pendingKey]);
 
+  useEffect(() => {
+    if (!hostSessionOnly) return;
+    // host-session-only: failure and discard notices describe the conversation
+    // they came from, so a session switch drops them. The list error shares
+    // this slot — switching hides it without a retry because the list effect
+    // does not depend on sessionId.
+    setError(undefined);
+    setDiscarded(false);
+  }, [provider, sessionId, hostSessionOnly]);
+
   // The Discard button unmounts itself, dropping focus to <body>: land it on
   // the composer that just got the draft back. The move must wait for the
   // clear to commit — the textarea is disabled while pending is set — and
@@ -839,6 +857,7 @@ function ManagedSessionsContent({
     : '';
   const navigationSessions = listTitleQuery ? sessions : navigationSummaries;
   useEffect(() => {
+    if (hostSessionOnly) return;
     const abort = new AbortController();
     listLifetime.current = abort;
     listBusy.current = false;
@@ -875,7 +894,14 @@ function ManagedSessionsContent({
         if (!abort.signal.aborted) setListLoading(false);
       });
     return () => abort.abort();
-  }, [provider, clientId, listRevision, archiveState, listTitleQuery]);
+  }, [
+    provider,
+    clientId,
+    listRevision,
+    archiveState,
+    listTitleQuery,
+    hostSessionOnly,
+  ]);
 
   useEffect(() => {
     const current = detail.summary;
@@ -1001,6 +1027,8 @@ function ManagedSessionsContent({
   ) {
     const abort = lifetime.current;
     if (
+      (hostSessionOnly && !sessionId) ||
+      (pendingRef.current && pendingRef.current.sessionId !== sessionId) ||
       !abort ||
       abort.signal.aborted ||
       busy ||
@@ -1238,7 +1266,12 @@ function ManagedSessionsContent({
   const modelContext = currentSummary?.modelContext;
   const selectedModel = currentSummary?.modelSelection?.modelId;
   const displayedModel =
-    selectedModel ?? modelContext?.modelId ?? currentSummary?.agentId ?? '';
+    hostSessionOnly && !modelChange.supported
+      ? ''
+      : (selectedModel ??
+        modelContext?.modelId ??
+        (hostSessionOnly ? undefined : currentSummary?.agentId) ??
+        '');
   const contextUsageKnown =
     !compression.usageInvalidated &&
     (!selectedModel || modelContext?.modelId === selectedModel) &&
@@ -1320,36 +1353,6 @@ function ManagedSessionsContent({
       aria-label={t('managed.sessions')}
       className={`flex min-h-0 flex-col gap-1 overflow-y-auto ${home ? '' : 'max-h-48 md:max-h-none'}`}
     >
-      {listError && (
-        <div
-          role="alert"
-          className="flex flex-wrap items-center gap-2 p-2 text-sm text-destructive"
-        >
-          <span className="min-w-0">
-            <span className="block">{t('managed.listLoadFailed')}</span>
-            {listError.httpError && (
-              <span className="block break-all text-xs">
-                {t('managed.errorDetails', {
-                  status: listError.httpError.status,
-                  code: listError.httpError.code,
-                  requestId: listError.httpError.requestId ?? '',
-                })}
-              </span>
-            )}
-          </span>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={listLoading}
-            onClick={() => {
-              if (listLoaded) void loadMore();
-              else setListRevision((current) => current + 1);
-            }}
-          >
-            {t('managed.listRetry')}
-          </Button>
-        </div>
-      )}
       {!interactive && error && (
         <p role="alert" className="text-sm text-destructive">
           {error}
@@ -1454,6 +1457,36 @@ function ManagedSessionsContent({
             onChange={(event) => setTitleQuery(event.target.value)}
           />
         </label>
+      )}
+      {listError && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center gap-2 p-2 text-sm text-destructive"
+        >
+          <span className="min-w-0">
+            <span className="block">{t('managed.listLoadFailed')}</span>
+            {listError.httpError && (
+              <span className="block break-words text-xs">
+                {t('managed.errorDetails', {
+                  status: listError.httpError.status,
+                  code: listError.httpError.code,
+                  requestId: listError.httpError.requestId ?? '',
+                })}
+              </span>
+            )}
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={listLoading}
+            onClick={() => {
+              if (listLoaded) void loadMore();
+              else setListRevision((current) => current + 1);
+            }}
+          >
+            {t('managed.listRetry')}
+          </Button>
+        </div>
       )}
       {home && provider.workspaceBinding ? (
         <ManagedWorkspaceNavigation
@@ -1571,6 +1604,14 @@ function ManagedSessionsContent({
       )}
     </nav>
   );
+  if (hostSessionOnly && !sessionId) {
+    return (
+      <section
+        aria-label={t('managed.conversation')}
+        data-managed-host-waiting
+      />
+    );
+  }
   return (
     <div
       ref={pageRef}
@@ -1581,7 +1622,8 @@ function ManagedSessionsContent({
       <p role="status" className="sr-only">
         {discarded ? t('managed.discarded') : ''}
       </p>
-      {home &&
+      {!hostSessionOnly &&
+        home &&
         provider.lifecycle &&
         archivedNavigationTarget &&
         createPortal(
@@ -1643,7 +1685,10 @@ function ManagedSessionsContent({
         ...new Set(
           [detail.stoppedReason, detail.error, error].filter(
             (message): message is string =>
-              Boolean(message) && (interactive || message !== error),
+              Boolean(message) &&
+              (interactive || message !== error) &&
+              // summary.failure 已在 composer 上方的失败区块渲染，告警通道不再重复。
+              message !== failureMessage,
           ),
         ),
       ].map((message) => (
@@ -1690,14 +1735,21 @@ function ManagedSessionsContent({
             : undefined
         }
       >
-        {home
-          ? navigationTarget
-            ? createPortal(navigation, navigationTarget)
-            : null
-          : navigation}
+        {hostSessionOnly
+          ? null
+          : home
+            ? navigationTarget
+              ? createPortal(navigation, navigationTarget)
+              : null
+            : navigation}
         <section
           className={`${shellStyles.chatPane} ${home ? '' : 'gap-3'}`}
           data-managed-home={home || undefined}
+          data-managed-empty={
+            home && messages.length === 0 && !summary?.failure
+              ? true
+              : undefined
+          }
           aria-label={t('managed.conversation')}
         >
           {summary && home && (
@@ -1846,9 +1898,7 @@ function ManagedSessionsContent({
                 compact={home}
               />
             )}
-          {summary?.failure && (
-            <p className="text-sm text-destructive">{failureMessage}</p>
-          )}
+
           {recovery.value && (
             <ManagedRecoveryPanel
               recovery={recovery.value}
@@ -1946,7 +1996,7 @@ function ManagedSessionsContent({
             </p>
           )}
           {!(!sessionId && provider.workspaceBinding) && (
-            <div className={shellStyles.content} style={{ flex: '1 1 auto' }}>
+            <div className={shellStyles.content}>
               <ToolDetailsContext.Provider value={loadToolDetails}>
                 <MessageList
                   messages={messages}
@@ -1964,8 +2014,12 @@ function ManagedSessionsContent({
                   loadingOlderHistory={detail.loadingOlder}
                   onLoadOlderHistory={detail.loadOlder}
                   hideSessionTimeline
+                  // 空转录仍显示欢迎头；但当会话已有失败态（如服务端已删除）时，
+                  // 由 failure 横幅说明状态，不再叠欢迎文案。
                   welcomeHeader={
-                    messages.length === 0 && !detail.loading ? (
+                    messages.length === 0 &&
+                    !detail.loading &&
+                    !summary?.failure ? (
                       <WelcomeHeader
                         version=""
                         cwd=""
@@ -1978,11 +2032,40 @@ function ManagedSessionsContent({
               </ToolDetailsContext.Provider>
             </div>
           )}
-          {pending && !busy && (
-            <div className="flex items-center gap-2" role="status">
-              <p className="text-sm text-muted-foreground">
-                {t('managed.uncertain')}
-              </p>
+          {/* 会话级状态统一在 composer 上方透出（与 renderComposerHeader 的位置一致），
+              失败与未决提交同区相邻，不再散落在会话信息区。 */}
+          {summary?.failure && (
+            <div
+              role="alert"
+              className="mx-auto mt-auto mb-2 flex w-full max-w-[var(--chat-shell-width)] items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-[10px] text-xs leading-relaxed text-destructive"
+            >
+              <span aria-hidden="true" className="mt-0.5 shrink-0">
+                ⚠
+              </span>
+              <p className="min-w-0 flex-1">{failureMessage}</p>
+            </div>
+          )}
+          {pendingElsewhere && !busy && (
+            <div
+              role="status"
+              className="mx-auto mt-auto mb-2 flex w-full max-w-[var(--chat-shell-width)] items-center gap-3 text-sm text-muted-foreground"
+            >
+              <p>{t('managed.pendingElsewhere')}</p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => onSelectSession(pending?.sessionId)}
+              >
+                {t('managed.openPendingOwner')}
+              </Button>
+            </div>
+          )}
+          {pendingHere && !busy && (
+            <div
+              role="status"
+              className="mx-auto mt-auto mb-2 flex w-full max-w-[var(--chat-shell-width)] items-start justify-between gap-3 rounded-lg border bg-muted/40 px-3 py-[10px] text-xs leading-relaxed text-muted-foreground"
+            >
+              <p className="min-w-0 flex-1">{t('managed.uncertain')}</p>
               <Button
                 size="sm"
                 disabled={busy || compression.blocked}
@@ -1993,7 +2076,7 @@ function ManagedSessionsContent({
               {/* Offered only where the handler can restore the draft:
                   destroying the only copy from a foreign session would lose
                   it for good. */}
-              {pending.sessionId === sessionId && (
+              {pendingHere.sessionId === sessionId && (
                 <Button
                   variant="ghost"
                   size="sm"
@@ -2006,12 +2089,12 @@ function ManagedSessionsContent({
                     // The pending record is client-scoped but the draft
                     // belongs to the session it was written for: restore it
                     // only there.
-                    if (pending.sessionId === sessionId) {
-                      setText(pending.text);
-                      composerRef.current?.setText(pending.text);
+                    if (pendingHere.sessionId === sessionId) {
+                      setText(pendingHere.text);
+                      composerRef.current?.setText(pendingHere.text);
                       restoreManagedAttachments(
                         composerRef.current,
-                        pending.input,
+                        pendingHere.input,
                       );
                     }
                     composerCommit.current = undefined;
@@ -2019,7 +2102,7 @@ function ManagedSessionsContent({
                     // A create that committed server-side before an
                     // unconfirmed failure is otherwise invisible until the
                     // user happens to press Refresh.
-                    if (pending.sessionId === undefined)
+                    if (pendingHere.sessionId === undefined)
                       setListRevision((current) => current + 1);
                     focusComposer.current = { sessionId };
                     setDiscarded(true);
@@ -2147,7 +2230,10 @@ function ManagedSessionsContent({
               loading={detail.loading}
             />
           </div>
-          {(!summary?.workspace || summary.capabilities.workspaceTurns) &&
+          {(!hostSessionOnly || !!sessionId) &&
+          (hostSessionOnly ||
+            !summary?.workspace ||
+            summary.capabilities.workspaceTurns) &&
           (!provider.workspaceBinding || (sessionId && summary)) ? (
             <div
               ref={composerContainerRef}
@@ -2356,7 +2442,14 @@ function ManagedSessionsContent({
                 }
                 dialogOpen={!interactive}
                 isRunning={
-                  home && Boolean(active || summary?.capabilities.canCancel)
+                  home &&
+                  Boolean(active || summary?.capabilities.canCancel) &&
+                  (!hostSessionOnly ||
+                    Boolean(
+                      cancellationEnabled &&
+                        summary?.capabilities.canCancel &&
+                        summary.activeTurnId,
+                    ))
                 }
                 onCancel={
                   home &&
@@ -2608,17 +2701,24 @@ function ManagedSessionsContent({
                   {t('managed.approvalFixed')}
                 </p>
               )}
-              <div className="flex items-center justify-end gap-2">
-                {sessionId &&
-                  !active &&
-                  summary &&
-                  !summary.capabilities.canSend && (
-                    <span className="mr-auto text-sm text-muted-foreground">
-                      {t('managed.newRequired')}
-                    </span>
-                  )}
-                {(!home || Boolean(text.trim())) && cancelButton}
-              </div>
+              {((sessionId &&
+                !active &&
+                summary &&
+                !summary.capabilities.canSend) ||
+                (!home && cancelButton) ||
+                Boolean(text.trim())) && (
+                <div className="flex items-center justify-end gap-2">
+                  {sessionId &&
+                    !active &&
+                    summary &&
+                    !summary.capabilities.canSend && (
+                      <span className="mr-auto text-sm text-muted-foreground">
+                        {t('managed.newRequired')}
+                      </span>
+                    )}
+                  {(!home || Boolean(text.trim())) && cancelButton}
+                </div>
+              )}
             </div>
           ) : (
             cancelButton && (
