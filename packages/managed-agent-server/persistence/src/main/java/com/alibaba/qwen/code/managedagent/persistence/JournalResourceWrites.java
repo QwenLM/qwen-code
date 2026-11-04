@@ -143,7 +143,11 @@ final class JournalResourceWrites {
         if (csiOriginal != null) {
             csiOriginal.requireContinuation();
         }
-        fencing.requireSessionStorageOpen(tenantId, request.workspaceId(), sessionId);
+        if (authority == null && csiOriginal == null) {
+            fencing.requireSessionStorageOpenForAdmission(tenantId, request.workspaceId(), sessionId);
+        } else {
+            fencing.requireSessionStorageOpen(tenantId, request.workspaceId(), sessionId);
+        }
         JournalStoreRows.HeadRow head = fencing.requireHeadAfterCsiCheck(tenantId, sessionId);
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         // Unlike the other writer paths, a v2 claim fences this lane even

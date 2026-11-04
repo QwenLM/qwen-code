@@ -23,9 +23,12 @@ final class WorkspaceMigrationAdmission {
     }
 
     static String owner(JdbcTemplate jdbc, String tenant, String storage) {
+        return owner(jdbc, tenant, storage, lockClause(jdbc, false));
+    }
+
+    private static String owner(JdbcTemplate jdbc, String tenant, String storage, String lock) {
         var rows = jdbc.query("SELECT tenant_id, storage_id, fence_operation_id FROM ma_storage"
-                + " WHERE tenant_key = ? AND storage_key = ?"
-                + (org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive() ? " FOR UPDATE" : ""), (row, index) -> WorkspaceOperations.values(
+                + " WHERE tenant_key = ? AND storage_key = ?" + lock, (row, index) -> WorkspaceOperations.values(
                         "tenant_id", row.getString("tenant_id"), "storage_id", row.getString("storage_id"),
                         "fence_operation_id", row.getString("fence_operation_id")), JdbcRuntimeBindingRepository.storageFenceKey(tenant),
                 JdbcRuntimeBindingRepository.storageFenceKey(storage));
@@ -39,19 +42,34 @@ final class WorkspaceMigrationAdmission {
     }
 
     static void requireOpen(JdbcTemplate jdbc, String tenant, String storage) {
-        if (storage != null && owner(jdbc, tenant, storage) != null) {
+        requireOpen(jdbc, tenant, storage, lockClause(jdbc, false));
+    }
+
+    static void requireOpenForAdmission(JdbcTemplate jdbc, String tenant, String storage) {
+        requireOpen(jdbc, tenant, storage, lockClause(jdbc, true));
+    }
+
+    private static void requireOpen(JdbcTemplate jdbc, String tenant, String storage, String lock) {
+        if (storage != null && owner(jdbc, tenant, storage, lock) != null) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
-        requirePhysicalOpen(jdbc, tenant, storage);
+        requirePhysicalOpen(jdbc, tenant, storage, lock);
     }
 
     static void requirePhysicalOpen(JdbcTemplate jdbc, String tenant, String storage) {
+        requirePhysicalOpen(jdbc, tenant, storage, lockClause(jdbc, false));
+    }
+
+    static void requirePhysicalOpenForAdmission(JdbcTemplate jdbc, String tenant, String storage) {
+        requirePhysicalOpen(jdbc, tenant, storage, lockClause(jdbc, true));
+    }
+
+    private static void requirePhysicalOpen(JdbcTemplate jdbc, String tenant, String storage, String lock) {
         if (storage == null) {
             return;
         }
-        boolean lock = org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive();
         var aliases = WorkspaceOperations.rows(jdbc, "SELECT tenant_id, storage_id, physical_key, storage_kind FROM ma_storage WHERE alias_key = ?"
-                + (lock ? " FOR UPDATE" : ""), JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage));
+                + lock, JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage));
         if (aliases.isEmpty()) {
             return;
         }
@@ -63,12 +81,25 @@ final class WorkspaceMigrationAdmission {
             return;
         }
         String physical = "SSH_LOCAL".equals(alias.get("storage_kind"))
-                ? SshWorkspaceStore.physicalKey(jdbc, tenant, storage) : LocalStorageOwners.key(jdbc, tenant, storage);
+                ? SshWorkspaceStore.physicalKey(jdbc, tenant, storage, lock) : LocalStorageOwners.key(jdbc, tenant, storage, lock);
         var states = jdbc.queryForList("SELECT mount_state FROM ma_storage_owner WHERE storage_key = ?"
-                + (lock ? " FOR UPDATE" : ""), String.class, physical);
+                + lock, String.class, physical);
         if (states.size() != 1 || !"READY".equals(states.getFirst())) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
+    }
+
+    private static String lockClause(JdbcTemplate jdbc, boolean shared) {
+        if (!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()) {
+            return "";
+        }
+        if (!shared) {
+            return " FOR UPDATE";
+        }
+        // H2 has no shared-lock syntax; MySQL admissions must retain a current read.
+        Boolean h2 = jdbc.execute((ConnectionCallback<Boolean>) connection ->
+                "H2".equals(connection.getMetaData().getDatabaseProductName()));
+        return Boolean.TRUE.equals(h2) ? " FOR UPDATE" : " FOR SHARE";
     }
 
     static void requireSessionOpen(JdbcTemplate jdbc, String tenant, String session) {

@@ -56,7 +56,11 @@ final class LocalStorageOwners {
     }
 
     static Map<String, Object> alias(JdbcTemplate jdbc, String tenant, String storage, boolean lock) {
-        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.STORAGE.columns() + " FROM ma_storage WHERE alias_key = ?" + (lock ? " FOR UPDATE" : ""),
+        return alias(jdbc, tenant, storage, lock ? " FOR UPDATE" : "");
+    }
+
+    private static Map<String, Object> alias(JdbcTemplate jdbc, String tenant, String storage, String lock) {
+        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.STORAGE.columns() + " FROM ma_storage WHERE alias_key = ?" + lock,
                 JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage));
         if (rows.isEmpty()) {
             return null;
@@ -70,7 +74,10 @@ final class LocalStorageOwners {
     }
 
     static String key(JdbcTemplate jdbc, String tenant, String storage) {
-        boolean lock = TransactionSynchronizationManager.isActualTransactionActive();
+        return key(jdbc, tenant, storage, TransactionSynchronizationManager.isActualTransactionActive() ? " FOR UPDATE" : "");
+    }
+
+    static String key(JdbcTemplate jdbc, String tenant, String storage, String lock) {
         var alias = alias(jdbc, tenant, storage, lock);
         if (alias == null || !"LOCAL".equals(alias.get("storage_kind"))
                 || !java.util.Set.of("REGISTERED", "RETIRING").contains(alias.get("registration_state"))
@@ -78,7 +85,7 @@ final class LocalStorageOwners {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
         var owners = WorkspaceOperations.rows(jdbc, "SELECT storage_key, physical_key, storage_kind FROM ma_storage_owner WHERE storage_key = ?"
-                + (lock ? " FOR UPDATE" : ""), physical);
+                + lock, physical);
         if (owners.size() != 1 || !physical.equals(owners.getFirst().get("physical_key"))
                 || !"LOCAL".equals(owners.getFirst().get("storage_kind"))) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
