@@ -1098,14 +1098,21 @@ function setupAcpTest(
         (e) => e.toolName === 'write_file',
       );
 
+      // The shared agent loop's tool batch blocks the call with the
+      // scheduler's notice, as on the other surfaces; the nightly unified
+      // leg sets the variable for every CLI it spawns.
+      const planModeNotice =
+        process.env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] === '1'
+          ? 'Tool blocked by plan mode: "write_file" is not a read-only tool.'
+          : 'Plan mode is active. The tool "write_file" cannot be executed';
       const blockedEvent = writeFileEvents.find(
-        (e) => e.status === 'failed' && e.error?.includes('Plan mode'),
+        (e) => e.status === 'failed' && /plan mode/i.test(e.error ?? ''),
       );
       expect(
         blockedEvent,
         `expected a failed write_file tool_call_update blocked by plan mode; events=${JSON.stringify(toolCallEvents)}`,
       ).toBeDefined();
-      expect(blockedEvent?.error).toContain('Plan mode is active');
+      expect(blockedEvent?.error).toContain(planModeNotice);
 
       // Verify the file was NOT created
       const fs = await import('fs');

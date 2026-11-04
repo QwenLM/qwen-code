@@ -998,6 +998,47 @@ const allowOnce = () => ({
       expect(Date.now() - started).toBeLessThan(30_000);
     }, 120_000);
 
+    it("blocks a write in plan mode with the scheduler's notice, as other surfaces do", async () => {
+      const { current, shared } = await both({
+        name: 'a write in plan mode',
+        prompts: ['Write the file.'],
+        settings: { tools: { approvalMode: 'plan' } },
+        reply: (messages, dir) =>
+          toolResults(messages) === 0
+            ? { toolCalls: [write(join(dir, 'out.txt'), 'no\n', 'call_no')] }
+            : { content: 'Understood.' },
+      });
+      const failedWrite = (run: Run) =>
+        JSON.stringify(
+          run.updates.filter(
+            (update) =>
+              (update as JsonObject)['toolCallId'] === 'call_no' &&
+              (update as JsonObject)['status'] === 'failed',
+          ),
+        );
+
+      expect(shared.stopReasons).toEqual(current.stopReasons);
+      // Both loops block the write before it runs and ask nothing; only the
+      // notice the model and the client see differs.
+      expect(current.permissions).toEqual([]);
+      expect(shared.permissions).toEqual([]);
+      expect(current.requests).toHaveLength(2);
+      expect(shared.requests).toHaveLength(2);
+      expect(shared.requests[0]).toEqual(current.requests[0]);
+      expect(failedWrite(current)).toContain(
+        'Plan mode is active. The tool \\"write_file\\" cannot be executed',
+      );
+      expect(failedWrite(shared)).toContain(
+        'Tool blocked by plan mode: \\"write_file\\" is not a read-only tool.',
+      );
+      expect(JSON.stringify(shared.requests[1])).toContain(
+        'Tool blocked by plan mode',
+      );
+      expect(JSON.stringify(shared.requests[1])).not.toContain(
+        'Plan mode is active. The tool',
+      );
+    }, 120_000);
+
     it('sends the date reminder with a prompt, as other surfaces do', async () => {
       const { current, shared } = await both({
         name: 'date reminder',
