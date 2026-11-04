@@ -22,6 +22,12 @@ import { describe, expect, it } from 'vitest';
 // Windows lanes in vitest.config.ts.
 describe('e2e workflow sandbox:none shard retry execution', () => {
   const script = readFileSync('.github/scripts/run-e2e-tests.sh', 'utf8');
+  // run-e2e-tests.sh sources this sibling at startup; the temp-dir copy must
+  // carry it too or `set -e` aborts on the missing source before any shard runs.
+  const aptMirrorProbe = readFileSync(
+    '.github/scripts/apt-mirror-probe.sh',
+    'utf8',
+  );
 
   function runStepScript({ failCalls, elapsedSeconds }) {
     const dir = mkdtempSync(join(tmpdir(), 'qwen-e2e-retry-'));
@@ -54,6 +60,7 @@ describe('e2e workflow sandbox:none shard retry execution', () => {
       chmodSync(dateStub, 0o755);
       const scriptFile = join(dir, 'run-e2e-tests.sh');
       writeFileSync(scriptFile, script);
+      writeFileSync(join(dir, 'apt-mirror-probe.sh'), aptMirrorProbe);
       let exitCode = 0;
       let output = '';
       try {
