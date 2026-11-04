@@ -1101,10 +1101,12 @@ export function createServeApp(
   const primaryEffectiveEnv = getRuntimeEffectiveEnv(primaryRuntimeEnvMetadata);
   const trustedSkillsConfigStatus = createWorkspaceSkillsStatusProvider({
     workspaceTrusted: true,
+    autoDiscover: true,
   });
   const untrustedSkillsConfigStatus = createWorkspaceSkillsStatusProvider({
     workspaceTrusted: false,
     includeUntrustedSkills: true,
+    autoDiscover: true,
   });
   const getSkillsConfigStatus = (workspaceCwd: string, trusted: boolean) => {
     const provider = trusted
@@ -4339,8 +4341,17 @@ export function createServeApp(
   }
 
   let appDrainComplete = false;
-  if (!deps.serveAppLifecycle)
+  const disposeSkillsConfigStatus = async () => {
+    await Promise.all([
+      trustedSkillsConfigStatus.dispose?.(),
+      untrustedSkillsConfigStatus.dispose?.(),
+    ]);
+  };
+  if (deps.serveAppLifecycle) {
+    serveAppLifecycle.setAppDrain(disposeSkillsConfigStatus);
+  } else
     serveAppLifecycle.setAppDrain(async () => {
+      await disposeSkillsConfigStatus();
       if (appDrainComplete) return;
       const pendingDrains = [
         stopHostedCsiSessions?.() ?? Promise.resolve(),
