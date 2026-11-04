@@ -36,6 +36,7 @@ import {
   truncateCodePoints,
 } from '@qwen-code/channel-base';
 import { testBotMention, stripBotMention } from './mention.js';
+import { resolveGithubWebOrigin } from './web-origin.js';
 
 interface GithubConfig extends ChannelConfig {
   baseUrl?: string;
@@ -364,14 +365,16 @@ const MAX_BOUND_DEFERRALS = 240;
 
 /**
  * Cold-start bound: consecutive EMPTY partial snapshots tolerated before the
- * comment lane opens anyway. A draining/unreadable workspace can answer
+ * comment lane opens anyway. A workspace whose chats directory the daemon
+ * cannot list, or a registry entry without a runtime, can answer
  * {bindings: [], partial: true} on the first poll after a restart while its
  * bound sessions still exist; opening the lane on that answer would route
  * every event publicly and commit the cursor — an irreversible
  * misclassification. The cap keeps a PERMANENTLY empty partial (a workspace
- * that is never active) from freezing the lane forever: once reached, the
- * lane opens and unmatched PR events take the per-event bounded deferral
- * (MAX_BOUND_DEFERRALS -> dead-letter) instead of the public path.
+ * that never becomes readable) from freezing the lane forever: once
+ * reached, the lane opens and unmatched PR events take the per-event
+ * bounded deferral (MAX_BOUND_DEFERRALS -> dead-letter) instead of the
+ * public path.
  */
 const MAX_COLD_EMPTY_PARTIAL_POLLS = 30;
 
@@ -957,9 +960,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * False until ANY binding snapshot succeeds (complete or partial). The
    * cold-start comment-lane gate uses this, not boundSnapshotTrusted: the
    * map is populated from partial snapshots too. Gating on complete-only
-   * would stall the lane forever under a permanent partial (multi-page
-   * scan / non-active workspace). An EMPTY partial answer is additionally
-   * bounded by coldEmptyPartialStreak: success of an incomplete scan does
+   * would stall the lane forever under a permanent partial (an unreadable
+   * sidecar / a workspace without a runtime). An EMPTY partial answer is
+   * additionally bounded by coldEmptyPartialStreak: success of an
+   * incomplete scan does
    * not establish absence, so the first such answers must not open the
    * lane onto an empty map.
    */
@@ -971,10 +975,19 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * answer.
    */
   private coldEmptyPartialStreak = 0;
+  /**
+   * How many polls of the current cold-empty streak were failed lookups
+   * (the rest answered with an empty partial). The cap line attributes the
+   * stall from this count rather than from boundSnapshotFailureStreak,
+   * which any successful answer resets: a run of failed lookups broken by
+   * a single empty partial would otherwise be blamed on the daemon's
+   * storage. Reset together with coldEmptyPartialStreak.
+   */
+  private coldEmptyFailurePolls = 0;
   // Consecutive partial snapshots (any partial). A NON-empty partial — e.g. a
-  // workspace with more active sessions than one page — is permanent and
+  // sidecar the daemon persistently cannot read — can be permanent and
   // otherwise silent; this drives a throttled diagnostic so the operator sees
-  // a pagination hint before the dead-letter alert hours later (doudouOUC).
+  // a hint before the dead-letter alert hours later (doudouOUC).
   private partialSnapshotStreak = 0;
   /**
    * True while the most recent pending-watch reconciliation FAILED (e.g.
@@ -1119,15 +1132,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       credential = `local gh credential for ${hostname}`;
     }
     process.stderr.write(`[Channel:${this.name}] using ${credential}\n`);
-    this.webOrigin = baseUrl
-      .replace(/\/api\/v3\/?$/, '')
-      .replace(/^https:\/\/api\.github\.com/, 'https://github.com')
-      // GitHub Enterprise Cloud data-residency tenants serve the web UI at
-      // <tenant>.ghe.com and the REST API at api.<tenant>.ghe.com. Binding
-      // URLs carry the web host, so map the API host to it. Scoped to a
-      // single .ghe.com label on purpose: a self-hosted GHE Server may
-      // legitimately serve web and API from an `api.`-prefixed host.
-      .replace(/^https:\/\/api\.([^./]+\.ghe\.com)/i, 'https://$1');
+    this.webOrigin = resolveGithubWebOrigin(baseUrl);
     this.githubHost = new URL(this.webOrigin).hostname.toLowerCase();
     this.octokit = new Octokit({
       auth,
@@ -1870,15 +1875,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // claiming delivery against an empty map would permanently freeze events
     // onto the public channel path. Any successful snapshot (even partial)
     // populates the map, so gate on boundSnapshotSeen — complete-only would
-    // stall the lane forever under a permanent partial (multi-page scan /
-    // non-active workspace). Defer the comment lane (cursor does not advance)
-    // instead; persisted tasks still recover above.
+    // stall the lane forever under a permanent partial (unreadable sidecar /
+    // workspace without a runtime). Defer the comment lane (cursor does not
+    // advance) instead; persisted tasks still recover above.
     if (this.deliverToBoundSessions && !this.boundSnapshotSeen) {
       return;
     }
     // An EMPTY partial first answer is not an authoritative absence either:
-    // a draining/unreadable workspace returns {bindings: [], partial: true}
-    // while its bound sessions still exist, and opening the lane here would
+    // a workspace whose chats directory cannot be listed (or an entry without
+    // a runtime) returns {bindings: [], partial: true} while its bound
+    // sessions still exist, and opening the lane here would
     // publicly route every event and commit the cursor before the real
     // snapshot arrives. Keep deferring while the map is empty and no
     // complete snapshot has ever succeeded — bounded, so a permanently
@@ -3506,6 +3512,33 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     return { chatId: match[1], number: Number(match[2]) };
   }
 
+  /**
+   * The cause clause of the cold-empty cap line, attributed from how many
+   * polls of the streak were failed lookups rather than empty partial
+   * answers: the majority cause leads and the other count is kept.
+   * boundSnapshotFailureStreak cannot carry this: any successful answer
+   * resets it, so a run of failed lookups broken by one empty partial
+   * would be blamed on the daemon's storage.
+   */
+  private coldEmptyCapCause(): string {
+    const failed = this.coldEmptyFailurePolls;
+    const total = this.coldEmptyPartialStreak;
+    const storageCause =
+      "a workspace without a runtime, a chats directory it cannot list, or a 'PR bindings scan' line for a sidecar, transcript or live session list it could not read; the channel worker's stderr reports how many binding rows it had to drop (check that the worker and the daemon run the same version)";
+    const lookupCheck =
+      'verify GET /sessions/pr-bindings is reachable and the worker credentials are valid';
+    if (failed === 0) {
+      return `The daemon's stderr names the cause: ${storageCause}.`;
+    }
+    if (failed >= total) {
+      return `The binding lookup itself has been failing (see the 'has never succeeded' line above): ${lookupCheck}.`;
+    }
+    if (failed * 2 >= total) {
+      return `The binding lookup itself has been failing for ${failed} of those polls (see the 'has never succeeded' lines above) and the other ${total - failed} answered with an empty partial: ${lookupCheck}, then check the daemon's stderr for ${storageCause}.`;
+    }
+    return `The daemon's stderr names the cause: ${storageCause}; ${failed} of those polls also failed the lookup outright (see the 'has never succeeded' lines above), so ${lookupCheck} as well.`;
+  }
+
   private async refreshBoundSessions(): Promise<void> {
     const boundSessions = this.boundSessions;
     if (!boundSessions) return;
@@ -3539,10 +3572,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // binding the partial answer failed to list, so private delivery
         // never degrades to the public channel path on a scan failure.
         // A LISTED session's PR set is authoritative (the route returns
-        // each listed session's complete sidecar projection), so retention
-        // must not revive PRs that session just unbound; and a retained
-        // candidate competes by recency, so a partial answer listing only
-        // an older session cannot displace the newer known one.
+        // each listed session's sidecar projection topped up with the
+        // bindings the bridge still holds for it, trimmed to the cap), so
+        // retention must not revive PRs that session just unbound; and a
+        // retained candidate competes by recency, so a partial answer
+        // listing only an older session cannot displace the newer known one.
         const seen = new Set(snapshot.bindings.map((b) => b.sessionId));
         // A permanent partial must not grow retention without bound: keep
         // the most recent unlisted sessions and drop the rest (oldest
@@ -3594,24 +3628,33 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.coldEmptyPartialStreak += 1;
         if (this.coldEmptyPartialStreak === MAX_COLD_EMPTY_PARTIAL_POLLS) {
           process.stderr.write(
-            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence — verify the daemon's workspaces are active and readable.\n`,
+            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence. ${this.coldEmptyCapCause()}\n`,
           );
         }
       } else {
         this.coldEmptyPartialStreak = 0;
+        this.coldEmptyFailurePolls = 0;
       }
       if (snapshot.partial) {
         this.partialSnapshotStreak += 1;
-        // A non-empty partial is the silent permanent case (a multi-page
-        // scan): surface a throttled hint naming the listed session count so
-        // the operator is not left with only a dead-letter alert hours later.
+        // A non-empty partial can be the silent permanent case (a sidecar,
+        // transcript or live list the daemon persistently cannot read, or a
+        // workspace without a runtime): surface a throttled hint naming the
+        // listed session count so the operator is not left with only a
+        // dead-letter alert hours later.
         if (
-          map.size > 0 &&
+          (snapshot.bindings.length > 0 || map.size > 0) &&
           (this.partialSnapshotStreak === 10 ||
             this.partialSnapshotStreak % 60 === 0)
         ) {
           process.stderr.write(
-            `[Channel:${this.name}] binding snapshot has been partial for ${this.partialSnapshotStreak} consecutive polls (${map.size} sessions listed): a multi-page scan — more active sessions than one page — is always partial, so unmatched PR events defer to the dead-letter horizon instead of the channel (issue events are unaffected). Verify the daemon's per-workspace session counts.\n`,
+            `[Channel:${this.name}] binding snapshot has been partial for ${this.partialSnapshotStreak} consecutive polls (${snapshot.bindings.length} sessions listed): the daemon could not read every PR sidecar, transcript or live session list, or a registered workspace has no runtime. ${
+              !this.boundSnapshotTrusted &&
+              map.size === 0 &&
+              this.coldEmptyPartialStreak < MAX_COLD_EMPTY_PARTIAL_POLLS
+                ? `The comment lane is still deferred (${this.coldEmptyPartialStreak}/${MAX_COLD_EMPTY_PARTIAL_POLLS} cold polls), so PR and issue events are both stalled.`
+                : 'Unmatched PR events defer to the dead-letter horizon instead of the channel (issue events are unaffected).'
+            } Check the daemon's stderr for the failing workspace, and its \`PR bindings scan\` lines for the session it could not read.\n`,
           );
         }
       } else {
@@ -3643,9 +3686,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // failing refresh stalled the lane indefinitely (R1-7).
         this.lastBindingsPartial = true;
         this.coldEmptyPartialStreak += 1;
+        this.coldEmptyFailurePolls += 1;
         if (this.coldEmptyPartialStreak === MAX_COLD_EMPTY_PARTIAL_POLLS) {
           process.stderr.write(
-            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence — verify the daemon's workspaces are active and readable.\n`,
+            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: ${
+              this.boundSnapshotSeen
+                ? 'opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence.'
+                : 'the comment lane stays closed until a snapshot succeeds; every notification, issue events included, remains stalled.'
+            } ${this.coldEmptyCapCause()}\n`,
           );
         }
         // Surface the stall distinctly and actionably, throttled so a
@@ -4194,7 +4242,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       }
     }
     // Prune only against a complete snapshot: a partial answer (workspace
-    // failure, non-active workspace or multi-page scan) must not destroy
+    // failure, unreadable sidecar or missing runtime) must not destroy
     // the edge-triggered memory of PRs it failed to list. Prune against the
     // full candidate set, not the capped watch set, so PRs rotating out of
     // the cap keep their baseline. Never delete an entry that still holds
