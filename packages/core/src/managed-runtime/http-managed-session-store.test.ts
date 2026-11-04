@@ -873,6 +873,184 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  // Boots a writer whose ordinary renewals after boot are processed by the
+  // Store but have their answers held until release(); with refuseRenewal
+  // the held answer is a 409 instead, and the request never reaches the
+  // Store. It records the leases the Store granted, counts acquires made
+  // after boot and, optionally, holds those acquires too.
+  async function bootWithHeldRenewalAnswer(options: {
+    holdAcquires: boolean;
+    refuseRenewal?: boolean;
+  }) {
+    const server = new FakeManagedSessionStore();
+    server.activationLeaseRenewal = true;
+    const observed = {
+      bootLeaseUntil: 0,
+      renewedLeaseUntil: 0,
+      refusedRenewals: 0,
+      acquiresAfterBoot: 0,
+    };
+    let booted = false;
+    const gates: { renewal?: Promise<void> } = {};
+    let releaseRenewal = () => {};
+    let releaseAcquire!: () => void;
+    const acquireGate = new Promise<void>((resolve) => {
+      releaseAcquire = resolve;
+    });
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      const url = requestUrl(input);
+      if (url.endsWith('/lifecycle:authorize')) return jsonResponse({});
+      if (url.endsWith('/writers:acquire') && booted) {
+        observed.acquiresAfterBoot++;
+        if (options.holdAcquires) await acquireGate;
+      }
+      const ordinaryRenewal =
+        gates.renewal !== undefined &&
+        url.endsWith('/writers:renew') &&
+        !JSON.parse(String(init?.body)).activation;
+      if (ordinaryRenewal && options.refuseRenewal) {
+        observed.refusedRenewals++;
+        await gates.renewal;
+        return jsonResponse(
+          {
+            error: {
+              code: 'managed_session_writer_conflict',
+              message: 'The writer lease has lapsed.',
+            },
+          },
+          409,
+        );
+      }
+      const response = await server.fetch(input, init);
+      if (url.endsWith('/writers:acquire') && !booted)
+        observed.bootLeaseUntil = (await response.clone().json()).leaseUntil;
+      if (ordinaryRenewal) {
+        observed.renewedLeaseUntil = (await response.clone().json()).leaseUntil;
+        await gates.renewal;
+      }
+      return response;
+    });
+    const { stores, authority } = await bootOriginalCsiAuthority(
+      server,
+      fetchFn,
+    );
+    booted = true;
+    gates.renewal = new Promise<void>((resolve) => {
+      releaseRenewal = resolve;
+    });
+    // The client is a plain field of the journal store; spying on it is the
+    // only way to see that the lapse was handled while the answer was held.
+    const client = (
+      stores.journalStore as unknown as {
+        client: { reacquireWriter(): Promise<void> };
+      }
+    ).client;
+    const reacquire = vi.spyOn(client, 'reacquireWriter');
+    return {
+      server,
+      stores,
+      authority,
+      observed,
+      reacquire,
+      release: () => releaseRenewal(),
+      releaseAcquire: () => releaseAcquire(),
+    };
+  }
+
+  // HostedShellLifecycleRecoveryIT spring-kill: an ordinary renewal was in
+  // flight when the grant it was renewing lapsed. The activation renewal saw
+  // the lapsed grant and reacquired the writer after that renewal answered,
+  // dropping the fresh grant; while the acquire was held by the Store, every
+  // lifecycle call failed locally with "writer is not active".
+  it('keeps the grant an in-flight renewal refreshed instead of reacquiring the writer', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({ holdAcquires: true });
+    let renewal: Promise<unknown> | undefined;
+    try {
+      // The scheduled ordinary renewal lands on the Store; its answer is held.
+      await vi.advanceTimersByTimeAsync(500);
+      expect(rig.server.renewCount).toBe(1);
+      // The grant the client holds lapses while that answer is in flight,
+      // but the lease the Store just renewed has not.
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      expect(rig.observed.renewedLeaseUntil).toBeGreaterThan(Date.now());
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rig.reacquire).toHaveBeenCalledTimes(1);
+      rig.release();
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(rig.stores.authorizeLifecycle()).resolves.toBeUndefined();
+      rig.releaseAcquire();
+      await renewal;
+      expect(rig.observed.acquiresAfterBoot).toBe(0);
+      expect(rig.authority.currentActivation!.renewalSeq).toBe(1);
+    } finally {
+      rig.release();
+      rig.releaseAcquire();
+      await renewal?.catch(() => undefined);
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('still reacquires when the renewal it waited for answers with a lease already lapsed', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({ holdAcquires: false });
+    let renewal: Promise<unknown> | undefined;
+    try {
+      await vi.advanceTimersByTimeAsync(500);
+      expect(rig.server.renewCount).toBe(1);
+      // By the time the held answer arrives, the lease the Store granted in
+      // it has lapsed too (a lease ending now counts as lapsed).
+      vi.setSystemTime(rig.observed.renewedLeaseUntil);
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rig.reacquire).toHaveBeenCalledTimes(1);
+      rig.release();
+      await renewal;
+      expect(rig.observed.acquiresAfterBoot).toBe(1);
+      expect(rig.authority.currentActivation!.renewalSeq).toBe(1);
+    } finally {
+      rig.release();
+      await renewal?.catch(() => undefined);
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('still reacquires after a refused renewal when the clock steps back during it', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({
+      holdAcquires: false,
+      refuseRenewal: true,
+    });
+    let renewal: Promise<unknown> | undefined;
+    try {
+      // The scheduled ordinary renewal is on its way to a refusal.
+      await vi.advanceTimersByTimeAsync(500);
+      expect(rig.observed.refusedRenewals).toBe(1);
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rig.reacquire).toHaveBeenCalledTimes(1);
+      // A wall-clock step back makes the lapsed grant look live again; the
+      // refused renewal did not replace it, so it is still reacquired.
+      vi.setSystemTime(rig.observed.bootLeaseUntil - 1000);
+      rig.release();
+      await renewal;
+      expect(rig.observed.acquiresAfterBoot).toBe(1);
+      expect(rig.authority.currentActivation!.renewalSeq).toBe(1);
+    } finally {
+      rig.release();
+      await renewal?.catch(() => undefined);
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it('retries the frozen ownership release after a lost acknowledgement without reacquiring', async () => {
     const server = new FakeManagedSessionStore();
     const attempts: Array<Record<string, unknown>> = [];
