@@ -512,6 +512,7 @@ The suite runs in the integration job. The nightly E2E run, and one started by h
   - a tool-result request carries the recall and the queued loop reminder and runs the client's size-only microcompaction, the managed memory tasks are the client's, skill review included, and the prompt counts toward commit attribution;
   - every compaction shows the compaction notice, also one inside a send;
   - from PR 2b, a tool batch is scheduled as one unit, as in the TUI: its approvals are asked for before any of its calls runs, and its concurrency-safe calls run concurrently, so their updates interleave;
+  - a call that plan mode blocks fails with the scheduler's notice, `Tool blocked by plan mode: …`, which the model also gets on the other surfaces, instead of ACP's `Plan mode is active. …`; both stop the call before it runs and ask for no approval;
   - the client's per-turn tool-call cap stops the response as it streams, so that request ends interrupted and reports no usage; the call past the cap is still shown as skipped;
   - a cancelled call's result reads `[Operation Cancelled] Reason: …`, and the other calls of a batch whose approval was declined are cancelled instead of skipped with ACP's permission-cancel message;
   - ACP's parameter-error and partial-edit stops take effect after the batch, so its other calls still run; a repeated provider call id ends the turn without recording skipped results;
@@ -531,7 +532,7 @@ The suite runs in the integration job. The nightly E2E run, and one started by h
   - a cron turn cancelled between rounds keeps the results of its last tool batch in history, as a prompt does, and a notification turn whose response is retried shows only the retried text;
   - a cron turn cancelled after its echo and before its first request keeps its prompt in history and in the record, as a cron turn cancelled while its request is going out does today;
 
-  The ACP parity suite covers the common cases unchanged and asserts the date reminder, UserPromptSubmit on tool results, cancelling while that hook runs, and that a batch's approvals come before its calls run.
+  The ACP parity suite covers the common cases unchanged and asserts the date reminder, UserPromptSubmit on tool results, cancelling while that hook runs, that a batch's approvals come before its calls run, and the plan-mode notice.
 
 - Later surfaces bring their own fixes: #15324 (ACP), #15326 (OpenTUI), #14114 and #12209 (ACP).
 
