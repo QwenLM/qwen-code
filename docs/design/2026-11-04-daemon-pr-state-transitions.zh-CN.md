@@ -48,6 +48,8 @@ daemon 对每个会话绑定的 PR 状态跟踪了两遍，用两套凭据、两
 
 ```ts
 watch?: {
+  /** 本快照的观察时间（`gh pr view` 的时间）；最新的兄弟快照是检测基线。 */
+  observedAt?: string;
   headSha?: string;
   checks?: 'passing' | 'failing' | 'pending' | 'none';
   mergeable?: 'mergeable' | 'conflicting';
@@ -75,14 +77,14 @@ watch?: {
 
 ### 4. 投递
 
-- **目标。** 整个 daemon 范围内每个 PR 只有一个收件会话，绝不是每个 workspace 一个。观察仍按 workspace 进行（每次扫描只 view 本 workspace 的 open 绑定 PR），但扫描检测到转换时，在所有受信 workspace 中绑定该 PR 的全部合格会话里选收件者——即 `GET /sessions/pr-bindings` 背后的进程级 sidecar 扫描——取最近活跃的那个（transcript mtime，再以 bridge 的 live 活动修正），这正是 channel 今天对整个绑定快照应用的规则，然后经该会话所属的 runtime 派发。随后把新快照与该转换的已触发记录写进该 PR 在所有 workspace 的每个 sidecar，各走各自的变更队列与锁；兄弟 workspace 之后的扫描因此观察不到转换，所以同一仓库注册了两个 workspace、各有一个会话跟随同一个 PR 时，只投递一次而非两次。归档会话只刷新 `state`，绝不投递。channel 自有会话（`sourceType: 'channel'`）与机器自有的隐藏目录会话永远不是目标。
+- **目标。** 整个 daemon 范围内每个 PR 只有一个收件会话，绝不是每个 workspace 一个。观察仍按 workspace 进行（每次扫描只 view 本 workspace 的 open 绑定 PR），但扫描检测到转换时，在所有受信 workspace 中绑定该 PR 的全部合格会话里选收件者——即 `GET /sessions/pr-bindings` 背后的进程级 sidecar 扫描——取最近活跃的那个（transcript mtime，再以 bridge 的 live 活动修正），这正是 channel 今天对整个绑定快照应用的规则，然后经该会话所属的 runtime 派发。随后把新快照与该转换的已触发记录写进该 PR 在所有 workspace 的每个 sidecar，各走各自的变更队列与锁——先写收件会话的 sidecar（快照加 `pending`），再写兄弟。这些是分开的文件写入，崩溃可能让某个兄弟落后；因此检测绝不只拿新鲜 view 与本次扫描自己的 sidecar 比较。**基线规则：**比较之前，扫描通过同一进程级扫描读取该 PR 在每个绑定 sidecar 中的 `watch` 块，取 `observedAt` 最新的作为基线。收件者已持有 H1 而某个兄弟仍停在 H0 时，该兄弟静默采用 H1——没有转换、没有 key——H0→H1 这一事件唯一的 key 就是收件者 `pending` 里已有的那条，排空时只投递一次。因此同一仓库注册了两个 workspace、各有一个会话跟随同一个 PR 时，无论中间是否崩溃，都只投递一次而非两次。归档会话只刷新 `state`，绝不投递。channel 自有会话（`sourceType: 'channel'`）与机器自有的隐藏目录会话永远不是目标。
 - **机制。** 刷新在进程内调用 daemon 的 prompt 准入——`POST /session/:id/prompt` 背后的代码——并带上 daemon 来源标记（`qwen.daemon.prStateEvent`），准入把它当作 channel 绑定中继那样分类：不是交互式用户 prompt（不做循环检测拒绝，不对注入文本做 PR 绑定回填，显示投影为"PR 事件"），以转换 key 作为 `idempotencyKey`，因此 daemon 生命周期内的重试会去重到原始准入。
 - **休眠会话。** 已绑定但不在线的会话通过 channel 访问器所用的同一恢复路径恢复后再投递；`wakeDormant` 默认开启，这样 daemon 重启不会丢事件。无法恢复的会话（记录已删除、已归档、worktree 被取代）丢弃该转换并记一行日志；任何地方都不会公开发布。
 - **prompt 文本。** 沿用 channel 绑定 prompt 的形状：事件头、不可信事件数据提示、PR 身份（仓库、编号、标题、URL）、一行 `Event:` 与摘要（`ci_failure` 从 rollup 中列出最多五个失败的 check）。回复留在会话内。
 
 ### 5. 持久性
 
-检测结果与新快照在同一次 sidecar 写入中持久化，转换追加到收件会话的 `pending`（该 PR 的其余 sidecar 只收到快照与已触发记录）；投递随后按最旧优先排空 `pending`，每条在准入后清除。三个崩溃窗口的处理：写入前崩溃，下次扫描重新检测（无丢失，也没投递过任何东西）；写入后、投递前崩溃，下次扫描先排空 `pending`；投递后、清除前崩溃，下次扫描重新投递，准入环在 daemon 生命周期内去重（跨重启是 at-least-once，与 channel 的取舍相同）。`pending` 每个 PR 上限 16 条；溢出时丢弃最旧的并记日志。
+检测结果与新快照在同一次 sidecar 写入中持久化，转换追加到收件会话的 `pending`（该 PR 的其余 sidecar 只收到快照与已触发记录）；投递随后按最旧优先排空 `pending`，每条在准入后清除。四个崩溃窗口的处理：收件者写入前崩溃，下次扫描重新检测（无丢失，也没投递过任何东西）；收件者写入后、兄弟写入前崩溃，兄弟按基线规则追平而不检测任何东西，下次扫描把 `pending` 排空一次；全部写入后、投递前崩溃，下次扫描先排空 `pending`；投递后、清除前崩溃，下次扫描重新投递，准入环在 daemon 生命周期内去重（跨重启是 at-least-once，与 channel 的取舍相同）。`pending` 每个 PR 上限 16 条；溢出时丢弃最旧的并记日志。
 
 ### 6. 配置
 
@@ -125,7 +127,7 @@ GitHub channel 的 `deliverToBoundSessions` 不变。`prWatchEvents`、监视通
 
 ## 验证计划
 
-- 单元：view 映射（`headRefOid`、`mergeable` 状态、rollup）；转换规则，包括 force-push 回访下每个 head 一次的 `ci_failure`（`A failing → B failing → A failing` 触发两次而非三次）、边沿触发的冲突、重开 → 关闭；多个绑定者之间的选择，含分属不同 workspace 的绑定者；模拟崩溃下的 pending 持久化与排空；配置解析。
+- 单元：view 映射（`headRefOid`、`mergeable` 状态、rollup）；转换规则，包括 force-push 回访下每个 head 一次的 `ci_failure`（`A failing → B failing → A failing` 触发两次而非三次）、边沿触发的冲突、重开 → 关闭；多个绑定者之间的选择，含分属不同 workspace 的绑定者；模拟崩溃下的 pending 持久化与排空，包括收件者 sidecar 写入与兄弟写入之间的崩溃（兄弟采用更新的基线、不检测任何东西，pending 中的转换以原始 key 恰好准入一次）；配置解析。
 - 刷新测试（现有带假 `fetchPullRequests` 的测试框架）：每个转换投递一次、休眠会话被恢复、归档与 channel 自有会话被跳过、上限与旋转。
 - E2E（daemon + 桩 `gh` 二进制）：在会话中绑定 PR，把桩的 rollup 翻成失败，下一次扫描后在该会话观察到恰好一条注入 prompt，daemon 重启后没有新的注入。
 
@@ -135,7 +137,7 @@ GitHub channel 的 `deliverToBoundSessions` 不变。`prWatchEvents`、监视通
 2. 检测与投递之间的 daemon 重启投递该转换一次；投递之后的重启最多重新投递一次。
 3. GitHub channel 不再发出任何 PR 状态 API 调用；带 `prWatchEvents` 的配置仍能连接，只记一条点名 `sessionPrWatch` 的弃用告警且不跑监视通道；PR B 之后的第一个 minor 版本起在 `connect()` 以同一条信息拒绝。
 4. 未设置该项时，刷新的行为与 API 调用量不变。
-5. 同一仓库的两个受信 workspace 各有一个会话绑定同一个 PR 时，每个转换只投递一次，给其中最近活跃的会话；force-push 回到一个 CI 失败已触发过的 head 时，只要该 head 仍在该 PR 的 16 个 head 历史内，`ci_failure` 不再触发。
+5. 同一仓库的两个受信 workspace 各有一个会话绑定同一个 PR 时，每个转换只投递一次，给其中最近活跃的会话，daemon 在收件者 sidecar 写入与兄弟写入之间重启时亦然；force-push 回到一个 CI 失败已触发过的 head 时，只要该 head 仍在该 PR 的 16 个 head 历史内，`ci_failure` 不再触发。
 
 ## 开放问题
 
