@@ -1460,12 +1460,12 @@ describe('Server Config (config.ts)', () => {
       [
         'the feature is on but the folder is undecided',
         { folderTrust: true },
-        true,
+        false,
       ],
       [
         'the folder is explicitly untrusted',
         { folderTrust: true, trustedFolder: false },
-        true,
+        false,
       ],
       ['the trust feature is off (default)', {}, false],
       [
@@ -1473,8 +1473,13 @@ describe('Server Config (config.ts)', () => {
         { trustedFolder: true },
         false,
       ],
+      [
+        'the feature is on and the folder is explicitly trusted',
+        { folderTrust: true, trustedFolder: true },
+        true,
+      ],
     ] as Array<[string, Partial<ConfigParameters>, boolean]>)(
-      'gates non-interactive project hooks when %s',
+      'applies the same explicit-trust gate to non-interactive hooks when %s',
       (_label, trust, loaded) => {
         const config = makeConfig({
           interactive: false,
