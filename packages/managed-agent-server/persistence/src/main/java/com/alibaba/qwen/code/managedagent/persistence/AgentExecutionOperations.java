@@ -83,7 +83,6 @@ final class AgentExecutionOperations {
     OperationAdmission beginContextCompression(String tenantId, String sessionId,
             String actorId, String actorDigest, String key, String digest,
             long expectedCompactionRevision, boolean supported) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         ContextBinding binding = session.workspace();
         if (binding == null) {
@@ -425,7 +424,6 @@ final class AgentExecutionOperations {
     CwdChangeOutcome completeCwdChangeOperation(String tenantId,
             String sessionId, String operationId, String owner,
             long claimGeneration) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         OperationRecord operation = lifecycleOperations.findSessionOperation(tenantId, sessionId, operationId, true)
                 .orElseThrow(() -> new IllegalStateException("Session operation is unavailable"));
@@ -573,7 +571,6 @@ final class AgentExecutionOperations {
         // a lost 202 survives capability and state changes; only a new
         // request rechecks the Session state, the task's cancel action
         // and the one-open-operation rule, atomically with its insert.
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         Optional<OperationRecord> existing = lifecycleOperations.replayOperation(tenantId, sessionId,
                 OperationKind.TASK_CANCEL, actorDigest, idempotencyKey);
@@ -858,7 +855,6 @@ final class AgentExecutionOperations {
             long retryAt) {
         String tenantId = parked.tenantId();
         String sessionId = parked.sessionId();
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         // Only a still-parked row: the claim's own late reply or a later
         // title may have settled it since the evidence was read.

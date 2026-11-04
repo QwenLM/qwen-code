@@ -207,7 +207,6 @@ final class AgentSessionPolicies {
     }
 
     SessionRecord requireMcpManagement(String tenantId, String actorId, String sessionId, String operationId) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null || "DELETED".equals(session.status())) {
             throw new ManagedAgentException(404, "session_not_found", "The Session was not found.");
@@ -251,7 +250,6 @@ final class AgentSessionPolicies {
     }
 
     SessionRecord requireExtensionManagement(String tenantId, String actorId, String sessionId, String operationId, boolean mutation) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null || "DELETED".equals(session.status())) {
             throw new ManagedAgentException(404, "session_not_found", "The Session was not found.");
@@ -516,7 +514,6 @@ final class AgentSessionPolicies {
     WebShellModelChangeResult changeSessionModel(String tenantId, String actorId,
             String sessionId, String key, String digest, String modelId, long expectedRevision,
             boolean supported) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
             throw new ManagedAgentException(400, "unsupported_feature",
@@ -591,7 +588,6 @@ final class AgentSessionPolicies {
             String sessionId, String key, String digest, String mode, long expectedRevision,
             boolean supported, boolean agentDefinitionSupported, Boolean requestedPlanMode, boolean planModeSupported,
             boolean liveSupported, Map<String, List<String>> requestedRules, boolean rulesSupported, boolean autoSupported) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null) {
             throw new ManagedAgentException(400, "unsupported_feature",

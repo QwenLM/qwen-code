@@ -38,7 +38,7 @@ Reference: the MySQL chapter, printed pages 32–35, in the
   generations, sizes, and ordinals. Validate signedness for every integer type on
   MySQL. H2 ignores unsigned storage ranges, so native MySQL evidence remains
   required. Retain the nonnegative CHECK constraints for H2. MySQL and MariaDB
-  require `STRICT_TRANS_TABLES` or `STRICT_ALL_TABLES` in global and session
+  require `STRICT_TRANS_TABLES` or `STRICT_ALL_TABLES` in each connection's session
   `sql_mode` to reject ordinary out-of-range unsigned writes instead of clamping
   them; `IGNORE` writes can downgrade these errors to warnings.
 - Name ordinary indexes with `idx_` and unique constraints with `uk_`. MySQL
@@ -63,9 +63,16 @@ must reject missing row IDs, incorrect primary or business keys, missing
 auto-increment behavior, changed integer types or signedness, and changed index
 prefixes. It must continue rejecting legacy, partial, and foreign catalogs.
 Shared Server/Broker admission and validation refuse non-strict MySQL or MariaDB
-before schema writes. The database defaults and every application connection
-must retain strict mode during operation; the startup check does not enforce
-later administrative or connection-mode changes, and does not change SQL modes.
+sessions before schema writes. They accept non-strict global defaults because
+the session mode controls writes. The embedded default Managed Agent pool adds
+`STRICT_TRANS_TABLES` to every new physical MySQL or MariaDB connection, including
+replacement connections, while preserving other session modes. This removes the
+need for an embedded application to change a shared instance's global settings.
+Standalone, maintenance and custom DataSource callers remain responsible for
+initializing every connection with strict mode. Connections must retain it
+throughout operation; a startup check does not police later mode changes. No
+global SQL settings, schema objects or database versions change. MariaDB's
+existing global and session CHECK-enforcement requirements remain in force.
 
 ## Verification and acceptance
 
@@ -83,9 +90,15 @@ later administrative or connection-mode changes, and does not change SQL modes.
   write the renamed columns.
 - Check snapshot/projection contracts, schema drift rejection, and relevant
   queue, publication, scheduling, Workspace and Runtime consumers.
-- Reject non-strict global or session modes before initialization or validation,
-  and verify ordinary negative unsigned writes fail under both supported strict modes on
-  MySQL without changing the server's global settings in the test.
+- Reject non-strict session modes before initialization or validation, without
+  querying global SQL defaults. Verify ordinary negative unsigned writes fail
+  under both supported strict modes on MySQL.
+- On a disposable MySQL 8.4 instance started with an empty global mode, verify
+  simultaneous pooled connections and replacements after physical connection
+  termination are strict, preserve other modes and leave global settings
+  unchanged. Disable Connector/J automatic truncation handling in this test so
+  only the pool initialization can supply strict mode. Verify H2 embedding and
+  existing MariaDB CHECK-enforcement rejection remain intact.
 - Run focused local Maven checks within the module's shared validation budget;
   report full-suite and native-process gaps for CI.
 

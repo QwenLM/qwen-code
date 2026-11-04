@@ -328,7 +328,7 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
   `SessionCreationCommand`；pin 测试常绿且棘轮生效。
 - `ManagedAgentStore` 不再有公开 setter/configure 装配；两个目标上帝类
   完成分解（P1 完成的标志：`persistence` 与 `runtime-broker` 中没有任何类
-  超过约定的体量棘轮）。
+  超过约定的体量棘轮，由 `ClassSizeRatchetTest` 强制）。
 - OpenAPI 零 diff、schema 零 diff，ArchUnit/Checkstyle/SpotBugs 门禁全绿，
   被接受修订上 CI 完整 profile 全绿。
 - README 与架构导览以双语存在并互链（P2）。
@@ -340,6 +340,8 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
 - 已解决（2026-10-31）：P0 附带具名构造 builder，全部迁移调用点均已
   使用；重载收敛与 builder 在同一改动落地。角色接口拆分（P0 第 3 步）
   作为独立切片跟进。
-- 类体量棘轮门禁是在 P1 之前引入（阻止继续长大），还是在拆分落地之后
-  再引入。
+- 已解决（2026-11-04）：类体量棘轮门禁在拆分落地之后引入。
+  `ClassSizeRatchetTest` 将 `persistence`/`runtime-broker` 当前大类按只降不升
+  钉住，并设一个随剩余大类被分解而下调的全局上限；见
+  [类体量棘轮设计](2026-11-04-managed-agent-class-size-ratchet.zh-CN.md)。
 - P1 切片与同批类上进行中的功能工作如何排序。
