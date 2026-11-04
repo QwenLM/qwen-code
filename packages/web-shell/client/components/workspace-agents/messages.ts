@@ -255,6 +255,11 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
     `This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload${v?.error ? `: ${v.error}` : '.'}`,
   'collab.runtime.notSavedThere': (v) =>
     `That computer connected, but could not save the connection, so it will not reconnect after a restart or a workspace reload${v?.error ? `: ${v.error}` : '.'}`,
+  'collab.runtime.joinTimedOut': (v) =>
+    `No answer from this computer’s daemon${v?.error ? ` (${v.error})` : ''}. It may still be joining: check on the coordinator before trying again, with a new join token if it did not join.`,
+  'collab.runtime.joinFailed': (v) => `This computer’s join: ${v?.error ?? ''}`,
+  'collab.runtime.joinNeedsHttp':
+    'This join link uses plain HTTP. Tick “Allow plain HTTP” if this network is trusted, or use an HTTPS link.',
   'collab.runtime.joinCli': 'Or from a terminal on this computer:',
 };
 
@@ -482,5 +487,10 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
     `这台电脑已加入，但没能保存这次连接，重启或重新加载工作区后不会自动重连${v?.error ? `：${v.error}` : '。'}`,
   'collab.runtime.notSavedThere': (v) =>
     `那台电脑已连接，但没能保存这次连接，重启或重新加载工作区后不会自动重连${v?.error ? `：${v.error}` : '。'}`,
+  'collab.runtime.joinTimedOut': (v) =>
+    `这台电脑的守护进程没有应答${v?.error ? `（${v.error}）` : ''}，它可能仍在加入：请先在协调方确认；如果没有加入，再用新的加入令牌重试。`,
+  'collab.runtime.joinFailed': (v) => `这台电脑的加入请求：${v?.error ?? ''}`,
+  'collab.runtime.joinNeedsHttp':
+    '这个加入链接使用 HTTP 明文。如果网络可信，请勾选“允许 HTTP 明文”；否则请使用 HTTPS 链接。',
   'collab.runtime.joinCli': '也可以在这台电脑的终端里运行：',
 };

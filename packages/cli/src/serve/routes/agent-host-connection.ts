@@ -56,6 +56,12 @@ function isCleartext(value: string): boolean {
 
 type RuntimeFor = (req: Request, res: Response) => WorkspaceRuntime | undefined;
 
+/** The saved connections were held by, or lost to, another writer. */
+function isStoreBusy(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === 'ELOCKED' || code === 'ECOMPROMISED';
+}
+
 function currentCheck(runtimeFor: RuntimeFor) {
   return (req: Request, res: Response, runtime: WorkspaceRuntime) => {
     const current = runtimeFor(req, res);
@@ -225,19 +231,28 @@ export function registerAgentHostRuntimeRoutes(
         async (error: unknown) => {
           // A held lock clears soon, and another writer may be about to
           // change the file: answered as busy below, for the caller to
-          // retry. Past that, only stop a connection we can confirm is
+          // retry. So does a lock lost to another writer before this one
+          // wrote. Past that, only stop a connection we can confirm is
           // forgotten: a readable file with no record (joined at boot, or a
           // join that was not saved) has nothing for the restore loop to
           // bring back, so stop it anyway. An UNREADABLE file is not "no
           // record" — the restore loop would reconnect and undo the
-          // disconnect — so refuse rather than stop.
-          if ((error as NodeJS.ErrnoException).code === 'ELOCKED') throw error;
-          const lookup = await findAgentHostConnectionChecked(target);
+          // disconnect — so refuse rather than stop. So is a file a newer
+          // version wrote, which that version may reconnect from; retrying
+          // cannot help, but stopping this daemon ends the connection, since
+          // this version does not reconnect from that file.
+          if (isStoreBusy(error)) throw error;
+          const reason = error instanceof Error ? error.message : String(error);
+          const newer =
+            (error as NodeJS.ErrnoException).code === 'ENEWERSCHEMA';
+          const lookup = newer
+            ? { kind: 'found' as const }
+            : await findAgentHostConnectionChecked(target);
           if (lookup.kind !== 'absent') {
             throw new Error(
               lookup.kind === 'unreadable'
                 ? 'Could not read the saved Agent Host connections, so nothing was stopped. Retry the request.'
-                : `Could not forget the saved connection, so nothing was stopped: ${error instanceof Error ? error.message : String(error)}`,
+                : `Could not forget the saved connection, so nothing was stopped: ${reason}${newer ? ' This version does not reconnect from that file, so the connection ends when this daemon stops.' : ''}`,
             );
           }
           return false;
@@ -246,7 +261,7 @@ export function registerAgentHostRuntimeRoutes(
       const stopped = stopAgentHostConnection(target);
       res.json({ disconnected: stopped || removed });
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ELOCKED') {
+      if (isStoreBusy(error)) {
         res.status(503).json({
           error:
             'The saved Agent Host connections are busy, so nothing was stopped. Retry the request.',
@@ -296,7 +311,11 @@ export function registerAgentHostRemoteConnectRoute(
           'Remote server credential and remote workspace are required.',
         );
       const endpoint = `${remote}/workspaces/${encodeURIComponent(input.remoteCwd)}/agent/hosts`;
-      const request = async (path: string, body?: unknown) => {
+      const request = async (
+        path: string,
+        body?: unknown,
+        timeoutMs = 20_000,
+      ) => {
         const response = await fetch(`${endpoint}${path}`, {
           method: body ? 'POST' : 'GET',
           headers: {
@@ -305,7 +324,7 @@ export function registerAgentHostRemoteConnectRoute(
           },
           ...(body ? { body: JSON.stringify(body) } : {}),
           redirect: 'error',
-          signal: AbortSignal.timeout(20000),
+          signal: AbortSignal.timeout(timeoutMs),
         });
         if (response.status === 404)
           throw new Error(
@@ -345,12 +364,20 @@ export function registerAgentHostRemoteConnectRoute(
         );
       const enrollment = await issueAgentHostEnrollment(runtime.workspaceCwd);
       if (!isCurrent(req, res, runtime)) return;
-      const result = await request('/connect', {
-        serverUrl: callback,
-        workspaceId: runtime.workspaceId,
-        enrollmentToken: enrollment.token,
-        allowHttp: input.allowHttp === true,
-      });
+      // The remote probes its programs, enrolls and sends up to three
+      // heartbeats (up to 10 s each), saves the connection, which can wait
+      // about 13.5 s for its lock, and probes its programs again. Giving up
+      // sooner would report a join that spent the token as failed.
+      const result = await request(
+        '/connect',
+        {
+          serverUrl: callback,
+          workspaceId: runtime.workspaceId,
+          enrollmentToken: enrollment.token,
+          allowHttp: input.allowHttp === true,
+        },
+        90_000,
+      );
       if (!isCurrent(req, res, runtime)) return;
       if (!result.connected)
         throw new Error('The remote server did not confirm the connection.');

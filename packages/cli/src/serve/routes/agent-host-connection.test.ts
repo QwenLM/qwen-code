@@ -379,6 +379,46 @@ it('passes on, unchanged, a remote join that could not be saved', async () => {
   });
 });
 
+it('gives the remote join longer than the service probe, so a spent token is not reported as failed', async () => {
+  // The remote's join is program probes, enrollment and heartbeats (up to
+  // 10 s each) and a save that can wait about 13.5 s for its lock.
+  const runtime = selected();
+  const timeout = vi.spyOn(AbortSignal, 'timeout');
+  const fetch = vi.fn(
+    async () =>
+      new Response(
+        JSON.stringify({ protocol: 2, providers: ['qwen'], connected: true }),
+      ),
+  );
+  vi.stubGlobal('fetch', fetch);
+  issueEnrollment.mockResolvedValue({ token: 'enrollment-token' });
+  const app = express();
+  app.use(express.json());
+  registerAgentHostRemoteConnectRoute(
+    app,
+    '/agent',
+    () => runtime,
+    () => (_req, _res, next) => next(),
+  );
+
+  try {
+    const response = await request(app)
+      .post('/agent/hosts/remote-connect')
+      .send({
+        remoteUrl: 'https://worker.example',
+        serverUrl: 'https://coordinator.example',
+        remoteCwd: '/remote',
+        remoteToken: 'remote-token',
+      });
+
+    expect(response.status).toBe(200);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(timeout.mock.calls.map(([ms]) => ms)).toEqual([20_000, 90_000]);
+  } finally {
+    timeout.mockRestore();
+  }
+});
+
 it('disconnects and forgets a saved connection', async () => {
   stopConnection.mockReturnValue(false);
   removeConnection.mockResolvedValue(true);
@@ -418,6 +458,47 @@ it('answers busy, and stops nothing, when the saved connections are locked', asy
   expect(response.body).toEqual({
     error:
       'The saved Agent Host connections are busy, so nothing was stopped. Retry the request.',
+  });
+  expect(stopConnection).not.toHaveBeenCalled();
+  expect(findConnectionChecked).not.toHaveBeenCalled();
+});
+
+it('answers busy, and stops nothing, when another writer took the lock over', async () => {
+  // The removal was refused before it wrote, so a retry can go through.
+  removeConnection.mockRejectedValue(
+    Object.assign(new Error('Held the lock too long'), {
+      code: 'ECOMPROMISED',
+    }),
+  );
+
+  const response = await disconnect();
+
+  expect(response.status).toBe(503);
+  expect(response.body).toEqual({
+    error:
+      'The saved Agent Host connections are busy, so nothing was stopped. Retry the request.',
+  });
+  expect(stopConnection).not.toHaveBeenCalled();
+  expect(findConnectionChecked).not.toHaveBeenCalled();
+});
+
+it('says why, and stops nothing, when a newer version wrote the saved connections', async () => {
+  // Retrying cannot help, so the reason is passed on instead of "Retry".
+  removeConnection.mockRejectedValue(
+    Object.assign(
+      new Error(
+        'connections.json was written by a newer version of Qwen Code (schema 2); not replacing it.',
+      ),
+      { code: 'ENEWERSCHEMA' },
+    ),
+  );
+
+  const response = await disconnect();
+
+  expect(response.status).toBe(400);
+  expect(response.body).toEqual({
+    error:
+      'Could not forget the saved connection, so nothing was stopped: connections.json was written by a newer version of Qwen Code (schema 2); not replacing it. This version does not reconnect from that file, so the connection ends when this daemon stops.',
   });
   expect(stopConnection).not.toHaveBeenCalled();
   expect(findConnectionChecked).not.toHaveBeenCalled();

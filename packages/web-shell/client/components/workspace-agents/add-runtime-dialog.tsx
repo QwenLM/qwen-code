@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { CheckCircle2, CopyIcon, LoaderCircle } from 'lucide-react';
+import { isDaemonUnavailableError } from '../../daemon/availability';
 import { useI18n } from '../../i18n';
 import { programLabel, runtimePrograms } from './agents-view-logic';
 import { Button } from '../ui/button';
@@ -135,6 +136,20 @@ function onlineIds(runtimes: readonly RuntimeSummary[]): Set<string> {
 
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 
+/**
+ * Whether this computer's daemon refuses a coordinator address unless HTTP
+ * is allowed, as its `hosts/connect` route checks it: plain HTTP off
+ * loopback, where any 127.x address counts as loopback.
+ */
+function refusesPlainHttp(serverUrl: string): boolean {
+  const { protocol, hostname } = new URL(serverUrl);
+  return (
+    protocol === 'http:' &&
+    !LOOPBACK.has(hostname) &&
+    !/^127(\.\d{1,3}){3}$/.test(hostname)
+  );
+}
+
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
@@ -222,22 +237,43 @@ export function joinOutcome(answer: unknown): { saveError?: string } {
 export function connectExistingWith(
   run: (action: () => Promise<unknown>) => Promise<boolean>,
   connect: (input: ConnectExistingInput) => Promise<unknown>,
+  onBusy?: (busy: boolean) => void,
 ): (input: ConnectExistingInput) => Promise<RuntimeJoinOutcome> {
   return async (input) => {
     let answer: unknown;
-    const ok = await run(async () => {
-      answer = await connect(input);
-      return answer;
-    });
-    return ok && joinOutcome(answer);
+    // Like a join, see `joinCoordinatorWith`: its result, and the remote's
+    // notice, would be lost with the dialog.
+    onBusy?.(true);
+    try {
+      const ok = await run(async () => {
+        answer = await connect(input);
+        return answer;
+      });
+      return ok && joinOutcome(answer);
+    } finally {
+      onBusy?.(false);
+    }
   };
 }
 
 /** The dialog's "Join a coordinator" callback; a failed join throws. */
 export function joinCoordinatorWith(
   join: (input: JoinCoordinatorInput) => Promise<unknown>,
+  onBusy?: (busy: boolean) => void,
 ): (input: JoinCoordinatorInput) => Promise<RuntimeJoinOutcome> {
-  return async (input) => joinOutcome(await join(input));
+  return async (input) => {
+    // The page waits while it runs: leaving it (New agent, Role templates,
+    // Mention in chat, creating an agent on a runtime) would unmount the
+    // dialog and drop the result. Leaving the Agents page altogether still
+    // does, and so does leaving it after a result that landed while the
+    // dialog was closed; the daemon logs a join that went through.
+    onBusy?.(true);
+    try {
+      return joinOutcome(await join(input));
+    } finally {
+      onBusy?.(false);
+    }
+  };
 }
 
 /**
@@ -295,14 +331,41 @@ export function AddRuntimeDialog({
   const [watch, setWatch] = useState<{
     at: number;
     known: ReadonlySet<string>;
+    /** Set when the address-and-token form started this wait. */
+    fromExisting?: true;
   }>();
-  const [error, setError] = useState<string>();
-  // Why the computer that joined could not save the connection, once a join
-  // went through without it: this one ('here') or the remote ('there').
-  const [notSaved, setNotSaved] = useState<{
-    where: 'here' | 'there';
-    error: string;
-  }>();
+  // What went wrong, kept with the form whose attempt it was (a join command
+  // or a join), and shown only while that form is on screen. `joinSent`: the
+  // join's came back from a join that was sent, not from checking the form.
+  const [errors, setErrors] = useState<{
+    command?: string;
+    join?: string;
+    joinSent?: boolean;
+  }>({});
+  const setError = (
+    where: 'command' | 'join',
+    message?: string,
+    sent = false,
+  ) =>
+    setErrors((current) => ({
+      ...current,
+      [where]: message,
+      ...(where === 'join' ? { joinSent: sent } : {}),
+    }));
+  // Why a computer that joined could not save the connection, one per
+  // machine: this one (`here`, from the join form, shown on its joined
+  // result) and the remote (`there`, from the address-and-token form, shown
+  // under that form, and on the connected result of the wait that form
+  // started). An attempt replaces only its own, and a close drops only what
+  // was on screen.
+  const [notSaved, setNotSaved] = useState<{ here?: string; there?: string }>(
+    {},
+  );
+  // A join or connect in flight, read synchronously: a second submit in the
+  // same tick (a double Enter) sees it before `busy` re-renders. Closing
+  // does not cancel the request, so it stays in flight, the dialog stays busy
+  // if it is reopened, and its result shows when it settles.
+  const inFlight = useRef(false);
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const replacementHostId = replacementTarget?.id;
@@ -324,7 +387,10 @@ export function AddRuntimeDialog({
         !watch.known.has(runtime.id),
     );
   }, [replacementHostId, runtimes, watch, join?.replacementHostId]);
-  const waiting = open && watch !== undefined && !connected;
+  // A connected result waits while a request is in flight: it would replace
+  // the form that sent it, and its Create-agent button leave the page.
+  const showsConnected = connected !== undefined && !busy;
+  const waiting = open && watch !== undefined && !showsConnected;
   useEffect(() => {
     if (!waiting) return;
     const timer = setInterval(() => setNow(Date.now()), 1_000);
@@ -342,8 +408,7 @@ export function AddRuntimeDialog({
 
   const generate = async () => {
     setBusy(true);
-    setError(undefined);
-    setNotSaved(undefined);
+    setError('command');
     try {
       if (!safeHost(address)) throw new Error(t('collab.runtime.badAddress'));
       setJoin(await onCreateJoinToken(replacementHostId));
@@ -354,7 +419,10 @@ export function AddRuntimeDialog({
           : onlineIds(runtimes),
       });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(
+        'command',
+        cause instanceof Error ? cause.message : String(cause),
+      );
     } finally {
       setBusy(false);
     }
@@ -362,11 +430,11 @@ export function AddRuntimeDialog({
 
   const submitExisting = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!onConnectExisting) return;
+    if (!onConnectExisting || inFlight.current) return;
     const data = new FormData(event.currentTarget);
+    inFlight.current = true;
     setBusy(true);
-    setError(undefined);
-    setNotSaved(undefined);
+    setNotSaved((current) => ({ ...current, there: undefined }));
     const known = onlineIds(runtimes);
     try {
       const outcome = await onConnectExisting({
@@ -377,29 +445,37 @@ export function AddRuntimeDialog({
         allowHttp: data.get('allowHttp') === 'on',
       });
       if (outcome) {
-        setWatch({ at: Date.now(), known });
+        setWatch({ at: Date.now(), known, fromExisting: true });
         if (outcome.saveError !== undefined) {
-          setNotSaved({ where: 'there', error: outcome.saveError });
+          const there = outcome.saveError;
+          setNotSaved((current) => ({ ...current, there }));
         }
       }
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   };
 
   const submitJoin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!onJoinCoordinator) return;
-    // Clear the previous attempt's notice before validating, like generate()
-    // and submitExisting(): a malformed link must not leave a stale unsaved
-    // notice standing beside the new validation error.
-    setNotSaved(undefined);
+    if (!onJoinCoordinator || inFlight.current) return;
+    // A new join replaces the previous one's notice, even one stopped by
+    // validation.
+    setNotSaved((current) => ({ ...current, here: undefined }));
     if (!joinTarget) {
-      setError(t('collab.runtime.joinBadLink'));
+      setError('join', t('collab.runtime.joinBadLink'));
       return;
     }
+    // The daemon would refuse it before using the token: say so here, where
+    // the token can stay.
+    if (!joinAllowHttp && refusesPlainHttp(joinTarget.serverUrl)) {
+      setError('join', t('collab.runtime.joinNeedsHttp'));
+      return;
+    }
+    inFlight.current = true;
     setBusy(true);
-    setError(undefined);
+    setError('join');
     try {
       const outcome = await onJoinCoordinator({
         serverUrl: joinTarget.serverUrl,
@@ -411,12 +487,30 @@ export function AddRuntimeDialog({
         setJoined(joinTarget.serverUrl);
         setJoinToken('');
         if (outcome.saveError !== undefined) {
-          setNotSaved({ where: 'here', error: outcome.saveError });
+          const here = outcome.saveError;
+          setNotSaved((current) => ({ ...current, here }));
         }
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      // Once sent, a token may be spent even by a join that failed (a proxy
+      // timeout, a dropped connection): never send it again as it is. One
+      // that never left (the daemon was unavailable) is kept.
+      if (!isDaemonUnavailableError(cause)) setJoinToken('');
+      const name = (cause as Error | undefined)?.name;
+      setError(
+        'join',
+        name === 'TimeoutError' || name === 'TypeError'
+          ? // With what the browser said, in case it was something else.
+            t('collab.runtime.joinTimedOut', {
+              error: (cause as Error).message,
+            })
+          : cause instanceof Error
+            ? cause.message
+            : String(cause),
+        true,
+      );
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   };
@@ -426,10 +520,41 @@ export function AddRuntimeDialog({
     : 0;
   // An expired link is no use to copy; offer a new one instead.
   const live = join && minutesLeft > 0 ? join : undefined;
+  // `here` belongs to the joined result, `there` to its form and to the
+  // connected result of the wait it started: the joined result takes the
+  // dialog over first.
+  const shownHere = joined !== undefined ? notSaved.here : undefined;
+  const shownThere =
+    !joined &&
+    (showsConnected ? watch?.fromExisting === true : method === 'existing')
+      ? notSaved.there
+      : undefined;
+  // Whose error is on screen: not over the joined result, nor under another
+  // form (a join that failed after a tab switch keeps it for when its form
+  // is back). Over a connected result, the join's, said to be the join's:
+  // hidden there, it would go with the page once Create agent on… is used.
+  const shownErrorOf: 'command' | 'join' | undefined = joined
+    ? undefined
+    : showsConnected
+      ? // Not one from checking the form: what it points at is not there.
+        errors.join !== undefined && errors.joinSent
+        ? 'join'
+        : undefined
+      : method !== 'existing' && errors[method] !== undefined
+        ? method
+        : undefined;
+  const shownError =
+    shownErrorOf === undefined
+      ? undefined
+      : showsConnected
+        ? t('collab.runtime.joinFailed', { error: errors.join ?? '' })
+        : errors[shownErrorOf];
   // Once a machine has joined, the next opening starts over, so a second
   // one can be added.
   const close = (next: boolean) => {
-    if (!next && connected) {
+    // A joined result is shown over a connected one, which then stays for
+    // the next opening.
+    if (!next && showsConnected && !joined) {
       setJoin(undefined);
       setWatch(undefined);
     }
@@ -437,7 +562,13 @@ export function AddRuntimeDialog({
       setJoined(undefined);
       setJoinLink('');
     }
-    if (!next) setNotSaved(undefined);
+    if (!next && shownErrorOf !== undefined) setError(shownErrorOf);
+    if (!next) {
+      setNotSaved((current) => ({
+        ...(shownHere === undefined ? { here: current.here } : {}),
+        ...(shownThere === undefined ? { there: current.there } : {}),
+      }));
+    }
     onOpenChange(next);
   };
 
@@ -491,7 +622,7 @@ export function AddRuntimeDialog({
               {t('collab.runtime.joinConnected', { server: joined })}
             </p>
           </div>
-        ) : connected ? (
+        ) : showsConnected && connected ? (
           <div className="flex flex-col gap-3">
             <div className="flex items-center gap-3 rounded-md border border-[var(--status-done-fg)]/30 bg-[var(--status-done-bg)] p-3">
               <CheckCircle2
@@ -537,12 +668,7 @@ export function AddRuntimeDialog({
                     type="button"
                     role="tab"
                     aria-selected={method === value}
-                    onClick={() => {
-                      setMethod(value);
-                      // A notice about one machine must not stay pinned under
-                      // another machine's form.
-                      setNotSaved(undefined);
-                    }}
+                    onClick={() => setMethod(value)}
                     className={`-mb-px border-b-2 pb-2 ${
                       method === value
                         ? 'border-foreground font-medium'
@@ -614,7 +740,9 @@ export function AddRuntimeDialog({
             ) : method === 'join' ? (
               // Its own key, like the form below: both sit in the same
               // place, and React would otherwise reuse one's inputs for the
-              // other, carrying a typed token into a visible field.
+              // other, carrying a typed token into a visible field. Both are
+              // read-only while a request is in flight, so what it answers is
+              // about the fields on screen.
               <form
                 key="join-coordinator"
                 id="join-coordinator"
@@ -629,6 +757,7 @@ export function AddRuntimeDialog({
                   <Input
                     name="joinLink"
                     required
+                    readOnly={busy}
                     value={joinLink}
                     onChange={(event) => setJoinLink(event.target.value)}
                     placeholder="https://coordinator:4170/join/<workspace>"
@@ -644,6 +773,7 @@ export function AddRuntimeDialog({
                     type="password"
                     autoComplete="off"
                     required
+                    readOnly={busy}
                     value={joinToken}
                     onChange={(event) => setJoinToken(event.target.value)}
                   />
@@ -652,6 +782,7 @@ export function AddRuntimeDialog({
                   <input
                     type="checkbox"
                     name="allowHttp"
+                    disabled={busy}
                     checked={joinAllowHttp}
                     onChange={(event) => setJoinAllowHttp(event.target.checked)}
                   />
@@ -682,6 +813,7 @@ export function AddRuntimeDialog({
                     name="remoteUrl"
                     type="url"
                     required
+                    readOnly={busy}
                     placeholder="http://192.168.1.20:4170"
                   />
                 </label>
@@ -692,6 +824,7 @@ export function AddRuntimeDialog({
                     type="password"
                     autoComplete="off"
                     required
+                    readOnly={busy}
                   />
                 </label>
                 <label className="flex flex-col gap-1.5">
@@ -699,11 +832,12 @@ export function AddRuntimeDialog({
                   <Input
                     name="remoteCwd"
                     required
+                    readOnly={busy}
                     placeholder="/home/me/project"
                   />
                 </label>
                 <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <input type="checkbox" name="allowHttp" />
+                  <input type="checkbox" name="allowHttp" disabled={busy} />
                   {t('collab.runtime.allowHttp')}
                 </label>
               </form>
@@ -711,23 +845,26 @@ export function AddRuntimeDialog({
           </>
         )}
 
-        {notSaved && (
-          <p
-            role="status"
-            className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-muted-foreground break-words"
-          >
-            {t(
-              notSaved.where === 'here'
-                ? 'collab.runtime.notSavedHere'
-                : 'collab.runtime.notSavedThere',
-              { error: notSaved.error },
-            )}
-          </p>
+        {(
+          [
+            ['collab.runtime.notSavedHere', shownHere],
+            ['collab.runtime.notSavedThere', shownThere],
+          ] as const
+        ).map(([key, saveError]) =>
+          saveError === undefined ? null : (
+            <p
+              key={key}
+              role="status"
+              className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-muted-foreground break-words"
+            >
+              {t(key, { error: saveError })}
+            </p>
+          ),
         )}
 
-        {error && (
+        {shownError && (
           <p role="alert" className="text-sm text-destructive">
-            {error}
+            {shownError}
           </p>
         )}
 
@@ -736,7 +873,7 @@ export function AddRuntimeDialog({
             <Button variant="outline" onClick={() => close(false)}>
               {t('collab.runtime.done')}
             </Button>
-          ) : connected ? (
+          ) : showsConnected && connected ? (
             <>
               <Button variant="outline" onClick={() => close(false)}>
                 {t('collab.runtime.done')}

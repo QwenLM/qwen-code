@@ -116,6 +116,8 @@ export interface ThreadsPageProps {
     'squads' | 'onCreate' | 'onUpdate' | 'onRetire'
   >;
   pending?: boolean;
+  /** A join or remote connect from a runtime dialog is in flight. */
+  connecting?: boolean;
 }
 
 export interface WorkspaceAgentSummaryView {
@@ -205,6 +207,7 @@ export function ThreadsPage({
   shares,
   squads,
   pending,
+  connecting = false,
 }: ThreadsPageProps) {
   const runtimeEntries = runtimes ?? [];
   const [configuring, setConfiguring] = useState<{
@@ -292,6 +295,29 @@ export function ThreadsPage({
     setCreatingSquad(false);
   };
 
+  // Shared by the add and replace dialogs. Creating an agent leaves this
+  // page, so it waits while a join or remote connect runs: the dialog that
+  // sent it would be unmounted, and its result lost.
+  const runtimeDialogProps = onCreateJoinToken
+    ? {
+        serverUrl: hostServerUrl ?? '',
+        runtimes: runtimeEntries,
+        onCreateJoinToken,
+        ...(onConnectRemoteHost
+          ? { onConnectExisting: onConnectRemoteHost }
+          : {}),
+        ...(onJoinCoordinator ? { onJoinCoordinator } : {}),
+        ...(onOpenAgentBuilder && !connecting
+          ? {
+              onCreateAgentOn: (runtimeId: string) => {
+                setAddingRuntime(false);
+                onOpenAgentBuilder(runtimeId);
+              },
+            }
+          : {}),
+      }
+    : undefined;
+
   // Laid out as the role templates view it swaps with: title and actions,
   // the view switch where that page has its filter, then the list.
   return (
@@ -307,12 +333,16 @@ export function ThreadsPage({
         </div>
         <div className="flex shrink-0 gap-2">
           {view === 'agents' && onOpenDefinitions ? (
-            <Button variant="outline" onClick={onOpenDefinitions}>
+            <Button
+              variant="outline"
+              disabled={connecting}
+              onClick={onOpenDefinitions}
+            >
               {t('collab.agent.roles')}
             </Button>
           ) : null}
           {view === 'agents' && onOpenAgentBuilder ? (
-            <Button onClick={() => onOpenAgentBuilder()}>
+            <Button disabled={connecting} onClick={() => onOpenAgentBuilder()}>
               <PlusIcon data-icon="inline-start" />
               {t('collab.agent.new')}
             </Button>
@@ -421,7 +451,7 @@ export function ThreadsPage({
                         <Button
                           variant="outline"
                           size="sm"
-                          disabled={!agent.enabled || pending}
+                          disabled={!agent.enabled || pending || connecting}
                           onClick={() => onMentionAgent(agent.name)}
                         >
                           {t('collab.agent.mentionIt')}
@@ -628,6 +658,7 @@ export function ThreadsPage({
               {...squads}
               agents={agents}
               pending={pending}
+              connecting={connecting}
               creating={creatingSquad}
               onCreatingChange={setCreatingSquad}
               {...(onMentionAgent ? { onMention: onMentionAgent } : {})}
@@ -760,31 +791,29 @@ export function ThreadsPage({
           </Empty>
         ) : null}
       </div>
-      {onCreateJoinToken && (
-        <AddRuntimeDialog
-          key={replacingRuntime?.id ?? 'add-host'}
-          open={addingRuntime}
-          onOpenChange={(open) => {
-            setAddingRuntime(open);
-            if (!open) setReplacingRuntime(undefined);
-          }}
-          serverUrl={hostServerUrl ?? ''}
-          runtimes={runtimeEntries}
-          onCreateJoinToken={onCreateJoinToken}
-          replacementTarget={replacingRuntime}
-          {...(onConnectRemoteHost
-            ? { onConnectExisting: onConnectRemoteHost }
-            : {})}
-          {...(onJoinCoordinator ? { onJoinCoordinator } : {})}
-          {...(onOpenAgentBuilder
-            ? {
-                onCreateAgentOn: (runtimeId: string) => {
-                  setAddingRuntime(false);
-                  onOpenAgentBuilder(runtimeId);
-                },
-              }
-            : {})}
-        />
+      {runtimeDialogProps && (
+        <>
+          {/* One instance for adding, never remounted by a replacement in
+              between: a join it sent, and its result, stay with it. */}
+          <AddRuntimeDialog
+            key="add-host"
+            open={addingRuntime && !replacingRuntime}
+            onOpenChange={setAddingRuntime}
+            {...runtimeDialogProps}
+          />
+          {replacingRuntime ? (
+            <AddRuntimeDialog
+              key={replacingRuntime.id}
+              open={addingRuntime}
+              onOpenChange={(open) => {
+                setAddingRuntime(open);
+                if (!open) setReplacingRuntime(undefined);
+              }}
+              replacementTarget={replacingRuntime}
+              {...runtimeDialogProps}
+            />
+          ) : null}
+        </>
       )}
       {shares && sharing && (
         <ShareAgentDialog

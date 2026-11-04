@@ -187,6 +187,28 @@ describe('connectExistingWith', () => {
 
     expect(await connectExistingWith(run, connect)(input)).toBe(false);
   });
+
+  it('keeps the page busy while a remote connect runs', async () => {
+    const busy: boolean[] = [];
+    let busyDuring: boolean[] = [];
+    const connect = vi.fn(async () => {
+      busyDuring = [...busy];
+      return { connected: true, saved: false, saveError: 'disk full' };
+    });
+
+    const outcome = await connectExistingWith(
+      async (action) => {
+        await action();
+        return true;
+      },
+      connect,
+      (value) => busy.push(value),
+    )(input);
+
+    expect(outcome).toEqual({ saveError: 'disk full' });
+    expect(busyDuring).toEqual([true]);
+    expect(busy).toEqual([true, false]);
+  });
 });
 
 describe('joinCoordinatorWith', () => {
@@ -208,4 +230,35 @@ describe('joinCoordinatorWith', () => {
     });
     expect(join).toHaveBeenCalledWith(input);
   });
+
+  it.each([
+    ['settles', async () => ({ connected: true })],
+    [
+      'fails',
+      async () => {
+        throw new Error('Invalid or expired Agent Host enrollment token.');
+      },
+    ],
+  ] as const)(
+    'keeps the page busy while a join runs, until it %s',
+    async (_label, answer) => {
+      // Leaving the page meanwhile would unmount the dialog that sent it.
+      const busy: boolean[] = [];
+      let busyDuring: boolean[] = [];
+      const join = vi.fn(async () => {
+        busyDuring = [...busy];
+        return answer();
+      });
+
+      await joinCoordinatorWith(join, (value) => busy.push(value))({
+        serverUrl: 'https://hub.example:4170',
+        workspaceId: 'ws_1',
+        enrollmentToken: 'join-token',
+        allowHttp: false,
+      }).catch(() => undefined);
+
+      expect(busyDuring).toEqual([true]);
+      expect(busy).toEqual([true, false]);
+    },
+  );
 });
