@@ -10,13 +10,20 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildRuntimeEnvironment,
+  findEnvFiles,
   hasLoadedEnvironmentValues,
   isFileSourcedEnvKey,
   loadEnvironment,
+  readProjectEnvFiles,
   reloadEnvironment,
   resetEnvironmentTrackingForTesting,
   SETTINGS_DIRECTORY_NAME,
 } from './environment.js';
+import {
+  hashProjectHooks,
+  LoadedHookApprovals,
+  type ProjectHooksApproval,
+} from './hook-approvals.js';
 import {
   ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
@@ -2170,5 +2177,112 @@ describe('hasLoadedEnvironmentValues', () => {
 
     expect(process.env[key]).toBe(value);
     expect(hasLoadedEnvironmentValues()).toBe(true);
+  });
+});
+
+describe('project hook approval env files stay inside the workspace', () => {
+  // #16313: the docker sandbox mounts only the workspace, so an ancestor .env
+  // the host hashed is absent in the container. Hashing it made the two sides
+  // disagree and silently withheld approved project hooks in the container.
+  function trustFolder(workspace: string, folder: string): void {
+    const trustedFoldersPath = path.join(workspace, 'trustedFolders.json');
+    fs.writeFileSync(
+      trustedFoldersPath,
+      JSON.stringify({ [folder]: TrustLevel.TRUST_FOLDER }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = trustedFoldersPath;
+    resetTrustedFoldersForTesting();
+  }
+
+  it('keeps an approved record approved when the ancestor .env is absent', async () => {
+    const parent = makeWorkspace();
+    const root = path.join(parent, 'workspace');
+    fs.mkdirSync(root);
+    const ancestorEnv = path.join(parent, '.env');
+    fs.writeFileSync(ancestorEnv, 'ANCESTOR_ONLY=host\n');
+    const previousTrustedFoldersPath =
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+    trustFolder(parent, root);
+
+    try {
+      const settings = testSettings({
+        security: { folderTrust: { enabled: true } },
+      });
+      const hooks = {
+        Stop: [{ hooks: [{ type: 'command', command: 'true' }] }],
+      };
+      const approval = (): ProjectHooksApproval => ({
+        root,
+        hooks,
+        resolved: hooks,
+        env: { files: readProjectEnvFiles(settings, root), settings: null },
+      });
+
+      // The host sees the ancestor .env, and approves the hooks with it hashed.
+      const hostApproval = approval();
+      // Positive control: discovery still walks above the workspace for the
+      // runtime env — only the approval hash input is narrowed.
+      expect(findEnvFiles(settings, root)).toContain(ancestorEnv);
+
+      const approvalsPath = path.join(parent, 'hookApprovals.json');
+      fs.writeFileSync(approvalsPath, '{}');
+      const loaded = new LoadedHookApprovals(
+        { path: approvalsPath, config: {} },
+        [],
+      );
+      await loaded.setState(hostApproval, 'approved');
+
+      // Container view: the mount point stops at the workspace, so the
+      // ancestor .env the host read does not exist there.
+      fs.rmSync(ancestorEnv);
+      const containerApproval = approval();
+      expect(containerApproval.env.files).not.toHaveProperty(ancestorEnv);
+      expect(containerApproval.env.files).toEqual(hostApproval.env.files);
+      expect(loaded.getState(containerApproval)).toBe('approved');
+    } finally {
+      if (previousTrustedFoldersPath === undefined) {
+        delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+      } else {
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] =
+          previousTrustedFoldersPath;
+      }
+      resetTrustedFoldersForTesting();
+    }
+  });
+
+  it('still hashes a .env inside the root and settings.env', () => {
+    const root = makeWorkspace();
+    const previousTrustedFoldersPath =
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+    trustFolder(root, root);
+
+    try {
+      const settings = testSettings({
+        security: { folderTrust: { enabled: true } },
+      });
+      const hooks = { Stop: [] };
+      const hashOf = (
+        files: Record<string, unknown>,
+        settingsEnv: unknown,
+      ): string => hashProjectHooks({ hooks, env: { files, settings: settingsEnv } });
+
+      const before = hashOf(readProjectEnvFiles(settings, root), null);
+      fs.writeFileSync(path.join(root, '.env'), 'INSIDE_ROOT=1\n');
+      const after = hashOf(readProjectEnvFiles(settings, root), null);
+
+      expect(Object.keys(readProjectEnvFiles(settings, root))).toContain(
+        path.join(root, '.env'),
+      );
+      expect(after).not.toBe(before);
+      expect(hashOf({}, { INSIDE_ROOT: '1' })).not.toBe(hashOf({}, null));
+    } finally {
+      if (previousTrustedFoldersPath === undefined) {
+        delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+      } else {
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] =
+          previousTrustedFoldersPath;
+      }
+      resetTrustedFoldersForTesting();
+    }
   });
 });

@@ -552,9 +552,25 @@ export function readProjectEnvFiles(
   startDir: string,
 ): Record<string, Record<string, string> | null> {
   const userLevelPaths = getUserLevelEnvPaths();
+  // `hashProjectHooks` hashes this map, and the sandbox mounts only the
+  // workspace: an ancestor `.env` the host can read does not exist inside the
+  // container, so hashing it made the container-side hash disagree and
+  // withheld hooks the host had approved. Keep the map to files the workspace
+  // itself owns; `findEnvFiles` still discovers ancestors for the runtime env.
+  let workspaceRoot = path.resolve(startDir);
+  try {
+    workspaceRoot = fs.realpathSync(workspaceRoot);
+  } catch {
+    // Match findEnvFiles(): use the resolved path when realpath is unavailable.
+  }
+  const isInsideWorkspace = (filePath: string): boolean => {
+    const relative = path.relative(workspaceRoot, path.resolve(filePath));
+    return !relative.startsWith('..') && !path.isAbsolute(relative);
+  };
   const files: Record<string, Record<string, string> | null> = {};
   for (const file of findEnvFiles(settings, startDir, userLevelPaths)) {
     if (userLevelPaths.has(path.normalize(file))) continue;
+    if (!isInsideWorkspace(file)) continue;
     try {
       files[file] = dotenv.parse(fs.readFileSync(file, 'utf-8'));
     } catch {
