@@ -524,7 +524,7 @@ if [[ "$*" == */check-runs/*/annotations* ]]; then
   exit 0
 fi
 if [[ "$*" == */attempts/*/jobs* ]]; then
-  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"cancelled","check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":1}'
+  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"cancelled","steps":[{"name":"Set up job"}],"check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":1}'
   exit 0
 fi
 printf '%s\\n' '1'
@@ -592,7 +592,27 @@ printf '%s\\n' '1'
     });
 
     it('fails open and reports when the annotations cannot be read', () => {
-      const resolved = classifyCancel([], { unreadable: true });
+      // Two cancelled jobs, because with a single one the fall-through prints
+      // the same `unknown` as the guard: only a second, readable job can see
+      // the guard removed (it would then classify concurrency and skip a real
+      // timeout, review R3-4).
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == */check-runs/*/annotations* ]]; then
+  id="$(printf '%s' "$*" | grep -oE 'check-runs/[0-9]+' | head -1 | cut -d/ -f2)"
+  [[ "$id" == 9001 ]] || { printf '%s\\n' 'The runner has received a shutdown signal.'; exit 0; }
+  exit 1
+fi
+if [[ "$*" == */attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"cancelled","steps":[{"name":"Set up job"}],"check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"},{"id":91235,"conclusion":"cancelled","steps":[{"name":"Set up job"}],"check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9002"}],"total_count":2}'
+  exit 0
+fi
+printf '%s\\n' '1'
+`;
+      const resolved = detect(
+        '1',
+        { RUN_CONCLUSION: 'cancelled' },
+        { ghScript },
+      );
       expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.stdout).toContain('failing open');
     });
@@ -617,7 +637,60 @@ printf '%s\\n' '1'
         { ghScript },
       );
       expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
-      expect(resolved.stdout).toContain('concurrency supersede');
+      // Nothing ran, so the notice must not name an annotation this path never
+      // fetched (review R3-2).
+      expect(resolved.stdout).toContain('cancelled before any job ran a step');
+      expect(resolved.stdout).not.toContain('concurrency supersede');
+    });
+
+    it('skips a cancelled job that stopped before its first step', () => {
+      // A maintainer cancelling a queued run, or a schedule displaced before
+      // any step starts, leaves conclusion `cancelled` with `steps: []` and an
+      // annotation neither pattern matches. Reporting it would file a
+      // "Main CI failed" issue for a run in which nothing ran (review R1-2).
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == */check-runs/*/annotations* ]]; then
+  printf '%s\\n' 'The run was canceled by @someone.'
+  exit 0
+fi
+if [[ "$*" == */attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"cancelled","steps":[],"check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":1}'
+  exit 0
+fi
+printf '%s\\n' '1'
+`;
+      const resolved = detect(
+        '1',
+        { RUN_CONCLUSION: 'cancelled' },
+        { ghScript },
+      );
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.stdout).toContain('cancelled before any job ran a step');
+    });
+
+    it('reports a cancelled run that also carries a failed job', () => {
+      // A job fails, then the next push entering the concurrency group cancels
+      // the rest of the run: the run concludes `cancelled` while that job still
+      // concludes `failure`. Reading only cancelled jobs would call this a
+      // supersede and drop the regression (review R3-1).
+      const ghScript = `#!/usr/bin/env bash
+if [[ "$*" == */check-runs/*/annotations* ]]; then
+  printf '%s\\n' 'The operation was canceled.'
+  exit 0
+fi
+if [[ "$*" == */attempts/*/jobs* ]]; then
+  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"failure","steps":[{"name":"Build"}],"check_run_url":""},{"id":91235,"conclusion":"cancelled","steps":[{"name":"Set up job"}],"check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":2}'
+  exit 0
+fi
+printf '%s\\n' '1'
+`;
+      const resolved = detect(
+        '1',
+        { RUN_CONCLUSION: 'cancelled' },
+        { ghScript },
+      );
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.stdout).toContain('failing open');
     });
 
     it('fails open when the jobs pages cannot be certified complete', () => {

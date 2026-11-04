@@ -131,6 +131,10 @@ jobs:
                   superseded=true
                   echo "::notice::Run ${WORKFLOW_RUN_ID} was cancelled by a concurrency supersede (shutdown/higher-priority annotation, no timeout); not reporting."
                   ;;
+                nothing-executed)
+                  superseded=true
+                  echo "::notice::Run ${WORKFLOW_RUN_ID} was cancelled before any job ran a step; nothing failed and nothing is reported."
+                  ;;
                 timeout)
                   echo "::notice::Run ${WORKFLOW_RUN_ID} was cancelled by a job execution-time timeout; reporting it as a failure."
                   ;;
