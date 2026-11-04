@@ -815,12 +815,17 @@ function isNoReplySentinel(text: string): boolean {
   return NO_REPLY_SENTINEL_PATTERN.test((fenced?.[1] ?? trimmed).trim());
 }
 
+/** GitHub's wording for a secondary (abuse) rate limit. */
+const SECONDARY_RATE_LIMIT_MESSAGE = /secondary rate limit|abuse detection/i;
+
 /**
  * GitHub rejected the write before creating anything: its rate limiter
  * answered. The rate-limit headers prove the answer came from GitHub rather
  * than a proxy in front of it; then either the primary budget is exhausted or
  * the message names a secondary limit, which GitHub sends with quota left
- * and not always with `retry-after`.
+ * and not always with `retry-after`. Unlike the watch-pass predicate, a
+ * `retry-after` header alone is not enough: a proxy can send one too, and a
+ * wrongly retried comment is a duplicate public reply.
  */
 function isDefiniteNoWriteGithubError(err: unknown): boolean {
   const e = err as {
@@ -834,7 +839,7 @@ function isDefiniteNoWriteGithubError(err: unknown): boolean {
   }
   return (
     Number(remaining) === 0 ||
-    /secondary rate limit|abuse detection/i.test(String(e.message))
+    SECONDARY_RATE_LIMIT_MESSAGE.test(String(e.message))
   );
 }
 
@@ -3452,6 +3457,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
               0,
               Number(headers['x-ratelimit-reset']) * 1000 - Date.now(),
             ) + 1000;
+        } else if (
+          (e.status === 403 || e.status === 429) &&
+          SECONDARY_RATE_LIMIT_MESSAGE.test(String(e.message))
+        ) {
+          // GitHub's guidance for a secondary limit without retry-after: wait
+          // at least a minute, longer on each repeat.
+          cooldown = 60_000 * 2 ** (attempt - 1);
         } else {
           cooldown = 1000 * 2 ** (attempt - 1);
         }

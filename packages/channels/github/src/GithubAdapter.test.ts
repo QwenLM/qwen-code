@@ -3718,6 +3718,46 @@ describe('GithubChannel', () => {
       },
     );
 
+    it('spaces secondary-limit retries of the final reply by GitHub minimum wait', async () => {
+      await connectForPublication();
+      // The retry cooldown alone: the poll loop's own interval sleep shares
+      // abortableSleep and would interleave with these values.
+      const sleep = vi.fn().mockResolvedValue(undefined);
+      (
+        channel as unknown as {
+          sleepForRetry: (ms: number) => Promise<void>;
+        }
+      ).sleepForRetry = sleep;
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        Object.assign(
+          new Error(
+            'You have exceeded a secondary rate limit. Please wait a few minutes before you try again.',
+          ),
+          {
+            status: 403,
+            response: { headers: { 'x-ratelimit-remaining': '4999' } },
+          },
+        ),
+      );
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toBeInstanceOf(Error);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(3);
+      expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([60_000, 120_000]);
+      expect(existsSync(pendingPath())).toBe(true);
+    });
+
     it('keeps a permission 403 on the final reply single-shot', async () => {
       await connectForPublication();
       const error = Object.assign(
@@ -5880,6 +5920,45 @@ describe('GithubChannel', () => {
       await expect(githubApi(fn)).resolves.toBe('ok');
       expect(sleep).toHaveBeenCalledWith(6000); // 5000 until reset + 1000 buffer
       dateSpy.mockRestore();
+    });
+
+    it('waits at least a minute, then longer, on a secondary limit without retry-after', async () => {
+      const sleep = stubSleep();
+      const secondary = (status: number) =>
+        Object.assign(
+          new Error(
+            'You have exceeded a secondary rate limit. Please wait a few minutes before you try again.',
+          ),
+          {
+            status,
+            response: { headers: { 'x-ratelimit-remaining': '4999' } },
+          },
+        );
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(secondary(403))
+        .mockRejectedValueOnce(secondary(429))
+        .mockResolvedValueOnce('ok');
+      await expect(githubApi(fn)).resolves.toBe('ok');
+      expect(sleep).toHaveBeenNthCalledWith(1, 60_000);
+      expect(sleep).toHaveBeenNthCalledWith(2, 120_000);
+    });
+
+    it('lets retry-after override the secondary-limit minimum', async () => {
+      const sleep = stubSleep();
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(
+          Object.assign(new Error('You have exceeded a secondary rate limit'), {
+            status: 403,
+            response: {
+              headers: { 'x-ratelimit-remaining': '4999', 'retry-after': '5' },
+            },
+          }),
+        )
+        .mockResolvedValueOnce('ok');
+      await expect(githubApi(fn)).resolves.toBe('ok');
+      expect(sleep).toHaveBeenCalledWith(5000);
     });
 
     it('falls back to exponential backoff without rate-limit headers', async () => {
