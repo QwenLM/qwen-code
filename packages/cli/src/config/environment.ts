@@ -543,6 +543,27 @@ export interface EnvFileReadFailure {
   readonly error: string;
 }
 
+/**
+ * The parsed `.env` files `loadEnvironment` reads for `startDir` that the
+ * workspace rather than the user controls; `null` for one it cannot read.
+ */
+export function readProjectEnvFiles(
+  settings: Settings,
+  startDir: string,
+): Record<string, Record<string, string> | null> {
+  const userLevelPaths = getUserLevelEnvPaths();
+  const files: Record<string, Record<string, string> | null> = {};
+  for (const file of findEnvFiles(settings, startDir, userLevelPaths)) {
+    if (userLevelPaths.has(path.normalize(file))) continue;
+    try {
+      files[file] = dotenv.parse(fs.readFileSync(file, 'utf-8'));
+    } catch {
+      files[file] = null;
+    }
+  }
+  return files;
+}
+
 function parseEnvFiles(
   envFilePaths: readonly string[],
   userLevelPaths: ReadonlySet<string>,

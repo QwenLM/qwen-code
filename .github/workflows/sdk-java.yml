@@ -65,6 +65,13 @@ jobs:
         include: >-
           ${{ fromJSON(inputs.tier == 'fast' && '[{"os":"ubuntu-latest","java":"21"}]' ||
           '[{"os":"ubuntu-latest","java":"11"},{"os":"ubuntu-latest","java":"17"},{"os":"ubuntu-latest","java":"21"},{"os":"macos-latest","java":"21"},{"os":"windows-latest","java":"21"}]') }}
+    env:
+      # The shared 2 GiB default is a build-sized floor for a light lane,
+      # not for this one: install, build and the JUnit forks together write
+      # far more, and a host with 2-4 GiB free passes the shared gate and
+      # then dies mid-suite (#16003).
+      DISK_FLOOR_MIN_FREE_KB: '8388608'
+
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -182,6 +189,16 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ inputs.ref || github.sha }}'
+
+      # Fail before the Maven, MySQL and RocketMQ steps when the workspace or
+      # RUNNER_TEMP filesystem is near full or out of inodes (#10035, #16003).
+      # The floor is absolute free KiB plus inodes; it cannot express the
+      # broker's used-ratio refusal (a large volume at 94% used still has ample
+      # free bytes), so the broker disk-threshold investigation stays out of
+      # scope here rather than being claimed as covered.
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
 
       # setup-java updates Maven files non-atomically. Keep them job-local
       # because runner instances on one ECS host share HOME.
@@ -634,6 +651,10 @@ jobs:
         with:
           ref: '${{ inputs.ref || github.sha }}'
 
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
+
       - name: 'Check Flyway migration versions are unique'
         run: 'node scripts/check-flyway-migrations.js packages/managed-agent-server packages/sdk-java/qwencode'
 
@@ -657,6 +678,7 @@ jobs:
     # not as an expected duration.
     timeout-minutes: 310
     env:
+      DISK_FLOOR_MIN_FREE_KB: '8388608'
       MYSQL_CONTAINER: 'qwen-code-sdk-java-mysql-${{ github.run_id }}-${{ github.run_attempt }}'
     steps:
       - name: 'Restore workspace ownership'
@@ -780,6 +802,12 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ inputs.ref || github.sha }}'
+
+      # Fail on a saturated pool host before the two Maven suites and the
+      # per-leg MySQL container fill the shared disk (#16003).
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
 
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
@@ -1654,6 +1682,17 @@ jobs:
     # 10 + 20 capped minutes plus the uncapped setup, which a loaded pool
     # host stretches (daemon-e2e measured its setup at up to 4x).
     timeout-minutes: 60
+    env:
+      # The shared 2 GiB default is a build-sized floor for a light lane,
+      # not for this one: install, build and the JUnit forks together write
+      # far more, and a host with 2-4 GiB free passes the shared gate and
+      # then dies mid-suite (#16003).
+      # The broker refuses writes on its own used-ratio rule at ~94% while
+      # the 952 GiB volume still reports tens of GiB free, so no absolute
+      # floor can catch it (#16003).
+      DISK_FLOOR_MIN_FREE_KB: '8388608'
+      DISK_FLOOR_MAX_USED_PCT: '90'
+
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -1771,6 +1810,11 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ inputs.ref || github.sha }}'
+
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
+
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
@@ -1927,6 +1971,11 @@ jobs:
     # stretches (daemon-e2e measured its setup at up to 4x).
     timeout-minutes: 130
     env:
+      # The broker refuses writes on its own used-ratio rule at ~94% while
+      # the 952 GiB volume still reports tens of GiB free, so no absolute
+      # floor can catch it (#16003).
+      DISK_FLOOR_MIN_FREE_KB: '8388608'
+      DISK_FLOOR_MAX_USED_PCT: '90'
       MYSQL_CONTAINER: 'qwen-code-mq3-mysql-${{ github.run_id }}-${{ github.run_attempt }}'
     steps:
       - name: 'Restore workspace ownership'
@@ -2045,6 +2094,11 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ inputs.ref || github.sha }}'
+
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
+
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
@@ -2299,6 +2353,13 @@ jobs:
     # stretched-setup tail above far more often than a 45 ceiling leaves room
     # for.
     timeout-minutes: "${{ inputs.tier == 'fast' && 90 || 45 }}"
+    env:
+      # The shared 2 GiB default is a build-sized floor for a light lane,
+      # not for this one: install, build and the JUnit forks together write
+      # far more, and a host with 2-4 GiB free passes the shared gate and
+      # then dies mid-suite (#16003).
+      DISK_FLOOR_MIN_FREE_KB: '8388608'
+
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -2416,6 +2477,10 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ inputs.ref || github.sha }}'
+
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
 
       # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
       - name: 'Set up Node.js 22 (hosted)'

@@ -506,7 +506,8 @@ class ToolPublicationLockOrderMySqlIT {
             }
             assertThat(waiting).as("Publication waits for the placement owner").isPositive();
             assertThat(source.subjectPlacementLocks.get())
-                    .as("Placement precedes retention in the contending transaction")
+                    .as(() -> "Placement precedes retention in the contending transaction; "
+                            + MySqlLockProbe.describeLockWaits(admin, schema))
                     .containsExactly("placement");
             source.releaseOwner.countDown();
             owner.get(30, TimeUnit.SECONDS);

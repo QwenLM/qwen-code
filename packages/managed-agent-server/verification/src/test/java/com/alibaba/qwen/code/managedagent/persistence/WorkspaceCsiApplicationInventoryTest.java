@@ -194,7 +194,7 @@ class WorkspaceCsiApplicationInventoryTest {
         changes.put("operation", "UNRECOGNIZED");
         changes.put("state", "PENDING");
         changes.put("idempotency_key", "invalid key");
-        changes.put("workspace_bound", true);
+        changes.put("is_workspace_bound", true);
         for (String field : List.of("session_id", "turn_id", "agent_id", "schedule_id", "channel_id", "action_id", "session_status_before")) {
             changes.put(field, "unrelated");
         }
@@ -788,7 +788,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
         assertThat(snapshot.tables()).hasSize(com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.TABLES.size());
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(805);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(810);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -872,13 +872,41 @@ class WorkspaceCsiApplicationInventoryTest {
     }
 
     @Test
+    void modelConfigurationColumnsRetainTypedValuesAndBlockPrivateModelActivity() throws Exception {
+        var before = inspect();
+        var owner = before.table("ma_session").rows().getFirst();
+        for (String field : List.of("model_config_digest", "model_config_key_id", "model_config_ciphertext")) {
+            assertThat(owner.cell(field).isNull()).isTrue();
+        }
+        assertThat(before.blockers()).noneMatch(blocker -> blocker.table().equals("ma_session"));
+
+        String digest = "sha256:" + "a".repeat(64);
+        jdbc.update("UPDATE ma_session SET model_config_digest = ?, model_config_key_id = ?, model_config_ciphertext = ?",
+                digest, "encryption-key", "encrypted-connection");
+        var after = inspect();
+        var configured = after.table("ma_session").rows().getFirst();
+        assertThat(configured.text("model_config_digest")).isEqualTo(digest);
+        assertThat(configured.text("model_config_key_id")).isEqualTo("encryption-key");
+        assertThat(configured.text("model_config_ciphertext")).isEqualTo("encrypted-connection");
+        assertThat(configured.bytes()).isNotEqualTo(owner.bytes());
+        assertThat(after.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift"));
+        assertThat(after.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session")
+                && blocker.code().equals("invalid_original_association"));
+
+        jdbc.update("UPDATE ma_session SET model_config_digest = NULL, model_config_key_id = NULL, model_config_ciphertext = NULL");
+        var restored = inspect();
+        assertThat(restored.table("ma_session").rows().getFirst().bytes()).isEqualTo(owner.bytes());
+        assertThat(restored.blockers()).noneMatch(blocker -> blocker.table().equals("ma_session"));
+    }
+
+    @Test
     void mainPlanColumnsRetainActualValuesWithoutAdmittingPrivatePlanActivity() throws Exception {
         var before = inspect();
         var owner = before.table("ma_session").rows().getFirst();
-        assertThat(owner.bool("plan_enabled")).isFalse();
+        assertThat(owner.bool("is_plan_enabled")).isFalse();
         assertThat(before.blockers()).noneMatch(blocker -> blocker.table().equals("ma_session"));
 
-        assertThatThrownBy(() -> jdbc.update("UPDATE ma_session SET plan_enabled = TRUE"))
+        assertThatThrownBy(() -> jdbc.update("UPDATE ma_session SET is_plan_enabled = TRUE"))
                 .isInstanceOfSatisfying(org.springframework.dao.DataAccessException.class, error ->
                         assertThat(error.getMostSpecificCause()).isInstanceOfSatisfying(java.sql.SQLException.class, sql -> {
                             assertThat(sql.getMessage()).containsIgnoringCase("ck_ma_session_plan");
@@ -887,15 +915,15 @@ class WorkspaceCsiApplicationInventoryTest {
                             assertThat(sql.getSQLState() + ":" + sql.getErrorCode())
                                     .isIn("23513:23513", "HY000:3819", "23000:4025");
                         }));
-        jdbc.update("UPDATE ma_session SET plan_enabled = TRUE, selected_approval_mode = 'default', approval_revision = 1");
+        jdbc.update("UPDATE ma_session SET is_plan_enabled = TRUE, selected_approval_mode = 'default', approval_revision = 1");
         var enabled = inspect();
-        assertThat(enabled.table("ma_session").rows().getFirst().bool("plan_enabled")).isTrue();
+        assertThat(enabled.table("ma_session").rows().getFirst().bool("is_plan_enabled")).isTrue();
         assertThat(enabled.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift"));
         assertThat(enabled.blockers()).anyMatch(blocker -> blocker.table().equals("ma_session")
                 && blocker.code().equals("invalid_original_association"));
         assertThat(enabled.table("ma_session").rows().getFirst().bytes()).isNotEqualTo(owner.bytes());
 
-        jdbc.update("UPDATE ma_session SET plan_enabled = FALSE, selected_approval_mode = NULL, approval_revision = 0");
+        jdbc.update("UPDATE ma_session SET is_plan_enabled = FALSE, selected_approval_mode = NULL, approval_revision = 0");
         var restored = inspect();
         assertThat(restored.table("ma_session").rows().getFirst().bytes()).isEqualTo(owner.bytes());
         assertThat(restored.blockers()).noneMatch(blocker -> blocker.table().equals("ma_session"));
@@ -904,11 +932,11 @@ class WorkspaceCsiApplicationInventoryTest {
                 + "status,gmt_create,gmt_modified)"
                 + " VALUES ('tenant',?,'turn','prompt','[]','digest','COMPLETED',1,1)", session);
         var originalTurn = inspect();
-        assertThat(originalTurn.table("ma_turn").rows().getFirst().cell("plan_enabled").isNull()).isTrue();
+        assertThat(originalTurn.table("ma_turn").rows().getFirst().cell("is_plan_enabled").isNull()).isTrue();
         assertThat(originalTurn.blockers()).anyMatch(blocker -> blocker.table().equals("ma_turn"));
-        jdbc.update("UPDATE ma_turn SET plan_enabled = TRUE, approval_mode = 'default', approval_revision = 1");
+        jdbc.update("UPDATE ma_turn SET is_plan_enabled = TRUE, approval_mode = 'default', approval_revision = 1");
         var plannedTurn = inspect();
-        assertThat(plannedTurn.table("ma_turn").rows().getFirst().bool("plan_enabled")).isTrue();
+        assertThat(plannedTurn.table("ma_turn").rows().getFirst().bool("is_plan_enabled")).isTrue();
         assertThat(plannedTurn.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift"));
         assertThat(plannedTurn.blockers()).anyMatch(blocker -> blocker.table().equals("ma_turn"));
         assertThat(plannedTurn.table("ma_turn").rows().getFirst().bytes())
@@ -956,26 +984,24 @@ class WorkspaceCsiApplicationInventoryTest {
 
     @Test
     void taskJournalBooleanMetadataRetainsUnsupportedActivityAndExactValues() throws Exception {
-        alterColumn("ma_public_event", "truncated", "BOOLEAN");
-        alterColumn("ma_public_event", "archived", "BOOLEAN");
         assertThat(inspect().blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift"));
         jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, last_sequence, gmt_modified)"
                 + " VALUES ('tenant', ?, 'TASK', 'task', 1, 1)", session);
         jdbc.update("INSERT INTO ma_public_event (tenant_id, session_id, stream_kind, stream_id, sequence_id, event_id,"
-                + " event_type, gmt_create, schema_version, projection_version, truncated, archived)"
+                + " event_type, gmt_create, schema_version, projection_version, is_truncated, is_archived)"
                 + " VALUES ('tenant', ?, 'TASK', 'task', 1, ?, 'output', 1, 1, 1, FALSE, TRUE)", session, UUID.randomUUID().toString());
         var observed = inspect();
         assertThat(observed.blockers()).anyMatch(blocker -> blocker.table().equals("ma_public_event")
                 && blocker.code().equals("unsupported_first_lane"));
         var row = observed.table("ma_public_event").rows().stream().filter(value -> "TASK".equals(value.text("stream_kind"))).findFirst().orElseThrow();
-        assertThat(row.bool("truncated")).isFalse();
-        assertThat(row.bool("archived")).isTrue();
+        assertThat(row.bool("is_truncated")).isFalse();
+        assertThat(row.bool("is_archived")).isTrue();
         var values = new java.util.LinkedHashMap<String, byte[]>();
         row.fields().forEach((name, cell) -> values.put(name, cell.bytes()));
-        values.put("archived", "2".getBytes(StandardCharsets.UTF_8));
+        values.put("is_archived", "2".getBytes(StandardCharsets.UTF_8));
         assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.expectedRow(
                 "ma_public_event", values, row.membership())).isInstanceOf(IllegalArgumentException.class);
-        alterColumn("ma_public_event", "truncated", "VARCHAR(8)");
+        alterColumn("ma_public_event", "is_truncated", "VARCHAR(8)");
         assertThat(inspect().blockers()).anyMatch(blocker -> blocker.code().equals("schema_drift"));
     }
 
@@ -1214,10 +1240,22 @@ class WorkspaceCsiApplicationInventoryTest {
     }
 
     @Test
+    void generatedRowIdentityIsExcludedFromEvidenceAndCatalogDriftIsRejected() throws Exception {
+        var before = inspect();
+        assertThat(before.table("ma_session").columns()).noneMatch(column -> column.name().equals("id"));
+        assertThat(before.table("ma_session").rows()).allSatisfy(row -> assertThat(row.fields()).doesNotContainKey("id"));
+        jdbc.update("UPDATE ma_session SET id = id + 1000");
+        assertThat(inspect().bytes()).isEqualTo(before.bytes());
+        dropRowIdentity();
+        assertThat(inspect().blockers()).anyMatch(blocker -> blocker.table().equals("inventory")
+                && blocker.code().equals("schema_drift"));
+    }
+
+    @Test
     void rowsUseTheWholeFinalPrimaryKeyAndSortNumericComponentsNumerically() throws Exception {
         for (long sequence : new long[] {10, 2}) {
             jdbc.update("INSERT INTO ma_public_event (tenant_id, session_id, sequence_id, event_id, event_type, data_json,"
-                    + " terminal, gmt_create) VALUES ('tenant', ?, ?, ?, 'fixture', '{}', FALSE, 1)",
+                    + " is_terminal, gmt_create) VALUES ('tenant', ?, ?, ?, 'fixture', '{}', FALSE, 1)",
                     session, sequence, UUID.randomUUID().toString());
         }
         var snapshot = inspect();
@@ -1296,10 +1334,10 @@ class WorkspaceCsiApplicationInventoryTest {
                     .isInstanceOf(IllegalArgumentException.class);
         }
         var changed = new java.util.LinkedHashMap<>(values);
-        changed.put("csi_guard", "1".getBytes(StandardCharsets.UTF_8));
+        changed.put("is_csi_guard", "1".getBytes(StandardCharsets.UTF_8));
         assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.expectedRow("ma_session", changed, row.membership()))
                 .isInstanceOf(IllegalArgumentException.class);
-        changed.put("csi_guard", values.get("csi_guard"));
+        changed.put("is_csi_guard", values.get("is_csi_guard"));
         changed.put("session_id", null);
         assertThatThrownBy(() -> WorkspaceCsiApplicationInventory.expectedRow("ma_session", changed, row.membership()))
                 .isInstanceOf(IllegalArgumentException.class);
@@ -1416,7 +1454,7 @@ class WorkspaceCsiApplicationInventoryTest {
     private void insertExecution(String id, String state, String bindingId, String runtimeSession, String runtimeKey) {
         jdbc.update("INSERT INTO ma_tool_execution (execution_call_id_hash, execution_call_id, idempotency_key_hash, idempotency_key,"
                 + " binding_id, runtime_generation, harness_session_id, runtime_session_id, runtime_session_key, turn_id, tool_call_id,"
-                + " request_digest, reference_json, execution_state, execution_status, result_json, last_sequence, cancel_requested,"
+                + " request_digest, reference_json, execution_state, execution_status, result_json, last_sequence, is_cancel_requested,"
                 + " dispatch_generation, record_version, settled_at, native_authorization_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,"
                 + " 'turn', 'call', 'digest', '{}', ?, 'success', '{}', 1, FALSE, 1, 1, " + ManagedSchemaTime.SQL_NOW + ", '{}')",
                 brokerHash(id), id, brokerHash("idempotency-" + id), "idempotency-" + id, bindingId, binding.getGeneration(),
@@ -1461,6 +1499,10 @@ class WorkspaceCsiApplicationInventoryTest {
             }
             statement.executeBatch();
         }
+    }
+
+    void dropRowIdentity() {
+        jdbc.execute("ALTER TABLE ma_session ALTER COLUMN id DROP IDENTITY");
     }
 
     void alterColumn(String table, String column, String type) {
@@ -2048,7 +2090,7 @@ class WorkspaceCsiApplicationInventoryTest {
                 if (references) {
                     var saved = WorkspaceCsiApplicationImage.sole(expected, "ma_runtime_binding");
                     var original = new JdbcCsiFilesRetirementGuard.Original(binding.getRequest(), binding.getBindingId(), binding.getGeneration(),
-                            RuntimeBindingRecord.State.valueOf(saved.text("binding_state")), saved.bool("drain_requested"), saved.number("record_version"),
+                            RuntimeBindingRecord.State.valueOf(saved.text("binding_state")), saved.bool("is_drain_requested"), saved.number("record_version"),
                             saved.number("first_activation_journal_revision"));
                     return WorkspaceCsiApplicationInventory.readRetainedReferencedKeys(
                             new WorkspaceCsiApplicationInventory.HistoricalScan(observed, System.nanoTime()), expected, original, intent);

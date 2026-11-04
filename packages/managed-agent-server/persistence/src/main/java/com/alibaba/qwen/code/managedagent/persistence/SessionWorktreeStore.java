@@ -11,6 +11,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.file.Path;
@@ -33,6 +34,7 @@ public class SessionWorktreeStore
             + " AND o.tenant_id = w.tenant_id AND o.operation_id = w.operation_id";
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
+    private final TransactionTemplate readTransaction;
     private final ManagedWorkspaceRegistry registry;
     private final WorkspaceStorageGuard guard;
     private String resumeAfter = "";
@@ -47,14 +49,16 @@ public class SessionWorktreeStore
             ManagedWorkspaceRegistry registry, WorkspaceStorageGuard guard) {
         this.jdbc = jdbc;
         this.transaction = new TransactionTemplate(manager);
+        this.readTransaction = new TransactionTemplate(manager);
+        this.readTransaction.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
         this.registry = registry;
         this.guard = guard;
     }
 
     public SourceLocation source(String tenant, String actor, com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection selection) {
-        return transaction.execute(status -> {
-            WorkspaceMigrationAdmission.lockTenant(jdbc, tenant);
-            ResolvedBinding source = registry.resolveForCreation(tenant, actor, selection);
+        WorkspaceStorageKindGuard.requireFreshTransaction();
+        return readTransaction.execute(status -> {
+            ResolvedBinding source = registry.resolveForRead(tenant, actor, selection);
             Path root = guard.verifiedRoot(source.binding());
             return new SourceLocation(source, root, storageIdentity(source.binding()));
         });
@@ -202,7 +206,7 @@ public class SessionWorktreeStore
     public List<String[]> failedInitialSessions() {
         return jdbc.query("SELECT DISTINCT w.tenant_id, w.session_id, w.failure_code FROM ma_session_worktree w"
                 + " JOIN ma_turn t ON t.tenant_id = w.tenant_id AND t.session_id = w.session_id"
-                + " WHERE w.state IN ('FAILED','BLOCKED') AND t.status = 'ACCEPTED' AND t.submission_attempted = FALSE LIMIT 20",
+                + " WHERE w.state IN ('FAILED','BLOCKED') AND t.status = 'ACCEPTED' AND t.is_submission_attempted = FALSE LIMIT 20",
                 (result, index) -> new String[] {result.getString("tenant_id"), result.getString("session_id"), result.getString("failure_code")});
     }
 
