@@ -1,16 +1,34 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, join } from 'node:path';
 import process from 'node:process';
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import type { ChannelBaseOptions } from './ChannelBase.js';
 import { ChannelBase } from './ChannelBase.js';
 import type { ChannelEventDetail } from './channel-events.js';
 import type { ChannelConfig } from './types.js';
-import { getGlobalQwenDir } from './paths.js';
+import { getGlobalQwenDir, getWorkspaceScopeDirName } from './paths.js';
+import { sanitizeLogText } from './sanitize.js';
 
 const INITIAL_BACKOFF = 2_000;
 const MAX_BACKOFF = 30_000;
+
+/**
+ * Inclusive bounds the poll loop enforces at runtime. Node clamps a timeout
+ * above its 32-bit range to 1ms and rounds a sub-millisecond one to ~1ms, so
+ * either end left open turns the loop into a hot loop that burns the platform's
+ * rate quota. The descriptor vocabulary has only an exclusive lower bound, so
+ * the inclusive floor a field documents is enforced here; a plugin declares
+ * `maximum: MAX_POLL_INTERVAL_MS` so the two cannot drift apart.
+ */
+export const MIN_POLL_INTERVAL_MS = 1;
+export const MAX_POLL_INTERVAL_MS = 86_400_000;
 
 export abstract class PollingChannelBase<Cursor> extends ChannelBase {
   protected cursor: Cursor;
@@ -73,16 +91,41 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
       Number.isFinite(configured) &&
       configured > 0
     ) {
-      return configured;
+      // Node clamps a timeout above its 32-bit range to 1ms, which would turn
+      // the poll loop into a hot loop that burns the platform's rate quota.
+      // Clamp rather than fall back: an interval between one day and that limit
+      // was honoured before this ceiling existed and is not a hot loop, so
+      // replacing it with 60s would multiply the poll rate by orders of
+      // magnitude. One day matches the ceiling Email enforces and GitHub
+      // declares.
+      //
+      // The low end needs the same treatment from the other direction: a
+      // fractional interval such as 0.5 passes the descriptor's exclusive
+      // lower bound and the store, and setTimeout rounds it to ~1ms.
+      return Math.min(
+        Math.max(configured, MIN_POLL_INTERVAL_MS),
+        MAX_POLL_INTERVAL_MS,
+      );
     }
     return 60_000;
   }
 
   protected saveCursor(): void {
     const path = this.cursorPath();
-    mkdirSync(join(getGlobalQwenDir(), 'channels'), { recursive: true });
+    const dir = dirname(path);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try {
+      chmodSync(dir, 0o700);
+    } catch {
+      // A directory we do not own stays as created; the write below still
+      // decides whether this channel can use it.
+    }
     const tmp = `${path}.tmp`;
-    writeFileSync(tmp, JSON.stringify(this.cursor) + '\n', 'utf-8');
+    writeFileSync(tmp, JSON.stringify(this.cursor) + '\n', {
+      encoding: 'utf-8',
+      mode: 0o600,
+    });
+    chmodSync(tmp, 0o600);
     renameSync(tmp, path);
   }
 
@@ -127,14 +170,18 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
         );
         const detail = this.pollEventDetail;
         this.pollEventDetail = undefined;
+        const message = sanitizeLogText(
+          err instanceof Error ? err.message : String(err),
+          200,
+        );
         process.stderr.write(
-          `[Channel:${this.name}] poll error (attempt ${this.consecutiveErrors}), backing off ${backoff}ms: ${err}\n`,
+          `[Channel:${this.name}] poll error (attempt ${this.consecutiveErrors}), backing off ${backoff}ms: ${message}\n`,
         );
         this.recordChannelEvent({
           type: 'poll',
           outcome: 'failed',
           durationMs: Date.now() - startedAt,
-          error: err instanceof Error ? err.message : String(err),
+          error: message,
           detail: {
             ...(detail ?? {}),
             consecutiveErrors: this.consecutiveErrors,
@@ -149,25 +196,43 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
   }
 
   private loadCursorFromDisk(): Cursor | null {
-    try {
-      const raw = readFileSync(this.cursorPath(), 'utf-8').trim();
-      if (!raw) return null;
-      return this.validateCursor(JSON.parse(raw));
-    } catch {
-      return null;
+    for (const path of [this.cursorPath(), this.legacyCursorPath()]) {
+      try {
+        const raw = readFileSync(path, 'utf-8').trim();
+        if (!raw) return null;
+        return this.validateCursor(JSON.parse(raw));
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+      }
     }
+    return null;
   }
 
   private cursorPath(): string {
+    return join(
+      getGlobalQwenDir(),
+      'channels',
+      getWorkspaceScopeDirName(this.config.cwd),
+      this.cursorFileName(),
+    );
+  }
+
+  /**
+   * Pre-scoping layout: one file directly under `channels/`, shared by every
+   * workspace running a channel of this name. Read only, so an upgrade keeps
+   * its cursor; the next save lands in the scoped path and the legacy file
+   * stays for other workspaces (and older versions) to read.
+   */
+  private legacyCursorPath(): string {
+    return join(getGlobalQwenDir(), 'channels', this.cursorFileName());
+  }
+
+  private cursorFileName(): string {
     const encoded = this.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 200);
     const hash = createHash('sha256')
       .update(this.name)
       .digest('hex')
       .slice(0, 16);
-    return join(
-      getGlobalQwenDir(),
-      'channels',
-      `${encoded}-${hash}-poll-cursor.json`,
-    );
+    return `${encoded}-${hash}-poll-cursor.json`;
   }
 }

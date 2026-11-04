@@ -465,7 +465,6 @@ public class ManagedActionStore
             String actionId,
             JsonNode body,
             long now) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
         // Serialize admission with journal projection and other Session commands.
         jdbc.queryForObject(
