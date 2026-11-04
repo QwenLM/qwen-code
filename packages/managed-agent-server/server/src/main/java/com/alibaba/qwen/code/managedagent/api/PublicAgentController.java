@@ -106,14 +106,11 @@ public class PublicAgentController {
                 ? service.createSession(tenant.tenantId(), tenant.actorId(),
                         idempotencyKey, request.agentId(),
                         request.agentRevision(), null, request.metadata(),
-                        request.input())
-                : worktree == null ? service.createWorkspaceSession(tenant.tenantId(),
-                        tenant.requireActorId(), idempotencyKey,
-                        request.agentId(), request.agentRevision(), null,
-                        request.metadata(), request.input(), selection, null, null, request.skills(), null, request.extensionPins())
+                        request.input(), com.alibaba.qwen.code.managedagent.model.SessionModelConfig.parse(request.modelConfig()))
                 : service.createWorkspaceSession(tenant.tenantId(), tenant.requireActorId(), idempotencyKey,
                         request.agentId(), request.agentRevision(), null, request.metadata(), request.input(),
-                        selection, null, null, request.skills(), null, request.extensionPins(), worktree);
+                        selection, null, null, request.skills(), null, request.extensionPins(), worktree,
+                        com.alibaba.qwen.code.managedagent.model.SessionModelConfig.parse(request.modelConfig()));
         PublicSession session = service.getPublicSession(tenant.tenantId(),
                 tenant.actorId(), admission.sessionId());
         return ResponseEntity.status(HttpStatus.ACCEPTED)

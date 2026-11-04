@@ -29,6 +29,7 @@ import {
   readSessionPrs,
   toSessionPrInfo,
   upsertSessionPr,
+  isSessionPrRole,
   type SessionArchiveState,
   type SubagentLevel,
   IMAGE_CAPABILITY,
@@ -3568,6 +3569,9 @@ export class AcpDispatcher {
                 typeof boundPr['url'] === 'string'
               ) {
                 const boundState = boundPr['state'];
+                // The bridge validated the shape above; a role it accepted
+                // persists, an absent one preserves the known role.
+                const boundRole = boundPr['role'];
                 const persistedPrs = (
                   await upsertSessionPr(
                     service.getPrSessionPathForArchiveState(
@@ -3582,6 +3586,9 @@ export class AcpDispatcher {
                       boundState === 'merged' ||
                       boundState === 'closed'
                         ? { state: boundState }
+                        : {}),
+                      ...(isSessionPrRole(boundRole)
+                        ? { role: boundRole }
                         : {}),
                     },
                   )
@@ -6500,7 +6507,10 @@ export class AcpDispatcher {
         );
       }
     } finally {
-      if (binding.promptAbort === abort) binding.promptAbort = undefined;
+      if (binding.promptAbort === abort) {
+        binding.promptAbort = undefined;
+        conn.promptSettled(sessionId);
+      }
     }
   }
 

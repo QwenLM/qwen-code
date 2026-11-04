@@ -21,7 +21,7 @@ class ManagedNativeSnapshotRetirementTest {
         ManagedSchema.initialize(source);
         var jdbc = new ManagedSchemaJdbcTemplate(source);
         var tx = new TransactionTemplate(new DataSourceTransactionManager(source));
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         var snapshots = new ManagedNativeJournalSnapshots(jdbc, sessions, new ObjectMapper());
         for (String session : java.util.List.of("retiring", "protected")) {
             tx.executeWithoutResult(status -> new ExtensionRecordJournal(sessions, "tenant", "workspace", session).open());
