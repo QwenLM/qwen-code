@@ -4123,8 +4123,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // and `head.sha !== preHead` alone would adopt it: the foreign
         // commit would earn the amend exemption and the promoted one
         // would lose its own. Requiring that entry to have moved HEAD
-        // *from* `preHead` keeps the registered SHA one this command
-        // created (see `trackSessionCommit`'s `requirePredecessor`).
+        // *from* `preHead` rejects the foreign one unless this command's
+        // own commit landed first; a foreign commit landed straight on
+        // `preHead` still passes — the #12523 residue disclosed on
+        // `trackSessionCommit`'s `requirePredecessor`.
         headBeforeCommand.unborn ? null : headBeforeCommand.sha,
       ).catch((err: unknown) => {
         // Registration must never break the settle path — a failure
@@ -4678,14 +4680,17 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * lands in this repository meanwhile is not a narrow race but the
    * expected shape, and difference-from-`preHead` alone would adopt it.
    * Passing the captured `preHead` here requires the entry that created
-   * HEAD to have moved it *from* that SHA, which only this command's own
-   * commit does. For an unborn repository the expected predecessor is
-   * explicitly `null`, which lets the initial commit register without
-   * treating a failed probe as a valid empty history. That sentinel is not
-   * provenance: every root commit satisfies it, so a root commit somebody
-   * else lands during the promoted window is indistinguishable from this
-   * command's own and registers too (#12523). Fail-closed on a born HEAD
-   * both ways: a foreign commit never earns an exemption, and a multi-commit
+   * HEAD to have moved it *from* that SHA. For an unborn repository the
+   * expected predecessor is explicitly `null`, which lets the initial
+   * commit register without treating a failed probe as a valid empty
+   * history. That sentinel is not provenance: every root commit satisfies
+   * it, so a root commit somebody else lands during the promoted window is
+   * indistinguishable from this command's own and registers too (#12523).
+   * A born HEAD narrows that window but does not close it: a foreign commit
+   * landed directly on `preHead` while this command's own commit never
+   * landed has the same predecessor and registers too, the same #12523
+   * residue. Fail-closed once this command's own commit landed first: a
+   * foreign commit on top of it never earns an exemption, and a multi-commit
    * promoted chain (`commit a && commit b`, whose newest entry descends
    * from `a`) loses one it had earned rather than guessing. The foreground
    * call site passes nothing and keeps the disclosed window unchanged.
