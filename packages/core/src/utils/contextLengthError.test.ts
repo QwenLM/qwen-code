@@ -153,6 +153,14 @@ describe('contextLengthError', () => {
         ),
       ).toBe(false);
     });
+
+    it('does not match input length unless it exceeds the context length', () => {
+      expect(
+        isContextLengthExceededError(
+          new Error('invalid option: input length must be a positive integer'),
+        ),
+      ).toBe(false);
+    });
   });
 
   describe('llama.cpp context overflow wording (#13415)', () => {
