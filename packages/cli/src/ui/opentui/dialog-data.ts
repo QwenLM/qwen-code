@@ -758,7 +758,8 @@ export function addPermissionRule(
   const current =
     (
       (settings.merged as Record<string, unknown>)['permissions'] as
-        Record<string, string[]> | undefined
+        | Record<string, string[]>
+        | undefined
     )?.[type] ?? [];
   if (!current.includes(ruleText)) {
     settings.setValue(scope, key, [...current, ruleText]);
@@ -778,7 +779,8 @@ export function deletePermissionRule(
     const settingScope = persistScopeToSettingScope(scope);
     const scopeSettings = settings.forScope(settingScope).settings;
     const rules = (scopeSettings as Record<string, unknown>)['permissions'] as
-      Record<string, string[]> | undefined;
+      | Record<string, string[]>
+      | undefined;
     const scopeRules = rules?.[type];
     // `parseRule` trims, so a stored entry with surrounding whitespace has to
     // match the trimmed rule or the removal never reaches the settings file.
@@ -802,7 +804,8 @@ export function addWorkspaceDirectory(
   const current =
     (
       (settings.merged as Record<string, unknown>)['context'] as
-        Record<string, string[]> | undefined
+        | Record<string, string[]>
+        | undefined
     )?.['includeDirectories'] ?? [];
   if (!current.includes(resolvedDir)) {
     settings.setValue(SettingScope.Workspace, key, [...current, resolvedDir]);
@@ -1058,7 +1061,8 @@ export async function applyMcpServerAction(
         if (server.isDisabled) {
           // Enable: clear the extension flag and both exclusion lists.
           const rawConfig = (config.getMcpServers?.() ?? {})[server.name] as
-            { extensionName?: string } | undefined;
+            | { extensionName?: string }
+            | undefined;
           const extensionName = rawConfig?.extensionName;
           if (extensionName) {
             config
@@ -1088,7 +1092,8 @@ export async function applyMcpServerAction(
         // Disable.
         if (server.source === 'extension') {
           const rawConfig = (config.getMcpServers?.() ?? {})[server.name] as
-            { extensionName?: string } | undefined;
+            | { extensionName?: string }
+            | undefined;
           const extensionName = rawConfig?.extensionName;
           const manager = config.getExtensionManager();
           if (!extensionName || !manager) {
@@ -1201,7 +1206,10 @@ export interface ExtensionActionResult {
 
 /** Update-check result feeding the "Update Now" action (detail view). */
 export type ExtensionUpdateCheckState =
-  'update-available' | 'up-to-date' | 'not-updatable' | 'error';
+  | 'update-available'
+  | 'up-to-date'
+  | 'not-updatable'
+  | 'error';
 
 const extensionUnavailable = (): ExtensionActionResult => ({
   message: t('Extensions are not available in this environment.'),
