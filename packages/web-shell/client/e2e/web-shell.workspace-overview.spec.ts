@@ -350,6 +350,12 @@ test('reads workspace metadata only while details or its menu are open @smoke', 
   await page.clock.install({ time: new Date('2026-01-01T00:00:00.000Z') });
   await page.clock.pauseAt(new Date('2026-01-01T01:00:00.000Z'));
   await gotoSession(page, scenario, daemon);
+  // The workspace-level project-hooks approval probe reads this route once
+  // per mount; let it settle before counting sidebar overview traffic.
+  await expect
+    .poll(() => overviewRequests(daemon, PRIMARY_CWD).length)
+    .toBeGreaterThan(0);
+  daemon.requests.length = 0;
   const header = page.getByRole('complementary').getByRole('button', {
     name: /^qwen-web-shell-e2e/,
   });

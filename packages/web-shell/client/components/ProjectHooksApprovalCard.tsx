@@ -46,13 +46,27 @@ export function ProjectHooksApprovalCard() {
     }
   }, [client, workspaceCwd, available]);
 
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+
+  // One read per mount / workspace / settings change. Keyed on identity,
+  // not the refresh callback, so a decision-driven re-render never refetches.
   useEffect(() => {
     setStatus(undefined);
-    void refresh();
-    if (!client || !available) return;
-    const timer = setInterval(() => void refresh(), POLL_INTERVAL_MS);
+    void refreshRef.current();
+  }, [client, workspaceCwd, available, settingsVersion]);
+
+  // Poll only while a decision is pending. Once resolved (or on daemons
+  // without hooks), no background reads: workspace metadata stays quiet
+  // until a settings event or remount changes the answer.
+  useEffect(() => {
+    if (!client || !available || !status?.pendingApproval) return;
+    const timer = setInterval(
+      () => void refreshRef.current(),
+      POLL_INTERVAL_MS,
+    );
     return () => clearInterval(timer);
-  }, [client, available, refresh, settingsVersion]);
+  }, [client, available, status?.pendingApproval]);
 
   const decide = useCallback(
     async (decision: 'approve' | 'reject') => {
