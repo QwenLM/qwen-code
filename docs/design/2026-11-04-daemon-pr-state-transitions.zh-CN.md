@@ -51,8 +51,8 @@ watch?: {
   headSha?: string;
   checks?: 'passing' | 'failing' | 'pending' | 'none';
   mergeable?: 'mergeable' | 'conflicting';
-  /** 已触发过 ci_failure 的 head（每个 head 一次）。 */
-  ciFiredSha?: string;
+  /** 已触发过 ci_failure 的 head，最旧在前（上限 16）。 */
+  ciFired?: string[];
   /** 已检测但尚未投递的转换，最旧在前（上限 16）。 */
   pending?: Array<{ type: PrTransitionType; key: string; summary: string; detectedAt: string }>;
 }
@@ -64,25 +64,25 @@ watch?: {
 
 与 channel 监视完全一致，迁移过来的运维者看到的行为不变：
 
-| 事件             | 触发条件                                                                                                             |
-| ---------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `head_change`    | `headSha` 与上次观察不同（force-push 回到最近的 SHA 是新的转换）。                                                   |
-| `ci_failure`     | `checks` 变为 `failing` 且 `ciFiredSha !== headSha`；随后设置 `ciFiredSha`，因此即使 CI 反复也每个 head 只触发一次。 |
-| `merge_conflict` | `mergeable` 从非冲突观察变为 `conflicting`（边沿触发；`conflicting → mergeable → conflicting` 会再次触发）。         |
-| `state_change`   | `state` 离开 `open`（merged 或 closed）。重新打开会让 `state` 回到 `open`，之后再关闭会再次触发。                    |
+| 事件             | 触发条件                                                                                                                                        |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `head_change`    | `headSha` 与上次观察不同（force-push 回到最近的 SHA 是新的转换）。                                                                              |
+| `ci_failure`     | `checks` 变为 `failing` 且 `headSha` 不在 `ciFired` 中；随后追加进去，因此即使 CI 反复、或 force-push 回到更早的 head，每个 head 也只触发一次。 |
+| `merge_conflict` | `mergeable` 从非冲突观察变为 `conflicting`（边沿触发；`conflicting → mergeable → conflicting` 会再次触发）。                                    |
+| `state_change`   | `state` 离开 `open`（merged 或 closed）。重新打开会让 `state` 回到 `open`，之后再关闭会再次触发。                                               |
 
-每个转换的 key 为 `pr-state:<owner/repo>#<number>:<type>:<headSha 或 previous→next>:<detectedAt>`；`detectedAt` 让 sidecar 重置后重新检测到的实例彼此不同，而 `ci_failure` 通过 `ciFiredSha` 保持每个 head 一次。
+每个转换的 key 为 `pr-state:<owner/repo>#<number>:<type>:<headSha 或 previous→next>:<detectedAt>`；`detectedAt` 让 sidecar 重置后重新检测到的实例彼此不同，而 `ci_failure` 通过 `ciFired` 保持每个 head 一次。`ciFired` 是 daemon 侧与 channel 持久化 `fired` 环等价的东西：有界的逐 head 历史，因此 force-push 回到 `A` 之后的 `A failing → B failing → A failing` 不会为 `A` 再触发一次。上限刻意不同：channel 每个 PR 保留 4 类事件共用的 64 个 key，被挤出后只钉住当前 head；daemon 每个 PR 保留最近 16 个失败过的 head，一个 head 在超过 16 个其它失败 head 之后再被回访会再次触发，与 channel 被挤出后的行为一致。
 
 ### 4. 投递
 
-- **目标。** 拥有该 sidecar 的会话。同一 workspace 的多个会话绑定同一个 PR 时，转换投递给最近活跃的那个（transcript mtime，再以 bridge 的 live 活动修正），其余 sidecar 记录新快照但不投递——这正是 channel 今天的规则。归档会话只刷新 `state`，绝不投递。channel 自有会话（`sourceType: 'channel'`）与机器自有的隐藏目录会话永远不是目标。
+- **目标。** 整个 daemon 范围内每个 PR 只有一个收件会话，绝不是每个 workspace 一个。观察仍按 workspace 进行（每次扫描只 view 本 workspace 的 open 绑定 PR），但扫描检测到转换时，在所有受信 workspace 中绑定该 PR 的全部合格会话里选收件者——即 `GET /sessions/pr-bindings` 背后的进程级 sidecar 扫描——取最近活跃的那个（transcript mtime，再以 bridge 的 live 活动修正），这正是 channel 今天对整个绑定快照应用的规则，然后经该会话所属的 runtime 派发。随后把新快照与该转换的已触发记录写进该 PR 在所有 workspace 的每个 sidecar，各走各自的变更队列与锁；兄弟 workspace 之后的扫描因此观察不到转换，所以同一仓库注册了两个 workspace、各有一个会话跟随同一个 PR 时，只投递一次而非两次。归档会话只刷新 `state`，绝不投递。channel 自有会话（`sourceType: 'channel'`）与机器自有的隐藏目录会话永远不是目标。
 - **机制。** 刷新在进程内调用 daemon 的 prompt 准入——`POST /session/:id/prompt` 背后的代码——并带上 daemon 来源标记（`qwen.daemon.prStateEvent`），准入把它当作 channel 绑定中继那样分类：不是交互式用户 prompt（不做循环检测拒绝，不对注入文本做 PR 绑定回填，显示投影为"PR 事件"），以转换 key 作为 `idempotencyKey`，因此 daemon 生命周期内的重试会去重到原始准入。
 - **休眠会话。** 已绑定但不在线的会话通过 channel 访问器所用的同一恢复路径恢复后再投递；`wakeDormant` 默认开启，这样 daemon 重启不会丢事件。无法恢复的会话（记录已删除、已归档、worktree 被取代）丢弃该转换并记一行日志；任何地方都不会公开发布。
 - **prompt 文本。** 沿用 channel 绑定 prompt 的形状：事件头、不可信事件数据提示、PR 身份（仓库、编号、标题、URL）、一行 `Event:` 与摘要（`ci_failure` 从 rollup 中列出最多五个失败的 check）。回复留在会话内。
 
 ### 5. 持久性
 
-检测结果与新快照在同一次 sidecar 写入中持久化，转换追加到 `pending`；投递随后按最旧优先排空 `pending`，每条在准入后清除。三个崩溃窗口的处理：写入前崩溃，下次扫描重新检测（无丢失，也没投递过任何东西）；写入后、投递前崩溃，下次扫描先排空 `pending`；投递后、清除前崩溃，下次扫描重新投递，准入环在 daemon 生命周期内去重（跨重启是 at-least-once，与 channel 的取舍相同）。`pending` 每个 PR 上限 16 条；溢出时丢弃最旧的并记日志。
+检测结果与新快照在同一次 sidecar 写入中持久化，转换追加到收件会话的 `pending`（该 PR 的其余 sidecar 只收到快照与已触发记录）；投递随后按最旧优先排空 `pending`，每条在准入后清除。三个崩溃窗口的处理：写入前崩溃，下次扫描重新检测（无丢失，也没投递过任何东西）；写入后、投递前崩溃，下次扫描先排空 `pending`；投递后、清除前崩溃，下次扫描重新投递，准入环在 daemon 生命周期内去重（跨重启是 at-least-once，与 channel 的取舍相同）。`pending` 每个 PR 上限 16 条；溢出时丢弃最旧的并记日志。
 
 ### 6. 配置
 
@@ -125,7 +125,7 @@ GitHub channel 的 `deliverToBoundSessions` 不变。`prWatchEvents`、监视通
 
 ## 验证计划
 
-- 单元：view 映射（`headRefOid`、`mergeable` 状态、rollup）；转换规则，包括每个 head 一次的 `ci_failure`、边沿触发的冲突、重开 → 关闭；多个绑定者之间的选择；模拟崩溃下的 pending 持久化与排空；配置解析。
+- 单元：view 映射（`headRefOid`、`mergeable` 状态、rollup）；转换规则，包括 force-push 回访下每个 head 一次的 `ci_failure`（`A failing → B failing → A failing` 触发两次而非三次）、边沿触发的冲突、重开 → 关闭；多个绑定者之间的选择，含分属不同 workspace 的绑定者；模拟崩溃下的 pending 持久化与排空；配置解析。
 - 刷新测试（现有带假 `fetchPullRequests` 的测试框架）：每个转换投递一次、休眠会话被恢复、归档与 channel 自有会话被跳过、上限与旋转。
 - E2E（daemon + 桩 `gh` 二进制）：在会话中绑定 PR，把桩的 rollup 翻成失败，下一次扫描后在该会话观察到恰好一条注入 prompt，daemon 重启后没有新的注入。
 
@@ -135,6 +135,7 @@ GitHub channel 的 `deliverToBoundSessions` 不变。`prWatchEvents`、监视通
 2. 检测与投递之间的 daemon 重启投递该转换一次；投递之后的重启最多重新投递一次。
 3. GitHub channel 不再发出任何 PR 状态 API 调用；带 `prWatchEvents` 的配置在 `connect()` 时被拒绝，并点名 `sessionPrWatch`。
 4. 未设置该项时，刷新的行为与 API 调用量不变。
+5. 同一仓库的两个受信 workspace 各有一个会话绑定同一个 PR 时，每个转换只投递一次，给其中最近活跃的会话；force-push 回到一个 CI 失败已触发过的 head 时，只要该 head 仍在该 PR 的 16 个 head 历史内，`ci_failure` 不再触发。
 
 ## 开放问题
 

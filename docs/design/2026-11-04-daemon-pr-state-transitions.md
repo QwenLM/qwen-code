@@ -51,8 +51,8 @@ watch?: {
   headSha?: string;
   checks?: 'passing' | 'failing' | 'pending' | 'none';
   mergeable?: 'mergeable' | 'conflicting';
-  /** Head for which ci_failure already fired (once per head). */
-  ciFiredSha?: string;
+  /** Heads for which ci_failure already fired, oldest first (cap 16). */
+  ciFired?: string[];
   /** Detected but not yet delivered transitions, oldest first (cap 16). */
   pending?: Array<{ type: PrTransitionType; key: string; summary: string; detectedAt: string }>;
 }
@@ -64,25 +64,25 @@ The first observation of a PR initializes the block silently. Entries persisted 
 
 Identical to the channel watch so behaviour does not change for operators who move over:
 
-| Event            | Fires when                                                                                                                                  |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `head_change`    | `headSha` differs from the previous observation (a force-push back to a recent SHA is a new transition).                                    |
-| `ci_failure`     | `checks` becomes `failing` and `ciFiredSha !== headSha`; sets `ciFiredSha`, so it fires once per head even if CI flaps.                     |
-| `merge_conflict` | `mergeable` becomes `conflicting` from a non-conflicting observation (edge-triggered; `conflicting → mergeable → conflicting` fires again). |
-| `state_change`   | `state` leaves `open` (merged or closed). A reopen returns `state` to `open`, so a later close fires again.                                 |
+| Event            | Fires when                                                                                                                                                     |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `head_change`    | `headSha` differs from the previous observation (a force-push back to a recent SHA is a new transition).                                                       |
+| `ci_failure`     | `checks` becomes `failing` and `headSha` is not in `ciFired`; appends it, so it fires once per head even if CI flaps or a force-push revisits an earlier head. |
+| `merge_conflict` | `mergeable` becomes `conflicting` from a non-conflicting observation (edge-triggered; `conflicting → mergeable → conflicting` fires again).                    |
+| `state_change`   | `state` leaves `open` (merged or closed). A reopen returns `state` to `open`, so a later close fires again.                                                    |
 
-Each transition's key is `pr-state:<owner/repo>#<number>:<type>:<headSha or previous→next>:<detectedAt>`; `detectedAt` keeps re-detected instances distinct across sidecar resets while `ci_failure` stays once-per-head through `ciFiredSha`.
+Each transition's key is `pr-state:<owner/repo>#<number>:<type>:<headSha or previous→next>:<detectedAt>`; `detectedAt` keeps re-detected instances distinct across sidecar resets while `ci_failure` stays once-per-head through `ciFired`. `ciFired` is the daemon's equivalent of the channel's durable `fired` ring: bounded per-head history, so `A failing → B failing → A failing` after a force-push back to `A` does not fire a second time for `A`. The bound differs deliberately: the channel keeps 64 keys shared by all four event types per PR and pins only the current head once they are evicted, while the daemon keeps the last 16 failing heads of each PR; a head revisited after more than 16 other failing heads fires again, as it does in the channel after eviction.
 
 ### 4. Delivery
 
-- **Target.** The session that owns the sidecar. When several sessions of one workspace bind the same PR, the transition is delivered to the most recently active one (transcript mtime, refined by the bridge's live activity) and the other sidecars record the new snapshot without delivery — the rule the channel uses today. Archived sessions are refreshed for `state` but never delivered to. Channel-owned sessions (`sourceType: 'channel'`) and machine-owned hidden-catalog sessions are never targets.
+- **Target.** One recipient per PR across the whole daemon, never one per workspace. Observation stays per workspace (each sweep views the open bound PRs of its own workspace), but when a sweep detects a transition it selects the recipient among every eligible session bound to that PR in every trusted workspace — the process-global sidecar scan behind `GET /sessions/pr-bindings` — taking the most recently active one (transcript mtime, refined by the bridge's live activity), the rule the channel applies to the whole bindings snapshot today, and dispatches through that session's owning runtime. The new snapshot and the transition's fired record are then written to every sidecar bound to the PR, in every workspace, through each sidecar's own mutation queue and lock; a sibling workspace's later sweep therefore observes no transition, so two registered workspaces for one repository, each with a session following the same PR, produce one delivery, not two. Archived sessions are refreshed for `state` but never delivered to. Channel-owned sessions (`sourceType: 'channel'`) and machine-owned hidden-catalog sessions are never targets.
 - **Mechanism.** The refresh calls the daemon's prompt admission in-process — the code behind `POST /session/:id/prompt` — with a daemon-origin marker (`qwen.daemon.prStateEvent`) that admission classifies like the channel bound relay: not an interactive user prompt (no loop-detected rejection, no PR-binding backfill on the injected text, a "PR event" display projection), with the transition key as the `idempotencyKey` so a retry within the daemon's lifetime deduplicates into the original admission.
 - **Dormant sessions.** A session that is bound but not live is restored through the same resume path the channel accessor uses, then delivered to; `wakeDormant` is on by default so a daemon restart does not lose events. A session that cannot be restored (record deleted, archived, worktree superseded) drops the transition with a log line; nothing is ever published anywhere.
 - **Prompt text.** The channel's bound prompt shape: an event header, the untrusted-event-data notice, PR identity (repo, number, title, URL), an `Event:` line and the summary (`ci_failure` names up to five failed checks from the rollup). The reply stays in the session.
 
 ### 5. Durability
 
-Detection and the new snapshot are persisted in one sidecar write with the transitions appended to `pending`; delivery then drains `pending` oldest-first and clears each entry after admission. The three crash windows resolve as: before the write, the transition is re-detected next sweep (no loss, nothing delivered); after the write and before delivery, the next sweep drains `pending` first; after delivery and before the clear, the next sweep re-delivers and the admission ring deduplicates it within the daemon's lifetime (at-least-once across a restart, the same trade the channel made). `pending` is capped at 16 per PR; overflow drops the oldest with a log line.
+Detection and the new snapshot are persisted in one sidecar write with the transitions appended to the recipient's `pending` (the other sidecars of the PR receive the snapshot and the fired record only); delivery then drains `pending` oldest-first and clears each entry after admission. The three crash windows resolve as: before the write, the transition is re-detected next sweep (no loss, nothing delivered); after the write and before delivery, the next sweep drains `pending` first; after delivery and before the clear, the next sweep re-delivers and the admission ring deduplicates it within the daemon's lifetime (at-least-once across a restart, the same trade the channel made). `pending` is capped at 16 per PR; overflow drops the oldest with a log line.
 
 ### 6. Configuration
 
@@ -125,7 +125,7 @@ The GitHub channel's `deliverToBoundSessions` is unchanged. `prWatchEvents`, the
 
 ## Validation plan
 
-- Unit: view mapping (`headRefOid`, `mergeable` states, rollup); transition rules including once-per-head `ci_failure`, edge-triggered conflict, reopen → close; selection among several binders; pending persistence and drain across simulated crashes; configuration parsing.
+- Unit: view mapping (`headRefOid`, `mergeable` states, rollup); transition rules including once-per-head `ci_failure` across a force-push revisit (`A failing → B failing → A failing` fires twice, not three times), edge-triggered conflict, reopen → close; selection among several binders, including binders in different workspaces; pending persistence and drain across simulated crashes; configuration parsing.
 - Refresh tests (existing harness with a fake `fetchPullRequests`): events delivered once per transition, dormant session restored, archived and channel-owned sessions skipped, cap and rotation.
 - E2E (daemon + stubbed `gh` binary): bind a PR in a session, flip the stub's rollup to failing, observe one injected prompt in that session after the next sweep and none after a daemon restart.
 
@@ -135,6 +135,7 @@ The GitHub channel's `deliverToBoundSessions` is unchanged. `prWatchEvents`, the
 2. A daemon restart between detection and delivery delivers the transition once; a restart after delivery re-delivers at most once.
 3. The GitHub channel no longer issues any PR-state API call; a configuration with `prWatchEvents` is rejected at `connect()` with a message naming `sessionPrWatch`.
 4. With the setting unset, the refresh's behaviour and API call volume are unchanged.
+5. Two trusted workspaces for one repository, each with a session bound to the same PR, receive one delivery per transition, to the most recently active of those sessions; and a force-push back to a head whose CI failure already fired does not fire `ci_failure` again while that head is within the PR's 16-head history.
 
 ## Open questions
 
