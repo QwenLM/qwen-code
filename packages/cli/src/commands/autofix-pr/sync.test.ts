@@ -1043,8 +1043,10 @@ describe('runSync (real git, bare remote)', () => {
   // What holds the branch decides what frees it: `git worktree remove`
   // refuses a locked worktree and one whose `.git` is gone, and `git
   // worktree prune` drops a stale record but not a locked one. The git
-  // commands the reason gives, run as given, let the next round through.
-  it.each<[string, (holder: string) => void, RegExp, RegExp]>([
+  // commands the reason gives, run by a shell as printed, let the next round
+  // through, wherever the holder is: its path quoted, spaces and quotes in it
+  // are one argument. POSIX shell syntax, run by `sh`.
+  const holders: Array<[string, (holder: string) => void, RegExp, RegExp]> = [
     ['a checkout', () => {}, /\. Switch that checkout/, /worktree prune/],
     [
       'a directory deleted by hand',
@@ -1061,7 +1063,7 @@ describe('runSync (real git, bare remote)', () => {
     [
       'a locked checkout',
       (holder) => run(repo, 'worktree', 'lock', holder),
-      /, which is locked\. Unlock it \(`git worktree unlock .*other-wt`\), then switch that checkout/,
+      /, which is locked\. Unlock it \(`git worktree unlock '.*'`\), then switch that checkout/,
       /worktree prune/,
     ],
     [
@@ -1070,14 +1072,26 @@ describe('runSync (real git, bare remote)', () => {
         run(repo, 'worktree', 'lock', holder);
         rmSync(holder, { recursive: true, force: true });
       },
-      /, a locked worktree git still records .*\. Unlock it \(`git worktree unlock .*other-wt`\), then drop its record with `git worktree prune`/,
+      /, a locked worktree git still records .*\. Unlock it \(`git worktree unlock '.*'`\), then drop its record with `git worktree prune`/,
       /worktree remove|Switch that checkout/,
     ],
-  ])(
+  ];
+  it
+    .skipIf(process.platform === 'win32')
+    .each(
+      holders.flatMap(([name, ...rest]) => [
+        [name, 'other-wt', ...rest] as const,
+        [
+          `${name} at a path with spaces and quotes`,
+          `other wt "q" it's`,
+          ...rest,
+        ] as const,
+      ]),
+    )(
     'with --discard says how to free a branch held by %s',
-    (_name, damage, says, saysNot) => {
+    (_name, dirName, damage, says, saysNot) => {
       run(paths.worktreePath, 'switch', '-q', '-c', 'fix/ci');
-      const holder = join(base, 'other-wt');
+      const holder = join(base, dirName);
       run(repo, 'worktree', 'add', '-q', holder, paths.branch);
       damage(holder);
       const { synced, reason } = runSync(7, true);
@@ -1087,7 +1101,11 @@ describe('runSync (real git, bare remote)', () => {
       for (const [, command] of String(reason).matchAll(
         /`(git worktree [^`]+)`/g,
       )) {
-        run(repo, ...command.split(' ').slice(1));
+        execFileSync('sh', ['-c', command], {
+          cwd: repo,
+          env: { ...process.env, GIT_CONFIG_GLOBAL: gitConfig },
+          stdio: 'pipe',
+        });
       }
       expect(runSync(7, true)).toMatchObject({
         synced: true,

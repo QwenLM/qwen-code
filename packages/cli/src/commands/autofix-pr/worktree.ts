@@ -10,6 +10,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { GIT_TIMEOUT_MS, gitOpt, gitProbe, gitRaw } from '../review/lib/git.js';
+import { shellQuotePath } from '../review/lib/shell-quote.js';
 import { redirectedAncestor, sanitizedGitEnv } from '../review/lib/worktree.js';
 import type { AutofixPrPaths } from './state.js';
 import { AutofixPrRefusal } from './refusal.js';
@@ -391,15 +392,17 @@ function worktreeHolding(worktreePath: string, branch: string): Holder | null {
 
 /** How the user frees the branch `holder` keeps. `git worktree prune`
  * drops a stale record but not a locked one, and `git worktree remove`
- * refuses a locked worktree and one whose `.git` is gone. */
+ * refuses a locked worktree and one whose `.git` is gone. The path in a
+ * command is quoted, so the command runs as printed. */
 function freeing({ path, stale, locked }: Holder): string {
+  const quoted = shellQuotePath(path);
   const gone =
     'worktree git still records although nothing is checked out there any more';
   const free = stale
     ? 'drop its record with `git worktree prune`'
-    : `switch that checkout to another branch or remove it (\`git worktree remove ${path}\`)`;
+    : `switch that checkout to another branch or remove it (\`git worktree remove ${quoted}\`)`;
   if (locked) {
-    return `, ${stale ? `a locked ${gone}` : 'which is locked'}. Unlock it (\`git worktree unlock ${path}\`), then ${free}`;
+    return `, ${stale ? `a locked ${gone}` : 'which is locked'}. Unlock it (\`git worktree unlock ${quoted}\`), then ${free}`;
   }
   return `${stale ? `, a ${gone}` : ''}. ${free[0].toUpperCase()}${free.slice(1)}`;
 }
