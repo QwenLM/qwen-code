@@ -1259,7 +1259,9 @@ user or system settings. The member is omitted entirely when no channel
 resolves, and older daemons never send it; a settings read failure degrades
 to its absence rather than failing the journal read. Each event records what a Channel did — an inbound
 message it accepted or skipped (with the machine reason: `reason_filter`,
-`mention_required`, `duplicate`, a sender-gate rejection), a publication
+`mention_required`, `duplicate`, a sender-gate rejection, `github_api_error`),
+a GitHub thread it failed to read and will read again (`failed` with
+`github_api_error`), a publication
 outcome, an inbound task transition, or a poll result — and never carries
 message text. A GitHub poll that filters more than 20 notifications journals
 the first 20 individually and one further `reason_filter` row whose
