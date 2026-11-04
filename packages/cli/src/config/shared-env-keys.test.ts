@@ -12,6 +12,7 @@ import {
   ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
   HOME_ENV_BOOTSTRAP_KEYS,
   INHERITED_LOADER_ENV_KEYS,
+  isGlobalDirEnvKey,
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
   type LoaderKeyRejectionReporter,
@@ -436,6 +437,17 @@ describe('isHardcodedProjectEnvExclusion', () => {
     // (and not a listed literal) is not excluded: GIT_CONFIG_NOSYSTEM only
     // skips the system gitconfig read and injects nothing.
     expect(isHardcodedProjectEnvExclusion('GIT_CONFIG_NOSYSTEM')).toBe(false);
+  });
+});
+
+describe('isGlobalDirEnvKey', () => {
+  it('matches every input the global dir is resolved from, in any case', () => {
+    for (const key of ['QWEN_HOME', 'XDG_CONFIG_HOME', 'HOME', 'USERPROFILE']) {
+      expect(isGlobalDirEnvKey(key)).toBe(true);
+      expect(isGlobalDirEnvKey(key.toLowerCase())).toBe(true);
+    }
+    expect(isGlobalDirEnvKey('QWEN_RUNTIME_DIR')).toBe(false);
+    expect(isGlobalDirEnvKey('XDG_CACHE_HOME')).toBe(false);
   });
 });
 

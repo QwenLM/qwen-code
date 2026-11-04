@@ -23,7 +23,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { FatalError } from '@qwen-code/qwen-code-core';
+import { FatalError, Storage } from '@qwen-code/qwen-code-core';
 import { AlreadyReportedError } from './utils/errors.js';
 import { TOP_LEVEL_HELP_OPTIONS } from './config/top-level-options.js';
 import {
@@ -56,7 +56,12 @@ const mocks = vi.hoisted(() => ({
   runWorkspaceRecoveryWorker: vi.fn(),
   runSessionSendMcp: vi.fn(),
   runManagedRuntimeAttestationWorker: vi.fn(),
+  preResolveHomeEnvOverrides: vi.fn(),
   runManagedRuntimeBootstrap: vi.fn(),
+}));
+
+vi.mock('./config/environment.js', () => ({
+  preResolveHomeEnvOverrides: mocks.preResolveHomeEnvOverrides,
 }));
 
 vi.mock('./serve/managed-runtime-bootstrap.js', () => ({
@@ -748,6 +753,8 @@ describe('runCliEntry', () => {
     vi.clearAllMocks();
     mocks.tryRunServeFastPath.mockResolvedValue(false);
     mocks.getCliVersion.mockResolvedValue('fallback-version');
+    // The mcp and memory fast paths write the marker; keep the real home out.
+    vi.spyOn(Storage, 'markDefaultGlobalQwenDir').mockImplementation(() => {});
     process.env['CLI_VERSION'] = '9.9.9';
     vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
       stdout.push(String(chunk));
@@ -1021,6 +1028,7 @@ describe('runCliEntry', () => {
     const helpText = stdout.join('');
     expect(helpText).toContain('List all configured MCP servers');
     expect(mocks.mcpListHandler).not.toHaveBeenCalled();
+    expect(Storage.markDefaultGlobalQwenDir).not.toHaveBeenCalled();
     expect(mocks.main).not.toHaveBeenCalled();
     expect(mocks.initStartupProfiler).not.toHaveBeenCalled();
     expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
@@ -1120,6 +1128,24 @@ describe('runCliEntry', () => {
     expect(mocks.initStartupProfiler).not.toHaveBeenCalled();
     expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { argv: ['mcp', 'list'], handler: mocks.mcpListHandler },
+    { argv: ['memory', 'import', 'codex'], handler: mocks.memoryImportHandler },
+  ])(
+    'marks the default global dir from the home .env before $argv runs',
+    async ({ argv, handler }) => {
+      await runCliEntry(argv);
+
+      const [resolved] =
+        mocks.preResolveHomeEnvOverrides.mock.invocationCallOrder;
+      const [marked] = vi.mocked(Storage.markDefaultGlobalQwenDir).mock
+        .invocationCallOrder;
+      const [ran] = handler.mock.invocationCallOrder;
+      expect(resolved).toBeLessThan(marked!);
+      expect(marked).toBeLessThan(ran!);
+    },
+  );
 
   it('does not treat an option-shifted memory argv as a bare help request', async () => {
     await runCliEntry(['memory', '--json', 'import', 'codex']);

@@ -1642,6 +1642,153 @@ describe('serve fast path environment bootstrap', () => {
     );
   });
 
+  describe('with the global dir in the XDG config directory', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    const savedXdg = process.env['XDG_CONFIG_HOME'];
+
+    // A fake Linux home without ~/.qwen, so the global dir is ~/.config/qwen.
+    const useXdgHome = (): string => {
+      delete process.env['QWEN_HOME'];
+      delete process.env['QWEN_RUNTIME_DIR'];
+      delete process.env['XDG_CONFIG_HOME'];
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      tempLaunchCwd = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-path-xdg-home-')),
+      );
+      process.env['HOME'] = tempLaunchCwd;
+      process.env['USERPROFILE'] = tempLaunchCwd;
+      return tempLaunchCwd;
+    };
+
+    afterEach(() => {
+      Object.defineProperty(process, 'platform', platform);
+      if (savedXdg === undefined) delete process.env['XDG_CONFIG_HOME'];
+      else process.env['XDG_CONFIG_HOME'] = savedXdg;
+    });
+
+    it('pre-resolves home env overrides from ~/.env', () => {
+      const home = useXdgHome();
+      writeFileSync(join(home, '.env'), 'QWEN_RUNTIME_DIR=from-home-env\n');
+
+      preResolveServeFastPathHomeEnvOverrides();
+
+      expect(process.env['QWEN_RUNTIME_DIR']).toBe('from-home-env');
+    });
+
+    it('resolves settings placeholders from ~/.env', () => {
+      const home = useXdgHome();
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-path-xdg-workspace-')),
+      );
+      mkdirSync(join(home, '.config', 'qwen'), { recursive: true });
+      writeFileSync(
+        join(home, '.config', 'qwen', 'settings.json'),
+        JSON.stringify({ advanced: { excludedEnvVars: ['${XDG_TEST_KEY}'] } }),
+      );
+      writeFileSync(join(home, '.env'), 'XDG_TEST_KEY=from-home-env\n');
+
+      expect(loadServeFastPathSettings(tempWorkspace).advanced).toMatchObject({
+        excludedEnvVars: ['from-home-env'],
+      });
+    });
+
+    it('does not let a home .env set XDG_CONFIG_HOME', () => {
+      const home = useXdgHome();
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-path-xdg-workspace-')),
+      );
+      writeFileSync(
+        join(home, '.env'),
+        'XDG_CONFIG_HOME=/elsewhere\nFASTPATH_XDG_ALLOWED=allowed\n',
+      );
+      try {
+        loadServeFastPathEnvironment({}, tempWorkspace);
+
+        expect(process.env['FASTPATH_XDG_ALLOWED']).toBe('allowed');
+        expect(process.env['XDG_CONFIG_HOME']).toBeUndefined();
+      } finally {
+        delete process.env['FASTPATH_XDG_ALLOWED'];
+      }
+    });
+
+    it('lets a legacy ~/.qwen/.env fill in keys but not set QWEN_HOME', () => {
+      const home = useXdgHome();
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-path-xdg-workspace-')),
+      );
+      const xdgDir = join(home, '.config', 'qwen');
+      mkdirSync(xdgDir, { recursive: true });
+      writeFileSync(join(xdgDir, '.qwen-global-dir'), '');
+      mkdirSync(join(home, '.qwen'));
+      writeFileSync(
+        join(home, '.qwen', '.env'),
+        `QWEN_HOME=${join(home, 'legacy')}\nFASTPATH_LEGACY_ALLOWED=allowed\n`,
+      );
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        preResolveServeFastPathHomeEnvOverrides();
+        loadServeFastPathEnvironment({}, tempWorkspace);
+
+        expect(process.env['FASTPATH_LEGACY_ALLOWED']).toBe('allowed');
+        expect(process.env['QWEN_HOME']).toBeUndefined();
+        expect(getGlobalQwenDirLite()).toBe(xdgDir);
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining(
+            `.env file ${join(home, '.qwen', '.env')} cannot set the env vars that locate the global directory; ignored: QWEN_HOME.`,
+          ),
+        );
+      } finally {
+        stderr.mockRestore();
+        delete process.env['FASTPATH_LEGACY_ALLOWED'];
+      }
+    });
+
+    // On Windows os.homedir() reads USERPROFILE, so unsetting it would leave
+    // the fake home.
+    it.skipIf(platform.value === 'win32')(
+      'does not let a home .env set USERPROFILE',
+      () => {
+        const home = useXdgHome();
+        tempWorkspace = realpathSync(
+          mkdtempSync(join(os.tmpdir(), 'qws-fast-path-xdg-workspace-')),
+        );
+        delete process.env['USERPROFILE'];
+        writeFileSync(join(home, '.env'), 'USERPROFILE=/elsewhere\n');
+
+        loadServeFastPathEnvironment({}, tempWorkspace);
+
+        expect(process.env['USERPROFILE']).toBeUndefined();
+      },
+    );
+
+    it.skipIf(platform.value === 'win32')(
+      'does not let settings.env set USERPROFILE',
+      () => {
+        useXdgHome();
+        tempWorkspace = realpathSync(
+          mkdtempSync(join(os.tmpdir(), 'qws-fast-path-xdg-workspace-')),
+        );
+        delete process.env['USERPROFILE'];
+        try {
+          loadServeFastPathEnvironment(
+            {
+              env: {
+                USERPROFILE: '/elsewhere',
+                FASTPATH_SETTINGS_ALLOWED: 'allowed',
+              },
+            },
+            tempWorkspace,
+          );
+
+          expect(process.env['FASTPATH_SETTINGS_ALLOWED']).toBe('allowed');
+          expect(process.env['USERPROFILE']).toBeUndefined();
+        } finally {
+          delete process.env['FASTPATH_SETTINGS_ALLOWED'];
+        }
+      },
+    );
+  });
+
   it('applies legacy settings keys consumed by the serve fast path', () => {
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(

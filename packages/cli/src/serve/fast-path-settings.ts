@@ -17,9 +17,11 @@ import { V1_INDICATOR_KEYS } from '../config/migration/versions/v1-to-v2-shared.
 import {
   DEFAULT_EXCLUDED_ENV_VARS,
   HOME_ENV_BOOTSTRAP_KEYS,
+  isGlobalDirEnvKey,
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
   isPrivateProvenanceEnvKey,
+  reportRejectedGlobalDirKeys,
   reportRejectedLoaderKeys,
 } from '../config/shared-env-keys.js';
 import {
@@ -98,7 +100,7 @@ export function preResolveServeFastPathHomeEnvOverrides(): void {
   const initialQwenDir = getGlobalQwenDirLite();
   readHomeEnvIntoFastPath(path.join(initialQwenDir, '.env'));
   if (!initialQwenHome) {
-    readHomeEnvIntoFastPath(path.join(path.dirname(initialQwenDir), '.env'));
+    readHomeEnvIntoFastPath(path.join(os.homedir() || os.tmpdir(), '.env'));
   }
 
   const discoveredQwenHome = process.env['QWEN_HOME'];
@@ -135,7 +137,7 @@ function getHomeEnvFallbackVarsFastPath(): Record<string, string> {
   const globalQwenDir = getGlobalQwenDirLite();
   const candidates = [path.join(globalQwenDir, '.env')];
   if (!process.env['QWEN_HOME']) {
-    candidates.push(path.join(path.dirname(globalQwenDir), '.env'));
+    candidates.push(path.join(os.homedir() || os.tmpdir(), '.env'));
   }
 
   const result: Record<string, string> = {};
@@ -315,6 +317,7 @@ export function loadServeFastPathEnvironment(
         // would otherwise freeze into daemonRuntimeBaseEnv and hand to every
         // spawned session — needs its own every-scope rejection here.
         if (isPrivateProvenanceEnvKey(key)) continue;
+        if (isGlobalDirEnvKey(key)) continue;
         if (!isHomeScopedEnvFile && isHardcodedProjectEnvExclusion(key)) {
           continue;
         }
@@ -333,6 +336,9 @@ export function loadServeFastPathEnvironment(
           Object.keys(parsedEnv),
         ),
       );
+      if (isHomeScopedEnvFile) {
+        reportRejectedGlobalDirKeys(`.env file ${envFilePath}`, parsedEnv);
+      }
     } catch {
       // Errors are ignored to match dotenv quiet-mode behavior.
     }
@@ -342,6 +348,7 @@ export function loadServeFastPathEnvironment(
     for (const [key, value] of Object.entries(settings.env)) {
       if (isHardcodedProjectEnvExclusion(key)) continue;
       if (isLoaderEnvKey(key)) continue;
+      if (isGlobalDirEnvKey(key)) continue;
       if (!Object.hasOwn(process.env, key) && typeof value === 'string') {
         process.env[key] = value;
       }

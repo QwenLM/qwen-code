@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const {
@@ -525,6 +526,139 @@ describe('scripts/cli-entry.js production entry', () => {
       } else {
         process.env.NODE_COMPILE_CACHE = inheritedCompileCache;
       }
+    });
+
+    describe('without QWEN_HOME', () => {
+      const inheritedHome = process.env.QWEN_HOME;
+      const inheritedXdg = process.env.XDG_CONFIG_HOME;
+
+      beforeEach(() => {
+        delete process.env.QWEN_HOME;
+        delete process.env.XDG_CONFIG_HOME;
+      });
+
+      afterEach(() => {
+        existsSyncMock.mockImplementation(() => false);
+        if (inheritedHome === undefined) delete process.env.QWEN_HOME;
+        else process.env.QWEN_HOME = inheritedHome;
+        if (inheritedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+        else process.env.XDG_CONFIG_HOME = inheritedXdg;
+      });
+
+      it('roots managed npm updates in ~/.config/qwen for a new install', async () => {
+        await import('../cli-entry.js?xdg-new-install');
+        expect(normalizePath(process.env.QWEN_CODE_MANAGED_NPM_ROOT)).toBe(
+          '/home/test-user/.config/qwen/updates/npm',
+        );
+      });
+
+      it('keeps managed npm updates in an existing ~/.qwen', async () => {
+        existsSyncMock.mockImplementation(
+          (file) => normalizePath(file) === '/home/test-user/.qwen',
+        );
+        await import('../cli-entry.js?xdg-legacy-home');
+        expect(normalizePath(process.env.QWEN_CODE_MANAGED_NPM_ROOT)).toBe(
+          '/home/test-user/.qwen/updates/npm',
+        );
+      });
+
+      it('stays in ~/.config/qwen once it holds the marker, even next to ~/.qwen', async () => {
+        existsSyncMock.mockImplementation((file) =>
+          [
+            '/home/test-user/.qwen',
+            '/home/test-user/.config/qwen/.qwen-global-dir',
+          ].includes(normalizePath(file)),
+        );
+        await import('../cli-entry.js?xdg-marked-home');
+        expect(normalizePath(process.env.QWEN_CODE_MANAGED_NPM_ROOT)).toBe(
+          '/home/test-user/.config/qwen/updates/npm',
+        );
+      });
+
+      it('uses an absolute XDG_CONFIG_HOME', async () => {
+        process.env.XDG_CONFIG_HOME = '/home/test-user/xdg';
+        await import('../cli-entry.js?xdg-absolute');
+        expect(normalizePath(process.env.QWEN_CODE_MANAGED_NPM_ROOT)).toBe(
+          '/home/test-user/xdg/qwen/updates/npm',
+        );
+      });
+
+      it('ignores a relative XDG_CONFIG_HOME, as core does', async () => {
+        process.env.XDG_CONFIG_HOME = 'relative-config';
+        await import('../cli-entry.js?xdg-relative');
+        expect(normalizePath(process.env.QWEN_CODE_MANAGED_NPM_ROOT)).toBe(
+          '/home/test-user/.config/qwen/updates/npm',
+        );
+      });
+
+      it.each([
+        ['darwin', () => import('../cli-entry.js?xdg-darwin')],
+        ['win32', () => import('../cli-entry.js?xdg-win32')],
+      ])(
+        'keeps managed npm updates in ~/.qwen on %s',
+        async (platform, run) => {
+          Object.defineProperty(process, 'platform', { value: platform });
+          existsSyncMock.mockImplementation(
+            (file) =>
+              normalizePath(file) ===
+              '/home/test-user/.config/qwen/.qwen-global-dir',
+          );
+          await run();
+          expect(normalizePath(process.env.QWEN_CODE_MANAGED_NPM_ROOT)).toBe(
+            '/home/test-user/.qwen/updates/npm',
+          );
+        },
+      );
+
+      it('uses <tmpdir>/.qwen without a home directory, as core does', async () => {
+        homedirMock.mockReturnValue('');
+        await import('../cli-entry.js?xdg-no-home');
+        expect(normalizePath(process.env.QWEN_CODE_MANAGED_NPM_ROOT)).toBe(
+          '/tmp/.qwen/updates/npm',
+        );
+      });
+
+      it('pre-resolves QWEN_HOME from the .env in ~/.config/qwen', async () => {
+        const readFileSyncMock = vi.mocked(readFileSync);
+        const impl = readFileSyncMock.getMockImplementation();
+        readFileSyncMock.mockImplementation((file, ...rest) =>
+          normalizePath(file) === '/home/test-user/.config/qwen/.env'
+            ? 'QWEN_HOME=/data/qwen\n'
+            : impl(file, ...rest),
+        );
+        try {
+          await import('../cli-entry.js?xdg-dotenv');
+          // resolve() as the launcher does, which adds a drive on Windows.
+          expect(normalizePath(process.env.QWEN_CODE_MANAGED_NPM_ROOT)).toBe(
+            normalizePath(join(resolve('/data/qwen'), 'updates', 'npm')),
+          );
+        } finally {
+          readFileSyncMock.mockImplementation(impl);
+        }
+      });
+
+      it('pre-resolves only QWEN_HOME from the .env in an existing ~/.qwen', async () => {
+        existsSyncMock.mockImplementation(
+          (file) => normalizePath(file) === '/home/test-user/.qwen',
+        );
+        const readFileSyncMock = vi.mocked(readFileSync);
+        const impl = readFileSyncMock.getMockImplementation();
+        readFileSyncMock.mockImplementation((file, ...rest) =>
+          normalizePath(file) === '/home/test-user/.qwen/.env'
+            ? 'QWEN_HOME=/data/qwen\nQWEN_TEST_DOTENV_KEY=copied\n'
+            : impl(file, ...rest),
+        );
+        try {
+          await import('../cli-entry.js?legacy-dotenv');
+          expect(normalizePath(process.env.QWEN_CODE_MANAGED_NPM_ROOT)).toBe(
+            normalizePath(join(resolve('/data/qwen'), 'updates', 'npm')),
+          );
+          expect(process.env.QWEN_TEST_DOTENV_KEY).toBeUndefined();
+        } finally {
+          readFileSyncMock.mockImplementation(impl);
+          delete process.env.QWEN_TEST_DOTENV_KEY;
+        }
+      });
     });
 
     it('runs the CLI in this process with gc exposed', async () => {
