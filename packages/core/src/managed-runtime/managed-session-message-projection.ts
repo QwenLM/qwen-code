@@ -38,6 +38,79 @@ import type {
 } from './managed-session-storage.js';
 
 /**
+ * Bytes of verified message bodies that the projections of one process keep.
+ * A Harness rebuilds a Session's history from its message bodies several times
+ * per Turn; without a cache every rebuild read every body of the Session again.
+ * The bound keeps resident Sessions from each holding their whole history:
+ * active Sessions stay warm and idle ones fall out first.
+ */
+export const MANAGED_MESSAGE_BODY_CACHE_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Message bodies already read through a projection, least recently read first.
+ * A body is immutable and its ref names its kind, length and digest, so an
+ * entry is exactly what the store returned for that ref. Entries are keyed by
+ * the resource store they were read from, so Sessions never share them. Only
+ * reads fill the cache: a body a projection has never read is still read from
+ * the store, and fails the projection if the store no longer has it.
+ */
+export class ManagedMessageBodyCache {
+  private readonly entries = new Map<string, Buffer>();
+  private readonly stores = new WeakMap<ManagedSessionResourceStore, number>();
+  private nextStore = 1;
+  private size = 0;
+
+  constructor(private readonly limitBytes: number) {}
+
+  get bytes(): number {
+    return this.size;
+  }
+
+  async read(
+    resources: ManagedSessionResourceStore,
+    ref: ManagedSessionDurableRef,
+  ): Promise<Buffer> {
+    let store = this.stores.get(resources);
+    if (store === undefined) {
+      store = this.nextStore++;
+      this.stores.set(resources, store);
+    }
+    const key = [
+      store,
+      ref.resourceId,
+      ref.kind,
+      ref.schemaVersion,
+      ref.byteLength,
+      ref.digest,
+    ].join('\u0000');
+    const cached = this.entries.get(key);
+    if (cached !== undefined) {
+      this.entries.delete(key);
+      this.entries.set(key, cached);
+      return cached;
+    }
+    const body = await readManagedMessageBody(
+      (bodyRef) => resources.read(bodyRef),
+      ref,
+    );
+    if (body.byteLength <= this.limitBytes && !this.entries.has(key)) {
+      this.entries.set(key, body);
+      this.size += body.byteLength;
+      for (const [oldest, value] of this.entries) {
+        if (this.size <= this.limitBytes) break;
+        this.entries.delete(oldest);
+        this.size -= value.byteLength;
+      }
+    }
+    return body;
+  }
+}
+
+const sharedMessageBodies = new ManagedMessageBodyCache(
+  MANAGED_MESSAGE_BODY_CACHE_BYTES,
+);
+
+/**
  * Carries the existing transcript history inside the authoritative log.
  *
  * A Managed session must not append an equivalent legacy record beside each
@@ -51,6 +124,7 @@ export class ManagedSessionMessageProjection {
   constructor(
     private readonly authority: LocalManagedSessionAuthority,
     private readonly resources: ManagedSessionResourceStore,
+    private readonly bodies: ManagedMessageBodyCache = sharedMessageBodies,
   ) {}
 
   /**
@@ -161,15 +235,14 @@ export class ManagedSessionMessageProjection {
           event.kind === 'message.committed' ||
           (includeCompactions && event.kind === 'context.compacted')
         ) {
-          records.push(
-            await readRecordBody(
-              this.resources,
-              event.payload[
-                event.kind === 'context.compacted' ? 'summaryRef' : 'contentRef'
-              ],
-              `${event.kind} event ${event.eventId} body`,
-            ),
+          const ref = assertManagedSessionDurableRef(
+            event.payload[
+              event.kind === 'context.compacted' ? 'summaryRef' : 'contentRef'
+            ],
+            `${event.kind} event ${event.eventId} body`,
           );
+          const body = await this.bodies.read(this.resources, ref);
+          records.push(JSON.parse(body.toString('utf8')) as ChatRecord);
         }
       }
     }

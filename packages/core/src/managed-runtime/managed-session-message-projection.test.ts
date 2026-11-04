@@ -16,12 +16,14 @@ import {
   readManagedSessionLog,
 } from './managed-session-authority.js';
 import {
+  ManagedMessageBodyCache,
   ManagedSessionMessageProjection,
   projectManagedSessionTitleInfo,
   readManagedSessionRecords,
 } from './managed-session-message-projection.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import { ManagedSessionRecordSink } from './managed-session-record-sink.js';
+import type { ManagedSessionResourceStore } from './managed-session-storage.js';
 import { managedSessionResourceRoot } from '../utils/sessionStorageUtils.js';
 import {
   MANAGED_SESSION_LIMITS,
@@ -1373,5 +1375,169 @@ describe('managed session message projection', () => {
       /is not present for session/,
     );
     await harness.close();
+  });
+});
+
+describe('managed message body cache', () => {
+  function messageReads(store: LocalManagedSessionResourceStore) {
+    const read = vi.spyOn(store, 'read');
+    return () =>
+      read.mock.calls.filter(([ref]) => ref.kind.startsWith('managed-message'))
+        .length;
+  }
+
+  it('reads each message body once across projections and Turns', async () => {
+    const harness = await createHarness();
+    const projection = new ManagedSessionMessageProjection(
+      harness.authority,
+      harness.store,
+      new ManagedMessageBodyCache(1024 * 1024),
+    );
+    for (const [index, record] of records.slice(0, 2).entries()) {
+      await projection.commit(
+        command('commitMessage', `cmd-msg-${index}`),
+        { record },
+        HOLDS,
+      );
+    }
+    const reads = messageReads(harness.store);
+
+    await expect(projection.project()).resolves.toEqual(records.slice(0, 2));
+    expect(reads()).toBe(2);
+    await expect(projection.projectModelRecords()).resolves.toEqual(
+      records.slice(0, 2),
+    );
+    await expect(projection.project()).resolves.toEqual(records.slice(0, 2));
+    expect(reads()).toBe(2);
+
+    // The next Turn's record is read once; the earlier ones stay cached.
+    // (The commit itself also reads the body once to verify it.)
+    await projection.commit(
+      command('commitMessage', 'cmd-msg-2'),
+      { record: records[2] },
+      HOLDS,
+    );
+    const committed = reads();
+    await expect(projection.project()).resolves.toEqual(records);
+    await expect(projection.projectModelRecords()).resolves.toEqual(records);
+    expect(reads() - committed).toBe(1);
+    await harness.close();
+  });
+
+  it('returns a fresh record for every projection', async () => {
+    const harness = await createHarness();
+    const projection = new ManagedSessionMessageProjection(
+      harness.authority,
+      harness.store,
+      new ManagedMessageBodyCache(1024 * 1024),
+    );
+    await projection.commit(
+      command('commitMessage', 'cmd-msg-0'),
+      { record: records[0] },
+      HOLDS,
+    );
+    const [first] = await projection.project();
+    (first as { cwd: string }).cwd = '/mutated';
+    await expect(projection.project()).resolves.toEqual([records[0]]);
+    await harness.close();
+  });
+
+  it('caches a chunked record whole', async () => {
+    const harness = await createHarness();
+    const projection = new ManagedSessionMessageProjection(
+      harness.authority,
+      harness.store,
+      new ManagedMessageBodyCache(4 * 1024 * 1024),
+    );
+    const big: ChatRecord = {
+      ...records[1],
+      uuid: 'rec-assistant-big',
+      message: { role: 'model', parts: [{ text: '长回答'.repeat(40_000) }] },
+    };
+    await projection.commit(
+      command('commitMessage', 'cmd-msg-big'),
+      { record: big },
+      HOLDS,
+    );
+    const reads = messageReads(harness.store);
+    await expect(projection.project()).resolves.toEqual([big]);
+    const first = reads();
+    expect(first).toBeGreaterThan(2);
+    await expect(projection.project()).resolves.toEqual([big]);
+    expect(reads()).toBe(first);
+    await harness.close();
+  });
+
+  function fakeStore(): ManagedSessionResourceStore & {
+    read: ReturnType<typeof vi.fn>;
+  } {
+    return {
+      read: vi.fn(async (ref: ManagedSessionDurableRef) =>
+        Buffer.alloc(ref.byteLength, 'x'),
+      ),
+    } as unknown as ManagedSessionResourceStore & {
+      read: ReturnType<typeof vi.fn>;
+    };
+  }
+
+  function ref(
+    resourceId: string,
+    byteLength: number,
+  ): ManagedSessionDurableRef {
+    return {
+      resourceId,
+      kind: 'managed-message',
+      schemaVersion: 1,
+      byteLength,
+      digest: DIGEST,
+    };
+  }
+
+  it('drops the least recently read bodies past its byte bound', async () => {
+    const cache = new ManagedMessageBodyCache(200);
+    const store = fakeStore();
+    await cache.read(store, ref('a', 100));
+    await cache.read(store, ref('b', 100));
+    expect(cache.bytes).toBe(200);
+    await cache.read(store, ref('a', 100));
+    await cache.read(store, ref('c', 100));
+    expect(cache.bytes).toBe(200);
+    expect(store.read).toHaveBeenCalledTimes(3);
+
+    // b was the least recently read, so it is the one that left.
+    await cache.read(store, ref('a', 100));
+    await cache.read(store, ref('c', 100));
+    expect(store.read).toHaveBeenCalledTimes(3);
+    await cache.read(store, ref('b', 100));
+    expect(store.read).toHaveBeenCalledTimes(4);
+
+    // A body larger than the bound is returned but never kept, and does not
+    // push out the bodies that fit.
+    await cache.read(store, ref('huge', 300));
+    await cache.read(store, ref('huge', 300));
+    expect(store.read).toHaveBeenCalledTimes(6);
+    await cache.read(store, ref('c', 100));
+    await cache.read(store, ref('b', 100));
+    expect(store.read).toHaveBeenCalledTimes(6);
+    expect(cache.bytes).toBe(200);
+  });
+
+  it('keeps the bodies of different stores apart', async () => {
+    const cache = new ManagedMessageBodyCache(1024);
+    const first = fakeStore();
+    const second = fakeStore();
+    await cache.read(first, ref('same', 10));
+    await cache.read(second, ref('same', 10));
+    await cache.read(first, ref('same', 10));
+    expect(first.read).toHaveBeenCalledTimes(1);
+    expect(second.read).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads a body again when its ref describes it differently', async () => {
+    const cache = new ManagedMessageBodyCache(1024);
+    const store = fakeStore();
+    await cache.read(store, ref('same', 10));
+    await cache.read(store, { ...ref('same', 10), digest: 'f'.repeat(64) });
+    expect(store.read).toHaveBeenCalledTimes(2);
   });
 });
