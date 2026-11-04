@@ -68,7 +68,7 @@ Because the cursor is global (not per-thread), a notification that arrives in a 
 `PollingChannelBase<Cursor>` (in `packages/channels/base/`) extends `ChannelBase` and provides the poll loop infrastructure:
 
 - **Poll loop**: start/stop via `startPollLoop()`/`stopPollLoop()`, called from `connect()`/`disconnect()`
-- **Poll interval**: read from channel config `pollInterval` (ms), validated as positive finite number, defaults to 60000
+- **Poll interval**: read from channel config `pollInterval` (ms), validated as a positive finite number, clamped to a maximum of 86400000 (one day), defaults to 60000. The clamp exists because Node clamps a timeout above its 32-bit range to 1ms, which would turn the loop into a hot loop; values between one day and that limit are clamped rather than replaced, so a previously honoured interval is not silently multiplied
 - **Cursor persistence**: JSON cursor saved atomically after each successful `pollOnce()`; loaded on construction (corrupt or unparseable date → fallback to `createInitialCursor()`)
 - **Cursor validation**: `validateCursor()` virtual hook — base rejects non-objects and arrays; subclasses add shape checks (e.g. GitHub rejects missing/invalid `lastProcessedAt` date)
 - **Backoff**: exponential 2s → 30s on poll errors, reset on success

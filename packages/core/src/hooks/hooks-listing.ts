@@ -106,6 +106,7 @@ export type HooksListingConfig = Pick<
   | 'getBareMode'
   | 'getSessionId'
   | 'isTrustedFolder'
+  | 'isExplicitlyTrustedFolder'
   | 'getSystemHooks'
   | 'getUserHooks'
   | 'getProjectHooks'
@@ -444,7 +445,9 @@ export function buildHooksListing(config: HooksListingConfig): HooksListing {
             hookId: entry.hookId,
             skillRoot: entry.skillRoot,
           },
-          gates,
+          entry.trustGated
+            ? { ...gates, trustedFolder: config.isExplicitlyTrustedFolder() }
+            : gates,
         ),
       );
     }

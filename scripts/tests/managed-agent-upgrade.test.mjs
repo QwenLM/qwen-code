@@ -488,6 +488,8 @@ async function rig(t, overrides = {}) {
     workersIgnoreTerm: false,
     responses: {},
     requests: [],
+    // Every host:port a start waited on.
+    connections: [],
     // Every systemd-run, with the environment systemd would hand it.
     services: [],
     // What the jar resolves, beyond the documented variables.
@@ -567,7 +569,10 @@ async function rig(t, overrides = {}) {
       host.clock += milliseconds / 1000;
       await writeCgroups();
     },
-    connect: async () => true,
+    connect: async (address, port) => {
+      host.connections.push(`${address}:${port}`);
+      return true;
+    },
     fetch: async (url, init = {}) => {
       host.requests.push({ url, init });
       if (host.hang) {
@@ -669,6 +674,11 @@ async function rig(t, overrides = {}) {
           authMode: mode === 'auto' ? 'open' : mode,
           trustedActorHeader:
             environment.get('QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER') ?? '',
+          serverUrl: serverBaseUrl(environment),
+          healthUrl: `${serverBaseUrl(environment)}/actuator/health`,
+          harnessBaseUrl:
+            environment.get('QWEN_MANAGED_AGENT_HARNESS_BASE_URL') ??
+            'http://127.0.0.1:4170',
           ...host.resolved,
         };
         return {
@@ -1920,6 +1930,211 @@ test('verify runs the online preflight and reads the API', async (t) => {
   assert.match(
     rowsOf(host.output).turn,
     /^FAIL Session s2 ended with turn.failed/,
+  );
+});
+
+test('start and verify reach the listeners the server resolves', async (t) => {
+  const { host, target } = await backedUp(t);
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  // The server port, a management port and the Harness URL set in a
+  // configuration file, which server.env does not show.
+  host.resolved = {
+    serverUrl: 'http://127.0.0.1:9090',
+    healthUrl: 'http://127.0.0.1:9091/manage/actuator/health',
+    harnessBaseUrl: 'http://127.0.0.1:4171',
+  };
+  host.responses['GET /manage/actuator/health'] = { status: 'UP' };
+  const urls = () => [...new Set(host.requests.map(({ url }) => url))];
+  assert.equal(await host.upgrade('start'), 0);
+  assert.deepEqual([...new Set(host.connections)], ['127.0.0.1:4171']);
+  assert.deepEqual(urls(), ['http://127.0.0.1:9091/manage/actuator/health']);
+  assert.ok(
+    host.output.includes(
+      `${SERVER} is UP at http://127.0.0.1:9091/manage/actuator/health; its API is at http://127.0.0.1:9090. Run verify before reopening ingress.`,
+    ),
+  );
+
+  host.requests = [];
+  host.responses['GET /v1/agents/sessions'] = { data: [{ id: 's1' }] };
+  host.responses['GET /v1/agents/sessions/s1'] = { id: 's1' };
+  host.responses['GET /v1/agents/sessions/s1/items'] = { data: [] };
+  assert.equal(await host.upgrade('verify', '--tenant', 'acme'), 0);
+  const rows = rowsOf(host.output);
+  assert.equal(
+    rows.health,
+    'PASS http://127.0.0.1:9091/manage/actuator/health is UP',
+  );
+  assert.equal(rows.session, 'PASS read Session s1 and 0 item(s)');
+  // The health row comes first, and each read needs the one before it.
+  assert.deepEqual(urls(), [
+    'http://127.0.0.1:9091/manage/actuator/health',
+    'http://127.0.0.1:9090/v1/agents/sessions?limit=1',
+    'http://127.0.0.1:9090/v1/agents/sessions/s1',
+    'http://127.0.0.1:9090/v1/agents/sessions/s1/items?limit=20',
+  ]);
+
+  // --server-url names the control plane, and the Harness stays where the
+  // configuration puts it.
+  await host.stop();
+  host.connections = [];
+  host.requests = [];
+  host.responses['GET /actuator/health'] = { status: 'UP' };
+  assert.equal(
+    await host.upgrade('start', '--server-url', 'http://proxy.test:8443/'),
+    0,
+  );
+  assert.deepEqual([...new Set(host.connections)], ['127.0.0.1:4171']);
+  assert.deepEqual(urls(), ['http://proxy.test:8443/actuator/health']);
+  host.requests = [];
+  assert.equal(
+    await host.upgrade(
+      'verify',
+      '--tenant',
+      'acme',
+      '--server-url',
+      'http://proxy.test:8443',
+    ),
+    0,
+  );
+  assert.deepEqual(urls(), [
+    'http://proxy.test:8443/actuator/health',
+    'http://proxy.test:8443/v1/agents/sessions?limit=1',
+    'http://proxy.test:8443/v1/agents/sessions/s1',
+    'http://proxy.test:8443/v1/agents/sessions/s1/items?limit=20',
+  ]);
+});
+
+test('start and verify use server.env when the configuration does not resolve', async (t) => {
+  const { host, target } = await backedUp(t, {
+    serverEnv: ['QWEN_MANAGED_AGENT_HARNESS_BASE_URL=http://127.0.0.1:4172'],
+  });
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  host.resolveFailure = 'cannot resolve the server configuration: refused';
+  host.responses['GET /actuator/health'] = { status: 'UP' };
+  assert.equal(await host.upgrade('start'), 0);
+  assert.ok(
+    host.output.includes(
+      "Cannot resolve the server's listeners: cannot resolve the server configuration: refused; using the URLs server.env names, or pass --server-url.",
+    ),
+  );
+  assert.deepEqual([...new Set(host.connections)], ['127.0.0.1:4172']);
+  assert.deepEqual(
+    [...new Set(host.requests.map(({ url }) => url))],
+    ['http://127.0.0.1:18080/actuator/health'],
+  );
+  // --server-url leaves nothing to fall back to but the Harness.
+  await host.stop();
+  host.connections = [];
+  assert.equal(
+    await host.upgrade('start', '--server-url', 'http://127.0.0.1:18081'),
+    0,
+  );
+  assert.ok(
+    host.output.includes(
+      "Cannot resolve the server's listeners: cannot resolve the server configuration: refused; using the Harness URL server.env names.",
+    ),
+  );
+  assert.deepEqual([...new Set(host.connections)], ['127.0.0.1:4172']);
+  // verify reaches no Harness, so it has nothing to resolve.
+  host.services = [];
+  assert.equal(
+    await host.upgrade('verify', '--server-url', 'http://127.0.0.1:18081'),
+    0,
+  );
+  assert.ok(!host.output.some((line) => line.startsWith('Cannot resolve')));
+  assert.ok(!host.services.some(({ args }) => args.includes(RESOLVER)));
+  assert.equal(
+    rowsOf(host.output).health,
+    'PASS http://127.0.0.1:18081/actuator/health is UP',
+  );
+
+  // An address from server.env that no URL can carry is refused as well.
+  await host.stop();
+  await writeFile(
+    path.join(host.etc, 'server.env'),
+    'QWEN_MANAGED_AGENT_SERVER_ADDRESS=fe80::1%eth0\n',
+    { flag: 'a' },
+  );
+  assert.equal(await host.upgrade('start'), 1);
+  assert.match(
+    host.output.join('\n'),
+    /start refused: The server's configuration puts the control plane at "http:\/\/\[fe80::1%eth0\]:18080", which is not a URL: a URL cannot carry an IPv6 zone\./,
+  );
+});
+
+test('start refuses listeners it cannot reach before it starts anything', async (t) => {
+  const { host, target } = await backedUp(t);
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  host.services = [];
+  host.resolved = { serverUrl: '', healthUrl: '' };
+  assert.equal(await host.upgrade('start'), 1);
+  assert.match(
+    host.output.join('\n'),
+    /start refused: The server's configuration gives the control plane no fixed port: 0 picks one at start, and a negative one opens none\. Pass --server-url <a URL that serves \/actuator\/health>\./,
+  );
+  // management.server.port -1 or 0, with the server on a fixed port.
+  host.resolved = { healthUrl: '' };
+  assert.equal(await host.upgrade('start'), 1);
+  assert.match(
+    host.output.join('\n'),
+    /gives the health endpoint no fixed port/,
+  );
+  host.resolved = { harnessBaseUrl: '' };
+  assert.equal(await host.upgrade('start'), 1);
+  assert.match(
+    host.output.join('\n'),
+    /start refused: The control plane reaches qwen-hosted-harness at "", which is not a URL; correct qwen\.managed-agent\.harness\.base-url\./,
+  );
+  // A link-local listener keeps its zone, which no URL can carry.
+  const zoned = 'http://[fe80:0:0:0:0:0:0:1%1]';
+  host.resolved = {
+    serverUrl: `${zoned}:8080`,
+    healthUrl: `${zoned}:8080/actuator/health`,
+  };
+  assert.equal(await host.upgrade('start'), 1);
+  assert.match(
+    host.output.join('\n'),
+    /start refused: The server's configuration puts the control plane at "http:\/\/\[fe80:0:0:0:0:0:0:1%1\]:8080", which is not a URL: a URL cannot carry an IPv6 zone\. Bind it where a URL can name it, or pass --server-url <a URL that serves \/actuator\/health>\./,
+  );
+  host.resolved = { healthUrl: `${zoned}:9091/actuator/health` };
+  assert.equal(await host.upgrade('start'), 1);
+  assert.match(
+    host.output.join('\n'),
+    /puts the health endpoint at "http:\/\/\[fe80:0:0:0:0:0:0:1%1\]:9091\/actuator\/health", which is not a URL: a URL/,
+  );
+  host.resolved = {
+    serverUrl: 'http://127.0.0.1:70000',
+    healthUrl: 'http://127.0.0.1:70000/actuator/health',
+  };
+  assert.equal(await host.upgrade('start'), 1);
+  assert.match(
+    host.output.join('\n'),
+    /puts the control plane at "http:\/\/127\.0\.0\.1:70000", which is not a URL\. Bind it/,
+  );
+  host.resolved = {};
+  assert.equal(
+    await host.upgrade('start', '--server-url', 'http://[fe80::1%eth0]:8080'),
+    1,
+  );
+  assert.match(
+    host.output.join('\n'),
+    /start refused: --server-url "http:\/\/\[fe80::1%eth0\]:8080" is not a URL\./,
+  );
+  assert.equal(host.units[HARNESS].ActiveState, 'inactive');
+  assert.equal(host.units[SERVER].ActiveState, 'inactive');
+  assert.ok(host.services.every(({ args }) => args.includes(RESOLVER)));
+
+  host.resolved = { healthUrl: '' };
+  host.responses['GET /actuator/health'] = { status: 'UP' };
+  assert.equal(
+    await host.upgrade('start', '--server-url', 'http://127.0.0.1:18080'),
+    0,
+  );
+  host.resolved = { serverUrl: '', healthUrl: '' };
+  assert.equal(await host.upgrade('verify'), 1);
+  assert.match(
+    host.output.join('\n'),
+    /verify refused: The server's configuration gives the control plane no fixed port/,
   );
 });
 

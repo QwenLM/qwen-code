@@ -79,6 +79,7 @@ import {
 import { WebShellThemeId, type WebShellTheme } from '../../themeContext';
 import { useBrand, useBrandName } from '../../brandContext';
 import { useI18n } from '../../i18n';
+import { MAX_SPLIT_PANES } from '../../utils/splitUrl';
 import { McpAppGeneratedUiOwnerContext } from '../../mcpAppHostContext';
 import { Input } from '../ui/input';
 import { Button } from '../ui/button';
@@ -168,6 +169,7 @@ import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
   SIDEBAR_SESSION_PREVIEW_LIMIT,
+  WEB_SHELL_SESSION_SOURCE_TYPE,
 } from '../../constants/sessions';
 import styles from './WebShellSidebar.module.css';
 import { UpdateControl } from './UpdateControl';
@@ -296,6 +298,7 @@ export type WebShellSidebarPrimaryNavItem =
   | 'agents'
   | 'plugins'
   | 'channels'
+  | 'channelEvents'
   | 'live'
   | 'scheduledTasks'
   | 'prWatches'
@@ -345,6 +348,7 @@ export const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[]
     'agents',
     'plugins',
     'channels',
+    'channelEvents',
     'live',
     'scheduledTasks',
     'prWatches',
@@ -360,6 +364,7 @@ export type WebShellSidebarSessionActionItem =
   | 'export'
   | 'delete'
   | 'pin'
+  | 'split'
   | 'archive';
 
 /** Subset of action items that have working inline (hover-button) handlers. */
@@ -379,7 +384,7 @@ export interface WebShellSidebarSessionActionsOptions {
    * archive a session.
    * Only items that also pass their built-in visibility condition are rendered.
    * Only items with working inline handlers are accepted
-   * (details/group/archive are dropdown-only).
+   * (details/group/archive/split are dropdown-only).
    * Recent sessions use dedicated Pin and Archive buttons instead of this
    * layout; the items policy still controls whether those actions are enabled.
    * Archived rows use Export and Restore inline, independently of this option.
@@ -388,7 +393,7 @@ export interface WebShellSidebarSessionActionsOptions {
 }
 
 export const DEFAULT_SESSION_ACTION_ITEMS: readonly WebShellSidebarSessionActionItem[] =
-  ['details', 'rename', 'group', 'export', 'delete', 'pin', 'archive'];
+  ['details', 'rename', 'group', 'export', 'delete', 'pin', 'archive', 'split'];
 
 const DEFAULT_INLINE_ACTION_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
   ['pin'];
@@ -463,6 +468,9 @@ interface WebShellSidebarProps {
   onOpenAgents?: (view?: 'agents' | 'squads' | 'runtime') => void;
   onOpenPlugins: () => void;
   onOpenChannels: () => void;
+  /** Opens the cross-Channel event timeline; absent when the host does not
+   * offer it. */
+  onOpenChannelEvents?: () => void;
   onOpenLive?: () => void;
   onLiveVoiceSlotChange?: (element: HTMLDivElement | null) => void;
   onOpenManagedSessions?: () => void;
@@ -482,6 +490,8 @@ interface WebShellSidebarProps {
   /** Opens the Workspaces overview panel (table of registered workspaces). */
   onOpenWorkspacesOverview?: () => void;
   onOpenSplitView: () => void;
+  onAddSessionToSplitView?: (sessionId: string) => void;
+  splitSessionIds?: readonly string[];
   /** Whether to offer the in-window split view (large screens only). */
   canOpenSplitView?: boolean;
   onNewSession: (workspaceCwd?: string) => Promise<boolean> | boolean;
@@ -1119,6 +1129,7 @@ export function WebShellSidebar({
   onOpenAgents,
   onOpenPlugins,
   onOpenChannels,
+  onOpenChannelEvents,
   onOpenLive,
   onLiveVoiceSlotChange,
   onOpenManagedSessions,
@@ -1131,6 +1142,8 @@ export function WebShellSidebar({
   canOpenSessionsOverview,
   onOpenWorkspacesOverview,
   onOpenSplitView,
+  onAddSessionToSplitView,
+  splitSessionIds,
   canOpenSplitView,
   onNewSession,
   onNewStandaloneSession,
@@ -1276,6 +1289,8 @@ export function WebShellSidebar({
       (primaryNavItems.has('plugins') ||
         (primaryNavItems.has('agents') && Boolean(onOpenAgents)) ||
         primaryNavItems.has('channels') ||
+        (primaryNavItems.has('channelEvents') &&
+          Boolean(onOpenChannelEvents)) ||
         (showLive && primaryNavItems.has('live') && Boolean(onOpenLive)) ||
         primaryNavItems.has('scheduledTasks') ||
         (primaryNavItems.has('prWatches') && Boolean(onOpenPrWatches)) ||
@@ -1311,6 +1326,8 @@ export function WebShellSidebar({
     primaryNavItems.has('channels');
   const channelView =
     channelNavigationEnabled && activePage === 'channels' && !homePreviewOpen;
+  const channelEventsNavigationEnabled =
+    projectFeaturesEnabled && primaryNavItems.has('channelEvents');
   const liveNavigationEnabled =
     railLayout &&
     projectFeaturesEnabled &&
@@ -5304,12 +5321,38 @@ export function WebShellSidebar({
           ? t('sidebar.currentDeleteDisabled')
           : undefined;
       const showGroup = !standalone && canOrganizeSession(session, 'group');
+      // Archived sessions cannot load into a split pane (they leave an empty
+      // pane), so the sidebar withholds the split action for them.
+      const showSplit =
+        !standalone &&
+        !isArchived &&
+        (session.sourceType === undefined ||
+          session.sourceType === WEB_SHELL_SESSION_SOURCE_TYPE) &&
+        canOpenSplitView &&
+        Boolean(onAddSessionToSplitView) &&
+        sessionActionItems.has('split') &&
+        canUseWorkspaceQualifiedActions(resolveSessionWorkspaceScope(session));
+      const splitAtCapacity =
+        (splitSessionIds?.length ?? 0) >= MAX_SPLIT_PANES &&
+        !splitSessionIds?.includes(session.sessionId);
+      // A pane that is already in the open split: adding it again is a
+      // no-op, so offer the same disabled treatment as the capacity case.
+      const splitAlreadyOpen = Boolean(
+        splitSessionIds?.includes(session.sessionId),
+      );
+      // Current session with the split closed: the click would seed a
+      // one-pane split of the session being viewed — a dead end, so disable
+      // it like the archive sibling does for the current session. While the
+      // split is open (splitSessionIds set), appending the current session
+      // is a legitimate add and stays enabled.
+      const splitCurrentDisabled = isCurrent && !splitSessionIds;
       const inlineActionCount =
         Number(showPin && inlineActionItems.has('pin')) +
         Number(showRename && inlineActionItems.has('rename')) +
         Number(showExport && inlineActionItems.has('export')) +
         Number(showDelete && inlineActionItems.has('delete'));
       const showMoreActions =
+        showSplit ||
         (showPin && !inlineActionItems.has('pin')) ||
         showArchive ||
         (showRename && !inlineActionItems.has('rename')) ||
@@ -5318,7 +5361,8 @@ export function WebShellSidebar({
         (showDelete && !inlineActionItems.has('delete'));
       const showDefaultActions =
         !recent &&
-        (showPin ||
+        (showSplit ||
+          showPin ||
           showArchive ||
           showRename ||
           showExport ||
@@ -5623,6 +5667,33 @@ export function WebShellSidebar({
                           onCloseAutoFocus={handleSessionMenuCloseAutoFocus}
                         >
                           <DropdownMenuGroup>
+                            {showSplit && (
+                              <DropdownMenuItem
+                                disabled={
+                                  busy ||
+                                  splitAtCapacity ||
+                                  splitAlreadyOpen ||
+                                  splitCurrentDisabled
+                                }
+                                title={
+                                  splitAtCapacity
+                                    ? t('sidebar.splitAtCapacity', {
+                                        max: MAX_SPLIT_PANES,
+                                      })
+                                    : splitAlreadyOpen
+                                      ? t('sidebar.splitAlreadyOpen')
+                                      : splitCurrentDisabled
+                                        ? t('sidebar.splitCurrentDisabled')
+                                        : undefined
+                                }
+                                onSelect={() =>
+                                  onAddSessionToSplitView?.(session.sessionId)
+                                }
+                              >
+                                <Columns2Icon />
+                                {t('sidebar.addToSplitView')}
+                              </DropdownMenuItem>
+                            )}
                             {showPin && !inlineActionItems.has('pin') && (
                               <DropdownMenuItem
                                 disabled={busy}
@@ -5725,6 +5796,8 @@ export function WebShellSidebar({
       canRenameSession,
       canUnarchiveSession,
       canMutateSessionArchive,
+      canOpenSplitView,
+      canUseWorkspaceQualifiedActions,
       cancelRename,
       completedUnreadIds,
       contentSearchHits,
@@ -5751,12 +5824,15 @@ export function WebShellSidebar({
       onSelectCurrentSession,
       openGroupMenuFromAnchor,
       currentSessionActive,
+      onAddSessionToSplitView,
+      resolveSessionWorkspaceScope,
       saveRename,
       searchQuery,
       sessionActionItems,
       inlineActionItems,
       livePresence,
       startRename,
+      splitSessionIds,
       t,
     ],
   );
@@ -6309,6 +6385,27 @@ export function WebShellSidebar({
             <MessagesSquareIcon size={16} strokeWidth={1.2} />
           </span>
           {!collapsed && !railLayout && <span>{t('sidebar.channels')}</span>}
+        </button>
+      )}
+      {channelEventsNavigationEnabled && onOpenChannelEvents && (
+        <button
+          className={styles.pluginButton}
+          type="button"
+          title={railLayout ? undefined : t('sidebar.channelEvents')}
+          aria-label={t('sidebar.channelEvents')}
+          aria-current={
+            railLayout && activePage === 'channel-events' ? 'page' : undefined
+          }
+          onClick={() =>
+            openNavigation(onOpenChannelEvents, channelEventsNavigationEnabled)
+          }
+        >
+          <span className={styles.navIcon}>
+            <ActivityIcon size={16} strokeWidth={1.2} />
+          </span>
+          {!collapsed && !railLayout && (
+            <span>{t('sidebar.channelEvents')}</span>
+          )}
         </button>
       )}
       {liveNavigationEnabled && onOpenLive && (
@@ -7584,6 +7681,9 @@ export function WebShellSidebar({
                   />
                 </div>
               )}
+              {/* Managed 历史由外部 App Host 注入，不受本地 Workspaces
+                  折叠状态控制；否则折叠分组会把仍有效的 Managed 会话一起隐藏。 */}
+              {!channelView && !liveView && managedWorkspaces}
               <div
                 className="flex flex-col"
                 hidden={liveView || !projectsExpanded}
@@ -7605,7 +7705,6 @@ export function WebShellSidebar({
                   {!hideProjectHeader && <WorkspaceHostHeading />}
                   <div className={styles.workspacePicker}>
                     <div className={styles.workspaceList}>
-                      {!channelView && managedWorkspaces}
                       {orderedProjectWorkspaces.map((ws) => (
                         <Fragment key={ws.id}>
                           <WorkspaceSection
