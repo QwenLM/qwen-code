@@ -1882,8 +1882,8 @@ function isInjectedPromptContext(part: Part): boolean {
 }
 
 /**
- * Moves the injected context that trails the pending turn's own text ahead of
- * it, so the user's instruction is the last thing the model reads.
+ * Moves the injected context that trails a user entry's own text ahead of it,
+ * so the user's instruction is the last thing the model reads.
  *
  * A fresh turn's entry is assembled from independent sources: per-turn
  * reminders ahead of the prompt, then hook/Mod context and the memory catalog
@@ -3044,8 +3044,9 @@ export class LlmChat {
       snapshot && !retainMemorySnapshot
         ? appendAutoMemoryContext(request, catalog)
         : request;
-    // Only the pending turn is reordered, and only in this request copy:
-    // stored history keeps the shape the transcript and resume read.
+    // Every user entry in this request copy is reordered the same way, so an
+    // entry's wire shape does not depend on its position; stored history keeps
+    // the shape the transcript and resume read.
     return currentUserContent
       ? movePromptContextAheadOfUserText(withCatalog)
       : withCatalog;

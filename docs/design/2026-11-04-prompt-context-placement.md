@@ -115,10 +115,16 @@ token undercount in the always-on-context warning remain separate work
 - A reminder the caller placed between two of its own parts stays there; only
   the appended block after the last own part moves.
 - Existing catalog budget, deduplication, and cache-boundary assertions still
-  hold. Two assertions that pinned the old order were updated: the pending-turn
-  check now asserts the catalog is present and the user text is last, and the
+  hold. Three assertions that pinned the old order were updated: the pending-turn
+  check now asserts the catalog is present and the user text is last; the
   durable-recovery check now asserts the request holds the same entries and
-  parts as history with the catalog moved ahead of the recovery prompt.
+  parts as history with the catalog moved ahead of the recovery prompt; and the
+  multi-turn prefix check now compares each request against the previous
+  request. The prefix check could not keep its old form: a reordered pending
+  entry deliberately differs from its stored shape, so request versus stored
+  history is no longer equal. Presence of the injected parts is still guarded,
+  by the two checks above and by the multi-turn test's own snapshot-count
+  assertion, not by the prefix comparison.
 
 `packages/core/src/core/llm-chat.test.ts`: 720 passed.
 
