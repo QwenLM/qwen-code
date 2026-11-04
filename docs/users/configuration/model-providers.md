@@ -553,6 +553,36 @@ provider entry; set it to `0` to disable the idle guard. The separate 15-minute
 stream lifetime cap still applies unless `QWEN_STREAM_MAX_LIFETIME_MS` is raised
 or disabled.
 
+#### Qwen3.x served under a custom model name
+
+Thinking control and the context window are inferred from the model id. If a
+vLLM or SGLang server exposes a Qwen3.x model under an id that does not start
+with `qwen` (for example `--served-model-name chat`), neither applies: side
+requests such as the auto-mode permission classifier keep thinking on, and the
+context window falls back to the 200K default. Declare both on the model entry,
+as described in [Override reasoning capabilities](#override-reasoning-capabilities):
+
+```json
+{
+  "id": "chat",
+  "name": "Qwen3.6 35B A3B (vLLM)",
+  "envKey": "VLLM_API_KEY",
+  "baseUrl": "http://localhost:8000/v1",
+  "capabilities": { "reasoning": { "profile": "qwen-chat-template" } },
+  "generationConfig": { "contextWindowSize": 262144 }
+}
+```
+
+`qwen-chat-template` sends `chat_template_kwargs.enable_thinking`, which these
+servers pass to the Qwen chat template; a top-level `enable_thinking` field is
+not read by them. Set `contextWindowSize` to the server's maximum model length
+(vLLM reports it as `max_model_len` in `/v1/models`). Qwen Code sends tool
+definitions on every request, so the server also needs tool calling and a
+reasoning parser enabled; on vLLM that is `--enable-auto-tool-choice`, a
+`--tool-call-parser` for the model (for example `qwen3_xml`) and
+`--reasoning-parser qwen3`. Parser names change between server releases, so
+check your server's documentation.
+
 For local servers that don't require authentication, you can use any placeholder value for the API key:
 
 ```bash
