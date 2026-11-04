@@ -334,14 +334,18 @@ MariaDB no longer has a CI lane or an ongoing compatibility guarantee.
 Existing dialect handling remains in place; this change does not reject
 MariaDB solely by product name or introduce a catalog migration.
 
-MySQL and MariaDB require `STRICT_TRANS_TABLES` or `STRICT_ALL_TABLES` in both
-global and session `sql_mode`. Schema admission and validation reject non-strict
-connections before schema writes. Strict mode prevents ordinary writes to unsigned
-counters from silently clamping negative values to zero; `IGNORE` writes can
-downgrade these errors to warnings. Configure the database defaults and
-every application connection to retain strict mode throughout operation; a
-startup check does not police later administrative or connection-mode changes.
-The application does not change the server's SQL mode.
+MySQL and MariaDB require `STRICT_TRANS_TABLES` or `STRICT_ALL_TABLES` in each
+application connection's session `sql_mode`. Schema admission and validation
+reject non-strict connections before schema writes. The embedded default Managed
+pool adds `STRICT_TRANS_TABLES` when creating every physical connection,
+preserving the other session modes. A non-strict global default is accepted.
+Strict mode prevents ordinary writes to unsigned counters from silently clamping
+negative values to zero; `IGNORE` writes can downgrade these errors to warnings.
+Standalone, maintenance and custom DataSource callers must configure every
+application connection to retain strict mode throughout operation; a startup
+check does not police later administrative or connection-mode changes. The
+application does not change the server's global SQL mode. MariaDB CHECK
+enforcement still requires both global and session settings to be enabled.
 
 Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
 process (the credentialed launch is spelled out in the Full WebShell

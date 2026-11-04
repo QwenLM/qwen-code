@@ -153,7 +153,11 @@ final class JournalCommit {
         // The storage's alias and directory rows order this commit against
         // migration and physical fences; migration prepare checks idleness on
         // committed data after locking them, so the guard adds nothing here.
-        fencing.requireSessionStorageOpen(tenantId, request.workspaceId(), sessionId);
+        if (authority == null && csiOriginal == null) {
+            fencing.requireSessionStorageOpenForAdmission(tenantId, request.workspaceId(), sessionId);
+        } else {
+            fencing.requireSessionStorageOpen(tenantId, request.workspaceId(), sessionId);
+        }
         JournalStoreRows.HeadRow head = csiHead == null
                 ? fencing.requireHeadAfterCsiCheck(tenantId, sessionId) : csiHead;
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
