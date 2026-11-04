@@ -214,7 +214,9 @@ function describeHook(
         typeof raw['command'] === 'string' &&
         /\$\{?\w/.test(raw['command'])
       ) {
-        details.push('resolves ${VAR} from the environment (project .env/settings.env or shell)');
+        details.push(
+          'resolves ${VAR} from the environment (project .env/settings.env or shell)',
+        );
       }
       add('env', envList(raw['env']));
       if (raw['shell']) add('shell', displayText(raw['shell']));
