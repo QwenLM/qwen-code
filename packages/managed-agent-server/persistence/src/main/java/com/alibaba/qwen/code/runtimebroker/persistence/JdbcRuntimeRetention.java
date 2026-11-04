@@ -140,7 +140,7 @@ public final class JdbcRuntimeRetention implements com.alibaba.qwen.code.runtime
                     && JdbcRepositorySupport.scopeKey(binding.getRequest().getScope()).equals(row.scopeKey())
                     && !sessionReferenced(connection, binding, row.id())) {
                 try (PreparedStatement statement = statement(connection,
-                        "DELETE FROM ma_runtime_session WHERE scope_key = ? AND runtime_session_id = ? AND record_version = ?")) {
+                        "DELETE FROM ma_runtime_session WHERE scope_key = ? AND runtime_session_id = ? AND record_version = ? AND execution_storage_key IS NULL")) {
                     statement.setString(1, row.scopeKey());
                     JdbcRepositorySupport.setIdentity(statement, 2, row.id());
                     statement.setLong(3, row.version());
@@ -316,7 +316,8 @@ public final class JdbcRuntimeRetention implements com.alibaba.qwen.code.runtime
         List<Session> rows = new ArrayList<>();
         try (PreparedStatement statement = statement(connection, "SELECT scope_key, runtime_session_id, last_active_at, record_version"
                 + " FROM ma_runtime_session WHERE binding_id = ? AND runtime_generation = ?"
-                + " AND session_state IN ('RELEASED', 'FAILED') AND (scope_key > ? OR (scope_key = ? AND runtime_session_id > ?))"
+                + " AND session_state IN ('RELEASED', 'FAILED') AND execution_storage_key IS NULL"
+                + " AND (scope_key > ? OR (scope_key = ? AND runtime_session_id > ?))"
                 + " ORDER BY scope_key, runtime_session_id LIMIT ? FOR UPDATE")) {
             JdbcRepositorySupport.setIdentity(statement, 1, binding.getBindingId());
             statement.setLong(2, binding.getGeneration());

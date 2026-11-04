@@ -626,8 +626,8 @@ await scenario(
       await act(async () => s.resize(width, region + 4));
       await idle(s);
       regionGeometry(s, region);
-      assert.equal(frame(s).includes('Type to search'), region >= 13);
-      if (region >= 13) {
+      assert.equal(frame(s).includes('Type to search'), region >= 16);
+      if (region >= 16) {
         assert.ok(frame(s).includes('> identifier'));
         assert.ok(frame(s).includes('session-id'));
       }

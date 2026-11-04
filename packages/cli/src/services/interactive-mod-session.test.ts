@@ -39,6 +39,7 @@ describe('interactive Mod owner', () => {
       flushLogs: vi.fn(),
       syncSession: vi.fn().mockResolvedValue(undefined),
       setRenderInput: vi.fn(),
+      submitPrompt: vi.fn(async (text: string) => ({ text: `${text}!` })),
       close: vi.fn().mockResolvedValue(undefined),
     };
     mocks.create.mockReturnValue(runtime);
@@ -221,6 +222,31 @@ describe('interactive Mod owner', () => {
     owner.setRenderInput(input);
     expect(runtime.setRenderInput).toHaveBeenCalledOnce();
     unsubscribe();
+  });
+
+  it('raises prompt.submit only when its first initialize says so, until it closes', async () => {
+    const { owner, host, runtime } = setup();
+    expect(host.prompts!()).toBe(false);
+    Object.defineProperty(runtime, 'hearsPrompts', { value: true });
+    expect(owner.hearsPrompts).toBe(true);
+    await owner.initialize(['AbovePrompt'], { prompts: true });
+    await owner.initialize(['AbovePrompt']);
+    expect(host.prompts!()).toBe(true);
+    const signal = new AbortController().signal;
+    expect(await owner.submitPrompt('Fix it', signal)).toEqual({
+      text: 'Fix it!',
+    });
+    expect(runtime.submitPrompt).toHaveBeenCalledExactlyOnceWith(
+      'Fix it',
+      signal,
+    );
+    await owner.close();
+    expect(owner.hearsPrompts).toBe(false);
+    // A closed owner lets the prompt through as typed.
+    expect(await owner.submitPrompt('Fix it', signal)).toEqual({
+      text: 'Fix it',
+    });
+    expect(runtime.submitPrompt).toHaveBeenCalledOnce();
   });
 
   it('closing before startup releases pending command loaders and removes the owner', async () => {

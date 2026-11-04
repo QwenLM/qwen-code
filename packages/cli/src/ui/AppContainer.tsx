@@ -1269,7 +1269,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Restore the transcript before Mod diagnostics, without making input
       // or Mod startup wait for asynchronous session recovery.
       void getInteractiveModSession(config)
-        ?.initialize(['AbovePrompt'])
+        ?.initialize(['AbovePrompt'], { prompts: true })
         .catch(() => {});
 
       if (resumedSessionData) {
@@ -1633,6 +1633,25 @@ export const AppContainer = (props: AppContainerProps) => {
   });
   const setBufferText = buffer.setText;
   setBufferTextRef.current = setBufferText;
+  const bufferRef = useRef(buffer);
+  bufferRef.current = buffer;
+  const pendingPastesRef = useRef(pendingPastes);
+  pendingPastesRef.current = pendingPastes;
+  // A typed prompt the Mods did not let in comes back to the composer with
+  // its pastes collapsed, ahead of anything typed since, as typed text whose
+  // provenance is gone.
+  const returnPrompt = useCallback(
+    (text: string, pastes: ReadonlyMap<string, string> = new Map()) => {
+      const draft = restorePasteDraft(text, pastes, pendingPastesRef.current);
+      const current = bufferRef.current.text;
+      invalidateSubmittedPromptProvenance();
+      setPendingPastes(draft.pasteExpansions);
+      bufferRef.current.setText(
+        current ? `${draft.text}\n${current}` : draft.text,
+      );
+    },
+    [invalidateSubmittedPromptProvenance],
+  );
   const restoredPromptStashTargetsRef = useRef(new Set<string>());
   const promptStashTargetDir = config.getTargetDir();
   useEffect(() => {
@@ -1959,6 +1978,40 @@ export const AppContainer = (props: AppContainerProps) => {
       );
     });
   }, [addHistoryItem, config]);
+
+  useEffect(() => {
+    // Surface the fail-closed project-hook gate instead of letting hooks
+    // stop silently after the explicit-trust requirement.
+    if (
+      !config.isInteractive() ||
+      config.isExplicitlyTrustedFolder() ||
+      config.getBareMode() ||
+      config.isSafeMode() ||
+      // With every hook disabled the trust gate is not why they are absent.
+      config.getDisableAllHooks()
+    ) {
+      return;
+    }
+    const projectHooks = settings.workspace?.settings?.hooks;
+    if (
+      !projectHooks ||
+      typeof projectHooks !== 'object' ||
+      Object.keys(projectHooks).length === 0
+    ) {
+      return;
+    }
+    addHistoryItem(
+      {
+        type: MessageType.WARNING,
+        text: t(
+          'Project hooks in .qwen/settings.json were not loaded: this folder is not explicitly trusted. Enable security.folderTrust.enabled and trust the folder to run them.',
+        ),
+      },
+      Date.now(),
+    );
+    // Startup notice only; later trust changes take effect on restart/reload.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config]);
 
   const clearPendingStateRef = useRef<() => void>(() => {});
   const clearPendingStateFromRef = useCallback(
@@ -2584,6 +2637,7 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalWidthRef,
     midTurnRestoreRef,
     goalQueueRef,
+    returnPrompt,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
   clearPendingStateRef.current = clearPendingState;
@@ -2717,7 +2771,11 @@ export const AppContainer = (props: AppContainerProps) => {
     restorePeerMessage,
   } = useMessageQueue();
 
-  midTurnDrainRef.current = drainQueue;
+  // While a Mod hooks prompt.submit, prompts typed during a turn are not
+  // steered into it at a tool boundary: they wait for the turn to end and are
+  // sent, and heard by the hooks, then.
+  midTurnDrainRef.current = (...args) =>
+    getInteractiveModSession(config)?.hearsPrompts ? [] : drainQueue(...args);
   midTurnRestoreRef.current = restoreMessages;
   goalQueueRef.current = {
     peekNextUserBatchKey,
