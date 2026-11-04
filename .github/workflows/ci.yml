@@ -746,6 +746,34 @@ jobs:
           overwrite: true
           retention-days: 7
 
+      # This job carries the same sampling install as the shards but builds for
+      # up to its whole timeout afterwards, and its sampler dies with that
+      # step's trap … EXIT. Without a collector here, a build that dies on a
+      # saturated host (the #10035 class, and the OOM that took hk2-11) keeps
+      # no evidence at all — the samples go with the runner temp dir.
+      - name: 'Dump disk state on failure'
+        if: '${{ failure() }}'
+        run: |-
+          DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
+          {
+            echo "DISKCONTEXT failure-dump $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            df -hT || df -h || true
+            df -i || true
+            grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo || true
+          } 2>/dev/null | tee -a "$DISK_SAMPLES" || true
+
+      # Last step, and a name distinct from the test and lint collectors:
+      # upload-artifact v4+ rejects duplicate names when several jobs fail in
+      # one run.
+      - name: 'Upload disk-pressure samples'
+        if: '${{ failure() }}'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'disk-pressure-build-${{ github.run_id }}-attempt-${{ github.run_attempt }}'
+          path: '${{ runner.temp }}/disk-pressure-samples.log'
+          if-no-files-found: 'ignore'
+          retention-days: 14
+
   # The required `Test (ubuntu-latest, Node 22.x)` check is `test_ubuntu`,
   # which passes only when the build and every shard below pass.
   test:
