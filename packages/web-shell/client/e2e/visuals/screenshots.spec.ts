@@ -1424,6 +1424,22 @@ for (const theme of THEMES) {
                 ],
               },
               {
+                key: 'deliverToBoundSessions',
+                label: 'Deliver To PR-Bound Sessions',
+                kind: 'boolean',
+              },
+              {
+                key: 'prWatchEvents',
+                label: 'PR Watch Events',
+                kind: 'string-list',
+                options: [
+                  { value: 'ci_failure', label: 'ci_failure' },
+                  { value: 'merge_conflict', label: 'merge_conflict' },
+                  { value: 'head_change', label: 'head_change' },
+                  { value: 'state_change', label: 'state_change' },
+                ],
+              },
+              {
                 key: 'privatePolicy',
                 label: 'Private Policy',
                 kind: 'enum',
@@ -1468,16 +1484,31 @@ for (const theme of THEMES) {
           name: 'Use local GitHub CLI authentication',
         }),
       ).toBeVisible();
-      // Anchor the capture to the checklist so a regression that falls back to
-      // a free-text filter fails here instead of shipping a stale picture.
+      // Anchor the slim default view: tuning lives behind the collapsed
+      // advanced panel, so a regression that flattens it back out fails here
+      // instead of shipping a stale picture.
+      const advancedTrigger = page.getByRole('button', {
+        name: 'Advanced settings',
+      });
+      await expect(advancedTrigger).toBeVisible();
+      await expect(advancedTrigger).toHaveAttribute('data-state', 'closed');
+      // The panel title must be reachable by heading navigation (a real h3
+      // wrapping the trigger, not a span inside the button).
+      await expect(
+        page.getByRole('heading', { name: 'Advanced settings' }),
+      ).toBeVisible();
       const reasonFilter = page.getByRole('group', { name: 'Reason Filter' });
+      await expect(reasonFilter).toHaveCount(0);
+      await captureScreenshot(page, `github-channel-editor-${theme}`);
+      // Expand the panel and anchor the capture to the checklist so a
+      // regression that falls back to a free-text filter fails here too.
+      await advancedTrigger.click();
       await expect(reasonFilter.getByRole('checkbox')).toHaveCount(4);
       await expect(
         reasonFilter.getByRole('checkbox', {
           name: /mention — the bot is @mentioned/,
         }),
       ).toBeChecked({ checked: false });
-      await captureScreenshot(page, `github-channel-editor-${theme}`);
       // The dialog body scrolls, and the checklist sits below the fold at this
       // viewport. Capture it separately and pin that it is fully on screen, so
       // the published picture cannot quietly omit the feature it documents.
@@ -1487,6 +1518,29 @@ for (const theme of THEMES) {
         .scrollIntoViewIfNeeded();
       await expect(reasonFilter).toBeInViewport({ ratio: 1 });
       await captureScreenshot(page, `github-channel-editor-reasons-${theme}`);
+      // The bound-session panel gates watch events on delivery. Capture the
+      // gated state (disabled boxes + hint), then enabled with a selection,
+      // so the published pictures document the dependency itself.
+      const watchGroup = page.getByRole('group', { name: 'PR Watch Events' });
+      await watchGroup.scrollIntoViewIfNeeded();
+      await expect(watchGroup).toBeInViewport({ ratio: 1 });
+      await expect(watchGroup.getByRole('checkbox')).toHaveCount(4);
+      const ciFailure = watchGroup.getByRole('checkbox', {
+        name: /ci_failure/,
+      });
+      await expect(ciFailure).toBeDisabled();
+      await captureScreenshot(
+        page,
+        `github-channel-editor-watch-gated-${theme}`,
+      );
+      await page
+        .getByRole('switch', { name: 'Deliver To PR-Bound Sessions' })
+        .click();
+      await expect(ciFailure).toBeEnabled();
+      await ciFailure.check();
+      await watchGroup.scrollIntoViewIfNeeded();
+      await expect(watchGroup).toBeInViewport({ ratio: 1 });
+      await captureScreenshot(page, `github-channel-editor-watch-on-${theme}`);
       await page.getByLabel('Instance name').fill('github-bot');
       await page.getByRole('button', { name: 'Save' }).click();
       await expect(
@@ -1679,6 +1733,19 @@ for (const theme of THEMES) {
       );
       await expect(inheriting.getByLabel('Allowed speakers')).toHaveValue('');
       await expect(page.getByLabel('Poll Interval (ms)')).toHaveValue('30000');
+
+      // Browser-side proof of the auto-open mitigation: this instance stores
+      // an advanced value, so the panel must open on edit, and collapsing it
+      // must report the configured count instead of hiding the value silently.
+      const advancedTrigger = page.getByRole('button', {
+        name: /Advanced settings/,
+      });
+      await expect(advancedTrigger).toHaveAttribute('data-state', 'open');
+      await advancedTrigger.click();
+      await expect(advancedTrigger).toHaveAttribute('data-state', 'closed');
+      await expect(advancedTrigger).toContainText('1 configured');
+      await advancedTrigger.click();
+      await expect(advancedTrigger).toHaveAttribute('data-state', 'open');
 
       // Put the last row in frame, not just the section title: a capture can
       // otherwise show the heading with every row below the fold. Only the last

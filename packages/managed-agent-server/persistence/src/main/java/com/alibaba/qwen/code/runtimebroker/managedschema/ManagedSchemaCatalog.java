@@ -45,11 +45,11 @@ final class ManagedSchemaCatalog {
                 throw new SQLException("Managed schema requires a dedicated application catalog;"
                         + " system or missing catalog refused before DDL: " + name);
             }
-            try (var statement = connection.prepareStatement("SELECT @@GLOBAL.sql_mode, @@SESSION.sql_mode");
+            try (var statement = connection.prepareStatement("SELECT @@SESSION.sql_mode");
                     var result = statement.executeQuery()) {
-                if (!result.next() || !strictSqlMode(result.getString(1)) || !strictSqlMode(result.getString(2))) {
+                if (!result.next() || !strictSqlMode(result.getString(1))) {
                     throw new SQLException("Managed schema requires strict SQL mode"
-                            + " (STRICT_TRANS_TABLES or STRICT_ALL_TABLES) globally and for the current session;"
+                            + " (STRICT_TRANS_TABLES or STRICT_ALL_TABLES) for the current session;"
                             + " refused before DDL");
                 }
             }

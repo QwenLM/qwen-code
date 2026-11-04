@@ -25,6 +25,7 @@ import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -71,17 +72,22 @@ final class JournalCommit {
         fencing.requireCredential(tenantId, request.workspaceId(), sessionId,
                 writerToken);
         fencing.checkLifecycleWriter(tenantId, sessionId, authority);
-        // An ordinary commit queues on its own Session row, not the tenant
-        // placement guard: lifecycle begin, settle and Harness placement all
-        // lock this row before they write, so none of them can land
-        // mid-commit, and commits of other Sessions no longer wait here. It
-        // is the first statement, so every later plain read sees what those
-        // writers committed before it. Lifecycle-authority commits took both
-        // guards above; CSI-pinned Sessions take them behind this root in
-        // lockCsiContinuation (design 2026-11-03-managed-journal-commit-tenant-guard).
-        Boolean rootPin = fencing.lockSessionFirst(tenantId, sessionId);
         JournalStoreRows.validateStableId(request.writerId(), "writerId");
         ValidatedCommit validated = validateCommit(request);
+        if (Arrays.stream(new String(validated.recordBytes(), StandardCharsets.UTF_8).split("\n"))
+                .map(com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore::parse)
+                .filter(Objects::nonNull)
+                .anyMatch(record -> "hosted.cleanup".equals(record.path("managedSession").path("kind").asText()))) {
+            // Retention takes placement before binding and Session locks. Cleanup
+            // admission must join that order before it can inspect the original binding.
+            fencing.lockPlacementBounded(tenantId);
+        }
+        // Other ordinary commits queue on their Session before any consistent
+        // read, so lifecycle and placement cannot change it mid-commit. Cleanup
+        // commits already hold placement; lifecycle authority holds both guards.
+        // CSI-pinned Sessions take them behind this root in
+        // lockCsiContinuation (design 2026-11-03-managed-journal-commit-tenant-guard).
+        Boolean rootPin = fencing.lockSessionFirst(tenantId, sessionId);
         HarnessPlacementStore.Placement placement = fencing.requirePlacement(tenantId, request.workspaceId(),
                 sessionId, writerToken, request.writerId(), false);
         boolean promotes = ManagedHostedRecoveryRecords.requiresVersionTwo(validated.recordBytes(), request.resources())
