@@ -502,7 +502,10 @@ describe('binding roles', () => {
     );
   });
 
-  it('mergeSessionPrLists keeps an explicit role the newer half lacks', () => {
+  it('mergeSessionPrLists lets the newer half win, preserving an explicit clear', () => {
+    // A missing role on the newer half can be an explicit `role: null`
+    // clear, not a pre-role binding: resurrecting the older role would
+    // re-enable instructions the operator removed (split-sidecar restore).
     const older: SessionPr = {
       ...entry(5),
       createdAt: '2026-08-01T00:00:00.000Z',
@@ -512,13 +515,35 @@ describe('binding roles', () => {
       ...entry(5),
       createdAt: '2026-08-02T00:00:00.000Z',
     };
-    expect(mergeSessionPrLists([older], [newer])[0]?.role).toBe('fix');
-    // A different repository's same-numbered PR carries nothing across.
-    const foreign: SessionPr = {
-      ...newer,
-      url: pull('other/repo', 5),
+    expect(mergeSessionPrLists([older], [newer])[0]?.role).toBeUndefined();
+    expect(mergeSessionPrLists([newer], [older])[0]?.role).toBeUndefined();
+    // A newer role still wins over an older one.
+    const newerTyped: SessionPr = { ...newer, role: 'review' };
+    expect(mergeSessionPrLists([older], [newerTyped])[0]?.role).toBe('review');
+  });
+
+  it('restoring a split sidecar does not resurrect a cleared role', async () => {
+    // Archive stopped after moving the transcript: the active half keeps
+    // the role; the operator then clears the archived binding through the
+    // metadata route (newer, role-less). Restoring merges the halves and
+    // the explicit clear must survive.
+    const activePath = path.join(tmpDir, 'active.pr.json');
+    const archivePath = path.join(tmpDir, 'archive.pr.json');
+    const seeded: SessionPr = {
+      ...entry(5),
+      createdAt: '2026-08-01T00:00:00.000Z',
+      role: 'fix',
     };
-    expect(mergeSessionPrLists([older], [foreign])[0]?.role).toBeUndefined();
+    await writeSessionPrs(activePath, [seeded]);
+    await writeSessionPrs(archivePath, [seeded]);
+    await upsertSessionPr(archivePath, {
+      number: 5,
+      url: entry(5).url,
+      role: null,
+    });
+    expect((await readSessionPrs(archivePath))?.[0]?.role).toBeUndefined();
+    await moveSessionPrSidecar(archivePath, activePath);
+    expect((await readSessionPrs(activePath))?.[0]?.role).toBeUndefined();
   });
 });
 

@@ -6196,7 +6196,10 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
     await (channel as unknown as { pollOnce: () => Promise<void> }).pollOnce();
   }
 
-  function prNotification(reason = 'mention') {
+  function prNotification(
+    reason = 'mention',
+    overrides: Record<string, unknown> = {},
+  ) {
     return makeNotification({
       reason,
       subject: {
@@ -6204,6 +6207,7 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         url: 'https://api.github.com/repos/owner/repo/pulls/42',
         type: 'PullRequest',
       },
+      ...overrides,
     });
   }
 
@@ -9090,6 +9094,363 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       );
       expect(fallback![1]).not.toContain('Role:');
       expect(fallback![1]).not.toContain('[Operator instruction');
+    });
+  });
+
+  describe('review-round regressions (durable fan-out, delivery ring, role loss, partial guard, lane class)', () => {
+    const reviewBinding = () =>
+      makeBinding({
+        sessionId: 'review-session',
+        prs: [
+          {
+            number: 42,
+            url: 'https://github.com/owner/repo/pull/42',
+            state: 'open',
+            role: 'review',
+          },
+        ],
+      });
+    const verifyBinding = () =>
+      makeBinding({
+        sessionId: 'verify-session',
+        prs: [
+          {
+            number: 42,
+            url: 'https://github.com/owner/repo/pull/42',
+            state: 'open',
+            role: 'verify',
+          },
+        ],
+      });
+    const fixBinding = () =>
+      makeBinding({
+        sessionId: 'fix-session',
+        prs: [
+          {
+            number: 42,
+            url: 'https://github.com/owner/repo/pull/42',
+            state: 'open',
+            role: 'fix',
+          },
+        ],
+      });
+
+    function tasksPath(): string {
+      return inboundTaskPath();
+    }
+    function deliveredRingPath(): string {
+      const nameHash = createHash('sha256')
+        .update('test-github')
+        .digest('hex')
+        .slice(0, 16);
+      return join(
+        process.env.QWEN_HOME!,
+        'channels',
+        getWorkspaceScopeDirName('/tmp/test'),
+        `test-github-${nameHash}-github-bound-delivered.json`,
+      );
+    }
+    function writeTasks(records: unknown[]): void {
+      const path = tasksPath();
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, `${JSON.stringify(records)}\n`, 'utf-8');
+    }
+    function readTasks(): Array<Record<string, unknown>> {
+      if (!existsSync(tasksPath())) return [];
+      return JSON.parse(readFileSync(tasksPath(), 'utf-8')) as Array<
+        Record<string, unknown>
+      >;
+    }
+    const commentEnvelope = {
+      channelName: 'test-github',
+      senderId: 'alice',
+      senderName: 'alice',
+      chatId: 'owner/repo',
+      threadId: 'pr:42',
+      messageId: '1001',
+      text: '@test-bot please fix this',
+      isGroup: true,
+      isMentioned: true,
+      isReplyToBot: false,
+      metadata:
+        'Type: Pull Request | Title: Test PR | URL: https://github.com/owner/repo/pull/42\nTrigger: comment.',
+    };
+
+    it('reconstructs missing fan-out siblings after a crash between claims (C1)', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: {
+            'review:comment': 'review it',
+            'verify:comment': 'verify it',
+          },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [reviewBinding(), verifyBinding()],
+        partial: false,
+      });
+      // The crash state: only the FIRST target's task survived, carrying
+      // the full fan-out intent and the event-wide dedupe key. Without
+      // reconstruction, recovery applies the survivor's dedupe and the
+      // re-listed comment is skipped — verify loses the event permanently.
+      writeTasks([
+        {
+          version: 1,
+          id: 'survivor',
+          createdAt: '2026-07-02T09:00:00.000Z',
+          updatedAt: '2026-07-02T09:00:00.000Z',
+          state: 'accepted',
+          issueNumber: 42,
+          source: {
+            chatId: 'owner/repo',
+            threadId: 'pr:42',
+            messageId: '1001',
+          },
+          envelope: commentEnvelope,
+          dedupe: { dispatchedComments: ['C_1001'] },
+          attempts: 0,
+          delivery: {
+            kind: 'bound-session',
+            sessionId: 'review-session',
+            role: 'review',
+          },
+          fanout: [
+            { sessionId: 'review-session', role: 'review' },
+            { sessionId: 'verify-session', role: 'verify' },
+          ],
+        },
+      ]);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      const delivered = (
+        boundSessions.deliverPrompt.mock.calls as Array<[string]>
+      ).map(([id]) => id);
+      expect(delivered).toContain('review-session');
+      expect(delivered).toContain('verify-session');
+      expect(delivered).toHaveLength(2);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+    });
+
+    it('never goes public after a sibling accepted, even across a restart with zero followers (C2)', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: {
+            'review:comment': 'review it',
+            'verify:comment': 'verify it',
+          },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [reviewBinding(), verifyBinding()],
+        partial: false,
+      });
+      boundSessions.deliverPrompt.mockImplementation(
+        async (sessionId: string) => {
+          if (sessionId === 'verify-session') {
+            throw new BoundSessionQueueFullError(sessionId);
+          }
+        },
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      // review accepted privately; the durable ring recorded the event.
+      expect(existsSync(deliveredRingPath())).toBe(true);
+      const ringKeys = (
+        JSON.parse(readFileSync(deliveredRingPath(), 'utf-8')) as {
+          keys: string[];
+        }
+      ).keys;
+      // The comment may ride the direct or the aggregate lane; the ring
+      // records whichever event identity was actually delivered.
+      expect(ringKeys).toHaveLength(1);
+      expect(ringKeys[0]).toMatch(/^github:owner\/repo:/);
+
+      // Simulate the gone-fallback defer that cleared verify's target, then
+      // every follower disappears. Recovery re-resolves to nothing on a
+      // COMPLETE snapshot: without the ring the absence gate would route
+      // the already-delivered event publicly.
+      const deferred = readTasks().map((task) => ({
+        ...task,
+        delivery: undefined,
+        backpressure: true,
+      }));
+      writeTasks(deferred);
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+
+      // Restart leg: a fresh adapter loads the ring from disk and still
+      // suppresses the public fallback for the same event.
+      writeTasks(deferred);
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: {
+            'review:comment': 'review it',
+            'verify:comment': 'verify it',
+          },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+    });
+
+    it('retires a queued comment whose role lost its match instead of injecting the obsolete instruction (C3)', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: { 'review:comment': 'review it' },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [reviewBinding()],
+        partial: false,
+      });
+      boundSessions.deliverPrompt.mockRejectedValue(
+        new BoundSessionQueueFullError('review-session'),
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      expect(readTasks().length).toBe(1);
+
+      // The operator changes the binding's role to fix, which has no
+      // comment subscription. The queued review comment must retire, not
+      // inject the obsolete review instruction into the frozen session.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [
+          makeBinding({
+            sessionId: 'review-session',
+            prs: [
+              {
+                number: 42,
+                url: 'https://github.com/owner/repo/pull/42',
+                state: 'open',
+                role: 'fix',
+              },
+            ],
+          }),
+        ],
+        partial: false,
+      });
+      boundSessions.deliverPrompt.mockResolvedValue(undefined);
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+
+      // Only the original queue-full attempt; no obsolete injection.
+      expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+      expect(readTasks()).toHaveLength(0);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+    });
+
+    it('defers instead of retiring when no visible role matches under a partial snapshot (D1)', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: { 'fix:comment': 'fix it' },
+        },
+        { boundSessions },
+      );
+      // Only the review role is visible, and the snapshot is partial: the
+      // unscanned fix role might still match. Retiring here would consume
+      // the event on incomplete evidence.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [reviewBinding()],
+        partial: true,
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('comment')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      const tasks = readTasks();
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!['backpressure']).toBe(true);
+      expect(tasks[0]!['delivery']).toBeUndefined();
+
+      // The complete snapshot reveals the fix role: the deferred event
+      // delivers privately instead of having been consumed.
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [fixBinding()],
+        partial: false,
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+      await pollOnce();
+      const delivered = boundSessions.deliverPrompt.mock.calls as Array<
+        [string, string]
+      >;
+      expect(delivered.map(([id]) => id)).toEqual(['fix-session']);
+      expect(delivered[0]![1]).toContain('fix it');
+    });
+
+    it('matches fix:comment for a comment delivered under another thread reason, reason-specific keys still winning (D2)', async () => {
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          boundSessionActions: {
+            'fix:comment': 'lane instruction',
+            'fix:mention': 'mention instruction',
+          },
+        },
+        { boundSessions },
+      );
+      boundSessions.listPrBindings.mockResolvedValue({
+        bindings: [fixBinding()],
+        partial: false,
+      });
+      // A comment arriving under the subscribed reason matches the lane
+      // class `comment`...
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification('subscribed')])
+        .mockResolvedValueOnce([makeComment()]);
+      await pollOnce();
+      let calls = boundSessions.deliverPrompt.mock.calls as Array<
+        [string, string]
+      >;
+      expect(calls[0]![0]).toBe('fix-session');
+      expect(calls[0]![1]).toContain('lane instruction');
+
+      // ...while a reason-specific key still wins for its own reason.
+      boundSessions.deliverPrompt.mockClear();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          prNotification('mention', {
+            updated_at: '2026-07-02T11:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({ id: 1002, created_at: '2026-07-02T10:30:00.000Z' }),
+        ]);
+      await pollOnce();
+      calls = boundSessions.deliverPrompt.mock.calls as Array<[string, string]>;
+      expect(calls[0]![1]).toContain('mention instruction');
     });
   });
 

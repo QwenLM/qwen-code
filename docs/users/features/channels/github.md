@@ -280,18 +280,25 @@ a role: `watch:head_change`, `comment`, `review:watch:head_change`,
 `verify:default`, or the catch-all `default`. The `watch:` prefix matters:
 `state_change` is both a watch transition and a notification reason — bare
 `state_change` matches the notification, `watch:state_change` the transition.
-For each role group the chain resolves `<role>:<event>` → `<role>:default` →
-`<event>` → `default`; **no match skips that role for the event** — the map
-is a per-role subscription. Untyped bindings resolve only the bare chain.
+For each role group the chain resolves `<role>:<event>` → `<role>:comment`
+(for comment events) → `<role>:default` → `<event>` → `comment` → `default`;
+**no match skips that role for the event** — the map is a per-role
+subscription. Comment events carry the thread's notification reason
+(`mention`, `subscribed`, `author`, ...), so `fix:comment` catches a comment
+delivered under any of those reasons, while a reason-specific key such as
+`fix:mention` still wins when configured. Untyped bindings resolve only the
+bare chain.
 
 **Routing.** One winner per role (the most recently updated follower within
 the group), fan-out across matched roles — at most four deliveries per event
 (review, verify, fix, untyped), never one per session. Each delivery is its
 own durable task: a queue-full role defers independently without blocking
-the others, and a lost session falls back only within its own role. A
-partially delivered event never also goes public; comment events fall back
-to the channel path only when no role has a live follower on a complete
-snapshot.
+the others, and a lost session falls back only within its own role. Once any
+role has accepted an event privately, it is never also answered publicly —
+a durable delivery history enforces this even if every follower later
+disappears. Comment events fall back to the channel path only when no role
+has a live follower on a complete snapshot and no role ever accepted the
+event.
 
 **Templates.** Values are operator instruction templates with `%repo%`,
 `%pr%`, `%url%`, `%title%`, `%event%`, `%sender%`, and `%role%` variables;

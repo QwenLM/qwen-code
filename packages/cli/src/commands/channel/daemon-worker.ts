@@ -28,6 +28,7 @@ import {
   ChannelLoopStore,
   DaemonChannelBridge,
   isChannelProactiveDeliveryError,
+  PR_BINDING_ROLES,
   sanitizeLogText,
   SessionRouter,
 } from '@qwen-code/channel-base';
@@ -42,6 +43,7 @@ import type {
   DaemonChannelSessionClient,
   DaemonChannelSessionFactory,
   DaemonChannelSessionFactoryRequest,
+  PrBindingRole,
   PrBindingsSnapshot,
   PrBindingSummary,
 } from '@qwen-code/channel-base';
@@ -441,11 +443,11 @@ export function createBoundSessionsAccessor(
           // An unknown role is a degraded entry, not a silently untyped
           // one: dropping it to the untyped group could misroute delivery
           // under a version skew. The count check below flags the answer
-          // partial so the adapter retains known bindings.
+          // partial so the adapter retains known bindings. The vocabulary
+          // is the shared constant so a later addition cannot silently
+          // degrade every snapshot here.
           (role !== undefined &&
-            role !== 'review' &&
-            role !== 'verify' &&
-            role !== 'fix')
+            !(PR_BINDING_ROLES as readonly string[]).includes(role as string))
         ) {
           continue;
         }
@@ -455,7 +457,9 @@ export function createBoundSessionsAccessor(
           ...(state === 'open' || state === 'merged' || state === 'closed'
             ? { state }
             : {}),
-          ...(role !== undefined ? { role } : {}),
+          // The vocabulary check above proved the value; includes() does
+          // not narrow unknown, so assert the validated type here.
+          ...(role !== undefined ? { role: role as PrBindingRole } : {}),
         });
       }
       if (entries.length < prs.length) {

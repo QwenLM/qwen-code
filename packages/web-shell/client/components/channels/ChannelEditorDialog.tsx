@@ -105,6 +105,7 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     deliverToBoundSessions:
       'channels.editor.field.github.deliverToBoundSessions',
     prWatchEvents: 'channels.editor.field.github.prWatchEvents',
+    boundSessionActions: 'channels.editor.field.github.boundSessionActions',
   },
   gitlab: {
     token: 'channels.editor.field.gitlab.token',

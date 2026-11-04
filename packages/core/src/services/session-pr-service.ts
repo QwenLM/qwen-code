@@ -471,13 +471,14 @@ export function mergeSessionPrLists(
         sessionPrSourceAuthority(newer.source)
         ? older.source
         : newer.source;
-    // An explicit role on the older half survives a newer half that predates
-    // it or never carried one — the same no-downgrade rule as provenance.
-    const role = samePr && newer.role === undefined ? older.role : newer.role;
+    // Role: the NEWER half wins outright, absence included. A missing role
+    // on the newer half can be an explicit `role: null` clear (the metadata
+    // route writes a newer role-less sidecar), and resurrecting the older
+    // half's role here would re-enable instructions the operator removed.
+    // Unlike provenance, role has no authority ladder to preserve.
     byNumber.set(entry.number, {
       ...newer,
       ...(source !== undefined ? { source } : {}),
-      ...(role !== undefined ? { role } : {}),
     });
   }
   return capSessionPrListByAuthority(

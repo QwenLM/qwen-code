@@ -1004,6 +1004,29 @@ describe('ChannelEditorDialog', () => {
     );
   });
 
+  it('resolves the boundSessionActions label and description in Chinese', async () => {
+    // FIELD_LABEL_KEYS.github must register the field, or the zh-CN editor
+    // falls back to the descriptor's English label and description.
+    const descriptor: DaemonChannelTypeDescriptor = {
+      ...DINGTALK,
+      type: 'github',
+      displayName: 'GitHub',
+      fields: [
+        {
+          key: 'boundSessionActions',
+          label: 'Bound Session Actions',
+          kind: 'record',
+          options: [{ value: 'default', label: 'default' }],
+        },
+      ],
+    };
+    await renderDialog({ descriptor, instance: INSTANCE, language: 'zh-CN' });
+    expect(document.body.textContent).toContain('绑定会话动作模板');
+    expect(document.body.textContent).toContain(
+      '投递给 PR 绑定会话的 operator 指令模板',
+    );
+  });
+
   it('submits a new instance with typed fields and the current revision', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     await renderDialog({ onSave });
