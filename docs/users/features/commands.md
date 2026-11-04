@@ -464,6 +464,7 @@ Commands for obtaining information and performing system settings.
 | `/stats skills`  | Show per-skill call counts for the current live session (live only; excludes cross-session daily/monthly activity)             | `/stats skills`                                                                     |
 | `/stats daily`   | Show daily token usage statistics                                                                                              | `/stats daily` (alias `day`), `/stats day [YYYY-MM-DD]`                             |
 | `/stats monthly` | Show monthly token usage statistics                                                                                            | `/stats monthly` (alias `month`), `/stats month [YYYY-MM]`                          |
+| `/stats range`   | Show token usage between two dates, including both endpoints                                                                   | `/stats range 2025-09-09 2026-07-11`                                                |
 | `/stats export`  | Export usage statistics to CSV or JSON                                                                                         | `/stats export <daily\|monthly> [date\|month] [--format csv\|json] [--output path]` |
 | `/settings`      | Open settings editor                                                                                                           | `/settings`                                                                         |
 | `/config`        | Get or set any setting by dot-path key (writes to user settings)                                                               | `/config` (list all), `/config <key>`, `/config <key>=<value>`                      |
@@ -479,6 +480,8 @@ Commands for obtaining information and performing system settings.
 | `/bug`           | Submit issue about Qwen Code                                                                                                   | `/bug Button click unresponsive`                                                    |
 | `/copy`          | Copy to clipboard: reply (Nth-last), code (by lang), LaTeX, or Mermaid                                                         | `/copy`, `/copy 2`, `/copy python`, `/copy latex`, `/copy mermaid`                  |
 | `/quit`          | Exit Qwen Code immediately                                                                                                     | `/quit` or `/exit`                                                                  |
+
+`/stats range <YYYY-MM-DD> <YYYY-MM-DD>` includes both dates and works across months and years. It uses each request's stored local calendar date, matching `/stats daily`, and reports only persisted token usage; usage from before local accounting was enabled cannot be reconstructed. The end date must be on or after the start date. For example, `/stats range 2025-09-09 2026-07-11` covers September 9, 2025 through July 11, 2026, inclusive.
 
 > [!warning]
 >

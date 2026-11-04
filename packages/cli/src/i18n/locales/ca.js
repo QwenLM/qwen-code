@@ -540,6 +540,12 @@ export default {
     "Mostra les estadístiques d'ús específiques del model.",
   'Show tool-specific usage statistics.':
     "Mostra les estadístiques d'ús específiques de les eines.",
+  'Show token usage for an inclusive date range.':
+    'Mostra l’ús de tokens en un interval de dates, incloent-hi ambdues dates.',
+  'Token usage for {{value}} (inclusive)':
+    'Ús de tokens per a {{value}} (inclusiu)',
+  'Usage: /stats range <YYYY-MM-DD> <YYYY-MM-DD>':
+    'Ús: /stats range <YYYY-MM-DD> <YYYY-MM-DD>',
   'Show daily token usage statistics.':
     "Mostra les estadístiques diàries d'ús de tokens.",
   'Show monthly token usage statistics.':

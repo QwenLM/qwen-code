@@ -22,6 +22,7 @@ import {
   formatTokenUsageSummaryAsCsv,
   getTokenUsageFilePath,
   queryTokenUsage,
+  queryTokenUsageRange,
   recordTokenUsageFromApiResponse,
   recordTokenUsageFromApiResponseBestEffort,
   resetTokenUsageFailureLogging,
@@ -359,6 +360,142 @@ describe('tokenUsageService', () => {
       expect(writeSpy).toHaveBeenCalledTimes(1);
     });
     expect(stderrSpy).not.toHaveBeenCalled();
+  });
+
+  describe('custom date ranges', () => {
+    async function seedRangeRecord(
+      localDate: string,
+      totalTokens: number,
+      model = 'model-a',
+      source = 'main',
+    ) {
+      const record = apiResponseEventToTokenUsageRecord(
+        fakeConfig(),
+        createEvent(model, localDate, usage(1, totalTokens - 1, totalTokens), {
+          subagentName: source,
+        }),
+      );
+      record.localDate = localDate;
+      record.localMonth = localDate.slice(0, 7);
+      await jsonl.writeLine(getTokenUsageFilePath(record.localMonth), record);
+    }
+
+    it('includes both endpoints across years, skips missing months and preserves groups', async () => {
+      await seedRangeRecord('2025-09-08', 100);
+      await seedRangeRecord('2025-09-09', 3);
+      await seedRangeRecord('2026-01-01', 9, 'model-b', 'researcher');
+      await seedRangeRecord('2026-07-11', 13);
+      await seedRangeRecord('2026-07-12', 100);
+      await mkdir(getTokenUsageFilePath('2024-01'));
+      await writeFile(
+        path.join(
+          path.dirname(getTokenUsageFilePath('2025-09')),
+          'token-usage-2026-13.jsonl',
+        ),
+        'not-json',
+      );
+
+      const summary = await queryTokenUsageRange('2025-09-09', '2026-07-11');
+
+      expect(summary.period).toBe('range');
+      expect(summary.value).toBe('2025-09-09..2026-07-11');
+      expect(summary.totals).toEqual({
+        requests: 3,
+        inputTokens: 3,
+        outputTokens: 22,
+        cachedTokens: 0,
+        thoughtsTokens: 0,
+        totalTokens: 25,
+        apiDurationMs: 300,
+      });
+      expect(summary.byModel).toEqual([
+        expect.objectContaining({ model: 'model-a', totalTokens: 16 }),
+        expect.objectContaining({ model: 'model-b', totalTokens: 9 }),
+      ]);
+      expect(summary.byAuthType).toEqual([
+        expect.objectContaining({
+          authType: AuthType.USE_GEMINI,
+          totalTokens: 25,
+        }),
+      ]);
+      expect(summary.byModelAndAuthType).toHaveLength(2);
+      expect(summary.bySource).toEqual([
+        expect.objectContaining({ source: 'main', totalTokens: 16 }),
+        expect.objectContaining({ source: 'researcher', totalTokens: 9 }),
+      ]);
+    });
+
+    it('uses stored local calendar buckets and matches daily totals for a leap day', async () => {
+      await seedRangeRecord('2024-02-28', 100);
+      await seedRangeRecord('2024-02-29', 7);
+      await seedRangeRecord('2024-03-01', 100);
+
+      const summary = await queryTokenUsageRange('2024-02-29', '2024-02-29');
+      const daily = await queryTokenUsage({
+        period: 'day',
+        value: '2024-02-29',
+      });
+
+      expect(summary.totals).toEqual(daily.totals);
+      expect(summary.totals.totalTokens).toBe(7);
+      expect(summary.byModel).toEqual(daily.byModel);
+    });
+
+    it('returns zero for absent history and for an interval without matching records', async () => {
+      expect(
+        (await queryTokenUsageRange('2025-09-09', '2026-07-11')).totals
+          .requests,
+      ).toBe(0);
+      await seedRangeRecord('2026-07-12', 100);
+      const summary = await queryTokenUsageRange('2026-07-01', '2026-07-11');
+      expect(summary.totals.totalTokens).toBe(0);
+      expect(summary.byModel).toEqual([]);
+    });
+
+    it.each([
+      ['', '2026-07-11'],
+      ['2025-09-09', ''],
+      ['2025-02-29', '2026-07-11'],
+      ['2025-09-09', '2026-04-31'],
+      ['2025-9-09', '2026-07-11'],
+      ['2025-09-09', '2026-13-01'],
+    ])('rejects invalid dates %s through %s', async (start, end) => {
+      const readSpy = vi.spyOn(jsonl, 'read');
+      await expect(queryTokenUsageRange(start, end)).rejects.toThrow(
+        'Expected YYYY-MM-DD',
+      );
+      expect(readSpy).not.toHaveBeenCalled();
+    });
+
+    it('rejects reversed ranges', async () => {
+      await expect(
+        queryTokenUsageRange('2026-07-11', '2025-09-09'),
+      ).rejects.toThrow('Start date must be on or before end date.');
+    });
+
+    it('propagates file read failures rather than returning partial totals', async () => {
+      await seedRangeRecord('2025-09-09', 3);
+      await seedRangeRecord('2026-07-11', 13);
+      const error = Object.assign(new Error('permission denied'), {
+        code: 'EACCES',
+      });
+      vi.spyOn(jsonl, 'read')
+        .mockResolvedValueOnce([])
+        .mockRejectedValueOnce(error);
+      await expect(
+        queryTokenUsageRange('2025-09-09', '2026-07-11'),
+      ).rejects.toThrow('permission denied');
+    });
+
+    it('propagates usage directory errors', async () => {
+      await writeFile(
+        path.dirname(getTokenUsageFilePath('2026-07')),
+        'not a directory',
+      );
+      await expect(
+        queryTokenUsageRange('2025-09-09', '2026-07-11'),
+      ).rejects.toThrow();
+    });
   });
 
   it('aggregates monthly model, auth type, model/auth, and source groups', async () => {
