@@ -179,6 +179,20 @@ describe('TUI product evidence', () => {
     ['integration-tests/test-helper.ts', lanes],
     ['.github/workflows/tui-parity.yml', lanes],
     ['docs/design/unrelated.md', []],
+    ['packages/web-shell/client/App.tsx', []],
+    ['packages/chrome-extension/package.json', []],
+    ['packages/mobile-mcp/package.json', []],
+    ['packages/qwen-live/build.mjs', []],
+    ['integrations/external-context/package.json', []],
+    ['integrations/external-context-mem0/package.json', []],
+    ['integrations/test-failure-explorer/package.json', []],
+    ['packages/desktop/package.json', []],
+    ['packages/live-host/electron-builder.yml', []],
+    ['packages/mobile-shell/build.gradle.kts', []],
+    ['packages/sdk-java/client/pom.xml', []],
+    ['packages/sdk-python/pyproject.toml', []],
+    ['packages/zed-extension/extension.toml', []],
+    ['packages/cua-driver/typescript/src/native-assets.ts', []],
     ['scripts/unrelated-maintenance.js', ['component']],
   ])(
     'selects mechanisms rather than blanket full acceptance for %s',
@@ -593,6 +607,64 @@ describe('TUI product evidence', () => {
     ).toBe(false);
   });
 
+  it('skips Web Shell-only changes but runs when CLI source rides along', async () => {
+    expect(
+      await required([
+        { filename: 'packages/web-shell/client/App.tsx' },
+        {
+          filename: 'packages/web-shell/client/completions/slashCompletion.ts',
+        },
+      ]),
+    ).toBe(false);
+    expect(
+      await required([
+        { filename: 'packages/web-shell/client/App.tsx' },
+        { filename: 'packages/cli/src/ui/App.tsx' },
+      ]),
+    ).toBe(true);
+  });
+
+  it('reports a policy exclusion instead of the no-impact default', async () => {
+    const { outputs } = await impact([
+      { filename: 'packages/cua-driver/typescript/src/native-assets.ts' },
+    ]);
+    expect(outputs.component).toBe('false');
+    expect(outputs.reason).toBe('Outside the TUI build/test closure');
+  });
+
+  // Parse by value, not by literal spelling: a trailing comment or an
+  // `!integrations/...` negation is lint-legal and must still be reconciled.
+  const excludedTrees = (yamlText) =>
+    parse(yamlText)
+      .packages.filter((entry) => entry.startsWith('!'))
+      .map((entry) => entry.slice(1));
+
+  it('excludes every tree the pnpm workspace itself leaves out', async () => {
+    const excluded = excludedTrees(readFileSync('pnpm-workspace.yaml', 'utf8'));
+    expect(excluded.length).toBeGreaterThan(0);
+    for (const tree of excluded) {
+      const { outputs } = await impact([
+        { filename: `${tree}/placeholder.ts` },
+      ]);
+      expect(outputs.component, tree).toBe('false');
+      expect(outputs.reason, tree).toBe('Outside the TUI build/test closure');
+    }
+  });
+
+  it('reconciles negations spelled with a trailing comment or another scope', () => {
+    expect(
+      excludedTrees(
+        [
+          'packages:',
+          "  - 'packages/*'",
+          "  - '!packages/desktop' # promoted to its own release later",
+          "  - '!integrations/generated-ui'",
+          '',
+        ].join('\n'),
+      ),
+    ).toEqual(['packages/desktop', 'integrations/generated-ui']);
+  });
+
   it.each([
     'packages/cli/src/ui/App.tsx',
     'packages/vscode-ide-companion/package.json',
@@ -657,6 +729,61 @@ describe('TUI product evidence', () => {
       'both ends under docs/',
       'docs/design/runtime.md',
       'docs/design/old-runtime.md',
+    ],
+    [
+      'both ends in the Web Shell',
+      'packages/web-shell/client/App.tsx',
+      'packages/web-shell/client/OldApp.tsx',
+    ],
+    [
+      'both ends in the Chrome extension',
+      'packages/chrome-extension/package.json',
+      'packages/chrome-extension/old-package.json',
+    ],
+    [
+      'both ends in mobile-mcp',
+      'packages/mobile-mcp/package.json',
+      'packages/mobile-mcp/old-package.json',
+    ],
+    [
+      'both ends in qwen-live',
+      'packages/qwen-live/build.mjs',
+      'packages/qwen-live/old-build.mjs',
+    ],
+    [
+      'both ends in external-context',
+      'integrations/external-context/package.json',
+      'integrations/external-context/old-package.json',
+    ],
+    [
+      'both ends in external-context-mem0',
+      'integrations/external-context-mem0/package.json',
+      'integrations/external-context-mem0/old-package.json',
+    ],
+    [
+      'both ends in test-failure-explorer',
+      'integrations/test-failure-explorer/package.json',
+      'integrations/test-failure-explorer/old-package.json',
+    ],
+    [
+      'both ends in the workspace-excluded desktop tree',
+      'packages/desktop/package.json',
+      'packages/desktop/old-package.json',
+    ],
+    [
+      'both ends in the workspace-excluded live-host tree',
+      'packages/live-host/electron-builder.yml',
+      'packages/live-host/old-electron-builder.yml',
+    ],
+    [
+      'both ends in the workspace-excluded mobile-shell tree',
+      'packages/mobile-shell/build.gradle.kts',
+      'packages/mobile-shell/old-build.gradle.kts',
+    ],
+    [
+      'both ends in the CUA driver tree',
+      'packages/cua-driver/typescript/src/native-assets.ts',
+      'packages/cua-driver/typescript/src/old-native-assets.ts',
     ],
   ])(
     'still skips a rename with %s',
@@ -965,6 +1092,57 @@ describe('e2e workflow', () => {
       expect(e2eRunScript).toContain(
         'export QWEN_SANDBOX_IMAGE="$sandbox_image_id"',
       );
+    });
+
+    it('probes the apt mirror instead of pinning a region', () => {
+      // #16214: deb.debian.org serves this pool at MB/s from Hong Kong and
+      // 11-20 kB/s from the mainland hosts, where the two apt layers then
+      // outlast the job's 60-minute cap. So neither a single mirror nor a
+      // host-name map is correct — the build probes and overrides only on a
+      // clear win, which leaves healthy hosts on the built-in source.
+      // The VPC intranet mirror is the durable fix: it bypasses the capped
+      // public egress that throttles the public mirrors (the maven script's
+      // rationale). It must stay a probe candidate — unreachable off-VPC, it
+      // measures 0 and loses, so no host map is needed.
+      expect(e2eRunScript).toContain('mirrors.cloud.aliyuncs.com');
+      expect(e2eRunScript).toContain('mirrors.aliyun.com');
+      expect(e2eRunScript).toContain('mirrors.tuna.tsinghua.edu.cn');
+      expect(e2eRunScript).toContain('--build-arg APT_MIRROR=');
+      // Both stages need the ARG: a stage cannot inherit an ARG declared
+      // before its own FROM, so one declaration per stage is the contract.
+      // Counting (not toMatch) catches deleting either one — R1-1 witnessed
+      // the runtime-stage removal surviving a single-match assertion.
+      expect(
+        readFileSync('Dockerfile', 'utf8').match(/^ARG APT_MIRROR=$/gm),
+      ).toHaveLength(2);
+
+      const selectIndex = e2eRunScript.indexOf('select_apt_mirror()');
+      expect(selectIndex).toBeGreaterThan(-1);
+      const callIndex = e2eRunScript.indexOf(
+        'apt_mirror="$(select_apt_mirror)"',
+      );
+      expect(callIndex).toBeGreaterThan(selectIndex);
+      // The probe has to run before the build consumes the flag, otherwise the
+      // mirror is decided after the layer it was meant to speed up.
+      expect(e2eRunScript.indexOf('if ! build_image;')).toBeGreaterThan(
+        callIndex,
+      );
+      // Two gates hold the override back, both on the mirror side: an absolute
+      // floor (no "slow vs slower" override) and a 4x factor (a genuinely fast
+      // default — the Hong Kong hosts — keeps its source). The literals are
+      // pinned, not just the names: a 10x mutation of the floor flips the
+      // both-slow shape onto a still-slow mirror. \b, not toContain, so the
+      // 10x-up mutation 'fast_mirror=10000000' cannot satisfy the pin.
+      expect(e2eRunScript).toMatch(/fast_mirror=1000000\b/);
+      expect(e2eRunScript).toMatch(/-gt "\$\{fast_mirror\}" \]/);
+      expect(e2eRunScript).toMatch(/-gt \$\(\(default_rate \* 4\)\)/);
+      // There must be NO "default looks healthy" gate: the mainland paths are
+      // bimodal, so a short probe of the default cannot veto the override
+      // (#16214 recurrence on hz4-2, run 41743539611). Pin its absence.
+      expect(e2eRunScript).not.toContain('slow_default');
+      // The measurements have to reach the log, or the next slow build is
+      // another manual investigation.
+      expect(e2eRunScript).toContain('apt probe:');
     });
 
     it('keeps one bounded retry without pruning the shared daemon', () => {
@@ -1338,6 +1516,80 @@ describe('e2e workflow', () => {
         expect(heal?.run, id).toContain(
           'chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE"',
         );
+      }
+    });
+  });
+
+  describe('artifact download time-boxing', () => {
+    // #12132: each leg downloads the shared archive twice — once, and again
+    // from the retry that only fires when the first attempt failed. Only the
+    // first attempt was time-boxed, so a stalling retry held its runner with
+    // no ceiling at all, and two legs had no job-level ceiling either.
+    const legs = [
+      'e2e-test-linux',
+      'e2e-test-macos',
+      'e2e-interactive-opentui',
+      'isolated-nightly',
+    ];
+    const downloads = (leg) =>
+      yml.jobs[leg].steps.filter((step) =>
+        String(step.name).startsWith('Download build artifact'),
+      );
+
+    it('caps every artifact-consuming leg at the job level', () => {
+      // 60 is the ceiling e2e-test-linux and e2e-interactive-opentui already
+      // carried; the other two legs consume the same archive on the same
+      // runners, so they get that budget instead of a new number.
+      for (const leg of legs) {
+        expect(yml.jobs[leg]['timeout-minutes'], leg).toBe(60);
+      }
+    });
+
+    it('time-boxes the retry as tightly as the first attempt', () => {
+      // 10 is the value every first-attempt download already pins. Without it
+      // the retry — the step that exists precisely because the first attempt
+      // misbehaved — was the only unbounded step in the download leg.
+      for (const leg of legs) {
+        const steps = downloads(leg);
+        expect(
+          steps.map((step) => step.name),
+          leg,
+        ).toEqual([
+          'Download build artifact',
+          'Download build artifact (retry)',
+        ]);
+        for (const step of steps) {
+          expect(step['timeout-minutes'], `${leg}/${step.name}`).toBe(10);
+        }
+      }
+    });
+
+    it('keeps the retry step red when the retry itself fails', () => {
+      // The first attempt's continue-on-error is what makes the retry
+      // reachable. Copying it onto the retry would leave a stalled download
+      // invisible: the leg would go on to unpack a missing archive and report
+      // a failure with the wrong cause.
+      for (const leg of legs) {
+        const retry = downloads(leg)[1];
+        expect(retry.name, leg).toBe('Download build artifact (retry)');
+        expect(retry['continue-on-error']).toBeUndefined();
+      }
+    });
+
+    it('leaves the already-landed ceilings where they are', () => {
+      // Regression guard. `build` produces the archive on a 30-minute budget
+      // while the legs consume it on 60, and 60 is also the number the
+      // shard-retry budget gate in run-e2e-tests.sh takes its 25-minute
+      // reserve out of. A later pass that "unifies" these values would move
+      // either the producer's ceiling or the retry arithmetic with every
+      // other witness green.
+      expect(yml.jobs.build['timeout-minutes']).toBe(30);
+      expect(yml.jobs['e2e-test-linux']['timeout-minutes']).toBe(60);
+      expect(yml.jobs['e2e-interactive-opentui']['timeout-minutes']).toBe(60);
+      for (const leg of legs) {
+        const first = downloads(leg)[0];
+        expect(first['timeout-minutes'], leg).toBe(10);
+        expect(first['continue-on-error'], leg).toBe(true);
       }
     });
   });

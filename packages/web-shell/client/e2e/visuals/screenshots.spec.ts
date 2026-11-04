@@ -564,6 +564,84 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `context-usage-${theme}`);
     });
 
+    test('context instruction file preview', async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd: '/workspace',
+        workspaceFiles: {
+          '/workspace/AGENTS.md':
+            '# AGENTS.md\n\n## Working Principles\n\n- Simplicity first: minimum code that solves the problem.\n- No abstractions for single-use code.\n',
+        },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await page.route(/\/session\/[^/]+\/context-usage(?:\?|$)/, (route) =>
+        route.fulfill({
+          json: {
+            v: 1,
+            sessionId: scenario.sessionId,
+            workspaceCwd: scenario.workspaceCwd,
+            formattedText: '',
+            usage: {
+              modelName: 'Qwen Test',
+              totalTokens: 60_000,
+              contextWindowSize: 100_000,
+              breakdown: {
+                systemPrompt: 10_000,
+                builtinTools: 10_000,
+                mcpTools: 0,
+                instructionFiles: 5_000,
+                memoryFiles: 1_000,
+                skills: 10_000,
+                messages: 24_000,
+                freeSpace: 30_000,
+                autocompactBuffer: 10_000,
+              },
+              builtinTools: [],
+              mcpTools: [],
+              instructionFiles: [
+                {
+                  path: 'AGENTS.md',
+                  tokens: 5_000,
+                  absolutePath: '/workspace/AGENTS.md',
+                },
+              ],
+              memoryFiles: [{ path: 'auto memory', tokens: 1_000 }],
+              skills: [],
+              showDetails: true,
+            },
+          } satisfies DaemonSessionContextUsageStatus,
+        }),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      await page
+        .getByRole('button', { name: 'Context Usage', exact: true })
+        .click();
+      const panel = page.locator('[class*="panel"][aria-busy]');
+      await expect(panel).toContainText('Remaining 40.0k');
+      await panel.locator('summary').filter({ hasText: 'Advanced' }).click();
+      await panel
+        .locator('summary')
+        .filter({ hasText: 'Instruction files' })
+        .click();
+      await expect(
+        panel.getByRole('button', { name: 'AGENTS.md', exact: true }),
+      ).toBeVisible();
+      await captureScreenshot(page, `context-instruction-files-panel-${theme}`);
+      await panel
+        .getByRole('button', { name: 'AGENTS.md', exact: true })
+        .click();
+      await expect(
+        page.getByText('Simplicity', { exact: false }).first(),
+      ).toBeVisible();
+      await captureScreenshot(
+        page,
+        `context-instruction-file-preview-${theme}`,
+      );
+    });
+
     test('trajectory', async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         transcriptPage: {
@@ -1335,6 +1413,17 @@ for (const theme of THEMES) {
                 ],
               },
               {
+                key: 'reasonFilter',
+                label: 'Reason Filter',
+                kind: 'string-list',
+                options: [
+                  { value: 'mention', label: 'mention' },
+                  { value: 'review_requested', label: 'review_requested' },
+                  { value: 'assign', label: 'assign' },
+                  { value: 'ci_activity', label: 'ci_activity' },
+                ],
+              },
+              {
                 key: 'privatePolicy',
                 label: 'Private Policy',
                 kind: 'enum',
@@ -1379,7 +1468,25 @@ for (const theme of THEMES) {
           name: 'Use local GitHub CLI authentication',
         }),
       ).toBeVisible();
+      // Anchor the capture to the checklist so a regression that falls back to
+      // a free-text filter fails here instead of shipping a stale picture.
+      const reasonFilter = page.getByRole('group', { name: 'Reason Filter' });
+      await expect(reasonFilter.getByRole('checkbox')).toHaveCount(4);
+      await expect(
+        reasonFilter.getByRole('checkbox', {
+          name: /mention — the bot is @mentioned/,
+        }),
+      ).toBeChecked({ checked: false });
       await captureScreenshot(page, `github-channel-editor-${theme}`);
+      // The dialog body scrolls, and the checklist sits below the fold at this
+      // viewport. Capture it separately and pin that it is fully on screen, so
+      // the published picture cannot quietly omit the feature it documents.
+      await page
+        .getByText('Reason Filter', { exact: true })
+        .first()
+        .scrollIntoViewIfNeeded();
+      await expect(reasonFilter).toBeInViewport({ ratio: 1 });
+      await captureScreenshot(page, `github-channel-editor-reasons-${theme}`);
       await page.getByLabel('Instance name').fill('github-bot');
       await page.getByRole('button', { name: 'Save' }).click();
       await expect(
@@ -1423,6 +1530,164 @@ for (const theme of THEMES) {
             }),
           }),
         ]);
+    });
+
+    test(`GitHub channel repository settings`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'workspace_settings',
+            'workspace_voice',
+            'channel_management',
+          ],
+        },
+        channelTypes: [
+          {
+            type: 'github',
+            displayName: 'GitHub',
+            manageable: true,
+            fields: [
+              {
+                key: 'token',
+                label: 'Personal Access Token',
+                kind: 'secret',
+                envResolvable: true,
+              },
+              {
+                key: 'useLocalGh',
+                label: 'Use Local GitHub CLI Authentication',
+                kind: 'boolean',
+              },
+              {
+                key: 'baseUrl',
+                label: 'Base URL',
+                kind: 'string',
+                envResolvable: true,
+              },
+              {
+                key: 'pollInterval',
+                label: 'Poll Interval (ms)',
+                kind: 'number',
+                exclusiveMinimum: 0,
+                default: '60000',
+              },
+              {
+                key: 'groupPolicy',
+                label: 'Group Policy',
+                kind: 'enum',
+                required: true,
+                default: 'open',
+                options: [
+                  { value: 'open', label: 'Open' },
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'disabled', label: 'Disabled' },
+                ],
+              },
+              {
+                key: 'privatePolicy',
+                label: 'Private Policy',
+                kind: 'enum',
+                required: true,
+                options: [
+                  { value: 'disabled', label: 'Disabled' },
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'pairing', label: 'Pairing' },
+                  { value: 'open', label: 'Open' },
+                ],
+              },
+              {
+                key: 'allowedUsers',
+                label: 'Allowed Users',
+                kind: 'string-list',
+              },
+            ],
+          },
+        ],
+        channels: {
+          revision: '1',
+          instances: {
+            'github-bot': {
+              name: 'github-bot',
+              config: {
+                type: 'github',
+                useLocalGh: true,
+                pollInterval: 30000,
+                groupPolicy: 'allowlist',
+                groups: {
+                  '*': { senders: 'allowlist', allowedUsers: ['operator'] },
+                  'qwenlm/qwen-code': {
+                    requireMention: false,
+                    senders: 'allowlist',
+                    allowedUsers: ['alice', 'bob'],
+                  },
+                  'acme/widgets': {},
+                },
+              },
+              secrets: {},
+              startsWithServe: false,
+              runtime: { state: 'stopped' },
+            },
+          },
+        },
+      });
+      await page.addInitScript(() => {
+        window.sessionStorage.setItem('qwen-daemon-token', 'visual-token');
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await page.getByRole('button', { name: 'Channels' }).click();
+      await page.getByRole('button', { name: 'Edit github-bot' }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Edit GitHub' }),
+      ).toBeVisible();
+
+      // Anchor the capture to the rows themselves: a regression that drops them
+      // must fail here rather than republish a picture of the old form.
+      await expect(page.getByText('Per-repository settings')).toBeVisible();
+      await expect(page.getByLabel('Require a mention')).toHaveCount(2);
+      await expect(page.getByLabel('Who may speak')).toHaveCount(2);
+      await expect(page.getByLabel('Allowed speakers')).toHaveCount(2);
+      // Scope every assertion to its own row: counting controls alone would
+      // still pass if the rows were wired to the wrong repository, or if the
+      // speaker boxes all showed the channel-wide list.
+      const customized = page.getByRole('group', { name: 'qwenlm/qwen-code' });
+      const inheriting = page.getByRole('group', { name: 'acme/widgets' });
+      await expect(customized.getByLabel('Require a mention')).toContainText(
+        'Answer without a mention',
+      );
+      await expect(customized.getByLabel('Who may speak')).toContainText(
+        'Allowlist only',
+      );
+      await expect(customized.getByLabel('Allowed speakers')).toHaveValue(
+        'alice, bob',
+      );
+      await expect(inheriting.getByLabel('Require a mention')).toContainText(
+        'Inherit (require a mention)',
+      );
+      await expect(inheriting.getByLabel('Who may speak')).toContainText(
+        'Inherit (allowlist only)',
+      );
+      await expect(inheriting.getByLabel('Allowed speakers')).toHaveValue('');
+      await expect(page.getByLabel('Poll Interval (ms)')).toHaveValue('30000');
+
+      // Put the last row in frame, not just the section title: a capture can
+      // otherwise show the heading with every row below the fold. Only the last
+      // row is required to fit — at this viewport the two rows together are
+      // taller than the dialog body, so demanding both would fail on geometry
+      // rather than on a regression.
+      await inheriting.scrollIntoViewIfNeeded();
+      await expect(inheriting).toBeInViewport({ ratio: 1 });
+      await captureScreenshot(page, `github-channel-repositories-${theme}`);
     });
 
     test(`mermaid diagram`, async ({ page }, testInfo) => {

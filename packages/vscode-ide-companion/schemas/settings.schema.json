@@ -651,7 +651,7 @@
       "type": "object",
       "properties": {
         "usageStatisticsEnabled": {
-          "description": "Enable collection of usage statistics",
+          "description": "Enable collection of usage statistics. Disabling this also stops the models.dev catalog refresh.",
           "type": "boolean",
           "default": true
         }
@@ -852,6 +852,11 @@
             "max"
           ],
           "description": "How hard reasoning-capable models think, applied across all providers. Set with /effort. Each provider maps and clamps this to what the active model supports (e.g. Gemini caps at \"high\"; Anthropic clamps tiers a model lacks). Leave unset to use the model/provider default."
+        },
+        "catalogRefresh": {
+          "description": "Download the models.dev model catalog in the background at most once every 24 hours. Disable it in managed installations that must not contact models.dev; the bundled and previously downloaded catalog data remain available. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored. QWEN_CODE_MODELS_DEV_REFRESH=off in the process environment still wins, and disabling privacy.usageStatisticsEnabled also disables the refresh.",
+          "type": "boolean",
+          "default": true
         },
         "maxSessionTurns": {
           "description": "Maximum number of user/model/tool turns to keep in a session. Must be an integer; -1 means unlimited.",
@@ -1947,7 +1952,7 @@
           }
         },
         "crossSessionMessaging": {
-          "description": "Let Qwen Code sessions on this machine send each other messages over a per-session local socket. On by default: this session is discoverable by the others, takes peer messages under the review rules of agents.crossSessionInbound, and its model can address them from send_message. Two senders are delivered without review unless agents.crossSessionInbound is \"hold\" or \"refuse\": processes this session starts, which inherit its child token, and a same-user process that claims this session's own review class, which nothing authenticates. Set to false to keep this session invisible and unreachable.",
+          "description": "Let Qwen Code sessions on this machine send each other messages over a per-session local socket. On by default: this session is discoverable by the others, takes peer messages under the review rules of agents.crossSessionInbound, and its model can address them from send_message. Two senders are delivered without review unless agents.crossSessionInbound is \"hold\" or \"refuse\": processes this session starts, which inherit its child token, and a same-user process that claims this session's own review class, which nothing authenticates. Set to false to disable peer discovery and messaging. --bare and --safe-mode disable messaging regardless of this setting. Interactive sessions can still appear in qwen sessions ps without a messaging address. Daemon- or editor-hosted sessions register only while messaging is active; Agent View managed rows are listed independently.",
           "type": "boolean",
           "default": true
         },
@@ -4600,7 +4605,7 @@
           "default": false
         },
         "unifiedAgentLoop": {
-          "description": "Run headless sessions (`-p` and stream-json) and the model rounds of ACP user prompts (Zed, VS Code, Web Shell) on the shared agent loop (experimental). Other turns and surfaces keep their current loop for now. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.",
+          "description": "Run headless sessions (`-p` and stream-json) and ACP sessions (Zed, VS Code, Web Shell, channels) on the shared agent loop (experimental). The interactive TUI and subagents keep their current loop for now. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.",
           "type": "boolean",
           "default": false
         },

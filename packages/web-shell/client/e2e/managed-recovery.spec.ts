@@ -302,6 +302,9 @@ test('new Session handoff is editable, preselected and never automatically sent 
   page,
 }) => {
   const scenario = await installRecovery(page);
+  await expect(
+    page.getByText('Confirmed inspection complete', { exact: true }),
+  ).toBeVisible();
   await page
     .getByRole('button', { name: 'Continue in a new Session', exact: true })
     .click();
