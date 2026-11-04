@@ -1691,12 +1691,161 @@ describe('GithubChannel', () => {
           mockOctokit.rest.activity.markNotificationsAsRead,
         ).toHaveBeenCalledTimes(1);
         expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
-        const rows = journalRows();
-        expect(rows).toHaveLength(30);
-        expect(rows.at(-1)).toMatchObject({ outcome: 'skipped' });
+        // Reported when the streak starts, every tenth retry and at give-up.
         expect(
-          rows.slice(0, -1).every((row) => row['outcome'] === 'failed'),
-        ).toBe(true);
+          journalRows().map((row) => [
+            row['outcome'],
+            (row['detail'] as { failures: number }).failures,
+          ]),
+        ).toEqual([
+          ['failed', 1],
+          ['failed', 10],
+          ['failed', 20],
+          ['skipped', 30],
+        ]);
+      });
+
+      const issueNotification = (n: number, updatedAt?: string) =>
+        makeNotification({
+          id: String(n),
+          updated_at: updatedAt ?? `2026-07-02T0${n}:00:00.000Z`,
+          subject: {
+            title: `Issue ${n}`,
+            url: `https://api.github.com/repos/owner/repo/issues/${n}`,
+            type: 'Issue',
+          },
+        });
+      const isListNotifications = (method: unknown) =>
+        method ===
+        mockOctokit.rest.activity.listNotificationsForAuthenticatedUser;
+
+      it.each([
+        [
+          'a secondary rate limit 403',
+          403,
+          'You have exceeded a secondary rate limit',
+          {},
+        ],
+        [
+          'an exhausted-budget 403',
+          403,
+          'API rate limit exceeded',
+          { 'x-ratelimit-remaining': '0' },
+        ],
+        ['a 429', 429, 'Too Many Requests', {}],
+        ['a 401', 401, 'Bad credentials', {}],
+      ])(
+        'stops reading further threads and holds the window on %s',
+        async (_label, status, message, headers) => {
+          await initFailing();
+          const read: number[] = [];
+          let poll = 0;
+          mockOctokit.paginate.mockImplementation(
+            async (method: unknown, params: { issue_number?: number }) => {
+              if (isListNotifications(method)) {
+                poll += 1;
+                return [issueNotification(1), issueNotification(2)];
+              }
+              read.push(params.issue_number!);
+              if (poll === 1) {
+                throw Object.assign(new Error(message), {
+                  status,
+                  response: { headers },
+                });
+              }
+              return [];
+            },
+          );
+
+          await pollOnce();
+
+          // The limit answered thread 1 (three in-call attempts); thread 2
+          // was not read at all, and nothing was marked read.
+          expect(read).toEqual([1, 1, 1]);
+          expect(
+            mockOctokit.rest.activity.markNotificationsAsRead,
+          ).not.toHaveBeenCalled();
+          expect(journalRows()).toEqual([
+            expect.objectContaining({ outcome: 'failed', number: 1 }),
+          ]);
+
+          await pollOnce();
+
+          expect(read.slice(3)).toEqual([1, 2]);
+          expect(
+            mockOctokit.rest.activity.markNotificationsAsRead,
+          ).toHaveBeenCalledTimes(1);
+        },
+      );
+
+      it('skips at once when the failure is a local exception without a status', async () => {
+        await initFailing();
+        mockOctokit.paginate
+          .mockResolvedValueOnce([makeNotification()])
+          .mockRejectedValue(new TypeError('unexpected comment shape'));
+
+        await pollOnce();
+
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+        expect(journalRows()).toEqual([
+          expect.objectContaining({ outcome: 'skipped' }),
+        ]);
+      });
+
+      it('restarts the count after a success while another thread holds the window', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              return [issueNotification(1), issueNotification(2)];
+            }
+            // Thread 1 fails except on poll 25; thread 2 always fails and
+            // keeps the window held throughout.
+            if (params.issue_number === 1 && poll === 25) return [];
+            throw transient();
+          },
+        );
+
+        for (let i = 0; i < 27; i++) await pollOnce();
+
+        const thread1 = journalRows()
+          .filter((row) => row['number'] === 1)
+          .map((row) => (row['detail'] as { failures: number }).failures);
+        // 1..24 failed, the success on 25 reset the streak, 26 starts again.
+        expect(thread1).toEqual([1, 10, 20, 1]);
+      });
+
+      it('restarts the count of a thread that comes back after the window committed', async () => {
+        await initFailing();
+        let poll = 0;
+        mockOctokit.paginate.mockImplementation(
+          async (method: unknown, params: { issue_number?: number }) => {
+            if (isListNotifications(method)) {
+              poll += 1;
+              // Thread 1 is read elsewhere after poll 12 and comes back with
+              // new activity on poll 14; thread 2 lets poll 13 commit.
+              if (poll <= 12) return [issueNotification(1)];
+              if (poll === 13) return [issueNotification(2)];
+              return [issueNotification(1, '2026-07-02T03:00:00.000Z')];
+            }
+            if (params.issue_number === 2) return [];
+            throw transient();
+          },
+        );
+
+        for (let i = 0; i < 14; i++) await pollOnce();
+
+        expect(
+          mockOctokit.rest.activity.markNotificationsAsRead,
+        ).toHaveBeenCalledTimes(1);
+        const thread1 = journalRows()
+          .filter((row) => row['number'] === 1)
+          .map((row) => (row['detail'] as { failures: number }).failures);
+        expect(thread1).toEqual([1, 10, 1]);
       });
 
       it('commits once out-of-phase failing threads are all exhausted', async () => {

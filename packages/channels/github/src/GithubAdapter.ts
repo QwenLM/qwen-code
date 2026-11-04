@@ -656,11 +656,11 @@ type InboundTaskState =
 
 const MAX_INBOUND_TASK_ATTEMPTS = 3;
 /**
- * Consecutive polls one notification may fail with a transient GitHub error
- * while it holds the cursor back (~30 minutes at the default 60s poll). Past
- * that it is skipped like a permanent failure until the window commits, so a
- * thread GitHub keeps failing cannot freeze mark-as-read for every other
- * thread: the window is held until each failing thread recovers or is skipped.
+ * Consecutive polls one notification's thread may fail with a 5xx while it
+ * holds the cursor back (~30 minutes at the default 60s poll). Past that it is
+ * skipped like a permanent failure until the window commits, so a thread
+ * GitHub keeps failing cannot freeze mark-as-read for every other thread: the
+ * window is held until each failing thread recovers or is skipped.
  */
 const MAX_TRANSIENT_NOTIFICATION_FAILURES = 30;
 /**
@@ -890,21 +890,27 @@ function isWatchPassAbortError(err: unknown): boolean {
 }
 
 /**
- * A per-thread failure GitHub may not repeat: no HTTP status (network,
- * timeout), a 5xx, or a shared credential/rate-limit answer. A secondary
- * limit can arrive as a bare 403 whose only marker is the message. Other 4xx
- * (a deleted, transferred or inaccessible thread) come back the same on every
- * retry.
+ * How a failure reading one notification's thread is handled. A rate-limit or
+ * credential answer (`shared`) applies to every thread, so the poll stops and
+ * holds the window until GitHub answers again; a secondary limit can arrive as
+ * a bare 403 whose only marker is the message. A 5xx (`transient`; Octokit
+ * also reports network failures as 500) belongs to this thread. Another 4xx (a
+ * deleted, transferred or inaccessible thread) or a local exception without a
+ * status comes back the same on every retry (`permanent`).
  */
-function isTransientGithubError(err: unknown): boolean {
+function classifyThreadFailure(
+  err: unknown,
+): 'shared' | 'transient' | 'permanent' {
   const e = err as { status?: unknown; message?: unknown };
-  if (typeof e.status !== 'number') return true;
-  return (
-    e.status >= 500 ||
+  if (typeof e.status !== 'number') return 'permanent';
+  if (
     isWatchPassAbortError(err) ||
     (e.status === 403 &&
       /secondary rate limit|abuse detection/i.test(String(e.message)))
-  );
+  ) {
+    return 'shared';
+  }
+  return e.status >= 500 ? 'transient' : 'permanent';
 }
 
 function parseTriggerKind(metadata: string | undefined): string | undefined {
@@ -2056,39 +2062,55 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }
         this.transientNotificationFailures.delete(failureKey);
       } catch (err) {
-        const transient = isTransientGithubError(err);
-        const failures =
-          (this.transientNotificationFailures.get(failureKey) ?? 0) + 1;
+        const failure = classifyThreadFailure(err);
+        let failures = this.transientNotificationFailures.get(failureKey) ?? 0;
+        if (failure === 'transient') failures += 1;
         const retry =
-          transient && failures < MAX_TRANSIENT_NOTIFICATION_FAILURES;
+          failure === 'shared' ||
+          (failure === 'transient' &&
+            failures < MAX_TRANSIENT_NOTIFICATION_FAILURES);
         if (retry) this.notificationRetryPending = true;
         // An exhausted streak stays recorded until the window commits or the
         // thread succeeds: while another thread still holds the cursor, a
         // fresh streak would let two out-of-phase threads hold it forever.
-        if (transient) {
+        if (failure === 'transient') {
           this.transientNotificationFailures.set(failureKey, failures);
-        } else {
+        } else if (failure === 'permanent') {
           this.transientNotificationFailures.delete(failureKey);
         }
-        const error = sanitizeLogText(
-          err instanceof Error ? err.message : String(err),
-          200,
-        );
-        process.stderr.write(
-          retry
-            ? `[Channel:${this.name}] API error processing ${threadId} (${failures}/${MAX_TRANSIENT_NOTIFICATION_FAILURES}), keeping it unread for the next poll: ${error}\n`
-            : `[Channel:${this.name}] API error processing ${threadId}, skipping: ${error}\n`,
-        );
-        this.recordChannelEvent({
-          type: 'inbound',
-          outcome: retry ? 'failed' : 'skipped',
-          reason: 'github_api_error',
-          triggerKind: reason,
-          repository: chatId,
-          thread: threadId,
-          number: issueNumber,
-          error,
-        });
+        // A held window re-reads the thread every poll: report a streak when
+        // it starts, every tenth retry and when it gives up.
+        if (
+          failure !== 'transient' ||
+          failures === 1 ||
+          (retry && failures % 10 === 0) ||
+          failures === MAX_TRANSIENT_NOTIFICATION_FAILURES
+        ) {
+          const error = sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            200,
+          );
+          process.stderr.write(
+            failure === 'shared'
+              ? `[Channel:${this.name}] API error processing ${threadId} (rate limit or credentials), keeping notifications unread and stopping this poll: ${error}\n`
+              : retry
+                ? `[Channel:${this.name}] API error processing ${threadId} (${failures}/${MAX_TRANSIENT_NOTIFICATION_FAILURES}), keeping it unread for the next poll: ${error}\n`
+                : `[Channel:${this.name}] API error processing ${threadId}, skipping: ${error}\n`,
+          );
+          this.recordChannelEvent({
+            type: 'inbound',
+            outcome: retry ? 'failed' : 'skipped',
+            reason: 'github_api_error',
+            triggerKind: reason,
+            repository: chatId,
+            thread: threadId,
+            number: issueNumber,
+            error,
+            ...(failure === 'transient' ? { detail: { failures } } : {}),
+          });
+        }
+        // The same limit would answer every remaining thread.
+        if (failure === 'shared') break;
         continue;
       }
     }
