@@ -702,6 +702,21 @@ describe('git-sourced lint lanes', () => {
     }
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'enrols the sourced apt-mirror probe in the shellcheck lane via its shebang',
+    () => {
+      // The lane filters candidates on file(1) mime type; a sourced-only .sh
+      // without a shebang reports text/plain and is silently dropped, so the
+      // probe must keep its shebang to stay linted (#16278 R1-2).
+      const probe = path.resolve('.github/scripts/apt-mirror-probe.sh');
+      const mime = spawnSync('file', ['--brief', '--mime-type', probe], {
+        encoding: 'utf8',
+      });
+      if (mime.status !== 0) return; // file(1) absent locally; CI gates have it
+      expect(mime.stdout.trim()).toBe('text/x-shellscript');
+    },
+  );
+
   it('appends the pip --user bin dir after the inherited PATH', async () => {
     const { getLinterPath } = await import('../lint.js');
     const env = { HOME: '/home/runner', PATH: '/usr/bin:/bin' };

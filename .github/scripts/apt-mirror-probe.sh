@@ -1,8 +1,12 @@
+#!/usr/bin/env bash
 # shellcheck shell=bash
-# Sourced by run-e2e-tests.sh and run-release-docker-integration.sh — both build
-# the sandbox image with `npm run build:sandbox`, and both need the same apt
-# source selection. Defines apt_mirror_probe_rate / select_apt_mirror; executes
-# nothing on its own.
+# Sourced by run-e2e-tests.sh and run-release-docker-integration.sh — the two
+# sandbox-image build sites this helper covers. A third cold `build:sandbox`
+# caller (release-sdk.yml build-sdk) is deliberately not wired here yet; it is
+# tracked in #16317. Defines apt_mirror_probe_rate / select_apt_mirror /
+# apply_apt_mirror; executes nothing on its own. The shebang is inert for a
+# sourced file but makes file(1) report text/x-shellscript so the shellcheck
+# lane enrols it (#16278 R1-2).
 #
 # The Dockerfile's built-in apt source is deb.debian.org. On the pool's
 # mainland-China hosts that CDN path has been measured at 11-45 kB/s, which
