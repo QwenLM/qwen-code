@@ -53,6 +53,12 @@ const device = {
   interval: 5,
   expiresAt: Date.now() + 600_000,
 };
+function authorize(info = free) {
+  mocks.signIn.mockImplementation(async (onDevice) => {
+    onDevice(device);
+    return info;
+  });
+}
 beforeEach(() => {
   vi.useFakeTimers();
   vi.resetAllMocks();
@@ -64,6 +70,7 @@ beforeEach(() => {
   mocks.browser.mockResolvedValue(undefined);
   mocks.getUserInfo.mockResolvedValue(free);
   mocks.signOut.mockResolvedValue(undefined);
+  authorize();
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -79,7 +86,6 @@ it('starts OAuth without environment configuration', async () => {
   vi.stubEnv('QWEN_OAUTH_BASE_URL', undefined);
   vi.stubEnv('QWEN_OAUTH_CLIENT_ID', undefined);
   vi.stubEnv('QWEN_HOME', undefined);
-  mocks.getUserInfo.mockResolvedValueOnce(null);
   mocks.signIn.mockImplementation(async (onDevice) => {
     onDevice(device);
     return free;
@@ -111,7 +117,6 @@ it.each([
 ])(
   'opens only authorization for fresh %s membership and keeps polling',
   async (member_type, plan) => {
-    mocks.getUserInfo.mockResolvedValueOnce(null);
     mocks.signIn.mockImplementation(async (onDevice) => {
       onDevice(device);
       return { ...free, member_type };
@@ -136,7 +141,7 @@ it.each([
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
-    expect(mocks.getUserInfo).toHaveBeenCalledTimes(2);
+    expect(mocks.getUserInfo).toHaveBeenCalledTimes(1);
     const signal: AbortSignal = mocks.signIn.mock.calls[0][1];
     unmount();
     expect(signal.aborted).toBe(true);
@@ -146,58 +151,81 @@ it.each([
   },
 );
 
-it('resumes saved membership without requesting another device code', async () => {
+it('requests authorization even when browser auto-opening is suppressed', async () => {
   const { result, unmount } = renderHook(() =>
     useSubscription({ suppressBrowserLaunch: true }),
   );
   await flush();
-  expect(mocks.signIn).not.toHaveBeenCalled();
+  expect(mocks.signIn).toHaveBeenCalledOnce();
+  expect(mocks.getUserInfo).not.toHaveBeenCalled();
   expect(mocks.browser).not.toHaveBeenCalled();
+  expect(result.current.deviceAuth?.user_code).toBe(device.user_code);
   expect(result.current.state.status).toBe('purchase-required');
   unmount();
 });
 
-it.each(['free', 'FREE', 'lite', 'go', 'enterprise', 'VIP'])(
-  'opens plans on the success page for a saved %s account and keeps polling',
+it.each(['free', 'plus', 'pro'])(
+  'waits for new authorization instead of restoring saved %s membership',
   async (member_type) => {
     mocks.getUserInfo.mockResolvedValue({ ...free, member_type });
-    const { result, unmount } = renderHook(() => useSubscription());
-    await flush();
-    expect(result.current.state.status).toBe('purchase-required');
-    expect(mocks.browser).toHaveBeenCalledWith(
-      'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code&memberPlan=qwen_code',
-    );
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(5000);
+    let finish!: (info: typeof free) => void;
+    mocks.signIn.mockImplementation((onDevice) => {
+      onDevice(device);
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
     });
-    expect(mocks.getUserInfo).toHaveBeenCalledTimes(2);
-    expect(mocks.browser).toHaveBeenCalledWith(
-      'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code&memberPlan=qwen_code',
+    const onActivate = vi.fn().mockResolvedValue(undefined);
+    const { result, unmount } = renderHook(() =>
+      useSubscription({ onActivate }),
     );
-    act(() => result.current.openPlans());
+    await flush();
+    expect(result.current.state.status).toBe('waiting');
+    expect(mocks.getUserInfo).not.toHaveBeenCalled();
+    expect(mocks.signOut).not.toHaveBeenCalled();
+    expect(onActivate).not.toHaveBeenCalled();
     expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
-      'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code&memberPlan=qwen_code',
-      'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
+      'https://pre4-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
     ]);
-    expect(mocks.signIn).not.toHaveBeenCalled();
+    await act(async () => finish({ ...free, member_type }));
+    expect(result.current.state.status).toBe(
+      member_type === 'free' ? 'purchase-required' : 'ready',
+    );
+    expect(mocks.signIn).toHaveBeenCalledOnce();
+    if (member_type !== 'free') {
+      expect(onActivate).toHaveBeenCalledWith(
+        expect.any(AbortSignal),
+        'https://pre4-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+      );
+    }
     unmount();
   },
 );
 
-it.each(['plus', 'PLUS', 'pro', 'Pro'])(
-  'opens only the success page for a saved %s account',
-  async (member_type) => {
-    mocks.getUserInfo.mockResolvedValue({ ...free, member_type });
-    const { result, unmount } = renderHook(() => useSubscription());
-    await flush();
-    expect(result.current.state.status).toBe('ready');
-    expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
-      'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code',
-    ]);
-    expect(mocks.signIn).not.toHaveBeenCalled();
-    unmount();
-  },
-);
+it('opens a new device authorization on every explicit entry', async () => {
+  mocks.signIn
+    .mockImplementationOnce(async (onDevice) => {
+      onDevice(device);
+      return free;
+    })
+    .mockImplementationOnce(async (onDevice) => {
+      onDevice({ ...device, user_code: 'NEXT-CODE' });
+      return free;
+    });
+  const first = renderHook(() => useSubscription());
+  await flush();
+  first.unmount();
+  const second = renderHook(() => useSubscription());
+  await flush();
+  expect(mocks.signIn).toHaveBeenCalledTimes(2);
+  expect(mocks.getUserInfo).not.toHaveBeenCalled();
+  expect(mocks.signOut).not.toHaveBeenCalled();
+  expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
+    'https://pre4-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
+    'https://pre4-chat.qwen.ai/authorize?user_code=NEXT-CODE&client=qwen-code',
+  ]);
+  second.unmount();
+});
 
 it.each([false, true])(
   'clears credentials before authorizing another account (suppressBrowserLaunch=%s)',
@@ -239,7 +267,7 @@ it.each([false, true])(
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10_000);
     });
-    expect(mocks.getUserInfo).toHaveBeenCalledOnce();
+    expect(mocks.getUserInfo).not.toHaveBeenCalled();
     expect(mocks.signIn).toHaveBeenCalledOnce();
     await act(async () => finishCleanup());
     expect(mocks.signIn).toHaveBeenCalledTimes(2);
@@ -285,12 +313,13 @@ it.each(['cancel', 'unmount', 'new lifetime'] as const)(
       hook.rerender({ suppressBrowserLaunch: true });
       await flush();
     }
+    const signIns = mocks.signIn.mock.calls.length;
     const queries = mocks.getUserInfo.mock.calls.length;
     const opened = mocks.browser.mock.calls.length;
     await act(async () => finish());
     expect(mocks.getUserInfo).toHaveBeenCalledTimes(queries);
     expect(mocks.browser).toHaveBeenCalledTimes(opened);
-    expect(mocks.signIn).not.toHaveBeenCalled();
+    expect(mocks.signIn).toHaveBeenCalledTimes(signIns);
     if (action !== 'unmount') hook.unmount();
   },
 );
@@ -319,8 +348,8 @@ it('does not restart a queued account switch after cancel', async () => {
     await switching;
     hook.result.current.cancel();
   });
-  expect(mocks.getUserInfo).toHaveBeenCalledOnce();
-  expect(mocks.signIn).not.toHaveBeenCalled();
+  expect(mocks.getUserInfo).not.toHaveBeenCalled();
+  expect(mocks.signIn).toHaveBeenCalledOnce();
   expect(mocks.browser).toHaveBeenCalledTimes(opened);
   hook.unmount();
 });
@@ -350,8 +379,8 @@ it.each(['cleanup', 'revoke'] as const)(
           : 'signed out locally',
       ),
     });
-    expect(mocks.signIn).not.toHaveBeenCalled();
-    expect(mocks.getUserInfo).toHaveBeenCalledOnce();
+    expect(mocks.signIn).toHaveBeenCalledOnce();
+    expect(mocks.getUserInfo).not.toHaveBeenCalled();
     hook.unmount();
   },
 );
@@ -359,23 +388,27 @@ it.each(['cleanup', 'revoke'] as const)(
 it('ignores a late old membership query after switching accounts', async () => {
   let finishQuery!: (info: typeof free) => void;
   mocks.getUserInfo
-    .mockResolvedValueOnce(free)
     .mockReturnValueOnce(
       new Promise((resolve) => {
         finishQuery = resolve;
       }),
     )
     .mockResolvedValue(null);
-  mocks.signIn.mockImplementation((onDevice) => {
-    onDevice({ ...device, user_code: 'NEXT-CODE' });
-    return new Promise(() => {});
-  });
+  mocks.signIn
+    .mockImplementationOnce(async (onDevice) => {
+      onDevice(device);
+      return free;
+    })
+    .mockImplementation((onDevice) => {
+      onDevice({ ...device, user_code: 'NEXT-CODE' });
+      return new Promise(() => {});
+    });
   const hook = renderHook(() => useSubscription());
   await flush();
   await act(async () => {
     await vi.advanceTimersByTimeAsync(5000);
   });
-  const signal = mocks.getUserInfo.mock.calls[1][0] as AbortSignal;
+  const signal = mocks.getUserInfo.mock.calls[0][0] as AbortSignal;
   await act(async () => {
     await hook.result.current.switchAccount();
   });
@@ -389,8 +422,13 @@ it('ignores a late old membership query after switching accounts', async () => {
 });
 
 it('discards the previous account cooldown after successful cleanup', async () => {
+  mocks.signIn
+    .mockImplementationOnce(async (onDevice) => {
+      onDevice(device);
+      return free;
+    })
+    .mockRejectedValueOnce(queryFailure());
   mocks.getUserInfo
-    .mockResolvedValueOnce(free)
     .mockRejectedValueOnce(
       new SubscriptionOAuthError(
         'rate_limited',
@@ -400,7 +438,6 @@ it('discards the previous account cooldown after successful cleanup', async () =
         'userinfo',
       ),
     )
-    .mockRejectedValueOnce(queryFailure())
     .mockResolvedValue(free);
   const hook = renderHook(() => useSubscription());
   await flush();
@@ -413,7 +450,7 @@ it('discards the previous account cooldown after successful cleanup', async () =
   });
   expect(hook.result.current.state.status).toBe('query-error');
   await act(async () => hook.result.current.checkAgain());
-  expect(mocks.getUserInfo).toHaveBeenCalledTimes(4);
+  expect(mocks.getUserInfo).toHaveBeenCalledTimes(2);
   expect(hook.result.current.state.status).toBe('purchase-required');
   hook.unmount();
 });
@@ -446,7 +483,6 @@ it('stops automatic polling at 120 seconds and allows a single manual query', as
 
 it('stops on query failure, then can discover a purchased plan without reauthorizing', async () => {
   mocks.getUserInfo
-    .mockResolvedValueOnce(free)
     .mockRejectedValueOnce(queryFailure())
     .mockResolvedValue({ ...free, member_type: 'pro' });
   const { result, unmount } = renderHook(() =>
@@ -466,12 +502,12 @@ it('stops on query failure, then can discover a purchased plan without reauthori
     result.current.checkAgain();
   });
   expect(result.current.state).toEqual({ status: 'ready', plan: 'Pro' });
-  expect(mocks.signIn).not.toHaveBeenCalled();
+  expect(mocks.signIn).toHaveBeenCalledOnce();
   unmount();
 });
 
 it('displays an unknown membership by its returned name', async () => {
-  mocks.getUserInfo.mockResolvedValue({ ...free, member_type: 'unknown' });
+  authorize({ ...free, member_type: 'unknown' });
   const { result, unmount } = renderHook(() => useSubscription());
   await flush();
   expect(result.current.state).toEqual({
@@ -481,7 +517,7 @@ it('displays an unknown membership by its returned name', async () => {
   unmount();
 });
 
-it('starts fresh authorization when saved refresh credentials are invalid', async () => {
+it('does not let stale saved refresh credentials block explicit authorization', async () => {
   mocks.signIn.mockImplementation(async (onDevice) => {
     onDevice(device);
     return { ...free, member_type: 'pro' };
@@ -502,6 +538,7 @@ it('starts fresh authorization when saved refresh credentials are invalid', asyn
     plan: 'Pro',
   });
   expect(mocks.signIn).toHaveBeenCalledOnce();
+  expect(mocks.getUserInfo).not.toHaveBeenCalled();
   expect(mocks.browser).toHaveBeenCalledWith(
     'https://pre4-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
   );
@@ -522,7 +559,7 @@ it('cancels membership polling without signing out', async () => {
     useSubscription({ suppressBrowserLaunch: true }),
   );
   await flush();
-  const signal: AbortSignal = mocks.getUserInfo.mock.calls[0][0];
+  const signal: AbortSignal = mocks.signIn.mock.calls[0][1];
   act(() => result.current.cancel());
   expect(signal.aborted).toBe(true);
   expect(mocks.signOut).not.toHaveBeenCalled();
@@ -535,9 +572,7 @@ it('cancels membership polling without signing out', async () => {
 });
 
 it('cancels a pending manual membership query without signing out', async () => {
-  mocks.getUserInfo
-    .mockResolvedValueOnce(free)
-    .mockRejectedValueOnce(queryFailure());
+  mocks.getUserInfo.mockRejectedValueOnce(queryFailure());
   const { result, unmount } = renderHook(() =>
     useSubscription({ suppressBrowserLaunch: true }),
   );
@@ -564,7 +599,7 @@ it('cancels a pending manual membership query without signing out', async () => 
 });
 
 it('recovers a first userinfo failure using saved credentials and starts purchase waiting only after confirmation', async () => {
-  mocks.getUserInfo.mockResolvedValueOnce(null).mockResolvedValue(free);
+  mocks.getUserInfo.mockResolvedValue(free);
   mocks.signIn.mockRejectedValue(
     new SubscriptionOAuthError(
       'network_error',
@@ -595,7 +630,7 @@ it('recovers a first userinfo failure using saved credentials and starts purchas
 });
 
 it('does not reopen plans when the first membership query after authorization is retried', async () => {
-  mocks.getUserInfo.mockResolvedValueOnce(null).mockResolvedValue(free);
+  mocks.getUserInfo.mockResolvedValue(free);
   mocks.signIn.mockImplementation(async (onDevice) => {
     onDevice(device);
     throw new SubscriptionOAuthError(
@@ -615,7 +650,7 @@ it('does not reopen plans when the first membership query after authorization is
   await act(async () => {
     await vi.advanceTimersByTimeAsync(5000);
   });
-  expect(mocks.getUserInfo).toHaveBeenCalledTimes(3);
+  expect(mocks.getUserInfo).toHaveBeenCalledTimes(2);
   expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
     'https://pre4-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
   ]);
@@ -662,6 +697,9 @@ it('does not repeat a membership request before Retry-After, then recovers', asy
     .mockResolvedValue({ ...free, member_type: 'plus' });
   const { result, unmount } = renderHook(() => useSubscription());
   await flush();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5000);
+  });
   act(() => {
     result.current.checkAgain();
     result.current.checkAgain();
@@ -676,7 +714,7 @@ it('does not repeat a membership request before Retry-After, then recovers', asy
 });
 
 it('activates a paid account, hides private errors, and permits retry', async () => {
-  mocks.getUserInfo.mockResolvedValue({ ...free, member_type: 'pro' });
+  authorize({ ...free, member_type: 'pro' });
   const onActivate = vi
     .fn()
     .mockRejectedValueOnce(new Error('private-token'))
@@ -698,7 +736,7 @@ it('activates a paid account, hides private errors, and permits retry', async ()
 });
 
 it('retains backend activation errors and observes Retry-After in the CLI', async () => {
-  mocks.getUserInfo.mockResolvedValue({ ...free, member_type: 'pro' });
+  authorize({ ...free, member_type: 'pro' });
   const onActivate = vi
     .fn()
     .mockRejectedValue(
@@ -727,7 +765,7 @@ it('retains backend activation errors and observes Retry-After in the CLI', asyn
 });
 
 it('leaves CLI readiness on activation refresh expiry without implicitly signing in', async () => {
-  mocks.getUserInfo.mockResolvedValue({ ...free, member_type: 'pro' });
+  authorize({ ...free, member_type: 'pro' });
   const onActivate = vi
     .fn()
     .mockRejectedValue(
@@ -745,21 +783,21 @@ it('leaves CLI readiness on activation refresh expiry without implicitly signing
     status: 'error',
     message: expect.stringContaining('credentials are no longer valid'),
   });
-  expect(mocks.signIn).not.toHaveBeenCalled();
+  expect(mocks.signIn).toHaveBeenCalledOnce();
   hook.unmount();
 });
 
 it.each(['plus', 'pro', 'PLUS', 'Pro', 'pLuS'] as const)(
-  'automatically activates restored %s membership once',
+  'automatically activates newly authorized %s membership once',
   async (member_type) => {
-    mocks.getUserInfo.mockResolvedValue({ ...free, member_type });
+    authorize({ ...free, member_type });
     const onActivate = vi.fn().mockResolvedValue(undefined);
     const hook = renderHook(() => useSubscription({ onActivate }));
     await flush();
     expect(onActivate).toHaveBeenCalledTimes(1);
     expect(onActivate).toHaveBeenCalledWith(
       expect.any(AbortSignal),
-      'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code',
+      'https://pre4-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
     );
     hook.rerender();
     await flush();
@@ -769,9 +807,7 @@ it.each(['plus', 'pro', 'PLUS', 'Pro', 'pLuS'] as const)(
 );
 
 it('automatically activates after purchase polling confirms membership', async () => {
-  mocks.getUserInfo
-    .mockResolvedValueOnce(free)
-    .mockResolvedValue({ ...free, member_type: 'pro' });
+  mocks.getUserInfo.mockResolvedValue({ ...free, member_type: 'pro' });
   const onActivate = vi.fn().mockResolvedValue(undefined);
   const hook = renderHook(() => useSubscription({ onActivate }));
   await flush();
@@ -784,7 +820,6 @@ it('automatically activates after purchase polling confirms membership', async (
 });
 
 it('automatically activates a newly authorized paid account', async () => {
-  mocks.getUserInfo.mockResolvedValueOnce(null);
   mocks.signIn.mockImplementation(async (onDevice) => {
     onDevice(device);
     return { ...free, member_type: 'pro' };
@@ -795,7 +830,7 @@ it('automatically activates a newly authorized paid account', async () => {
   expect(mocks.signIn).toHaveBeenCalledOnce();
   expect(onActivate).toHaveBeenCalledWith(
     expect.any(AbortSignal),
-    'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code',
+    'https://pre4-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
   );
   expect(onActivate).toHaveBeenCalledOnce();
   expect(mocks.browser.mock.calls.map(([url]) => url)).toEqual([
@@ -805,9 +840,11 @@ it('automatically activates a newly authorized paid account', async () => {
 });
 
 it('automatically activates after a failed initial membership query is retried', async () => {
-  mocks.getUserInfo
-    .mockRejectedValueOnce(queryFailure())
-    .mockResolvedValue({ ...free, member_type: 'plus' });
+  mocks.signIn.mockImplementationOnce(async (onDevice) => {
+    onDevice(device);
+    throw queryFailure();
+  });
+  mocks.getUserInfo.mockResolvedValue({ ...free, member_type: 'plus' });
   const onActivate = vi.fn().mockResolvedValue(undefined);
   const hook = renderHook(() => useSubscription({ onActivate }));
   await flush();
@@ -820,7 +857,7 @@ it('automatically activates after a failed initial membership query is retried',
   expect(onActivate).toHaveBeenCalledOnce();
   expect(onActivate).toHaveBeenCalledWith(
     expect.any(AbortSignal),
-    'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code',
+    'https://pre4-chat.qwen.ai/authorize?user_code=ABCD-EFGH&client=qwen-code',
   );
   expect(hook.result.current.connectionError).toBeUndefined();
   hook.unmount();
@@ -828,7 +865,6 @@ it('automatically activates after a failed initial membership query is retried',
 
 it('automatically activates when manual purchase recovery confirms Pro', async () => {
   mocks.getUserInfo
-    .mockResolvedValueOnce(free)
     .mockRejectedValueOnce(queryFailure())
     .mockResolvedValue({ ...free, member_type: 'pro' });
   const onActivate = vi.fn().mockResolvedValue(undefined);
@@ -849,7 +885,7 @@ it('automatically activates when manual purchase recovery confirms Pro', async (
 
 it('reads the latest activation callback without retrying automatically on rerenders', async () => {
   let confirm!: (info: typeof free) => void;
-  mocks.getUserInfo.mockReturnValue(
+  mocks.signIn.mockReturnValue(
     new Promise((resolve) => {
       confirm = resolve;
     }),
@@ -880,7 +916,7 @@ it('reads the latest activation callback without retrying automatically on reren
 it.each(['cancel', 'unmount'] as const)(
   'stops pending activation on %s and suppresses a late success',
   async (action) => {
-    mocks.getUserInfo.mockResolvedValue({ ...free, member_type: 'pro' });
+    authorize({ ...free, member_type: 'pro' });
     let finish!: () => void;
     let signal!: AbortSignal;
     const completed = vi.fn();
@@ -908,7 +944,7 @@ it.each(['cancel', 'unmount'] as const)(
 );
 
 it('does not activate a new lifetime from the previous paid confirmation', async () => {
-  mocks.getUserInfo.mockResolvedValueOnce({ ...free, member_type: 'pro' });
+  authorize({ ...free, member_type: 'pro' });
   let confirm!: (info: typeof free) => void;
   const onActivate = vi.fn().mockRejectedValue(new Error('offline'));
   const hook = renderHook(
@@ -918,7 +954,7 @@ it('does not activate a new lifetime from the previous paid confirmation', async
   );
   await flush();
   expect(onActivate).toHaveBeenCalledOnce();
-  mocks.getUserInfo.mockReturnValue(
+  mocks.signIn.mockReturnValue(
     new Promise((resolve) => {
       confirm = resolve;
     }),
@@ -935,14 +971,14 @@ it('does not activate a new lifetime from the previous paid confirmation', async
 it('does not let an old activation release a new lifetime membership-query guard', async () => {
   let finishOldActivation!: () => void;
   let confirmNewMembership!: (info: typeof free) => void;
-  mocks.getUserInfo
+  mocks.signIn
     .mockResolvedValueOnce({ ...free, member_type: 'pro' })
-    .mockRejectedValueOnce(queryFailure())
-    .mockReturnValueOnce(
-      new Promise((resolve) => {
-        confirmNewMembership = resolve;
-      }),
-    );
+    .mockRejectedValueOnce(queryFailure());
+  mocks.getUserInfo.mockReturnValueOnce(
+    new Promise((resolve) => {
+      confirmNewMembership = resolve;
+    }),
+  );
   const onActivate = vi
     .fn()
     .mockReturnValueOnce(
@@ -962,10 +998,10 @@ it('does not let an old activation release a new lifetime membership-query guard
   await flush();
   expect(hook.result.current.state.status).toBe('query-error');
   act(() => hook.result.current.checkAgain());
-  expect(mocks.getUserInfo).toHaveBeenCalledTimes(3);
+  expect(mocks.getUserInfo).toHaveBeenCalledTimes(1);
   await act(async () => finishOldActivation());
   act(() => hook.result.current.checkAgain());
-  expect(mocks.getUserInfo).toHaveBeenCalledTimes(3);
+  expect(mocks.getUserInfo).toHaveBeenCalledTimes(1);
   expect(hook.result.current.checking).toBe(true);
   await act(async () => confirmNewMembership({ ...free, member_type: 'pro' }));
   expect(onActivate).toHaveBeenCalledTimes(2);
@@ -975,14 +1011,13 @@ it('does not let an old activation release a new lifetime membership-query guard
 it('does not let an old membership query release a new lifetime query guard', async () => {
   let confirmOld!: (info: typeof free) => void;
   let confirmNew!: (info: typeof free) => void;
+  mocks.signIn.mockRejectedValue(queryFailure());
   mocks.getUserInfo
-    .mockRejectedValueOnce(queryFailure())
     .mockReturnValueOnce(
       new Promise((resolve) => {
         confirmOld = resolve;
       }),
     )
-    .mockRejectedValueOnce(queryFailure())
     .mockReturnValueOnce(
       new Promise((resolve) => {
         confirmNew = resolve;
@@ -997,10 +1032,10 @@ it('does not let an old membership query release a new lifetime query guard', as
   hook.rerender({ suppressBrowserLaunch: true });
   await flush();
   act(() => hook.result.current.checkAgain());
-  expect(mocks.getUserInfo).toHaveBeenCalledTimes(4);
+  expect(mocks.getUserInfo).toHaveBeenCalledTimes(2);
   await act(async () => confirmOld({ ...free, member_type: 'pro' }));
   act(() => hook.result.current.checkAgain());
-  expect(mocks.getUserInfo).toHaveBeenCalledTimes(4);
+  expect(mocks.getUserInfo).toHaveBeenCalledTimes(2);
   await act(async () => confirmNew({ ...free, member_type: 'pro' }));
   expect(hook.result.current.state.status).toBe('ready');
   hook.unmount();

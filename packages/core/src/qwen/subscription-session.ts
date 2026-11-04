@@ -251,7 +251,7 @@ export class QwenSubscriptionSession {
         ...this.config,
         revision,
         ...(previous && this.matches(previous)
-          ? { tokens: previous.tokens, retryAfter: previous.retryAfter }
+          ? { retryAfter: previous.retryAfter }
           : {}),
       };
       await this.write(credentials, assertCanCommit);

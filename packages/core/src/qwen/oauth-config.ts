@@ -29,15 +29,3 @@ export function getQwenSubscriptionPlansUrl(): string {
   url.searchParams.set('memberPlan', 'qwen_code');
   return url.toString();
 }
-
-export function getQwenSubscriptionSuccessUrl(memberType?: string): string {
-  const url = new URL('/authorize/success', getQwenOAuthConfig().webOrigin);
-  url.searchParams.set('client', 'qwen-code');
-  if (
-    memberType !== undefined &&
-    !['plus', 'pro'].includes(memberType.toLowerCase())
-  ) {
-    url.searchParams.set('memberPlan', 'qwen_code');
-  }
-  return url.toString();
-}

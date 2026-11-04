@@ -307,6 +307,58 @@ it('does not commit a late catalog after logout or a new login', async () => {
   expect(readCachedSubscriptionModels()).toEqual([]);
 });
 
+it.each(['response', 'network failure'])(
+  'rejects an old account catalog %s requested before reauthorization',
+  async (outcome) => {
+    const session = new QwenSubscriptionSession();
+    await session.signIn(() => {});
+    let finishAuthorization!: (value: typeof rotated) => void;
+    client.pollForToken.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishAuthorization = resolve;
+        }),
+    );
+    client.getUserInfo.mockResolvedValueOnce({ ...user, sub: 'new-account' });
+    const onDevice = vi.fn();
+
+    let finishCatalog!: (value: ReturnType<typeof modelResponse>) => void;
+    let failCatalog!: (error: Error) => void;
+    modelFetch.mockImplementationOnce(
+      () =>
+        new Promise((resolve, reject) => {
+          finishCatalog = resolve;
+          failCatalog = reject;
+        }),
+    );
+    const catalog = session.getModels().catch((error: unknown) => error);
+    await vi.waitFor(() => expect(modelFetch).toHaveBeenCalledOnce());
+    expect(modelFetch).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: `Bearer ${tokens.access_token}`,
+        }),
+      }),
+    );
+    const authorization = session.signIn(onDevice);
+    await vi.waitFor(() => expect(onDevice).toHaveBeenCalledOnce());
+    expect(session.isSignedIn()).toBe(false);
+    await expect(session.getModels()).rejects.toMatchObject({
+      code: 'session_changed',
+    });
+    expect(modelFetch).toHaveBeenCalledOnce();
+    finishAuthorization(rotated);
+    await authorization;
+    if (outcome === 'response')
+      finishCatalog(modelResponse(['old-account-model']));
+    else failCatalog(new TypeError('offline'));
+    expect(await catalog).toMatchObject({ code: 'session_changed' });
+    expect(await session.getAccessToken()).toBe(rotated.access_token);
+    expect(readCachedSubscriptionModels()).toEqual([]);
+  },
+);
+
 it('replaces a successful catalog and never silently replaces a removed selection', async () => {
   const session = new QwenSubscriptionSession();
   await session.signIn(() => {});
@@ -497,6 +549,57 @@ it('does not write tokens when login was cancelled before polling completed', as
   expect(JSON.parse(await fs.readFile(file, 'utf8')).tokens).toBeUndefined();
   expect(client.getUserInfo).not.toHaveBeenCalled();
 });
+
+it.each(['cancel', 'device failure', 'denied'])(
+  'clears the previous account and model cache before authorization %s',
+  async (failure) => {
+    const session = new QwenSubscriptionSession();
+    await session.signIn(() => {});
+    modelFetch.mockResolvedValue(modelResponse(['served']));
+    await session.getModels();
+    const abort = new AbortController();
+    client.requestDeviceAuthorization.mockImplementationOnce(async () => {
+      expect(session.isSignedIn()).toBe(false);
+      expect(readCachedSubscriptionModels()).toEqual([]);
+      if (failure === 'device failure') {
+        throw new SubscriptionOAuthError(
+          'network_error',
+          undefined,
+          undefined,
+          undefined,
+          'device',
+        );
+      }
+      return device;
+    });
+    if (failure === 'cancel') {
+      client.pollForToken.mockImplementationOnce(async () => {
+        abort.abort();
+        return rotated;
+      });
+    } else if (failure === 'denied') {
+      client.pollForToken.mockRejectedValueOnce(
+        new SubscriptionOAuthError(
+          'access_denied',
+          400,
+          undefined,
+          undefined,
+          'exchange',
+        ),
+      );
+    }
+    await expect(session.signIn(() => {}, abort.signal)).rejects.toThrow();
+    expect(session.isSignedIn()).toBe(false);
+    await expect(session.getAccessToken()).rejects.toMatchObject({
+      code: 'session_changed',
+    });
+    expect(readCachedSubscriptionModels()).toEqual([]);
+    await expect(session.getModels()).rejects.toMatchObject({
+      code: 'session_changed',
+    });
+    expect(client.revokeToken).not.toHaveBeenCalled();
+  },
+);
 
 it('serializes sign-out after an in-flight refresh so refreshed credentials are removed', async () => {
   const session = new QwenSubscriptionSession();

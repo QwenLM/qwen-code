@@ -161,8 +161,12 @@ describe('process-global Subscription routes', () => {
     });
     expect(JSON.stringify(view.body)).not.toContain('secret');
   });
-  it('resumes shared credentials, redacts identity, and preserves another GUI terminal result', async () => {
-    mocks.userInfo.mockResolvedValue({ ...user, access_token: 'secret' });
+  it('redacts new authorization identity and preserves another GUI result', async () => {
+    mocks.signIn.mockImplementation(async (onDevice) => {
+      onDevice({ user_code: 'NEW-CODE' });
+      return { ...user, access_token: 'secret' };
+    });
+    mocks.userInfo.mockResolvedValue(user);
     const { post, get } = makeApp();
     const first = await post(`${base}/flows`);
     await post(`${base}/flows`);
@@ -170,37 +174,41 @@ describe('process-global Subscription routes', () => {
       id: first.body.id,
       status: 'ready',
       authorizationUrl:
-        'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code&memberPlan=qwen_code',
+        'https://pre4-chat.qwen.ai/authorize?user_code=NEW-CODE&client=qwen-code',
       userInfo: user,
     });
+    expect(mocks.userInfo).not.toHaveBeenCalled();
+    expect(mocks.signIn).toHaveBeenCalledTimes(2);
     expect((await post(`${base}/userinfo`)).body).toEqual(user);
-    expect(mocks.signIn).not.toHaveBeenCalled();
   });
-  it.each([
-    ['free', 'qwen_code'],
-    ['FREE', 'qwen_code'],
-    ['lite', 'qwen_code'],
-    ['go', 'qwen_code'],
-    ['enterprise', 'qwen_code'],
-    ['VIP', 'qwen_code'],
-    ['plus', null],
-    ['PLUS', null],
-    ['pro', null],
-    ['Pro', null],
-  ])(
-    'returns the membership-specific success URL for saved %s credentials',
-    async (member_type, memberPlan) => {
+  it.each(['free', 'plus', 'pro'])(
+    'requires a new grant even with saved %s credentials',
+    async (member_type) => {
       mocks.userInfo.mockResolvedValue({ ...user, member_type });
+      let finish!: (info: typeof user) => void;
+      mocks.signIn.mockImplementation((onDevice) => {
+        onDevice({ user_code: 'NEW-CODE' });
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      });
       const { post, get } = makeApp();
       const started = await post(`${base}/flows`);
-      const view = (await get(`${base}/flows/${started.body.id}`)).body;
-      expect(view.status).toBe('ready');
-      const url = new URL(view.authorizationUrl);
-      expect(url.origin).toBe('https://pre4-chat.qwen.ai');
-      expect(url.pathname).toBe('/authorize/success');
-      expect(url.searchParams.get('client')).toBe('qwen-code');
-      expect(url.searchParams.get('memberPlan')).toBe(memberPlan);
-      expect(mocks.signIn).not.toHaveBeenCalled();
+      const path = `${base}/flows/${started.body.id}`;
+      expect((await get(path)).body).toEqual({
+        id: started.body.id,
+        status: 'waiting',
+        authorizationUrl:
+          'https://pre4-chat.qwen.ai/authorize?user_code=NEW-CODE&client=qwen-code',
+      });
+      expect(mocks.userInfo).not.toHaveBeenCalled();
+      expect(mocks.signOut).not.toHaveBeenCalled();
+      finish({ ...user, member_type });
+      expect((await get(path)).body).toMatchObject({
+        status: 'ready',
+        userInfo: { ...user, member_type },
+      });
+      expect(mocks.signIn).toHaveBeenCalledOnce();
     },
   );
   it('cancels polling and ignores a late successful result', async () => {
@@ -258,6 +266,7 @@ describe('process-global Subscription routes', () => {
     ],
   ])('returns a safe error only', async (error, code) => {
     mocks.userInfo.mockRejectedValue(error);
+    mocks.signIn.mockRejectedValue(error);
     const { post, get } = makeApp();
     const started = await post(`${base}/flows`);
     expect((await get(`${base}/flows/${started.body.id}`)).body).toEqual({
@@ -372,6 +381,15 @@ it('lets the OAuth client own a grant longer than ten minutes', async () => {
 });
 
 it('preserves safe recovery metadata while hiding backend descriptions', async () => {
+  mocks.signIn.mockRejectedValue(
+    new SubscriptionOAuthError(
+      'rate_limited',
+      429,
+      'synthetic-secret',
+      60_000,
+      'userinfo',
+    ),
+  );
   mocks.userInfo.mockRejectedValue(
     new SubscriptionOAuthError(
       'rate_limited',

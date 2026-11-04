@@ -6,10 +6,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
-import {
-  isSubscriptionSessionExpired,
-  subscriptionErrorMessage,
-} from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
+import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import {
   SubscriptionOAuthError,
   subscriptionError,
@@ -19,7 +16,6 @@ import {
 import {
   getQwenOAuthConfig,
   getQwenSubscriptionPlansUrl,
-  getQwenSubscriptionSuccessUrl,
 } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import {
   SUBSCRIPTION_MODELS_UNAVAILABLE,
@@ -252,35 +248,15 @@ export function useSubscription({
       plansUrl.current = getQwenSubscriptionPlansUrl();
       const activeSession = new QwenSubscriptionSession();
       session.current = activeSession;
-      const saved = await activeSession
-        .getUserInfo(signal)
-        .catch((error: unknown) => {
-          signal.throwIfAborted();
-          if (isSubscriptionSessionExpired(error)) return null;
-          throw error;
-        });
-      if (saved) {
+      const info = await activeSession.signIn((device) => {
         signal.throwIfAborted();
-        authorizationUrl.current = getQwenSubscriptionSuccessUrl(
-          saved.member_type,
-        );
+        const url = subscriptionAuthorizationUrl(device);
+        authorizationUrl.current = url;
+        setDeviceAuth({ ...device, verification_uri_complete: url });
         if (!suppressBrowserLaunch) {
-          void openBrowserSecurely(authorizationUrl.current).catch(
-            () => undefined,
-          );
+          void openBrowserSecurely(url).catch(() => undefined);
         }
-      }
-      const info =
-        saved ??
-        (await activeSession.signIn((device) => {
-          signal.throwIfAborted();
-          const url = subscriptionAuthorizationUrl(device);
-          authorizationUrl.current = url;
-          setDeviceAuth({ ...device, verification_uri_complete: url });
-          if (!suppressBrowserLaunch) {
-            void openBrowserSecurely(url).catch(() => undefined);
-          }
-        }, signal));
+      }, signal);
       const next = applyInfo(info);
       if (next.status !== 'purchase-required') return;
       await startPurchase.current();
@@ -397,7 +373,7 @@ export function useSubscription({
     setConnecting(true);
     setConnectionError(undefined);
     try {
-      await activate.current(signal, getQwenSubscriptionSuccessUrl());
+      await activate.current(signal, authorizationUrl.current);
     } catch (error) {
       if (!signal.aborted && lifetime.current?.signal === signal) {
         rememberRetry(error);

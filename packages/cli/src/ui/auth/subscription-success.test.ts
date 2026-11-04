@@ -53,7 +53,8 @@ it('uses the actual selected model and account in the English summary', async ()
 });
 
 it('keeps the actual browser link between the model and common commands', () => {
-  const url = 'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code';
+  const url =
+    'https://pre4-chat.qwen.ai/authorize?user_code=TEST-CODE&client=qwen-code';
   const message = subscriptionSuccessMessage(
     {
       sub: 'user',

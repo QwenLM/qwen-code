@@ -169,17 +169,15 @@ it.each(
     [false, true].map((dialog) => ({ member_type, dialog })),
   ),
 )(
-  'opens plans on the success page for saved $member_type membership (dialog=$dialog)',
+  'opens authorization for $member_type membership (dialog=$dialog)',
   async ({ member_type, dialog }) => {
-    const successUrl =
-      'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code&memberPlan=qwen_code';
     transport.startSubscriptionLogin.mockResolvedValue({
       ...ready,
-      authorizationUrl: successUrl,
+      authorizationUrl,
       userInfo: { ...user, member_type },
     });
     await render(undefined, transport, { dialog });
-    expect(open.mock.calls.map(([url]) => url)).toEqual([successUrl]);
+    expect(open.mock.calls.map(([url]) => url)).toEqual([authorizationUrl]);
     expect(
       [...document.querySelectorAll('section button')].map((button) =>
         button.getAttribute('aria-label'),
@@ -196,7 +194,7 @@ it.each(
         .click();
     });
     expect(open.mock.calls.map(([url]) => url)).toEqual([
-      successUrl,
+      authorizationUrl,
       'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
     ]);
   },
@@ -207,17 +205,15 @@ it.each(
     [false, true].map((dialog) => ({ member_type, dialog })),
   ),
 )(
-  'opens only the success page for saved $member_type membership (dialog=$dialog)',
+  'opens authorization for paid $member_type membership (dialog=$dialog)',
   async ({ member_type, dialog }) => {
-    const successUrl =
-      'https://pre4-chat.qwen.ai/authorize/success?client=qwen-code';
     transport.startSubscriptionLogin.mockResolvedValue({
       ...ready,
-      authorizationUrl: successUrl,
+      authorizationUrl,
       userInfo: { ...user, member_type },
     });
     await render(undefined, transport, { dialog });
-    expect(open.mock.calls.map(([url]) => url)).toEqual([successUrl]);
+    expect(open.mock.calls.map(([url]) => url)).toEqual([authorizationUrl]);
     expect(transport.startSubscriptionLogin).toHaveBeenCalledOnce();
   },
 );

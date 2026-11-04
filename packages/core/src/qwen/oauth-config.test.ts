@@ -8,32 +8,9 @@ import { afterEach, expect, it, vi } from 'vitest';
 import {
   getQwenOAuthConfig,
   getQwenSubscriptionPlansUrl,
-  getQwenSubscriptionSuccessUrl,
 } from './oauth-config.js';
 
 afterEach(() => vi.unstubAllEnvs());
-
-it.each(['free', 'FREE', 'lite', 'go', 'enterprise', 'VIP'])(
-  'opens Code plans on the success page for saved %s membership',
-  (memberType) => {
-    const url = new URL(getQwenSubscriptionSuccessUrl(memberType));
-    expect(url.origin).toBe(getQwenOAuthConfig().webOrigin);
-    expect(url.pathname).toBe('/authorize/success');
-    expect([...url.searchParams]).toEqual([
-      ['client', 'qwen-code'],
-      ['memberPlan', 'qwen_code'],
-    ]);
-  },
-);
-
-it.each([undefined, 'plus', 'PLUS', 'pro', 'Pro'])(
-  'keeps the success page without plans for %s membership',
-  (memberType) => {
-    const url = new URL(getQwenSubscriptionSuccessUrl(memberType));
-    expect(url.pathname).toBe('/authorize/success');
-    expect([...url.searchParams]).toEqual([['client', 'qwen-code']]);
-  },
-);
 
 it('opens Code plans on the web home without device authorization parameters', () => {
   const url = new URL(getQwenSubscriptionPlansUrl());

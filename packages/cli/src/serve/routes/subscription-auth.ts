@@ -15,10 +15,8 @@ import {
 import {
   getQwenOAuthConfig,
   getQwenSubscriptionPlansUrl,
-  getQwenSubscriptionSuccessUrl,
 } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import type { DaemonSubscriptionFlow } from '@qwen-code/sdk/daemon';
-import { isSubscriptionSessionExpired } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 
 const PUBLIC_ERRORS = new Set([
   'access_denied',
@@ -133,30 +131,14 @@ export function registerSubscriptionAuthRoutes(
       };
       const run = async () => {
         const session = new QwenSubscriptionSession();
-        const saved = await session
-          .getUserInfo(controller.signal)
-          .catch((error: unknown) => {
-            controller.signal.throwIfAborted();
-            if (isSubscriptionSessionExpired(error)) return null;
-            throw error;
-          });
-        if (saved) {
-          flow.view = {
-            id,
-            status: 'waiting',
-            authorizationUrl: getQwenSubscriptionSuccessUrl(saved.member_type),
-          };
-        }
-        const user =
-          saved ??
-          (await session.signIn((device) => {
-            controller.signal.throwIfAborted();
-            const url = new URL('/authorize', webOrigin);
-            url.searchParams.set('user_code', device.user_code);
-            url.searchParams.set('client', 'qwen-code');
-            const authorizationUrl = url.toString();
-            flow.view = { id, status: 'waiting', authorizationUrl };
-          }, controller.signal));
+        const user = await session.signIn((device) => {
+          controller.signal.throwIfAborted();
+          const url = new URL('/authorize', webOrigin);
+          url.searchParams.set('user_code', device.user_code);
+          url.searchParams.set('client', 'qwen-code');
+          const authorizationUrl = url.toString();
+          flow.view = { id, status: 'waiting', authorizationUrl };
+        }, controller.signal);
         controller.signal.throwIfAborted();
         finish({
           id,

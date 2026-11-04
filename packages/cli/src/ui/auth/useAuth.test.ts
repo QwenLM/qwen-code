@@ -129,6 +129,32 @@ describe('useAuthCommand', () => {
     expect(result.current.authError).toBe(null);
   });
 
+  it.each([undefined, AuthType.USE_OPENAI, AuthType.QWEN_SUBSCRIPTION])(
+    'clears an earlier error when explicitly opening /auth with provider %s',
+    (authType) => {
+      const config = createConfig();
+      config.getAuthType.mockReturnValue(authType);
+      const { result } = renderHook(() =>
+        useAuthCommand(createSettings() as never, config as never, vi.fn()),
+      );
+      act(() =>
+        result.current.onAuthError('Could not load Qwen Subscription models.'),
+      );
+      expect(result.current.authError).not.toBeNull();
+
+      act(() => result.current.openAuthDialog());
+      expect(result.current.authError).toBeNull();
+      expect(result.current.isAuthDialogOpen).toBe(true);
+      expect(result.current.state.isAuthDialogDismissible).toBe(true);
+      expect(config.getAuthType()).toBe(authType);
+      expect(config.refreshAuth).not.toHaveBeenCalled();
+      expect(config.syncModelSelection).not.toHaveBeenCalled();
+
+      act(() => result.current.onAuthError('New login attempt failed.'));
+      expect(result.current.authError).toBe('New login attempt failed.');
+    },
+  );
+
   it('resets authentication UI after logout before opening the picker', () => {
     const config = createConfig();
     const onAuthChange = vi.fn();
