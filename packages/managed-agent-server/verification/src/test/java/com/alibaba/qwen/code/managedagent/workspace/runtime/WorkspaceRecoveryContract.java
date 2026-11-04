@@ -375,27 +375,38 @@ public final class WorkspaceRecoveryContract {
         public final JdbcRuntimeSessionRepository sessions;
         public final JdbcToolExecutionRepository executions;
         public final SessionRecord session;
-        public final String tenant = "recovery-" + UUID.randomUUID();
+        public final String tenant;
+        private final String workspace;
+        private final String storage;
 
         public Fixture(DataSource source, JdbcTemplate jdbc, ManagedAgentStore store) {
+            this(source, jdbc, store, "recovery-" + UUID.randomUUID(), "workspace", "storage");
+        }
+
+        public Fixture(DataSource source, JdbcTemplate jdbc, ManagedAgentStore store,
+                String tenant, String workspace, String storage) {
+            this.tenant = tenant;
+            this.workspace = workspace;
+            this.storage = storage;
             bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
             sessions = new JdbcRuntimeSessionRepository(source);
             executions = new JdbcToolExecutionRepository(source);
-            com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage.register(jdbc, tenant, "storage");
+            com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage.register(jdbc, tenant, storage);
             jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
-                    + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, 'storage',"
-                    + " 'Workspace', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+                    + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, ?, 1, ?,"
+                    + " 'Workspace', ?, ?, 'ACTIVE')", tenant, workspace, storage,
+                    WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                    + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
+                    + " VALUES (?, ?, ?, 'OPERATOR')", tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
             var transaction = new org.springframework.transaction.support.TransactionTemplate(
                     new org.springframework.jdbc.datasource.DataSourceTransactionManager(source));
             var created = transaction.execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                     .tenantId(tenant)
                     .actorId("actor")
-                    .idempotencyKey("create")
+                    .idempotencyKey("create-" + workspace)
                     .requestDigest("sha256:" + "a".repeat(64))
                     .agentId("qwen-code")
-                    .selection(new WorkspaceSelection("workspace", "."))
+                    .selection(new WorkspaceSelection(workspace, "."))
                     .build()));
             session = store.findSessionById(created.sessionId()).orElseThrow();
         }
@@ -405,9 +416,9 @@ public final class WorkspaceRecoveryContract {
         }
 
         public Runtime runtime(String name, String harnessSessionId) {
-            var scope = new RuntimeScope(tenant, "workspace", "1", "/original-storage",
+            var scope = new RuntimeScope(tenant, workspace, "1", "/original-storage",
                     WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
-            var request = new RuntimeProvisionRequest(scope, tenant + name, "local-process", "storage");
+            var request = new RuntimeProvisionRequest(scope, tenant + name, "local-process", storage);
             var initial = bindings.findOrCreate(request);
             var claim = bindings.claimOperation(initial.getBindingId(), "fixture", Duration.ofMinutes(2));
             var seed = claim.getProvisionSeed();

@@ -342,7 +342,9 @@ export interface SendMessageOptions {
    * a prompt, so the client does none of them. On a Retry, the host started
    * the todo work chain and keeps the attempt's recorded user message, so the
    * client neither starts the chain nor records the message again. On a Goal
-   * turn, the host recorded the runtime continuation's message.
+   * turn, the host recorded the runtime continuation's message. On a Cron or
+   * Notification send, the host records the prompt or the notification
+   * itself.
    */
   userTurnRecordedByHost?: boolean;
   /**
@@ -4560,15 +4562,17 @@ export class LlmClient {
       // under them without losing the resumed info item this record exists to
       // restore. See `ChatRecord.deliveredTurn` for that accepted imprecision
       // and the test pinning it.
-      this.config
-        .getChatRecordingService()
-        ?.recordNotification(
-          request,
-          options?.notificationDisplayText,
-          undefined,
-          goalPermit,
-          /* deliveredTurn */ true,
-        );
+      if (!options?.userTurnRecordedByHost) {
+        this.config
+          .getChatRecordingService()
+          ?.recordNotification(
+            request,
+            options?.notificationDisplayText,
+            undefined,
+            goalPermit,
+            /* deliveredTurn */ true,
+          );
+      }
     }
 
     // Notifications start a fresh Turn with a new prompt_id, so the loop
@@ -4721,13 +4725,15 @@ export class LlmClient {
 
         // record user/cron message for session management
         if (messageType === SendMessageType.Cron) {
-          this.config
-            .getChatRecordingService()
-            ?.recordCronPrompt(
-              request,
-              options?.notificationDisplayText,
-              goalPermit,
-            );
+          if (!options?.userTurnRecordedByHost) {
+            this.config
+              .getChatRecordingService()
+              ?.recordCronPrompt(
+                request,
+                options?.notificationDisplayText,
+                goalPermit,
+              );
+          }
         } else if (!options?.userTurnRecordedByHost) {
           const recorder = this.config.getChatRecordingService();
           recorder?.recordUserMessage(

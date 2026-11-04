@@ -675,7 +675,7 @@ class HostedProcessCrashIT {
                         .containsEntry("runtime_session_id", execution.get("runtime_session_id"))
                         .containsEntry("binding_id", execution.get("binding_id"))
                         .containsEntry("runtime_generation", execution.get("runtime_generation"))
-                        .containsEntry("session_state", "READY").containsEntry("execution_exclusive", false);
+                        .containsEntry("session_state", "READY").containsEntry("is_execution_exclusive", false);
                 assertThat(((Number) member.get("runtime_generation")).longValue()).isEqualTo(1);
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_binding b"
                         + " JOIN ma_runtime_session rs ON rs.binding_id=b.binding_id AND rs.runtime_generation=b.runtime_generation"
@@ -684,7 +684,7 @@ class HostedProcessCrashIT {
                         + " WHERE rs.scope_key=? AND rs.runtime_session_id=? AND b.scope_key=rs.scope_key"
                         + " AND b.tenant_id=rs.tenant_id AND b.workspace_id=rs.workspace_id AND b.workspace_generation=rs.workspace_generation"
                         + " AND b.canonical_cwd=rs.canonical_cwd AND b.capability_digest=rs.capability_digest AND b.isolation_class=rs.isolation_class"
-                        + " AND b.provisioner_kind='local-process' AND b.binding_state='READY' AND b.drain_requested=FALSE"
+                        + " AND b.provisioner_kind='local-process' AND b.binding_state='READY' AND b.is_drain_requested=FALSE"
                         + " AND s.workspace_id=b.workspace_id AND s.workspace_generation=b.workspace_generation AND s.workspace_storage_id=b.storage_id"
                         + " AND st.physical_key=rs.execution_storage_key AND st.registration_state='REGISTERED' AND st.storage_kind='LOCAL'"
                         + " AND st.registration_revision>0 AND s.workspace_config_ref=? AND s.workspace_policy_ref=? AND s.context_config_ref=?",

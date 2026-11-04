@@ -11,10 +11,10 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.util.Map;
 
 final class LocalStorageOwners {
-    static final String SESSION_AUTHORITY_SQL = "SELECT 1 FROM ma_session WHERE tenant_id = ? AND workspace_storage_id = ? AND resource_gc_completed = FALSE LIMIT 1";
+    static final String SESSION_AUTHORITY_SQL = "SELECT 1 FROM ma_session WHERE tenant_id = ? AND workspace_storage_id = ? AND is_resource_gc_completed = FALSE LIMIT 1";
     static final String RUNTIME_AUTHORITY_SQL = "SELECT 1 FROM ma_runtime_binding WHERE storage_alias_key = ?"
             + " AND (binding_state NOT IN ('FAILED', 'RELEASED')"
-            + " OR (binding_state = 'FAILED' AND provision_seeded = TRUE)) LIMIT 1";
+            + " OR (binding_state = 'FAILED' AND is_provision_seeded = TRUE)) LIMIT 1";
     static final String OPERATION_AUTHORITY_SQL = "SELECT 1 FROM ma_operation WHERE storage_key = ?"
             + " AND ((operation_kind IN ('WORKSPACE_RECOVERY', 'WORKSPACE_OPERATOR_RECOVERY', 'STORAGE_MIGRATION')"
             + " AND state IN ('CAPTURING', 'VERIFYING', 'PREPARED', 'ATTESTED', 'RETIRING', 'RETIRED', 'PREPARING', 'INVALIDATED'))"
@@ -23,10 +23,10 @@ final class LocalStorageOwners {
             + String.join("', '", ChildWorkspaceStore.PREPARING, ChildWorkspaceStore.READY, ChildWorkspaceStore.MERGING,
                     ChildWorkspaceStore.APPLYING, ChildWorkspaceStore.APPLIED, ChildWorkspaceStore.DISCARDING,
                     ChildWorkspaceStore.CONFLICTED, ChildWorkspaceStore.BLOCKED, ChildWorkspaceStore.FAILED) + "'))) LIMIT 1";
-    static final String HEAD_AUTHORITY_SQL = "SELECT /*! STRAIGHT_JOIN */ 1 FROM ma_session s USE INDEX (ix_ma_session_storage_scope)"
+    static final String HEAD_AUTHORITY_SQL = "SELECT /*! STRAIGHT_JOIN */ 1 FROM ma_session s USE INDEX (idx_ma_session_storage_scope)"
             + " JOIN ma_session_head h ON h.tenant_key = s.tenant_key AND h.harness_key = s.session_key"
             + " JOIN ma_workspace w ON w.tenant_id = s.tenant_id AND w.workspace_id = h.workspace_id"
-            + " WHERE s.tenant_id = ? AND s.workspace_storage_id IS NULL AND s.resource_gc_completed = FALSE"
+            + " WHERE s.tenant_id = ? AND s.workspace_storage_id IS NULL AND s.is_resource_gc_completed = FALSE"
             + " AND h.tenant_key = ? AND h.head_kind = 'MANAGED_SESSION' AND w.tenant_id = ? AND w.storage_id = ? LIMIT 1";
 
     private LocalStorageOwners() {
@@ -56,7 +56,11 @@ final class LocalStorageOwners {
     }
 
     static Map<String, Object> alias(JdbcTemplate jdbc, String tenant, String storage, boolean lock) {
-        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.STORAGE.columns() + " FROM ma_storage WHERE alias_key = ?" + (lock ? " FOR UPDATE" : ""),
+        return alias(jdbc, tenant, storage, lock ? " FOR UPDATE" : "");
+    }
+
+    private static Map<String, Object> alias(JdbcTemplate jdbc, String tenant, String storage, String lock) {
+        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.STORAGE.columns() + " FROM ma_storage WHERE alias_key = ?" + lock,
                 JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage));
         if (rows.isEmpty()) {
             return null;
@@ -70,20 +74,25 @@ final class LocalStorageOwners {
     }
 
     static String key(JdbcTemplate jdbc, String tenant, String storage) {
-        boolean lock = TransactionSynchronizationManager.isActualTransactionActive();
+        String lock = TransactionSynchronizationManager.isActualTransactionActive() ? " FOR UPDATE" : "";
         var alias = alias(jdbc, tenant, storage, lock);
+        requireOwner(jdbc, alias, lock);
+        return (String) alias.get("physical_key");
+    }
+
+    static Map<String, Object> requireOwner(JdbcTemplate jdbc, Map<String, Object> alias, String lock) {
         if (alias == null || !"LOCAL".equals(alias.get("storage_kind"))
                 || !java.util.Set.of("REGISTERED", "RETIRING").contains(alias.get("registration_state"))
                 || !(alias.get("physical_key") instanceof String physical)) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
-        var owners = WorkspaceOperations.rows(jdbc, "SELECT storage_key, physical_key, storage_kind FROM ma_storage_owner WHERE storage_key = ?"
-                + (lock ? " FOR UPDATE" : ""), physical);
+        var owners = WorkspaceOperations.rows(jdbc, "SELECT storage_key, physical_key, storage_kind, mount_state FROM ma_storage_owner WHERE storage_key = ?"
+                + lock, physical);
         if (owners.size() != 1 || !physical.equals(owners.getFirst().get("physical_key"))
                 || !"LOCAL".equals(owners.getFirst().get("storage_kind"))) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
-        return physical;
+        return owners.getFirst();
     }
     static String lockCovered(JdbcTemplate jdbc, String tenant, String storage) {
         if (!TransactionSynchronizationManager.isActualTransactionActive()) {

@@ -520,7 +520,7 @@ final class AgentSessionAdmissions {
         // paused before this call is about to mint the Session anyway.
         // The row lock serializes that verdict against this read, so a
         // settled record refuses the mint inside its own transaction —
-        // addressed by the parent's launch row's own primary key, which
+        // addressed by the parent's launch row's unique business key, which
         // is the same key the idempotent admission derives, so the
         // locking read never becomes a cross-tenant table scan under
         // REPEATABLE READ.
@@ -843,7 +843,7 @@ final class AgentSessionAdmissions {
                         + " context_revision, workspace_config_ref,"
                         + " workspace_policy_ref, tool_profile,"
                         + " creator_actor_key, owner_actor_key, runtime_request_key, approval_mode,"
-                        + " plan_enabled, selected_approval_mode, approval_revision, model_id, model_revision) VALUES"
+                        + " is_plan_enabled, selected_approval_mode, approval_revision, model_id, model_revision) VALUES"
                         + " (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?,"
                         + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 tenantId, sessionId, agentId, pin.revision(), pin.digest(),

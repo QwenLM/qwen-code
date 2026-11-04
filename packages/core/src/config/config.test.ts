@@ -43,6 +43,7 @@ import {
 } from './config.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { Storage } from './storage.js';
+import { ideContextStore } from '../ide/ideContext.js';
 import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
@@ -1231,6 +1232,135 @@ describe('Server Config (config.ts)', () => {
     }
   });
 
+  describe('project hooks approval gate', () => {
+    it('withholds project hooks while they await approval, never user hooks', () => {
+      const config = makeConfig({
+        userHooks,
+        projectHooks,
+        projectHooksPendingApproval: true,
+      });
+
+      expect(config.isProjectHooksPendingApproval()).toBe(true);
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getWithheldProjectHooks()).toBe(projectHooks);
+      expect(config.getUserHooks()).toBe(userHooks);
+
+      config.setProjectHooksPendingApproval(false);
+
+      expect(config.isProjectHooksPendingApproval()).toBe(false);
+      expect(config.getProjectHooks()).toBe(projectHooks);
+      expect(config.getWithheldProjectHooks()).toBeUndefined();
+    });
+
+    it.each([
+      ['not gated', undefined, false, false],
+      ['gated and approved', false, true, false],
+      ['gated and pending', true, true, true],
+    ])(
+      'reports a session that is %s',
+      (_label, projectHooksPendingApproval, gated, pending) => {
+        const config = makeConfig({ projectHooksPendingApproval });
+        expect(config.isProjectHooksApprovalGated()).toBe(gated);
+        expect(config.isProjectHooksPendingApproval()).toBe(pending);
+      },
+    );
+
+    it('re-arms a --yolo session once it leaves YOLO', () => {
+      const config = makeConfig({
+        approvalMode: ApprovalMode.YOLO,
+        projectHooksPendingApproval: false,
+        projectHooksYoloExempt: true,
+      });
+      expect(config.isProjectHooksApprovalGated()).toBe(false);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(config.isProjectHooksApprovalGated()).toBe(true);
+    });
+
+    it('withholds the legacy merged hooks from both getters while pending', () => {
+      const config = makeConfig({
+        hooks: projectHooks,
+        projectHooksPendingApproval: true,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getUserHooks()).toBeUndefined();
+
+      config.setProjectHooksPendingApproval(false);
+
+      expect(config.getProjectHooks()).toBe(projectHooks);
+      expect(config.getUserHooks()).toBe(projectHooks);
+    });
+
+    it('keeps a mid-session gate after the hooks are replaced', () => {
+      const config = makeConfig({ projectHooks });
+      config.setProjectHooksPendingApproval(true);
+
+      config.setHooksFromSettings({ projectHooks });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it.each([
+      ['the trust feature is off (default)', {}],
+      [
+        'the feature is on but the folder is untrusted',
+        { folderTrust: true, trustedFolder: false },
+      ],
+    ] as Array<[string, Partial<ConfigParameters>]>)(
+      'an approved block runs in an interactive session when %s',
+      (_label, trust) => {
+        const config = makeConfig({
+          interactive: true,
+          ...trust,
+          projectHooks,
+          projectHooksPendingApproval: false,
+        });
+
+        expect(config.getProjectHooks()).toBe(projectHooks);
+        // The registry loads the approved block; the listing must not add
+        // a second, trust-disabled copy of the same hooks.
+        expect(config.getTrustWithheldProjectHooks()).toBeUndefined();
+      },
+    );
+
+    it('a pending block stays withheld in an interactive untrusted session', () => {
+      const config = makeConfig({
+        interactive: true,
+        projectHooks,
+        projectHooksPendingApproval: true,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getTrustWithheldProjectHooks()).toBe(projectHooks);
+      // The approval reason stays reachable even though trust also withholds.
+      expect(config.getWithheldProjectHooks()).toBe(projectHooks);
+
+      config.setProjectHooksPendingApproval(true, true);
+      expect(config.isProjectHooksRejected()).toBe(true);
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getWithheldProjectHooks()).toBe(projectHooks);
+    });
+
+    it('an ungated interactive session still needs explicit folder trust', () => {
+      const config = makeConfig({
+        interactive: true,
+        projectHooks,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getTrustWithheldProjectHooks()).toBe(projectHooks);
+
+      const trusted = makeConfig({
+        interactive: true,
+        folderTrust: true,
+        trustedFolder: true,
+        projectHooks,
+      });
+      expect(trusted.getProjectHooks()).toBe(projectHooks);
+      expect(trusted.getTrustWithheldProjectHooks()).toBeUndefined();
+    });
+  });
+
   describe('setHooksFromSettings', () => {
     it.each([
       [
@@ -1242,7 +1372,7 @@ describe('Server Config (config.ts)', () => {
       ],
       [
         'replaces project hooks without leaking them into user hooks',
-        {},
+        { interactive: true, folderTrust: true, trustedFolder: true },
         { projectHooks },
         undefined,
         projectHooks,
@@ -1274,9 +1404,13 @@ describe('Server Config (config.ts)', () => {
     });
 
     it.each([false, undefined])(
-      'keeps the project hook gate when folder trust is %s',
+      'keeps the interactive project hook gate when folder trust is %s',
       (trustedFolder) => {
-        const config = makeConfig({ folderTrust: true, trustedFolder });
+        const config = makeConfig({
+          interactive: true,
+          folderTrust: true,
+          trustedFolder,
+        });
 
         config.setHooksFromSettings({ userHooks, projectHooks });
 
@@ -1297,23 +1431,24 @@ describe('Server Config (config.ts)', () => {
 
   describe('per-scope hooks and the legacy merged fallback', () => {
     const mergedHooks = { ...systemHooks, ...userHooks, ...projectHooks };
+    const explicitTrust = { folderTrust: true, trustedFolder: true };
 
     it.each([
       [
         'does not read the merged hooks as project hooks when only user hooks are supplied',
-        { userHooks },
+        { ...explicitTrust, userHooks },
         userHooks,
         undefined,
       ],
       [
         'does not read the merged hooks as user hooks when only project hooks are supplied',
-        { projectHooks },
+        { ...explicitTrust, projectHooks },
         undefined,
         projectHooks,
       ],
       [
         'still serves the merged hooks as user and project hooks when no scope is supplied',
-        {},
+        explicitTrust,
         mergedHooks,
         mergedHooks,
       ],
@@ -1395,7 +1530,11 @@ describe('Server Config (config.ts)', () => {
         // A Config built from merged settings alone still registers the hook
         // under both the user and project sources. The planner is what keeps
         // that from running it twice.
-        const registry = await registryFor({ hooks: lintHook });
+        const registry = await registryFor({
+          folderTrust: true,
+          trustedFolder: true,
+          hooks: lintHook,
+        });
         expect(registry.getAllHooks().map(({ source }) => source)).toEqual([
           'user',
           'project',
@@ -1412,6 +1551,7 @@ describe('Server Config (config.ts)', () => {
 
     it('loads system hooks in an untrusted folder, where project hooks are withheld', () => {
       const config = makeConfig({
+        interactive: true,
         trustedFolder: false,
         systemHooks,
         projectHooks,
@@ -1419,6 +1559,90 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.getSystemHooks()).toBe(systemHooks);
       expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it.each([
+      ['the trust feature is off', {}, false],
+      [
+        'the feature is on but the folder is undecided',
+        { folderTrust: true },
+        false,
+      ],
+      [
+        'the feature is on and the folder is explicitly trusted',
+        { folderTrust: true, trustedFolder: true },
+        true,
+      ],
+    ] as Array<[string, Partial<ConfigParameters>, boolean]>)(
+      'gates interactive settings-file project hooks when %s',
+      (_label, trust, explicit) => {
+        const config = makeConfig({
+          interactive: true,
+          ...trust,
+          projectHooks,
+        });
+
+        expect(config.getProjectHooks()).toEqual(
+          explicit ? projectHooks : undefined,
+        );
+        expect(config.getTrustWithheldProjectHooks()).toEqual(
+          explicit ? undefined : projectHooks,
+        );
+        expect(config.getUserHooks()).toBeUndefined();
+      },
+    );
+
+    it.each([
+      ['the trust feature is off', {}],
+      ['the feature is on but the folder is undecided', { folderTrust: true }],
+      [
+        'the folder is explicitly untrusted',
+        { folderTrust: true, trustedFolder: false },
+      ],
+    ] as Array<[string, Partial<ConfigParameters>]>)(
+      'loads project hooks in non-interactive sessions when %s (implicit trust)',
+      (_label, trust) => {
+        const config = makeConfig({
+          interactive: false,
+          ...trust,
+          projectHooks,
+        });
+
+        expect(config.getProjectHooks()).toEqual(projectHooks);
+        expect(config.getTrustWithheldProjectHooks()).toBeUndefined();
+      },
+    );
+
+    it('still withholds project hooks in non-interactive safe and bare modes', () => {
+      expect(
+        makeConfig({ safeMode: true, projectHooks }).getProjectHooks(),
+      ).toBeUndefined();
+      expect(
+        makeConfig({ bareMode: true, projectHooks }).getProjectHooks(),
+      ).toBeUndefined();
+      expect(
+        makeConfig({
+          safeMode: true,
+          projectHooks,
+        }).getTrustWithheldProjectHooks(),
+      ).toBeUndefined();
+      expect(
+        makeConfig({
+          bareMode: true,
+          projectHooks,
+        }).getTrustWithheldProjectHooks(),
+      ).toBeUndefined();
+    });
+
+    it('loads project hooks with IDE-granted trust even while the feature is off', () => {
+      ideContextStore.clear();
+      ideContextStore.set({ workspaceState: { isTrusted: true } });
+      try {
+        const config = makeConfig({ interactive: true, projectHooks });
+        expect(config.getProjectHooks()).toEqual(projectHooks);
+      } finally {
+        ideContextStore.clear();
+      }
     });
   });
 
@@ -10747,6 +10971,41 @@ describe('Server Config (config.ts)', () => {
         subagentRegistry.__mcpManagerMock.setOnBudgetEvent,
       ).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('explicit folder trust for repository execution', () => {
+  afterEach(() => ideContextStore.clear());
+
+  it.each([
+    [false, undefined, true, false],
+    [false, true, true, false],
+    [true, undefined, false, false],
+    [true, false, false, false],
+    [true, true, true, true],
+  ] as const)(
+    'distinguishes enabled=%s, trusted=%s from implicit trust',
+    (folderTrust, trustedFolder, legacy, explicit) => {
+      ideContextStore.clear();
+      const config = new Config({
+        ...MINIMAL_PARAMS,
+        folderTrust,
+        trustedFolder,
+      });
+      expect(config.isTrustedFolder()).toBe(legacy);
+      expect(config.isExplicitlyTrustedFolder()).toBe(explicit);
+    },
+  );
+
+  it('honors live IDE trust, including denial and disconnect', () => {
+    const config = new Config({ ...MINIMAL_PARAMS, folderTrust: false });
+    ideContextStore.set({ workspaceState: { isTrusted: true } });
+    expect(config.isExplicitlyTrustedFolder()).toBe(true);
+    ideContextStore.set({ workspaceState: { isTrusted: false } });
+    expect(config.isExplicitlyTrustedFolder()).toBe(false);
+    ideContextStore.clear();
+    expect(config.isTrustedFolder()).toBe(true);
+    expect(config.isExplicitlyTrustedFolder()).toBe(false);
   });
 });
 

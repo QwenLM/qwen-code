@@ -813,7 +813,7 @@ describe('HookEventHandler', () => {
   describe('project-skill trust gate at fire time', () => {
     // The second side of the gate `applySideEffects` enforces on the way
     // in: a hook registered from a repository's `.qwen/skills/` frontmatter
-    // fires only while the folder is STILL trusted. `isTrustedFolder()` is
+    // fires only while the folder is STILL trusted. `isExplicitlyTrustedFolder()` is
     // live under an IDE connection, so a revocation mid-session must
     // silence the hook at its next event — no restart, no unregistration.
     const gated = {
@@ -830,9 +830,9 @@ describe('HookEventHandler', () => {
       config: { type: HookType.Command, command: './mine.sh' },
     };
     const trust = (value: boolean) => {
-      const isTrustedFolder = vi.fn().mockReturnValue(value);
-      Object.assign(mockConfig, { isTrustedFolder });
-      return isTrustedFolder;
+      const isExplicitlyTrustedFolder = vi.fn().mockReturnValue(value);
+      Object.assign(mockConfig, { isExplicitlyTrustedFolder });
+      return isExplicitlyTrustedFolder;
     };
     const fire = async (sessionHooks: unknown[]) => {
       vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue(

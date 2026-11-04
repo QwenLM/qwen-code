@@ -12,6 +12,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.nio.charset.StandardCharsets;
@@ -69,11 +70,12 @@ final class AgentSessionCommands {
             String idempotencyKey, String requestDigest, String sessionId,
             List<Map<String, Object>> input, String payloadDigest,
             String actorId) {
-        // A per-turn admission: a long holder of the tenant's placement row
-        // answers tenant_guard_contended within the hot-path bound instead
-        // of parking the submit past the caller's budget (#13800).
-        ManagedSessionStore.lockBounded(() -> WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId,
-                ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        // A per-turn admission takes no tenant guard. The Session row orders it
+        // against lifecycle begin, requireOpen's locking reads of this storage's
+        // alias (fence) and directory rows order it against migration fence
+        // installation and physical fencing, and nothing later in this
+        // transaction takes the guard. The Session lock comes first, so this
+        // transaction's snapshot is taken after it.
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         sessionPolicies.requirePublicChildImmutable(session);
         // A bound Session's later Turn needs the same deployment opt-in as
@@ -86,7 +88,7 @@ final class AgentSessionCommands {
         // The replay probe must not lock: a FOR UPDATE read that misses
         // next-key-locks a gap of the tenant-shared command index, and
         // concurrent admissions holding such gap locks deadlock when they
-        // all try to insert into the same gap. The PRIMARY KEY deduplicates
+        // all try to insert into the same gap. The unique business key deduplicates
         // racing inserts instead, and the service replays on
         // DuplicateKeyException.
         Optional<CommandRecord> existing = findCommand(tenantId, operation,
@@ -105,7 +107,7 @@ final class AgentSessionCommands {
                     throw AgentSessionPolicies.workspaceExecutionUnavailable();
                 }
             }
-            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+            WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
         }
         if (!"ACTIVE".equals(session.status())) {
             throw new ManagedAgentException(409, "session_not_active",
@@ -216,9 +218,12 @@ final class AgentSessionCommands {
 
     SessionMutationCommand beginSessionRename(String tenantId, String key,
             String digest, String sessionId, String title, String actorId) {
+        // Empty operation ranges can share an InnoDB gap even across Session scopes.
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
-        // Tenant and Session locks serialize admission without gap-locking missing index entries.
+        // The Session lock serializes this Session's admissions without gap-locking missing index
+        // entries. A different Session reusing the tenant-scoped key loses on the receipt's unique
+        // key in beginSessionMutation and answers idempotency_conflict.
         Optional<CommandRecord> previous = findCommand(tenantId, "RENAME_SESSION", key, false);
         if (previous.isPresent()
                 && sessionId.equals(previous.get().sessionId())) {
@@ -364,7 +369,6 @@ final class AgentSessionCommands {
     SessionRecord settleRename(RenameDelivery delivery, String owner, String bootId) {
         String tenantId = delivery.tenantId();
         String sessionId = delivery.sessionId();
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         var rows =
                 jdbc.queryForList(
@@ -434,7 +438,6 @@ final class AgentSessionCommands {
     }
 
     void abandonSessionRename(String tenantId, String key, String sessionId, long revision, String owner) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (jdbc.queryForObject(
                         "SELECT COUNT(*) FROM ma_operation WHERE operation_key = ? AND operation_kind = 'RENAME' AND state = 'RUNNING' AND claim_owner = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW + "",
@@ -451,21 +454,20 @@ final class AgentSessionCommands {
         String unanswered = "(state = 'RUNNING' AND phase = 'SUBMITTED' AND claim_until <= "
                 + ManagedSchemaTime.SQL_NOW + ")";
         for (Map<String, Object> row : jdbc.queryForList(
-                "SELECT operation_key, tenant_id, session_id, idempotency_key FROM ma_operation WHERE operation_kind = 'RENAME' AND " + unanswered + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.csi_guard = FALSE) LIMIT 100")) {
+                "SELECT operation_key, tenant_id, session_id, idempotency_key FROM ma_operation WHERE operation_kind = 'RENAME' AND " + unanswered + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.is_csi_guard = FALSE) LIMIT 100")) {
             parkRename(row, unanswered);
         }
         jdbc.update(
-                "UPDATE ma_operation SET state = 'PENDING', delivery_state = 'PENDING', phase = 'ADMITTED', available_at = ?, claim_owner = NULL, claim_until = NULL, gmt_modified = ? WHERE operation_kind = 'RENAME' AND state = 'RUNNING' AND phase = 'PREPARING' AND claim_until <= " + ManagedSchemaTime.SQL_NOW + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.csi_guard = FALSE) LIMIT 100",
+                "UPDATE ma_operation SET state = 'PENDING', delivery_state = 'PENDING', phase = 'ADMITTED', available_at = ?, claim_owner = NULL, claim_until = NULL, gmt_modified = ? WHERE operation_kind = 'RENAME' AND state = 'RUNNING' AND phase = 'PREPARING' AND claim_until <= " + ManagedSchemaTime.SQL_NOW + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.is_csi_guard = FALSE) LIMIT 100",
                 now,
                 now);
         return jdbc.query(
-                "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'RENAME' AND delivery_state = 'PENDING' AND state = 'PENDING' AND available_at <= ? AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.csi_guard = FALSE) ORDER BY available_at LIMIT 100",
+                "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'RENAME' AND delivery_state = 'PENDING' AND state = 'PENDING' AND available_at <= ? AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.is_csi_guard = FALSE) ORDER BY available_at LIMIT 100",
                 this::renameDelivery,
                 now);
     }
 
     Optional<RenameDelivery> claimRename(RenameDelivery delivery, String owner, Duration lease) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, delivery.tenantId());
         storeRows.requireLegacySessionForUpdate(delivery.tenantId(), delivery.sessionId());
         long now = clock.millis();
         int claimed =
@@ -506,7 +508,6 @@ final class AgentSessionCommands {
     }
 
     void retryRename(RenameDelivery delivery, String owner, long availableAt) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, delivery.tenantId());
         storeRows.requireLegacyMutation(delivery.tenantId(), delivery.sessionId());
         String key = renameKey(delivery.tenantId(), delivery.sessionId(), delivery.revision());
         parkRename(Map.of("operation_key", key, "tenant_id", delivery.tenantId(),
@@ -573,24 +574,23 @@ final class AgentSessionCommands {
     SessionMutationCommand beginSessionMutation(String tenantId,
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind, String actorId) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        // No tenant guard. The Session lock comes first, so this transaction's snapshot follows
+        // it and serializes this Session's commands. The replay probe does not lock: a locking
+        // read that misses gap-locks the tenant-shared receipt index, and concurrent admissions
+        // of different keys would deadlock inserting into that gap. A racing Session reusing the
+        // tenant-scoped key loses on the receipt's unique key instead (see insertCommand below).
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         Optional<CommandRecord> existing = findCommand(tenantId, operation,
-                idempotencyKey, kind != SessionMutationKind.RENAME);
+                idempotencyKey, false);
         if (existing.isPresent()) {
             CommandRecord command = existing.get();
-            if (!command.requestDigest().equals(requestDigest)
-                    || !command.sessionId().equals(sessionId)) {
-                throw new ManagedAgentException(409,
-                        "idempotency_conflict",
-                        "The idempotency key was reused with different content.");
-            }
+            requireSameMutation(command, requestDigest, sessionId);
             if ("FAILED".equals(command.status())) {
                 if (session.workspace() != null) {
-                    WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+                    WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
                 }
                 sessionPolicies.requireNoOpenOperation(tenantId, sessionId);
                 validateMutationStatus(session, kind);
@@ -607,14 +607,28 @@ final class AgentSessionCommands {
                     true);
         }
         if (session.workspace() != null) {
-            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+            WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
         }
         sessionPolicies.requireNoOpenOperation(tenantId, sessionId);
         validateMutationStatus(session, kind);
         long now = clock.millis();
-        insertCommand(tenantId, operation, idempotencyKey, requestDigest,
-                sessionId, null, "PENDING", session.status(),
-                commandActorKey(tenantId, actorId), now);
+        try {
+            insertCommand(tenantId, operation, idempotencyKey, requestDigest,
+                    sessionId, null, "PENDING", session.status(),
+                    commandActorKey(tenantId, actorId), now);
+        } catch (DuplicateKeyException race) {
+            // Every receipt unique key derives from this command key, so another request
+            // committed it first. A locking read normally sees it past this transaction's
+            // snapshot; if an engine still hides it, the key is taken all the same. Nothing has
+            // been written here yet.
+            CommandRecord winner = findCommand(tenantId, operation, idempotencyKey, true).orElse(null);
+            if (winner == null) {
+                throw new ManagedAgentException(409, "idempotency_conflict",
+                        "The idempotency key was reused with different content.");
+            }
+            requireSameMutation(winner, requestDigest, sessionId);
+            return new SessionMutationCommand(sessionId, winner.status(), true);
+        }
         jdbc.update("UPDATE ma_request_receipt SET gmt_modified = " + ManagedSchemaTime.SQL_NOW
                         + ", mutation_attempt_sequence"
                         + " = ? WHERE receipt_key = ? AND namespace = 'SESSION_COMMAND'",
@@ -631,10 +645,18 @@ final class AgentSessionCommands {
         return new SessionMutationCommand(sessionId, "PENDING", false);
     }
 
+    private static void requireSameMutation(CommandRecord command, String requestDigest, String sessionId) {
+        if (!command.requestDigest().equals(requestDigest)
+                || !command.sessionId().equals(sessionId)) {
+            throw new ManagedAgentException(409,
+                    "idempotency_conflict",
+                    "The idempotency key was reused with different content.");
+        }
+    }
+
     SessionRecord completeSessionMutation(String tenantId,
             String operation, String idempotencyKey, String sessionId,
             SessionMutationKind kind, String title, String harnessBootId) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
@@ -668,7 +690,7 @@ final class AgentSessionCommands {
                             + " request was retired.");
         }
         if (session.workspace() != null) {
-            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+            WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
         }
         validateMutationStatus(session, kind);
         long now = clock.millis();
@@ -862,7 +884,7 @@ final class AgentSessionCommands {
         // to a (kind, state) index whose range holds every Session's pending
         // rows, and two Sessions' settles then deadlock. H2 skips the hint.
         for (String operationKey : jdbc.queryForList("SELECT operation_key"
-                        + " FROM ma_operation /*! FORCE INDEX (uq_ma_operation_identity) */"
+                        + " FROM ma_operation /*! FORCE INDEX (uk_ma_operation_identity) */"
                         + " WHERE scope_key = ? AND"
                         + " operation_kind = ? AND target_key = ? AND state ="
                         + " 'PENDING' FOR UPDATE",
@@ -929,7 +951,7 @@ final class AgentSessionCommands {
             String payloadDigest, long now) {
         jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
                         + " turn_id, prompt_id, input_json, payload_digest,"
-                        + " status, gmt_create, gmt_modified, model_id, model_revision, approval_mode, approval_revision, plan_enabled, permission_rules_json) SELECT"
+                        + " status, gmt_create, gmt_modified, model_id, model_revision, approval_mode, approval_revision, is_plan_enabled, permission_rules_json) SELECT"
                         + " ?, ?, ?, ?, ?, ?, 'ACCEPTED', ?, ?, model_id,"
                         + " CASE WHEN model_id IS NULL THEN NULL ELSE model_revision END,"
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
@@ -946,7 +968,7 @@ final class AgentSessionCommands {
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
                         + " 'hosted-workspace-shell/1','hosted-workspace-files/3')"
-                        + " THEN plan_enabled ELSE NULL END,"
+                        + " THEN is_plan_enabled ELSE NULL END,"
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"

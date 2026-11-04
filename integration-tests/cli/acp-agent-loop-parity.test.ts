@@ -13,7 +13,13 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -31,6 +37,7 @@ import {
   type FakeOpenAIServer,
 } from '../fake-openai-server.js';
 import { ACP_HOME_PREFIX, removeScratchDir } from '../scratch-dir.js';
+import { approveProjectHooks } from '../project-hook-approval.js';
 
 // The agent trusts a client that presents the capability it was started with.
 const PRIVATE_ACP_CAPABILITY_ENV = 'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
@@ -57,6 +64,8 @@ interface Scenario {
    * this many Goal turns to end.
    */
   goalTurns?: number;
+  /** Waits after the prompts for this many background-notification turns to end. */
+  backgroundTurns?: number;
   /** The model's reply to a request that does not stream, such as a verifier's. */
   sideReply?: (body: JsonObject) => FakeOpenAIResponse;
   /** Sends `session/cancel` once this file exists in the test directory. */
@@ -94,6 +103,8 @@ interface Run {
   permissionsAt: number[];
   /** The stop reason of each Goal turn, in order. */
   goalTurnEnds: unknown[];
+  /** The stop reason of each background-notification turn, in order. */
+  backgroundTurnEnds: unknown[];
 }
 
 const PROMPT_TIMEOUT_MS = 60_000;
@@ -101,6 +112,11 @@ const PROMPT_TIMEOUT_MS = 60_000;
 // A Goal's id and the record ids it cites are random in each run.
 const RANDOM_ID =
   /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+
+// A background task's id, its process and the run's own home directory.
+const BACKGROUND_TASK_ID = /bg_[0-9a-f]{8}/g;
+const PROCESS_ID = /(pid>|pid: |pid )\d+/g;
+const RUN_HOME = new RegExp(`${ACP_HOME_PREFIX}[A-Za-z0-9]+`, 'g');
 
 // Fields that differ between two runs of the same scenario.
 const VOLATILE_KEYS = new Set([
@@ -155,7 +171,13 @@ function normalize(value: unknown, dir: string, sessionId = ''): unknown {
     .join('<DIR>')
     .replace(CONTINUATION_PROMPT_ID, '$1');
   if (sessionId) text = text.split(sessionId).join('<SESSION>');
-  const replaced = JSON.parse(text.replace(RANDOM_ID, '<ID>'));
+  const replaced = JSON.parse(
+    text
+      .replace(RANDOM_ID, '<ID>')
+      .replace(BACKGROUND_TASK_ID, 'bg_<ID>')
+      .replace(PROCESS_ID, '$1<PID>')
+      .replace(RUN_HOME, '<HOME>'),
+  );
   const strip = (node: unknown): unknown => {
     if (Array.isArray(node)) return node.map(strip);
     if (node && typeof node === 'object') {
@@ -260,6 +282,8 @@ const allowOnce = () => ({
       });
       const dir = rig.testDir!;
       scenario.prepare?.(rig);
+      // Snapshot the fixture's home writes before the child can touch it.
+      const homeBefore = readdirSync(join(dir, '.qwen-home')).sort();
       let streamingIndex = 0;
       server = await startFakeOpenAIServer(
         ({ body }) =>
@@ -278,6 +302,7 @@ const allowOnce = () => ({
         ? CONTAINER_SANDBOX_NO_PROXY
         : '127.0.0.1,localhost';
       const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
+      if (scenario.settings?.['hooks']) approveProjectHooks(qwenHome, dir);
       const env: NodeJS.ProcessEnv = {
         ...process.env,
         OPENAI_API_KEY: 'fake-key',
@@ -287,6 +312,11 @@ const allowOnce = () => ({
         NO_PROXY: noProxy,
         no_proxy: noProxy,
         QWEN_HOME: qwenHome,
+        // TestRig keeps QWEN_RUNTIME_DIR inside the workspace; leaving it
+        // there lets the session runtime write `tmp/<hash>` into the directory
+        // each run's request snapshot encodes, so give each run its own
+        // scratch runtime outside the workspace.
+        QWEN_RUNTIME_DIR: qwenHome,
       };
       delete env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'];
       if (shared) env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = '1';
@@ -312,6 +342,7 @@ const allowOnce = () => ({
 
       const updates: unknown[] = [];
       const goalTurnEnds: unknown[] = [];
+      const backgroundTurnEnds: unknown[] = [];
       const permissions: unknown[] = [];
       const permissionsAt: number[] = [];
       const pending = new Map<
@@ -376,6 +407,13 @@ const allowOnce = () => ({
         }
         if (method === '_qwencode/end_turn' && params?.['source'] === 'goal') {
           goalTurnEnds.push(params['reason']);
+          return;
+        }
+        if (
+          method === '_qwencode/end_turn' &&
+          params?.['source'] === 'background_notification'
+        ) {
+          backgroundTurnEnds.push(params['reason']);
           return;
         }
         if (typeof id !== 'number' || typeof method !== 'string') return;
@@ -461,7 +499,8 @@ const allowOnce = () => ({
         }
         const goalDeadline = Date.now() + PROMPT_TIMEOUT_MS;
         while (
-          goalTurnEnds.length < (scenario.goalTurns ?? 0) &&
+          (goalTurnEnds.length < (scenario.goalTurns ?? 0) ||
+            backgroundTurnEnds.length < (scenario.backgroundTurns ?? 0)) &&
           Date.now() < goalDeadline
         ) {
           await new Promise((resolve) => setTimeout(resolve, 50));
@@ -472,8 +511,17 @@ const allowOnce = () => ({
           if (agent.exitCode !== null || agent.signalCode) resolve(undefined);
           else agent.once('exit', resolve);
         });
-        await removeScratchDir(qwenHome);
+        // Keep the runtime state for post-mortem whenever TestRig.cleanup()
+        // keeps the test directory, which it decides by truthiness.
+        if (!process.env['KEEP_OUTPUT']) {
+          await removeScratchDir(qwenHome);
+        }
       }
+      // The scratch runtime keeps the session runtime's `tmp/<hash>` and
+      // `usage/` out of the workspace. Comparing against the pre-run listing
+      // avoids copying TestRig's seeded names, and a leak fails here directly
+      // rather than only when the request equality loses a race.
+      expect(readdirSync(join(dir, '.qwen-home')).sort()).toEqual(homeBefore);
       return {
         requests: modelRequests(server, dir),
         dateReminders: streamingMessages(server).filter((messages) =>
@@ -492,6 +540,7 @@ const allowOnce = () => ({
         permissions: permissions.map((call) => normalize(call, dir, sessionId)),
         permissionsAt,
         goalTurnEnds,
+        backgroundTurnEnds,
       };
     }
 
@@ -709,6 +758,31 @@ const allowOnce = () => ({
         }),
       },
       {
+        name: 'a background shell whose result starts a notification turn',
+        prompts: ['Run the job in the background.'],
+        backgroundTurns: 1,
+        // The job outlasts the prompt, so its result starts a turn of its
+        // own on both loops.
+        reply: (_messages, _dir, index) =>
+          index === 0
+            ? {
+                toolCalls: [
+                  fakeToolCall(
+                    'run_shell_command',
+                    {
+                      command: 'sleep 2; echo job done',
+                      description: 'Run the job',
+                      is_background: true,
+                    },
+                    'call_job',
+                  ),
+                ],
+              }
+            : index === 1
+              ? { content: 'The job is running.' }
+              : { content: 'The job is done.' },
+      },
+      {
         name: 'a model error',
         prompts: ['Fail please.'],
         reply: () => ({ errorContent: 'upstream exploded' }),
@@ -796,6 +870,10 @@ const allowOnce = () => ({
         expect(shared.stopReasons).toEqual(current.stopReasons);
         expect(shared.requests).toEqual(current.requests);
         expect(shared.goalTurnEnds).toEqual(current.goalTurnEnds);
+        expect(shared.backgroundTurnEnds).toEqual(current.backgroundTurnEnds);
+        expect(current.backgroundTurnEnds).toHaveLength(
+          scenario.backgroundTurns ?? 0,
+        );
         if (scenario.goalTurns) {
           expect(current.goalTurnEnds).toHaveLength(scenario.goalTurns);
         }

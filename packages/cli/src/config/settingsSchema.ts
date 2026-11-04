@@ -4570,7 +4570,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Run headless sessions (`-p` and stream-json) and the model rounds of ACP user prompts (Zed, VS Code, Web Shell) on the shared agent loop (experimental). Other turns and surfaces keep their current loop for now. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.',
+          'Run headless sessions (`-p` and stream-json) and ACP sessions (Zed, VS Code, Web Shell, channels) on the shared agent loop (experimental). The Ink TUI sends its model requests through it, while its tool runs, OpenTUI and subagents keep their current loop for now. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.',
         showInDialog: true,
       },
       agentCollaboration: {
