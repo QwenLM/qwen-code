@@ -162,8 +162,9 @@ For an accepted issue or pull-request comment, the channel adds GitHub's `👀` 
 
 The GitHub channel publishes only completed responses. Intermediate model chunks are never published as separate comments.
 
-If GitHub returns a definite no-write delivery failure, such as a rate-limit
-response, the channel stores the final reply in
+If GitHub returns a definite no-write delivery failure — its rate limiter
+rejecting the comment, either because the hourly budget is exhausted or
+because a secondary rate limit was hit — the channel stores the final reply in
 `~/.qwen/channels/<workspace-scope>/<channel>-<name-hash>-github-pending-deliveries.json`
 with private file permissions and retries it on the next channel start. The
 corresponding inbound task remains in `reply_pending` state until that delivery

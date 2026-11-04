@@ -3667,6 +3667,88 @@ describe('GithubChannel', () => {
       expect(existsSync(pendingPath())).toBe(true);
     });
 
+    it.each([
+      ['a 403 with retry-after', 403, { 'retry-after': '60' }],
+      ['a bare 403', 403, {}],
+      ['a 429', 429, {}],
+    ])(
+      'keeps the final reply as pending on a secondary rate limit sent as %s',
+      async (_label, status, extraHeaders) => {
+        await connectForPublication();
+        const error = Object.assign(
+          new Error(
+            'You have exceeded a secondary rate limit. Please wait a few minutes before you try again. - https://docs.github.com/rest/overview/rate-limits-for-the-rest-api#about-secondary-rate-limits',
+          ),
+          {
+            status,
+            response: {
+              headers: { 'x-ratelimit-remaining': '4999', ...extraHeaders },
+            },
+          },
+        );
+        mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+        const publish = (
+          channel as unknown as {
+            publishFinalResponse: (
+              chatId: string,
+              threadId: string,
+              text: string,
+              sessionId: string,
+            ) => Promise<void>;
+          }
+        ).publishFinalResponse.bind(channel);
+
+        await expect(
+          publish(
+            'owner/repo',
+            'issue:42',
+            'Final reply',
+            'session-publication',
+          ),
+        ).rejects.toMatchObject({ cause: error });
+        const audit = readFileSync(auditPath(), 'utf-8');
+        expect(audit).toContain('"outcome":"failed"');
+        expect(audit).not.toContain('"outcome":"failed_ambiguous"');
+        expect(JSON.parse(readFileSync(pendingPath(), 'utf-8'))).toEqual([
+          expect.objectContaining({
+            threadId: 'issue:42',
+            fullText: 'Final reply',
+          }),
+        ]);
+      },
+    );
+
+    it('keeps a permission 403 on the final reply single-shot', async () => {
+      await connectForPublication();
+      const error = Object.assign(
+        new Error('Resource not accessible by personal access token'),
+        {
+          status: 403,
+          response: { headers: { 'x-ratelimit-remaining': '4999' } },
+        },
+      );
+      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
+      const publish = (
+        channel as unknown as {
+          publishFinalResponse: (
+            chatId: string,
+            threadId: string,
+            text: string,
+            sessionId: string,
+          ) => Promise<void>;
+        }
+      ).publishFinalResponse.bind(channel);
+
+      await expect(
+        publish('owner/repo', 'issue:42', 'Final reply', 'session-publication'),
+      ).rejects.toMatchObject({ cause: error });
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(readFileSync(auditPath(), 'utf-8')).toContain(
+        '"outcome":"failed_ambiguous"',
+      );
+      expect(existsSync(pendingPath())).toBe(false);
+    });
+
     it('migrates legacy pending finals before retrying', async () => {
       const legacyPath = join(
         process.env.QWEN_HOME!,

@@ -815,14 +815,26 @@ function isNoReplySentinel(text: string): boolean {
   return NO_REPLY_SENTINEL_PATTERN.test((fenced?.[1] ?? trimmed).trim());
 }
 
+/**
+ * GitHub rejected the write before creating anything: its rate limiter
+ * answered. The rate-limit headers prove the answer came from GitHub rather
+ * than a proxy in front of it; then either the primary budget is exhausted or
+ * the message names a secondary limit, which GitHub sends with quota left
+ * and not always with `retry-after`.
+ */
 function isDefiniteNoWriteGithubError(err: unknown): boolean {
   const e = err as {
     status?: number;
+    message?: unknown;
     response?: { headers?: Record<string, string | number> };
   };
+  const remaining = e.response?.headers?.['x-ratelimit-remaining'];
+  if ((e.status !== 403 && e.status !== 429) || remaining === undefined) {
+    return false;
+  }
   return (
-    (e.status === 403 || e.status === 429) &&
-    Number(e.response?.headers?.['x-ratelimit-remaining']) === 0
+    Number(remaining) === 0 ||
+    /secondary rate limit|abuse detection/i.test(String(e.message))
   );
 }
 
