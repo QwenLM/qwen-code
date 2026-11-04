@@ -124,6 +124,23 @@ function canonicalHierarchyChart(): string {
   });
 }
 
+function visibleTable(container: HTMLElement): {
+  headers: Array<string | null>;
+  rows: Array<Array<string | null>>;
+} {
+  const isVisible = (element: Element) => element.closest('[hidden]') === null;
+  return {
+    headers: Array.from(container.querySelectorAll('th'))
+      .filter(isVisible)
+      .map((cell) => cell.textContent),
+    rows: Array.from(container.querySelectorAll('tbody tr'))
+      .filter(isVisible)
+      .map((row) =>
+        Array.from(row.querySelectorAll('td')).map((cell) => cell.textContent),
+      ),
+  };
+}
+
 function chartTree({
   content,
   registry,
@@ -751,13 +768,13 @@ describe('Web Shell markdown-chart integration', () => {
     expect(
       container.querySelector('[data-markdown-chart-data-view="true"]'),
     ).not.toBeNull();
-    expect(
-      container.querySelector('[role="alert"]')?.textContent?.trim(),
-    ).toBeTruthy();
+    const alert = container.querySelector('[role="alert"]');
+    expect(alert?.textContent).toBe('ECharts failed to render the chart');
+    expect(alert?.closest('[hidden]')).not.toBeNull();
   });
 
   it('localizes graph data-view tabs and column headers', async () => {
-    const { runtime } = createFakeRuntime();
+    const { instance, runtime } = createFakeRuntime();
     const registry = createMarkdownChartRegistry({
       loadECharts: async () => runtime,
       resizeObserver: false,
@@ -778,6 +795,9 @@ describe('Web Shell markdown-chart integration', () => {
     );
     await flushChart();
 
+    expect(instance.setOption).toHaveBeenCalledOnce();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+
     const showData = container.querySelector<HTMLButtonElement>(
       'button[aria-label="显示数据"]',
     );
@@ -786,29 +806,30 @@ describe('Web Shell markdown-chart integration', () => {
       showData?.click();
     });
 
-    expect(
-      Array.from(container.querySelectorAll('[role="tab"]')).map(
-        (tab) => tab.textContent,
-      ),
-    ).toEqual(['节点', '连线']);
-    expect(
-      Array.from(container.querySelectorAll('th')).map(
-        (cell) => cell.textContent,
-      ),
-    ).toEqual([
-      '名称',
-      '分类',
-      'ID',
-      '起点',
-      '终点',
-      '数值',
-      '起点 ID',
-      '终点 ID',
-    ]);
+    const tabs = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    );
+    expect(tabs.map((tab) => tab.textContent)).toEqual(['节点', '连线']);
+    expect(visibleTable(container)).toEqual({
+      headers: ['名称', '分类', 'ID'],
+      rows: [
+        ['Orders', 'sales', 'orders'],
+        ['Billing', 'finance', 'billing'],
+      ],
+    });
+
+    await act(async () => {
+      tabs[1]?.click();
+    });
+
+    expect(visibleTable(container)).toEqual({
+      headers: ['起点', '终点', '数值', '起点 ID', '终点 ID'],
+      rows: [['Orders', 'Billing', '3', 'orders', 'billing']],
+    });
   });
 
   it('localizes hierarchy data-view column headers', async () => {
-    const { runtime } = createFakeRuntime();
+    const { instance, runtime } = createFakeRuntime();
     const registry = createMarkdownChartRegistry({
       loadECharts: async () => runtime,
       resizeObserver: false,
@@ -829,6 +850,9 @@ describe('Web Shell markdown-chart integration', () => {
     );
     await flushChart();
 
+    expect(instance.setOption).toHaveBeenCalledOnce();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+
     const showData = container.querySelector<HTMLButtonElement>(
       'button[aria-label="显示数据"]',
     );
@@ -837,11 +861,14 @@ describe('Web Shell markdown-chart integration', () => {
       showData?.click();
     });
 
-    expect(
-      Array.from(container.querySelectorAll('th')).map(
-        (cell) => cell.textContent,
-      ),
-    ).toEqual(['深度', '路径', '名称', '数值', '子树合计（派生）', 'ID 路径']);
+    expect(visibleTable(container)).toEqual({
+      headers: ['深度', '路径', '名称', '数值', '子树合计（派生）', 'ID 路径'],
+      rows: [
+        ['0', 'Company', 'Company', 'null', '15', 'company'],
+        ['1', 'Company / Ops', 'Ops', '5', '5', 'company / ops'],
+        ['1', 'Company / Sales', 'Sales', '10', '10', 'company / sales'],
+      ],
+    });
   });
 });
 
