@@ -183,20 +183,28 @@ describe('tool hook additionalContext delivery', () => {
     expect(count(result, marker('PreToolUse', 'call_allow'))).toBe(1);
   });
 
-  it('headless: runs project hooks with the trust feature disabled (implicit trust)', async () => {
+  it('headless: withholds project hooks while the trust feature is disabled', async () => {
     const server = await setup(
-      'hook context headless implicit trust',
+      'hook context headless feature off',
       'read_file',
       'note.txt',
-      'call_implicit_trust',
+      'call_feature_off',
       undefined,
       { security: { folderTrust: { enabled: false } } },
     );
+    // The child must see the feature-off user settings, not the rig's
+    // pre-trusted home: the inherited trust-store env var outranks
+    // QWEN_HOME, so drop the grant it points at.
+    writeFileSync(
+      join(rig.testDir!, '.qwen-home', 'trustedFolders.json'),
+      JSON.stringify({}),
+    );
     await rig.run('read the note', ...fakeModelLaunchArgs(server));
 
-    expect(hookHits()).toEqual([
-      { event: 'PreToolUse', call: 'call_implicit_trust' },
-    ]);
+    expect(hookHits()).toEqual([]);
+    const result = toolResultFor(server, 'call_feature_off');
+    expect(result).toContain('hello from note');
+    expect(count(result, marker('PreToolUse', 'call_feature_off'))).toBe(0);
   });
 
   it('headless: delivers PreToolUse context with a denied result', async () => {
@@ -377,6 +385,12 @@ describe('tool hook additionalContext delivery', () => {
     // The agent keeps writing under QWEN_HOME briefly after it exits, so keep
     // it out of rig.testDir, whose teardown would otherwise race those writes.
     const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
+    // Project hooks need the trust model enabled; the inherited rig trust
+    // store (QWEN_CODE_TRUSTED_FOLDERS_PATH) still grants this directory.
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
     const child = spawn(
       'node',
       [

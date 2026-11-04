@@ -340,6 +340,12 @@ describe('PreToolUse updatedInput', () => {
     // The agent keeps writing under QWEN_HOME briefly after it exits, so keep
     // it out of rig.testDir, whose teardown would otherwise race those writes.
     const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
+    // Project hooks need the trust model enabled; the inherited rig trust
+    // store (QWEN_CODE_TRUSTED_FOLDERS_PATH) still grants this directory.
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
     const child = spawn(
       'node',
       [

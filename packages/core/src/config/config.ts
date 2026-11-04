@@ -11767,14 +11767,18 @@ export class Config {
     if (this.getBareMode() || this.isSafeMode()) {
       return undefined;
     }
-    // Interactive sessions need explicit trust for repo-supplied hooks: a
-    // disabled folder-trust feature must not silently authorize them.
-    // Non-interactive invocations (`-p`, piped stdin, ACP/SDK embeddings)
-    // treat trust as implicit — the caller chose the directory and there is
-    // no prompt surface; only run them in directories you trust. An explicit
-    // refusal is already enforced upstream: an untrusted workspace
-    // contributes no settings, so it supplies no project hooks.
-    if (this.isInteractive() && !this.isExplicitlyTrustedFolder()) {
+    // Repo-supplied hooks always need explicit trust. Interactive sessions
+    // have no exemption. Non-interactive invocations (`-p`, piped stdin,
+    // ACP/SDK embeddings) may treat the workspace choice as implicit trust,
+    // but only once the operator has opted into the trust model by enabling
+    // the folder-trust feature: with the feature off (the default), a fresh
+    // environment must not execute repository hooks in any mode, and an
+    // untrusted workspace contributes no settings to begin with. Embedders
+    // enable the feature; the workspace decision then comes from their
+    // trust store.
+    const headlessImplicitTrust =
+      !this.isInteractive() && this.getFolderTrust();
+    if (!headlessImplicitTrust && !this.isExplicitlyTrustedFolder()) {
       return undefined;
     }
     // The legacy merged `hooks` stands in only when no scope was supplied.

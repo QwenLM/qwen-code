@@ -1457,22 +1457,34 @@ describe('Server Config (config.ts)', () => {
     );
 
     it.each([
-      ['the trust feature is off', {}],
-      ['the feature is on but the folder is undecided', { folderTrust: true }],
+      [
+        'the feature is on but the folder is undecided',
+        { folderTrust: true },
+        true,
+      ],
       [
         'the folder is explicitly untrusted',
         { folderTrust: true, trustedFolder: false },
+        true,
       ],
-    ] as Array<[string, Partial<ConfigParameters>]>)(
-      'loads project hooks in non-interactive sessions when %s (implicit trust)',
-      (_label, trust) => {
+      ['the trust feature is off (default)', {}, false],
+      [
+        'the feature is off and a trust flag was passed without it',
+        { trustedFolder: true },
+        false,
+      ],
+    ] as Array<[string, Partial<ConfigParameters>, boolean]>)(
+      'gates non-interactive project hooks when %s',
+      (_label, trust, loaded) => {
         const config = makeConfig({
           interactive: false,
           ...trust,
           projectHooks,
         });
 
-        expect(config.getProjectHooks()).toEqual(projectHooks);
+        expect(config.getProjectHooks()).toEqual(
+          loaded ? projectHooks : undefined,
+        );
       },
     );
 
