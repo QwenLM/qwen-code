@@ -80,17 +80,18 @@ Local `gh` authentication requires an HTTPS `baseUrl` so the daemon host credent
 
 ## Configuration Options
 
-| Option                    | Default                  | Description                                                                                                                                         |
-| ------------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `token`                   | unset                    | Optional classic PAT with `notifications` scope; overrides local `gh` authentication                                                                |
-| `useLocalGh`              | `false`                  | Explicitly reuse the daemon host's account-wide GitHub CLI authentication                                                                           |
-| `pollInterval`            | `60000`                  | Poll interval in ms                                                                                                                                 |
-| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                                                                              |
-| `groupPolicy`             | `"disabled"`             | Must be `"open"`, `"allowlist"` with the repo (`owner/repo`) listed in `groups`, or `"pairing"` with the repo approved for notifications to flow    |
-| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run                                                                    |
-| `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                                                                                        |
-| `deliverToBoundSessions`  | `false`                  | Deliver events for PRs bound to a live session into that session as a prompt instead of a channel-owned session (daemon-managed channels only)      |
-| `prWatchEvents`           | unset                    | Optional state transitions to watch for bound PRs: `ci_failure`, `merge_conflict`, `head_change`, `state_change`. Requires `deliverToBoundSessions` |
+| Option                    | Default                  | Description                                                                                                                                                                                                        |
+| ------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `token`                   | unset                    | Optional classic PAT with `notifications` scope; overrides local `gh` authentication                                                                                                                               |
+| `useLocalGh`              | `false`                  | Explicitly reuse the daemon host's account-wide GitHub CLI authentication                                                                                                                                          |
+| `pollInterval`            | `60000`                  | Poll interval in ms                                                                                                                                                                                                |
+| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                                                                                                                                             |
+| `groupPolicy`             | `"disabled"`             | Must be `"open"`, `"allowlist"` with the repo (`owner/repo`) listed in `groups`, or `"pairing"` with the repo approved for notifications to flow                                                                   |
+| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run                                                                                                                                   |
+| `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                                                                                                                                                       |
+| `deliverToBoundSessions`  | `false`                  | Deliver events for PRs bound to a live session into that session as a prompt instead of a channel-owned session (daemon-managed channels only)                                                                     |
+| `prWatchEvents`           | unset                    | Optional state transitions to watch for bound PRs: `ci_failure`, `merge_conflict`, `head_change`, `state_change`. Requires `deliverToBoundSessions`                                                                |
+| `boundSessionActions`     | unset                    | Optional operator instruction templates for bound-session delivery, keyed by event class with optional role prefixes (`review:`, `verify:`, `fix:`). Enables role-aware fan-out. Requires `deliverToBoundSessions` |
 
 Use `reasonFilter` to drop noisy notification classes such as `ci_activity` or `state_change`. Do not use `reasonFilter: ["mention"]` as a replacement for `groups.*.requireMention`: GitHub's `mention` reason is sticky at the thread level, so real new @mentions can arrive later under `comment`, `subscribed`, `author`, or other reasons and would be skipped.
 
@@ -183,7 +184,9 @@ so the session that follows the PR handles the event with its existing context.
   automatically, and the session may act on GitHub through its own tools.
 - Comment sender gates still apply before delivery. When several sessions are
   bound to the same PR, the most recently updated non-archived session wins;
-  channel-owned sessions are never candidates.
+  channel-owned sessions are never candidates. With `boundSessionActions`
+  configured, routing becomes role-aware instead: one winner per role,
+  fan-out across roles (see below).
 - When no bound session exists (or it cannot be restored), **comment** events
   fall back to the normal channel path and its public-reply contract — on a
   complete binding snapshot; while the snapshot is partial or its refresh is
@@ -260,6 +263,78 @@ status (404/410/451) only skips that PR. A failing Checks endpoint never
 suppresses the other three detections: their data comes from `pulls.get`,
 and the last known CI aggregate stands until a fetch succeeds again.
 Transitions are persisted before delivery, so restarts do not re-fire them.
+
+### Role-Aware Action Templates
+
+With `boundSessionActions` configured, bound delivery becomes declarative and
+role-aware: the operator states what each kind of session should do when an
+event arrives, instead of relying on the session's own context to guess.
+
+**Roles.** A binding can carry a role — `review`, `verify`, or `fix`. The
+prompt-route backfill assigns `review` when a session runs `/review <N>` and
+`verify` for `/verify-pr <N>`; `fix` is bound explicitly through the session
+metadata API (`PATCH /session/:id/metadata` with `pr: { number, url, role:
+"fix" }`; `role: null` clears it, an omitted role preserves it). Bindings
+without a role are _untyped_. A later command re-offer never overwrites an
+existing role.
+
+**Keys and resolution.** Each key is an event class, optionally prefixed with
+a role: `watch:head_change`, `comment`, `review:watch:head_change`,
+`verify:default`, or the catch-all `default`. The `watch:` prefix matters:
+`state_change` is both a watch transition and a notification reason — bare
+`state_change` matches the notification, `watch:state_change` the transition.
+For each role group the chain resolves `<role>:<event>` → `<role>:comment`
+(for comment events) → `<role>:default` → `<event>` → `comment` → `default`;
+**no match skips that role for the event** — the map is a per-role
+subscription. Comment events carry the thread's notification reason
+(`mention`, `subscribed`, `author`, ...), so `fix:comment` catches a comment
+delivered under any of those reasons, while a reason-specific key such as
+`fix:mention` still wins when configured. Untyped bindings resolve only the
+bare chain.
+
+**Routing.** One winner per role (the most recently updated follower within
+the group), fan-out across matched roles — at most four deliveries per event
+(review, verify, fix, untyped), never one per session. Each delivery is its
+own durable task: a queue-full role defers independently without blocking
+the others, and a lost session falls back only within its own role. Once any
+role has accepted an event privately, it is never also answered publicly —
+a durable delivery history enforces this even if every follower later
+disappears. Comment events fall back to the channel path only when no role
+has a live follower on a complete snapshot and no role ever accepted the
+event.
+
+**Templates.** Values are operator instruction templates with `%repo%`,
+`%pr%`, `%url%`, `%title%`, `%event%`, `%sender%`, and `%role%` variables;
+`%%` renders a literal `%`, and an unknown `%foo%` stays literal so typos are
+visible. Substituted GitHub values are sanitized and capped at 200 code
+points with a visible marker. The rendered instruction appears in a labeled
+`[Operator instruction — trusted, from this channel's configuration]` block;
+the untrusted-data warning explicitly covers the substituted values. Example
+for a review / verify / fix split across three workspaces:
+
+```json
+{
+  "deliverToBoundSessions": true,
+  "prWatchEvents": ["head_change", "ci_failure", "merge_conflict"],
+  "boundSessionActions": {
+    "review:watch:head_change": "The PR head advanced. Run /review %pr% --resume and report the delta since your last review.",
+    "verify:watch:head_change": "The PR head advanced. Run /verify-pr %pr% --publish.",
+    "fix:watch:ci_failure": "CI failed on the current head. Diagnose the failed checks named below and fix them.",
+    "fix:watch:merge_conflict": "The PR has a merge conflict. Resolve it.",
+    "fix:comment": "New review comments arrived. Address the actionable ones."
+  }
+}
+```
+
+One head advance then produces two prompt turns (review + verify); the fix
+session is only disturbed by CI failures, conflicts, and comments.
+
+**Boundaries.** A template is an instruction, not an execution guarantee:
+the session's model keeps discretion and its approval mode governs actions.
+A template containing `--publish` is the operator's explicit publication
+consent for the rounds it triggers — configure it deliberately. With
+`boundSessionActions` absent, delivery keeps the legacy single-winner
+behavior and the generic prompt, byte for byte.
 
 ## Known Limitations
 
