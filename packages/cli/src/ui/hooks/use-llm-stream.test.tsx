@@ -68,7 +68,10 @@ import {
 import type { DirectUserAdmission, QueuedGoalTurn } from './useMessageQueue.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
-import { framePasteExpansion } from '../utils/paste-placeholders.js';
+import {
+  framePasteExpansion,
+  REWRITE_CHANGED_PASTE,
+} from '../utils/paste-placeholders.js';
 
 // --- MOCKS ---
 const pendingToolPersistence = vi.hoisted(() => ({
@@ -14526,6 +14529,49 @@ describe('useLlmStream', () => {
             composed(`look ${placeholder}`),
           );
           expect(userRows()[0].text).toBe(`look ${placeholder}`);
+        });
+
+        it('refuses a rewrite that changed a paste and hands the prompt back', async () => {
+          const { submitPrompt } = installModTurn();
+          submitPrompt.mockImplementationOnce(async (text) => ({
+            text: text.replace('line2', '[redacted]'),
+          }));
+          const onPromptReturned = vi.fn();
+          const { result } = renderTestHook(
+            [],
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            false,
+            onPromptReturned,
+          );
+
+          await act(async () => {
+            await result.current.submitQuery(
+              composed(`look ${placeholder}`),
+              SendMessageType.UserQuery,
+              undefined,
+              {
+                submittedPrompt: `look ${placeholder}`,
+                displayText: `look ${placeholder}`,
+                pasteExpansions: pastes,
+              },
+            );
+          });
+
+          expect(handleAtCommandSpy).not.toHaveBeenCalled();
+          expect(mockSendMessageStream).not.toHaveBeenCalled();
+          expect(userRows()).toEqual([]);
+          expect(mockAddItem).toHaveBeenCalledWith(
+            { type: MessageType.ERROR, text: REWRITE_CHANGED_PASTE },
+            expect.any(Number),
+          );
+          expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+            `look ${placeholder}`,
+            pastes,
+          );
         });
 
         it('hands back a dropped prompt with its pastes collapsed', async () => {
