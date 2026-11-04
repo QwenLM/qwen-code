@@ -4465,6 +4465,11 @@ const EN: Messages = {
   'channels.editor.section.access': 'Access control',
   'channels.editor.section.access.description':
     'Configure direct-message and group access separately.',
+  'channels.editor.section.advanced': 'Advanced settings',
+  'channels.editor.section.advanced.description':
+    'Rarely changed tuning for connection, routing, and session behavior.',
+  'channels.editor.section.advanced.configuredCount': (v) =>
+    `${v?.count ?? 0} configured`,
   'channels.editor.session.isolation': 'Conversation isolation',
   'channels.editor.instanceName': 'Instance name',
   'channels.editor.instanceNamePlaceholder': 'e.g. release-bot',
@@ -8956,6 +8961,11 @@ const ZH: Messages = {
   'channels.editor.section.access': '访问控制',
   'channels.editor.section.access.description':
     '分别设置谁可以私聊，以及哪些群聊可以使用此频道。',
+  'channels.editor.section.advanced': '高级设置',
+  'channels.editor.section.advanced.description':
+    '连接、路由与会话行为的少改调优项。',
+  'channels.editor.section.advanced.configuredCount': (v) =>
+    `已配置 ${v?.count ?? 0} 项`,
   'channels.editor.session.isolation': '会话隔离方式',
   'channels.editor.instanceName': '实例名称',
   'channels.editor.instanceNamePlaceholder': '例如 release-bot',

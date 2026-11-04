@@ -96,6 +96,36 @@ export function toList(value: string): string[] {
     .filter(Boolean);
 }
 
+/**
+ * The one record rule, shared by validation, the save path, and the editor's
+ * visibility/auto-open predicates: a JSON record holding at least one
+ * non-empty string value. Returns the filtered record so the save path and
+ * the boolean readers cannot drift apart.
+ */
+export function parseRouteRecord(
+  value: string,
+): Record<string, string> | undefined {
+  if (!value.trim()) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!isRecord(parsed)) return undefined;
+    const filtered = Object.fromEntries(
+      Object.entries(parsed).filter(
+        ([, entry]) => typeof entry === 'string' && entry.trim(),
+      ),
+    );
+    return Object.keys(filtered).length > 0
+      ? (filtered as Record<string, string>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function recordHasRoute(value: string): boolean {
+  return parseRouteRecord(value) !== undefined;
+}
+
 export function hasDescriptorPrivatePolicy(
   descriptor: DaemonChannelTypeDescriptor,
 ): boolean {
@@ -325,16 +355,7 @@ function isMissingField(
   }
   const value = draft.values[field.key];
   if (field.kind === 'record') {
-    if (typeof value !== 'string' || !value.trim()) return true;
-    try {
-      const parsed: unknown = JSON.parse(value);
-      if (!isRecord(parsed)) return true;
-      return Object.values(parsed).every(
-        (v) => typeof v !== 'string' || !v.trim(),
-      );
-    } catch {
-      return true;
-    }
+    return typeof value !== 'string' || !recordHasRoute(value);
   }
   return typeof value === 'string' ? value.trim().length === 0 : false;
 }
@@ -589,23 +610,10 @@ function assignField(
       .map((s) => s.trim())
       .filter(Boolean);
   } else if (field.kind === 'record') {
-    try {
-      const parsed: unknown = JSON.parse(value);
-      if (!isRecord(parsed)) {
-        delete config[field.key];
-        return;
-      }
-      const filtered = Object.fromEntries(
-        Object.entries(parsed).filter(
-          ([, v]) => typeof v === 'string' && v.trim(),
-        ),
-      );
-      if (Object.keys(filtered).length > 0) {
-        config[field.key] = filtered;
-      } else {
-        delete config[field.key];
-      }
-    } catch {
+    const filtered = parseRouteRecord(value);
+    if (filtered) {
+      config[field.key] = filtered;
+    } else {
       delete config[field.key];
     }
   } else {
