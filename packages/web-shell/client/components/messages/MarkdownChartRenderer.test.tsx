@@ -771,6 +771,13 @@ describe('Web Shell markdown-chart integration', () => {
     const alert = container.querySelector('[role="alert"]');
     expect(alert?.textContent).toBe('ECharts failed to render the chart');
     expect(alert?.closest('[hidden]')).not.toBeNull();
+    expect(visibleTable(container)).toEqual({
+      headers: ['day', 'orders'],
+      rows: [
+        ['Mon', '120'],
+        ['Tue', '200'],
+      ],
+    });
   });
 
   it('localizes graph data-view tabs and column headers', async () => {
@@ -864,6 +871,8 @@ describe('Web Shell markdown-chart integration', () => {
     expect(visibleTable(container)).toEqual({
       headers: ['深度', '路径', '名称', '数值', '子树合计（派生）', 'ID 路径'],
       rows: [
+        // The dependency stringifies a missing own value as the literal
+        // "null" (upstream `node.value ?? null`); this cell is not ours.
         ['0', 'Company', 'Company', 'null', '15', 'company'],
         ['1', 'Company / Ops', 'Ops', '5', '5', 'company / ops'],
         ['1', 'Company / Sales', 'Sales', '10', '10', 'company / sales'],
