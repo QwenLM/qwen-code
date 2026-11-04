@@ -351,6 +351,63 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
 
 When pointing an entry at a hosted OpenAI-compatible gateway, set `baseUrl` to the API's `/v1` root (for example, `https://gateway.example.com/v1`) rather than the full `/v1/chat/completions` path — the SDK appends the request path itself.
 
+### Oracle Cloud Infrastructure (OCI) Generative AI
+
+OCI Generative AI exposes an OpenAI-compatible endpoint per region and authenticates with an OCI Generative AI API key sent as a Bearer token, so it works with the `openai` protocol and no extra code. Model ids carry the publisher as a prefix (`openai.gpt-5.5`, `xai.grok-4.3`, `openai.gpt-oss-120b`).
+
+Two base URLs matter:
+
+- Chat Completions: `https://inference.generativeai.<region>.oci.oraclecloud.com/openai/v1`
+- Responses: `https://inference.generativeai.<region>.oci.oraclecloud.com/v1` with `wireApi: "responses"`
+
+Regions that serve the OpenAI-compatible endpoints include `us-chicago-1`, `us-ashburn-1`, `us-phoenix-1`, `eu-frankfurt-1` and `uk-london-1`; see [OCI OpenAI-Compatible Endpoints](https://docs.oracle.com/en-us/iaas/Content/generative-ai/openai-compatible-api.htm) and the [regions page](https://docs.oracle.com/en-us/iaas/Content/generative-ai/agentic-regions.htm) for the current list and models.
+
+```json
+{
+  "env": {
+    "OCI_GENAI_API_KEY": "<your OCI Generative AI API key>"
+  },
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "xai.grok-4.3",
+        "name": "Grok 4.3 (OCI)",
+        "envKey": "OCI_GENAI_API_KEY",
+        "baseUrl": "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com/openai/v1",
+        "generationConfig": { "contextWindowSize": 1000000 }
+      },
+      {
+        "id": "openai.gpt-oss-120b",
+        "name": "gpt-oss-120b (OCI)",
+        "envKey": "OCI_GENAI_API_KEY",
+        "baseUrl": "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com/openai/v1",
+        "generationConfig": { "contextWindowSize": 131072 }
+      },
+      {
+        "id": "openai.gpt-5.5",
+        "name": "GPT-5.5 (OCI, Responses)",
+        "wireApi": "responses",
+        "envKey": "OCI_GENAI_API_KEY",
+        "baseUrl": "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com/v1",
+        "generationConfig": { "contextWindowSize": 400000 }
+      }
+    ]
+  },
+  "security": { "auth": { "selectedType": "openai" } },
+  "model": { "name": "openai.gpt-5.5" }
+}
+```
+
+Things to know about this endpoint:
+
+- **Pin `contextWindowSize`.** The dotted publisher prefix is not stripped by the built-in model lookup, so an entry without it gets the generic defaults.
+- **No `GET /models`.** Model discovery is not available; list the models you want explicitly.
+- **GPT-5 and o-series on Chat Completions need `max_completion_tokens`.** Those families reject `max_tokens`. Until that key is chosen automatically, either use the Responses wire as above or add `"samplingParams": { "max_completion_tokens": 32000 }` to the entry's `generationConfig`.
+- **gpt-5.6 and GPT-6 families with tools: use the Responses wire.** On Chat Completions these models refuse function tools unless `reasoning_effort` is `none`, and some of them (for example `gpt-6-astra`) do not accept `none` at all. On Responses they work without any extra configuration.
+- **gpt-oss stays on Chat Completions.** Its Responses route rejects function tools.
+- **Error bodies arrive compressed.** A rejected request can show as `400 status code (no body)`; the message is readable with `Accept-Encoding: identity` in a direct call.
+- **Imported models on a dedicated AI cluster** (for example Qwen models imported from Hugging Face) are addressed by the endpoint OCID as the model id on the Responses wire. Treat that as an advanced, per-tenancy setup.
+
 ### OpenAI Responses API (`openai-responses`)
 
 Use `openai` with `wireApi: "responses"` to target OpenAI's `/v1/responses` endpoint. When the endpoint returns encrypted reasoning with visible thought text, it replays prior-turn reasoning across turns and `--resume` via `reasoning.encrypted_content`. Compatible endpoints that stream `response.reasoning_text.delta` also display their reasoning, but endpoints without `encrypted_content` cannot replay the opaque reasoning state. Use `reasoning.effort` (not `extra_body.enable_thinking`, which the Chat Completions wires use) to control reasoning intensity.
