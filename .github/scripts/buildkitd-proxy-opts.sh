@@ -57,7 +57,12 @@ fi
 # would prove reachability too. Anything else (000 timeout, 5xx) leaves
 # buildkitd on its default direct route rather than aiming it at a proxy
 # that cannot carry the traffic.
-code="$(curl -s -o /dev/null --max-time 5 -x "${proxy_url}" \
+# `--noproxy ''` is load-bearing: curl consults the no-proxy list after
+# picking a proxy, so an inherited NO_PROXY/no_proxy matching the registry
+# (including `*`) would send this probe direct and let a dead proxy pass as
+# healthy. Clearing the list for this one invocation is the only lever here;
+# a NO_PROXY driver-opt is not an option (see the note below).
+code="$(curl -s -o /dev/null --max-time 5 --noproxy '' -x "${proxy_url}" \
   -w '%{http_code}' 'https://registry-1.docker.io/v2/' 2> /dev/null || true)"
 case "${code}" in
   200 | 401) ;;

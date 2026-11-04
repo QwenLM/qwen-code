@@ -843,6 +843,13 @@ describe.skipIf(process.platform === 'win32')(
       // caused the incident, through the exact proxy it will inject.
       expect(result.calls).toContain('-x http://127.0.0.1:7890');
       expect(result.calls).toContain('https://registry-1.docker.io/v2/');
+      // Route pin, not text pin: an inherited NO_PROXY/no_proxy matching the
+      // registry would make curl dial direct while still printing 401, so a
+      // dead proxy would pass. The exclusion list must be cleared explicitly.
+      expect(result.calls).toMatch(/--noproxy\s+-x http:\/\/127\.0\.0\.1:7890/);
+      // Without the timeout a proxy that accepts and never answers hangs the
+      // detect step, which carries no timeout-minutes of its own.
+      expect(result.calls).toContain('--max-time 5');
       // The measurement reaches the step log, or the next broken build is
       // another manual SSH investigation (#16218 precedent).
       expect(result.err).toContain('buildkitd proxy:');
