@@ -18,7 +18,7 @@ The second poller exists only where an operator configured a GitHub channel with
 - Sidecar schema (`packages/core/src/services/session-pr-service.ts`, `SessionPr`): `number`, `url`, `createdAt`, `state?`, `source?`, `issues?`. No head SHA, CI rollup or mergeability is persisted, so a refresh cannot see a transition.
 - The refresh's GitHub path fetches `gh pr list --state all --limit 500` in **slim** mode (`number,url,headRefName,state`) because the CI rollup field makes large `--state all` queries hit GitHub GraphQL server timeouts (504). `GH_PR_LIST_FIELDS` (non-slim) already carries `statusCheckRollup`, `isDraft`, `reviewDecision`, `updatedAt`, but not `headRefOid` or `mergeable`.
 - The daemon already injects prompts into sessions it does not own the keyboard of: the channel bound relay (`POST /session/:id/prompt` with the `qwen.channel.prompt` / `qwen.daemon.channelBoundRelay` markers and an `idempotencyKey`), and it restores dormant sessions through the `/session/:id/resume` path. Both are in-process code paths the refresh can call without HTTP.
-- The channel watch's user-facing semantics are documented in `docs/users/features/channels/github.md` and were merged on 2026-11-04 (#16117); no tagged release contains them (v0.26.6 is from 2026-11-02).
+- The channel watch's user-facing semantics are documented in `docs/users/features/channels/github.md` and were merged on 2026-11-03 (#16117) and shipped in v0.26.7 (2026-11-04), whose release notes name the feature; `prWatchEvents` is therefore a released, operator-configurable setting.
 
 ## Goals
 
@@ -86,11 +86,11 @@ Detection and the new snapshot are persisted in one sidecar write with the trans
 
 ### 6. Configuration
 
-A daemon-level setting read the way the refresh interval is: `sessionPrWatch: { events: ['ci_failure', 'merge_conflict', 'head_change', 'state_change'], wakeDormant?: boolean }` with `QWEN_SESSION_PR_WATCH_EVENTS` as the environment override. Default: no events (off). Latency is the refresh interval (5 minutes by default, 1-minute floor).
+A daemon-level setting read the way the refresh interval is: `sessionPrWatch: { events: ['ci_failure', 'merge_conflict', 'head_change', 'state_change'], wakeDormant?: boolean }` with `QWEN_SESSION_PR_WATCH_EVENTS` as the environment override. Default: no events (off). Latency is the refresh interval (5 minutes by default; values below one minute fall back to the default and `0` disables the sweep).
 
 ### 7. Channel migration
 
-The GitHub channel's `deliverToBoundSessions` is unchanged. `prWatchEvents`, the watch pass, the watch state file, its task-store branches, the 30-PR cap and the CI re-check intervals are removed from the adapter; `connect()` rejects a configuration that still sets `prWatchEvents`, naming `sessionPrWatch`, and the Web Shell descriptor drops the field. Because no tagged release contains the channel watch, there is no deprecation window. Two PRs: A adds the daemon observation, delivery and configuration; B removes the adapter watch and updates the channel docs, landing after A.
+The GitHub channel's `deliverToBoundSessions` is unchanged. `prWatchEvents`, the watch pass, the watch state file, its task-store branches, the 30-PR cap and the CI re-check intervals are removed from the adapter; `connect()` keeps accepting `prWatchEvents` for one minor release as a deprecation window: it logs exactly one warning naming `sessionPrWatch`, ignores the field (no watch pass runs), and the Web Shell descriptor marks it deprecated; the first minor release after PR B rejects it at `connect()` with the same message. The setting shipped in v0.26.7, and a shipped, release-noted option is not rejected on sight even though it is opt-in behind `deliverToBoundSessions` and adoption is plausibly near zero. Two PRs: A adds the daemon observation, delivery and configuration; B removes the adapter watch and updates the channel docs, landing after A.
 
 ## Key decisions
 
@@ -99,7 +99,7 @@ The GitHub channel's `deliverToBoundSessions` is unchanged. `prWatchEvents`, the
 3. **Same selection and transition rules as the channel watch**, so operators moving over see the same events.
 4. **The sidecar is the queue.** No new state file: the snapshot and the pending transitions ride the existing serialized, cross-process-locked sidecar write.
 5. **One CI definition** (core's rollup), accepting that `cancelled` and `stale` count as failing until the open question below is settled.
-6. **No deprecation window** for `prWatchEvents`: the feature is one day old and unreleased.
+6. **One-release deprecation window** for `prWatchEvents`: v0.26.7 shipped it (#16117, released 2026-11-04) and names it in the release notes, so it is not rejected on sight; adoption is plausibly near zero (hours old, opt-in behind `deliverToBoundSessions`), so one minor release of warn-and-ignore is enough before `connect()` rejects it.
 7. **Off by default** in this change; turning it on by default is a product decision for later.
 
 ## Files affected
@@ -111,13 +111,13 @@ The GitHub channel's `deliverToBoundSessions` is unchanged. `prWatchEvents`, the
 | daemon         | `packages/cli/src/serve/server/session-pr-refresh.ts`                                            | per-PR observation (cap 30, rotating), transition detection, delivery through prompt admission and resume |
 | daemon         | `packages/cli/src/serve/routes/session.ts`, `packages/acp-bridge/src/session-control-plane.ts`   | `qwen.daemon.prStateEvent` classification in prompt admission                                             |
 | config         | settings schema + `packages/cli/src/serve/server.ts`                                             | `sessionPrWatch` / `QWEN_SESSION_PR_WATCH_EVENTS`                                                         |
-| channel (PR B) | `packages/channels/github/src/GithubAdapter.ts`, `index.ts`, Web Shell descriptor                | remove the watch pass, state file, `prWatchEvents`                                                        |
+| channel (PR B) | `packages/channels/github/src/GithubAdapter.ts`, `index.ts`, Web Shell descriptor                | remove the watch pass and state file; deprecate `prWatchEvents` (warn-and-ignore)                         |
 | docs           | `docs/users/features/channels/github.md`, a new user page for `sessionPrWatch`, both design docs | document the move                                                                                         |
 | tests          | collocated `.test.ts` for each changed file                                                      | see validation                                                                                            |
 
 ## Constraints and risks
 
-- **Latency** is the refresh interval (5 minutes by default) instead of the channel's 60-second poll. Operators who need faster signal lower `QWEN_SESSION_PR_REFRESH_MINUTES` (floor 1).
+- **Latency** is the refresh interval (5 minutes by default) instead of the channel's 60-second poll. Operators who need faster signal lower `QWEN_SESSION_PR_REFRESH_MINUTES` (values below 1 fall back to the default; `0` disables the sweep).
 - **Credential.** Requires `gh` authenticated on the daemon host, which the refresh and the PR sidebar already require. Workspaces without it keep today's behaviour (no state refresh, no events).
 - **API budget.** At most 30 `gh pr view` calls per workspace per sweep (360 per hour at the default interval) on top of the existing listing; well under the channel watch's budget.
 - **Untrusted content into an interactive session.** The event prompt carries the PR title and check names as data, marked untrusted, the same contract as the channel's bound prompt; the session's approval mode governs its actions.
@@ -133,7 +133,7 @@ The GitHub channel's `deliverToBoundSessions` is unchanged. `prWatchEvents`, the
 
 1. With `sessionPrWatch.events` set, a bound session receives exactly one prompt per transition instance for CI failure, merge conflict, head change and merge/close, with the same recurrence semantics as the channel watch, without any GitHub channel configured.
 2. A daemon restart between detection and delivery delivers the transition once; a restart after delivery re-delivers at most once.
-3. The GitHub channel no longer issues any PR-state API call; a configuration with `prWatchEvents` is rejected at `connect()` with a message naming `sessionPrWatch`.
+3. The GitHub channel no longer issues any PR-state API call; a configuration with `prWatchEvents` still connects, logs exactly one deprecation warning naming `sessionPrWatch`, and runs no watch pass; from the first minor release after PR B it is rejected at `connect()` with the same message.
 4. With the setting unset, the refresh's behaviour and API call volume are unchanged.
 5. Two trusted workspaces for one repository, each with a session bound to the same PR, receive one delivery per transition, to the most recently active of those sessions; and a force-push back to a head whose CI failure already fired does not fire `ci_failure` again while that head is within the PR's 16-head history.
 

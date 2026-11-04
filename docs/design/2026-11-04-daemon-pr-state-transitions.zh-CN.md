@@ -18,7 +18,7 @@ daemon 对每个会话绑定的 PR 状态跟踪了两遍，用两套凭据、两
 - sidecar 结构（`packages/core/src/services/session-pr-service.ts` 的 `SessionPr`）：`number`、`url`、`createdAt`、`state?`、`source?`、`issues?`。不持久化 head SHA、CI rollup 或可合并性，所以刷新看不到任何转换。
 - 刷新的 GitHub 路径以 **slim** 模式（`number,url,headRefName,state`）跑 `gh pr list --state all --limit 500`，因为 CI rollup 字段会让大的 `--state all` 查询撞上 GitHub GraphQL 服务端超时（504）。非 slim 的 `GH_PR_LIST_FIELDS` 已含 `statusCheckRollup`、`isDraft`、`reviewDecision`、`updatedAt`，但没有 `headRefOid` 或 `mergeable`。
 - daemon 已经会向自己不握键盘的会话注入 prompt：channel 的绑定中继（带 `qwen.channel.prompt` / `qwen.daemon.channelBoundRelay` 标记与 `idempotencyKey` 的 `POST /session/:id/prompt`），并经 `/session/:id/resume` 路径恢复休眠会话。两者都是刷新可以在进程内直接调用的代码路径，无需 HTTP。
-- channel 监视面向用户的语义记录在 `docs/users/features/channels/github.md`，于 2026-11-04 合入（#16117）；没有任何已打标签的发布包含它（v0.26.6 发布于 2026-11-02）。
+- channel 监视面向用户的语义记录在 `docs/users/features/channels/github.md`，于 2026-11-03 合入（#16117）并随 v0.26.7（2026-11-04）发布，发布说明点名了该功能；`prWatchEvents` 因此是已发布、运维者可配置的设置。
 
 ## 目标
 
@@ -86,11 +86,11 @@ watch?: {
 
 ### 6. 配置
 
-一个按刷新间隔同样方式读取的 daemon 级设置：`sessionPrWatch: { events: ['ci_failure', 'merge_conflict', 'head_change', 'state_change'], wakeDormant?: boolean }`，环境变量 `QWEN_SESSION_PR_WATCH_EVENTS` 可覆盖。默认：无事件（关闭）。延迟即刷新间隔（默认 5 分钟，下限 1 分钟）。
+一个按刷新间隔同样方式读取的 daemon 级设置：`sessionPrWatch: { events: ['ci_failure', 'merge_conflict', 'head_change', 'state_change'], wakeDormant?: boolean }`，环境变量 `QWEN_SESSION_PR_WATCH_EVENTS` 可覆盖。默认：无事件（关闭）。延迟即刷新间隔（默认 5 分钟；小于 1 分钟回退到默认值，`0` 关闭扫描）。
 
 ### 7. channel 迁移
 
-GitHub channel 的 `deliverToBoundSessions` 不变。`prWatchEvents`、监视通道、监视状态文件、任务存储中的监视分支、30 个 PR 的上限与 CI 复查间隔从适配器中移除；`connect()` 拒绝仍设置 `prWatchEvents` 的配置并点名 `sessionPrWatch`，Web Shell 描述符去掉该字段。由于没有已打标签的发布包含 channel 监视，不设弃用窗口。两个 PR：A 增加 daemon 的观察、投递与配置；B 移除适配器监视并更新 channel 文档，在 A 之后合入。
+GitHub channel 的 `deliverToBoundSessions` 不变。`prWatchEvents`、监视通道、监视状态文件、任务存储中的监视分支、30 个 PR 的上限与 CI 复查间隔从适配器中移除；`connect()` 在一个 minor 版本内继续接受 `prWatchEvents` 作为弃用窗口：只记一条点名 `sessionPrWatch` 的告警、忽略该字段（不再跑监视通道），Web Shell 描述符将其标为已弃用；PR B 之后的第一个 minor 版本起在 `connect()` 以同一条信息拒绝它。该设置已随 v0.26.7 发布，已发布且写进发布说明的选项不能见到就拒绝，即便它需在 `deliverToBoundSessions` 之后可选开启、实际采用量大概率接近于零。两个 PR：A 增加 daemon 的观察、投递与配置；B 移除适配器监视并更新 channel 文档，在 A 之后合入。
 
 ## 关键决策
 
@@ -99,7 +99,7 @@ GitHub channel 的 `deliverToBoundSessions` 不变。`prWatchEvents`、监视通
 3. **与 channel 监视相同的选择与转换规则**，迁移过来的运维者看到的事件相同。
 4. **sidecar 就是队列。** 不新增状态文件：快照与待投递转换搭乘已有的串行化、跨进程加锁的 sidecar 写入。
 5. **单一 CI 定义**（core 的 rollup），在下面的开放问题定案前接受 `cancelled` 与 `stale` 算作失败。
-6. **`prWatchEvents` 不设弃用窗口**：该功能只有一天历史且未发布。
+6. **`prWatchEvents` 设一个版本的弃用窗口**：v0.26.7 已发布它（#16117，2026-11-04 发布）并在发布说明中点名，因此不能见到就拒绝；采用量大概率接近于零（只有几小时、需在 `deliverToBoundSessions` 之后可选开启），所以一个 minor 版本的告警并忽略足够，之后再由 `connect()` 拒绝。
 7. **本次改动默认关闭**；默认开启是之后的产品决策。
 
 ## 涉及文件
@@ -111,13 +111,13 @@ GitHub channel 的 `deliverToBoundSessions` 不变。`prWatchEvents`、监视通
 | daemon          | `packages/cli/src/serve/server/session-pr-refresh.ts`                                          | 逐 PR 观察（上限 30，旋转）、转换检测、经 prompt 准入与恢复路径投递                |
 | daemon          | `packages/cli/src/serve/routes/session.ts`、`packages/acp-bridge/src/session-control-plane.ts` | prompt 准入中的 `qwen.daemon.prStateEvent` 分类                                    |
 | 配置            | settings schema + `packages/cli/src/serve/server.ts`                                           | `sessionPrWatch` / `QWEN_SESSION_PR_WATCH_EVENTS`                                  |
-| channel（PR B） | `packages/channels/github/src/GithubAdapter.ts`、`index.ts`、Web Shell 描述符                  | 移除监视通道、状态文件、`prWatchEvents`                                            |
+| channel（PR B） | `packages/channels/github/src/GithubAdapter.ts`、`index.ts`、Web Shell 描述符                  | 移除监视通道与状态文件；弃用 `prWatchEvents`（告警并忽略）                         |
 | 文档            | `docs/users/features/channels/github.md`、新的 `sessionPrWatch` 用户页、两份设计文档           | 记录这次迁移                                                                       |
 | 测试            | 每个改动文件并置的 `.test.ts`                                                                  | 见验证                                                                             |
 
 ## 约束与风险
 
-- **延迟**为刷新间隔（默认 5 分钟），而非 channel 的 60 秒轮询。需要更快信号的运维者调低 `QWEN_SESSION_PR_REFRESH_MINUTES`（下限 1）。
+- **延迟**为刷新间隔（默认 5 分钟），而非 channel 的 60 秒轮询。需要更快信号的运维者调低 `QWEN_SESSION_PR_REFRESH_MINUTES`（小于 1 回退到默认值；`0` 关闭扫描）。
 - **凭据。** 需要 daemon 宿主上已认证的 `gh`，这是刷新与 PR 侧栏已有的要求。没有它的 workspace 保持今天的行为（不刷新状态，也无事件）。
 - **API 预算。** 在现有列表之外，每 workspace 每次扫描最多 30 次 `gh pr view`（默认间隔下每小时 360 次）；远低于 channel 监视的预算。
 - **不可信内容进入交互式会话。** 事件 prompt 把 PR 标题与 check 名称作为数据携带并标记为不可信，与 channel 绑定 prompt 的契约相同；会话自身的审批模式决定其行为。
@@ -133,7 +133,7 @@ GitHub channel 的 `deliverToBoundSessions` 不变。`prWatchEvents`、监视通
 
 1. 设置 `sessionPrWatch.events` 后，绑定会话对 CI 失败、合并冲突、head 变更、合并/关闭的每个转换实例恰好收到一条 prompt，递归语义与 channel 监视相同，且无需配置任何 GitHub channel。
 2. 检测与投递之间的 daemon 重启投递该转换一次；投递之后的重启最多重新投递一次。
-3. GitHub channel 不再发出任何 PR 状态 API 调用；带 `prWatchEvents` 的配置在 `connect()` 时被拒绝，并点名 `sessionPrWatch`。
+3. GitHub channel 不再发出任何 PR 状态 API 调用；带 `prWatchEvents` 的配置仍能连接，只记一条点名 `sessionPrWatch` 的弃用告警且不跑监视通道；PR B 之后的第一个 minor 版本起在 `connect()` 以同一条信息拒绝。
 4. 未设置该项时，刷新的行为与 API 调用量不变。
 5. 同一仓库的两个受信 workspace 各有一个会话绑定同一个 PR 时，每个转换只投递一次，给其中最近活跃的会话；force-push 回到一个 CI 失败已触发过的 head 时，只要该 head 仍在该 PR 的 16 个 head 历史内，`ci_failure` 不再触发。
 
