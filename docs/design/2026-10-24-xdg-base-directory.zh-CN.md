@@ -17,9 +17,11 @@ Qwen Code 在所有平台上都把设置、凭据和其他全局状态保存在 
    - 如果 `~/.qwen` 存在，且 XDG 目录中包含标记文件 `.qwen-global-dir`，使用 XDG 目录。
    - 否则使用 `~/.qwen`。
 
+完全没有主目录时，与之前一样使用 `<tmpdir>/.qwen`。
+
 ## 设计决策
 
-- 两个位置都存在时，由标记文件而不是目录是否存在来决定。只要 CLI 把 XDG 目录用作默认全局目录且标记缺失，就会向其中写入 `.qwen-global-dir`。每个入口都在读取主目录 `.env` 之后立即这样做：主 CLI 在解析参数之前写入，因此子命令、bare 模式、关闭使用统计以及沙箱运行的宿主一侧都被覆盖；`mcp` 和 `memory` 快速路径以及 `qwen serve` 也会写入。设置了 `QWEN_HOME` 时从不写入标记，因此某一次运行把 `QWEN_HOME` 指向 `~/.config/qwen`，并不会让该目录成为默认目录。沙箱子进程总是在设置了 `QWEN_HOME` 的情况下运行。这个文件名足够特殊，无关程序的 `~/.config/qwen` 不会包含它。
+- 两个位置都存在时，由标记文件而不是目录是否存在来决定。只要 CLI 把 XDG 目录用作默认全局目录且标记缺失，就会向其中写入 `.qwen-global-dir`。每个入口都在读取主目录 `.env` 之后立即这样做：主 CLI 在解析参数之前写入，因此子命令、bare 模式、关闭使用统计以及沙箱运行的宿主一侧都被覆盖；`mcp` 和 `memory` 快速路径以及 `qwen serve` 也会写入。VS Code 插件的设置写入逻辑在写入 `settings.json` 之后也会写入标记，因为这可能是新安装保存的第一份内容。该目录按 XDG 规范的要求以 0700 权限创建。设置了 `QWEN_HOME` 时从不写入标记，因此某一次运行把 `QWEN_HOME` 指向 `~/.config/qwen`，并不会让该目录成为默认目录。沙箱子进程总是在设置了 `QWEN_HOME` 的情况下运行。这个文件名足够特殊，无关程序的 `~/.config/qwen` 不会包含它。
 - 所有各自解析默认目录的组件都采用同一规则，就像它们已经共享 `QWEN_HOME` 规则一样：
   - core 的 `Storage`；
   - CLI 的轻量设置解析和 serve 的运行时目录回退；
@@ -30,13 +32,14 @@ Qwen Code 在所有平台上都把设置、凭据和其他全局状态保存在 
   - 内置 `/stuck` skill 的 shell 前置脚本。
 - `XDG_CONFIG_HOME`、`HOME` 和 `USERPROFILE` 只从 Qwen Code 启动时的环境读取。`QWEN_HOME` 还可以来自全局目录的 `.env` 和 `~/.env`，它们在解析全局目录之前读取。之后加载的任何 `.env` 文件以及 `settings.json` 中的 `env` 部分都不能设置这四个变量，包括 XDG 安装上遗留的 `~/.qwen/.env`，因为之后再出现的值会把设置和凭据拆分到两个目录。
 - 原本把全局目录的父目录当作主目录的代码，现在直接使用主目录，因此 `~/.env` 仍然是主目录级的 `.env`。
-- Auto 模式的自我修改保护覆盖解析后的全局目录，因此 `~/.config/qwen/settings.json` 及其 `hooks/`、`skills/` 与 `~/.qwen/...` 一样受到路径模式的保护。写成 `~/...` 形式的 `QWEN_HOME` 也同样适用。在 Linux 上，即使正在使用 `~/.qwen`，它也会保护 XDG 目录及其标记，因为在那里写入标记会让 XDG 目录在下一次启动时成为全局目录。
+- Auto 模式的自我修改保护覆盖解析后的全局目录，因此 `~/.config/qwen/settings.json` 及其 `hooks/`、`skills/` 与 `~/.qwen/...` 一样受到路径模式的保护。写成 `~/...` 形式的 `QWEN_HOME` 也同样适用。在 Linux 上，即使正在使用 `~/.qwen`，它也会保护 XDG 目录及其标记，因为在那里写入标记会让 XDG 目录在下一次启动时成为全局目录。保护逻辑无法解析的重定向目标（例如 `${XDG_CONFIG_HOME:-$HOME/.config}/qwen/settings.json`）会进入审查。
 - 需手动开启的诊断功能（启动与 CPU profile、堆快照）写入全局目录，因此在 XDG 安装上不会再创建 `~/.qwen`。
+- 用户输出样式和主目录级 `loop.md` 必须解析到主目录之内；当 `QWEN_HOME` 或位于主目录之外的 `XDG_CONFIG_HOME` 把全局目录放到别处时，则须解析到全局目录之内，因此它们在那里仍可加载。
 - XDG 安装不会读取 `~/.qwen` 中的 `settings.json` 或 `oauth_creds.json`。如果 `~/.qwen` 中有其中某个文件而 XDG 目录中没有，例如旧版本重新创建了 `~/.qwen` 且用户在那里登录，CLI 会在启动时给出警告，列出这些文件以及两种解决办法：在当前安装中运行 `/auth`，或删除标记文件以重新使用 `~/.qwen`。XDG 目录有了自己的副本，或 `~/.qwen` 中的文件不复存在后，警告就不再出现。
 
 ## 考虑过的方案
 
-- 只要 `~/.qwen` 存在就使用它，否则使用 XDG（issue 中提出的规则）。有些地方会重新创建 `~/.qwen`：Live 发现的约定位置，以及 VS Code 插件内置的旧版 CLI。任何一个都会把新的 XDG 安装拉回几乎为空的 `~/.qwen`，看起来就像设置和凭据丢失了。
+- 只要 `~/.qwen` 存在就使用它，否则使用 XDG（issue 中提出的规则）。有些地方会重新创建 `~/.qwen`，包括 Live 发现的约定位置，以及 VS Code 插件内置的旧版 CLI。任何一个都会把新的 XDG 安装拉回几乎为空的 `~/.qwen`，看起来就像设置和凭据丢失了。
 - 只要 XDG 目录存在就优先使用它。这样一个无关的 `~/.config/qwen` 会悄悄取代已有的 `~/.qwen`。
 - 用 Qwen Code 首次运行时已经写入的文件（`installation_id`、`output-language.md`）作为标记。这两个文件都有条件：关闭使用统计时不写 `installation_id`，bare 模式下不写 `output-language.md`，这样的首次运行不会留下任何标记。而且设置了 `QWEN_HOME` 时它们同样会被写入，被重定向的运行会把所指向的目录据为己有。
 - 把配置、数据和状态拆分到 `XDG_CONFIG_HOME`、`XDG_DATA_HOME` 和 `XDG_STATE_HOME`。这会涉及所有运行时路径，留待后续处理；`QWEN_RUNTIME_DIR` 已经可以把运行时输出分开存放。
@@ -79,14 +82,14 @@ Qwen Code 在所有平台上都把设置、凭据和其他全局状态保存在 
 - 自定义的 `XDG_CONFIG_HOME` 只在设置了它的地方生效。没有设置它的启动环境（例如桌面启动器、systemd 用户服务或 cron）会解析到 `~/.config/qwen`，在没有 `~/.qwen` 时把它当作另一个独立的安装。标记规则只保护 `~/.qwen`。请把它设置在所有启动环境都会读取的位置，例如 systemd 的 `environment.d` 文件或 `/etc/environment`，而不只是 shell 配置文件。
 - 指向不存在目标的 `~/.qwen` 符号链接会被视为不存在，与 `existsSync` 的结果一致。它存在期间不会写入标记，因此一旦目标恢复（例如此前尚未挂载的卷），`~/.qwen` 会重新被使用。
 - 在 Linux 上，未设置 `QWEN_HOME` 时，每次解析默认目录都需要一到两次 `existsSync` 调用，在 macOS 上两次约 3 µs。结果不做缓存，因为主目录 `.env` 可能在第一次解析之后才设置 `QWEN_HOME`，而 VS Code 插件也是有意每次重新探测。
-- 伪造主目录或在 mock `node:fs` 时未提供 `existsSync` 的测试，现在会固定 `QWEN_HOME`，因为 Linux CI 使用空的 `HOME` 运行。
+- 伪造主目录或在 mock `node:fs` 时未提供 `existsSync` 的测试，现在会固定 `QWEN_HOME`，因为 Linux CI 从一个新建的空主目录开始运行。
 
 ## 超出范围
 
 - 自动迁移 `~/.qwen`。
 - 把配置、数据和状态拆分到不同的 XDG 目录，即 #1210 的另一半。
 - 仍字面写着 `~/.qwen` 的提示词、设置说明和文档，这在使用 `QWEN_HOME` 时已是如此。其中包括生成已发布 VS Code schema 的 `settingsSchema.ts` 描述，以及九种语言中的 `Saved in at ~/.qwen/settings.json` 字符串；修复它们需要插入解析后的路径并迁移这些键，见 #15628。
-- Live 发现的约定位置，它仍使用 `~/.qwen`。
+- 在 `~/.qwen` 下保存自己的文件、从不读取全局目录的辅助功能：Live 发现的约定位置、`autofix-pr` 的锚点存储、browser-use 原生宿主启动脚本和桌面中继。它们可能在 XDG 安装上重新创建 `~/.qwen`，标记会让安装留在原处。
 - 仓库自身的开发脚本（沙箱命令查找、遥测及其主目录 `.env` 预读），它们仍读取 `~/.qwen`。在 Linux 新安装上它们看不到 `~/.config/qwen`：只在那里配置的沙箱不会被构建和启动脚本识别，`npm run telemetry` 也会从 `~/.qwen` 读取设置和输出。
 
 ## 验收标准

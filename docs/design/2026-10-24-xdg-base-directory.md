@@ -17,9 +17,11 @@ This change moves only the default location of the global directory. `QWEN_HOME`
    - If `~/.qwen` exists and the XDG directory contains the marker file `.qwen-global-dir`, use the XDG directory.
    - Otherwise use `~/.qwen`.
 
+With no home directory at all, `<tmpdir>/.qwen` is used, as before.
+
 ## Decisions
 
-- When both locations exist, a marker file decides between them, not whether a directory exists. The CLI writes `.qwen-global-dir` into the XDG directory whenever it uses that directory as the default global directory and the marker is missing. Every entry point does this right after reading the home `.env`: the main CLI before it parses arguments, so subcommands, bare mode, usage statistics off and the host side of a sandboxed run are covered, the `mcp` and `memory` fast paths, and `qwen serve`. It never writes the marker while `QWEN_HOME` is set, so pointing `QWEN_HOME` at `~/.config/qwen` for one run does not make that directory the default. A sandbox child always runs with `QWEN_HOME` set. The name is specific enough that an unrelated program's `~/.config/qwen` will not contain it.
+- When both locations exist, a marker file decides between them, not whether a directory exists. The CLI writes `.qwen-global-dir` into the XDG directory whenever it uses that directory as the default global directory and the marker is missing. Every entry point does this right after reading the home `.env`: the main CLI before it parses arguments, so subcommands, bare mode, usage statistics off and the host side of a sandboxed run are covered, the `mcp` and `memory` fast paths, and `qwen serve`. The VS Code companion's settings writer marks it too, after writing `settings.json`, because that can be the first thing a new install stores. The directory is created with mode 0700, as the XDG specification asks. It never writes the marker while `QWEN_HOME` is set, so pointing `QWEN_HOME` at `~/.config/qwen` for one run does not make that directory the default. A sandbox child always runs with `QWEN_HOME` set. The name is specific enough that an unrelated program's `~/.config/qwen` will not contain it.
 - Every component that resolves the default on its own applies the same rule, just as they already share the `QWEN_HOME` rule:
   - core `Storage`;
   - the CLI's lightweight settings resolver and the serve runtime-directory fallback;
@@ -30,13 +32,14 @@ This change moves only the default location of the global directory. `QWEN_HOME`
   - the bundled `/stuck` skill's shell preamble.
 - `XDG_CONFIG_HOME`, `HOME` and `USERPROFILE` are read only from the environment Qwen Code starts with. `QWEN_HOME` can also come from the global directory's `.env` and `~/.env`, which are read before the global directory is resolved. No `.env` file loaded later, and no `env` section in `settings.json`, can set any of the four, including a `~/.qwen/.env` left behind on an XDG install, because a later value would split settings and credentials across two directories.
 - Code that derived the home directory as the parent of the global directory now uses the home directory directly, so `~/.env` remains the home-level `.env`.
-- Auto mode's self-modification guard protects the resolved global directory, so `~/.config/qwen/settings.json` and its `hooks/` and `skills/` keep the protection that `~/.qwen/...` gets from the path patterns. This also covers a `QWEN_HOME` written as `~/...`. On Linux it protects the XDG directory and its marker even while `~/.qwen` is in use, because writing the marker there makes the XDG directory the global directory on the next start.
+- Auto mode's self-modification guard protects the resolved global directory, so `~/.config/qwen/settings.json` and its `hooks/` and `skills/` keep the protection that `~/.qwen/...` gets from the path patterns. This also covers a `QWEN_HOME` written as `~/...`. On Linux it protects the XDG directory and its marker even while `~/.qwen` is in use, because writing the marker there makes the XDG directory the global directory on the next start. A redirect target the guard cannot resolve, such as `${XDG_CONFIG_HOME:-$HOME/.config}/qwen/settings.json`, goes to review.
 - The opt-in diagnostics (startup and CPU profiles, heap snapshots) write under the global directory, so they no longer create `~/.qwen` on an XDG install.
+- User output styles and the home `loop.md` have to resolve inside the home directory, or inside the global directory when `QWEN_HOME` or an `XDG_CONFIG_HOME` outside the home directory puts it elsewhere, so they keep loading there.
 - An XDG install does not read `settings.json` or `oauth_creds.json` from `~/.qwen`. When `~/.qwen` has one that the XDG directory lacks, for example because an older release recreated `~/.qwen` and the user signed in there, the CLI prints a startup warning that names the files and the two ways out: run `/auth` in this install, or delete the marker to use `~/.qwen` again. The warning stops once the XDG directory has its own copy or the file is gone from `~/.qwen`.
 
 ## Alternatives considered
 
-- Keep `~/.qwen` whenever it exists, otherwise use XDG (the rule proposed in the issue). Several things recreate `~/.qwen`: the Live discovery rendezvous and an older CLI bundled with the VS Code companion. Any of them would move a new XDG install back to a nearly empty `~/.qwen`, which looks like lost settings and credentials.
+- Keep `~/.qwen` whenever it exists, otherwise use XDG (the rule proposed in the issue). Several things recreate `~/.qwen`, including the Live discovery rendezvous and an older CLI bundled with the VS Code companion. Any of them would move a new XDG install back to a nearly empty `~/.qwen`, which looks like lost settings and credentials.
 - Prefer the XDG directory whenever it exists. An unrelated `~/.config/qwen` would then silently take over an existing `~/.qwen`.
 - Use files Qwen Code already writes on first run (`installation_id`, `output-language.md`) as the markers. Both are conditional: `installation_id` is skipped when usage statistics are off and `output-language.md` in bare mode, so such a first run leaves no marker. Both are also written under `QWEN_HOME`, so a redirected run would claim the directory it was pointed at.
 - Split configuration, data and state across `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME`. That touches every runtime path and is left for a follow-up; `QWEN_RUNTIME_DIR` already separates runtime output.
@@ -79,14 +82,14 @@ This change moves only the default location of the global directory. `QWEN_HOME`
 - A custom `XDG_CONFIG_HOME` applies only where it is set. A launch context without it, such as a desktop launcher, a systemd user service or cron, resolves `~/.config/qwen` and, when there is no `~/.qwen`, uses it as a separate install. The marker rule only protects `~/.qwen`. Set it where every launch context reads it, such as a systemd `environment.d` file or `/etc/environment`, not only in a shell profile.
 - A `~/.qwen` that is a dangling symlink counts as missing, as `existsSync` reports it. No marker is written while it is there, so once its target is back, such as a volume that was not mounted yet, `~/.qwen` is used again.
 - On Linux, resolving the default costs one or two `existsSync` calls when `QWEN_HOME` is unset, on every call, about 3 µs for two on macOS. The result is not cached, because the home `.env` can set `QWEN_HOME` after the first resolution and the VS Code companion re-probes on purpose.
-- Tests that faked the home directory, or mocked `node:fs` without `existsSync`, now pin `QWEN_HOME`, because Linux CI runs with an empty `HOME`.
+- Tests that faked the home directory, or mocked `node:fs` without `existsSync`, now pin `QWEN_HOME`, because Linux CI starts from a new, empty home directory.
 
 ## Out of scope
 
 - Automatic migration of `~/.qwen`.
 - Splitting configuration, data and state into separate XDG directories, the other half of #1210.
 - Prompt texts, setting descriptions and documentation that still say `~/.qwen` literally, as they already do under `QWEN_HOME`. This includes the `settingsSchema.ts` descriptions behind the published VS Code schema and the `Saved in at ~/.qwen/settings.json` string in nine locales; fixing them means interpolating the resolved path and migrating the keys, tracked in #15628.
-- The Live discovery rendezvous, which still uses `~/.qwen`.
+- Helpers that keep their own files under `~/.qwen` and never read the global directory: the Live discovery rendezvous, the `autofix-pr` anchor store, the browser-use native host launcher and the desktop relay. They can recreate `~/.qwen` on an XDG install, and the marker keeps the install where it is.
 - The repository's own development scripts (sandbox command lookup, telemetry and their home `.env` bootstrap), which still read `~/.qwen`. On a new Linux install they do not see `~/.config/qwen`: a sandbox configured only there is not picked up by the build and start scripts, and `npm run telemetry` reads its settings and output from `~/.qwen`.
 
 ## Acceptance criteria
