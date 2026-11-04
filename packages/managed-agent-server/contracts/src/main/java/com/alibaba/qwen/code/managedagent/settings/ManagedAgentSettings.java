@@ -23,6 +23,7 @@ public interface ManagedAgentSettings {
     public List<String> getDefinitionToolProfiles();
     public List<String> getDefinitionModels();
     public List<? extends ModelOption> getModelCatalog();
+    public default List<String> getModelConfigBaseUrls() { return List.of(); }
     public interface ModelOption {
         public String getModelId();
         public String getLabel();

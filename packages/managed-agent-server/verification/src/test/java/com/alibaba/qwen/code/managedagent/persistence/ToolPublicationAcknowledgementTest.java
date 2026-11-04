@@ -230,7 +230,7 @@ class ToolPublicationAcknowledgementTest {
     void lateAuthorityChangesRefuse(String damage) {
         var bundle = admissions.verifyOriginalAcknowledgement(execution);
         switch (damage) {
-            case "quarantine" -> jdbc.update("UPDATE ma_output_capture SET quarantined = TRUE");
+            case "quarantine" -> jdbc.update("UPDATE ma_output_capture SET is_quarantined = TRUE");
             case "object" -> jdbc.update("UPDATE ma_resource SET capture_state = 'QUARANTINED' WHERE slot_key = X'6d616e69666573743a31'");
             case "seal" -> jdbc.update("UPDATE ma_output_capture SET seal_manifest_sha256 = ?", "f".repeat(64));
             case "reference" -> jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'JOURNAL' AND journal_revision = ?", revision);

@@ -34,6 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 /** A shared Workspace binding answers each Runtime Session for its own Harness Session. */
 class SharedHarnessOwnershipTest {
@@ -76,6 +77,31 @@ class SharedHarnessOwnershipTest {
         bindings.requireHarnessAdmission(new RuntimeProvisionRequest(SCOPE, null, "kubernetes-workspace", "storage"),
                 SCOPE, "harness-a", null);
         bindings.requireHarnessAdmission(SCOPE, "harness-a", null);
+    }
+
+    @Test
+    void harnessChecksDoNotWaitForTheTenantPlacementGuard() throws Exception {
+        bindings.requestHarnessDrain("tenant", "harness-a");
+        try (var holder = source.getConnection()) {
+            holder.setAutoCommit(false);
+            JdbcRuntimeBindingRepository.lockPlacementDomain(holder, "tenant");
+            try {
+                assertTimeoutPreemptively(Duration.ofSeconds(10), () -> {
+                    bindings.requireHarnessAdmission(SHARED, SCOPE, "harness-b", null);
+                    bindings.requireHarnessAdmission(SCOPE, "harness-b", null);
+                    bindings.requireHookAdmission(SHARED, SCOPE, "harness-b", null);
+                    bindings.requireHookAdmission(SCOPE, "harness-b", null);
+                    assertEquals(false, bindings.requireHarnessRecovery(SHARED, SCOPE, "harness-a", null));
+                    assertClosed(() -> bindings.requireHarnessAdmission(SHARED, SCOPE, "harness-a", null));
+                    assertClosed(() -> bindings.requireHarnessCleanup(SHARED, SCOPE, "harness-a",
+                            new RuntimeLifecycleAuthority("close", 1)));
+                    assertClosed(() -> bindings.requireHarnessCleanup(SCOPE, "harness-a",
+                            new RuntimeLifecycleAuthority("close", 1)));
+                });
+            } finally {
+                holder.rollback();
+            }
+        }
     }
 
     @Test

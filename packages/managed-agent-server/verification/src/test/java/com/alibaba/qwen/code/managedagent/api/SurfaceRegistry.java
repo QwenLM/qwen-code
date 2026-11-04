@@ -471,6 +471,10 @@ public enum SurfaceRegistry {
             "/internal/managed-session-store/v1/sessions/{sessionId}/approval:query",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
             EnumSet.of(Capability.STORE_APPROVAL_QUERY)),
+    INTERNAL_MODEL_CONFIG_QUERY(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/model-config:query",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
+            EnumSet.of(Capability.STORE_MODEL_CONFIG_QUERY)),
     INTERNAL_EXECUTION_AUTHORIZE(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}"
                     + "/execution:authorize",
@@ -782,6 +786,7 @@ public enum SurfaceRegistry {
         AUTOMATION_RUN,
         AUTOMATION_RUN_LIST,
         STORE_APPROVAL_QUERY,
+        STORE_MODEL_CONFIG_QUERY,
         STORE_EXECUTION_AUTHORIZE,
         STORE_LIFECYCLE_AUTHORIZE,
         STORE_WRITER_ACQUIRE,
