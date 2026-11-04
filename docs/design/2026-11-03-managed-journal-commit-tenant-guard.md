@@ -83,6 +83,7 @@ Taking the head first would invert that order.
    record exists unless it is first written in the same commit as its verdict;
    that rare case keeps a gap lock, and a deadlock there is rolled back like
    any other.
+
 4. **Unchanged paths.** Lifecycle-authority commits (`authority != null`)
    still take both guards in `checkLifecycleWriter`, before anything else.
    CSI-pinned Sessions still take both guards in `lockCsiContinuation`, after

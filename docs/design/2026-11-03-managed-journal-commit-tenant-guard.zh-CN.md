@@ -65,6 +65,7 @@ commit 改为在**自己的 Session 行**上排队，不再使用租户行。之
    血缘，使"从未启动"的 verdict 与子 Session 创建串行。commit 从不向血缘索引插入数据。
    子运行记录通常已存在，只有在它与 verdict 由同一个 commit 首次写入时才不存在；这种少见
    情况下仍会加间隙锁，若因此死锁，会像其他死锁一样回滚。
+
 4. **不变的路径。** 带生命周期授权的 commit（`authority != null`）仍在
    `checkLifecycleWriter` 中最先获取两个 guard。CSI 固定的 Session 仍在
    `lockCsiContinuation` 中、在锁定 root 之后获取两个 guard。这是 root → guard 的顺序，
