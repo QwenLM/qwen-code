@@ -149,7 +149,7 @@ PR #16117 增加了第二条投递通道：开启 `deliverToBoundSessions` 后�
 
 **依赖降级。** 绑定扫描是一个新的硬依赖：只要它从未成功过，冷启动门就会推迟评论通道，于是**所有**通知停摆，而轮询本身仍报 `ok`。适配器现在在它**本来就限流**的那几行 stderr 旁边记 `poll` / `degraded`——`bindings_unreachable`（首次失败，之后每十次）、`bindings_partial`（第十次，之后每六十次，带 `detail.sessions`）、`bindings_cold_empty`（首次，之后每十次，以及有界逃逸打开评论通道时再记一次）——并在既有 `watchReconcileBlocked` 标志的 false→true 边沿记 `watch_reconcile_blocked` / `watch_pending_unreconciled`。复用这些限流和这个标志意味着不新增适配器状态、也不新增洪水：永久故障不会把有用的行挤出日志轮转窗口。
 
-`detail.streak` 统计的是**绑定扫描次数，不是轮询次数**：`refreshBoundSessions` 在每次 gone 会话重试时也会跑，所以一次轮询可能让它加不止一次。标签与 stderr 措辞因此都说「扫描」。同理 `detail.sessions` 用的是本次扫描自己的行数，而不是路由映射的大小——映射按 PR 建键，一个会话关注两个 PR 就会被报成两个会话，把运维支使去查一个根本没发生的漏读。
+`detail.streak` 统计的是**绑定扫描次数，不是轮询次数**：`refreshBoundSessions` 在每次 gone 会话重试时也会跑，所以一次轮询可能让它加不止一次。标签与 stderr 措辞因此都说「扫描」。同理 `detail.sessions` 统计的是会话数，而不是路由映射的大小——映射按 PR 建键，一个会话关注两个 PR 就会被报成两个会话，把运维支使去查一个根本没发生的漏读。它等于本次扫描列出的会话行**加上部分快照下保留仍在路由的会话**，受 `MAX_PARTIAL_RETAINED` 封顶。只数 listed 行会把一个「保留会话仍在收投递」的 draining 工作区报成 0，并给出一个并非页容量的页容量诊断。它是会话行的计数，不是通过映射自身过滤后剩下的条目数（建映射时会跳过 channel 自有的会话与无法解析的绑定 URL）。行标签与 stderr 都写「列出 / listed」，这个词是「列出或被保留」的简写，两个表面打印的是同一个数字。
 
 **恢复记在清零边沿上**，即 `watch_reconcile_recovered`。`poll` / `ok` 行不能充当这个信号：基类在每次不抛错的轮询后都会写一条，包括持续故障期间的每一次，所以它在整个降级窗口都存在、结束时也没有变化。只有 watch 守卫这几个原因有恢复行。`bindings_unreachable` 与 `bindings_cold_empty` 是隐含恢复的——扫描一旦成功就不再产生它们，下一次 streak 从头开始。**`bindings_partial` 不是带恢复边沿的降级**：成功的多页扫描恰恰是它的*生产者*，而 `partialSnapshotStreak` 只在完整快照时清零，永远多页的守护进程永远不会返回完整快照。它是一条常驻健康提示，因此运维不能把「它安静下来」当作恢复的证据。
 

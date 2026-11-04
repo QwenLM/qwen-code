@@ -327,10 +327,18 @@ cannot rotate the useful rows out of the journal.
 `detail.streak` counts **binding scans, not polls**: `refreshBoundSessions` also
 runs on every gone-session retry, so one poll can advance it more than once.
 The label and the stderr wording say scans for that reason. Likewise
-`detail.sessions` is the scan's own row count, not the routing map's size —
-the map is keyed per PR, so one session following two PRs would otherwise be
-reported as two sessions and send the operator chasing an under-read that never
-happened.
+`detail.sessions` counts sessions, not the routing map's size — the map is
+keyed per PR, so one session following two PRs would otherwise be reported as
+two sessions and send the operator chasing an under-read that never happened.
+It is the session rows this scan listed **plus the sessions retention keeps
+routing** under a partial answer, bounded by `MAX_PARTIAL_RETAINED`. Counting
+only the listed rows would report 0 for a draining workspace whose retained
+sessions are still receiving deliveries, and hand the operator a page-cap
+diagnosis for a state that is not a page cap. It is a count of session rows,
+not of the entries that survive the map's own filters (channel-owned sessions
+and unparseable binding URLs are skipped when the map is built). The row label
+and the stderr line both say "listed"; that word is shorthand for
+listed-or-retained, and both surfaces print this same number.
 
 **Recovery is journalled on the clearing edge**, as `watch_reconcile_recovered`.
 A `poll` / `ok` row cannot serve as that signal: the base writes one after every
