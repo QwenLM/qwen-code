@@ -60,6 +60,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -3061,7 +3062,20 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                             boolean retryable = !(cause instanceof RuntimeBrokerException
                                     brokerFailure) || brokerFailure.isRetryable();
                             if (currentClaim != null) {
-                                if (request.isManagedContext() && !retryableExternalWorkspaceProvision(request, cause) || !retryable) {
+                                if ("local-process".equals(request.getProvisionerKind())
+                                        && cause instanceof RuntimeBrokerException refusal
+                                        && refusal.getStatusCode() == 503 && refusal.isRetryable()
+                                        && "runtime_local_capacity".equals(refusal.getCode())
+                                        && refusal.getCause() instanceof RejectedExecutionException) {
+                                    // Worker admission failed before launch. Only a newly saved non-durable
+                                    // placeholder can be cleared; real resource identities must survive retry.
+                                    if (claimed.getResourceHandle() == null && currentClaim.getResourceHandle() != null
+                                            && !provisioner.supportsStartupRecovery(currentClaim.getResourceHandle())
+                                            && bindingRepository.compareAndSet(currentClaim,
+                                                    currentClaim.withResourceHandle(null, clock.instant())) == null) {
+                                        throw unavailable("runtime_provision_fenced", "Runtime provisioning claim expired");
+                                    }
+                                } else if (request.isManagedContext() && !retryableExternalWorkspaceProvision(request, cause) || !retryable) {
                                     // A retry cannot succeed once the binding
                                     // is blocked, so say so.
                                     if (blockRecoveryQuietly(currentClaim, cause)

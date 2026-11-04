@@ -391,9 +391,18 @@ public class ManagedWorkspaceRegistry
 
     public ResolvedBinding resolveForCreation(String tenantId,
             String actorId, WorkspaceSelection selection) {
+        return resolve(tenantId, actorId, selection, true, false);
+    }
+
+    ResolvedBinding resolveForRead(String tenantId, String actorId, WorkspaceSelection selection) {
+        return resolve(tenantId, actorId, selection, false, false);
+    }
+
+    private ResolvedBinding resolve(String tenantId, String actorId, WorkspaceSelection selection,
+            boolean lock, boolean requireOwner) {
         if (!TransactionSynchronizationManager.isActualTransactionActive()) {
             throw new IllegalStateException(
-                    "Workspace resolution requires a creation transaction");
+                    "Workspace resolution requires a transaction");
         }
         if (actorId == null || actorId.isEmpty()) {
             throw new ManagedAgentException(401,
@@ -406,26 +415,15 @@ public class ManagedWorkspaceRegistry
             throw new ManagedAgentException(403,
                     "actor_scope_mismatch", "Authenticated actor scope is invalid.");
         }
-        String workspaceId;
-        if (selection == null) {
-            List<String> defaults = jdbc.queryForList(
-                    "SELECT workspace_id FROM ma_workspace"
-                            + " WHERE tenant_id = ? AND is_default = TRUE FOR UPDATE",
-                    String.class, tenantId);
-            if (defaults.isEmpty()) {
-                throw workspaceRequired();
-            }
-            workspaceId = defaults.getFirst();
-        } else {
-            workspaceId = selection.workspaceId();
-        }
-        List<WorkspaceRecord> records = jdbc.query(
-                "SELECT workspace_generation, storage_id, display_name,"
-                        + " config_ref, policy_ref, state FROM"
-                        + " ma_workspace WHERE tenant_id = ?"
-                        + " AND workspace_id = ? FOR UPDATE",
-                (result, row) -> workspaceRow(tenantId, workspaceId,
-                        result), tenantId, workspaceId);
+        List<RegistryRow> records = jdbc.query(
+                "SELECT workspace_id, workspace_generation, storage_id, display_name,"
+                        + " config_ref, policy_ref, state, workspace_kind FROM"
+                        + " ma_workspace WHERE "
+                        + (selection == null ? "tenant_id = ? AND is_default = TRUE" : "tenant_id = ? AND workspace_id = ?")
+                        + (lock ? " FOR UPDATE" : ""),
+                (result, row) -> new RegistryRow(workspaceRow(tenantId, result.getString("workspace_id"), result),
+                        result.getString("workspace_kind")),
+                selection == null ? new Object[] {tenantId} : new Object[] {tenantId, selection.workspaceId()});
         if (records.isEmpty()) {
             if (selection == null) {
                 throw workspaceRequired();
@@ -433,11 +431,13 @@ public class ManagedWorkspaceRegistry
             throw new ManagedAgentException(404,
                     "workspace_not_found", "Workspace not found.");
         }
+        WorkspaceRecord record = records.getFirst().workspace();
+        String workspaceId = record.getWorkspaceId();
         List<AccessRow> access = jdbc.query(
                 "SELECT role FROM ma_workspace_access"
                         + " WHERE tenant_id = ? AND workspace_id = ?"
                         + " AND actor_id = ? AND role IN ('READER', 'OPERATOR',"
-                        + " 'OWNER') FOR UPDATE",
+                        + " 'OWNER')" + (lock ? " FOR UPDATE" : ""),
                 (result, row) -> new AccessRow(WorkspaceAccess.valueOf(
                         result.getString("role"))), tenantId,
                 workspaceId, key);
@@ -455,7 +455,6 @@ public class ManagedWorkspaceRegistry
             throw new ManagedAgentException(403,
                     "workspace_forbidden", "Workspace cannot be used.");
         }
-        WorkspaceRecord record = records.getFirst();
         requireSshNodeAccess(tenantId, actorId, record.getStorageId());
         if (record.getState() != WorkspaceState.ACTIVE) {
             if (selection == null) {
@@ -468,6 +467,10 @@ public class ManagedWorkspaceRegistry
                 record.getWorkspaceGeneration(), record.getStorageId(),
                 selection == null ? "." : selection.cwdRelative(),
                 descriptorRef(record.getConfigRef(), record.getPolicyRef()), 1);
+        if (requireOwner && (access.getFirst().value() != WorkspaceAccess.OWNER
+                || !"ROOT".equals(records.getFirst().kind()))) {
+            throw new ManagedAgentException(404, "workspace_not_found", "Workspace not found.");
+        }
         if (isExternal(binding) && (!externalFilesAllowed(binding) || !".".equals(binding.getCwdRelative()))) {
             throw new ManagedAgentException(HttpStatus.CONFLICT.value(), "workspace_unavailable", "External Workspace files are unavailable.");
         }
@@ -495,13 +498,11 @@ public class ManagedWorkspaceRegistry
     }
 
     ResolvedBinding resolveOwnedDirectory(String tenant, String actor, String workspace, String cwd) {
-        ResolvedBinding resolved = resolveForCreation(tenant, actor, new WorkspaceSelection(workspace, cwd));
-        if (accessOf(tenant, actor, workspace) != WorkspaceAccess.OWNER
-                || jdbc.queryForList("SELECT 1 FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?"
-                        + " AND workspace_kind = 'ROOT'", Integer.class, tenant, workspace).isEmpty()) {
-            throw new ManagedAgentException(404, "workspace_not_found", "Workspace not found.");
-        }
-        return resolved;
+        return resolve(tenant, actor, new WorkspaceSelection(workspace, cwd), true, true);
+    }
+
+    ResolvedBinding resolveOwnedDirectoryForRead(String tenant, String actor, String workspace, String cwd) {
+        return resolve(tenant, actor, new WorkspaceSelection(workspace, cwd), false, true);
     }
 
     static String descriptorRef(String configRef, String policyRef) {
@@ -542,5 +543,8 @@ public class ManagedWorkspaceRegistry
             String state, String workspaceKind, long workspaceGeneration,
             String storageId, String configRef, String policyRef,
             String storageKind, WorkspaceAccess access, String role) {
+    }
+
+    private record RegistryRow(WorkspaceRecord workspace, String kind) {
     }
 }

@@ -60,8 +60,7 @@ com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT 
 com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT 1 FROM ma_turn WHERE tenant_id = ? AND session_id = ? AND (status IN ('RECOVERY_BLOCKED', 'CANCELLING') OR status IN ('ACCEPTED', 'RUNNING') AND error_code IN (?, ?, ?)) LIMIT 1
 com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ? AND status IN ('ACCEPTED', 'RUNNING', 'CANCELLING')
 com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT COUNT(*) FROM ma_turn WHERE tenant_id=? AND session_id=?
-com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT approval_revision, permission_rules_json FROM ma_session WHERE tenant_id=? AND session_id=?
-com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?
+com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT approval_revision, permission_rules_json, is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE
 com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE
 com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT model_revision FROM ma_session WHERE tenant_id = ? AND session_id = ?
 com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java|SELECT turn_id FROM ma_turn WHERE tenant_id=? AND session_id=? AND is_submission_attempted=TRUE LIMIT 1 FOR UPDATE
@@ -303,7 +302,7 @@ com/alibaba/qwen/code/managedagent/persistence/WorkspaceExecutionStore.java|SELE
 com/alibaba/qwen/code/managedagent/persistence/WorkspaceExecutionStore.java|SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ? AND turn_id = ? AND status = 'RUNNING' AND is_submission_attempted = TRUE AND harness_event_epoch IS NOT NULL AND dispatch_owner = ? AND dispatch_lease_until >=
 com/alibaba/qwen/code/managedagent/persistence/WorkspaceExecutionStore.java|SELECT parent_session_id FROM ma_session WHERE tenant_id = ? AND session_id = ?
 com/alibaba/qwen/code/managedagent/persistence/WorkspaceExecutionStore.java|SELECT tenant_id, session_id, parent_session_id, creator_actor_key, workspace_id, workspace_generation, workspace_storage_id FROM ma_session WHERE tenant_id = ? AND session_id = ?
-com/alibaba/qwen/code/managedagent/persistence/WorkspaceFileStore.java|SELECT * FROM ma_session WHERE tenant_id = ? AND session_id = ? AND status <> 'DELETED' FOR UPDATE
+com/alibaba/qwen/code/managedagent/persistence/WorkspaceFileStore.java|SELECT * FROM ma_session WHERE tenant_id = ? AND session_id = ? AND status <> 'DELETED'
 com/alibaba/qwen/code/managedagent/persistence/WorkspaceFileUploadStore.java|SELECT 1 FROM ma_session WHERE tenant_id = ? AND session_id = ? AND status <> 'DELETED'
 com/alibaba/qwen/code/managedagent/persistence/WorkspaceLifecycleStore.java|SELECT harness_boot_id FROM ma_session WHERE tenant_id = ? AND session_id = ?
 com/alibaba/qwen/code/managedagent/persistence/WorkspaceLifecycleStore.java|SELECT o.claim_generation, o.claim_until AS lease_until, o.delivery_state, o.lifecycle_protocol_version, s.status, f.phase, f.operation_id FROM ma_operation o JOIN ma_session s ON s.tenant_id = o.tenant_id AND s.session_id = o.session_id JOIN ma_session_head f ON f.tenant_id = s.tenant_id AND f.harness_session_id = s.session_id WHERE o.operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE') AND o.tenant_id = ? AND o.session_id = ? AND o.operation_id = ? AND f.tenant_key = ? AND f.harness_key = ? FOR UPDATE

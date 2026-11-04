@@ -920,6 +920,7 @@ CREATE TABLE ma_runtime_slot (
     storage_id VARBINARY(1024) COMMENT 'Logical storage identity.',
     last_generation BIGINT UNSIGNED NOT NULL COMMENT 'Last allocated Runtime generation, retained after binding collection.',
     active_binding_id VARBINARY(2048) COMMENT 'Current binding identity, if the slot has an active binding.',
+    INDEX idx_ma_runtime_slot_isolation (isolation_key),
     CONSTRAINT uk_ma_runtime_slot_business_key UNIQUE (request_key),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_runtime_slot_id PRIMARY KEY (id)
