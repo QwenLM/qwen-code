@@ -79,14 +79,14 @@ watch?: {
 
 ### 4. 投递
 
-- **目标。** 整个 daemon 范围内每个 PR 只有一个收件会话，绝不是每个 workspace 一个。观察仍按 workspace 进行（每次扫描只 view 本 workspace 的 open 绑定 PR，按 §1 的新鲜度去重），但检测与投递以 PR 为范围。扫描检测到转换时，把新快照、已触发记录与 `pending` 条目写进**该 PR 在所有受信 workspace 的每个 active 绑定 sidecar**——由 `GET /sessions/pr-bindings` 背后的进程级 sidecar 扫描枚举——各走各自的变更队列与锁。收件者在投递时才惰性决定：在所有受信 workspace 中绑定该 PR 的全部合格会话里取最近活跃的那个（transcript mtime，再以 bridge 的 live 活动修正），这正是 channel 今天对整个绑定快照应用的规则，经该会话所属的 runtime 派发。因为 `pending` 以 PR 为范围，检测与排空之间被归档或被别的会话超过的收件者不会丢任何东西：排空在兄弟 sidecar 里找到同一条目，以其原始 key 投递。**基线规则：**检测绝不只拿新鲜 view 与本次扫描自己的 sidecar 比较；比较之前，扫描读取该 PR 在每个绑定 sidecar 中的 `watch` 块，取 `observedAt` 最新的作为基线——取那一次观察的整个块（`state`、`headSha`、`checks`、`mergeable` 及其仍待投递的条目），绝不从多个 sidecar 拼字段。被崩溃落下的兄弟静默采用更新的块，连同其 pending 条目——没有转换、没有新 key。扫描的 `partial` 答案不是基线证据：若扫描无法枚举该 PR 的每个绑定 sidecar（draining、transitioning 或 blocked 的 workspace，某个 sidecar 读取失败），本次扫描对该 PR 跳过检测而不是对着未经确认的基线比较；slim 列表的 `state` 刷新不受影响。**信任与退役：**每个兄弟在写入前、收件者在派发前立即重新解析；不再注册、不再受信或 runtime 代际已退役（`assertGenerationOpen()`）的 workspace 记一行日志跳过并视同崩溃窗口（其 sidecar 之后按基线规则追平），不受信的 workspace 永远不是投递目标。因此同一仓库注册了两个 workspace、各有一个会话跟随同一个 PR 时，无论中间是否崩溃，都只投递一次而非两次。归档会话只刷新 `state`，绝不投递。channel 自有会话（`sourceType: 'channel'`）与机器自有的隐藏目录会话永远不是目标。
+- **目标。** 整个 daemon 范围内每个 PR 只有一个收件会话，绝不是每个 workspace 一个。观察仍按 workspace 进行（每次扫描只 view 本 workspace 的 open 绑定 PR，按 §1 的新鲜度去重），但检测与投递以 PR 为范围。扫描检测到转换时，把新快照、已触发记录与 `pending` 条目写进**该 PR 在所有受信 workspace 的每个 active 绑定 sidecar**——由 `GET /sessions/pr-bindings` 背后的进程级 sidecar 扫描枚举——各走各自的变更队列与锁。收件者在投递时才惰性决定，且只对尚未准入的 key（已准入的 key 绝不改投，§5）：在所有受信 workspace 中绑定该 PR 的全部合格会话里取最近活跃的那个（transcript mtime，再以 bridge 的 live 活动修正），这正是 channel 今天对整个绑定快照应用的规则，经该会话所属的 runtime 派发。因为 `pending` 以 PR 为范围，检测与排空之间被归档或被别的会话超过的收件者不会丢任何东西：排空在兄弟 sidecar 里找到同一条目，以其原始 key 投递。**基线规则：**检测绝不只拿新鲜 view 与本次扫描自己的 sidecar 比较；比较之前，扫描读取该 PR 在每个绑定 sidecar 中的 `watch` 块，取 `observedAt` 最新的作为基线——取那一次观察的整个块（`state`、`headSha`、`checks`、`mergeable` 及其仍待投递的条目），绝不从多个 sidecar 拼字段。被崩溃落下的兄弟静默采用更新的块，连同其 pending 条目——没有转换、没有新 key。扫描的 `partial` 答案不是基线证据：若扫描无法枚举该 PR 的每个绑定 sidecar（draining、transitioning 或 blocked 的 workspace，某个 sidecar 读取失败），本次扫描对该 PR 跳过检测而不是对着未经确认的基线比较；slim 列表的 `state` 刷新不受影响。**信任与退役：**每个兄弟在写入前、收件者在派发前立即重新解析；不再注册、不再受信或 runtime 代际已退役（`assertGenerationOpen()`）的 workspace 记一行日志跳过并视同崩溃窗口（其 sidecar 之后按基线规则追平），不受信的 workspace 永远不是投递目标。因此同一仓库注册了两个 workspace、各有一个会话跟随同一个 PR 时，无论中间是否崩溃，都只投递一次而非两次。归档会话只刷新 `state`，绝不投递。channel 自有会话（`sourceType: 'channel'`）与机器自有的隐藏目录会话永远不是目标。
 - **机制。** 刷新在进程内调用 daemon 的 prompt 准入——`POST /session/:id/prompt` 背后的代码——并带上 daemon 来源分类，准入把它当作 channel 绑定中继那样处理：不是交互式用户 prompt（不做循环检测拒绝，不对注入文本做 PR 绑定回填，显示投影为"PR 事件"），以转换 key 作为 `idempotencyKey`，因此 daemon 生命周期内的重试会去重到原始准入。该分类绑定来源而非字符串：作为准入调用的受信进程内参数传入（即 `context.channelPrompt` 已有的形状，路由与 bridge 只从受信 context 重新装配它，绝不从请求的 `_meta`）。标记名 `qwen.daemon.prStateEvent` 只出现在显示投影和两份剥离清单（路由与 bridge）中作为纵深防御；携带它的客户端请求体会被剥离且得不到任何授权，并由一个与现有伪造 `qwen.channel.prompt` 用例同形的路由测试钉住。
 - **休眠会话。** 已绑定但不在线的会话通过 channel 访问器所用的同一恢复路径恢复后再投递；`wakeDormant` 默认开启，这样 daemon 重启不会丢事件；`wakeDormant: false` 时转换留在 `pending`，在该会话下一次 live 回合投递（排空在恢复时也会运行），每个 PR 16 条的上限仍然适用且淘汰会记日志，不会静默消失。无法恢复的会话（记录已删除、已归档、worktree 被取代）丢弃该转换并记一行日志；任何地方都不会公开发布。
 - **prompt 文本。** 沿用 channel 绑定 prompt 的形状：事件头、不可信事件数据提示、PR 身份（仓库、编号、标题、URL）、一行 `Event:` 与摘要（`ci_failure` 从 rollup 中列出最多五个失败的 check）。回复留在会话内。
 
 ### 5. 持久性
 
-检测结果与新快照按该 PR 的每个绑定 sidecar 各一次写入持久化，每次都把转换追加到该 sidecar 的 `pending`；投递随后按最旧优先排空 `pending`，把同一 key 在该 PR 各 sidecar 中的副本合并，对当时解析出的收件者每个 key 只准入一次，准入后从每个 sidecar 清除该 key。四个崩溃窗口的处理：首次写入前崩溃，下次扫描重新检测（无丢失，也没投递过任何东西）；sidecar 写入之间崩溃，被落下的 sidecar 按基线规则追平——采用更新的块连同其 pending 条目而不检测任何东西——下次扫描把该 key 排空一次；全部写入后、投递前崩溃，下次扫描先排空 `pending`；投递后、清除前崩溃，下次扫描重新投递，准入环在 daemon 生命周期内去重（跨重启是 at-least-once，与 channel 的取舍相同）。`pending` 每个 PR 上限 16 条；溢出时丢弃最旧的并记日志。
+检测结果与新快照按该 PR 的每个绑定 sidecar 各一次写入持久化，每次都把转换追加到该 sidecar 的 `pending`；投递随后按最旧优先排空 `pending`，把同一 key 在该 PR 各 sidecar 中的副本合并，对当时解析出的收件者每个 key 只准入一次，把已准入的 key（按 `owner/repo#number`）记入 daemon 生命周期内的进程内集合，准入后从每个 sidecar 清除该 key。让重试安全的是这份记录而非 prompt 路由的准入环：准入环按会话加 key 键控，挡不住同一 key 对另一会话的准入。若某个副本清除失败、重试前最近活跃的绑定者又换了人，下次排空在已准入集合里找到该 key，只重试清除——绝不为已准入的 key 再选新收件者；惰性选收件者只对尚未准入的 key 生效。四个崩溃窗口的处理：首次写入前崩溃，下次扫描重新检测（无丢失，也没投递过任何东西）；sidecar 写入之间崩溃，被落下的 sidecar 按基线规则追平——采用更新的块连同其 pending 条目而不检测任何东西——下次扫描把该 key 排空一次；全部写入后、投递前崩溃，下次扫描先排空 `pending`；投递后、清除前崩溃，daemon 生命周期内下次扫描只重试清除（已准入集合记得该 key，无论此刻收件者会是谁）；跨重启集合丢失，该 key 重新投递一次（at-least-once，与 channel 的取舍相同）。`pending` 每个 PR 上限 16 条；溢出时丢弃最旧的并记日志。
 
 ### 6. 配置
 
@@ -129,14 +129,14 @@ GitHub channel 的 `deliverToBoundSessions` 不变。`prWatchEvents`、监视通
 
 ## 验证计划
 
-- 单元：view 映射（`headRefOid`、`mergeable` 状态、rollup）；转换规则，包括 force-push 回访下每个 head 一次的 `ci_failure`（`A failing → B failing → A failing` 触发两次而非三次）、边沿触发的冲突、重开 → 关闭；多个绑定者之间的选择，含分属不同 workspace 的绑定者；模拟崩溃下的 pending 持久化与排空，包括 head 变更与经 slim 列表观察到的终态 `state_change` 两种情形下收件者 sidecar 写入与兄弟写入之间的崩溃（兄弟按 `observedAt` 采用更新的基线、不检测任何东西，pending 中的转换以原始 key 恰好准入一次）；配置解析；超长 key 的哈希；`partial` 扫描的跳过（不检测、不产生第二个 key）；`CONFLICTING` 之后的 `UNKNOWN` 保留已存值且不产生转换；检测与排空之间收件者被归档或被超过（从兄弟 sidecar 以原始 key 恰好准入一次）；`wakeDormant: false` 把条目留到下一次 live 回合；以及未设置该项时零次 `gh pr view` 且列表调用次数不变。
+- 单元：view 映射（`headRefOid`、`mergeable` 状态、rollup）；转换规则，包括 force-push 回访下每个 head 一次的 `ci_failure`（`A failing → B failing → A failing` 触发两次而非三次）、边沿触发的冲突、重开 → 关闭；多个绑定者之间的选择，含分属不同 workspace 的绑定者；模拟崩溃下的 pending 持久化与排空，包括 head 变更与经 slim 列表观察到的终态 `state_change` 两种情形下收件者 sidecar 写入与兄弟写入之间的崩溃（兄弟按 `observedAt` 采用更新的基线、不检测任何东西，pending 中的转换以原始 key 恰好准入一次）；配置解析；超长 key 的哈希；`partial` 扫描的跳过（不检测、不产生第二个 key）；`CONFLICTING` 之后的 `UNKNOWN` 保留已存值且不产生转换；检测与排空之间收件者被归档或被超过（从兄弟 sidecar 以原始 key 恰好准入一次）；部分清除后收件者变化（K 已准入 A，B 的副本未清除，B 成为最近活跃的绑定者 → 不再二次准入，只重试清除）；`wakeDormant: false` 把条目留到下一次 live 回合；以及未设置该项时零次 `gh pr view` 且列表调用次数不变。
 - 刷新测试（现有带假 `fetchPullRequests` 的测试框架）：每个转换投递一次、休眠会话被恢复、归档与 channel 自有会话被跳过、上限与旋转（对 40 个 PR 的两次连续扫描 view 不相交的窗口）、聚合 view 预算、兄弟写入前的信任/退役重新解析，以及重叠规则（已配置 channel 监视的仓库被跳过）。
 - E2E（daemon + 桩 `gh` 二进制）：在会话中绑定 PR，把桩的 rollup 翻成失败，下一次扫描后在该会话观察到恰好一条注入 prompt，daemon 重启后没有新的注入。
 
 ## 验收标准
 
 1. 设置 `sessionPrWatch.events` 后，绑定会话对 CI 失败、合并冲突、head 变更、合并/关闭的每个转换实例恰好收到一条 prompt，递归语义与 channel 监视相同，且无需配置任何 GitHub channel。
-2. 检测与投递之间的 daemon 重启投递该转换一次；投递之后的重启最多重新投递一次。
+2. 检测与投递之间的 daemon 重启投递该转换一次；投递之后的重启最多重新投递一次；不重启时每个 key 最多准入一次，即使副本清除失败且重试前最近活跃的绑定者换了人。
 3. GitHub channel 不再发出任何 PR 状态 API 调用；带 `prWatchEvents` 的配置仍能连接，只记一条点名 `sessionPrWatch` 的弃用告警且不跑监视通道；PR B 之后的第一个 minor 版本起在 `connect()` 以同一条信息拒绝。
 4. 未设置该项时，刷新的行为与 API 调用量不变。
 5. 同一仓库的两个受信 workspace 各有一个会话绑定同一个 PR 时，每个转换只投递一次，给其中最近活跃的会话，daemon 在 sidecar 写入之间重启、或收件者在检测与排空之间被归档或被超过时亦然；force-push 回到一个 CI 失败已触发过的 head 时，只要该 head 仍在该 PR 的 16 个 head 历史内，`ci_failure` 不再触发。
