@@ -298,12 +298,32 @@ export function useReactToolScheduler(
           batchCompletionsRef.current.set(callId, onBatchComplete);
         }
       }
+      // A batch that ends without completing still releases its callback,
+      // with no calls, so its caller stops waiting and a later batch that
+      // reuses a call id is not routed to it.
+      const abandonBatchCompletion = () => {
+        if (!onBatchComplete) return;
+        let owned = false;
+        for (const { callId } of requests) {
+          if (batchCompletionsRef.current.get(callId) === onBatchComplete) {
+            batchCompletionsRef.current.delete(callId);
+            owned = true;
+          }
+        }
+        if (!owned) return;
+        void onBatchComplete([]).catch((error: unknown) => {
+          debugLogger.error('Tool batch release failed:', error);
+        });
+      };
       const isQueuedCancellation = (error: unknown) =>
         signal.aborted &&
         error instanceof Error &&
         error.message === 'Tool call cancelled while in queue.';
       const completeAsCancelled = async () => {
-        if (sessionSignal?.aborted) return;
+        if (sessionSignal?.aborted) {
+          abandonBatchCompletion();
+          return;
+        }
         const reason =
           '[Operation Cancelled] Reason: Tool call cancelled before execution.';
         const cancelledCalls: CompletedToolCall[] = requests.map(
@@ -349,6 +369,7 @@ export function useReactToolScheduler(
             });
             return;
           }
+          abandonBatchCompletion();
           if (signal.aborted) return;
           debugLogger.error(
             `Tool scheduling failed: ${
@@ -362,7 +383,10 @@ export function useReactToolScheduler(
       // name the batch it failed to complete.
       void (async () => {
         const completeAsSchedulingError = async (error: unknown) => {
-          if (sessionSignal?.aborted) return;
+          if (sessionSignal?.aborted) {
+            abandonBatchCompletion();
+            return;
+          }
           debugLogger.error(
             `Full-turn tool scheduling failed: ${
               error instanceof Error ? error.message : String(error)

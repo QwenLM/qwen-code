@@ -284,6 +284,55 @@ describe('useReactToolScheduler in YOLO Mode', () => {
     ]);
   });
 
+  it("releases a batch's callback when scheduling fails without completing it", async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockTool);
+    (mockTool.execute as Mock).mockResolvedValue({
+      llmContent: 'later output',
+      returnDisplay: 'later output',
+    } as ToolResult);
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockRejectedValueOnce(new Error('already running'));
+    const onBatchComplete = vi.fn(async () => {});
+    const { result } = renderSchedulerInYoloMode();
+    const request = {
+      callId: 'reusedCall',
+      name: 'mockTool',
+      args: {},
+    } as ToolCallRequestInfo;
+
+    act(() => {
+      result.current[1](
+        request,
+        new AbortController().signal,
+        undefined,
+        onBatchComplete,
+      );
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    // The caller stops waiting, with no calls.
+    expect(onBatchComplete).toHaveBeenCalledOnce();
+    expect(onBatchComplete).toHaveBeenCalledWith([]);
+    scheduleSpy.mockRestore();
+
+    // A later batch reusing the call id goes to onComplete, not the old one.
+    act(() => {
+      result.current[1](request, new AbortController().signal);
+    });
+    for (let step = 0; step < 3; step++) {
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+    }
+    expect(onBatchComplete).toHaveBeenCalledOnce();
+    expect(onComplete).toHaveBeenCalledWith([
+      expect.objectContaining({ status: 'success', request }),
+    ]);
+  });
+
   it('keeps shell heartbeats out of liveOutput while retaining display chunks', async () => {
     let resolveExecute: (result: ToolResult) => void;
     let emitUpdate: ((output: unknown) => void) | undefined;

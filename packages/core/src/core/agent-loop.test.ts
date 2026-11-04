@@ -882,6 +882,32 @@ describe('runToolBatch', () => {
     expect(result.responses?.flatMap(({ parts }) => parts)).toEqual(
       result.parts,
     );
+    expect(result.responses?.every(({ record }) => !record)).toBe(true);
+  });
+
+  it('leaves recording to the surface when it defers it', async () => {
+    const { client } = fakeClient([]);
+    const { config, recordToolResult } = fakeConfig();
+
+    const result = await runToolBatch([toolRequest('c1'), toolRequest('c2')], {
+      config,
+      client,
+      signal: new AbortController().signal,
+      duplicates: duplicates(),
+      executor: fakeExecutor().executor,
+      deferRecording: true,
+    });
+
+    expect(recordToolResult).not.toHaveBeenCalled();
+    result.responses?.[1]?.record?.();
+    expect(recordToolResult).toHaveBeenCalledTimes(1);
+    expect(recordToolResult.mock.calls[0]?.[0]).toEqual(
+      result.responses?.[1]?.parts,
+    );
+    expect(recordToolResult.mock.calls[0]?.[1]).toMatchObject({
+      callId: 'c2',
+      status: 'success',
+    });
   });
 });
 

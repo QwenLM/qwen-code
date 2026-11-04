@@ -320,6 +320,11 @@ export interface ToolBatchOptions {
    * with the stop reason `cancelled`, for a surface that keeps them.
    */
   keepCancelledResults?: boolean;
+  /**
+   * Leave each result unrecorded and return its recording as `record` on
+   * `responses`, for a surface that records only the results it sends.
+   */
+  deferRecording?: boolean;
 }
 
 export interface ToolBatchResult {
@@ -329,7 +334,12 @@ export interface ToolBatchResult {
    * The same parts by call, for a surface that drops some calls' results.
    * Absent when the batch stopped before it answered any call.
    */
-  responses?: Array<{ callId: string; parts: Part[] }>;
+  responses?: Array<{
+    callId: string;
+    parts: Part[];
+    /** Records the result, when the batch deferred recording. */
+    record?: () => void;
+  }>;
   stop?: AgentLoopStopReason;
 }
 
@@ -521,31 +531,39 @@ export async function runToolBatch(
     })),
     new Map(ordered.map(({ request }) => [request.callId, request.prompt_id])),
   );
-  const recorder = config.getChatRecordingService?.();
   const parts: Part[] = [];
-  const responses: ToolBatchResult['responses'] = [];
+  const responses: NonNullable<ToolBatchResult['responses']> = [];
   ordered.forEach(({ request, executionRequest, response, status }, index) => {
     const responseParts = finalized[index].responseParts;
     parts.push(...responseParts);
-    responses.push({ callId: request.callId, parts: responseParts });
-    const provenance = goalToolResultProvenance(
-      executionRequest,
-      responseParts,
-    );
-    recorder?.recordToolResult?.(
-      responseParts,
-      {
-        callId: request.callId,
-        status,
-        resultDisplay: response.resultDisplay,
-        persistedOutputFiles: finalized[index].persistedOutputFiles,
-        artifacts: finalized[index].artifacts,
-        error: response.error,
-        errorType: response.errorType,
-        executionStatus: response.executionStatus,
-      },
-      ...(provenance ? ([provenance] as const) : ([] as const)),
-    );
+    // The recorder is resolved when the result is written, as the surface
+    // may record it later.
+    const record = () => {
+      const provenance = goalToolResultProvenance(
+        executionRequest,
+        responseParts,
+      );
+      config.getChatRecordingService?.()?.recordToolResult?.(
+        responseParts,
+        {
+          callId: request.callId,
+          status,
+          resultDisplay: response.resultDisplay,
+          persistedOutputFiles: finalized[index].persistedOutputFiles,
+          artifacts: finalized[index].artifacts,
+          error: response.error,
+          errorType: response.errorType,
+          executionStatus: response.executionStatus,
+        },
+        ...(provenance ? ([provenance] as const) : ([] as const)),
+      );
+    };
+    if (options.deferRecording) {
+      responses.push({ callId: request.callId, parts: responseParts, record });
+    } else {
+      responses.push({ callId: request.callId, parts: responseParts });
+      record();
+    }
   });
 
   if (aborted && !ended) return { parts, responses, stop: 'cancelled' };

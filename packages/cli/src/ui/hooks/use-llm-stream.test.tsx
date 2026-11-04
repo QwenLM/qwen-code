@@ -24781,6 +24781,204 @@ describe('useLlmStream', () => {
       expect(sentIds(1)).toEqual(['replayed', 'fresh']);
     });
 
+    const recordedCallIds = () => {
+      const recordToolResult = vi.fn();
+      mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+        recordThought: vi.fn(),
+        initialize: vi.fn(),
+        recordMessage: vi.fn(),
+        recordMessageTokens: vi.fn(),
+        recordToolCalls: vi.fn(),
+        getConversationFile: vi.fn(),
+        recordToolResult,
+      });
+      return () =>
+        recordToolResult.mock.calls.map(
+          (call) => (call[1] as { callId: string }).callId,
+        );
+    };
+
+    it('records and counts once a call whose result history already has, and does not send it', async () => {
+      completeBatches();
+      const recorded = recordedCallIds();
+      rounds(
+        [toolRequest('read_a'), toolRequest('read_b')],
+        [{ type: ServerLlmEventType.Content, value: 'Read.' }],
+      );
+      const client = mockConfig.getLlmClient();
+      client.getHistoryFunctionResponseIds = vi
+        .fn()
+        .mockReturnValue(new Set(['read_a']));
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Read the files.');
+      });
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(sentIds(1)).toEqual(['read_b']);
+      // History's response stays the only one: the batch's result for
+      // read_a is dropped, so it is not recorded either.
+      expect(recorded()).toEqual(['read_b']);
+      expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(2);
+    });
+
+    it('records once the result that replaces a placeholder', async () => {
+      completeBatches();
+      const recorded = recordedCallIds();
+      rounds([toolRequest('read_a')]);
+      const client = mockConfig.getLlmClient();
+      client.getHistoryFunctionResponseIds = vi
+        .fn()
+        .mockReturnValue(new Set(['read_a']));
+      client.getSynthesizedRepairCallIds = vi
+        .fn()
+        .mockReturnValue(new Set(['read_a']));
+      client.replaceSynthesizedToolResponse = vi.fn().mockReturnValue(true);
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+
+      await waitFor(() => {
+        expect(client.replaceSynthesizedToolResponse).toHaveBeenCalledWith(
+          'read_a',
+          completedCall(toolRequest('read_a').value as ToolCallRequestInfo)
+            .response.responseParts,
+        );
+      });
+      expect(recorded()).toEqual(['read_a']);
+      expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(1);
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    it("sends the replay answers when the batch's executed calls were all cancelled", async () => {
+      mockScheduleToolCalls.mockImplementation(
+        (
+          requests: ToolCallRequestInfo[],
+          _signal: AbortSignal,
+          _modelOverride: string | undefined,
+          onBatchComplete?: (calls: unknown[]) => Promise<void>,
+        ) => {
+          void onBatchComplete?.(
+            requests.map((request) => ({
+              ...completedCall(request),
+              status: 'cancelled' as const,
+            })),
+          );
+        },
+      );
+      const replayed = {
+        ...toolRequest('replayed'),
+        value: { ...toolRequest('replayed').value, providerCallId: 'replayed' },
+      };
+      const client = mockConfig.getLlmClient();
+      client.getHistoryToolCallFingerprints = vi
+        .fn()
+        .mockReturnValue(
+          new Map([
+            [
+              'replayed',
+              getToolCallFingerprint(replayed.value.name, replayed.value.args),
+            ],
+          ]),
+        );
+      rounds(
+        [replayed, toolRequest('declined')],
+        [{ type: ServerLlmEventType.Content, value: 'Done.' }],
+      );
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Read the files.');
+      });
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(sentIds(1)).toEqual(['replayed', 'declined']);
+    });
+
+    it('holds a batch that completes during another model stream and handles it against history as it is when that stream ends', async () => {
+      const recorded = recordedCallIds();
+      let completeBatch: (() => Promise<void>) | undefined;
+      mockScheduleToolCalls.mockImplementation(
+        (
+          requests: ToolCallRequestInfo[],
+          _signal: AbortSignal,
+          _modelOverride: string | undefined,
+          onBatchComplete?: (calls: unknown[]) => Promise<void>,
+        ) => {
+          completeBatch = () =>
+            onBatchComplete?.(
+              requests.map((request) => completedCall(request)),
+            ) ?? Promise.resolve();
+        },
+      );
+      let endSecondStream!: () => void;
+      const secondStreamHeld = new Promise<void>((resolve) => {
+        endSecondStream = resolve;
+      });
+      mockSendMessageStream
+        .mockReturnValueOnce(
+          (async function* () {
+            yield toolRequest('read_a');
+          })(),
+        )
+        .mockReturnValueOnce(
+          (async function* () {
+            yield { type: ServerLlmEventType.Content, value: 'Thinking.' };
+            await secondStreamHeld;
+          })(),
+        );
+      const client = mockConfig.getLlmClient();
+      const { result } = renderTestHook([], client);
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+      expect(completeBatch).toBeDefined();
+      let secondSubmission!: Promise<void>;
+      await act(async () => {
+        secondSubmission = result.current.submitQuery('Something else.');
+      });
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+
+      await act(async () => {
+        await completeBatch!();
+      });
+      // While the batch waited, the other stream's repair answered read_a
+      // with a placeholder.
+      client.getHistoryFunctionResponseIds = vi
+        .fn()
+        .mockReturnValue(new Set(['read_a']));
+      client.getSynthesizedRepairCallIds = vi
+        .fn()
+        .mockReturnValue(new Set(['read_a']));
+      client.replaceSynthesizedToolResponse = vi.fn().mockReturnValue(true);
+      expect(recorded()).toEqual([]);
+
+      await act(async () => {
+        endSecondStream();
+        await secondSubmission;
+      });
+
+      await waitFor(() => {
+        expect(client.replaceSynthesizedToolResponse).toHaveBeenCalledWith(
+          'read_a',
+          expect.anything(),
+        );
+      });
+      expect(recorded()).toEqual(['read_a']);
+      // The placeholder took the result: no continuation sends it again.
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+
     it('ends the round on a cancel without scheduling its calls', async () => {
       const after = vi.fn();
       mockSendMessageStream.mockReturnValue(

@@ -461,9 +461,15 @@ interface SharedToolBatch {
   handled: Map<string, string>;
 }
 
-/** A shared tool batch's finalized results, for `handleCompletedTools`. */
+/** A shared tool batch's results, for `handleCompletedTools`. */
 interface SharedToolBatchResults {
-  responses: Array<{ callId: string; parts: Part[] }>;
+  /**
+   * The finalized results by call, replays included, each with its
+   * recording, which waits until the result is sent.
+   */
+  responses: Array<{ callId: string; parts: Part[]; record?: () => void }>;
+  /** The calls the batch ran, which it counted as it counts them. */
+  ranCallIds: ReadonlySet<string>;
   promptId: string | undefined;
 }
 
@@ -1229,9 +1235,16 @@ export const useLlmStream = (
   const detachedToolContinuationAbortControllersRef = useRef(
     new Set<AbortController>(),
   );
-  const pendingCompletedToolBatchesRef = useRef<TrackedToolCall[][]>([]);
+  // Batches that completed while a model stream was active, with the shared
+  // batch's results when it ran them.
+  const pendingCompletedToolBatchesRef = useRef<
+    Array<{ tools: TrackedToolCall[]; shared?: SharedToolBatchResults }>
+  >([]);
   const handleCompletedToolsRef = useRef<
-    (completedTools: TrackedToolCall[]) => Promise<void>
+    (
+      completedTools: TrackedToolCall[],
+      shared?: SharedToolBatchResults,
+    ) => Promise<void>
   >(async () => {});
   const commitCompletedToolBatchRef = useRef<
     (completed: InteractiveToolCall[]) => Promise<void>
@@ -1239,9 +1252,6 @@ export const useLlmStream = (
   const runSharedToolBatchRef = useRef<
     (batch: SharedToolBatch) => Promise<void>
   >(async () => {});
-  // Shared tool batches that completed while a model stream was active wait
-  // here, as the current path's deferred batches do.
-  const modelStreamsIdleWaitersRef = useRef<Array<() => void>>([]);
   const immediateDuplicateToolResponsesRef = useRef<{
     promptId: string | undefined;
     responses: Array<{
@@ -3644,6 +3654,16 @@ export const useLlmStream = (
               );
             }
           }
+          // As the current path does, the turn's other streams see these
+          // calls as handled from the moment they are scheduled.
+          for (const request of executableOnSharedLoop) {
+            if (!request.providerCallId) continue;
+            recordHandledToolCall(
+              handledToolCallFingerprintsRef.current,
+              request.providerCallId,
+              getCachedToolCallFingerprint(request, request.name, request.args),
+            );
+          }
           registerToolBatch(executableOnSharedLoop);
           void runSharedToolBatchRef.current({
             calls: toolCallRequests,
@@ -5031,21 +5051,36 @@ export const useLlmStream = (
             activeGoalAdmissionRef.current = null;
           }
           if (shouldDrainCompletedToolBatches) {
-            for (const resume of modelStreamsIdleWaitersRef.current.splice(0)) {
-              resume();
-            }
             const pendingCompletedToolBatches =
               pendingCompletedToolBatchesRef.current.splice(0);
             const pendingCompletedTools = new Map<string, TrackedToolCall>();
-            for (const pendingBatch of pendingCompletedToolBatches) {
-              for (const toolCall of pendingBatch) {
+            let pendingShared: SharedToolBatchResults | undefined;
+            for (const { tools, shared } of pendingCompletedToolBatches) {
+              for (const toolCall of tools) {
                 pendingCompletedTools.set(toolCall.request.callId, toolCall);
+              }
+              // The shared batches' results go out in the same continuation.
+              if (shared) {
+                pendingShared = pendingShared
+                  ? {
+                      responses: [
+                        ...pendingShared.responses,
+                        ...shared.responses,
+                      ],
+                      ranCallIds: new Set([
+                        ...pendingShared.ranCallIds,
+                        ...shared.ranCallIds,
+                      ]),
+                      promptId: pendingShared.promptId ?? shared.promptId,
+                    }
+                  : shared;
               }
             }
             if (pendingCompletedTools.size > 0) {
-              await handleCompletedToolsRef.current([
-                ...pendingCompletedTools.values(),
-              ]);
+              await handleCompletedToolsRef.current(
+                [...pendingCompletedTools.values()],
+                pendingShared,
+              );
             }
           }
         }
@@ -5536,6 +5571,12 @@ export const useLlmStream = (
       const chat = llmClient?.getChat();
       const isCurrentSession = () =>
         config.getSessionId() === sessionId && llmClient?.getChat() === chat;
+      // The shared batch finalized these results and counted these calls.
+      const sharedResultsByCallId = new Map(
+        shared?.responses.map((entry) => [entry.callId, entry]) ?? [],
+      );
+      const countedByBatch = (toolCall: TrackedToolCall) =>
+        shared?.ranCallIds.has(toolCall.request.callId) === true;
       const completedAndReadyToSubmitTools =
         completedToolCallsFromScheduler.filter(
           (
@@ -5605,22 +5646,45 @@ export const useLlmStream = (
         const replacedCallIds: string[] = [];
         let abandonedSessionId: string | null = null;
         if (replaceableTools.length > 0 && llmClient) {
-          const finalizedReplaceable = await finalizeToolResponses(
-            config,
-            replaceableTools.map(({ request, response }) => ({
-              callId: request.callId,
-              toolName: request.name,
-              responseParts: response.responseParts,
-              persistedOutputFiles: response.persistedOutputFiles,
-              artifacts: response.artifacts,
-            })),
-            new Map(
-              replaceableTools.flatMap(({ request }) =>
-                request.prompt_id
-                  ? [[request.callId, request.prompt_id] as const]
-                  : [],
-              ),
-            ),
+          // The shared batch's results are already finalized.
+          const unfinalizedTools = replaceableTools.filter(
+            ({ request }) => !sharedResultsByCallId.has(request.callId),
+          );
+          const finalizedUnshared =
+            unfinalizedTools.length === 0
+              ? []
+              : await finalizeToolResponses(
+                  config,
+                  unfinalizedTools.map(({ request, response }) => ({
+                    callId: request.callId,
+                    toolName: request.name,
+                    responseParts: response.responseParts,
+                    persistedOutputFiles: response.persistedOutputFiles,
+                    artifacts: response.artifacts,
+                  })),
+                  new Map(
+                    unfinalizedTools.flatMap(({ request }) =>
+                      request.prompt_id
+                        ? [[request.callId, request.prompt_id] as const]
+                        : [],
+                    ),
+                  ),
+                );
+          const finalizedReplaceable = replaceableTools.map(
+            (
+              toolCall,
+            ): Awaited<ReturnType<typeof finalizeToolResponses>>[number] => {
+              const sharedResult = sharedResultsByCallId.get(
+                toolCall.request.callId,
+              );
+              return sharedResult
+                ? {
+                    callId: sharedResult.callId,
+                    toolName: toolCall.request.name,
+                    responseParts: sharedResult.parts,
+                  }
+                : finalizedUnshared[unfinalizedTools.indexOf(toolCall)]!;
+            },
           );
           // A session swap (/clear, /resume, daemon churn) during the
           // finalize await leaves the captured chat abandoned: splicing
@@ -5653,6 +5717,11 @@ export const useLlmStream = (
               // the call; once a model turn intervenes the scan stops there
               // and synthesizes a fresh placeholder instead, leaving the
               // recorded result durable but unreferenced.
+              const sharedResult = sharedResultsByCallId.get(entry.callId);
+              if (sharedResult) {
+                sharedResult.record?.();
+                return;
+              }
               config.getChatRecordingService?.()?.recordToolResult?.(
                 entry.responseParts,
                 {
@@ -5719,6 +5788,7 @@ export const useLlmStream = (
         for (const tc of dedupedTools) {
           if (tc.request.isClientInitiated) continue;
           if (tc.status === 'cancelled' || tc.nativeAttemptsObserved) continue;
+          if (countedByBatch(tc)) continue;
           llmClient?.recordCompletedToolCall(
             tc.request.name,
             tc.request.args as Record<string, unknown>,
@@ -5763,17 +5833,27 @@ export const useLlmStream = (
         }
       }
 
-      if (shared && activeModelStreamsRef.current > 0) {
-        await new Promise<void>((resume) =>
-          modelStreamsIdleWaitersRef.current.push(resume),
-        );
-      } else if (activeModelStreamsRef.current > 0) {
+      if (activeModelStreamsRef.current > 0) {
         const deferredTools = completedAndReadyToSubmitTools.filter(
           (toolCall) =>
             !historyCallIdsWithResponse.has(toolCall.request.callId),
         );
         if (deferredTools.length > 0) {
-          pendingCompletedToolBatchesRef.current.push(deferredTools);
+          // The drain runs this step again, against history as it is then.
+          const handledCallIds = new Set(dedupedCallIds);
+          pendingCompletedToolBatchesRef.current.push({
+            tools: deferredTools,
+            ...(shared
+              ? {
+                  shared: {
+                    ...shared,
+                    responses: shared.responses.filter(
+                      ({ callId }) => !handledCallIds.has(callId),
+                    ),
+                  },
+                }
+              : {}),
+          });
         }
         return;
       }
@@ -5932,7 +6012,8 @@ export const useLlmStream = (
         }
         if (
           toolCall.status !== 'cancelled' &&
-          !toolCall.nativeAttemptsObserved
+          !toolCall.nativeAttemptsObserved &&
+          !countedByBatch(toolCall)
         ) {
           llmClient?.recordCompletedToolCall(
             toolCall.request.name,
@@ -6231,30 +6312,35 @@ export const useLlmStream = (
         promptId = pendingDuplicatePromptId;
       }
 
-      // The shared batch already recorded its calls and their results.
+      // The shared batch's results this continuation sends: its executed
+      // calls still in llmTools, and its replay answers.
       const unsentCallIds = new Set(
         completedAndReadyToSubmitTools
           .filter((toolCall) => !llmTools.includes(toolCall))
           .map((toolCall) => toolCall.request.callId),
       );
-      const sharedResponses = shared?.responses.filter(
-        ({ callId }) => !unsentCallIds.has(callId),
+      const sharedResponses =
+        shared?.responses.filter(({ callId }) => !unsentCallIds.has(callId)) ??
+        [];
+      // The other calls' results are finalized and recorded here.
+      const unsharedTools = llmTools.filter(
+        (toolCall) => !sharedResultsByCallId.has(toolCall.request.callId),
       );
       if (shared && !promptId && shared.promptId) promptId = shared.promptId;
-      if (!shared) {
-        for (const toolCall of llmTools) {
-          if (toolCall.nativeAttemptsObserved) continue;
-          llmClient?.recordCompletedToolCall(
-            toolCall.request.name,
-            toolCall.request.args as Record<string, unknown>,
-          );
+      for (const toolCall of llmTools) {
+        if (toolCall.nativeAttemptsObserved || countedByBatch(toolCall)) {
+          continue;
         }
+        llmClient?.recordCompletedToolCall(
+          toolCall.request.name,
+          toolCall.request.args as Record<string, unknown>,
+        );
       }
 
       if (
-        sharedResponses
-          ? sharedResponses.length === 0
-          : llmTools.length === 0 && pendingDuplicateResponses.length === 0
+        sharedResponses.length === 0 &&
+        unsharedTools.length === 0 &&
+        pendingDuplicateResponses.length === 0
       ) {
         if (!promptId && terminalPromptId) {
           promptId = terminalPromptId;
@@ -6289,109 +6375,106 @@ export const useLlmStream = (
         return;
       }
 
-      let responsesToSend: Part[];
-      // Each call's finalized parts, for the pairing a cancel owes history.
-      let sentResponses: Array<{ callId: string; responseParts: Part[] }>;
-      if (sharedResponses) {
-        sentResponses = sharedResponses.map(({ callId, parts }) => ({
+      type ReadyToolResponse = {
+        request: ToolCallRequestInfo;
+        response: ToolCallResponseInfo;
+        status: 'success' | 'error' | 'cancelled';
+      };
+      const executableQueues = new Map<string, ReadyToolResponse[]>();
+      for (const toolCall of unsharedTools) {
+        const queue = executableQueues.get(toolCall.request.callId) ?? [];
+        queue.push({
+          request: toolCall.request,
+          response: toolCall.response,
+          status: toolCall.status,
+        });
+        executableQueues.set(toolCall.request.callId, queue);
+      }
+      const duplicateQueues = new Map<string, ReadyToolResponse[]>();
+      for (const duplicate of pendingDuplicateResponses) {
+        const queue = duplicateQueues.get(duplicate.request.callId) ?? [];
+        queue.push({
+          ...duplicate,
+          status: duplicate.response.error ? 'error' : 'success',
+        });
+        duplicateQueues.set(duplicate.request.callId, queue);
+      }
+      const orderedResponses: ReadyToolResponse[] = [];
+      for (const batch of readyDuplicateBatches) {
+        for (const callId of batch.callOrder) {
+          const executable = executableQueues.get(callId)?.shift();
+          if (executable) {
+            orderedResponses.push(executable);
+            continue;
+          }
+          const duplicate = duplicateQueues.get(callId)?.shift();
+          if (duplicate) orderedResponses.push(duplicate);
+        }
+      }
+      for (const queue of executableQueues.values()) {
+        orderedResponses.push(...queue);
+      }
+      for (const queue of duplicateQueues.values()) {
+        orderedResponses.push(...queue);
+      }
+
+      const finalizedResponses =
+        orderedResponses.length === 0
+          ? []
+          : await finalizeToolResponses(
+              config,
+              orderedResponses.map(({ request, response }) => ({
+                callId: request.callId,
+                toolName: request.name,
+                responseParts: response.responseParts,
+                persistedOutputFiles: response.persistedOutputFiles,
+                artifacts: response.artifacts,
+              })),
+              new Map(
+                orderedResponses.flatMap(({ request }) =>
+                  request.prompt_id
+                    ? [[request.callId, request.prompt_id] as const]
+                    : [],
+                ),
+              ),
+            );
+      // Each call's finalized parts, for the pairing a cancel owes history:
+      // the shared batch's first, in its request order.
+      const sentResponses = [
+        ...sharedResponses.map(({ callId, parts }) => ({
           callId,
           responseParts: parts,
-        }));
-        responsesToSend = sharedResponses.flatMap(({ parts }) => parts);
-        if (!isCurrentSession()) {
-          if (toolGoalBinding) releaseGoalTurn(toolGoalBinding);
-          return;
-        }
-      } else {
-        type ReadyToolResponse = {
-          request: ToolCallRequestInfo;
-          response: ToolCallResponseInfo;
-          status: 'success' | 'error' | 'cancelled';
-        };
-        const executableQueues = new Map<string, ReadyToolResponse[]>();
-        for (const toolCall of llmTools) {
-          const queue = executableQueues.get(toolCall.request.callId) ?? [];
-          queue.push({
-            request: toolCall.request,
-            response: toolCall.response,
-            status: toolCall.status,
-          });
-          executableQueues.set(toolCall.request.callId, queue);
-        }
-        const duplicateQueues = new Map<string, ReadyToolResponse[]>();
-        for (const duplicate of pendingDuplicateResponses) {
-          const queue = duplicateQueues.get(duplicate.request.callId) ?? [];
-          queue.push({
-            ...duplicate,
-            status: duplicate.response.error ? 'error' : 'success',
-          });
-          duplicateQueues.set(duplicate.request.callId, queue);
-        }
-        const orderedResponses: ReadyToolResponse[] = [];
-        for (const batch of readyDuplicateBatches) {
-          for (const callId of batch.callOrder) {
-            const executable = executableQueues.get(callId)?.shift();
-            if (executable) {
-              orderedResponses.push(executable);
-              continue;
-            }
-            const duplicate = duplicateQueues.get(callId)?.shift();
-            if (duplicate) orderedResponses.push(duplicate);
-          }
-        }
-        for (const queue of executableQueues.values()) {
-          orderedResponses.push(...queue);
-        }
-        for (const queue of duplicateQueues.values()) {
-          orderedResponses.push(...queue);
-        }
-
-        const finalizedResponses = await finalizeToolResponses(
-          config,
-          orderedResponses.map(({ request, response }) => ({
+        })),
+        ...finalizedResponses,
+      ];
+      const responsesToSend = sentResponses.flatMap(
+        (entry) => entry.responseParts,
+      );
+      if (!isCurrentSession()) {
+        if (toolGoalBinding) releaseGoalTurn(toolGoalBinding);
+        return;
+      }
+      for (const { record } of sharedResponses) record?.();
+      orderedResponses.forEach(({ request, response, status }, index) => {
+        config.getChatRecordingService?.()?.recordToolResult?.(
+          finalizedResponses[index].responseParts,
+          {
             callId: request.callId,
-            toolName: request.name,
-            responseParts: response.responseParts,
-            persistedOutputFiles: response.persistedOutputFiles,
-            artifacts: response.artifacts,
-          })),
-          new Map(
-            orderedResponses.flatMap(({ request }) =>
-              request.prompt_id
-                ? [[request.callId, request.prompt_id] as const]
-                : [],
-            ),
+            status,
+            resultDisplay: response.resultDisplay,
+            persistedOutputFiles:
+              finalizedResponses[index].persistedOutputFiles,
+            artifacts: finalizedResponses[index].artifacts,
+            error: response.error,
+            errorType: response.errorType,
+            executionStatus: response.executionStatus,
+          },
+          goalToolResultProvenance(
+            request,
+            finalizedResponses[index].responseParts,
           ),
         );
-        sentResponses = finalizedResponses;
-        responsesToSend = finalizedResponses.flatMap(
-          (entry) => entry.responseParts,
-        );
-        if (!isCurrentSession()) {
-          if (toolGoalBinding) releaseGoalTurn(toolGoalBinding);
-          return;
-        }
-        orderedResponses.forEach(({ request, response, status }, index) => {
-          config.getChatRecordingService?.()?.recordToolResult?.(
-            finalizedResponses[index].responseParts,
-            {
-              callId: request.callId,
-              status,
-              resultDisplay: response.resultDisplay,
-              persistedOutputFiles:
-                finalizedResponses[index].persistedOutputFiles,
-              artifacts: finalizedResponses[index].artifacts,
-              error: response.error,
-              errorType: response.errorType,
-              executionStatus: response.executionStatus,
-            },
-            goalToolResultProvenance(
-              request,
-              finalizedResponses[index].responseParts,
-            ),
-          );
-        });
-      }
+      });
 
       if (continuationWasCancelled()) {
         // This is the branch a cancelled tool batch actually takes: the
@@ -6431,7 +6514,19 @@ export const useLlmStream = (
         (tc) => tc.status === 'cancelled',
       );
 
-      if (allToolsCancelled && pendingDuplicateResponses.length === 0) {
+      // The shared batch's replay answers, like the duplicate responses,
+      // still go out.
+      const llmToolCallIds = new Set(
+        llmTools.map((toolCall) => toolCall.request.callId),
+      );
+      const sendsSharedReplayAnswers = sharedResponses.some(
+        ({ callId }) => !llmToolCallIds.has(callId),
+      );
+      if (
+        allToolsCancelled &&
+        pendingDuplicateResponses.length === 0 &&
+        !sendsSharedReplayAnswers
+      ) {
         if (llmClient) {
           // We need to manually add the function responses to the history
           // so the model knows the tools were cancelled.
@@ -7067,6 +7162,7 @@ export const useLlmStream = (
           );
         },
       );
+      let committed = false;
       try {
         const result = await runToolBatch(batch.calls, {
           config,
@@ -7079,6 +7175,8 @@ export const useLlmStream = (
           executor,
           // Esc keeps the results, which the TUI pairs into history.
           keepCancelledResults: true,
+          // The TUI records only the results it sends, in its own session.
+          deferRecording: true,
           host: {
             onToolResult: ({ request, response, origin }) => {
               if (origin !== 'executed') {
@@ -7087,21 +7185,32 @@ export const useLlmStream = (
             },
           },
         });
-        for (const [providerCallId, fingerprint] of batch.handled) {
-          if (!handledToolCallFingerprintsRef.current.has(providerCallId)) {
-            handledToolCallFingerprintsRef.current.set(
-              providerCallId,
-              fingerprint,
-            );
-          }
-        }
         if (settled.length === 0) return;
+        committed = true;
         await commitCompletedToolBatch(settled, {
           responses: result.responses ?? [],
+          ranCallIds: new Set(settled.map(({ request }) => request.callId)),
           promptId: batch.promptId,
         });
       } catch (error) {
         debugLogger.error('Shared tool batch failed:', error);
+        // The scheduler already settled the calls: complete them without
+        // the batch's results, as the current path would, so the tool group
+        // is kept and the turn goes on. The batch counted them already.
+        if (!committed && settled.length > 0) {
+          try {
+            await commitCompletedToolBatch(settled, {
+              responses: [],
+              ranCallIds: new Set(settled.map(({ request }) => request.callId)),
+              promptId: batch.promptId,
+            });
+          } catch (commitError) {
+            debugLogger.error(
+              'Completing a failed shared tool batch failed:',
+              commitError,
+            );
+          }
+        }
       } finally {
         releaseBatchActivity?.();
       }
