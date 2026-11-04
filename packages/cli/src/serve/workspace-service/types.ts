@@ -166,6 +166,17 @@ export interface DaemonWorkspaceService {
     ctx: WorkspaceRequestContext,
   ): Promise<ServeWorkspaceHooksStatus>;
 
+  /**
+   * Record the user's decision on the workspace's pending project hooks.
+   * Daemon-local: works without a live ACP child (the decision is needed on
+   * a cold, possibly untrusted workspace), writes the same hash-bound
+   * record the TUI dialog writes, and never grants folder trust.
+   */
+  approveProjectHooks(
+    ctx: WorkspaceRequestContext,
+    decision: 'approve' | 'reject',
+  ): Promise<{ decision: 'approve' | 'reject'; reloaded: boolean }>;
+
   /** Installed extension status for the bound workspace. */
   getWorkspaceExtensionsStatus(
     ctx: WorkspaceRequestContext,
@@ -392,6 +403,13 @@ export class WorkspaceTrustGrantIneffectiveError extends Error {
         'Check the workspace trust status and trust policy before retrying.',
     );
     this.name = 'WorkspaceTrustGrantIneffectiveError';
+  }
+}
+
+export class WorkspaceProjectHooksNotPendingError extends Error {
+  constructor() {
+    super('No project hooks await approval in this workspace.');
+    this.name = 'WorkspaceProjectHooksNotPendingError';
   }
 }
 

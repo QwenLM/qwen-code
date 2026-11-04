@@ -1,4 +1,5 @@
 import { DaemonConnectionBanner } from './components/DaemonConnectionBanner.js';
+import { ProjectHooksApprovalBanner } from './components/ProjectHooksApprovalBanner.js';
 import { useDaemonAvailability } from './daemon/availability-context.js';
 import { isDaemonUnavailableError } from './daemon/availability.js';
 import {
@@ -23203,7 +23204,10 @@ export function App({
               {!artifactPanelFullscreen &&
                 (managedMode ||
                   !(artifactPanelOpen && useFloatingArtifactPanel)) && (
-                  <DaemonConnectionBanner />
+                  <>
+                    <DaemonConnectionBanner />
+                    {!managedMode && <ProjectHooksApprovalBanner />}
+                  </>
                 )}
               <div
                 ref={contextBodyRef}

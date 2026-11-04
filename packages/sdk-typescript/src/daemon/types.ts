@@ -5678,6 +5678,10 @@ export interface DaemonWorkspaceHooksStatus {
   disabled: boolean;
   hooks: DaemonHookEntry[];
   events: Record<string, DaemonHookEventMeta>;
+  /** Project hooks await the user's approval; see the hooks approve control. */
+  pendingApproval?: boolean;
+  /** Sanitized display lines of the withheld hooks, for the approval prompt. */
+  pendingApprovalHooks?: string[];
   errors?: DaemonStatusCell[];
 }
 

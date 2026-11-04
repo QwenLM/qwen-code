@@ -272,7 +272,11 @@ import {
 import { loadMcpApprovals } from '../config/mcpApprovals.js';
 import {
   getProjectHooksForApproval,
+  getProjectHooksForApprovalFromRawWorkspace,
+  getProjectHooksApprovalState,
   getSeparatedHookSettings,
+  loadHookApprovals,
+  summarizeProjectHooks,
 } from '../config/hook-approvals.js';
 import { assembleMcpServers } from '../config/mcpServers.js';
 import { recomputeMcpGating } from '../config/hot-reload.js';
@@ -9777,6 +9781,7 @@ class QwenAgent implements Agent {
         disabled: listing.allDisabled,
         hooks,
         events: IDLE_HOOK_EVENTS,
+        ...this.projectHooksApprovalCell(),
       };
     } catch (error) {
       let disabled = false;
@@ -9794,6 +9799,37 @@ class QwenAgent implements Agent {
         events: IDLE_HOOK_EVENTS,
         errors: [this.errorCell('hooks', error)],
       };
+    }
+  }
+
+  /**
+   * The pending project-hooks decision for daemon clients. Reads the stored
+   * decision fresh so a cold ACP child (or one whose in-memory flag predates
+   * a decision made elsewhere) reports the same truth the gate will apply.
+   * Falls back to the raw workspace block when the trust gate withheld the
+   * whole workspace scope; approving there does not bypass folder trust.
+   */
+  private projectHooksApprovalCell(): {
+    pendingApproval?: boolean;
+    pendingApprovalHooks?: string[];
+  } {
+    try {
+      const approval =
+        getProjectHooksForApproval(this.settings) ??
+        getProjectHooksForApprovalFromRawWorkspace(this.settings);
+      if (!approval || getProjectHooksApprovalState(approval) !== 'pending') {
+        return {};
+      }
+      return {
+        pendingApproval: true,
+        pendingApprovalHooks: summarizeProjectHooks(
+          approval.resolved,
+          approval.hooks,
+        ),
+      };
+    } catch {
+      // A settings read failure must not take the whole status cell down.
+      return {};
     }
   }
 
@@ -10969,6 +11005,41 @@ class QwenAgent implements Agent {
           string,
           unknown
         >;
+      case SERVE_CONTROL_EXT_METHODS.projectHooksApprove: {
+        // Dedicated approval route, NOT session/request_permission: permission
+        // requests are auto-answered by automation clients, a trust decision
+        // must be an explicit user act. Records the same hash-bound approval
+        // the TUI dialog writes, then reloads the registry.
+        const approval =
+          getProjectHooksForApproval(this.settings) ??
+          getProjectHooksForApprovalFromRawWorkspace(this.settings);
+        if (!approval) {
+          throw RequestError.invalidParams(
+            undefined,
+            'No project hooks await approval in this workspace.',
+          );
+        }
+        const decision = params['decision'];
+        if (decision !== 'approve' && decision !== 'reject') {
+          throw RequestError.invalidParams(
+            undefined,
+            'decision must be approve or reject.',
+          );
+        }
+        await loadHookApprovals().setState(
+          approval,
+          decision === 'approve' ? 'approved' : 'rejected',
+        );
+        this.config.setProjectHooksPendingApproval(
+          decision !== 'approve',
+          decision === 'reject',
+        );
+        await this.config.getHookSystem()?.reload();
+        return { decision, reloaded: true } as unknown as Record<
+          string,
+          unknown
+        >;
+      }
       case SERVE_STATUS_EXT_METHODS.sessionHooks: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {

@@ -1943,6 +1943,28 @@ export class DaemonClient {
     );
   }
 
+  async approveWorkspaceHooks(
+    decision: 'approve' | 'reject',
+  ): Promise<{ decision: 'approve' | 'reject'; reloaded: boolean }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/hooks/approve`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ decision }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/hooks/approve');
+        }
+        return (await res.json()) as {
+          decision: 'approve' | 'reject';
+          reloaded: boolean;
+        };
+      },
+    );
+  }
+
   async sessionHooks(sessionId: string): Promise<DaemonSessionHooksStatus> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/hooks`,
@@ -8586,6 +8608,16 @@ export class WorkspaceDaemonClient {
 
   workspaceHooks(): Promise<DaemonWorkspaceHooksStatus> {
     return this.get('/hooks', 'GET /workspaces/:workspace/hooks');
+  }
+
+  approveWorkspaceHooks(
+    decision: 'approve' | 'reject',
+  ): Promise<{ decision: 'approve' | 'reject'; reloaded: boolean }> {
+    return this.post(
+      '/hooks/approve',
+      'POST /workspaces/:workspace/hooks/approve',
+      { decision },
+    );
   }
 
   workspaceEnv(): Promise<DaemonWorkspaceEnvStatus> {

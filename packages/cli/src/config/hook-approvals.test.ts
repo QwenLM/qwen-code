@@ -13,6 +13,7 @@ import {
   fitHookLine,
   fitHookLines,
   getProjectHooksForApproval,
+  getProjectHooksForApprovalFromRawWorkspace,
   getProjectHooksHeadlessWarning,
   getProjectHooksRoot,
   getSeparatedHookSettings,
@@ -321,6 +322,45 @@ describe('hook-approvals (hash-bound approval store)', () => {
     expect(rejected).toContain('rejected');
     expect(rejected).toContain(HOOK_APPROVALS_FILENAME);
     expect(rejected).not.toContain('Run qwen interactively');
+  });
+
+  it('raw-workspace fallback hashes identically to the trusted path', () => {
+    const settings = {
+      merged: {},
+      getProjectHooks: () => hooks,
+      workspace: {
+        path: '/r/.qwen/settings.json',
+        originalSettings: { hooks },
+      },
+    };
+    const trusted = getProjectHooksForApproval(settings);
+    const raw = getProjectHooksForApprovalFromRawWorkspace(settings);
+    expect(raw).toBeDefined();
+    expect(hashProjectHooks(raw!)).toBe(hashProjectHooks(trusted!));
+    expect(raw!.root).toBe(trusted!.root);
+  });
+
+  it('raw-workspace fallback gates nothing when no hook would run', () => {
+    expect(
+      getProjectHooksForApprovalFromRawWorkspace({
+        merged: {},
+        workspace: {
+          path: '/r/.qwen/settings.json',
+          originalSettings: {
+            hooks: { Stop: [{ hooks: [{ type: 'nope', command: 'x' }] }] },
+          },
+        },
+      }),
+    ).toBeUndefined();
+    expect(
+      getProjectHooksForApprovalFromRawWorkspace({
+        merged: {},
+        workspace: {
+          path: '/r/.qwen/settings.json',
+          originalSettings: {},
+        },
+      }),
+    ).toBeUndefined();
   });
 });
 

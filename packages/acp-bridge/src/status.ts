@@ -206,6 +206,15 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
   workspaceMcpInitialize: 'qwen/control/workspace/mcp/initialize',
   workspaceMcpReload: 'qwen/control/workspace/mcp/reload',
+  /**
+   * Record the user's decision on the workspace's pending project hooks.
+   * A dedicated control route, not session/request_permission: permission
+   * prompts are auto-answered by automation clients, while this decision
+   * persists a hash-bound approval and must be an explicit user act.
+   * Params: `{ decision: 'approve' | 'reject' }`; result:
+   * `{ decision, reloaded }`.
+   */
+  projectHooksApprove: 'qwen/control/workspace/hooks/approve',
   workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',
   workspaceGenerationStart: 'qwen/control/workspace/generation/start',
   workspaceGenerationCancel: 'qwen/control/workspace/generation/cancel',
@@ -1584,6 +1593,14 @@ export interface ServeWorkspaceHooksStatus {
   disabled: boolean;
   hooks: ServeHookEntry[];
   events: Record<string, ServeHookEventMeta>;
+  /**
+   * The workspace's project hooks await the user's approval decision. A
+   * client renders its approval affordance from this flag and records the
+   * decision via SERVE_CONTROL_EXT_METHODS.projectHooksApprove.
+   */
+  pendingApproval?: boolean;
+  /** Sanitized display lines of the withheld hooks, for the approval prompt. */
+  pendingApprovalHooks?: string[];
   errors?: ServeStatusCell[];
 }
 
