@@ -92,7 +92,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
-import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
+import {
+  getInteractiveModSession,
+  MODS_FAILED_TO_INITIALIZE,
+} from '../../services/interactive-mod-session.js';
 import type { ModTurn } from '../../services/mod-session.js';
 import type {
   HistoryItem,
@@ -114,7 +117,8 @@ import {
   stripLeadingSystemReminders,
 } from '../utils/historyUtils.js';
 import {
-  collapsePastes,
+  collapseRewrite,
+  REWRITE_CHANGED_PASTE,
   expandPendingPastePlaceholders,
   framePasteExpansion,
 } from '../utils/paste-placeholders.js';
@@ -1936,11 +1940,22 @@ export const useLlmStream = (
             const ahead = found
               ? trimmedQuery.slice(0, trimmedQuery.length - typed.length)
               : '';
-            // A paste the rewrite kept whole stays collapsed and framed.
-            const collapsed = collapsePastes(rewritten, pasteExpansions);
-            pasteExpansions = collapsed.pasteExpansions.size
-              ? collapsed.pasteExpansions
-              : undefined;
+            // Each paste comes back whole to be collapsed and framed again,
+            // or the rewrite is refused rather than sent unframed.
+            const collapsed = collapseRewrite(
+              userText,
+              rewritten,
+              pasteExpansions,
+            );
+            if (!collapsed) {
+              addItem(
+                { type: MessageType.ERROR, text: REWRITE_CHANGED_PASTE },
+                userMessageTimestamp,
+              );
+              onPromptReturned?.(userText, pasteExpansions);
+              return { queryToSend: null, shouldProceed: false };
+            }
+            pasteExpansions = collapsed.pasteExpansions;
             userText = collapsed.text;
             recallText = rewritten;
             trimmedQuery =
@@ -4005,7 +4020,7 @@ export const useLlmStream = (
           addItem(
             {
               type: MessageType.ERROR,
-              text: 'Mods failed to initialize. Fix the Mod configuration and restart. /help and /quit remain available.',
+              text: MODS_FAILED_TO_INITIALIZE,
             },
             Date.now(),
           );
