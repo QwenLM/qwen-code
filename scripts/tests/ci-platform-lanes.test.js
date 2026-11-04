@@ -353,6 +353,29 @@ it('keeps every blocking test_build step under the job ceiling', () => {
   }
 });
 
+it('keeps every shard step cap under the job ceiling', () => {
+  // Same reason as the build job: the job cap cancels the job, and a cancelled
+  // job skips the failure-gated disk-pressure collector at the end. The caps
+  // are pinned one by one rather than summed — they are alternatives in
+  // practice, since a step only runs when the previous one left work to do,
+  // and install plus the test step already add up past the ceiling by design.
+  // The job cap therefore stays the outer backstop, not the sum of the parts.
+  const jobCap = Number(ci.jobs.test['timeout-minutes']);
+  const steps = new Map(
+    (ci.jobs.test.steps ?? []).map((step) => [step.name, step]),
+  );
+  for (const name of [
+    'Install dependencies',
+    'Download the built tree',
+    'Retry downloading the built tree',
+    'Run tests and generate reports',
+  ]) {
+    const minutes = steps.get(name)?.['timeout-minutes'];
+    expect(typeof minutes, `${name} has no step timeout`).toBe('number');
+    expect(minutes, `${name} cannot outlast the job`).toBeLessThan(jobCap);
+  }
+});
+
 it('reports the required Linux check only when the build and every shard pass', () => {
   const gate = ci.jobs.test_ubuntu;
   expect(gate.name).toBe('Test (ubuntu-latest, Node 22.x)');
@@ -394,6 +417,16 @@ it('pins the build-to-shard artifact handoff on both ends', () => {
   expect(name).toBeTruthy();
   expect(shard.get('Download the built tree').with.name).toBe(name);
   expect(shard.get('Retry downloading the built tree').with.name).toBe(name);
+  // Both attempts have to outlast the slow tail, not the median: eight shards
+  // fetch this same artifact at once, the slowest completed one on main took
+  // just under five minutes, and one exceeded the old five-minute cap on two
+  // runs in a row, skipping the unpack entirely.
+  for (const step of [
+    'Download the built tree',
+    'Retry downloading the built tree',
+  ]) {
+    expect(shard.get(step)?.['timeout-minutes'], step).toBe(15);
+  }
   expect(shard.get('Unpack the built tree').run).toContain(
     `\${RUNNER_TEMP}/${name}/${name}.tgz`,
   );
