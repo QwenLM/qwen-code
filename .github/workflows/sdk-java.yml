@@ -183,9 +183,12 @@ jobs:
         with:
           ref: '${{ inputs.ref || github.sha }}'
 
-      # Fail before the Maven, MySQL and RocketMQ steps on a saturated pool
-      # host (#16003). RUNNER_TEMP covers the broker store at
-      # ${RUNNER_TEMP}/rocketmq as well as the JUnit temp directory.
+      # Fail before the Maven, MySQL and RocketMQ steps when the workspace or
+      # RUNNER_TEMP filesystem is near full or out of inodes (#10035, #16003).
+      # The floor is absolute free KiB plus inodes; it cannot express the
+      # broker's used-ratio refusal (a large volume at 94% used still has ample
+      # free bytes), so the broker disk-threshold investigation stays out of
+      # scope here rather than being claimed as covered.
       - name: 'Disk floor gate (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'

@@ -191,16 +191,23 @@ describe('SDK Java self-hosted workflow guards', () => {
 
   it('fails Java pool jobs before disk exhaustion reaches their suites', () => {
     const jobs = parse(workflow).jobs;
-    const gatedJobs = [];
+    // Derive the corpus from runs-on, not a closed name list: a lane joins
+    // the pool with a one-line runs-on ternary, and a hardcoded list stays
+    // green through exactly that move (same hazard as the setup-java corpus
+    // below). Every pool-capable lane must carry the gate.
+    const poolJobs = Object.entries(jobs).filter(([, definition]) =>
+      String(definition['runs-on'] ?? '').includes('self-hosted'),
+    );
+    expect(poolJobs.length).toBeGreaterThan(0);
 
-    for (const [name, definition] of Object.entries(jobs)) {
+    for (const [name, definition] of poolJobs) {
       const steps = definition.steps ?? [];
       const gateIndex = steps.findIndex(
         (candidate) => candidate.name === 'Disk floor gate (self-hosted)',
       );
-      if (gateIndex < 0) continue;
-
-      gatedJobs.push(name);
+      // Skipping ungated jobs is how a newly pool-routed lane silently walks
+      // into the suites on a saturated host; require the gate instead.
+      expect(gateIndex, name).toBeGreaterThan(-1);
       expect(steps[gateIndex - 1]?.uses, name).toMatch(/^actions\/checkout@/);
       expect(steps[gateIndex].if, name).toBe(
         "${{ runner.environment == 'self-hosted' }}",
@@ -208,18 +215,10 @@ describe('SDK Java self-hosted workflow guards', () => {
       expect(steps[gateIndex].run, name).toBe(
         'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"',
       );
+      // continue-on-error would neuter the gate while every other assertion
+      // stays true; the job must actually stop on a saturated host.
+      expect(steps[gateIndex]['continue-on-error'], name).toBeUndefined();
     }
-
-    expect(gatedJobs.sort()).toEqual(
-      [
-        'test',
-        'flyway-migrations',
-        'mysql-integration',
-        'event-transport-broker',
-        'event-transport-multi-node',
-        'daemon-e2e',
-      ].sort(),
-    );
   });
 
   it('serializes the host-shared Maven cache write-back on each physical ECS host', () => {
