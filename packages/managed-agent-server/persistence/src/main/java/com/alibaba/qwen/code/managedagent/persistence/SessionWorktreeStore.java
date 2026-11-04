@@ -57,10 +57,18 @@ public class SessionWorktreeStore
 
     public SourceLocation source(String tenant, String actor, com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection selection) {
         WorkspaceStorageKindGuard.requireFreshTransaction();
+        SourceLocation before = readSource(tenant, actor, selection);
+        if (!before.equals(readSource(tenant, actor, selection))) {
+            throw com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.error("worktree_source_changed");
+        }
+        return before;
+    }
+
+    private SourceLocation readSource(String tenant, String actor, com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection selection) {
         return readTransaction.execute(status -> {
             ResolvedBinding source = registry.resolveForRead(tenant, actor, selection);
-            Path root = guard.verifiedRoot(source.binding());
-            return new SourceLocation(source, root, storageIdentity(source.binding()));
+            Path root = guard.verifiedRootForRead(source.binding());
+            return new SourceLocation(source, root, storageIdentity(source.binding(), false));
         });
     }
 
@@ -89,7 +97,7 @@ public class SessionWorktreeStore
             throw com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.error("worktree_source_changed");
         }
         worktreeFiles.requireRoot(plan);
-        if (plan.storageIdentity() != null && !plan.storageIdentity().equals(storageIdentity(source.binding()))) {
+        if (plan.storageIdentity() != null && !plan.storageIdentity().equals(storageIdentity(source.binding(), true))) {
             throw com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.error("worktree_source_changed");
         }
         long now = System.currentTimeMillis();
@@ -382,12 +390,14 @@ public class SessionWorktreeStore
         }));
     }
 
-    private String storageIdentity(ContextBinding binding) {
+    private String storageIdentity(ContextBinding binding, boolean lock) {
         var alias = jdbc.queryForList("SELECT physical_key, registration_revision, mount_revision, fence_operation_id"
-                        + " FROM ma_storage WHERE alias_key = ? FOR UPDATE",
+                        + " FROM ma_storage WHERE alias_key = ?" + (lock ? " FOR UPDATE" : ""),
                 com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(binding.getTenantId(), binding.getStorageId()));
         var owner = jdbc.queryForList("SELECT mount_revision, mount_registration_id, mount_state, mount_operation_id"
-                        + " FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE", WorkspaceExecutionStore.storageKey(jdbc, binding));
+                        + " FROM ma_storage_owner WHERE storage_key = ?" + (lock ? " FOR UPDATE" : ""),
+                lock ? WorkspaceExecutionStore.storageKey(jdbc, binding)
+                        : LocalStorageOwners.key(jdbc, binding.getTenantId(), binding.getStorageId(), false));
         return org.apache.commons.codec.digest.DigestUtils.sha256Hex(json(List.of(alias, owner)));
     }
 
