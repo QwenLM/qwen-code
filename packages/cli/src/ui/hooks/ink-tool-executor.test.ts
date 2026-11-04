@@ -89,6 +89,28 @@ describe('createInkToolExecutor', () => {
     ]);
   });
 
+  it('settles the batch when onSettled throws', async () => {
+    let callbackResult: Promise<void> | undefined;
+    const schedule = vi.fn<ScheduleFn>(
+      (requests, _signal, _modelOverride, onBatchComplete) => {
+        const calls = requests as ToolCallRequestInfo[];
+        callbackResult = onBatchComplete?.([completed(calls[0], 'success')]);
+      },
+    );
+    const executor = createInkToolExecutor(schedule, undefined, () => {
+      throw new Error('Chat not initialized');
+    });
+
+    const settled = await executor.run(
+      [request('a')],
+      new AbortController().signal,
+      hooks(),
+    );
+
+    expect(settled.map(({ request }) => request.callId)).toEqual(['a']);
+    await expect(callbackResult).rejects.toThrow('Chat not initialized');
+  });
+
   it('schedules nothing when every launch is refused', async () => {
     const schedule = vi.fn<ScheduleFn>();
     const executor = createInkToolExecutor(schedule, undefined, vi.fn());

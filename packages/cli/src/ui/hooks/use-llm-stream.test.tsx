@@ -624,6 +624,8 @@ describe('useLlmStream', () => {
       },
       rerenderWithToolCalls: (toolCalls: TrackedToolCall[]) =>
         rerender({ ...baseProps, toolCalls }),
+      rerenderWithClient: (nextClient: any) =>
+        rerender({ ...baseProps, client: nextClient }),
     };
   };
 
@@ -25144,6 +25146,89 @@ describe('useLlmStream', () => {
       });
       expect(sentIds(1)).toEqual(['read_a']);
       expect(sentIds(2)).toEqual(['replayed']);
+    });
+
+    const holdBatches = () => {
+      const pending: Array<() => void> = [];
+      mockScheduleToolCalls.mockImplementation(
+        (
+          requests: ToolCallRequestInfo[],
+          _signal: AbortSignal,
+          _modelOverride: string | undefined,
+          onBatchComplete?: (calls: unknown[]) => Promise<void>,
+        ) => {
+          pending.push(() => {
+            void onBatchComplete?.(
+              requests.map((request) => completedCall(request)),
+            );
+          });
+        },
+      );
+      return pending;
+    };
+
+    it('continues a batch that settles after a re-render with the state of that render', async () => {
+      const pending = holdBatches();
+      rounds([toolRequest('read_a')]);
+      const { result, client, rerenderWithClient } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+      await waitFor(() => expect(pending).toHaveLength(1));
+      // The TUI takes a new client (an auth refresh) while the tool runs.
+      const nextSendMessageStream = vi.fn(() =>
+        (async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'Read.' };
+        })(),
+      );
+      rerenderWithClient({
+        ...client,
+        sendMessageStream: nextSendMessageStream,
+      });
+      await act(async () => {
+        pending[0]();
+      });
+
+      await waitFor(() => {
+        expect(nextSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      expect(
+        (nextSendMessageStream.mock.calls[0] as unknown[])[3],
+      ).toMatchObject({ type: SendMessageType.ToolResult });
+    });
+
+    it('ends a batch that settles while its chat cannot be read without holding the turn', async () => {
+      const pending = holdBatches();
+      rounds([toolRequest('read_a')]);
+      const { result, client } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Read the file.');
+      });
+      await waitFor(() => expect(pending).toHaveLength(1));
+      const getChat = client.getChat;
+      client.getChat = vi.fn(() => {
+        throw new Error('Chat not initialized');
+      });
+      try {
+        await act(async () => {
+          pending[0]();
+        });
+
+        await waitFor(() => {
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+        });
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+        expect(
+          mockAddItem.mock.calls.filter(
+            ([item]) => (item as { type?: string }).type === 'tool_group',
+          ),
+        ).toHaveLength(1);
+      } finally {
+        client.getChat = getChat;
+      }
     });
 
     it('ends the round on a cancel without scheduling its calls', async () => {

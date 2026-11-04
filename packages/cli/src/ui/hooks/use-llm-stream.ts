@@ -1266,8 +1266,18 @@ export const useLlmStream = (
     ) => Promise<void>
   >(async () => {});
   const commitCompletedToolBatchRef = useRef<
-    (completed: InteractiveToolCall[]) => Promise<void>
+    (
+      completed: InteractiveToolCall[],
+      shared?: SharedToolBatchResults,
+      committedToolGroup?: { batchId: string | undefined },
+    ) => Promise<void>
   >(async () => {});
+  // The client the TUI holds now, for a shared batch that settles renders
+  // after it started.
+  const llmClientRef = useRef(llmClient);
+  useLayoutEffect(() => {
+    llmClientRef.current = llmClient;
+  }, [llmClient]);
   const runSharedToolBatchRef = useRef<
     (batch: SharedToolBatch) => Promise<void>
   >(async () => {});
@@ -7200,12 +7210,6 @@ export const useLlmStream = (
             submissionLeaseGenerationRef.current,
           );
           if (calls.length === 0) return;
-          // Taken here, before the batch finalizes, as the scheduler's
-          // completion takes them.
-          owner = {
-            sessionId: config.getSessionId(),
-            chat: llmClient?.getChat(),
-          };
           // In the render that clears the scheduler's display list (#9420).
           const batchId = getToolBatchId(calls[0].request.callId);
           try {
@@ -7213,6 +7217,21 @@ export const useLlmStream = (
             committedToolGroup = { batchId };
           } catch (error) {
             debugLogger.error('Committing a shared tool group failed:', error);
+          }
+          // Taken here, before the batch finalizes, as the scheduler's
+          // completion takes them, from the client the TUI holds now. With
+          // no chat to continue (a reset under way), the batch ends without
+          // a continuation.
+          try {
+            owner = {
+              sessionId: config.getSessionId(),
+              chat: llmClientRef.current?.getChat(),
+            };
+          } catch (error) {
+            debugLogger.error(
+              'Capturing a shared tool batch session failed:',
+              error,
+            );
           }
         },
       );
@@ -7251,7 +7270,11 @@ export const useLlmStream = (
         });
         if (settled.length === 0 || !owner) return;
         committed = true;
-        await commitCompletedToolBatch(
+        // Through the ref: the batch may have waited on approvals or long
+        // tools, and the continuation must use the TUI's state as it is now
+        // (a quota fallback, a new submitQuery), as the scheduler's
+        // completion does through its onComplete ref.
+        await commitCompletedToolBatchRef.current(
           settled,
           {
             responses: result.responses ?? [],
@@ -7275,7 +7298,7 @@ export const useLlmStream = (
         }
         if (!committed && settled.length > 0 && owner) {
           try {
-            await commitCompletedToolBatch(
+            await commitCompletedToolBatchRef.current(
               settled,
               {
                 responses: [],
@@ -7305,7 +7328,6 @@ export const useLlmStream = (
       dualOutput,
       getToolBatchId,
       addCompletedToolGroup,
-      commitCompletedToolBatch,
     ],
   );
 
