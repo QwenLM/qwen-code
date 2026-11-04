@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/audio-capture",
-  "version": "0.26.7",
+  "version": "0.26.7-nightly.20261104.b9e20830f7",
   "description": "Native microphone capture backend for Qwen Code voice input",
   "repository": {
     "type": "git",

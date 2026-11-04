@@ -1,7 +1,7 @@
 {
   "name": "@qwen-code/qwen-code",
   "private": true,
-  "version": "0.26.7",
+  "version": "0.26.7-nightly.20261104.b9e20830f7",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -38,7 +38,7 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.26.7"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.26.7-nightly.20261104.b9e20830f7"
   },
   "dependencies": {
     "@alcalzone/ansi-tokenize": "0.3.0",
