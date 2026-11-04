@@ -38,7 +38,7 @@ daemon 对每个会话绑定的 PR 状态跟踪了两遍，用两套凭据、两
 
 ### 1. 观察
 
-刷新保留用于 `state` 的 slim `--state all` 列表，并对该 workspace 每个**open** 的绑定 PR 增加一次 `gh pr view <number> --json headRefOid,mergeable,state,statusCheckRollup`，每次扫描上限 30 个，复用 Aone 路径已有的旋转窗口（`sweepStart`），因此 open 绑定 PR 超过 30 个的 workspace 仍会在连续扫描中观察到每一个。单个 PR 的 view 不会撞上批量 rollup 的超时。merged 与 closed 的 PR 只通过 slim 列表观察，不为它们逐个抓取。
+刷新保留用于 `state` 的 slim `--state all` 列表，并对该 workspace 每个**open** 的绑定 PR 增加一次 `gh pr view <number> --json headRefOid,mergeable,state,statusCheckRollup`，每次扫描上限 30 个，复用 Aone 路径已有的旋转窗口（`sweepStart`），因此 open 绑定 PR 超过 30 个的 workspace 仍会在连续扫描中观察到每一个。单个 PR 的 view 不会撞上批量 rollup 的超时。merged 与 closed 的 PR 只通过 slim 列表观察，不为它们逐个抓取，但这次观察同样更新 `watch` 块（其 `state` 与 `observedAt`），与一次 view 完全一样，因此下文的恢复规则对终态同样成立。
 
 `mergeable` 映射为 `MERGEABLE → mergeable`、`CONFLICTING → conflicting`、`UNKNOWN → undefined`（GitHub 仍在计算；绝不覆盖上次已知值）。CI 使用 core 已有的 `aggregateChecks` rollup（`passing` / `failing` / `pending` / `none`）：侧栏与事件共用一个定义。
 
@@ -48,8 +48,10 @@ daemon 对每个会话绑定的 PR 状态跟踪了两遍，用两套凭据、两
 
 ```ts
 watch?: {
-  /** 本快照的观察时间（`gh pr view` 的时间）；最新的兄弟快照是检测基线。 */
+  /** 观察版本：最后一次更新本块的那次观察的时间——open PR 是一次 `gh pr view`，merged 或 closed 的 PR 是 slim 列表。最新的兄弟块是检测基线。 */
   observedAt?: string;
+  /** `observedAt` 那次观察看到的状态，与之配对，使基线携带同一次观察的状态；顶层 `state` 仍是侧栏字段。 */
+  state?: 'open' | 'merged' | 'closed';
   headSha?: string;
   checks?: 'passing' | 'failing' | 'pending' | 'none';
   mergeable?: 'mergeable' | 'conflicting';
@@ -77,7 +79,7 @@ watch?: {
 
 ### 4. 投递
 
-- **目标。** 整个 daemon 范围内每个 PR 只有一个收件会话，绝不是每个 workspace 一个。观察仍按 workspace 进行（每次扫描只 view 本 workspace 的 open 绑定 PR），但扫描检测到转换时，在所有受信 workspace 中绑定该 PR 的全部合格会话里选收件者——即 `GET /sessions/pr-bindings` 背后的进程级 sidecar 扫描——取最近活跃的那个（transcript mtime，再以 bridge 的 live 活动修正），这正是 channel 今天对整个绑定快照应用的规则，然后经该会话所属的 runtime 派发。随后把新快照与该转换的已触发记录写进该 PR 在所有 workspace 的每个 sidecar，各走各自的变更队列与锁——先写收件会话的 sidecar（快照加 `pending`），再写兄弟。这些是分开的文件写入，崩溃可能让某个兄弟落后；因此检测绝不只拿新鲜 view 与本次扫描自己的 sidecar 比较。**基线规则：**比较之前，扫描通过同一进程级扫描读取该 PR 在每个绑定 sidecar 中的 `watch` 块，取 `observedAt` 最新的作为基线。收件者已持有 H1 而某个兄弟仍停在 H0 时，该兄弟静默采用 H1——没有转换、没有 key——H0→H1 这一事件唯一的 key 就是收件者 `pending` 里已有的那条，排空时只投递一次。因此同一仓库注册了两个 workspace、各有一个会话跟随同一个 PR 时，无论中间是否崩溃，都只投递一次而非两次。归档会话只刷新 `state`，绝不投递。channel 自有会话（`sourceType: 'channel'`）与机器自有的隐藏目录会话永远不是目标。
+- **目标。** 整个 daemon 范围内每个 PR 只有一个收件会话，绝不是每个 workspace 一个。观察仍按 workspace 进行（每次扫描只 view 本 workspace 的 open 绑定 PR），但扫描检测到转换时，在所有受信 workspace 中绑定该 PR 的全部合格会话里选收件者——即 `GET /sessions/pr-bindings` 背后的进程级 sidecar 扫描——取最近活跃的那个（transcript mtime，再以 bridge 的 live 活动修正），这正是 channel 今天对整个绑定快照应用的规则，然后经该会话所属的 runtime 派发。随后把新快照与该转换的已触发记录写进该 PR 在所有 workspace 的每个 sidecar，各走各自的变更队列与锁——先写收件会话的 sidecar（快照加 `pending`），再写兄弟。这些是分开的文件写入，崩溃可能让某个兄弟落后；因此检测绝不只拿新鲜 view 与本次扫描自己的 sidecar 比较。**基线规则：**比较之前，扫描通过同一进程级扫描读取该 PR 在每个绑定 sidecar 中的 `watch` 块，取 `observedAt` 最新的作为基线——取那一次观察的整个块（`state`、`headSha`、`checks`、`mergeable`），绝不从多个 sidecar 拼字段。任何改变该块的观察都会盖 `observedAt`，包括 slim 列表观察到的 `merged` 或 `closed`，因此崩溃前刚写进收件者 sidecar 的终态快照比仍停在 `open` 的兄弟更新，按版本而非枚举顺序赢得基线。收件者已持有 H1 而某个兄弟仍停在 H0 时，该兄弟静默采用 H1——没有转换、没有 key——H0→H1 这一事件唯一的 key 就是收件者 `pending` 里已有的那条，排空时只投递一次。因此同一仓库注册了两个 workspace、各有一个会话跟随同一个 PR 时，无论中间是否崩溃，都只投递一次而非两次。归档会话只刷新 `state`，绝不投递。channel 自有会话（`sourceType: 'channel'`）与机器自有的隐藏目录会话永远不是目标。
 - **机制。** 刷新在进程内调用 daemon 的 prompt 准入——`POST /session/:id/prompt` 背后的代码——并带上 daemon 来源标记（`qwen.daemon.prStateEvent`），准入把它当作 channel 绑定中继那样分类：不是交互式用户 prompt（不做循环检测拒绝，不对注入文本做 PR 绑定回填，显示投影为"PR 事件"），以转换 key 作为 `idempotencyKey`，因此 daemon 生命周期内的重试会去重到原始准入。
 - **休眠会话。** 已绑定但不在线的会话通过 channel 访问器所用的同一恢复路径恢复后再投递；`wakeDormant` 默认开启，这样 daemon 重启不会丢事件。无法恢复的会话（记录已删除、已归档、worktree 被取代）丢弃该转换并记一行日志；任何地方都不会公开发布。
 - **prompt 文本。** 沿用 channel 绑定 prompt 的形状：事件头、不可信事件数据提示、PR 身份（仓库、编号、标题、URL）、一行 `Event:` 与摘要（`ci_failure` 从 rollup 中列出最多五个失败的 check）。回复留在会话内。
@@ -127,7 +129,7 @@ GitHub channel 的 `deliverToBoundSessions` 不变。`prWatchEvents`、监视通
 
 ## 验证计划
 
-- 单元：view 映射（`headRefOid`、`mergeable` 状态、rollup）；转换规则，包括 force-push 回访下每个 head 一次的 `ci_failure`（`A failing → B failing → A failing` 触发两次而非三次）、边沿触发的冲突、重开 → 关闭；多个绑定者之间的选择，含分属不同 workspace 的绑定者；模拟崩溃下的 pending 持久化与排空，包括收件者 sidecar 写入与兄弟写入之间的崩溃（兄弟采用更新的基线、不检测任何东西，pending 中的转换以原始 key 恰好准入一次）；配置解析。
+- 单元：view 映射（`headRefOid`、`mergeable` 状态、rollup）；转换规则，包括 force-push 回访下每个 head 一次的 `ci_failure`（`A failing → B failing → A failing` 触发两次而非三次）、边沿触发的冲突、重开 → 关闭；多个绑定者之间的选择，含分属不同 workspace 的绑定者；模拟崩溃下的 pending 持久化与排空，包括 head 变更与经 slim 列表观察到的终态 `state_change` 两种情形下收件者 sidecar 写入与兄弟写入之间的崩溃（兄弟按 `observedAt` 采用更新的基线、不检测任何东西，pending 中的转换以原始 key 恰好准入一次）；配置解析。
 - 刷新测试（现有带假 `fetchPullRequests` 的测试框架）：每个转换投递一次、休眠会话被恢复、归档与 channel 自有会话被跳过、上限与旋转。
 - E2E（daemon + 桩 `gh` 二进制）：在会话中绑定 PR，把桩的 rollup 翻成失败，下一次扫描后在该会话观察到恰好一条注入 prompt，daemon 重启后没有新的注入。
 
