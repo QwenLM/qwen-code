@@ -1390,6 +1390,131 @@ describe('useComposerCore history and drafts', () => {
 });
 
 describe('useComposerCore paste', () => {
+  it.each([
+    { text: 'https://example.com/image.png', images: 1, attach: true },
+    { text: ' http://example.com/image.png ', images: 1, attach: true },
+    {
+      text: 'PPT text with https://example.com/image.png',
+      images: 1,
+      attach: false,
+    },
+    {
+      text: 'https://example.com/image.png\ncaption',
+      images: 1,
+      attach: false,
+    },
+    { text: 'https://example.com/image.png', images: 0, attach: false },
+    { text: 'https://example.com/image.png', images: 2, attach: false },
+  ])(
+    'distinguishes image URLs from editable text: $text / $images images',
+    async ({ text, images, attach }) => {
+      const onImageIngestionNotice = vi.fn();
+      await mount({ onImageIngestionNotice });
+      const files = Array.from(
+        { length: images },
+        () => new File(['png'], 'image.png', { type: 'image/png' }),
+      );
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: {
+          files,
+          items: [],
+          types: images ? ['Files', 'text/plain'] : ['text/plain'],
+          getData: (type: string) => (type === 'text/plain' ? text : ''),
+        },
+      });
+      act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+      await waitForImageIngestion();
+
+      expect(latest!.getText()).toBe(attach ? '' : text);
+      expect(latest!.pastedImages).toHaveLength(attach ? 1 : 0);
+      expect(onImageIngestionNotice).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['/fork ', '  /extensions install ', '!curl '])(
+    'keeps image URL arguments inline in command drafts: %s',
+    async (draft) => {
+      const { onSubmit } = await mount();
+      act(() => {
+        latest!.setText(draft);
+        latest!.viewRef.current!.dispatch({
+          selection: { anchor: draft.length },
+        });
+      });
+      const text = 'https://example.com/image.png';
+      const image = new File(['png'], 'image.png', { type: 'image/png' });
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: {
+          files: [image],
+          items: [],
+          types: ['Files', 'text/plain'],
+          getData: () => text,
+        },
+      });
+      act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+      await waitForImageIngestion();
+      expect(latest!.getText()).toBe(draft + text);
+      expect(latest!.pastedImages).toEqual([]);
+      act(() => latest!.submitText());
+      expect(onSubmit.mock.calls[0]![0]).toBe((draft + text).trim());
+      expect(onSubmit.mock.calls[0]![1]).toBeUndefined();
+    },
+  );
+
+  it.each(['disabled', 'shell', 'attachments-disabled', 'other-control'])(
+    'keeps URL text editable for %s',
+    async (mode) => {
+      await mount({
+        disabled: mode === 'disabled',
+        attachmentsEnabled: mode !== 'attachments-disabled',
+      });
+      if (mode === 'shell') act(() => latest!.toggleShellMode());
+      const text = 'https://example.com/image.png';
+      const image = new File(['png'], 'image.png', { type: 'image/png' });
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: {
+          files: [image],
+          items: [],
+          types: ['Files', 'text/plain'],
+          getData: () => text,
+        },
+      });
+      const target = container!.querySelector(
+        mode === 'other-control'
+          ? '[data-testid="composer-surface-input"]'
+          : '.cm-content',
+      )!;
+      act(() => target.dispatchEvent(event));
+      await waitForImageIngestion();
+      expect(latest!.pastedImages).toEqual([]);
+      expect(latest!.pendingImageBatchCount).toBe(0);
+      if (mode === 'shell' || mode === 'attachments-disabled') {
+        expect(latest!.getText()).toBe(text);
+      }
+      if (mode === 'other-control') expect(event.defaultPrevented).toBe(false);
+    },
+  );
+
+  it('warns when a paste advertises files without exposing any file', async () => {
+    const onImageIngestionNotice = vi.fn();
+    await mount({ onImageIngestionNotice });
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: { files: [], items: [], types: ['Files'], getData: () => '' },
+    });
+    act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+    await waitForImageIngestion();
+    expect(latest!.pastedImages).toEqual([]);
+    expect(onImageIngestionNotice).toHaveBeenCalledOnce();
+    expect(onImageIngestionNotice).toHaveBeenCalledWith(
+      'warning',
+      '1 file(s) were unavailable and skipped.',
+    );
+  });
+
   it('pastes editable text when PPT clipboard also includes an image', async () => {
     const { onSubmit } = await mount();
     const text = '第一季度收入增长 20%\n请改写这段文字。';

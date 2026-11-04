@@ -1413,6 +1413,17 @@ for (const theme of THEMES) {
                 ],
               },
               {
+                key: 'reasonFilter',
+                label: 'Reason Filter',
+                kind: 'string-list',
+                options: [
+                  { value: 'mention', label: 'mention' },
+                  { value: 'review_requested', label: 'review_requested' },
+                  { value: 'assign', label: 'assign' },
+                  { value: 'ci_activity', label: 'ci_activity' },
+                ],
+              },
+              {
                 key: 'privatePolicy',
                 label: 'Private Policy',
                 kind: 'enum',
@@ -1457,7 +1468,40 @@ for (const theme of THEMES) {
           name: 'Use local GitHub CLI authentication',
         }),
       ).toBeVisible();
+      // Anchor the slim default view: tuning lives behind the collapsed
+      // advanced panel, so a regression that flattens it back out fails here
+      // instead of shipping a stale picture.
+      const advancedTrigger = page.getByRole('button', {
+        name: 'Advanced settings',
+      });
+      await expect(advancedTrigger).toBeVisible();
+      await expect(advancedTrigger).toHaveAttribute('data-state', 'closed');
+      // The panel title must be reachable by heading navigation (a real h3
+      // wrapping the trigger, not a span inside the button).
+      await expect(
+        page.getByRole('heading', { name: 'Advanced settings' }),
+      ).toBeVisible();
+      const reasonFilter = page.getByRole('group', { name: 'Reason Filter' });
+      await expect(reasonFilter).toHaveCount(0);
       await captureScreenshot(page, `github-channel-editor-${theme}`);
+      // Expand the panel and anchor the capture to the checklist so a
+      // regression that falls back to a free-text filter fails here too.
+      await advancedTrigger.click();
+      await expect(reasonFilter.getByRole('checkbox')).toHaveCount(4);
+      await expect(
+        reasonFilter.getByRole('checkbox', {
+          name: /mention — the bot is @mentioned/,
+        }),
+      ).toBeChecked({ checked: false });
+      // The dialog body scrolls, and the checklist sits below the fold at this
+      // viewport. Capture it separately and pin that it is fully on screen, so
+      // the published picture cannot quietly omit the feature it documents.
+      await page
+        .getByText('Reason Filter', { exact: true })
+        .first()
+        .scrollIntoViewIfNeeded();
+      await expect(reasonFilter).toBeInViewport({ ratio: 1 });
+      await captureScreenshot(page, `github-channel-editor-reasons-${theme}`);
       await page.getByLabel('Instance name').fill('github-bot');
       await page.getByRole('button', { name: 'Save' }).click();
       await expect(
@@ -1501,6 +1545,177 @@ for (const theme of THEMES) {
             }),
           }),
         ]);
+    });
+
+    test(`GitHub channel repository settings`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'workspace_settings',
+            'workspace_voice',
+            'channel_management',
+          ],
+        },
+        channelTypes: [
+          {
+            type: 'github',
+            displayName: 'GitHub',
+            manageable: true,
+            fields: [
+              {
+                key: 'token',
+                label: 'Personal Access Token',
+                kind: 'secret',
+                envResolvable: true,
+              },
+              {
+                key: 'useLocalGh',
+                label: 'Use Local GitHub CLI Authentication',
+                kind: 'boolean',
+              },
+              {
+                key: 'baseUrl',
+                label: 'Base URL',
+                kind: 'string',
+                envResolvable: true,
+              },
+              {
+                key: 'pollInterval',
+                label: 'Poll Interval (ms)',
+                kind: 'number',
+                exclusiveMinimum: 0,
+                default: '60000',
+              },
+              {
+                key: 'groupPolicy',
+                label: 'Group Policy',
+                kind: 'enum',
+                required: true,
+                default: 'open',
+                options: [
+                  { value: 'open', label: 'Open' },
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'disabled', label: 'Disabled' },
+                ],
+              },
+              {
+                key: 'privatePolicy',
+                label: 'Private Policy',
+                kind: 'enum',
+                required: true,
+                options: [
+                  { value: 'disabled', label: 'Disabled' },
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'pairing', label: 'Pairing' },
+                  { value: 'open', label: 'Open' },
+                ],
+              },
+              {
+                key: 'allowedUsers',
+                label: 'Allowed Users',
+                kind: 'string-list',
+              },
+            ],
+          },
+        ],
+        channels: {
+          revision: '1',
+          instances: {
+            'github-bot': {
+              name: 'github-bot',
+              config: {
+                type: 'github',
+                useLocalGh: true,
+                pollInterval: 30000,
+                groupPolicy: 'allowlist',
+                groups: {
+                  '*': { senders: 'allowlist', allowedUsers: ['operator'] },
+                  'qwenlm/qwen-code': {
+                    requireMention: false,
+                    senders: 'allowlist',
+                    allowedUsers: ['alice', 'bob'],
+                  },
+                  'acme/widgets': {},
+                },
+              },
+              secrets: {},
+              startsWithServe: false,
+              runtime: { state: 'stopped' },
+            },
+          },
+        },
+      });
+      await page.addInitScript(() => {
+        window.sessionStorage.setItem('qwen-daemon-token', 'visual-token');
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await page.getByRole('button', { name: 'Channels' }).click();
+      await page.getByRole('button', { name: 'Edit github-bot' }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Edit GitHub' }),
+      ).toBeVisible();
+
+      // Anchor the capture to the rows themselves: a regression that drops them
+      // must fail here rather than republish a picture of the old form.
+      await expect(page.getByText('Per-repository settings')).toBeVisible();
+      await expect(page.getByLabel('Require a mention')).toHaveCount(2);
+      await expect(page.getByLabel('Who may speak')).toHaveCount(2);
+      await expect(page.getByLabel('Allowed speakers')).toHaveCount(2);
+      // Scope every assertion to its own row: counting controls alone would
+      // still pass if the rows were wired to the wrong repository, or if the
+      // speaker boxes all showed the channel-wide list.
+      const customized = page.getByRole('group', { name: 'qwenlm/qwen-code' });
+      const inheriting = page.getByRole('group', { name: 'acme/widgets' });
+      await expect(customized.getByLabel('Require a mention')).toContainText(
+        'Answer without a mention',
+      );
+      await expect(customized.getByLabel('Who may speak')).toContainText(
+        'Allowlist only',
+      );
+      await expect(customized.getByLabel('Allowed speakers')).toHaveValue(
+        'alice, bob',
+      );
+      await expect(inheriting.getByLabel('Require a mention')).toContainText(
+        'Inherit (require a mention)',
+      );
+      await expect(inheriting.getByLabel('Who may speak')).toContainText(
+        'Inherit (allowlist only)',
+      );
+      await expect(inheriting.getByLabel('Allowed speakers')).toHaveValue('');
+      await expect(page.getByLabel('Poll Interval (ms)')).toHaveValue('30000');
+
+      // Browser-side proof of the auto-open mitigation: this instance stores
+      // an advanced value, so the panel must open on edit, and collapsing it
+      // must report the configured count instead of hiding the value silently.
+      const advancedTrigger = page.getByRole('button', {
+        name: /Advanced settings/,
+      });
+      await expect(advancedTrigger).toHaveAttribute('data-state', 'open');
+      await advancedTrigger.click();
+      await expect(advancedTrigger).toHaveAttribute('data-state', 'closed');
+      await expect(advancedTrigger).toContainText('1 configured');
+      await advancedTrigger.click();
+      await expect(advancedTrigger).toHaveAttribute('data-state', 'open');
+
+      // Put the last row in frame, not just the section title: a capture can
+      // otherwise show the heading with every row below the fold. Only the last
+      // row is required to fit — at this viewport the two rows together are
+      // taller than the dialog body, so demanding both would fail on geometry
+      // rather than on a regression.
+      await inheriting.scrollIntoViewIfNeeded();
+      await expect(inheriting).toBeInViewport({ ratio: 1 });
+      await captureScreenshot(page, `github-channel-repositories-${theme}`);
     });
 
     test(`mermaid diagram`, async ({ page }, testInfo) => {

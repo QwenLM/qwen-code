@@ -24,6 +24,9 @@ import {
   wrapSystemReminder,
 } from '@qwen-code/qwen-code-core';
 import { AUTO_MEMORY_SNAPSHOT_METADATA } from '@qwen-code/qwen-code-core/memory/request-context.js';
+import { ToolRegistry } from '@qwen-code/qwen-code-core/tools/tool-registry.js';
+import { SearchMemoryTool } from '@qwen-code/qwen-code-core/tools/search-memory.js';
+import { ManageMemoryTool } from '@qwen-code/qwen-code-core/tools/manage-memory.js';
 import { t } from '../../i18n/index.js';
 import type { ContextCategoryBreakdown } from '../types.js';
 import {
@@ -249,6 +252,45 @@ describe('collectContextData (contextCommand)', () => {
     expect(getFunctionDeclarationsSpy).toHaveBeenCalledWith();
   });
 
+  it.each(['legacy', 'structured'] as const)(
+    'reports only declared memory tools in %s recall mode',
+    async (mode) => {
+      const config = Object.assign(makeMockConfig(), {
+        getMemoryRecallMode: () => mode,
+        getMcpTransportPool: () => undefined,
+        getDisabledTools: () => new Set<string>(),
+      });
+      const registry = new ToolRegistry(config);
+      vi.mocked(config.getToolRegistry).mockReturnValue(registry);
+      registry.registerTool(new SearchMemoryTool(config));
+      registry.registerTool(new ManageMemoryTool(config));
+
+      const data = await collectContextData(config, true);
+
+      expect(data.builtinTools.map((tool) => tool.name).sort()).toEqual(
+        mode === 'structured' ? ['manage_memory', 'search_memory'] : [],
+      );
+      if (mode === 'structured') {
+        expect(data.builtinTools.every((tool) => tool.tokens > 0)).toBe(true);
+      }
+    },
+  );
+
+  it.each(['propose_goal', 'blocked_tool'])(
+    'omits a registered %s absent from the declarations',
+    async (name) => {
+      const config = makeMockConfig();
+      vi.mocked(config.getToolRegistry().getAllTools).mockReturnValue([
+        { name, schema: { name, description: 'Hidden tool' } },
+      ] as ReturnType<ToolRegistry['getAllTools']>);
+
+      const data = await collectContextData(config, true);
+
+      expect(data.builtinTools).toEqual([]);
+      expect(data.mcpTools).toEqual([]);
+    },
+  );
+
   it('reads the per-session chat token count, not the process-global singleton (#5763)', async () => {
     // uiTelemetryService is a module-level singleton shared by every session
     // in a `serve` daemon. Reading it here would report whichever session most
@@ -441,10 +483,8 @@ describe('collectContextData (contextCommand)', () => {
       tools?: unknown[];
       /**
        * What getFunctionDeclarations() returns. Defaults to the schemas of
-       * `tools`, because production declares the non-deferred tools it
-       * registers; a registry holding a tool it never declares is the state
-       * that drives `displayBuiltinTools` into its clamp, so a fixture that
-       * wants the clamp passes `declared` explicitly (#12235).
+       * `tools`. Pass `declared` explicitly for tools that are registered but
+       * hidden from the model, or declarations generated from their schemas.
        */
       declared?: unknown[];
       /** Overrides the default one-skill list. */
@@ -1358,13 +1398,7 @@ describe('collectContextData (contextCommand)', () => {
       expect(sumRows(data.breakdown)).toBe(100_000);
     });
 
-    it('charges the builtin-clamp deficit to the mcp row, not to messages', async () => {
-      // Under `tools.codeModeOnly` the declarations collapse to a few control
-      // tools while an `alwaysLoadTools` MCP server still bills every schema
-      // the detail loop sees, so the billed tools exceed the declared ones and
-      // `displayBuiltinTools` clamps at 0. The clamp deficit must come out of
-      // the mcp row — the row whose billing overshoots the declarations;
-      // otherwise `attributedOverhead` silently takes it out of `messages`.
+    it('bills generated control declarations without undeclared MCP schemas', async () => {
       // Own value properties shadow the prototype's getters (Object.assign
       // would trip the setter-less `schema` accessor on DeclarativeTool).
       const mcpToolDouble = Object.defineProperties(
@@ -1373,6 +1407,7 @@ describe('collectContextData (contextCommand)', () => {
           name: { value: 'mcp__server__big_tool' },
           serverName: { value: 'server' },
           serverToolName: { value: 'big_tool' },
+          alwaysLoad: { value: true },
           schema: {
             value: {
               name: 'mcp__server__big_tool',
@@ -1383,20 +1418,24 @@ describe('collectContextData (contextCommand)', () => {
         },
       ) as DiscoveredMCPTool;
       const controlSchema = {
-        name: 'tool_call',
+        name: 'exec',
+        description: 'Generated code-mode bindings. '.repeat(8),
         parameters: { type: 'OBJECT', properties: {} },
       };
       const tools = [
         { ...skillToolDouble, getLoadedSkillContentNames: () => new Map() },
         mcpToolDouble,
-        { name: controlSchema.name, schema: controlSchema },
+        {
+          name: controlSchema.name,
+          schema: { ...controlSchema, description: 'Original exec schema' },
+        },
       ];
       const declared = [skillToolSchema, controlSchema];
       const history = [prelude, ...conversation];
 
       const unscaled = await collectContextData(
         makeChatConfig({ total: 0, tools, declared, history }),
-        false,
+        true,
       );
       // Free space retains its zero floor when the estimate exceeds the window.
       expect(unscaled.breakdown.freeSpace).toBe(
@@ -1407,23 +1446,26 @@ describe('collectContextData (contextCommand)', () => {
             unscaled.breakdown.autocompactBuffer,
         ),
       );
-      // The deficit comes out of the mcp row, not the built-in or skills rows.
-      expect(unscaled.breakdown.mcpTools).toBe(
+      expect(unscaled.breakdown.mcpTools).toBe(0);
+      expect(unscaled.breakdown.builtinTools).toBe(
         estimateContextTextTokens(JSON.stringify(declared)) -
           estimateContextTextTokens(JSON.stringify(skillToolSchema)),
       );
-      expect(unscaled.breakdown.mcpTools).toBeGreaterThan(0);
-      expect(unscaled.breakdown.builtinTools).toBe(0);
-      // With nothing declared the mcp row cannot absorb the whole deficit, so
-      // the rest is charged to skills and the window still adds up.
+      expect(unscaled.builtinTools).toEqual([
+        {
+          name: 'exec',
+          tokens: estimateContextTextTokens(JSON.stringify(controlSchema)),
+        },
+      ]);
       const undeclared = await collectContextData(
         makeChatConfig({ total: 0, tools, declared: [], history }),
-        false,
+        true,
       );
+      expect(undeclared.builtinTools).toEqual([]);
+      expect(undeclared.mcpTools).toEqual([]);
       expect(undeclared.breakdown.mcpTools).toBe(0);
       expect(undeclared.breakdown.skills).toBe(
-        estimateContextTextTokens(listingReminder) +
-          estimateContextTextTokens(JSON.stringify([])),
+        estimateContextTextTokens(listingReminder),
       );
       expect(undeclared.breakdown.freeSpace).toBe(
         Math.max(
@@ -1446,32 +1488,78 @@ describe('collectContextData (contextCommand)', () => {
         false,
       );
 
-      // The fixture does put the clamp in force: billed skill definition plus
-      // mcp schemas exceed the declared tools.
-      expect(
-        estimateContextTextTokens(JSON.stringify(skillToolSchema)) +
-          estimateContextTextTokens(JSON.stringify(mcpToolDouble.schema)),
-      ).toBeGreaterThan(estimateContextTextTokens(JSON.stringify(declared)));
       expect(data.breakdown.messages).toBe(300);
       expect(sumRows(data.breakdown)).toBe(total);
 
-      // `/context detail` lists the MCP tools under the mcp row, so they must
-      // add up to it on both paths.
-      const mcpDetailSum = (
-        item: Awaited<ReturnType<typeof collectContextData>>,
-      ) => item.mcpTools.reduce((sum, tool) => sum + tool.tokens, 0);
       for (const options of [
         { total: 0, tools, declared, history },
         { total: 0, tools, declared: [], history },
         { total, tools, declared, history },
+        { total: 1, tools, declared, history },
       ]) {
         const detailed = await collectContextData(
           makeChatConfig(options),
           true,
         );
-        expect(mcpDetailSum(detailed)).toBe(detailed.breakdown.mcpTools);
+        expect(detailed.mcpTools).toEqual([]);
+        expect(detailed.breakdown.mcpTools).toBe(0);
+        if (options.total > 0) {
+          expect(sumRows(detailed.breakdown)).toBe(options.total);
+        }
       }
+
+      const exposed = await collectContextData(
+        makeChatConfig({
+          total: 0,
+          tools,
+          declared: [...declared, mcpToolDouble.schema],
+          history,
+        }),
+        true,
+      );
+      expect(exposed.mcpTools).toEqual([
+        {
+          name: 'server__big_tool',
+          tokens: estimateContextTextTokens(
+            JSON.stringify(mcpToolDouble.schema),
+          ),
+        },
+      ]);
     });
+
+    it.each([false, true])(
+      'uses the emitted Skill schema while retaining its body (declared: %s)',
+      async (declared) => {
+        const declaration = {
+          ...skillToolSchema,
+          description: 'Emitted skill schema. '.repeat(20),
+        };
+        const data = await collectContextData(
+          makeChatConfig({
+            total: 100_000,
+            tools: [skillToolDouble],
+            declared: declared ? [declaration] : [],
+            skillList: trackedSkillList,
+            history: [prelude, conversation[0]!, skillResponse(trackedBody)],
+          }),
+          true,
+        );
+
+        expect(data.breakdown.skills).toBe(
+          (declared
+            ? estimateContextTextTokens(JSON.stringify(declaration))
+            : 0) +
+            estimateContextTextTokens(listingReminder) +
+            estimateContextTextTokens(trackedBody),
+        );
+        expect(data.skills[0].bodyTokens).toBe(
+          estimateContextTextTokens(trackedBody),
+        );
+        expect(data.breakdown.messages).toBe(100);
+        expect(data.builtinTools).toEqual([]);
+        expect(sumRows(data.breakdown)).toBe(100_000);
+      },
+    );
 
     it('bills a path-activation envelope folded into a tool response as messages (#12235)', async () => {
       // coreToolScheduler appends this reminder to the tool result and then
@@ -1884,8 +1972,6 @@ describe('collectContextData (contextCommand)', () => {
 
     expect(data.builtinTools).toHaveLength(0);
     expect(data.mcpTools).toHaveLength(0);
-    expect(isDeferredAndHidden).toHaveBeenCalledWith('web_fetch');
-    expect(isDeferredAndHidden).toHaveBeenCalledWith('mcp__server__tool');
   });
 
   it('includes visibleTools in per-tool breakdown when deferred and not revealed (#6372)', async () => {

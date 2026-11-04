@@ -26,6 +26,7 @@ import {
 } from '../fake-openai-server.js';
 import { pickE2eRenderer, resolveE2eCliCommand } from '../renderer-matrix.js';
 import { InteractiveSession } from './interactive-session.js';
+import { createUntil } from './wait.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../..');
@@ -49,17 +50,7 @@ const alive = (pid: number) => {
     return false;
   }
 };
-async function until(
-  check: () => boolean | Promise<boolean>,
-  label: string,
-  budget = 8000,
-) {
-  const end = Date.now() + budget;
-  while (!(await check())) {
-    if (Date.now() >= end) throw new Error(label);
-    await sleep(50);
-  }
-}
+const until = createUntil(8_000);
 type ChildEvent = {
   kind: string;
   token: string;
