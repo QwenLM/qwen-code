@@ -1231,6 +1231,15 @@ describe('package scripts', () => {
       'retry_arg=(--shard="${UNIT_TEST_SHARD}" --passWithNoTests)',
     );
     expect(step).toContain('retry_arg+=(--retry="${VITEST_RETRY}")');
+    // The standalone runtime regression is the one suite that must run on
+    // exactly one shard. The lane script's own test injects the variable into
+    // its stub env, so it proves the script obeys it and nothing else proves
+    // CI sets it: flipping this to a constant, inverting it, or dropping it
+    // while resolving a conflict runs the regression on seven wrong shards or
+    // nowhere, and the only CI coverage of that suite goes with it.
+    expect(step).toContain(
+      "QWEN_CI_SKIP_STANDALONE_RUNTIMES: \"${{ matrix.shard != 1 && '1' || '' }}\"",
+    );
     // The step hands the shard and the retry to the lane script, which
     // passes them to all three of its Vitest runs: the CLI and core suites in the main lane, and
     // the other workspaces and scripts/tests in the side lane.

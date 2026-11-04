@@ -351,6 +351,33 @@ it('reports the required Linux check only when the build and every shard pass', 
   );
 });
 
+it('pins the build-to-shard artifact handoff on both ends', () => {
+  const built = new Map(
+    (ci.jobs.test_build.steps ?? []).map((step) => [step.name, step]),
+  );
+  const shard = new Map(
+    (ci.jobs.test.steps ?? []).map((step) => [step.name, step]),
+  );
+
+  // The shards install with QWEN_SKIP_PREPARE and never build packages/*/dist
+  // themselves, so the archive must define the tree with the same path list
+  // `pack` uses — a local copy that drifts ships a tree nothing tested.
+  const archive = built.get('Archive the built tree').run;
+  expect(archive).toContain('node scripts/ci-build-cache.mjs paths');
+  expect(archive).not.toContain('git ls-files');
+
+  // Four coupled literals tie the producer to the consumers. Renaming any one
+  // fails all eight shards at unpack after a full build, on the required
+  // check, so the name has to be pinned in one place.
+  const name = built.get('Upload the built tree').with.name;
+  expect(name).toBeTruthy();
+  expect(shard.get('Download the built tree').with.name).toBe(name);
+  expect(shard.get('Retry downloading the built tree').with.name).toBe(name);
+  expect(shard.get('Unpack the built tree').run).toContain(
+    `\${RUNNER_TEMP}/${name}/${name}.tgz`,
+  );
+});
+
 it('keeps the no-AK gate above its dependency-install budget on ECS', () => {
   expect(timeoutMinutesOn('integration_no_ak', ECS_RUNNER)).toBe(60);
 });
@@ -777,6 +804,39 @@ describe('post-merge push lane', () => {
         t.get(n),
       );
     }
+    // The one step pair the loop above skips is the only body duplicated
+    // verbatim between the two jobs: the sampler, the kill trap and the
+    // install command must stay identical, or the shards install differently
+    // from how the build installed. Only `env` and `if` may differ, and each
+    // difference is stated below instead of hidden by the skip.
+    const install = (job) =>
+      (ci.jobs[job].steps ?? []).find(
+        (candidate) => candidate.name === 'Install dependencies',
+      );
+    const withoutVariants = (job) => {
+      const { env: _env, if: _if, ...rest } = install(job);
+      return JSON.stringify(canon(rest));
+    };
+    expect(
+      withoutVariants('test_build'),
+      'Install dependencies drifted between test_build and test',
+    ).toBe(withoutVariants('test'));
+    expect(install('test_build').env).toEqual({ QWEN_SKIP_PREPARE: '1' });
+    expect(install('test').env).toEqual({
+      QWEN_SKIP_PREPARE: '1',
+      QWEN_SKIP_NOTICE_GENERATION: '1',
+    });
+    const namesIn = (job) => (ci.jobs[job].steps ?? []).map((x) => x.name);
+    // Values alone are order-blind, and order is load-bearing here: `steps`
+    // exposes only steps that already ran, and a missing property reads as
+    // ''. Moving `Use trusted CI profile` below its consumers changes no
+    // serialized value while every `ci_profile == 'full'` gate reads '' and
+    // the lane completes green having built and uploaded nothing.
+    const buildSharedSet = new Set(buildShared);
+    expect(
+      namesIn('test_build').filter((n) => t.has(n)),
+      'shared prelude reordered between test_build and test',
+    ).toEqual(namesIn('test').filter((n) => buildSharedSet.has(n)));
     // The serializer is the guard's eyes: both sides of every comparison below
     // flow through it, so a regression that drops nested fields compares `{}`
     // to `{}` and the drift loop reports green — the exact array-replacer blind
@@ -799,13 +859,10 @@ describe('post-merge push lane', () => {
     }
     // The exemption above is only for the field that must differ: the shard
     // install carries the build guard, and the lint install must not.
-    const installIf = (job) =>
-      (ci.jobs[job].steps ?? []).find((s) => s.name === 'Install dependencies')
-        ?.if;
-    expect(String(installIf('test') ?? '')).toContain(
+    expect(String(install('test')?.if ?? '')).toContain(
       "needs.test_build.result == 'success'",
     );
-    expect(String(installIf('lint_and_static') ?? '')).not.toContain(
+    expect(String(install('lint_and_static')?.if ?? '')).not.toContain(
       'needs.test_build',
     );
     // Name-keyed maps are order-blind, and order is load-bearing here: the
@@ -814,7 +871,6 @@ describe('post-merge push lane', () => {
     // (id: ci_profile) ever lands below its consumers, every
     // `ci_profile == 'full'` gate evaluates '' == 'full' and the lane
     // completes green having executed nothing.
-    const namesIn = (job) => (ci.jobs[job].steps ?? []).map((x) => x.name);
     const sharedSet = new Set(shared);
     expect(
       namesIn('lint_and_static').filter((n) => sharedSet.has(n)),

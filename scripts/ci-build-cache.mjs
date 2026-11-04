@@ -10,6 +10,7 @@
 //   build <dir>   build the tree, reusing what <dir> holds from an earlier
 //                 run: only workspaces whose inputs changed rebuild
 //   pack <dir>    store the built tree and its input hashes in <dir>
+//   paths         print the built paths, NUL-separated, for `tar -T -`
 //
 // A workspace's hash covers its tracked files (tests excluded: no build
 // reads them), the global inputs every build shares, and the hashes of the
@@ -21,7 +22,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const root = resolve(import.meta.dirname, '..');
+// The archive step in ci.yml shares `builtPaths()` with `pack` through the
+// `paths` mode, so the tree the shards unpack is defined once. The override
+// exists so the mode tests can point the script at a fixture repository.
+const root = resolve(
+  process.env.CI_BUILD_CACHE_ROOT ?? join(import.meta.dirname, '..'),
+);
 const TREE = 'tree.tgz';
 const HASHES = 'hashes.json';
 
@@ -153,8 +159,18 @@ export function main(argv) {
     console.log(combined.digest('hex'));
     return;
   }
+  if (mode === 'paths') {
+    process.stdout.write(
+      builtPaths()
+        .map((path) => `${path}\0`)
+        .join(''),
+    );
+    return;
+  }
   if (!dir || (mode !== 'build' && mode !== 'pack')) {
-    throw new Error('usage: ci-build-cache.mjs key | build <dir> | pack <dir>');
+    throw new Error(
+      'usage: ci-build-cache.mjs key | build <dir> | pack <dir> | paths',
+    );
   }
   const cacheDir = resolve(dir);
   const workspaces = listWorkspaces();
@@ -171,6 +187,13 @@ export function main(argv) {
     writeFileSync(join(cacheDir, HASHES), JSON.stringify(hashes, null, 2));
     return;
   }
+
+  // `scripts/build.js` guards the ink patch its typecheck depends on, but the
+  // cached branch below deliberately does not run that file — it rebuilds only
+  // the changed workspaces. Without this, the same missing
+  // `frame-controller.d.ts` self-heals or explains itself on a cache miss and
+  // surfaces as ~50 tsc errors inside ink's declarations on a hit.
+  run('node scripts/build.js --preflight');
 
   const hashFile = join(cacheDir, HASHES);
   if (!existsSync(hashFile) || !existsSync(join(cacheDir, TREE))) {

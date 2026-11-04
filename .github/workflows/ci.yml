@@ -727,12 +727,13 @@ jobs:
 
       # Everything the build wrote: the ignored, untracked paths outside
       # node_modules, which each shard's own install recreates. The
-      # checkout's clean leaves nothing else ignored in the workspace.
+      # checkout's clean leaves nothing else ignored in the workspace. The
+      # path list comes from `ci-build-cache.mjs` so `pack` and this archive
+      # cannot disagree about what the build produces.
       - name: 'Archive the built tree'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: |-
-          git ls-files -z --others --ignored --exclude-standard --directory |
-            grep -zEv '(^|/)node_modules/$' |
+          node scripts/ci-build-cache.mjs paths |
             tar --null -T - -czf "${RUNNER_TEMP}/unit-test-tree.tgz"
           du -h "${RUNNER_TEMP}/unit-test-tree.tgz"
 
