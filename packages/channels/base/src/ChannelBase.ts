@@ -1,6 +1,7 @@
 import { basename, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type {
+  ChannelBoundSessions,
   ChannelConfig,
   ChannelMemoryCallbacks,
   ChannelMemoryEntry,
@@ -36,6 +37,8 @@ import {
   ChannelProactiveDeliveryError,
   isChannelProactiveDeliveryError,
 } from './ChannelProactiveDeliveryError.js';
+import { appendChannelEvent } from './channel-events.js';
+import type { ChannelEventInput } from './channel-events.js';
 import { GroupGate } from './GroupGate.js';
 import { DmGate } from './DmGate.js';
 import { GroupHistoryStore } from './group-history-store.js';
@@ -255,6 +258,12 @@ export interface ChannelBaseOptions {
   bridgeRecovery?: () => Promise<void> | undefined;
   groupHistoryPath?: string;
   loopController?: ChannelLoopController;
+  /**
+   * Daemon-backed delivery into PR-bound sessions the channel does not own.
+   * Only the daemon channel worker provides it; adapters must treat its
+   * absence as "feature unavailable" and keep channel-session routing.
+   */
+  boundSessions?: ChannelBoundSessions;
   observedContacts?: {
     observe(
       channelName: string,
@@ -491,6 +500,7 @@ export abstract class ChannelBase {
   // re-post once per still-pending request, but never per trigger.
   private readonly groupPairingNotified = new Map<string, string>();
   private readonly loopController?: ChannelLoopController;
+  protected readonly boundSessions?: ChannelBoundSessions;
   private readonly observedContacts?: ChannelBaseOptions['observedContacts'];
   private readonly namedSessions?: NamedSessionManager;
   private readonly observedContactEnvelopes = new WeakSet<Envelope>();
@@ -1438,6 +1448,7 @@ export abstract class ChannelBase {
         ),
     );
     this.loopController = options?.loopController;
+    this.boundSessions = options?.boundSessions;
     this.observedContacts = options?.observedContacts;
     this.bridgeRecovery = options?.bridgeRecovery;
 
@@ -6368,7 +6379,10 @@ export abstract class ChannelBase {
     envelope: Envelope,
     options: PreflightInboundOptions = {},
   ): boolean | Promise<boolean> {
-    if (!this.applyMessageRoute(envelope)) return false;
+    if (!this.applyMessageRoute(envelope)) {
+      this.recordPreflightRejected('message_route', envelope);
+      return false;
+    }
     const groupResult = this.groupGate.check(envelope, {
       createPairingRequest: !options.deferPairingRequests,
     });
@@ -6378,7 +6392,7 @@ export abstract class ChannelBase {
       (envelope.isMentioned || envelope.isReplyToBot);
     if (!groupResult.allowed && !deferredGroupPairing) {
       if (groupResult.pairing !== undefined) {
-        this.logPreflightRejected('group_pairing_required');
+        this.logPreflightRejected('group_pairing_required', envelope);
         return this.onGroupPairingRequired(
           envelope.chatId,
           groupResult.pairing,
@@ -6398,17 +6412,23 @@ export abstract class ChannelBase {
       if (groupResult.reason === 'mention_required') {
         // This is the expected high-frequency drop path for group bots.
         this.recordPendingGroupHistory(envelope);
+        // Journaled but not logged: the operator needs the reason, the log
+        // must not gain a line per ambient comment.
+        this.recordPreflightRejected('group_mention_required', envelope);
       } else if (groupResult.reason === 'pairing_trigger_required') {
         return false;
       } else {
-        this.logPreflightRejected(`group_${groupResult.reason ?? 'denied'}`);
+        this.logPreflightRejected(
+          `group_${groupResult.reason ?? 'denied'}`,
+          envelope,
+        );
       }
       return false;
     }
 
     const dmResult = this.dmGate.check(envelope);
     if (!dmResult.allowed) {
-      this.logPreflightRejected(`dm_${dmResult.reason ?? 'denied'}`);
+      this.logPreflightRejected(`dm_${dmResult.reason ?? 'denied'}`, envelope);
       return false;
     }
 
@@ -6427,7 +6447,7 @@ export abstract class ChannelBase {
     const result = senderGate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
       if (result.pairing !== undefined) {
-        this.logPreflightRejected('sender_pairing_required');
+        this.logPreflightRejected('sender_pairing_required', envelope);
         return this.onPairingRequired(
           envelope.chatId,
           result.pairing,
@@ -6446,6 +6466,7 @@ export abstract class ChannelBase {
       }
       this.logPreflightRejected(
         senderGate === this.gate ? 'sender_denied' : 'group_sender_denied',
+        envelope,
       );
       return false;
     }
@@ -6454,13 +6475,46 @@ export abstract class ChannelBase {
     return true;
   }
 
-  protected logPreflightRejected(reason: string): void {
+  /**
+   * Logs a preflight rejection and journals it. `envelope` supplies the
+   * identifiers an operator needs to find the message the skip refers to; it
+   * is optional because some adapters reject before an envelope exists.
+   */
+  protected logPreflightRejected(reason: string, envelope?: Envelope): void {
     process.stderr.write(
       `[Channel:${this.name}] preflight rejected reason=${sanitizeLogText(
         reason,
         80,
       )}\n`,
     );
+    this.recordPreflightRejected(reason, envelope);
+  }
+
+  /**
+   * Journals a preflight rejection without a stderr line, for the drop paths
+   * that are expected to be frequent.
+   */
+  protected recordPreflightRejected(reason: string, envelope?: Envelope): void {
+    this.recordChannelEvent({
+      type: 'inbound',
+      outcome: 'skipped',
+      reason,
+      ...(envelope
+        ? {
+            repository: envelope.chatId,
+            thread: envelope.threadId,
+            messageId: envelope.messageId,
+            actor: envelope.senderId,
+            ...(envelope.messageRoute
+              ? { detail: { route: envelope.messageRoute } }
+              : {}),
+          }
+        : {}),
+    });
+  }
+
+  protected recordChannelEvent(event: ChannelEventInput): void {
+    appendChannelEvent(this.name, this.config.cwd, event);
   }
 
   protected logDebugPayload(platform: string, payload: unknown): void {
@@ -6536,6 +6590,17 @@ export abstract class ChannelBase {
     envelope: Envelope,
     process: () => Promise<void> = () => this.processInbound(envelope),
   ): Promise<void> {
+    this.recordChannelEvent({
+      type: 'inbound',
+      outcome: 'accepted',
+      repository: envelope.chatId,
+      thread: envelope.threadId,
+      messageId: envelope.messageId,
+      actor: envelope.senderId,
+      ...(envelope.messageRoute
+        ? { detail: { route: envelope.messageRoute } }
+        : {}),
+    });
     if (this.namedSessions && !(await this.prepareNamedTurnBinding(envelope))) {
       return;
     }

@@ -134,6 +134,13 @@ describe('defaultModalities', () => {
     casesFor('returns image + video for', [
       ['qwen-vl-max', ONLY_IMAGE_VIDEO],
       ['qwen3-vl-plus', has({ image: true, video: true })],
+      ['qwen2.5-vl-32b-instruct', ONLY_IMAGE_VIDEO],
+      [
+        'quantized Qwen2.5-VL builds',
+        ONLY_IMAGE_VIDEO,
+        'Qwen/Qwen2.5-VL-3B-Instruct-AWQ',
+      ],
+      ['qwen2-vl-7b-instruct', ONLY_IMAGE_VIDEO],
       ['coder-model (same as qwen3.5-plus)', IMAGE_VIDEO, 'coder-model'],
       ['qwen3.5-plus', ONLY_IMAGE_VIDEO],
       ['qwen3.7-plus', ONLY_IMAGE_VIDEO],
@@ -153,6 +160,7 @@ describe('defaultModalities', () => {
     ]);
 
     casesFor('returns image for', [
+      ['qvq-72b-preview', IMAGE],
       [
         'qwen3.8-max-preview (provider-prefixed)',
         IMAGE,

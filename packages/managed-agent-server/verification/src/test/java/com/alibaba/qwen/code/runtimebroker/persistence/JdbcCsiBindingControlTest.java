@@ -34,7 +34,7 @@ class JdbcCsiBindingControlTest {
         var source = source();
         try (var connection = source.getConnection()) {
             sql(connection, "CREATE SCHEMA other");
-            sql(connection, "CREATE TABLE other.ma_session (csi_guard BOOLEAN)");
+            sql(connection, "CREATE TABLE other.ma_session (is_csi_guard BOOLEAN)");
         }
         var bindings = bindings(source);
         var request = new RuntimeProvisionRequest(new RuntimeScope("tenant", "workspace", "1", "/workspace",
@@ -101,7 +101,7 @@ class JdbcCsiBindingControlTest {
         var fixture = fixture();
         try (var connection = fixture.source().getConnection()) {
             sql(connection,
-                    "INSERT INTO ma_tenant_guard VALUES ('"
+                    "INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES ('"
                             + com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys
                                     .key("tenant")
                             + "', 'other', 'output_publication')");

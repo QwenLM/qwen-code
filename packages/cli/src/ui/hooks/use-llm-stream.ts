@@ -22,6 +22,7 @@ import {
   type Config,
   type EditorType,
   type LlmClient,
+  type SendMessageOptions,
   type Logger,
   type RetryInfo,
   type ServerLlmChatCompressedEvent,
@@ -91,8 +92,16 @@ import {
   getApiHistoryPromptId,
 } from '@qwen-code/qwen-code-core';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import {
+  runModelRound,
+  type AgentLoopRound,
+  type AgentLoopStopReason,
+} from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
-import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
+import {
+  getInteractiveModSession,
+  MODS_FAILED_TO_INITIALIZE,
+} from '../../services/interactive-mod-session.js';
 import type { ModTurn } from '../../services/mod-session.js';
 import type {
   HistoryItem,
@@ -113,7 +122,12 @@ import {
   findLastUserItemIndex,
   stripLeadingSystemReminders,
 } from '../utils/historyUtils.js';
-import { expandPendingPastePlaceholders } from '../utils/paste-placeholders.js';
+import {
+  collapseRewrite,
+  REWRITE_CHANGED_PASTE,
+  expandPendingPastePlaceholders,
+  framePasteExpansion,
+} from '../utils/paste-placeholders.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import {
   handleAtCommand,
@@ -431,6 +445,22 @@ interface StreamProcessingResult {
   userPromptBlocked: boolean;
 }
 
+/**
+ * A model round on the shared agent loop (`experimental.unifiedAgentLoop`):
+ * `runModelRound` sends it, collects its tool calls and turns the client's
+ * terminal events into a stop reason.
+ */
+interface SharedModelRound {
+  client: LlmClient;
+  round: AgentLoopRound;
+  signal: AbortSignal;
+}
+
+/** Ends a shared model round from inside its event callback. */
+class StreamProcessingEnded {
+  constructor(readonly result: StreamProcessingResult) {}
+}
+
 const EDIT_TOOL_NAMES = new Set([
   ToolNames.EDIT,
   'replace', // legacy alias, may still arrive from older providers
@@ -547,6 +577,13 @@ function charIndexAfterLine(text: string, keptLines: number): number {
  * `pendingHistoryItem` was just set from a stream chunk but the consumer's
  * React-state copy still reads as empty.
  */
+/** What the Mods' `prompt.submit` hooks let in, when they heard a prompt. */
+interface PromptSubmitted {
+  /** A rewrite: its text, and the same with its pastes collapsed. */
+  rewritten?: { text: string; display: string };
+  context?: string[];
+}
+
 export interface CancelSubmitInfo {
   /** `pendingHistoryItemRef.current` captured before any cancel mutation. */
   pendingItem: HistoryItemWithoutId | null;
@@ -646,6 +683,12 @@ export const useLlmStream = (
     submissionInFlightRef?: React.RefObject<boolean>;
     onSubmissionSettled?: () => void;
   } | null>,
+  // Hands a typed prompt that was not sent back to the composer, with the
+  // pastes its placeholders stand for.
+  onPromptReturned?: (
+    text: string,
+    pasteExpansions?: ReadonlyMap<string, string>,
+  ) => void,
 ) => {
   const [workflowKeywordActive, setWorkflowKeywordActive] = useState(false);
   const workflowConfigRef = useRef(config);
@@ -1801,6 +1844,8 @@ export const useLlmStream = (
         request: ToolCallRequestInfo;
         restoreResponseBinding?: RestoreToolResponseBinding;
       };
+      /** What the Mods' `prompt.submit` hooks let in, when they heard it. */
+      promptSubmitted?: PromptSubmitted;
     }> => {
       if (turnCancelledRef.current && !preserveTurnOwnership) {
         return { queryToSend: null, shouldProceed: false };
@@ -1818,9 +1863,10 @@ export const useLlmStream = (
       }
 
       let localQueryToSendToLlm: PartListUnion | null = null;
+      let promptSubmitted: PromptSubmitted | undefined;
 
       if (typeof query === 'string') {
-        const trimmedQuery = query.trim();
+        let trimmedQuery = query.trim();
 
         // Notification messages (e.g. background agent completions) are
         // pre-processed by the notification drain loop which already
@@ -1858,13 +1904,92 @@ export const useLlmStream = (
         // is the fallback for producers outside this process; slash commands
         // keep their own text. Logged before the slash and shell arms can
         // return, so handled commands stay recallable.
-        const userText =
+        let userText =
           displayText ??
           submittedPrompt ??
           (isSlash ? trimmedQuery : stripLeadingSystemReminders(trimmedQuery));
-        const recallText = pasteExpansions?.size
+        let recallText = pasteExpansions?.size
           ? expandPendingPastePlaceholders(userText, pasteExpansions)
           : userText;
+        // The Mods hear a prompt the person typed before anything reads it:
+        // the recall log, the transcript row, `@` references and the send.
+        const mods =
+          submitType === SendMessageType.UserQuery &&
+          !isSlash &&
+          !(shellModeIntent ?? shellModeActive)
+            ? getInteractiveModSession(config)
+            : undefined;
+        if (mods) {
+          let submitted: Awaited<ReturnType<typeof mods.submitPrompt>>;
+          try {
+            submitted = await mods.submitPrompt(recallText, abortSignal);
+          } catch (error) {
+            if (!abortSignal.aborted) throw error;
+            onPromptReturned?.(userText, pasteExpansions);
+            return { queryToSend: null, shouldProceed: false };
+          }
+          // A dropped prompt is neither shown nor recalled, since it may hold
+          // what the hook kept out; the composer gets it back to edit.
+          if ('drop' in submitted) {
+            addItem(
+              { type: MessageType.ERROR, text: submitted.drop },
+              userMessageTimestamp,
+            );
+            onPromptReturned?.(userText, pasteExpansions);
+            return { queryToSend: null, shouldProceed: false };
+          }
+          promptSubmitted = {
+            ...(submitted.context?.length
+              ? { context: submitted.context }
+              : {}),
+          };
+          const rewritten = submitted.text.trim();
+          if (rewritten !== recallText.trim()) {
+            // The typed text as the composer sent it: pastes framed. What the
+            // composer put ahead of it, attachment references and model-only
+            // notices, stays ahead of the rewrite.
+            const typed = (
+              pasteExpansions?.size
+                ? framePasteExpansion(userText, pasteExpansions)
+                : recallText
+            ).trim();
+            const found = trimmedQuery.endsWith(typed);
+            if (!found) {
+              debugLogger.warn(
+                'prompt.submit: the typed text was not found in the prompt; sending the rewrite alone',
+              );
+            }
+            const ahead = found
+              ? trimmedQuery.slice(0, trimmedQuery.length - typed.length)
+              : '';
+            // Each paste comes back whole to be collapsed and framed again,
+            // or the rewrite is refused rather than sent unframed.
+            const collapsed = collapseRewrite(
+              userText,
+              rewritten,
+              pasteExpansions,
+            );
+            if (!collapsed) {
+              addItem(
+                { type: MessageType.ERROR, text: REWRITE_CHANGED_PASTE },
+                userMessageTimestamp,
+              );
+              onPromptReturned?.(userText, pasteExpansions);
+              return { queryToSend: null, shouldProceed: false };
+            }
+            pasteExpansions = collapsed.pasteExpansions;
+            userText = collapsed.text;
+            recallText = rewritten;
+            trimmedQuery =
+              ahead +
+              (pasteExpansions
+                ? framePasteExpansion(userText, pasteExpansions)
+                : rewritten);
+            submittedPrompt = userText;
+            if (humanInput) humanInput = { text: rewritten };
+            promptSubmitted.rewritten = { text: rewritten, display: userText };
+          }
+        }
         await logger?.logMessage(MessageSenderType.USER, recallText);
         if (abortSignal.aborted) {
           return { queryToSend: null, shouldProceed: false };
@@ -2073,7 +2198,11 @@ export const useLlmStream = (
         );
         return { queryToSend: null, shouldProceed: false };
       }
-      return { queryToSend: localQueryToSendToLlm, shouldProceed: true };
+      return {
+        queryToSend: localQueryToSendToLlm,
+        shouldProceed: true,
+        ...(promptSubmitted ? { promptSubmitted } : {}),
+      };
     },
     [
       config,
@@ -2084,6 +2213,7 @@ export const useLlmStream = (
       logger,
       shellModeActive,
       applyVisionBridgeIfNeeded,
+      onPromptReturned,
     ],
   );
 
@@ -2851,7 +2981,7 @@ export const useLlmStream = (
 
   const processLlmStreamEvents = useCallback(
     async (
-      stream: AsyncIterable<LlmEvent>,
+      source: AsyncIterable<LlmEvent> | SharedModelRound,
       userMessageTimestamp: number,
       signal: AbortSignal,
       submitType: SendMessageType,
@@ -2877,7 +3007,12 @@ export const useLlmStream = (
             : count,
         0,
       );
-      const toolCallRequests: ToolCallRequestInfo[] = [];
+      const sharedRound = 'round' in source;
+      // On the shared round, `runModelRound` collects the calls and drops
+      // those of an attempt a retry or fallback replaced; the processor's own
+      // resets of `toolCallRequests` below matter only on the current path.
+      let toolCallRequests: ToolCallRequestInfo[] = [];
+      let roundStop: AgentLoopStopReason | undefined;
       let streamInteractionOwner = trackInteractionOwner
         ? activeInteractionOwnerRef.current
         : undefined;
@@ -3026,252 +3161,218 @@ export const useLlmStream = (
         }, STREAM_UPDATE_THROTTLE_MS);
       };
 
-      flushBufferedStreamEventsRef.current.add(flushBufferedStreamEvents);
-      dualOutput?.startAssistantMessage();
-      try {
-        for await (const event of stream) {
-          if (!streamInteractionOwner && promptId) {
-            streamInteractionOwner = getActiveInteractionSpan(promptId);
-            if (trackInteractionOwner && streamInteractionOwner) {
-              activeInteractionOwnerRef.current ??= streamInteractionOwner;
-            }
+      const handleStreamEvent = (
+        event: LlmEvent,
+      ): StreamProcessingResult | undefined => {
+        if (!streamInteractionOwner && promptId) {
+          streamInteractionOwner = getActiveInteractionSpan(promptId);
+          if (trackInteractionOwner && streamInteractionOwner) {
+            activeInteractionOwnerRef.current ??= streamInteractionOwner;
           }
-          dualOutput?.processEvent(event);
-          const modTurn = modTurnRef.current;
-          if (trackInteractionOwner && modTurn && modTurn.promptId === promptId)
-            modTurn.turn.saw(event);
-          switch (event.type) {
-            case ServerLlmEventType.Thought:
-              // Subject-only chunks are discrete status updates for the
-              // loading indicator and render immediately. Anything carrying
-              // streamed text (with or without a subject) goes through the
-              // throttled buffer so it batches with adjacent reasoning
-              // chunks; the flush merger preserves the subject.
-              if (event.value.subject && !event.value.description) {
-                flushBufferedStreamEvents();
-                setThought(event.value);
-              } else {
-                bufferedEvents.push({ kind: 'thought', value: event.value });
-                scheduleBufferedStreamFlush();
-              }
-              break;
-            case ServerLlmEventType.Content: {
-              // Thinking is done once the answer starts streaming; reset the
-              // title status. On the thinking→answer transition, flush any
-              // buffered reasoning so the full thought is captured, then commit
-              // it to history (collapsed) above the answer. After that the
-              // condition is false, so normal content batching resumes.
-              if (
-                pendingThoughtItemRef.current ||
-                bufferedEvents.some((e) => e.kind === 'thought')
-              ) {
-                flushBufferedStreamEvents();
-                commitPendingThought(userMessageTimestamp, true);
-                thoughtBuffer = '';
-              }
-              setThought((prev) => (prev ? null : prev));
-              const displayParts = event.parts ?? [{ text: event.value }];
-              for (const part of displayParts) {
-                if ('text' in part) {
-                  if (part.text.length > 0) {
-                    bufferedEvents.push({ kind: 'content', value: part.text });
-                  }
-                } else {
-                  const image = getInlineImageData({
-                    inlineData: part.inlineData,
-                  });
-                  if (image) {
-                    bufferedEvents.push({ kind: 'image', value: image });
-                  }
-                }
-              }
+        }
+        dualOutput?.processEvent(event);
+        const modTurn = modTurnRef.current;
+        if (trackInteractionOwner && modTurn && modTurn.promptId === promptId)
+          modTurn.turn.saw(event);
+        switch (event.type) {
+          case ServerLlmEventType.Thought:
+            // Subject-only chunks are discrete status updates for the
+            // loading indicator and render immediately. Anything carrying
+            // streamed text (with or without a subject) goes through the
+            // throttled buffer so it batches with adjacent reasoning
+            // chunks; the flush merger preserves the subject.
+            if (event.value.subject && !event.value.description) {
+              flushBufferedStreamEvents();
+              setThought(event.value);
+            } else {
+              bufferedEvents.push({ kind: 'thought', value: event.value });
               scheduleBufferedStreamFlush();
-              break;
             }
-            case ServerLlmEventType.ToolCallRequest:
-              // Thinking is done once a tool call is issued; flush buffered
-              // reasoning then commit it to history (collapsed) above the tool
-              // output.
+            break;
+          case ServerLlmEventType.Content: {
+            // Thinking is done once the answer starts streaming; reset the
+            // title status. On the thinking→answer transition, flush any
+            // buffered reasoning so the full thought is captured, then commit
+            // it to history (collapsed) above the answer. After that the
+            // condition is false, so normal content batching resumes.
+            if (
+              pendingThoughtItemRef.current ||
+              bufferedEvents.some((e) => e.kind === 'thought')
+            ) {
               flushBufferedStreamEvents();
               commitPendingThought(userMessageTimestamp, true);
               thoughtBuffer = '';
-              setThought((prev) => (prev ? null : prev));
-              if (event.value.goalContext && turnAdmission) {
-                bindGoalTurn(
-                  event.value.goalContext,
-                  turnAdmission.turnKey,
-                  turnAdmission.origin,
-                  turnAdmission.controller,
-                );
-              }
-              toolCallRequests.push(event.value);
-              // Count tool call args JSON toward token estimation.
-              try {
-                const argsJson = JSON.stringify(event.value.args);
-                streamingResponseLengthRef.current += argsJson.length;
-              } catch {
-                // Best-effort — don't block on serialization errors
-              }
-              break;
-            case ServerLlmEventType.UserCancelled:
-              flushBufferedStreamEvents();
-              toolCallRequests.length = 0;
-              handleUserCancelledEvent(userMessageTimestamp);
-              return {
-                status: StreamProcessingStatus.UserCancelled,
-                scheduledToolContinuation: false,
-                userPromptBlocked,
-              };
-            case ServerLlmEventType.Error:
-              flushBufferedStreamEvents();
-              handleErrorEvent(
-                event.value,
-                userMessageTimestamp,
-                submitType,
-                trackInteractionOwner &&
-                  toolContinuationOwner?.foregroundAbortController !==
-                    undefined &&
-                  abortControllerRef.current ===
-                    toolContinuationOwner.foregroundAbortController,
-              );
-              break;
-            case ServerLlmEventType.ChatCompressed:
-              flushBufferedStreamEvents();
-              commitPendingThought(userMessageTimestamp);
-              thoughtBuffer = '';
-              setThought(null);
-              handleChatCompressionEvent(event.value, userMessageTimestamp);
-              llmMessageBuffer = '';
-              assistantOutputStarted = false;
-              break;
-            case ServerLlmEventType.ToolCallConfirmation:
-            case ServerLlmEventType.ToolCallResponse:
-              flushBufferedStreamEvents();
-              break;
-            case ServerLlmEventType.ToolCallPreparation:
-              break;
-            case ServerLlmEventType.MaxSessionTurns:
-              flushBufferedStreamEvents();
-              commitPendingThought(userMessageTimestamp);
-              thoughtBuffer = '';
-              setThought(null);
-              if (pendingHistoryItemRef.current) {
-                commitItemInOrder(
-                  pendingHistoryItemRef.current,
-                  userMessageTimestamp,
-                );
-                setPendingHistoryItem(null);
-              }
-              handleMaxSessionTurnsEvent();
-              llmMessageBuffer = '';
-              assistantOutputStarted = false;
-              break;
-            case ServerLlmEventType.SessionTokenLimitExceeded:
-              flushBufferedStreamEvents();
-              commitPendingThought(userMessageTimestamp);
-              thoughtBuffer = '';
-              setThought(null);
-              if (pendingHistoryItemRef.current) {
-                commitItemInOrder(
-                  pendingHistoryItemRef.current,
-                  userMessageTimestamp,
-                );
-                setPendingHistoryItem(null);
-              }
-              handleSessionTokenLimitExceededEvent(event.value);
-              llmMessageBuffer = '';
-              assistantOutputStarted = false;
-              break;
-            case ServerLlmEventType.Finished:
-              flushBufferedStreamEvents();
-              // A thinking-only turn (no content/tool) still commits its
-              // reasoning so it persists collapsed in history.
-              commitPendingThought(userMessageTimestamp);
-              // Seal off this turn's UI state before the parent re-enters
-              // sendMessageStream for a continuation (Stop-hook block at
-              // client.ts:1378 or next-speaker auto-continue at 1444). Both
-              // paths yield* a fresh Turn through this same stream processor,
-              // so without this seal the next turn's first content/thought
-              // chunk appends to this turn's pending item — visible in the UI
-              // as "t" → "te" → "tes" cumulative rendering even though each
-              // turn is persisted as a clean, separate assistant message.
-              if (pendingHistoryItemRef.current) {
-                commitItemInOrder(
-                  pendingHistoryItemRef.current,
-                  userMessageTimestamp,
-                );
-                setPendingHistoryItem(null);
-              }
-              llmMessageBuffer = '';
-              thoughtBuffer = '';
-              assistantOutputStarted = false;
-              assistantInlineImageCount = 0;
-              setThought(null);
-              handleFinishedEvent(
-                event as ServerLlmFinishedEvent,
-                userMessageTimestamp,
-              );
-              break;
-            case ServerLlmEventType.Citation:
-              flushBufferedStreamEvents();
-              if (showCitations(settings)) {
-                commitPendingThought(userMessageTimestamp);
-                thoughtBuffer = '';
-                setThought(null);
-                llmMessageBuffer = '';
-                assistantOutputStarted = false;
-              }
-              handleCitationEvent(event.value, userMessageTimestamp);
-              break;
-            case ServerLlmEventType.LoopDetected:
-              flushBufferedStreamEvents();
-              // handle later because we want to move pending history to history
-              // before we add loop detected message to history
-              loopDetectedRef.current = true;
-              loopStopRef.current = event.value;
-              break;
-            case ServerLlmEventType.Retry:
-              // On fresh restart (escalation / rate-limit / invalid stream),
-              // clear pending content and buffers to discard the failed attempt.
-              // On continuation (recovery), keep the pending gemini item AND
-              // buffers so the model's continuation text appends to them —
-              // otherwise handleContentEvent would see a null pending item,
-              // create a fresh one, and reset the buffer to just the new chunk,
-              // losing the partial text we meant to preserve.
-              if (!event.isContinuation) {
-                discardBufferedStreamEvents();
-                commitPendingThought(userMessageTimestamp, true);
-                setPendingAssistantItems([]);
-                if (pendingHistoryItemRef.current) {
-                  setPendingHistoryItem(null);
+            }
+            setThought((prev) => (prev ? null : prev));
+            const displayParts = event.parts ?? [{ text: event.value }];
+            for (const part of displayParts) {
+              if ('text' in part) {
+                if (part.text.length > 0) {
+                  bufferedEvents.push({ kind: 'content', value: part.text });
                 }
-                thoughtBuffer = '';
-                setThought(null);
-                llmMessageBuffer = '';
-                assistantOutputStarted = false;
-                assistantInlineImageCount = 0;
               } else {
-                flushBufferedStreamEvents();
+                const image = getInlineImageData({
+                  inlineData: part.inlineData,
+                });
+                if (image) {
+                  bufferedEvents.push({ kind: 'image', value: image });
+                }
               }
-              // Always discard tool call requests from the truncated/failed
-              // attempt to prevent duplicate execution after escalation or
-              // recovery. The recovery path now skips turns that already
-              // contain a functionCall (see llm-chat.ts), so this only
-              // clears stale requests from pre-RETRY accumulation.
-              toolCallRequests.length = 0;
-              // Show retry info if available (rate-limit / throttling errors)
-              if (event.retryInfo) {
-                startRetryCountdown(event.retryInfo);
-              } else {
-                // The retry attempt is starting now, so any prior retry UI is stale.
-                clearRetryCountdown();
-              }
-              break;
-            case ServerLlmEventType.ModelFallback: {
-              // The primary model (or a prior fallback) exhausted its retry
-              // budget on a capacity/availability error and the system is
-              // switching to the next fallback model. Discard partial content
-              // from the failed attempt and show a notification.
+            }
+            scheduleBufferedStreamFlush();
+            break;
+          }
+          case ServerLlmEventType.ToolCallRequest:
+            // Thinking is done once a tool call is issued; flush buffered
+            // reasoning then commit it to history (collapsed) above the tool
+            // output.
+            flushBufferedStreamEvents();
+            commitPendingThought(userMessageTimestamp, true);
+            thoughtBuffer = '';
+            setThought((prev) => (prev ? null : prev));
+            if (event.value.goalContext && turnAdmission) {
+              bindGoalTurn(
+                event.value.goalContext,
+                turnAdmission.turnKey,
+                turnAdmission.origin,
+                turnAdmission.controller,
+              );
+            }
+            if (!sharedRound) toolCallRequests.push(event.value);
+            // Count tool call args JSON toward token estimation.
+            try {
+              const argsJson = JSON.stringify(event.value.args);
+              streamingResponseLengthRef.current += argsJson.length;
+            } catch {
+              // Best-effort — don't block on serialization errors
+            }
+            break;
+          case ServerLlmEventType.UserCancelled:
+            flushBufferedStreamEvents();
+            toolCallRequests.length = 0;
+            handleUserCancelledEvent(userMessageTimestamp);
+            return {
+              status: StreamProcessingStatus.UserCancelled,
+              scheduledToolContinuation: false,
+              userPromptBlocked,
+            };
+          case ServerLlmEventType.Error:
+            flushBufferedStreamEvents();
+            handleErrorEvent(
+              event.value,
+              userMessageTimestamp,
+              submitType,
+              trackInteractionOwner &&
+                toolContinuationOwner?.foregroundAbortController !==
+                  undefined &&
+                abortControllerRef.current ===
+                  toolContinuationOwner.foregroundAbortController,
+            );
+            break;
+          case ServerLlmEventType.ChatCompressed:
+            flushBufferedStreamEvents();
+            commitPendingThought(userMessageTimestamp);
+            thoughtBuffer = '';
+            setThought(null);
+            handleChatCompressionEvent(event.value, userMessageTimestamp);
+            llmMessageBuffer = '';
+            assistantOutputStarted = false;
+            break;
+          case ServerLlmEventType.ToolCallConfirmation:
+          case ServerLlmEventType.ToolCallResponse:
+            flushBufferedStreamEvents();
+            break;
+          case ServerLlmEventType.ToolCallPreparation:
+            break;
+          case ServerLlmEventType.MaxSessionTurns:
+            flushBufferedStreamEvents();
+            commitPendingThought(userMessageTimestamp);
+            thoughtBuffer = '';
+            setThought(null);
+            if (pendingHistoryItemRef.current) {
+              commitItemInOrder(
+                pendingHistoryItemRef.current,
+                userMessageTimestamp,
+              );
+              setPendingHistoryItem(null);
+            }
+            handleMaxSessionTurnsEvent();
+            llmMessageBuffer = '';
+            assistantOutputStarted = false;
+            break;
+          case ServerLlmEventType.SessionTokenLimitExceeded:
+            flushBufferedStreamEvents();
+            commitPendingThought(userMessageTimestamp);
+            thoughtBuffer = '';
+            setThought(null);
+            if (pendingHistoryItemRef.current) {
+              commitItemInOrder(
+                pendingHistoryItemRef.current,
+                userMessageTimestamp,
+              );
+              setPendingHistoryItem(null);
+            }
+            handleSessionTokenLimitExceededEvent(event.value);
+            llmMessageBuffer = '';
+            assistantOutputStarted = false;
+            break;
+          case ServerLlmEventType.Finished:
+            flushBufferedStreamEvents();
+            // A thinking-only turn (no content/tool) still commits its
+            // reasoning so it persists collapsed in history.
+            commitPendingThought(userMessageTimestamp);
+            // Seal off this turn's UI state before the parent re-enters
+            // sendMessageStream for a continuation (Stop-hook block at
+            // client.ts:1378 or next-speaker auto-continue at 1444). Both
+            // paths yield* a fresh Turn through this same stream processor,
+            // so without this seal the next turn's first content/thought
+            // chunk appends to this turn's pending item — visible in the UI
+            // as "t" → "te" → "tes" cumulative rendering even though each
+            // turn is persisted as a clean, separate assistant message.
+            if (pendingHistoryItemRef.current) {
+              commitItemInOrder(
+                pendingHistoryItemRef.current,
+                userMessageTimestamp,
+              );
+              setPendingHistoryItem(null);
+            }
+            llmMessageBuffer = '';
+            thoughtBuffer = '';
+            assistantOutputStarted = false;
+            assistantInlineImageCount = 0;
+            setThought(null);
+            handleFinishedEvent(
+              event as ServerLlmFinishedEvent,
+              userMessageTimestamp,
+            );
+            break;
+          case ServerLlmEventType.Citation:
+            flushBufferedStreamEvents();
+            if (showCitations(settings)) {
+              commitPendingThought(userMessageTimestamp);
+              thoughtBuffer = '';
+              setThought(null);
+              llmMessageBuffer = '';
+              assistantOutputStarted = false;
+            }
+            handleCitationEvent(event.value, userMessageTimestamp);
+            break;
+          case ServerLlmEventType.LoopDetected:
+            flushBufferedStreamEvents();
+            // handle later because we want to move pending history to history
+            // before we add loop detected message to history
+            loopDetectedRef.current = true;
+            loopStopRef.current = event.value;
+            break;
+          case ServerLlmEventType.Retry:
+            // On fresh restart (escalation / rate-limit / invalid stream),
+            // clear pending content and buffers to discard the failed attempt.
+            // On continuation (recovery), keep the pending gemini item AND
+            // buffers so the model's continuation text appends to them —
+            // otherwise handleContentEvent would see a null pending item,
+            // create a fresh one, and reset the buffer to just the new chunk,
+            // losing the partial text we meant to preserve.
+            if (!event.isContinuation) {
               discardBufferedStreamEvents();
               commitPendingThought(userMessageTimestamp, true);
               setPendingAssistantItems([]);
@@ -3283,117 +3384,181 @@ export const useLlmStream = (
               llmMessageBuffer = '';
               assistantOutputStarted = false;
               assistantInlineImageCount = 0;
-              toolCallRequests.length = 0;
+            } else {
+              flushBufferedStreamEvents();
+            }
+            // Always discard tool call requests from the truncated/failed
+            // attempt to prevent duplicate execution after escalation or
+            // recovery. The recovery path now skips turns that already
+            // contain a functionCall (see llm-chat.ts), so this only
+            // clears stale requests from pre-RETRY accumulation.
+            toolCallRequests.length = 0;
+            // Show retry info if available (rate-limit / throttling errors)
+            if (event.retryInfo) {
+              startRetryCountdown(event.retryInfo);
+            } else {
+              // The retry attempt is starting now, so any prior retry UI is stale.
               clearRetryCountdown();
-              const fromModel =
-                sanitizeDisplayText(event.fromModel) ?? '(unknown)';
-              const toModel = sanitizeDisplayText(event.toModel) ?? '(unknown)';
+            }
+            break;
+          case ServerLlmEventType.ModelFallback: {
+            // The primary model (or a prior fallback) exhausted its retry
+            // budget on a capacity/availability error and the system is
+            // switching to the next fallback model. Discard partial content
+            // from the failed attempt and show a notification.
+            discardBufferedStreamEvents();
+            commitPendingThought(userMessageTimestamp, true);
+            setPendingAssistantItems([]);
+            if (pendingHistoryItemRef.current) {
+              setPendingHistoryItem(null);
+            }
+            thoughtBuffer = '';
+            setThought(null);
+            llmMessageBuffer = '';
+            assistantOutputStarted = false;
+            assistantInlineImageCount = 0;
+            toolCallRequests.length = 0;
+            clearRetryCountdown();
+            const fromModel =
+              sanitizeDisplayText(event.fromModel) ?? '(unknown)';
+            const toModel = sanitizeDisplayText(event.toModel) ?? '(unknown)';
+            addItem(
+              {
+                type: 'notification',
+                text: `Model ${fromModel} unavailable, falling back to ${toModel}`,
+              },
+              userMessageTimestamp,
+            );
+            break;
+          }
+          case ServerLlmEventType.HookSystemMessage:
+            flushBufferedStreamEvents();
+            commitPendingThought(userMessageTimestamp);
+            thoughtBuffer = '';
+            setThought(null);
+            // Display system message from Stop hooks with "Stop says:" prefix
+            // First commit any pending AI response to ensure correct ordering
+            if (pendingHistoryItemRef.current) {
+              commitItemInOrder(
+                pendingHistoryItemRef.current,
+                userMessageTimestamp,
+              );
+              setPendingHistoryItem(null);
+            }
+            addItem(
+              {
+                type: 'stop_hook_system_message',
+                message: event.value,
+              } as HistoryItemWithoutId,
+              userMessageTimestamp,
+            );
+            llmMessageBuffer = '';
+            assistantOutputStarted = false;
+            break;
+          case ServerLlmEventType.GoalSettlementFailed:
+            flushBufferedStreamEvents();
+            commitPendingThought(userMessageTimestamp);
+            thoughtBuffer = '';
+            setThought(null);
+            if (pendingHistoryItemRef.current) {
+              commitItemInOrder(
+                pendingHistoryItemRef.current,
+                userMessageTimestamp,
+              );
+              setPendingHistoryItem(null);
+            }
+            addItem(
+              { type: 'warning', text: event.value },
+              userMessageTimestamp,
+            );
+            llmMessageBuffer = '';
+            assistantOutputStarted = false;
+            break;
+          case ServerLlmEventType.UserPromptSubmitBlocked:
+            flushBufferedStreamEvents();
+            commitPendingThought(userMessageTimestamp);
+            thoughtBuffer = '';
+            setThought(null);
+            userPromptBlocked = true;
+            handleUserPromptSubmitBlockedEvent(
+              event.value,
+              userMessageTimestamp,
+            );
+            llmMessageBuffer = '';
+            assistantOutputStarted = false;
+            break;
+          case ServerLlmEventType.StopHookLoop:
+            flushBufferedStreamEvents();
+            commitPendingThought(userMessageTimestamp);
+            thoughtBuffer = '';
+            setThought(null);
+            handleStopHookLoopEvent(event.value, userMessageTimestamp);
+            llmMessageBuffer = '';
+            assistantOutputStarted = false;
+            break;
+          case ServerLlmEventType.GoalState:
+            if (event.cause && shouldDisplayGoalStateCause(event.cause)) {
+              flushBufferedStreamEvents();
+              commitPendingThought(userMessageTimestamp);
+              thoughtBuffer = '';
+              setThought(null);
+              if (pendingHistoryItemRef.current) {
+                commitItemInOrder(
+                  pendingHistoryItemRef.current,
+                  userMessageTimestamp,
+                );
+                setPendingHistoryItem(null);
+              }
               addItem(
                 {
-                  type: 'notification',
-                  text: `Model ${fromModel} unavailable, falling back to ${toModel}`,
+                  type: 'goal_state',
+                  snapshot: event.value,
+                  cause: event.cause,
                 },
                 userMessageTimestamp,
               );
-              break;
+              llmMessageBuffer = '';
+              assistantOutputStarted = false;
             }
-            case ServerLlmEventType.HookSystemMessage:
-              flushBufferedStreamEvents();
-              commitPendingThought(userMessageTimestamp);
-              thoughtBuffer = '';
-              setThought(null);
-              // Display system message from Stop hooks with "Stop says:" prefix
-              // First commit any pending AI response to ensure correct ordering
-              if (pendingHistoryItemRef.current) {
-                commitItemInOrder(
-                  pendingHistoryItemRef.current,
-                  userMessageTimestamp,
-                );
-                setPendingHistoryItem(null);
-              }
-              addItem(
-                {
-                  type: 'stop_hook_system_message',
-                  message: event.value,
-                } as HistoryItemWithoutId,
-                userMessageTimestamp,
-              );
-              llmMessageBuffer = '';
-              assistantOutputStarted = false;
-              break;
-            case ServerLlmEventType.GoalSettlementFailed:
-              flushBufferedStreamEvents();
-              commitPendingThought(userMessageTimestamp);
-              thoughtBuffer = '';
-              setThought(null);
-              if (pendingHistoryItemRef.current) {
-                commitItemInOrder(
-                  pendingHistoryItemRef.current,
-                  userMessageTimestamp,
-                );
-                setPendingHistoryItem(null);
-              }
-              addItem(
-                { type: 'warning', text: event.value },
-                userMessageTimestamp,
-              );
-              llmMessageBuffer = '';
-              assistantOutputStarted = false;
-              break;
-            case ServerLlmEventType.UserPromptSubmitBlocked:
-              flushBufferedStreamEvents();
-              commitPendingThought(userMessageTimestamp);
-              thoughtBuffer = '';
-              setThought(null);
-              userPromptBlocked = true;
-              handleUserPromptSubmitBlockedEvent(
-                event.value,
-                userMessageTimestamp,
-              );
-              llmMessageBuffer = '';
-              assistantOutputStarted = false;
-              break;
-            case ServerLlmEventType.StopHookLoop:
-              flushBufferedStreamEvents();
-              commitPendingThought(userMessageTimestamp);
-              thoughtBuffer = '';
-              setThought(null);
-              handleStopHookLoopEvent(event.value, userMessageTimestamp);
-              llmMessageBuffer = '';
-              assistantOutputStarted = false;
-              break;
-            case ServerLlmEventType.GoalState:
-              if (event.cause && shouldDisplayGoalStateCause(event.cause)) {
-                flushBufferedStreamEvents();
-                commitPendingThought(userMessageTimestamp);
-                thoughtBuffer = '';
-                setThought(null);
-                if (pendingHistoryItemRef.current) {
-                  commitItemInOrder(
-                    pendingHistoryItemRef.current,
-                    userMessageTimestamp,
-                  );
-                  setPendingHistoryItem(null);
-                }
-                addItem(
-                  {
-                    type: 'goal_state',
-                    snapshot: event.value,
-                    cause: event.cause,
-                  },
-                  userMessageTimestamp,
-                );
-                llmMessageBuffer = '';
-                assistantOutputStarted = false;
-              }
-              break;
-            default: {
-              // enforces exhaustive switch-case
-              const unreachable: never = event;
-              return unreachable;
-            }
+            break;
+          default: {
+            // enforces exhaustive switch-case
+            const unreachable: never = event;
+            return unreachable;
           }
         }
+        return undefined;
+      };
+
+      flushBufferedStreamEventsRef.current.add(flushBufferedStreamEvents);
+      dualOutput?.startAssistantMessage();
+      try {
+        if (sharedRound) {
+          debugLogger.debug(
+            `[processLlmStreamEvents] model round on the shared agent loop (prompt ${source.round.promptId})`,
+          );
+          const { calls, stop } = await runModelRound(
+            source.client,
+            source.round,
+            source.signal,
+            {
+              onModelEvent: (event) => {
+                const ended = handleStreamEvent(event);
+                if (ended) throw new StreamProcessingEnded(ended);
+              },
+            },
+          );
+          toolCallRequests = calls;
+          roundStop = stop;
+        } else {
+          for await (const event of source) {
+            const ended = handleStreamEvent(event);
+            if (ended) return ended;
+          }
+        }
+      } catch (error) {
+        if (error instanceof StreamProcessingEnded) return error.result;
+        throw error;
       } finally {
         flushBufferedStreamEvents();
         // A thrown stream must leave interleaved output discardable on retry.
@@ -3413,7 +3578,7 @@ export const useLlmStream = (
       if (
         toolCallRequests.length > 0 &&
         !signal.aborted &&
-        !loopDetectedRef.current
+        (sharedRound ? roundStop === undefined : !loopDetectedRef.current)
       ) {
         const executableToolCallRequests: ToolCallRequestInfo[] = [];
         const duplicateResponses: Array<{
@@ -3912,7 +4077,7 @@ export const useLlmStream = (
           addItem(
             {
               type: MessageType.ERROR,
-              text: 'Mods failed to initialize. Fix the Mod configuration and restart. /help and /quit remain available.',
+              text: MODS_FAILED_TO_INITIALIZE,
             },
             Date.now(),
           );
@@ -4173,6 +4338,7 @@ export const useLlmStream = (
             request: ToolCallRequestInfo;
             restoreResponseBinding?: RestoreToolResponseBinding;
           };
+          promptSubmitted?: PromptSubmitted;
         };
         try {
           preparedQuery =
@@ -4221,6 +4387,16 @@ export const useLlmStream = (
         }
         const { queryToSend, shouldProceed, scheduledClientTool } =
           preparedQuery;
+        // A rewrite from the Mods' `prompt.submit` hooks is the prompt from
+        // here on: what the transcript shows, what `turn.start` hears and
+        // what workflow keywords are read from.
+        const promptRewrite = preparedQuery.promptSubmitted?.rewritten;
+        const promptContext = preparedQuery.promptSubmitted?.context;
+        const sentPrompt = promptRewrite?.display ?? submittedPrompt;
+        const typedInput =
+          promptRewrite === undefined || !metadata?.humanInput
+            ? metadata?.humanInput
+            : { text: promptRewrite.text };
 
         if (scheduledClientTool && foregroundAbortController) {
           if (scheduledClientTool.restoreResponseBinding) {
@@ -4450,9 +4626,7 @@ export const useLlmStream = (
             !(metadata?.shellMode ?? shellModeActive) &&
             !dispatchesSlashCommand &&
             !(typeof query === 'string' && isBtwCommand(query));
-          const humanInput = workflowModeEligible
-            ? metadata?.humanInput
-            : undefined;
+          const humanInput = workflowModeEligible ? typedInput : undefined;
           // A prompt the person submitted or retried is a turn the Mods hear.
           const startsModTurn =
             mods !== undefined &&
@@ -4477,8 +4651,9 @@ export const useLlmStream = (
                     const turn = mods?.startTurn(
                       submitType === SendMessageType.Retry
                         ? ''
-                        : (metadata?.humanInput?.text ??
-                            submittedPrompt ??
+                        : (typedInput?.text ??
+                            promptRewrite?.text ??
+                            sentPrompt ??
                             (typeof query === 'string' ? query : '')),
                       AbortSignal.any([abortSignal, cancel.signal]),
                       () => cancelForModRef.current(),
@@ -4497,7 +4672,10 @@ export const useLlmStream = (
             ...(allowConcurrentBtwDuringResponse
               ? { isConcurrentSideQuery: true }
               : {}),
-            ...(submittedPrompt !== undefined ? { submittedPrompt } : {}),
+            ...(sentPrompt !== undefined
+              ? { submittedPrompt: sentPrompt }
+              : {}),
+            ...(promptContext ? { promptContext } : {}),
             ...(humanInput === undefined
               ? {}
               : {
@@ -4533,36 +4711,47 @@ export const useLlmStream = (
           const providerSignal = inheritedToolContinuationOwner
             ? processingSignal
             : abortSignal;
-          const stream = llmClient.sendMessageStream(
-            finalQueryToSend,
-            providerSignal,
-            prompt_id!,
-            {
-              ...sendOptions,
-              ...(goalBinding
+          const roundOptions: SendMessageOptions = {
+            ...sendOptions,
+            ...(goalBinding
+              ? {
+                  goalPermit: goalBinding.permit,
+                  goalTurnKey: goalBinding.turnKey,
+                  goalSignal: goalBinding.controller.signal,
+                  goalOrigin: goalBinding.origin,
+                  getQueuedGoalTurnKey: () =>
+                    goalQueueRef?.current?.peekNextUserBatchKey(true),
+                }
+              : userAdmission
                 ? {
-                    goalPermit: goalBinding.permit,
-                    goalTurnKey: goalBinding.turnKey,
-                    goalSignal: goalBinding.controller.signal,
-                    goalOrigin: goalBinding.origin,
+                    goalTurnKey: userAdmission.turnKey,
+                    goalSignal: turnController!.signal,
+                    goalOrigin: 'user' as const,
                     getQueuedGoalTurnKey: () =>
                       goalQueueRef?.current?.peekNextUserBatchKey(true),
                   }
-                : userAdmission
-                  ? {
-                      goalTurnKey: userAdmission.turnKey,
-                      goalSignal: turnController!.signal,
-                      goalOrigin: 'user' as const,
-                      getQueuedGoalTurnKey: () =>
-                        goalQueueRef?.current?.peekNextUserBatchKey(true),
-                    }
-                  : {}),
-            },
-          );
+                : {}),
+          };
+          const source = config.isUnifiedAgentLoopEnabled?.()
+            ? {
+                client: llmClient,
+                signal: providerSignal,
+                round: {
+                  parts: finalQueryToSend,
+                  promptId: prompt_id!,
+                  options: roundOptions,
+                },
+              }
+            : llmClient.sendMessageStream(
+                finalQueryToSend,
+                providerSignal,
+                prompt_id!,
+                roundOptions,
+              );
           metadata?.onRequestStarted?.();
 
           const processingResult = await processLlmStreamEvents(
-            stream,
+            source,
             userMessageTimestamp,
             processingSignal,
             submitType,
