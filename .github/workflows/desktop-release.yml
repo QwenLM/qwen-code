@@ -491,15 +491,24 @@ jobs:
           # repository (BaseOS, AppStream, CRB, extras and EPEL 10 carry no
           # such build). `matrix.display` names the server each rpm root can
           # install, so a leg added later picks one instead of inheriting an
-          # arm by accident.
-          if [ '${{ matrix.display }}' = 'xvfb' ]; then
-            dnf install -y --setopt=install_weak_deps=False xorg-x11-server-Xvfb
-          else
-            # weston (EPEL) provides a headless Wayland display and Xwayland
-            # (AppStream) bridges it to X11 for WebKitGTK. The smoke step
-            # below starts both.
-            dnf install -y --setopt=install_weak_deps=False weston xorg-x11-server-Xwayland
-          fi
+          # arm by accident. An unknown value fails closed: the weston arm
+          # needs the EPEL bootstrap above, so guessing it would be wrong on
+          # every root that has no EPEL.
+          case '${{ matrix.display }}' in
+            xvfb)
+              dnf install -y --setopt=install_weak_deps=False xorg-x11-server-Xvfb
+              ;;
+            weston)
+              # weston (EPEL) provides a headless Wayland display and Xwayland
+              # (AppStream) bridges it to X11 for WebKitGTK. The smoke step
+              # below starts both.
+              dnf install -y --setopt=install_weak_deps=False weston xorg-x11-server-Xwayland
+              ;;
+            *)
+              echo "matrix.display must be 'xvfb' or 'weston', got '${{ matrix.display }}'" >&2
+              exit 1
+              ;;
+          esac
 
       - name: 'Install Qwen Code dependencies'
         shell: 'bash'
