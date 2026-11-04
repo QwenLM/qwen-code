@@ -1,15 +1,12 @@
 # Authentication
 
-Qwen Code's first-run `/auth` menu has four top-level options. Pick the one that matches how you want to run the CLI:
+Qwen Code’s first-run `/auth` menu has five top-level options. Pick the one that matches how you want to run the CLI:
 
-- **QwenCloud**: official recommended setup. Opens a sub-menu with **Token Plan** (subscription with a monthly Credit quota · dedicated endpoint, Personal and Team editions) or **Standard API Key** (pay-as-you-go). You then pick the platform explicitly — **China — 千问AI平台** or **International — QwenCloud** — so the UI language never decides your endpoint. Both access methods also enable the built-in [`web_search` tool](../../developers/tools/web-search.md) with no extra setup.
-- **Alibaba ModelStudio**: opens a sub-menu with **Coding Plan** (for individual developers · weekly quota included), **Token Plan** (for teams and companies · usage-based billing with a dedicated endpoint), or **Standard API Key** (connect with an existing ModelStudio API key). Token Plan and Standard API Key also enable the built-in [`web_search` tool](../../developers/tools/web-search.md) with no extra setup. Saved ModelStudio credentials, endpoints and models keep working unchanged.
+- [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code): sign in with your Qwen account through **Qwen OAuth** to access **Qwen Code and Agent** with your **Plus or Pro subscription** from [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code). If you don’t have a subscription yet, visit [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code) to subscribe to Plus or Pro, then return to Qwen Code and select [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code).
+- **QwenCloud**: official recommended setup. Opens a sub-menu with **Token Plan** (subscription with a monthly Credit quota · dedicated endpoint, Personal and Team editions) or **Standard API Key** (pay-as-you-go). You then pick the platform explicitly — **China — 千问AI平台** or **International — QwenCloud** — so the UI language never decides your endpoint. Both access methods also enable the built-in [`web_search` tool](https://qwenlm.github.io/qwen-code-docs/en/developers/tools/web-search/) with no extra setup.
+- **Alibaba ModelStudio**: opens a sub-menu with **Coding Plan** (for individual developers · weekly quota included), **Token Plan** (for teams and companies · usage-based billing with a dedicated endpoint), or **Standard API Key** (connect with an existing ModelStudio API key). Token Plan and Standard API Key also enable the built-in [`web_search` tool](https://qwenlm.github.io/qwen-code-docs/en/developers/tools/web-search/) with no extra setup. Saved ModelStudio credentials, endpoints and models keep working unchanged.
 - **Third-party Providers**: choose a built-in provider and connect with an API key (DeepSeek, Grok, MiniMax, Z.AI, Kimi, Idealab, ModelScope, OpenRouter, Requesty).
 - **Custom Provider**: manually connect a local server, proxy, or unsupported provider — supports OpenAI, Anthropic, Gemini, and other compatible endpoints.
-
-> [!note]
->
-> **Qwen OAuth** is no longer a selectable dialog entry — its free tier was discontinued on 2026-04-15. It remains documented below as a hard-coded, discontinued provider only.
 
 ## ☁️ Option 1: QwenCloud
 
@@ -92,29 +89,29 @@ As with the other provider-specific keys, `QWENCLOUD_API_KEY` and `QWENCLOUD_TOK
 >
 > QwenCloud and Alibaba ModelStudio are separate entries with separate env keys and endpoints. Choosing QwenCloud does not rewrite or delete saved ModelStudio credentials, endpoints, or model selections.
 
-## Option 2: Qwen OAuth (Discontinued)
+## **Option 2: Qwen OAuth —** [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code)
 
-> [!warning]
->
-> The Qwen OAuth free tier was discontinued on 2026-04-15. Existing cached tokens may continue working briefly, but new requests will be rejected. Please switch to Alibaba Cloud Coding Plan, [OpenRouter](https://openrouter.ai), [Fireworks AI](https://app.fireworks.ai), or another provider. Run `qwen` and use `/auth` to configure.
+Qwen OAuth lets you sign in with your Qwen account and use your **Plus or Pro subscription** from [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code) to access **Qwen Code and Agent**. In the first-run menu or `/auth` dialog, choose [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code) to get started.
 
-- **How it works**: on first start, Qwen Code opens a browser login page. After you finish, credentials are cached locally so you usually won't need to log in again.
-- **Requirements**: a `qwen.ai` account + internet access (at least for the first login).
-- **Benefits**: no API key management, automatic credential refresh.
-- **Cost & quota**: the free tier has been discontinued as of 2026-04-15.
+- **How it works**: select [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code) and follow the browser sign-in flow to authorize Qwen Code with your Qwen account.
+- **Requirements**: a Qwen account with an active **Plus or Pro subscription** from [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code) and internet access.
+- **Benefits**: access **Qwen Code and Agent** through your Qwen subscription without manually configuring an API key.
+- **Cost & quota**: usage is subject to your subscription plan. Visit [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code) for Plus and Pro plan details.
 
-Start the CLI and follow the browser flow:
+### **Interactive setup**
 
-```bash
-qwen
-```
+1. If you don’t have a subscription yet, visit [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code) and subscribe to **Plus or Pro**. If you already have an active subscription, continue with the next step.
+2. Start Qwen Code in your terminal:
 
-Qwen OAuth is no longer offered as a selectable entry in the `/auth` dialog; run `/auth` and choose one of the current options (QwenCloud, Alibaba ModelStudio, Third-party Providers, or Custom Provider) instead.
+   ```bash
+   qwen
+   ```
 
-> [!note]
->
-> In non-interactive or headless environments (e.g., CI, SSH, containers), you typically **cannot** complete the OAuth browser login flow.
-> In these cases, please use the Alibaba Cloud Coding Plan or API Key authentication method.
+3. In the first-run menu, choose [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code). If Qwen Code is already running, enter `/auth` to open the authentication menu and select the same option.
+4. Complete the browser sign-in and authorization flow using the **same Qwen account you used to subscribe at** [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code).
+5. Return to Qwen Code to start working with your subscription.
+
+For non-interactive environments where you cannot complete the browser sign-in flow, such as CI or unattended containers, use an API-key-based authentication method instead.
 
 ## 💳 Option 3: Alibaba Cloud Coding Plan
 
