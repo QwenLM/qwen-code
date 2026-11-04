@@ -168,7 +168,8 @@ rejecting the comment with a 403 or 429 that carries GitHub's rate-limit
 headers, either because the hourly budget is exhausted or because a secondary
 rate limit was hit — the channel retries the comment twice more, waiting as
 long as GitHub asks: `retry-after` when GitHub sends it, the budget reset when
-the hourly budget is exhausted, and otherwise one minute and then two. If it
+the hourly budget is exhausted, and otherwise one minute and then two (also
+when the reset already looks past, which means the local clock is ahead). If it
 still fails, or the channel stops during the wait, the channel stores the
 final reply in
 `~/.qwen/channels/<workspace-scope>/<channel>-<name-hash>-github-pending-deliveries.json`

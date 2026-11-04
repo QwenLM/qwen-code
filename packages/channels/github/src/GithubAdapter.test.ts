@@ -3472,6 +3472,49 @@ describe('GithubChannel', () => {
       );
     });
 
+    it('keeps the records when a stop deferred by another write lets the wait run out', async () => {
+      writePending([
+        pendingRecord({ id: 'first', sourceMessageId: '1001' }),
+        pendingRecord({
+          id: 'second',
+          threadId: 'issue:43',
+          sourceMessageId: '1002',
+        }),
+      ]);
+      mockOctokit.rest.issues.createComment.mockRejectedValue(
+        Object.assign(new Error('You have exceeded a secondary rate limit'), {
+          status: 403,
+          response: { headers: { 'x-ratelimit-remaining': '4999' } },
+        }),
+      );
+      const privateChannel = channel as unknown as {
+        octokit: typeof mockOctokit;
+        sleepForRetry: (ms: number) => Promise<void>;
+        pendingFinalDeliveryRequestsActive: number;
+        retryPendingFinalDeliveries: (signal?: AbortSignal) => Promise<void>;
+      };
+      privateChannel.octokit = mockOctokit as never;
+      // Another write is in flight when the channel stops, so the pass's
+      // abort waits for it and the retry wait simply ends.
+      privateChannel.sleepForRetry = vi.fn().mockImplementation(async () => {
+        privateChannel.pendingFinalDeliveryRequestsActive += 1;
+        channel.disconnect();
+        privateChannel.pendingFinalDeliveryRequestsActive -= 1;
+      });
+
+      await privateChannel.retryPendingFinalDeliveries(
+        new AbortController().signal,
+      );
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledTimes(1);
+      expect(
+        JSON.parse(readFileSync(pendingPath(), 'utf-8')).map(
+          (record: { id: string }) => record.id,
+        ),
+      ).toEqual(['first', 'second']);
+      expect(existsSync(auditPath())).toBe(false);
+    });
+
     it('keeps a record whose retry an abort stopped before it was sent', async () => {
       writePending([pendingRecord({ id: 'first', sourceMessageId: '1001' })]);
       const abort = new AbortController();
@@ -6431,6 +6474,8 @@ describe('GithubChannel', () => {
 
     it('waits at least a minute, then longer, on a secondary limit without retry-after', async () => {
       const sleep = stubSleep();
+      // GitHub sends the hourly reset with every answer; quota is left, so
+      // it does not set this wait.
       const secondary = (status: number) =>
         Object.assign(
           new Error(
@@ -6438,7 +6483,14 @@ describe('GithubChannel', () => {
           ),
           {
             status,
-            response: { headers: { 'x-ratelimit-remaining': '4999' } },
+            response: {
+              headers: {
+                'x-ratelimit-remaining': '4999',
+                'x-ratelimit-reset': String(
+                  Math.ceil(Date.now() / 1000) + 3000,
+                ),
+              },
+            },
           },
         );
       const fn = vi
@@ -6589,7 +6641,7 @@ describe('GithubChannel', () => {
       dateSpy.mockRestore();
     });
 
-    it('retries after a second when the budget reset has already passed', async () => {
+    it('waits the rate-limit minimum when the budget reset looks past', async () => {
       const now = 1_700_000_000_000;
       const dateSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
       const sleep = stubSleep();
@@ -6603,7 +6655,8 @@ describe('GithubChannel', () => {
         )
         .mockResolvedValueOnce('ok');
       await expect(githubApi(fn)).resolves.toBe('ok');
-      expect(sleep).toHaveBeenCalledWith(1000);
+      // GitHub still counts the budget as spent: the local clock is ahead.
+      expect(sleep).toHaveBeenCalledWith(60_000);
       dateSpy.mockRestore();
     });
 

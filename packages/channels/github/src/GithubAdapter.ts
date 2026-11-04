@@ -3910,12 +3910,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         const retryAfter = Number(headers['retry-after'] ?? NaN);
         const usableRetryAfter = Number.isFinite(retryAfter) && retryAfter > 0;
         const rateLimited = isRateLimitAnswer(err);
-        const reset = Number(headers['x-ratelimit-reset']);
+        // GitHub answering with an exhausted budget means its window has not
+        // reset yet, so a reset that looks past is clock skew: the minimum
+        // below applies instead of a 1 s retry.
+        const untilReset =
+          Number(headers['x-ratelimit-reset']) * 1000 - Date.now();
         let cooldown: number;
         if (usableRetryAfter) {
           cooldown = retryAfter * 1000;
-        } else if (rateLimited && rateLimitRemaining(err) === 0 && reset > 0) {
-          cooldown = Math.max(0, reset * 1000 - Date.now()) + 1000;
+        } else if (
+          rateLimited &&
+          rateLimitRemaining(err) === 0 &&
+          untilReset > 0
+        ) {
+          cooldown = untilReset + 1000;
         } else if (rateLimited) {
           // GitHub's guidance for a rate limit without a usable retry-after
           // or reset: wait at least a minute, longer on each repeat.
