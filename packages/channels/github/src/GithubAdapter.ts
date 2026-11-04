@@ -974,6 +974,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * answer.
    */
   private coldEmptyPartialStreak = 0;
+  /**
+   * How many polls of the current cold-empty streak were failed lookups
+   * (the rest answered with an empty partial). The cap line attributes the
+   * stall from this count rather than from boundSnapshotFailureStreak,
+   * which any successful answer resets: a run of failed lookups broken by
+   * a single empty partial would otherwise be blamed on the daemon's
+   * storage. Reset together with coldEmptyPartialStreak.
+   */
+  private coldEmptyFailurePolls = 0;
   // Consecutive partial snapshots (any partial). A NON-empty partial — e.g. a
   // sidecar the daemon persistently cannot read — can be permanent and
   // otherwise silent; this drives a throttled diagnostic so the operator sees
@@ -3510,6 +3519,33 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     return { chatId: match[1], number: Number(match[2]) };
   }
 
+  /**
+   * The cause clause of the cold-empty cap line, attributed from how many
+   * polls of the streak were failed lookups rather than empty partial
+   * answers: the majority cause leads and the other count is kept.
+   * boundSnapshotFailureStreak cannot carry this: any successful answer
+   * resets it, so a run of failed lookups broken by one empty partial
+   * would be blamed on the daemon's storage.
+   */
+  private coldEmptyCapCause(): string {
+    const failed = this.coldEmptyFailurePolls;
+    const total = this.coldEmptyPartialStreak;
+    const storageCause =
+      "a workspace without a runtime, a chats directory it cannot list, or a 'PR bindings scan' line for a sidecar, transcript or live session list it could not read; the channel worker's stderr reports how many binding rows it had to drop (check that the worker and the daemon run the same version)";
+    const lookupCheck =
+      'verify GET /sessions/pr-bindings is reachable and the worker credentials are valid';
+    if (failed === 0) {
+      return `The daemon's stderr names the cause: ${storageCause}.`;
+    }
+    if (failed >= total) {
+      return `The binding lookup itself has been failing (see the 'has never succeeded' line above): ${lookupCheck}.`;
+    }
+    if (failed * 2 >= total) {
+      return `The binding lookup itself has been failing for ${failed} of those polls (see the 'has never succeeded' lines above) and the other ${total - failed} answered with an empty partial: ${lookupCheck}, then check the daemon's stderr for ${storageCause}.`;
+    }
+    return `The daemon's stderr names the cause: ${storageCause}; ${failed} of those polls also failed the lookup outright (see the 'has never succeeded' lines above), so ${lookupCheck} as well.`;
+  }
+
   private async refreshBoundSessions(): Promise<void> {
     const boundSessions = this.boundSessions;
     if (!boundSessions) return;
@@ -3518,9 +3554,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.lastBindingsPartial = snapshot.partial;
       this.boundRefreshFailed = false;
       this.boundSnapshotSeen = true;
-      // Remembered for the cold-empty cap message: a cap reached by failed
-      // lookups followed by one empty partial must still name the lookup.
-      const priorFailureStreak = this.boundSnapshotFailureStreak;
       this.boundSnapshotFailureStreak = 0;
       if (!snapshot.partial) this.boundSnapshotTrusted = true;
       const map = new Map<string, PrBindingSummary>();
@@ -3546,10 +3579,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // binding the partial answer failed to list, so private delivery
         // never degrades to the public channel path on a scan failure.
         // A LISTED session's PR set is authoritative (the route returns
-        // each listed session's complete sidecar projection), so retention
-        // must not revive PRs that session just unbound; and a retained
-        // candidate competes by recency, so a partial answer listing only
-        // an older session cannot displace the newer known one.
+        // each listed session's sidecar projection topped up with the
+        // bindings the bridge still holds for it, trimmed to the cap), so
+        // retention must not revive PRs that session just unbound; and a
+        // retained candidate competes by recency, so a partial answer
+        // listing only an older session cannot displace the newer known one.
         const seen = new Set(snapshot.bindings.map((b) => b.sessionId));
         // A permanent partial must not grow retention without bound: keep
         // the most recent unlisted sessions and drop the rest (oldest
@@ -3601,15 +3635,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         this.coldEmptyPartialStreak += 1;
         if (this.coldEmptyPartialStreak === MAX_COLD_EMPTY_PARTIAL_POLLS) {
           process.stderr.write(
-            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence. ${
-              priorFailureStreak + 1 >= MAX_COLD_EMPTY_PARTIAL_POLLS
-                ? "The binding lookup itself has been failing (see the 'has never succeeded' line above): verify GET /sessions/pr-bindings is reachable and the worker credentials are valid."
-                : "The daemon's stderr names the cause: a workspace without a runtime, a chats directory it cannot list, or a 'PR bindings scan' line for a sidecar, transcript or live session list it could not read; the channel worker's stderr names a binding row it had to drop (check that the worker and the daemon run the same version)."
-            }\n`,
+            `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence. ${this.coldEmptyCapCause()}\n`,
           );
         }
       } else {
         this.coldEmptyPartialStreak = 0;
+        this.coldEmptyFailurePolls = 0;
       }
       if (snapshot.partial) {
         this.partialSnapshotStreak += 1;
@@ -3662,18 +3693,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // failing refresh stalled the lane indefinitely (R1-7).
         this.lastBindingsPartial = true;
         this.coldEmptyPartialStreak += 1;
+        this.coldEmptyFailurePolls += 1;
         if (this.coldEmptyPartialStreak === MAX_COLD_EMPTY_PARTIAL_POLLS) {
           process.stderr.write(
             `[Channel:${this.name}] binding snapshot has been an empty partial for ${this.coldEmptyPartialStreak} consecutive polls: ${
               this.boundSnapshotSeen
                 ? 'opening the comment lane. Unmatched PR events will defer (and dead-letter after the backpressure horizon) until a complete snapshot establishes absence.'
                 : 'the comment lane stays closed until a snapshot succeeds; every notification, issue events included, remains stalled.'
-            } ${
-              this.boundSnapshotFailureStreak + 1 >=
-              MAX_COLD_EMPTY_PARTIAL_POLLS
-                ? "The binding lookup itself has been failing (see the 'has never succeeded' line above): verify GET /sessions/pr-bindings is reachable and the worker credentials are valid."
-                : "The daemon's stderr names the cause: a workspace without a runtime, a chats directory it cannot list, or a 'PR bindings scan' line for a sidecar, transcript or live session list it could not read; the channel worker's stderr names a binding row it had to drop (check that the worker and the daemon run the same version)."
-            }\n`,
+            } ${this.coldEmptyCapCause()}\n`,
           );
         }
         // Surface the stall distinctly and actionably, throttled so a

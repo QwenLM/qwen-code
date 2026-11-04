@@ -134,9 +134,11 @@ async function resolveAttribution(
     }
   }
   // The shared recency rule: an unparseable live value never displaces the
-  // persisted one, and the comparison is chronological, not lexicographic.
+  // persisted one (an unparseable updatedAt falls through to createdAt), and
+  // the comparison is chronological, not lexicographic.
   const updatedAt = laterActivityTimestamp(
-    validTimestamp(liveSummary?.updatedAt ?? liveSummary?.createdAt),
+    validTimestamp(liveSummary?.updatedAt) ??
+      validTimestamp(liveSummary?.createdAt),
     item ? new Date(item.mtime).toISOString() : undefined,
   );
   return {

@@ -216,12 +216,12 @@ so the session that follows the PR handles the event with its existing context.
   per-event deferral is PR-scoped: bindings are PR-only, so once the lane is
   open an issue event is never deferred by it (its absence needs no snapshot)
   and routes publicly even under a permanently partial scan. A partial
-  snapshot only arises when part of the catalog could not be read (a PR
-  sidecar, transcript or live session list the daemon could not read, or a
-  workspace whose runtime is missing) or when the channel worker had to drop
-  a malformed binding row (check that the worker and the daemon run the same
-  version; the worker logs the drop); the number of active sessions never
-  makes it partial. While such a failure persists, a
+  snapshot only arises when part of the catalog could not be read (a chats
+  directory the daemon could not list, a PR sidecar, transcript or live
+  session list it could not read, or a workspace whose runtime is missing)
+  or when the channel worker had to drop a malformed binding row (check that
+  the worker and the daemon run the same version; the worker logs the
+  drop); the number of active sessions never makes it partial. While such a failure persists, a
   comment on a PR that no session follows defers per-event until the
   dead-letter horizon (~4 hours at the default poll) rather than falling back
   to the channel; issue events are unaffected, since the per-event absence

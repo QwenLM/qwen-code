@@ -649,6 +649,24 @@ describe('GET /sessions/pr-bindings', () => {
     expect(body.bindings[0]?.updatedAt).toBe('2026-11-02T12:00:00.000Z');
   });
 
+  it('falls back to a parseable live createdAt when updatedAt is unparseable', async () => {
+    const cwd = await makeWorkspace();
+    await seedTranscript(cwd, SESSION_A, {
+      mtime: new Date('2026-11-02T12:00:00.000Z'),
+    });
+    await seedBinding(cwd, SESSION_A, [101]);
+    liveSessions.set(cwd, [
+      liveSummary(cwd, SESSION_A, {
+        createdAt: '2026-11-03T12:00:00.000Z',
+        updatedAt: 'zzzz',
+      }),
+    ]);
+
+    const body = await fetchBindings([makeEntry(makeRuntime(cwd))]);
+
+    expect(body.bindings[0]?.updatedAt).toBe('2026-11-03T12:00:00.000Z');
+  });
+
   it('excludes machine-owned hidden-catalog sessions', async () => {
     const cwd = await makeWorkspace();
     await seedTranscript(cwd, SESSION_A, { sourceType: 'agent' });
