@@ -16,9 +16,11 @@ region 能支付正常边框、垂直 padding、标题和 body margin 并保留�
 
 skills 标题按真实内容宽度截断；标题和关闭提示无法共占一行时隐藏关闭提示，使窄终端下正常 chrome 的六行计费仍成立。
 
+`/stats` 采用本批的布局规则（#13080），但不加入其 resize 验证。其独立浮层使用同样的正常/紧凑布局，正常 chrome 为八行 —— 边框、垂直 padding、标签栏、空行和页脚提示连同其 margin，与 Ink 对话框的计费一致 —— 标签栏和提示只在正常 chrome 下绘制，隐藏时 Tab 与 Escape 仍有效。两段文字都按内容宽度截断为一行，标签从右侧起截，使八行计费在窄终端下同样成立，与 skills 标题规则一致；小节标题用空行盒子而不是外边距留空，否则视口只有一行时子节点的外边距不计入内容高度、尾部画不出来。Settings 内嵌不传预算，保留不滚动的正文。
+
 ## 验证与验收
 
-原生 Bun 脚本在宽度 11/20/40/100、region 高度 1–8/12/15/40 下运行真实组件：框架高度及绘制的边框必须留在 region 内。增减尺寸测试必须能读取 fixture 最后一行，并在重挂载 body 上保留原生 Yoga shrink。真实 session picker 的 list 和 preview resize 必须重挂载且保持 Yoga shrink 1。快速单测约束无预算行为和正常/紧凑布局转换；既有 Ink dialog 测试及 component parity 验证共享 renderer 的回归边界。
+原生 Bun 脚本在宽度 11/20/40/100、region 高度 1–8/12/15/40 下运行真实组件：框架高度及绘制的边框必须留在 region 内（stats 框体自 #13080 起纳入该扫描，并检查一行预算下其最后一行可达）。增减尺寸测试必须能读取 fixture 最后一行，并在重挂载 body 上保留原生 Yoga shrink。真实 session picker 的 list 和 preview resize 必须重挂载且保持 Yoga shrink 1。快速单测约束无预算行为和正常/紧凑布局转换；既有 Ink dialog 测试及 component parity 验证共享 renderer 的回归边界。
 
 移除紧凑 chrome 或尺寸 key 后，mutation 检查必须失败。交付前须通过 build、typecheck、相关 lint 和 unit/native 检查。证据来自本机 macOS/Bun 原生无头渲染；Linux、Windows、tmux 和实际鼠标滚动体验需要另行验收。原生无头帧不代表真实终端录像。
 

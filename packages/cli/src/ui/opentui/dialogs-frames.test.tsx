@@ -117,8 +117,10 @@ import { DialogFrame } from './dialogs-shared.js';
 import { OpenTuiMemoryDialog } from './dialogs-memory-status.js';
 import { OpenTuiStatusLineDialog } from './dialogs-statusline.js';
 import {
+  computeStatsBodyRows,
   OpenTuiSkillsDialog,
   OpenTuiStatsDialog,
+  STATS_FIXED_ROWS,
 } from './dialogs-stats-skills.js';
 import { OpenTuiThemeDialog } from './dialogs-theme.js';
 
@@ -194,6 +196,140 @@ describe('sibling dialog frames (region clips, frame does not shrink)', () => {
       flexShrink: 0,
     });
     expect(layoutOf(container.firstElementChild)['marginTop']).toBeUndefined();
+  });
+
+  it('stats frame chrome matches the rows STATS_FIXED_ROWS charges', () => {
+    // The body budget is the region minus STATS_FIXED_ROWS; the frame is
+    // unshrinkable, so any chrome row added or removed without updating the
+    // constant pushes the border past the region's clip or leaves dead rows.
+    const { container } = render(
+      <OpenTuiStatsDialog
+        config={null}
+        onClose={() => {}}
+        availableTerminalHeight={19}
+      />,
+    );
+    const frameEl = container.firstElementChild;
+    const frame = layoutOf(frameEl);
+    expect(frame).toMatchObject({ border: true, flexShrink: 0 });
+    const [tabBar, spacer, scrollbox, footer, ...rest] = Array.from(
+      frameEl?.children ?? [],
+    );
+    expect(rest).toHaveLength(0);
+    expect(scrollbox?.getAttribute('data-kind')).toBe('scrollbox');
+    expect(layoutOf(tabBar)).toMatchObject({ flexDirection: 'row' });
+    expect(layoutOf(footer)['height']).toBeUndefined();
+    expect(footer?.children).toHaveLength(1);
+    const chrome =
+      2 + // border
+      Number(frame['paddingTop'] ?? 0) +
+      Number(frame['paddingBottom'] ?? 0) +
+      1 + // the tab bar's single row
+      Number(layoutOf(spacer)['height'] ?? 0) +
+      Number(layoutOf(footer)['marginTop'] ?? 0) +
+      1; // the footer hint's single row
+    expect(chrome).toBe(STATS_FIXED_ROWS);
+    expect(layoutOf(scrollbox)).toMatchObject({
+      height: computeStatsBodyRows(19),
+    });
+  });
+
+  it.each([1, 2, 3, 4, 5, 6, 7, 8])(
+    'keeps the stats body inside a %i-row region by shedding chrome',
+    (height) => {
+      // A region that cannot pay the eight chrome rows and a body row takes
+      // the short-scroll compact chrome: no padding, tab bar or hint, the
+      // border only from three rows, so the unshrinkable frame is never
+      // taller than the region and the body keeps content rows.
+      const { container } = render(
+        <OpenTuiStatsDialog
+          config={null}
+          onClose={() => {}}
+          availableTerminalHeight={height}
+        />,
+      );
+      expect(within(container).queryByText('Session')).toBeNull();
+      expect(within(container).queryByText(/esc$/)).toBeNull();
+      expect(layoutOf(container.firstElementChild)).toMatchObject({
+        border: height >= 3 ? true : [],
+        paddingTop: 0,
+        paddingBottom: 0,
+        flexShrink: 0,
+      });
+      const bodyRows = height - (height >= 3 ? 2 : 0);
+      expect(computeStatsBodyRows(height)).toBe(bodyRows);
+      expect(
+        layoutOf(container.querySelector('[data-kind="scrollbox"]')),
+      ).toMatchObject({ height: bodyRows });
+    },
+  );
+
+  it('spaces the stats section titles with a box so a one-row viewport measures the whole body', () => {
+    // With a one-row scrollbox viewport the renderer leaves a child's margin
+    // out of the content height: three marginTop titles measured the body
+    // three rows short and the Tokens section was never reachable.
+    const { container } = render(
+      <OpenTuiStatsDialog
+        config={null}
+        onClose={() => {}}
+        availableTerminalHeight={9}
+      />,
+    );
+    for (const name of ['Interaction Summary', 'Performance', 'Tokens']) {
+      const title = within(container).getByText(name).parentElement;
+      expect(layoutOf(title)['marginTop']).toBeUndefined();
+      expect(layoutOf(title?.firstElementChild)).toMatchObject({ height: 1 });
+    }
+  });
+
+  it('clips the stats tab bar and hint to one row at a narrow width', () => {
+    // At forty columns the content width is 30, where the 33-column tab bar
+    // wrapped to a second row that STATS_FIXED_ROWS never charged, so the
+    // frame grew past the region. The labels now clip from the right and
+    // every chrome run refuses to wrap.
+    frameState.width = 40;
+    const { container } = render(
+      <OpenTuiStatsDialog
+        config={null}
+        onClose={() => {}}
+        availableTerminalHeight={19}
+      />,
+    );
+    const frameEl = container.firstElementChild;
+    const [tabBar, , scrollbox, footer] = Array.from(frameEl?.children ?? []);
+    const labels = Array.from(tabBar?.querySelectorAll('span') ?? []);
+    expect(labels.map((label) => label.textContent)).toEqual([
+      ' Session ',
+      ' Activity ',
+      ' Efficie…',
+    ]);
+    const hints = Array.from(footer?.querySelectorAll('span') ?? []);
+    expect(hints.map((hint) => hint.textContent)).toEqual(['tab · esc']);
+    for (const run of [...labels, ...hints]) {
+      expect(layoutOf(run)).toMatchObject({ wrapMode: 'none' });
+    }
+    expect(layoutOf(scrollbox)).toMatchObject({
+      height: computeStatsBodyRows(19),
+    });
+  });
+
+  it('drops the stats tabs a very narrow row cannot fit', () => {
+    // Twenty columns leave a content width of 10: one label and no room for
+    // the gap before the next, which goes with it.
+    frameState.width = 20;
+    const { container } = render(
+      <OpenTuiStatsDialog
+        config={null}
+        onClose={() => {}}
+        availableTerminalHeight={19}
+      />,
+    );
+    const [tabBar] = Array.from(container.firstElementChild?.children ?? []);
+    expect(
+      Array.from(tabBar?.querySelectorAll('span') ?? []).map(
+        (label) => label.textContent,
+      ),
+    ).toEqual([' Session ']);
   });
 
   it('skills frame opens flush and unshrinkable', () => {
